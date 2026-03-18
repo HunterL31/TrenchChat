@@ -242,13 +242,6 @@ class InviteManager:
         RNS.log(f"TrenchChat: sending invite for channel {channel_hash_hex[:12]}… "
                 f"to {invitee_hash_hex[:12]}…", RNS.LOG_NOTICE)
         invitee_hash = bytes.fromhex(invitee_hash_hex)
-        # Check we can recall the invitee's identity before trying to send
-        dest_identity = RNS.Identity.recall(invitee_hash)
-        if dest_identity is None:
-            RNS.log(f"TrenchChat: cannot send invite — identity {invitee_hash_hex[:12]}… "
-                    f"not known to Reticulum. Path request sent, retry after path resolves.",
-                    RNS.LOG_WARNING)
-            RNS.Transport.request_path(invitee_hash)
         token, expiry = self.generate_invite_token(channel_hash_hex, invitee_hash, ttl)
         self._send_raw(invitee_hash_hex, {
             F_MSG_TYPE:     MT_INVITE,
@@ -383,17 +376,22 @@ class InviteManager:
     def _send_raw(self, dest_hex: str, fields: dict):
         msg_type = fields.get(F_MSG_TYPE, "unknown")
         try:
-            dest_hash = bytes.fromhex(dest_hex)
-            dest_identity = RNS.Identity.recall(dest_hash)
+            identity_hash = bytes.fromhex(dest_hex)
+
+            # Compute the LXMF delivery destination hash from the identity hash.
+            # RNS.Identity.recall() takes a *destination* hash, not an identity hash.
+            delivery_dest_hash = RNS.Destination.hash(identity_hash, "lxmf", "delivery")
+
+            dest_identity = RNS.Identity.recall(delivery_dest_hash)
 
             if dest_identity is None:
-                RNS.log(f"TrenchChat [invite]: identity {dest_hex[:12]}… not known, "
+                RNS.log(f"TrenchChat [invite]: delivery dest for {dest_hex[:12]}… not known, "
                         f"requesting path and waiting up to 10s…", RNS.LOG_DEBUG)
-                RNS.Transport.request_path(dest_hash)
+                RNS.Transport.request_path(delivery_dest_hash)
                 timeout = time.time() + 10
                 while dest_identity is None and time.time() < timeout:
                     time.sleep(0.5)
-                    dest_identity = RNS.Identity.recall(dest_hash)
+                    dest_identity = RNS.Identity.recall(delivery_dest_hash)
 
             if dest_identity is None:
                 RNS.log(f"TrenchChat [invite]: cannot deliver {msg_type!r} to "
