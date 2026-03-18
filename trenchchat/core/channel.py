@@ -61,6 +61,14 @@ class ChannelManager:
             created_at=time.time(),
         )
         self._storage.subscribe(hash_hex)
+        # Always add the creator as an admin member so access checks work
+        # immediately, even before a full member list document is published.
+        self._storage.upsert_member(
+            channel_hash=hash_hex,
+            identity_hash=self._identity.hash_hex,
+            display_name=self._identity.display_name,
+            is_admin=True,
+        )
         self.announce_channel(hash_hex)
         return hash_hex
 
@@ -128,3 +136,10 @@ class ChannelManager:
                     aspect,
                 )
                 self._owned_destinations[row["hash"]] = dest
+                # Ensure creator is always present as admin in the members table
+                self._storage.upsert_member(
+                    channel_hash=row["hash"],
+                    identity_hash=self._identity.hash_hex,
+                    display_name=self._identity.display_name,
+                    is_admin=True,
+                )

@@ -18,9 +18,9 @@ from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
     QListWidget, QListWidgetItem, QSplitter, QToolBar,
     QLabel, QDialog, QFormLayout, QLineEdit, QComboBox,
-    QDialogButtonBox, QMessageBox, QStackedWidget,
+    QDialogButtonBox, QMessageBox, QStackedWidget, QMenu,
 )
-from PyQt6.QtCore import Qt, pyqtSlot
+from PyQt6.QtCore import Qt, pyqtSlot, QPoint
 from PyQt6.QtGui import QAction, QFont
 
 from trenchchat.config import Config
@@ -29,10 +29,12 @@ from trenchchat.core.storage import Storage
 from trenchchat.core.channel import ChannelManager
 from trenchchat.core.messaging import Messaging
 from trenchchat.core.subscription import SubscriptionManager
+from trenchchat.core.invite import InviteManager
 from trenchchat.network.router import Router
 from trenchchat.gui.channel_view import ChannelView
 from trenchchat.gui.compose import ComposeWidget
 from trenchchat.gui.settings import SettingsDialog
+from trenchchat.gui.invite_dialogs import InviteDialog, MembersDialog, IncomingInviteDialog
 
 
 class NewChannelDialog(QDialog):
@@ -75,7 +77,8 @@ class NewChannelDialog(QDialog):
 class MainWindow(QMainWindow):
     def __init__(self, config: Config, identity: Identity, storage: Storage,
                  router: Router, channel_mgr: ChannelManager,
-                 messaging: Messaging, subscription_mgr: SubscriptionManager):
+                 messaging: Messaging, subscription_mgr: SubscriptionManager,
+                 invite_mgr: InviteManager):
         super().__init__()
         self._config = config
         self._identity = identity
@@ -84,6 +87,7 @@ class MainWindow(QMainWindow):
         self._channel_mgr = channel_mgr
         self._messaging = messaging
         self._subscription_mgr = subscription_mgr
+        self._invite_mgr = invite_mgr
 
         self._channel_views: dict[str, ChannelView] = {}
         self._current_channel: str | None = None
@@ -94,6 +98,7 @@ class MainWindow(QMainWindow):
         self._build_ui()
 
         messaging.add_message_callback(self._on_new_message)
+        invite_mgr.add_invite_callback(self._on_incoming_invite)
         self._refresh_channel_list()
 
     # --- UI construction ---
@@ -150,6 +155,8 @@ class MainWindow(QMainWindow):
             "QListWidget::item:selected { background: #2a4a7a; color: #fff; }"
         )
         self._channel_list_widget.currentItemChanged.connect(self._on_channel_selected)
+        self._channel_list_widget.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._channel_list_widget.customContextMenuRequested.connect(self._on_channel_context_menu)
         left_layout.addWidget(self._channel_list_widget)
         left.setMinimumWidth(180)
         left.setMaximumWidth(260)
@@ -268,6 +275,11 @@ class MainWindow(QMainWindow):
             description=dlg.description,
             access_mode=dlg.access_mode,
         )
+        # For invite-only channels, initialise the member list with the creator
+        # as the first admin. This also writes the creator into the members table
+        # so is_admin() returns True and the Invite Member menu item appears.
+        if dlg.access_mode == "invite":
+            self._invite_mgr.publish_member_list(hash_hex)
         self._refresh_channel_list()
         self._switch_to_channel(hash_hex)
 
@@ -299,6 +311,110 @@ class MainWindow(QMainWindow):
         else:
             # Channel not currently open — just refresh the list to update last_seen
             self._refresh_channel_list()
+
+    # --- channel context menu ---
+
+    @pyqtSlot(QPoint)
+    def _on_channel_context_menu(self, pos: QPoint):
+        item = self._channel_list_widget.itemAt(pos)
+        if item is None:
+            return
+        channel_hash = item.data(Qt.ItemDataRole.UserRole)
+        channel = self._storage.get_channel(channel_hash)
+        if channel is None:
+            return
+
+        is_invite_channel = channel["access_mode"] == "invite"
+        is_admin = self._storage.is_admin(channel_hash, self._identity.hash_hex)
+
+        menu = QMenu(self)
+        menu.setStyleSheet(
+            "QMenu { background: #2d2d2d; color: #d4d4d4; border: 1px solid #444; }"
+            "QMenu::item:selected { background: #2a4a7a; }"
+            "QMenu::separator { background: #444; height: 1px; margin: 2px 0; }"
+        )
+
+        if is_invite_channel and is_admin:
+            invite_action = menu.addAction("Invite member…")
+            invite_action.triggered.connect(
+                lambda: self._on_invite_member(channel_hash, channel["name"])
+            )
+
+        if is_invite_channel:
+            members_action = menu.addAction("View members…")
+            members_action.triggered.connect(
+                lambda: self._on_view_members(channel_hash, channel["name"], is_admin)
+            )
+
+        if menu.actions():
+            menu.addSeparator()
+
+        leave_action = menu.addAction("Leave channel")
+        leave_action.triggered.connect(lambda: self._on_leave_channel(channel_hash))
+
+        menu.exec(self._channel_list_widget.mapToGlobal(pos))
+
+    def _on_invite_member(self, channel_hash: str, channel_name: str):
+        dlg = InviteDialog(channel_name, self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        invitee_hex = dlg.invitee_hash
+        if invitee_hex:
+            self._invite_mgr.send_invite(channel_hash, invitee_hex)
+            QMessageBox.information(
+                self, "Invite sent",
+                f"Invite sent to {invitee_hex[:16]}…\n"
+                "They will be added once they accept."
+            )
+
+    def _on_view_members(self, channel_hash: str, channel_name: str, is_admin: bool):
+        dlg = MembersDialog(
+            channel_hash, channel_name, self._storage,
+            self._identity.hash_hex, is_admin, self
+        )
+        dlg.exec()
+        # Apply any pending membership changes
+        if dlg.members_to_remove or dlg.admins_to_add or dlg.admins_to_remove:
+            self._invite_mgr.publish_member_list(
+                channel_hash,
+                remove_members=dlg.members_to_remove or None,
+                add_admins=dlg.admins_to_add or None,
+                remove_admins=dlg.admins_to_remove or None,
+            )
+
+    def _on_leave_channel(self, channel_hash: str):
+        channel = self._storage.get_channel(channel_hash)
+        name = channel["name"] if channel else channel_hash[:12]
+        confirm = QMessageBox.question(
+            self, "Leave channel",
+            f"Leave #{name}? Your local message history will be kept.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if confirm == QMessageBox.StandardButton.Yes:
+            owner_hash = channel["creator_hash"] if channel else None
+            self._subscription_mgr.unsubscribe(channel_hash, owner_hash)
+            if channel_hash in self._channel_views:
+                view = self._channel_views.pop(channel_hash)
+                self._stack.removeWidget(view)
+                view.deleteLater()
+            self._current_channel = None
+            self._compose.set_enabled(False)
+            self._refresh_channel_list()
+
+    # --- incoming invite ---
+
+    def _on_incoming_invite(self, channel_hash_hex: str, channel_name: str,
+                             token: bytes, expiry: float, admin_hash_hex: str):
+        dlg = IncomingInviteDialog(channel_name, admin_hash_hex, self)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            self._invite_mgr.send_join_request(
+                channel_hash_hex, token, expiry, admin_hash_hex
+            )
+            QMessageBox.information(
+                self, "Join request sent",
+                f"Your request to join #{channel_name} has been sent.\n"
+                "You'll be added once an admin approves it."
+            )
 
     # --- settings ---
 

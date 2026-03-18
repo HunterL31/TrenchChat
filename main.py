@@ -77,6 +77,7 @@ def main():
         channel_mgr=channel_mgr,
         messaging=messaging,
         subscription_mgr=subscription_mgr,
+        invite_mgr=invite_mgr,
     )
     window.show()
 

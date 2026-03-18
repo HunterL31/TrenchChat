@@ -39,8 +39,9 @@ F_ADMIN_HASH         = 0x14
 F_CHANNEL_HASH       = 0x01
 F_MEMBER_LIST_DOC    = 0x21
 
-MT_JOIN_REQUEST      = "join_request"
+MT_JOIN_REQUEST       = "join_request"
 MT_MEMBER_LIST_UPDATE = "member_list_update"
+MT_INVITE             = "invite"
 
 DEFAULT_TOKEN_TTL = 7 * 24 * 3600  # 7 days
 
@@ -70,7 +71,17 @@ class InviteManager:
         self._identity = identity
         self._storage = storage
         self._router = router
+        self._invite_callbacks: list = []
         router.add_delivery_callback(self._on_lxmf_message)
+
+    def add_invite_callback(self, callback):
+        """callback(channel_hash_hex, channel_name, token, expiry, admin_hash_hex)"""
+        if callback not in self._invite_callbacks:
+            self._invite_callbacks.append(callback)
+
+    def remove_invite_callback(self, callback):
+        if callback in self._invite_callbacks:
+            self._invite_callbacks.remove(callback)
 
     # --- member list document ---
 
@@ -304,10 +315,19 @@ class InviteManager:
                     RNS.log(f"TrenchChat: member list update parse error: {e}",
                             RNS.LOG_WARNING)
 
-        elif msg_type == "invite":
-            # Store the received invite for the user to act on via the UI.
-            # The UI calls send_join_request() when the user accepts.
-            pass
+        elif msg_type == MT_INVITE:
+            token        = fields.get(F_INVITE_TOKEN)
+            expiry       = fields.get(F_EXPIRY_TS)
+            admin_hash   = fields.get(F_ADMIN_HASH)
+            if token and expiry and admin_hash:
+                admin_hex = admin_hash.hex() if isinstance(admin_hash, bytes) else str(admin_hash)
+                channel = self._storage.get_channel(channel_hash_hex)
+                channel_name = channel["name"] if channel else channel_hash_hex[:12]
+                for cb in self._invite_callbacks:
+                    try:
+                        cb(channel_hash_hex, channel_name, token, expiry, admin_hex)
+                    except Exception as e:
+                        RNS.log(f"TrenchChat: invite callback error: {e}", RNS.LOG_ERROR)
 
     def _handle_join_request(self, fields: dict, channel_hash_hex: str):
         token        = fields.get(F_INVITE_TOKEN)
