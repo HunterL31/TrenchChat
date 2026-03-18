@@ -227,7 +227,7 @@ class MainWindow(QMainWindow):
 
     # --- channel selection ---
 
-    @pyqtSlot()
+    @pyqtSlot(QListWidgetItem, QListWidgetItem)
     def _on_channel_selected(self, current, previous):
         if current is None:
             return
