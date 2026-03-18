@@ -19,8 +19,9 @@ from PyQt6.QtWidgets import (
     QListWidget, QListWidgetItem, QSplitter, QToolBar,
     QLabel, QDialog, QFormLayout, QLineEdit, QComboBox,
     QDialogButtonBox, QMessageBox, QStackedWidget, QMenu,
+    QPushButton, QFrame,
 )
-from PyQt6.QtCore import Qt, pyqtSlot, QPoint
+from PyQt6.QtCore import Qt, pyqtSlot, QPoint, pyqtSignal
 from PyQt6.QtGui import QAction, QFont
 
 from trenchchat.config import Config
@@ -34,7 +35,7 @@ from trenchchat.network.router import Router
 from trenchchat.gui.channel_view import ChannelView
 from trenchchat.gui.compose import ComposeWidget
 from trenchchat.gui.settings import SettingsDialog
-from trenchchat.gui.invite_dialogs import InviteDialog, MembersDialog, IncomingInviteDialog
+from trenchchat.gui.invite_dialogs import InviteDialog, MembersDialog
 
 
 class NewChannelDialog(QDialog):
@@ -75,6 +76,10 @@ class NewChannelDialog(QDialog):
 
 
 class MainWindow(QMainWindow):
+    # Signal used to safely marshal invite notifications from the LXMF
+    # background thread onto the Qt main thread.
+    _invite_received = pyqtSignal(str, str, bytes, float, str)
+
     def __init__(self, config: Config, identity: Identity, storage: Storage,
                  router: Router, channel_mgr: ChannelManager,
                  messaging: Messaging, subscription_mgr: SubscriptionManager,
@@ -89,6 +94,9 @@ class MainWindow(QMainWindow):
         self._subscription_mgr = subscription_mgr
         self._invite_mgr = invite_mgr
 
+        # Pending invites: list of (channel_hash_hex, channel_name, token, expiry, admin_hash_hex)
+        self._pending_invites: list[tuple] = []
+
         self._channel_views: dict[str, ChannelView] = {}
         self._current_channel: str | None = None
 
@@ -96,6 +104,9 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(800, 600)
         self._apply_dark_theme()
         self._build_ui()
+
+        # Connect the thread-safe signal to the main-thread handler
+        self._invite_received.connect(self._on_invite_received_main_thread)
 
         messaging.add_message_callback(self._on_new_message)
         invite_mgr.add_invite_callback(self._on_incoming_invite)
@@ -135,9 +146,20 @@ class MainWindow(QMainWindow):
         settings_action.triggered.connect(self._on_settings)
         toolbar.addAction(settings_action)
 
+        # Invite notification bar (hidden until an invite arrives)
+        self._invite_bar = self._build_invite_bar()
+
+        # Central widget wraps the bar + splitter
+        central = QWidget()
+        central_layout = QVBoxLayout(central)
+        central_layout.setContentsMargins(0, 0, 0, 0)
+        central_layout.setSpacing(0)
+        central_layout.addWidget(self._invite_bar)
+        self.setCentralWidget(central)
+
         # Main splitter
         splitter = QSplitter(Qt.Orientation.Horizontal)
-        self.setCentralWidget(splitter)
+        central_layout.addWidget(splitter, 1)
 
         # Left: channel list
         left = QWidget()
@@ -183,6 +205,54 @@ class MainWindow(QMainWindow):
         splitter.addWidget(right)
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
+
+    def _build_invite_bar(self) -> QFrame:
+        bar = QFrame()
+        bar.setFrameShape(QFrame.Shape.NoFrame)
+        bar.setStyleSheet(
+            "QFrame { background: #2d4a1e; border-bottom: 1px solid #4a7a30; }"
+            "QLabel { color: #b8e08a; font-size: 12px; background: transparent; border: none; }"
+            "QPushButton { padding: 2px 10px; font-size: 11px; }"
+        )
+        bar.hide()
+
+        layout = QHBoxLayout(bar)
+        layout.setContentsMargins(10, 5, 10, 5)
+
+        self._invite_bar_label = QLabel()
+        layout.addWidget(self._invite_bar_label, 1)
+
+        accept_btn = QPushButton("Accept")
+        accept_btn.setStyleSheet("background: #3a8a20; color: white; border-radius: 3px;")
+        accept_btn.clicked.connect(self._on_accept_invite)
+        layout.addWidget(accept_btn)
+
+        decline_btn = QPushButton("Decline")
+        decline_btn.setStyleSheet("background: #5a2020; color: white; border-radius: 3px;")
+        decline_btn.clicked.connect(self._on_decline_invite)
+        layout.addWidget(decline_btn)
+
+        next_btn = QPushButton("▸")
+        next_btn.setToolTip("Next invite")
+        next_btn.setFixedWidth(28)
+        next_btn.setStyleSheet("background: #444; color: #ccc; border-radius: 3px;")
+        next_btn.clicked.connect(self._on_next_invite)
+        layout.addWidget(next_btn)
+
+        return bar
+
+    def _update_invite_bar(self):
+        if not self._pending_invites:
+            self._invite_bar.hide()
+            return
+        channel_hash, channel_name, token, expiry, admin_hex = self._pending_invites[0]
+        count = len(self._pending_invites)
+        count_str = f" ({count})" if count > 1 else ""
+        self._invite_bar_label.setText(
+            f"📨  You've been invited to join  #{channel_name}{count_str}  "
+            f"— from {admin_hex[:16]}…"
+        )
+        self._invite_bar.show()
 
     def _apply_dark_theme(self):
         self.setStyleSheet("""
@@ -405,16 +475,40 @@ class MainWindow(QMainWindow):
 
     def _on_incoming_invite(self, channel_hash_hex: str, channel_name: str,
                              token: bytes, expiry: float, admin_hash_hex: str):
-        dlg = IncomingInviteDialog(channel_name, admin_hash_hex, self)
-        if dlg.exec() == QDialog.DialogCode.Accepted:
-            self._invite_mgr.send_join_request(
-                channel_hash_hex, token, expiry, admin_hash_hex
-            )
-            QMessageBox.information(
-                self, "Join request sent",
-                f"Your request to join #{channel_name} has been sent.\n"
-                "You'll be added once an admin approves it."
-            )
+        # Called from LXMF background thread — emit signal to cross to main thread.
+        self._invite_received.emit(channel_hash_hex, channel_name, token, expiry, admin_hash_hex)
+
+    @pyqtSlot(str, str, bytes, float, str)
+    def _on_invite_received_main_thread(self, channel_hash_hex: str, channel_name: str,
+                                         token: bytes, expiry: float, admin_hash_hex: str):
+        self._pending_invites.append((channel_hash_hex, channel_name, token, expiry, admin_hash_hex))
+        self._update_invite_bar()
+
+    @pyqtSlot()
+    def _on_accept_invite(self):
+        if not self._pending_invites:
+            return
+        channel_hash, channel_name, token, expiry, admin_hex = self._pending_invites.pop(0)
+        self._invite_mgr.send_join_request(channel_hash, token, expiry, admin_hex)
+        QMessageBox.information(
+            self, "Join request sent",
+            f"Your request to join #{channel_name} has been sent.\n"
+            "You'll be added once an admin approves it."
+        )
+        self._update_invite_bar()
+
+    @pyqtSlot()
+    def _on_decline_invite(self):
+        if self._pending_invites:
+            self._pending_invites.pop(0)
+        self._update_invite_bar()
+
+    @pyqtSlot()
+    def _on_next_invite(self):
+        if len(self._pending_invites) > 1:
+            # Rotate to show the next pending invite
+            self._pending_invites.append(self._pending_invites.pop(0))
+        self._update_invite_bar()
 
     # --- settings ---
 
