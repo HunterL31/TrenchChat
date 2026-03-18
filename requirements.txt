@@ -1,0 +1,4 @@
+rns
+lxmf
+PyQt6
+msgpack
