@@ -385,12 +385,22 @@ class InviteManager:
         try:
             dest_hash = bytes.fromhex(dest_hex)
             dest_identity = RNS.Identity.recall(dest_hash)
+
+            if dest_identity is None:
+                RNS.log(f"TrenchChat [invite]: identity {dest_hex[:12]}… not known, "
+                        f"requesting path and waiting up to 10s…", RNS.LOG_DEBUG)
+                RNS.Transport.request_path(dest_hash)
+                timeout = time.time() + 10
+                while dest_identity is None and time.time() < timeout:
+                    time.sleep(0.5)
+                    dest_identity = RNS.Identity.recall(dest_hash)
+
             if dest_identity is None:
                 RNS.log(f"TrenchChat [invite]: cannot deliver {msg_type!r} to "
-                        f"{dest_hex[:12]}… — identity not known, requesting path",
+                        f"{dest_hex[:12]}… — identity not known after path request",
                         RNS.LOG_WARNING)
-                RNS.Transport.request_path(dest_hash)
                 return
+
             dest = RNS.Destination(
                 dest_identity,
                 RNS.Destination.OUT,
