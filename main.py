@@ -15,6 +15,7 @@ Startup order:
 
 import sys
 import signal
+import argparse
 
 import RNS
 from PyQt6.QtWidgets import QApplication
@@ -31,11 +32,18 @@ from trenchchat.gui.main_window import MainWindow
 
 
 def main():
+    parser = argparse.ArgumentParser(description="TrenchChat")
+    parser.add_argument(
+        "-v", "--verbose", action="store_true",
+        help="Enable verbose Reticulum + TrenchChat debug logging"
+    )
+    args = parser.parse_args()
+
     # --- config ---
     config = Config()
 
     # --- Reticulum ---
-    rns = RNS.Reticulum()
+    rns = RNS.Reticulum(loglevel=RNS.LOG_DEBUG if args.verbose else RNS.LOG_NOTICE)
 
     # --- identity ---
     identity = Identity(config)

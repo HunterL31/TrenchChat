@@ -239,10 +239,19 @@ class InviteManager:
     def send_invite(self, channel_hash_hex: str, invitee_hash_hex: str,
                     ttl: float = DEFAULT_TOKEN_TTL):
         """Generate a token and send it to the invitee via LXMF."""
+        RNS.log(f"TrenchChat: sending invite for channel {channel_hash_hex[:12]}… "
+                f"to {invitee_hash_hex[:12]}…", RNS.LOG_NOTICE)
         invitee_hash = bytes.fromhex(invitee_hash_hex)
+        # Check we can recall the invitee's identity before trying to send
+        dest_identity = RNS.Identity.recall(invitee_hash)
+        if dest_identity is None:
+            RNS.log(f"TrenchChat: cannot send invite — identity {invitee_hash_hex[:12]}… "
+                    f"not known to Reticulum. Path request sent, retry after path resolves.",
+                    RNS.LOG_WARNING)
+            RNS.Transport.request_path(invitee_hash)
         token, expiry = self.generate_invite_token(channel_hash_hex, invitee_hash, ttl)
         self._send_raw(invitee_hash_hex, {
-            F_MSG_TYPE:     "invite",
+            F_MSG_TYPE:     MT_INVITE,
             F_CHANNEL_HASH: bytes.fromhex(channel_hash_hex),
             F_INVITE_TOKEN: token,
             F_INVITEE_HASH: invitee_hash,
@@ -253,6 +262,8 @@ class InviteManager:
     def send_join_request(self, channel_hash_hex: str, token: bytes,
                           expiry: float, admin_hash_hex: str):
         """Send a join request to an admin using a received invite token."""
+        RNS.log(f"TrenchChat: sending join request for channel {channel_hash_hex[:12]}… "
+                f"to admin {admin_hash_hex[:12]}…", RNS.LOG_NOTICE)
         self._send_raw(admin_hash_hex, {
             F_MSG_TYPE:     MT_JOIN_REQUEST,
             F_CHANNEL_HASH: bytes.fromhex(channel_hash_hex),
@@ -287,13 +298,20 @@ class InviteManager:
         if isinstance(msg_type, bytes):
             msg_type = msg_type.decode(errors="replace")
 
+        RNS.log(f"TrenchChat [invite]: received control message type={msg_type!r}",
+                RNS.LOG_DEBUG)
+
         channel_hash_bytes = fields.get(F_CHANNEL_HASH)
         if not channel_hash_bytes:
+            RNS.log("TrenchChat [invite]: control message missing channel hash, dropping",
+                    RNS.LOG_WARNING)
             return
         channel_hash_hex = channel_hash_bytes.hex() \
             if isinstance(channel_hash_bytes, bytes) else str(channel_hash_bytes)
 
         if msg_type == MT_JOIN_REQUEST:
+            RNS.log(f"TrenchChat [invite]: join request received for channel {channel_hash_hex[:12]}…",
+                    RNS.LOG_NOTICE)
             self._handle_join_request(fields, channel_hash_hex)
 
         elif msg_type == MT_MEMBER_LIST_UPDATE:
@@ -301,7 +319,6 @@ class InviteManager:
             if blob:
                 try:
                     doc = msgpack.unpackb(blob, raw=True)
-                    # Convert bytes keys to bytes values for consistency
                     doc_clean = {
                         "channel_hash": doc[b"channel_hash"],
                         "version":      doc[b"version"],
@@ -310,7 +327,10 @@ class InviteManager:
                         "admins":       list(doc[b"admins"]),
                         "signatures":   dict(doc[b"signatures"]),
                     }
-                    self._accept_document(doc_clean, channel_hash_hex)
+                    accepted = self._accept_document(doc_clean, channel_hash_hex)
+                    RNS.log(f"TrenchChat [invite]: member list update v{doc_clean['version']} "
+                            f"for {channel_hash_hex[:12]}… — {'accepted' if accepted else 'rejected'}",
+                            RNS.LOG_NOTICE)
                 except Exception as e:
                     RNS.log(f"TrenchChat: member list update parse error: {e}",
                             RNS.LOG_WARNING)
@@ -319,6 +339,11 @@ class InviteManager:
             token        = fields.get(F_INVITE_TOKEN)
             expiry       = fields.get(F_EXPIRY_TS)
             admin_hash   = fields.get(F_ADMIN_HASH)
+            RNS.log(f"TrenchChat [invite]: invite received for channel {channel_hash_hex[:12]}… "
+                    f"token={'present' if token else 'MISSING'} "
+                    f"expiry={'present' if expiry else 'MISSING'} "
+                    f"admin={'present' if admin_hash else 'MISSING'}",
+                    RNS.LOG_NOTICE)
             if token and expiry and admin_hash:
                 admin_hex = admin_hash.hex() if isinstance(admin_hash, bytes) else str(admin_hash)
                 channel = self._storage.get_channel(channel_hash_hex)
@@ -328,6 +353,9 @@ class InviteManager:
                         cb(channel_hash_hex, channel_name, token, expiry, admin_hex)
                     except Exception as e:
                         RNS.log(f"TrenchChat: invite callback error: {e}", RNS.LOG_ERROR)
+            else:
+                RNS.log("TrenchChat [invite]: invite message missing required fields, dropping",
+                        RNS.LOG_WARNING)
 
     def _handle_join_request(self, fields: dict, channel_hash_hex: str):
         token        = fields.get(F_INVITE_TOKEN)
@@ -353,10 +381,14 @@ class InviteManager:
     # --- helpers ---
 
     def _send_raw(self, dest_hex: str, fields: dict):
+        msg_type = fields.get(F_MSG_TYPE, "unknown")
         try:
             dest_hash = bytes.fromhex(dest_hex)
             dest_identity = RNS.Identity.recall(dest_hash)
             if dest_identity is None:
+                RNS.log(f"TrenchChat [invite]: cannot deliver {msg_type!r} to "
+                        f"{dest_hex[:12]}… — identity not known, requesting path",
+                        RNS.LOG_WARNING)
                 RNS.Transport.request_path(dest_hash)
                 return
             dest = RNS.Destination(
@@ -373,6 +405,8 @@ class InviteManager:
                 desired_method=LXMF.LXMessage.DIRECT,
             )
             lxm.fields = fields
+            RNS.log(f"TrenchChat [invite]: queuing {msg_type!r} → {dest_hex[:12]}…",
+                    RNS.LOG_NOTICE)
             self._router.send(lxm)
         except Exception as e:
-            RNS.log(f"TrenchChat: invite send error: {e}", RNS.LOG_WARNING)
+            RNS.log(f"TrenchChat: invite send error ({msg_type}): {e}", RNS.LOG_WARNING)
