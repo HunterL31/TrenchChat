@@ -372,6 +372,9 @@ class MainWindow(QMainWindow):
         else:
             subs = self._subscription_mgr.get_subscribers(self._current_channel)
             all_dests = list(subs) if subs else []
+            # Always include self so the message is stored locally even with no subscribers.
+            if self._identity.hash_hex not in all_dests:
+                all_dests.append(self._identity.hash_hex)
 
         self._messaging.send_message(
             channel_hash_hex=self._current_channel,
