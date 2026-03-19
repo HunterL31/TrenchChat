@@ -71,10 +71,11 @@ class Messaging:
             if dest_hex == self._identity.hash_hex:
                 continue
             try:
-                dest_hash = bytes.fromhex(dest_hex)
-                dest_identity = RNS.Identity.recall(dest_hash)
+                identity_hash = bytes.fromhex(dest_hex)
+                delivery_dest_hash = RNS.Destination.hash(identity_hash, "lxmf", "delivery")
+                dest_identity = RNS.Identity.recall(delivery_dest_hash)
                 if dest_identity is None:
-                    RNS.Transport.request_path(dest_hash)
+                    RNS.Transport.request_path(delivery_dest_hash)
                     continue
 
                 dest = RNS.Destination(

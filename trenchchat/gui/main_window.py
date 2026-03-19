@@ -360,9 +360,18 @@ class MainWindow(QMainWindow):
     def _on_send_message(self, text: str):
         if not self._current_channel:
             return
-        subs = self._subscription_mgr.get_subscribers(self._current_channel)
-        # Always include ourselves so the message is stored locally.
-        all_dests = list(subs) if subs else []
+
+        channel = self._storage.get_channel(self._current_channel)
+        if channel and channel["access_mode"] == "invite":
+            # For invite-only channels use the members table as the recipient list.
+            all_dests = [
+                row["identity_hash"]
+                for row in self._storage.get_members(self._current_channel)
+            ]
+        else:
+            subs = self._subscription_mgr.get_subscribers(self._current_channel)
+            all_dests = list(subs) if subs else []
+
         self._messaging.send_message(
             channel_hash_hex=self._current_channel,
             content=text,
