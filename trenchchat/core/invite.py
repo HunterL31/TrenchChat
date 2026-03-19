@@ -118,10 +118,6 @@ class InviteManager:
 
     def _validate_document(self, doc: dict, channel_hash_hex: str) -> bool:
         """Return True if the document has at least one valid admin signature."""
-        channel = self._storage.get_channel(channel_hash_hex)
-        if channel is None:
-            return False
-
         admins_in_doc: list[bytes] = doc.get("admins", [])
         sigs: dict = doc.get("signatures", {})
 
