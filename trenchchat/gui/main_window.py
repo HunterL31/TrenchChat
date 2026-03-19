@@ -76,9 +76,9 @@ class NewChannelDialog(QDialog):
 
 
 class MainWindow(QMainWindow):
-    # Signal used to safely marshal invite notifications from the LXMF
-    # background thread onto the Qt main thread.
-    _invite_received = pyqtSignal(str, str, bytes, float, str)
+    # Signals used to safely marshal background-thread events onto the Qt main thread.
+    _invite_received  = pyqtSignal(str, str, bytes, float, str)
+    _message_received = pyqtSignal(str, str)   # channel_hash_hex, message_id
 
     def __init__(self, config: Config, identity: Identity, storage: Storage,
                  router: Router, channel_mgr: ChannelManager,
@@ -105,8 +105,9 @@ class MainWindow(QMainWindow):
         self._apply_dark_theme()
         self._build_ui()
 
-        # Connect the thread-safe signal to the main-thread handler
+        # Connect thread-safe signals to main-thread handlers
         self._invite_received.connect(self._on_invite_received_main_thread)
+        self._message_received.connect(self._on_new_message_main_thread)
 
         messaging.add_message_callback(self._on_new_message)
         invite_mgr.add_invite_callback(self._on_incoming_invite)
@@ -386,10 +387,14 @@ class MainWindow(QMainWindow):
     # --- incoming message ---
 
     def _on_new_message(self, channel_hash_hex: str, message_id: str):
+        """Called from LXMF background thread — marshal to main thread via signal."""
+        self._message_received.emit(channel_hash_hex, message_id)
+
+    @pyqtSlot(str, str)
+    def _on_new_message_main_thread(self, channel_hash_hex: str, message_id: str):
         if channel_hash_hex in self._channel_views:
             self._channel_views[channel_hash_hex].on_new_message(message_id)
         else:
-            # Channel not currently open — just refresh the list to update last_seen
             self._refresh_channel_list()
 
     def _on_channel_joined(self, channel_hash_hex: str, channel_name: str):
