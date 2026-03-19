@@ -21,7 +21,7 @@ from PyQt6.QtWidgets import (
     QDialogButtonBox, QMessageBox, QStackedWidget, QMenu,
     QPushButton, QFrame,
 )
-from PyQt6.QtCore import Qt, pyqtSlot, QPoint, pyqtSignal
+from PyQt6.QtCore import Qt, pyqtSlot, QPoint, pyqtSignal, QTimer
 from PyQt6.QtGui import QAction, QFont
 
 from trenchchat.config import Config
@@ -110,6 +110,7 @@ class MainWindow(QMainWindow):
 
         messaging.add_message_callback(self._on_new_message)
         invite_mgr.add_invite_callback(self._on_incoming_invite)
+        invite_mgr.add_channel_joined_callback(self._on_channel_joined)
         self._refresh_channel_list()
 
     # --- UI construction ---
@@ -381,6 +382,10 @@ class MainWindow(QMainWindow):
         else:
             # Channel not currently open — just refresh the list to update last_seen
             self._refresh_channel_list()
+
+    def _on_channel_joined(self, channel_hash_hex: str, channel_name: str):
+        """Called from background thread when auto-joined a channel via invite."""
+        QTimer.singleShot(0, self._refresh_channel_list)
 
     # --- channel context menu ---
 

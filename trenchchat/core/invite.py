@@ -38,6 +38,11 @@ F_EXPIRY_TS          = 0x13
 F_ADMIN_HASH         = 0x14
 F_CHANNEL_HASH       = 0x01
 F_MEMBER_LIST_DOC    = 0x21
+F_CHANNEL_NAME       = 0x22
+F_CHANNEL_DESC       = 0x23
+F_CHANNEL_CREATOR    = 0x24
+F_CHANNEL_ACCESS     = 0x25
+F_CHANNEL_CREATED_AT = 0x26
 
 MT_JOIN_REQUEST       = "join_request"
 MT_MEMBER_LIST_UPDATE = "member_list_update"
@@ -72,6 +77,7 @@ class InviteManager:
         self._storage = storage
         self._router = router
         self._invite_callbacks: list = []
+        self._channel_callbacks: list = []
         router.add_delivery_callback(self._on_lxmf_message)
 
     def add_invite_callback(self, callback):
@@ -82,6 +88,15 @@ class InviteManager:
     def remove_invite_callback(self, callback):
         if callback in self._invite_callbacks:
             self._invite_callbacks.remove(callback)
+
+    def add_channel_joined_callback(self, callback):
+        """callback(channel_hash_hex, channel_name) — fired when auto-joined via invite."""
+        if callback not in self._channel_callbacks:
+            self._channel_callbacks.append(callback)
+
+    def remove_channel_joined_callback(self, callback):
+        if callback in self._channel_callbacks:
+            self._channel_callbacks.remove(callback)
 
     # --- member list document ---
 
@@ -214,15 +229,23 @@ class InviteManager:
 
     def _broadcast_member_list(self, channel_hash_hex: str, doc: dict):
         blob = msgpack.packb(doc, use_bin_type=True)
+        channel = self._storage.get_channel(channel_hash_hex)
+        fields = {
+            F_MSG_TYPE:        MT_MEMBER_LIST_UPDATE,
+            F_CHANNEL_HASH:    bytes.fromhex(channel_hash_hex),
+            F_MEMBER_LIST_DOC: blob,
+        }
+        if channel:
+            fields[F_CHANNEL_NAME]       = channel["name"]
+            fields[F_CHANNEL_DESC]       = channel["description"] or ""
+            fields[F_CHANNEL_CREATOR]    = channel["creator_hash"]
+            fields[F_CHANNEL_ACCESS]     = channel["access_mode"]
+            fields[F_CHANNEL_CREATED_AT] = channel["created_at"]
         for row in self._storage.get_members(channel_hash_hex):
             dest_hex = row["identity_hash"]
             if dest_hex == self._identity.hash_hex:
                 continue
-            self._send_raw(dest_hex, {
-                F_MSG_TYPE:        MT_MEMBER_LIST_UPDATE,
-                F_CHANNEL_HASH:    bytes.fromhex(channel_hash_hex),
-                F_MEMBER_LIST_DOC: blob,
-            })
+            self._send_raw(dest_hex, fields)
 
     # --- invite token ---
 
@@ -328,6 +351,42 @@ class InviteManager:
                     RNS.log(f"TrenchChat [invite]: member list update v{doc_clean['version']} "
                             f"for {channel_hash_hex[:12]}… — {'accepted' if accepted else 'rejected'}",
                             RNS.LOG_NOTICE)
+
+                    # If channel metadata was included and we don't know this channel yet,
+                    # upsert it and subscribe so it appears in the sidebar.
+                    if accepted:
+                        channel_name = fields.get(F_CHANNEL_NAME)
+                        if channel_name and not self._storage.get_channel(channel_hash_hex):
+                            if isinstance(channel_name, bytes):
+                                channel_name = channel_name.decode("utf-8", errors="replace")
+                            desc = fields.get(F_CHANNEL_DESC, b"")
+                            if isinstance(desc, bytes):
+                                desc = desc.decode("utf-8", errors="replace")
+                            creator = fields.get(F_CHANNEL_CREATOR, b"")
+                            if isinstance(creator, bytes):
+                                creator = creator.decode("utf-8", errors="replace")
+                            access = fields.get(F_CHANNEL_ACCESS, b"invite")
+                            if isinstance(access, bytes):
+                                access = access.decode("utf-8", errors="replace")
+                            created_at = fields.get(F_CHANNEL_CREATED_AT, time.time())
+                            self._storage.upsert_channel(
+                                hash=channel_hash_hex,
+                                name=channel_name,
+                                description=desc,
+                                creator_hash=creator,
+                                access_mode=access,
+                                created_at=created_at,
+                            )
+                            self._storage.subscribe(channel_hash_hex)
+                            RNS.log(f"TrenchChat [invite]: auto-joined channel "
+                                    f"{channel_name!r} ({channel_hash_hex[:12]}…)",
+                                    RNS.LOG_NOTICE)
+                            for cb in self._channel_callbacks:
+                                try:
+                                    cb(channel_hash_hex, channel_name)
+                                except Exception as e:
+                                    RNS.log(f"TrenchChat: channel callback error: {e}",
+                                            RNS.LOG_ERROR)
                 except Exception as e:
                     RNS.log(f"TrenchChat: member list update parse error: {e}",
                             RNS.LOG_WARNING)
