@@ -78,6 +78,7 @@ class InviteManager:
         self._router = router
         self._invite_callbacks: list = []
         self._channel_callbacks: list = []
+        self._member_list_callbacks: list = []
         router.add_delivery_callback(self._on_lxmf_message)
 
     def add_invite_callback(self, callback):
@@ -97,6 +98,15 @@ class InviteManager:
     def remove_channel_joined_callback(self, callback):
         if callback in self._channel_callbacks:
             self._channel_callbacks.remove(callback)
+
+    def add_member_list_callback(self, callback):
+        """callback(channel_hash_hex) — fired whenever a member list update is accepted."""
+        if callback not in self._member_list_callbacks:
+            self._member_list_callbacks.append(callback)
+
+    def remove_member_list_callback(self, callback):
+        if callback in self._member_list_callbacks:
+            self._member_list_callbacks.remove(callback)
 
     # --- member list document ---
 
@@ -183,6 +193,13 @@ class InviteManager:
             for m in doc["members"]
         ]
         self._storage.replace_members(channel_hash_hex, member_rows)
+
+        for cb in self._member_list_callbacks:
+            try:
+                cb(channel_hash_hex)
+            except Exception as e:
+                RNS.log(f"TrenchChat: member list callback error: {e}", RNS.LOG_ERROR)
+
         return True
 
     # --- publish a new member list (admin action) ---

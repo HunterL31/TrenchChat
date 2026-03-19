@@ -212,6 +212,7 @@ class MainWindow(QMainWindow):
         messaging.add_message_callback(self._on_new_message)
         invite_mgr.add_invite_callback(self._on_incoming_invite)
         invite_mgr.add_channel_joined_callback(self._on_channel_joined)
+        invite_mgr.add_member_list_callback(self._on_member_list_updated)
         channel_mgr.add_channel_discovered_callback(self._on_channel_discovered)
         self._refresh_channel_list()
 
@@ -428,13 +429,19 @@ class MainWindow(QMainWindow):
             self._stack.addWidget(view)
 
         self._stack.setCurrentWidget(self._channel_views[channel_hash_hex])
-        self._compose.set_enabled(True)
 
         channel = self._storage.get_channel(channel_hash_hex)
-        if channel:
-            self._compose.set_placeholder(
-                f"Message #{channel['name']}…  (Enter to send)"
-            )
+        if channel and channel["access_mode"] == "invite":
+            is_member = self._storage.is_member(channel_hash_hex, self._identity.hash_hex)
+            self._compose.set_enabled(is_member)
+            if is_member:
+                self._compose.set_placeholder(f"Message #{channel['name']}…  (Enter to send)")
+            else:
+                self._compose.set_placeholder("You are not a member of this channel")
+        else:
+            self._compose.set_enabled(True)
+            if channel:
+                self._compose.set_placeholder(f"Message #{channel['name']}…  (Enter to send)")
 
     # --- new / join channel ---
 
@@ -534,6 +541,16 @@ class MainWindow(QMainWindow):
     def _on_channel_joined(self, channel_hash_hex: str, channel_name: str):
         """Called from background thread when auto-joined a channel via invite."""
         QTimer.singleShot(0, self._refresh_channel_list)
+
+    def _on_member_list_updated(self, channel_hash_hex: str):
+        """Called from background thread when a member list is accepted."""
+        QTimer.singleShot(0, lambda: self._on_member_list_updated_main_thread(channel_hash_hex))
+
+    def _on_member_list_updated_main_thread(self, channel_hash_hex: str):
+        # If the current channel's membership changed, refresh the compose state.
+        if channel_hash_hex == self._current_channel:
+            self._switch_to_channel(channel_hash_hex)
+        self._refresh_channel_list()
 
     # --- channel context menu ---
 
