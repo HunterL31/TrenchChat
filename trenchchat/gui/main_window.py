@@ -19,7 +19,8 @@ from PyQt6.QtWidgets import (
     QListWidget, QListWidgetItem, QSplitter, QToolBar,
     QLabel, QDialog, QFormLayout, QLineEdit, QComboBox,
     QDialogButtonBox, QMessageBox, QStackedWidget, QMenu,
-    QPushButton, QFrame,
+    QPushButton, QFrame, QTableWidget, QTableWidgetItem, QHeaderView,
+    QAbstractItemView,
 )
 from PyQt6.QtCore import Qt, pyqtSlot, QPoint, pyqtSignal, QTimer
 from PyQt6.QtGui import QAction, QFont
@@ -75,10 +76,77 @@ class NewChannelDialog(QDialog):
         return self._access.currentText()
 
 
+class JoinChannelDialog(QDialog):
+    """Lists discovered public channels the user hasn't subscribed to yet."""
+
+    def __init__(self, storage: Storage, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Join Channel")
+        self.setMinimumSize(500, 320)
+        self._storage = storage
+        self._selected_hash: str | None = None
+
+        layout = QVBoxLayout(self)
+
+        self._table = QTableWidget(0, 3)
+        self._table.setHorizontalHeaderLabels(["Name", "Description", "Creator"])
+        self._table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        self._table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self._table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._table.setAlternatingRowColors(True)
+        self._table.verticalHeader().setVisible(False)
+        self._table.itemSelectionChanged.connect(self._on_selection_changed)
+        self._table.doubleClicked.connect(self._on_double_click)
+        layout.addWidget(self._table)
+
+        self._buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        self._buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Join")
+        self._buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(False)
+        self._buttons.accepted.connect(self.accept)
+        self._buttons.rejected.connect(self.reject)
+        layout.addWidget(self._buttons)
+
+        self._populate()
+
+    def _populate(self):
+        self._table.setRowCount(0)
+        self._hashes: list[str] = []
+        for row in self._storage.get_all_channels():
+            if self._storage.is_subscribed(row["hash"]):
+                continue
+            if row["access_mode"] != "public":
+                continue
+            r = self._table.rowCount()
+            self._table.insertRow(r)
+            self._table.setItem(r, 0, QTableWidgetItem(row["name"]))
+            self._table.setItem(r, 1, QTableWidgetItem(row["description"] or ""))
+            self._table.setItem(r, 2, QTableWidgetItem(row["creator_hash"][:12] + "…"))
+            self._hashes.append(row["hash"])
+
+    def _on_selection_changed(self):
+        rows = self._table.selectedItems()
+        self._buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(bool(rows))
+        if rows:
+            self._selected_hash = self._hashes[self._table.currentRow()]
+
+    def _on_double_click(self, index):
+        self._selected_hash = self._hashes[index.row()]
+        self.accept()
+
+    @property
+    def selected_channel_hash(self) -> str | None:
+        return self._selected_hash
+
+
 class MainWindow(QMainWindow):
     # Signals used to safely marshal background-thread events onto the Qt main thread.
-    _invite_received  = pyqtSignal(str, str, bytes, float, str)
-    _message_received = pyqtSignal(str, str)   # channel_hash_hex, message_id
+    _invite_received    = pyqtSignal(str, str, bytes, float, str)
+    _message_received   = pyqtSignal(str, str)   # channel_hash_hex, message_id
+    _channel_discovered = pyqtSignal(str, str)   # channel_hash_hex, channel_name
 
     def __init__(self, config: Config, identity: Identity, storage: Storage,
                  router: Router, channel_mgr: ChannelManager,
@@ -108,10 +176,12 @@ class MainWindow(QMainWindow):
         # Connect thread-safe signals to main-thread handlers
         self._invite_received.connect(self._on_invite_received_main_thread)
         self._message_received.connect(self._on_new_message_main_thread)
+        self._channel_discovered.connect(self._on_channel_discovered_main_thread)
 
         messaging.add_message_callback(self._on_new_message)
         invite_mgr.add_invite_callback(self._on_incoming_invite)
         invite_mgr.add_channel_joined_callback(self._on_channel_joined)
+        channel_mgr.add_channel_discovered_callback(self._on_channel_discovered)
         self._refresh_channel_list()
 
     # --- UI construction ---
@@ -124,6 +194,10 @@ class MainWindow(QMainWindow):
         new_channel_action = QAction("＋ New Channel", self)
         new_channel_action.triggered.connect(self._on_new_channel)
         toolbar.addAction(new_channel_action)
+
+        join_channel_action = QAction("⤵ Join Channel", self)
+        join_channel_action.triggered.connect(self._on_join_channel)
+        toolbar.addAction(join_channel_action)
 
         toolbar.addSeparator()
 
@@ -331,7 +405,33 @@ class MainWindow(QMainWindow):
                 f"Message #{channel['name']}…  (Enter to send)"
             )
 
-    # --- new channel ---
+    # --- new / join channel ---
+
+    @pyqtSlot()
+    def _on_join_channel(self):
+        dlg = JoinChannelDialog(self._storage, self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        channel_hash = dlg.selected_channel_hash
+        if not channel_hash:
+            return
+        channel = self._storage.get_channel(channel_hash)
+        owner_hash = channel["creator_hash"] if channel else None
+        self._subscription_mgr.subscribe(channel_hash, owner_hash)
+        self._refresh_channel_list()
+        self._switch_to_channel(channel_hash)
+
+    def _on_channel_discovered(self, channel_hash_hex: str, channel_name: str):
+        """Called from background announce thread — marshal to main thread."""
+        self._channel_discovered.emit(channel_hash_hex, channel_name)
+
+    @pyqtSlot(str, str)
+    def _on_channel_discovered_main_thread(self, channel_hash_hex: str, channel_name: str):
+        """A new public channel was heard on the network — show a subtle notification."""
+        self.statusBar().showMessage(
+            f"New channel discovered: #{channel_name} — click 'Join Channel' to subscribe",
+            8000,
+        )
 
     @pyqtSlot()
     def _on_new_channel(self):
