@@ -79,14 +79,22 @@ class NewChannelDialog(QDialog):
 class JoinChannelDialog(QDialog):
     """Lists discovered public channels the user hasn't subscribed to yet."""
 
-    def __init__(self, storage: Storage, parent=None):
+    def __init__(self, storage: Storage, channel_mgr, router, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Join Channel")
         self.setMinimumSize(500, 320)
         self._storage = storage
+        self._channel_mgr = channel_mgr
+        self._router = router
         self._selected_hash: str | None = None
 
         layout = QVBoxLayout(self)
+
+        hint = QLabel("Channels announced on the network appear here. "
+                      "Click Refresh to request fresh announcements.")
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #888; font-size: 11px; padding: 4px;")
+        layout.addWidget(hint)
 
         self._table = QTableWidget(0, 3)
         self._table.setHorizontalHeaderLabels(["Name", "Description", "Creator"])
@@ -101,6 +109,13 @@ class JoinChannelDialog(QDialog):
         self._table.doubleClicked.connect(self._on_double_click)
         layout.addWidget(self._table)
 
+        btn_row = QHBoxLayout()
+        self._refresh_btn = QPushButton("↻ Refresh")
+        self._refresh_btn.clicked.connect(self._on_refresh)
+        btn_row.addWidget(self._refresh_btn)
+        btn_row.addStretch()
+        layout.addLayout(btn_row)
+
         self._buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
@@ -111,6 +126,9 @@ class JoinChannelDialog(QDialog):
         layout.addWidget(self._buttons)
 
         self._populate()
+        # Trigger a re-announce on open so peers hear us and may re-announce back.
+        self._channel_mgr.announce_all_owned()
+        self._router.announce()
 
     def _populate(self):
         self._table.setRowCount(0)
@@ -126,6 +144,19 @@ class JoinChannelDialog(QDialog):
             self._table.setItem(r, 1, QTableWidgetItem(row["description"] or ""))
             self._table.setItem(r, 2, QTableWidgetItem(row["creator_hash"][:12] + "…"))
             self._hashes.append(row["hash"])
+
+    def _on_refresh(self):
+        """Re-announce our own channels and repopulate the table after a short delay."""
+        self._channel_mgr.announce_all_owned()
+        self._router.announce()
+        self._refresh_btn.setEnabled(False)
+        self._refresh_btn.setText("Refreshing…")
+        QTimer.singleShot(3000, self._after_refresh)
+
+    def _after_refresh(self):
+        self._populate()
+        self._refresh_btn.setEnabled(True)
+        self._refresh_btn.setText("↻ Refresh")
 
     def _on_selection_changed(self):
         rows = self._table.selectedItems()
@@ -409,7 +440,7 @@ class MainWindow(QMainWindow):
 
     @pyqtSlot()
     def _on_join_channel(self):
-        dlg = JoinChannelDialog(self._storage, self)
+        dlg = JoinChannelDialog(self._storage, self._channel_mgr, self._router, self)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
         channel_hash = dlg.selected_channel_hash
