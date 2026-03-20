@@ -14,10 +14,11 @@ _MESSAGE_STORE_PATH = str(DATA_DIR / "messagestore")
 
 
 class Router:
-    def __init__(self, config: Config, identity):
+    def __init__(self, config: Config, identity, storagepath: str | None = None):
         """
         identity: trenchchat.core.identity.Identity instance
         (passed in to avoid circular imports)
+        storagepath: override for the LXMF message store directory
         """
         self._config = config
         self._identity = identity
@@ -25,7 +26,7 @@ class Router:
         self._delivery_callbacks: list = []
 
         self._router = LXMF.LXMRouter(
-            storagepath=_MESSAGE_STORE_PATH,
+            storagepath=storagepath or _MESSAGE_STORE_PATH,
             identity=identity.rns_identity,
             name=config.propagation_node_name or None,
         )

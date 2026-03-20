@@ -75,7 +75,7 @@ CREATE INDEX IF NOT EXISTS idx_missed_deliveries_recipient
 
 class Storage:
     def __init__(self, db_path: Path = DB_PATH):
-        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        db_path.parent.mkdir(parents=True, exist_ok=True)
         self._path = str(db_path)
         self._conn = sqlite3.connect(self._path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
