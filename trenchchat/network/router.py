@@ -26,6 +26,7 @@ class Router:
 
         self._router = LXMF.LXMRouter(
             storagepath=_MESSAGE_STORE_PATH,
+            identity=identity.rns_identity,
             name=config.propagation_node_name or None,
         )
 

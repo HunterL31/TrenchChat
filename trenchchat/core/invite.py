@@ -38,9 +38,15 @@ F_EXPIRY_TS          = 0x13
 F_ADMIN_HASH         = 0x14
 F_CHANNEL_HASH       = 0x01
 F_MEMBER_LIST_DOC    = 0x21
+F_CHANNEL_NAME       = 0x22
+F_CHANNEL_DESC       = 0x23
+F_CHANNEL_CREATOR    = 0x24
+F_CHANNEL_ACCESS     = 0x25
+F_CHANNEL_CREATED_AT = 0x26
 
-MT_JOIN_REQUEST      = "join_request"
+MT_JOIN_REQUEST       = "join_request"
 MT_MEMBER_LIST_UPDATE = "member_list_update"
+MT_INVITE             = "invite"
 
 DEFAULT_TOKEN_TTL = 7 * 24 * 3600  # 7 days
 
@@ -70,7 +76,37 @@ class InviteManager:
         self._identity = identity
         self._storage = storage
         self._router = router
+        self._invite_callbacks: list = []
+        self._channel_callbacks: list = []
+        self._member_list_callbacks: list = []
         router.add_delivery_callback(self._on_lxmf_message)
+
+    def add_invite_callback(self, callback):
+        """callback(channel_hash_hex, channel_name, token, expiry, admin_hash_hex)"""
+        if callback not in self._invite_callbacks:
+            self._invite_callbacks.append(callback)
+
+    def remove_invite_callback(self, callback):
+        if callback in self._invite_callbacks:
+            self._invite_callbacks.remove(callback)
+
+    def add_channel_joined_callback(self, callback):
+        """callback(channel_hash_hex, channel_name) — fired when auto-joined via invite."""
+        if callback not in self._channel_callbacks:
+            self._channel_callbacks.append(callback)
+
+    def remove_channel_joined_callback(self, callback):
+        if callback in self._channel_callbacks:
+            self._channel_callbacks.remove(callback)
+
+    def add_member_list_callback(self, callback):
+        """callback(channel_hash_hex) — fired whenever a member list update is accepted."""
+        if callback not in self._member_list_callbacks:
+            self._member_list_callbacks.append(callback)
+
+    def remove_member_list_callback(self, callback):
+        if callback in self._member_list_callbacks:
+            self._member_list_callbacks.remove(callback)
 
     # --- member list document ---
 
@@ -92,10 +128,6 @@ class InviteManager:
 
     def _validate_document(self, doc: dict, channel_hash_hex: str) -> bool:
         """Return True if the document has at least one valid admin signature."""
-        channel = self._storage.get_channel(channel_hash_hex)
-        if channel is None:
-            return False
-
         admins_in_doc: list[bytes] = doc.get("admins", [])
         sigs: dict = doc.get("signatures", {})
 
@@ -105,7 +137,8 @@ class InviteManager:
         )
 
         for admin_hash_bytes, sig in sigs.items():
-            admin_identity = RNS.Identity.recall(admin_hash_bytes)
+            admin_delivery_hash = RNS.Destination.hash(admin_hash_bytes, "lxmf", "delivery")
+            admin_identity = RNS.Identity.recall(admin_delivery_hash)
             if admin_identity is None:
                 continue
             if admin_hash_bytes in admins_in_doc:
@@ -160,6 +193,13 @@ class InviteManager:
             for m in doc["members"]
         ]
         self._storage.replace_members(channel_hash_hex, member_rows)
+
+        for cb in self._member_list_callbacks:
+            try:
+                cb(channel_hash_hex)
+            except Exception as e:
+                RNS.log(f"TrenchChat: member list callback error: {e}", RNS.LOG_ERROR)
+
         return True
 
     # --- publish a new member list (admin action) ---
@@ -202,15 +242,23 @@ class InviteManager:
 
     def _broadcast_member_list(self, channel_hash_hex: str, doc: dict):
         blob = msgpack.packb(doc, use_bin_type=True)
+        channel = self._storage.get_channel(channel_hash_hex)
+        fields = {
+            F_MSG_TYPE:        MT_MEMBER_LIST_UPDATE,
+            F_CHANNEL_HASH:    bytes.fromhex(channel_hash_hex),
+            F_MEMBER_LIST_DOC: blob,
+        }
+        if channel:
+            fields[F_CHANNEL_NAME]       = channel["name"]
+            fields[F_CHANNEL_DESC]       = channel["description"] or ""
+            fields[F_CHANNEL_CREATOR]    = channel["creator_hash"]
+            fields[F_CHANNEL_ACCESS]     = channel["access_mode"]
+            fields[F_CHANNEL_CREATED_AT] = channel["created_at"]
         for row in self._storage.get_members(channel_hash_hex):
             dest_hex = row["identity_hash"]
             if dest_hex == self._identity.hash_hex:
                 continue
-            self._send_raw(dest_hex, {
-                F_MSG_TYPE:        MT_MEMBER_LIST_UPDATE,
-                F_CHANNEL_HASH:    bytes.fromhex(channel_hash_hex),
-                F_MEMBER_LIST_DOC: blob,
-            })
+            self._send_raw(dest_hex, fields)
 
     # --- invite token ---
 
@@ -228,10 +276,12 @@ class InviteManager:
     def send_invite(self, channel_hash_hex: str, invitee_hash_hex: str,
                     ttl: float = DEFAULT_TOKEN_TTL):
         """Generate a token and send it to the invitee via LXMF."""
+        RNS.log(f"TrenchChat: sending invite for channel {channel_hash_hex[:12]}… "
+                f"to {invitee_hash_hex[:12]}…", RNS.LOG_NOTICE)
         invitee_hash = bytes.fromhex(invitee_hash_hex)
         token, expiry = self.generate_invite_token(channel_hash_hex, invitee_hash, ttl)
         self._send_raw(invitee_hash_hex, {
-            F_MSG_TYPE:     "invite",
+            F_MSG_TYPE:     MT_INVITE,
             F_CHANNEL_HASH: bytes.fromhex(channel_hash_hex),
             F_INVITE_TOKEN: token,
             F_INVITEE_HASH: invitee_hash,
@@ -242,6 +292,8 @@ class InviteManager:
     def send_join_request(self, channel_hash_hex: str, token: bytes,
                           expiry: float, admin_hash_hex: str):
         """Send a join request to an admin using a received invite token."""
+        RNS.log(f"TrenchChat: sending join request for channel {channel_hash_hex[:12]}… "
+                f"to admin {admin_hash_hex[:12]}…", RNS.LOG_NOTICE)
         self._send_raw(admin_hash_hex, {
             F_MSG_TYPE:     MT_JOIN_REQUEST,
             F_CHANNEL_HASH: bytes.fromhex(channel_hash_hex),
@@ -256,8 +308,11 @@ class InviteManager:
                               admin_hash: bytes) -> bool:
         if time.time() > expiry:
             return False
-        admin_identity = RNS.Identity.recall(admin_hash)
+        admin_delivery_hash = RNS.Destination.hash(admin_hash, "lxmf", "delivery")
+        admin_identity = RNS.Identity.recall(admin_delivery_hash)
         if admin_identity is None:
+            RNS.log(f"TrenchChat [invite]: cannot verify token — admin identity "
+                    f"{admin_hash.hex()[:12]}… not known", RNS.LOG_WARNING)
             return False
         if not self._storage.is_admin(channel_hash_hex, admin_hash.hex()):
             return False
@@ -276,13 +331,20 @@ class InviteManager:
         if isinstance(msg_type, bytes):
             msg_type = msg_type.decode(errors="replace")
 
+        RNS.log(f"TrenchChat [invite]: received control message type={msg_type!r}",
+                RNS.LOG_DEBUG)
+
         channel_hash_bytes = fields.get(F_CHANNEL_HASH)
         if not channel_hash_bytes:
+            RNS.log("TrenchChat [invite]: control message missing channel hash, dropping",
+                    RNS.LOG_WARNING)
             return
         channel_hash_hex = channel_hash_bytes.hex() \
             if isinstance(channel_hash_bytes, bytes) else str(channel_hash_bytes)
 
         if msg_type == MT_JOIN_REQUEST:
+            RNS.log(f"TrenchChat [invite]: join request received for channel {channel_hash_hex[:12]}…",
+                    RNS.LOG_NOTICE)
             self._handle_join_request(fields, channel_hash_hex)
 
         elif msg_type == MT_MEMBER_LIST_UPDATE:
@@ -290,7 +352,6 @@ class InviteManager:
             if blob:
                 try:
                     doc = msgpack.unpackb(blob, raw=True)
-                    # Convert bytes keys to bytes values for consistency
                     doc_clean = {
                         "channel_hash": doc[b"channel_hash"],
                         "version":      doc[b"version"],
@@ -299,15 +360,71 @@ class InviteManager:
                         "admins":       list(doc[b"admins"]),
                         "signatures":   dict(doc[b"signatures"]),
                     }
-                    self._accept_document(doc_clean, channel_hash_hex)
+                    accepted = self._accept_document(doc_clean, channel_hash_hex)
+                    RNS.log(f"TrenchChat [invite]: member list update v{doc_clean['version']} "
+                            f"for {channel_hash_hex[:12]}… — {'accepted' if accepted else 'rejected'}",
+                            RNS.LOG_NOTICE)
+
+                    # If channel metadata was included and we don't know this channel yet,
+                    # upsert it and subscribe so it appears in the sidebar.
+                    if accepted:
+                        channel_name = fields.get(F_CHANNEL_NAME)
+                        if channel_name and not self._storage.get_channel(channel_hash_hex):
+                            if isinstance(channel_name, bytes):
+                                channel_name = channel_name.decode("utf-8", errors="replace")
+                            desc = fields.get(F_CHANNEL_DESC, b"")
+                            if isinstance(desc, bytes):
+                                desc = desc.decode("utf-8", errors="replace")
+                            creator = fields.get(F_CHANNEL_CREATOR, b"")
+                            if isinstance(creator, bytes):
+                                creator = creator.decode("utf-8", errors="replace")
+                            access = fields.get(F_CHANNEL_ACCESS, b"invite")
+                            if isinstance(access, bytes):
+                                access = access.decode("utf-8", errors="replace")
+                            created_at = fields.get(F_CHANNEL_CREATED_AT, time.time())
+                            self._storage.upsert_channel(
+                                hash=channel_hash_hex,
+                                name=channel_name,
+                                description=desc,
+                                creator_hash=creator,
+                                access_mode=access,
+                                created_at=created_at,
+                            )
+                            self._storage.subscribe(channel_hash_hex)
+                            RNS.log(f"TrenchChat [invite]: auto-joined channel "
+                                    f"{channel_name!r} ({channel_hash_hex[:12]}…)",
+                                    RNS.LOG_NOTICE)
+                            for cb in self._channel_callbacks:
+                                try:
+                                    cb(channel_hash_hex, channel_name)
+                                except Exception as e:
+                                    RNS.log(f"TrenchChat: channel callback error: {e}",
+                                            RNS.LOG_ERROR)
                 except Exception as e:
                     RNS.log(f"TrenchChat: member list update parse error: {e}",
                             RNS.LOG_WARNING)
 
-        elif msg_type == "invite":
-            # Store the received invite for the user to act on via the UI.
-            # The UI calls send_join_request() when the user accepts.
-            pass
+        elif msg_type == MT_INVITE:
+            token        = fields.get(F_INVITE_TOKEN)
+            expiry       = fields.get(F_EXPIRY_TS)
+            admin_hash   = fields.get(F_ADMIN_HASH)
+            RNS.log(f"TrenchChat [invite]: invite received for channel {channel_hash_hex[:12]}… "
+                    f"token={'present' if token else 'MISSING'} "
+                    f"expiry={'present' if expiry else 'MISSING'} "
+                    f"admin={'present' if admin_hash else 'MISSING'}",
+                    RNS.LOG_NOTICE)
+            if token and expiry and admin_hash:
+                admin_hex = admin_hash.hex() if isinstance(admin_hash, bytes) else str(admin_hash)
+                channel = self._storage.get_channel(channel_hash_hex)
+                channel_name = channel["name"] if channel else channel_hash_hex[:12]
+                for cb in self._invite_callbacks:
+                    try:
+                        cb(channel_hash_hex, channel_name, token, expiry, admin_hex)
+                    except Exception as e:
+                        RNS.log(f"TrenchChat: invite callback error: {e}", RNS.LOG_ERROR)
+            else:
+                RNS.log("TrenchChat [invite]: invite message missing required fields, dropping",
+                        RNS.LOG_WARNING)
 
     def _handle_join_request(self, fields: dict, channel_hash_hex: str):
         token        = fields.get(F_INVITE_TOKEN)
@@ -333,12 +450,31 @@ class InviteManager:
     # --- helpers ---
 
     def _send_raw(self, dest_hex: str, fields: dict):
+        msg_type = fields.get(F_MSG_TYPE, "unknown")
         try:
-            dest_hash = bytes.fromhex(dest_hex)
-            dest_identity = RNS.Identity.recall(dest_hash)
+            identity_hash = bytes.fromhex(dest_hex)
+
+            # Compute the LXMF delivery destination hash from the identity hash.
+            # RNS.Identity.recall() takes a *destination* hash, not an identity hash.
+            delivery_dest_hash = RNS.Destination.hash(identity_hash, "lxmf", "delivery")
+
+            dest_identity = RNS.Identity.recall(delivery_dest_hash)
+
             if dest_identity is None:
-                RNS.Transport.request_path(dest_hash)
+                RNS.log(f"TrenchChat [invite]: delivery dest for {dest_hex[:12]}… not known, "
+                        f"requesting path and waiting up to 10s…", RNS.LOG_DEBUG)
+                RNS.Transport.request_path(delivery_dest_hash)
+                timeout = time.time() + 10
+                while dest_identity is None and time.time() < timeout:
+                    time.sleep(0.5)
+                    dest_identity = RNS.Identity.recall(delivery_dest_hash)
+
+            if dest_identity is None:
+                RNS.log(f"TrenchChat [invite]: cannot deliver {msg_type!r} to "
+                        f"{dest_hex[:12]}… — identity not known after path request",
+                        RNS.LOG_WARNING)
                 return
+
             dest = RNS.Destination(
                 dest_identity,
                 RNS.Destination.OUT,
@@ -353,6 +489,8 @@ class InviteManager:
                 desired_method=LXMF.LXMessage.DIRECT,
             )
             lxm.fields = fields
+            RNS.log(f"TrenchChat [invite]: queuing {msg_type!r} → {dest_hex[:12]}…",
+                    RNS.LOG_NOTICE)
             self._router.send(lxm)
         except Exception as e:
-            RNS.log(f"TrenchChat: invite send error: {e}", RNS.LOG_WARNING)
+            RNS.log(f"TrenchChat: invite send error ({msg_type}): {e}", RNS.LOG_WARNING)

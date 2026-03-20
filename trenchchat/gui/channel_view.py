@@ -25,7 +25,7 @@ def _format_ts(ts: float) -> str:
 
 
 class MessageBubble(QFrame):
-    def __init__(self, sender: str, content: str, timestamp: float,
+    def __init__(self, sender: str, sender_hash: str, content: str, timestamp: float,
                  received_at: float, is_own: bool = False, parent=None):
         super().__init__(parent)
         self.setFrameShape(QFrame.Shape.NoFrame)
@@ -35,8 +35,9 @@ class MessageBubble(QFrame):
         layout.setContentsMargins(8, 4, 8, 4)
         layout.setSpacing(2)
 
-        # Header: sender + time
-        header = QLabel(f"<b>{sender}</b>  <span style='color:#888;font-size:11px'>"
+        # Header: sender + truncated hash badge + time
+        hash_badge = f"<span style='color:#666;font-size:10px'>[{sender_hash[:8]}]</span>"
+        header = QLabel(f"<b>{sender}</b> {hash_badge}  <span style='color:#888;font-size:11px'>"
                         f"{_format_ts(timestamp)}</span>")
         header.setTextFormat(Qt.TextFormat.RichText)
         layout.addWidget(header)
@@ -149,6 +150,7 @@ class ChannelView(QWidget):
 
         bubble = MessageBubble(
             sender=row["sender_name"] or row["sender_hash"][:8],
+            sender_hash=row["sender_hash"],
             content=row["content"],
             timestamp=row["timestamp"],
             received_at=row["received_at"],

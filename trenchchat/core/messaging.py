@@ -71,10 +71,11 @@ class Messaging:
             if dest_hex == self._identity.hash_hex:
                 continue
             try:
-                dest_hash = bytes.fromhex(dest_hex)
-                dest_identity = RNS.Identity.recall(dest_hash)
+                identity_hash = bytes.fromhex(dest_hex)
+                delivery_dest_hash = RNS.Destination.hash(identity_hash, "lxmf", "delivery")
+                dest_identity = RNS.Identity.recall(delivery_dest_hash)
                 if dest_identity is None:
-                    RNS.Transport.request_path(dest_hash)
+                    RNS.Transport.request_path(delivery_dest_hash)
                     continue
 
                 dest = RNS.Destination(
@@ -134,14 +135,17 @@ class Messaging:
         if not self._storage.is_subscribed(channel_hash_hex):
             return
 
+        # Resolve the sender's identity hash from the LXMF delivery destination hash.
+        # message.source_hash is the delivery dest hash, not the raw identity hash.
+        sender_identity = RNS.Identity.recall(message.source_hash) \
+            if message.source_hash else None
+        sender_hex = sender_identity.hash.hex() \
+            if sender_identity else (message.source_hash.hex() if message.source_hash else "")
+
         channel = self._storage.get_channel(channel_hash_hex)
         if channel and channel["access_mode"] == "invite":
-            sender_hex = message.source_hash.hex() \
-                if message.source_hash else ""
             if not self._storage.is_member(channel_hash_hex, sender_hex):
                 return
-
-        sender_hex = message.source_hash.hex() if message.source_hash else ""
         sender_name = fields.get(F_DISPLAY_NAME, "")
         if isinstance(sender_name, bytes):
             sender_name = sender_name.decode(errors="replace")

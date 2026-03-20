@@ -1,25 +1,31 @@
 """
 Thin wrapper around RNS.Identity.
 
-TrenchChat does not manage its own key files. Reticulum owns the identity.
-We create a persistent named destination so the identity hash stays stable
-across restarts (Reticulum stores the keypair in its own keystore).
+The keypair is persisted to ~/.trenchchat/identity so the identity hash
+stays stable across restarts.  On first launch the file is created; on
+subsequent launches it is loaded from disk.
 """
 
 import RNS
 
 from trenchchat import APP_NAME
-from trenchchat.config import Config
+from trenchchat.config import Config, DATA_DIR
 
 # The aspect used to derive TrenchChat's stable delivery destination.
 _DELIVERY_ASPECT = "delivery"
+
+_IDENTITY_PATH = DATA_DIR / "identity"
 
 
 class Identity:
     def __init__(self, config: Config):
         self._config = config
         # RNS must already be initialised before this is constructed.
-        self._identity: RNS.Identity = RNS.Identity()
+        if _IDENTITY_PATH.exists():
+            self._identity: RNS.Identity = RNS.Identity.from_file(str(_IDENTITY_PATH))
+        else:
+            self._identity = RNS.Identity()
+            self._identity.to_file(str(_IDENTITY_PATH))
         self._destination: RNS.Destination = RNS.Destination(
             self._identity,
             RNS.Destination.IN,

@@ -15,6 +15,7 @@ Startup order:
 
 import sys
 import signal
+import argparse
 
 import RNS
 from PyQt6.QtWidgets import QApplication
@@ -31,11 +32,18 @@ from trenchchat.gui.main_window import MainWindow
 
 
 def main():
+    parser = argparse.ArgumentParser(description="TrenchChat")
+    parser.add_argument(
+        "-v", "--verbose", action="store_true",
+        help="Enable verbose Reticulum + TrenchChat debug logging"
+    )
+    args = parser.parse_args()
+
     # --- config ---
     config = Config()
 
     # --- Reticulum ---
-    rns = RNS.Reticulum()
+    rns = RNS.Reticulum(loglevel=RNS.LOG_DEBUG if args.verbose else RNS.LOG_NOTICE)
 
     # --- identity ---
     identity = Identity(config)
@@ -69,6 +77,22 @@ def main():
     # Allow Ctrl+C to quit cleanly
     signal.signal(signal.SIGINT, signal.SIG_DFL)
 
+    # Re-announce every 5 minutes so newly connected peers can discover us.
+    # Also fires a second announce shortly after startup in case the TCP
+    # interface to the hub wasn't ready when the first announce fired.
+    from PyQt6.QtCore import QTimer
+    def _reannounce():
+        router.announce()
+        channel_mgr.announce_all_owned()
+        RNS.log("TrenchChat: re-announced delivery destination and channels", RNS.LOG_DEBUG)
+
+    reannounce_timer = QTimer()
+    reannounce_timer.timeout.connect(_reannounce)
+    reannounce_timer.start(1 * 60 * 1000)  # every minute
+
+    # Extra early announce ~10s after startup to catch interfaces that come up late
+    QTimer.singleShot(10_000, _reannounce)
+
     window = MainWindow(
         config=config,
         identity=identity,
@@ -77,6 +101,7 @@ def main():
         channel_mgr=channel_mgr,
         messaging=messaging,
         subscription_mgr=subscription_mgr,
+        invite_mgr=invite_mgr,
     )
     window.show()
 

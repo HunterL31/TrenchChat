@@ -29,8 +29,18 @@ class ChannelManager:
         self._identity = identity
         self._storage = storage
         self._owned_destinations: dict[str, RNS.Destination] = {}
+        self._discovered_callbacks: list = []
         self._announce_handler = ChannelAnnounceHandler(self._on_channel_discovered)
         RNS.Transport.register_announce_handler(self._announce_handler)
+
+    def add_channel_discovered_callback(self, callback):
+        """callback(channel_hash_hex, channel_name) — fired when a new public channel is heard."""
+        if callback not in self._discovered_callbacks:
+            self._discovered_callbacks.append(callback)
+
+    def remove_channel_discovered_callback(self, callback):
+        if callback in self._discovered_callbacks:
+            self._discovered_callbacks.remove(callback)
 
     # --- create ---
 
@@ -61,6 +71,14 @@ class ChannelManager:
             created_at=time.time(),
         )
         self._storage.subscribe(hash_hex)
+        # Always add the creator as an admin member so access checks work
+        # immediately, even before a full member list document is published.
+        self._storage.upsert_member(
+            channel_hash=hash_hex,
+            identity_hash=self._identity.hash_hex,
+            display_name=self._identity.display_name,
+            is_admin=True,
+        )
         self.announce_channel(hash_hex)
         return hash_hex
 
@@ -97,6 +115,7 @@ class ChannelManager:
         creator_hash = metadata.get("creator", announced_identity.hash.hex()
                                     if announced_identity else "")
 
+        already_known = self._storage.get_channel(hash_hex) is not None
         self._storage.upsert_channel(
             hash=hash_hex,
             name=name,
@@ -105,6 +124,15 @@ class ChannelManager:
             access_mode=access_mode,
             created_at=time.time(),
         )
+
+        # Notify UI about newly discovered public channels so user can choose to join.
+        if not already_known and access_mode == "public":
+            for cb in self._discovered_callbacks:
+                try:
+                    cb(hash_hex, name)
+                except Exception as e:
+                    RNS.log(f"TrenchChat: channel discovered callback error: {e}",
+                            RNS.LOG_ERROR)
 
     # --- owned channel destination lookup ---
 
@@ -128,3 +156,10 @@ class ChannelManager:
                     aspect,
                 )
                 self._owned_destinations[row["hash"]] = dest
+                # Ensure creator is always present as admin in the members table
+                self._storage.upsert_member(
+                    channel_hash=row["hash"],
+                    identity_hash=self._identity.hash_hex,
+                    display_name=self._identity.display_name,
+                    is_admin=True,
+                )
