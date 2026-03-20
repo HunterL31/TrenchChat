@@ -18,6 +18,7 @@ import signal
 import argparse
 
 import RNS
+from PyQt6.QtCore import QTimer
 from PyQt6.QtWidgets import QApplication
 
 from trenchchat.config import Config
@@ -29,6 +30,9 @@ from trenchchat.core.subscription import SubscriptionManager
 from trenchchat.core.invite import InviteManager
 from trenchchat.network.router import Router
 from trenchchat.gui.main_window import MainWindow
+
+_REANNOUNCE_INTERVAL_MS = 60_000
+_STARTUP_ANNOUNCE_DELAY_MS = 10_000
 
 
 def main():
@@ -77,10 +81,9 @@ def main():
     # Allow Ctrl+C to quit cleanly
     signal.signal(signal.SIGINT, signal.SIG_DFL)
 
-    # Re-announce every 5 minutes so newly connected peers can discover us.
+    # Re-announce every minute so newly connected peers can discover us.
     # Also fires a second announce shortly after startup in case the TCP
     # interface to the hub wasn't ready when the first announce fired.
-    from PyQt6.QtCore import QTimer
     def _reannounce():
         router.announce()
         channel_mgr.announce_all_owned()
@@ -88,10 +91,10 @@ def main():
 
     reannounce_timer = QTimer()
     reannounce_timer.timeout.connect(_reannounce)
-    reannounce_timer.start(1 * 60 * 1000)  # every minute
+    reannounce_timer.start(_REANNOUNCE_INTERVAL_MS)
 
-    # Extra early announce ~10s after startup to catch interfaces that come up late
-    QTimer.singleShot(10_000, _reannounce)
+    # Extra early announce to catch interfaces that come up late
+    QTimer.singleShot(_STARTUP_ANNOUNCE_DELAY_MS, _reannounce)
 
     window = MainWindow(
         config=config,

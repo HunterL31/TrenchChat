@@ -20,25 +20,21 @@ import RNS
 import LXMF
 
 from trenchchat.core.identity import Identity
+from trenchchat.core.protocol import (
+    F_CHANNEL_HASH, F_DISPLAY_NAME, F_TIMESTAMP, F_MESSAGE_ID,
+    F_REPLY_TO, F_LAST_SEEN_ID, F_SYNC_WINDOW_START, F_SYNC_MESSAGES,
+    F_MISSED_FOR, F_MISSED_MSG_ID, F_MSG_TYPE,
+)
 from trenchchat.core.storage import Storage
 from trenchchat.network.router import Router
 
-# LXMF field keys — chat messages
-F_CHANNEL_HASH = 0x01
-F_DISPLAY_NAME = 0x02
-F_TIMESTAMP    = 0x03
-F_MESSAGE_ID   = 0x04
-F_REPLY_TO     = 0x05
-F_LAST_SEEN_ID = 0x06
-
-# LXMF field keys — sync / missed-delivery control messages
-F_SYNC_WINDOW_START = 0x07
-F_SYNC_MESSAGES     = 0x08
-F_MISSED_FOR        = 0x09
-F_MISSED_MSG_ID     = 0x0A
-
-# Control message type field (used by invite / member-list / sync subsystems)
-F_MSG_TYPE     = 0x10
+# Re-export field constants so existing importers of messaging.py continue to work
+__all__ = [
+    "F_CHANNEL_HASH", "F_DISPLAY_NAME", "F_TIMESTAMP", "F_MESSAGE_ID",
+    "F_REPLY_TO", "F_LAST_SEEN_ID", "F_SYNC_WINDOW_START", "F_SYNC_MESSAGES",
+    "F_MISSED_FOR", "F_MISSED_MSG_ID", "F_MSG_TYPE",
+    "CAUSAL_WINDOW_SECS", "Messaging",
+]
 
 # Threshold in seconds within which last_seen_id causal ordering is applied
 CAUSAL_WINDOW_SECS = 5.0
@@ -265,11 +261,15 @@ class Messaging:
 
         if inserted:
             self._storage.touch_channel(channel_hash_hex)
-            for cb in self._message_callbacks:
-                try:
-                    cb(channel_hash_hex, msg_id)
-                except Exception as e:
-                    RNS.log(f"TrenchChat: message callback error: {e}", RNS.LOG_ERROR)
+            self.notify_message_received(channel_hash_hex, msg_id)
+
+    def notify_message_received(self, channel_hash_hex: str, message_id: str) -> None:
+        """Fire all registered message callbacks for a newly received message."""
+        for cb in self._message_callbacks:
+            try:
+                cb(channel_hash_hex, message_id)
+            except Exception as e:
+                RNS.log(f"TrenchChat: message callback error: {e}", RNS.LOG_ERROR)
 
     def add_message_callback(self, callback):
         """callback(channel_hash_hex: str, message_id: str)"""

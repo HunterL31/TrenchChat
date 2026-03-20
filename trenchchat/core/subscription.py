@@ -23,17 +23,12 @@ import LXMF
 import msgpack
 
 from trenchchat.core.identity import Identity
+from trenchchat.core.protocol import (
+    F_CHANNEL_HASH, F_MSG_TYPE, F_SUBSCRIBER_LIST,
+    MT_SUBSCRIBE, MT_UNSUBSCRIBE, MT_SUBSCRIBER_LIST,
+)
 from trenchchat.core.storage import Storage
 from trenchchat.network.router import Router
-
-# Control field keys for subscription protocol
-F_MSG_TYPE        = 0x10
-F_CHANNEL_HASH    = 0x01
-
-MT_SUBSCRIBE      = "subscribe"
-MT_UNSUBSCRIBE    = "unsubscribe"
-MT_SUBSCRIBER_LIST = "subscriber_list"
-F_SUBSCRIBER_LIST = 0x30   # msgpack list of hex identity hashes
 
 
 class SubscriptionManager:
@@ -105,7 +100,11 @@ class SubscriptionManager:
         channel_hash_hex = channel_hash_bytes.hex() \
             if isinstance(channel_hash_bytes, bytes) else str(channel_hash_bytes)
 
-        sender_hex = message.source_hash.hex() if message.source_hash else ""
+        # message.source_hash is the LXMF delivery destination hash.
+        # Resolve it back to the sender's identity hash for owner comparisons.
+        sender_delivery_hex = message.source_hash.hex() if message.source_hash else ""
+        sender_identity = RNS.Identity.recall(message.source_hash) if message.source_hash else None
+        sender_hex = sender_identity.hash.hex() if sender_identity else sender_delivery_hex
 
         if msg_type == MT_SUBSCRIBE:
             channel = self._storage.get_channel(channel_hash_hex)

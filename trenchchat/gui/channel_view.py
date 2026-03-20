@@ -5,6 +5,7 @@ Shows messages sorted by timestamp with causal tiebreaking via last_seen_id.
 Late-arriving messages are flagged visually.
 """
 
+import datetime
 import time
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QScrollArea, QLabel, QFrame, QSizePolicy
@@ -17,9 +18,10 @@ from trenchchat.core.storage import Storage
 # Messages received more than this many seconds after their timestamp are "late"
 LATE_THRESHOLD_SECS = 30.0
 
+_MESSAGE_HISTORY_LIMIT = 500
+
 
 def _format_ts(ts: float) -> str:
-    import datetime
     dt = datetime.datetime.fromtimestamp(ts)
     return dt.strftime("%H:%M")
 
@@ -62,8 +64,6 @@ class MessageBubble(QFrame):
 
 class ChannelView(QWidget):
     """Displays the message history for a single channel."""
-
-    request_scroll_indicator = pyqtSignal(int)  # number of out-of-order messages
 
     def __init__(self, channel_hash_hex: str, storage: Storage,
                  own_identity_hex: str, restore_to_id: str | None = None,
@@ -114,7 +114,7 @@ class ChannelView(QWidget):
             if item.widget():
                 item.widget().deleteLater()
 
-        rows = self._storage.get_messages(self._channel_hash, limit=500)
+        rows = self._storage.get_messages(self._channel_hash, limit=_MESSAGE_HISTORY_LIMIT)
         for row in rows:
             self._append_bubble(row, scroll=False)
 
@@ -132,7 +132,7 @@ class ChannelView(QWidget):
         if message_id in self._displayed_ids:
             return
 
-        rows = self._storage.get_messages(self._channel_hash, limit=500)
+        rows = self._storage.get_messages(self._channel_hash, limit=_MESSAGE_HISTORY_LIMIT)
         # Find the new message
         for row in rows:
             if row["message_id"] == message_id:

@@ -11,7 +11,8 @@ from trenchchat import APP_NAME, APP_ASPECT_CHANNEL
 def _parse_channel_app_data(app_data: bytes) -> dict:
     try:
         return msgpack.unpackb(app_data, raw=False)
-    except Exception:
+    except Exception as e:
+        RNS.log(f"TrenchChat: failed to parse channel app_data: {e}", RNS.LOG_DEBUG)
         return {}
 
 

@@ -22,7 +22,7 @@ from PyQt6.QtWidgets import (
     QLabel, QDialog, QFormLayout, QLineEdit, QComboBox,
     QDialogButtonBox, QMessageBox, QStackedWidget, QMenu,
     QPushButton, QFrame, QTableWidget, QTableWidgetItem, QHeaderView,
-    QAbstractItemView,
+    QAbstractItemView, QSizePolicy,
 )
 from PyQt6.QtCore import Qt, pyqtSlot, QPoint, pyqtSignal, QTimer, QSettings
 from PyQt6.QtGui import QAction, QFont
@@ -41,6 +41,8 @@ from trenchchat.gui.channel_view import ChannelView
 from trenchchat.gui.compose import ComposeWidget
 from trenchchat.gui.settings import SettingsDialog
 from trenchchat.gui.invite_dialogs import InviteDialog, MembersDialog
+
+_STARTUP_SYNC_DELAY_MS = 3_000
 
 
 class NewChannelDialog(QDialog):
@@ -179,9 +181,11 @@ class JoinChannelDialog(QDialog):
 
 class MainWindow(QMainWindow):
     # Signals used to safely marshal background-thread events onto the Qt main thread.
-    _invite_received    = pyqtSignal(str, str, bytes, float, str)
-    _message_received   = pyqtSignal(str, str)   # channel_hash_hex, message_id
-    _channel_discovered = pyqtSignal(str, str)   # channel_hash_hex, channel_name
+    _invite_received      = pyqtSignal(str, str, bytes, float, str)
+    _message_received     = pyqtSignal(str, str)   # channel_hash_hex, message_id
+    _channel_discovered   = pyqtSignal(str, str)   # channel_hash_hex, channel_name
+    _channel_joined       = pyqtSignal(str, str)   # channel_hash_hex, channel_name
+    _member_list_updated  = pyqtSignal(str)         # channel_hash_hex
 
     def __init__(self, config: Config, identity: Identity, storage: Storage,
                  router: Router, channel_mgr: ChannelManager,
@@ -213,6 +217,8 @@ class MainWindow(QMainWindow):
         self._invite_received.connect(self._on_invite_received_main_thread)
         self._message_received.connect(self._on_new_message_main_thread)
         self._channel_discovered.connect(self._on_channel_discovered_main_thread)
+        self._channel_joined.connect(self._on_channel_joined_main_thread)
+        self._member_list_updated.connect(self._on_member_list_updated_main_thread)
 
         messaging.add_message_callback(self._on_new_message)
         invite_mgr.add_invite_callback(self._on_incoming_invite)
@@ -227,7 +233,7 @@ class MainWindow(QMainWindow):
             PeerAnnounceHandler(self._sync_mgr.on_peer_appeared)
         )
         # Defer sync requests briefly so the RNS stack is fully ready
-        QTimer.singleShot(3000, self._sync_mgr.request_sync_all)
+        QTimer.singleShot(_STARTUP_SYNC_DELAY_MS, self._sync_mgr.request_sync_all)
 
         self._refresh_channel_list()
         self._restore_channel_selection()
@@ -258,11 +264,6 @@ class MainWindow(QMainWindow):
         toolbar.addWidget(identity_label)
 
         spacer = QWidget()
-        spacer.setSizePolicy(
-            spacer.sizePolicy().horizontalPolicy(),
-            spacer.sizePolicy().verticalPolicy(),
-        )
-        from PyQt6.QtWidgets import QSizePolicy
         spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         toolbar.addWidget(spacer)
 
@@ -596,12 +597,18 @@ class MainWindow(QMainWindow):
 
     def _on_channel_joined(self, channel_hash_hex: str, channel_name: str):
         """Called from background thread when auto-joined a channel via invite."""
-        QTimer.singleShot(0, self._refresh_channel_list)
+        self._channel_joined.emit(channel_hash_hex, channel_name)
+
+    @pyqtSlot(str, str)
+    def _on_channel_joined_main_thread(self, channel_hash_hex: str, channel_name: str):
+        """Runs on the Qt main thread after a channel-joined event."""
+        self._refresh_channel_list()
 
     def _on_member_list_updated(self, channel_hash_hex: str):
         """Called from background thread when a member list is accepted."""
-        QTimer.singleShot(0, lambda: self._on_member_list_updated_main_thread(channel_hash_hex))
+        self._member_list_updated.emit(channel_hash_hex)
 
+    @pyqtSlot(str)
     def _on_member_list_updated_main_thread(self, channel_hash_hex: str):
         # If the current channel's membership changed, refresh the compose state.
         if channel_hash_hex == self._current_channel:
@@ -740,7 +747,6 @@ class MainWindow(QMainWindow):
 
     @pyqtSlot()
     def _on_settings(self):
-        from trenchchat.network.router import Router as R
         dlg = SettingsDialog(
             self._config, self._identity, self._storage, self._router, self
         )

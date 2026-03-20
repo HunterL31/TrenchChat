@@ -155,8 +155,7 @@ class SettingsDialog(QDialog):
             item = self._channel_list.item(i)
             if item.checkState() == Qt.CheckState.Checked:
                 selected.append(item.data(Qt.ItemDataRole.UserRole))
-        self._config._data["propagation_node"]["channel_filter"]["channel_hashes"] = selected
-        self._config.save()
+        self._config.set_channel_filter_hashes(selected)
 
         # Toggle propagation node
         if new_enabled and not self._config.propagation_enabled:

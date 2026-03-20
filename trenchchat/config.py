@@ -2,8 +2,12 @@ import json
 import os
 from pathlib import Path
 
+import RNS
+
 DATA_DIR = Path.home() / ".trenchchat"
 CONFIG_PATH = DATA_DIR / "config.json"
+
+_DEFAULT_DATA_DIR = DATA_DIR
 
 _DEFAULTS = {
     "display_name": "Anonymous",
@@ -31,21 +35,23 @@ def _deep_merge(base: dict, override: dict) -> dict:
 
 
 class Config:
-    def __init__(self):
-        DATA_DIR.mkdir(parents=True, exist_ok=True)
+    def __init__(self, data_dir: Path | None = None):
+        self._data_dir = data_dir or _DEFAULT_DATA_DIR
+        self._config_path = self._data_dir / "config.json"
+        self._data_dir.mkdir(parents=True, exist_ok=True)
         self._data: dict = _deep_merge(_DEFAULTS, self._load_from_disk())
 
     def _load_from_disk(self) -> dict:
-        if CONFIG_PATH.exists():
+        if self._config_path.exists():
             try:
-                with open(CONFIG_PATH, "r") as f:
+                with open(self._config_path, "r") as f:
                     return json.load(f)
-            except (json.JSONDecodeError, OSError):
-                pass
+            except (json.JSONDecodeError, OSError) as e:
+                RNS.log(f"TrenchChat: failed to load config from disk: {e}", RNS.LOG_WARNING)
         return {}
 
     def save(self):
-        with open(CONFIG_PATH, "w") as f:
+        with open(self._config_path, "w") as f:
             json.dump(self._data, f, indent=2)
 
     # --- display name ---
@@ -113,6 +119,11 @@ class Config:
         if hex_hash in hashes:
             hashes.remove(hex_hash)
             self.save()
+
+    def set_channel_filter_hashes(self, hashes: list[str]) -> None:
+        """Replace the full set of channel filter hashes."""
+        self._data["propagation_node"]["channel_filter"]["channel_hashes"] = hashes
+        self.save()
 
     # --- outbound propagation node ---
 
