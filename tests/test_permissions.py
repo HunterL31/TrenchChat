@@ -224,6 +224,28 @@ class TestBroadcastPermissions:
 
         assert after["version"] == before["version"] + 1
 
+    def test_owner_role_preserved_after_promoting_member_to_admin(self, peer_factory):
+        """
+        Regression: promoting a member to admin via publish_member_list must not
+        demote the owner.  v1 docs lack an 'owners' key; the fix recovers the
+        owner from the channel creator_hash so the next publish does not lose it.
+        """
+        alice = peer_factory("alice")
+        bob   = peer_factory("bob")
+
+        ch_hash = alice.channel_mgr.create_channel("promote-regression", "", "invite")
+        alice.invite_mgr.publish_member_list(ch_hash, add_members=[bob.identity.hash])
+
+        # Promote Bob to admin — this is the operation that triggered the bug
+        alice.invite_mgr.publish_member_list(ch_hash, add_admins=[bob.identity.hash])
+
+        assert alice.storage.get_role(ch_hash, alice.identity.hash_hex) == ROLE_OWNER, \
+            "Owner was demoted after promoting a member to admin"
+        assert alice.storage.has_permission(ch_hash, alice.identity.hash_hex, MANAGE_CHANNEL), \
+            "Owner lost MANAGE_CHANNEL after promoting a member to admin"
+        assert alice.storage.get_role(ch_hash, bob.identity.hash_hex) == ROLE_ADMIN, \
+            "Bob was not promoted to admin"
+
 
 # ---------------------------------------------------------------------------
 # ChannelPermissionsDialog GUI unit tests

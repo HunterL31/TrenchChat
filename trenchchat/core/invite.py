@@ -51,6 +51,24 @@ from trenchchat.network.router import Router
 DEFAULT_TOKEN_TTL = 7 * 24 * 3600  # 7 days
 
 
+def _recover_owners(owners: list[bytes], admins: list[bytes],
+                    channel: object | None) -> list[bytes]:
+    """Return a non-empty owners list, recovering from v1 docs that lack one.
+
+    v1 member list documents have no 'owners' key.  When upgrading such a doc
+    to v2, fall back to the channel creator hash so the owner is not silently
+    demoted to admin on the next publish.
+    """
+    if owners:
+        return owners
+    if channel and channel["creator_hash"]:
+        try:
+            return [bytes.fromhex(channel["creator_hash"])]
+        except ValueError:
+            pass
+    return list(admins)
+
+
 def _signed_payload(channel_hash: bytes, version: int, published_at: float,
                     members: list[bytes], admins: list[bytes],
                     owners: list[bytes] | None = None,
@@ -336,7 +354,10 @@ class InviteManager:
             old_doc = msgpack.unpackb(existing["document_blob"], raw=True)
             members = list(old_doc[b"members"])
             admins  = list(old_doc[b"admins"])
-            owners  = list(old_doc.get(b"owners", []))
+            owners  = _recover_owners(
+                list(old_doc.get(b"owners", [])), admins,
+                self._storage.get_channel(channel_hash_hex),
+            )
             version = existing["version"] + 1
         else:
             members = [self._identity.hash]
@@ -384,11 +405,14 @@ class InviteManager:
         broadcast need to happen.
         """
         existing = self._storage.get_member_list_version(channel_hash_hex)
+        channel = self._storage.get_channel(channel_hash_hex)
         if existing:
             old_doc = msgpack.unpackb(existing["document_blob"], raw=True)
             members = list(old_doc[b"members"])
             admins  = list(old_doc[b"admins"])
-            owners  = list(old_doc.get(b"owners", []))
+            owners  = _recover_owners(
+                list(old_doc.get(b"owners", [])), admins, channel,
+            )
             version = existing["version"] + 1
         else:
             members = [self._identity.hash]
@@ -396,7 +420,6 @@ class InviteManager:
             owners  = [self._identity.hash]
             version = 1
 
-        channel = self._storage.get_channel(channel_hash_hex)
         perms = (permissions_from_json(channel["permissions"])
                  if channel and channel["permissions"] else None)
 
