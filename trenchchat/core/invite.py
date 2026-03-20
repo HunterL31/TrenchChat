@@ -213,11 +213,22 @@ class InviteManager:
         """
         Apply acceptance rules. Returns True if accepted.
         Rules (in order):
-          1. At least one valid admin signature.
-          2. version > local_version  → accept.
-          3. version == local_version, higher published_at → accept.
-          4. version == local_version, same published_at, lower admin hash → accept.
+          1. doc["channel_hash"] must match the expected channel.
+          2. At least one valid admin signature.
+          3. version > local_version  → accept.
+          4. version == local_version, higher published_at → accept.
+          5. version == local_version, same published_at, lower admin hash → accept.
         """
+        doc_channel_hex = doc.get("channel_hash", b"").hex() \
+            if isinstance(doc.get("channel_hash"), bytes) else str(doc.get("channel_hash", ""))
+        if doc_channel_hex != channel_hash_hex:
+            RNS.log(
+                f"TrenchChat [invite]: member list doc channel hash mismatch "
+                f"(doc={doc_channel_hex[:12]}… expected={channel_hash_hex[:12]}…) — rejected",
+                RNS.LOG_WARNING,
+            )
+            return False
+
         if not self._validate_document(doc, channel_hash_hex):
             return False
 

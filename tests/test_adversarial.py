@@ -14,6 +14,8 @@ Scenarios covered:
     - Non-member sends a join_request with a forged (self-signed) token
     - Member without INVITE permission sends a join_request to add a stranger
     - Replaying an already-used (expired) invite token
+    - Token issued for a different channel is submitted for this channel
+    - Token issued for Carol is submitted by Dave claiming to be Carol
 
   KICK (remove_members)
     - Member without KICK calls publish_member_list(remove_members=...)
@@ -28,6 +30,14 @@ Scenarios covered:
       (the core does not gate broadcast_permissions on MANAGE_CHANNEL, but
        the permissions it embeds are already in the DB — so a member can't
        change the DB without MANAGE_CHANNEL; this test confirms that)
+
+  MEMBER LIST INTEGRITY
+    - Replay of an older (lower-version) member list doc is rejected
+    - Crafted doc that demotes Alice (removes her from admins), signed by Bob
+    - Crafted doc that removes Alice from owners, signed by Bob
+    - Crafted doc that adds Bob to owners, signed by Bob
+    - Version tiebreak: same version+timestamp, higher signer hash loses
+    - Doc for channel A delivered as if it were for channel B is rejected
 """
 
 import struct
@@ -411,3 +421,342 @@ class TestAdversarialManageChannel:
             lambda: bob.storage.has_permission(ch_hash, bob.identity.hash_hex, INVITE),
             timeout=5,
         ), "Bob did not receive Alice's permission update"
+
+
+# ---------------------------------------------------------------------------
+# INVITE TOKEN — cross-channel and cross-invitee misuse
+# ---------------------------------------------------------------------------
+
+class TestAdversarialTokenMisuse:
+    def test_token_for_wrong_channel_rejected(self, peer_factory):
+        """
+        A valid token issued by Alice for channel A is submitted as a join
+        request for channel B.  The token payload binds the channel hash, so
+        verification must fail and Carol must not be added to channel B.
+        """
+        alice = peer_factory("alice")
+        carol = peer_factory("carol")
+
+        ch_a = alice.channel_mgr.create_channel("channel-a", "", "invite")
+        ch_b = alice.channel_mgr.create_channel("channel-b", "", "invite")
+        alice.invite_mgr.publish_member_list(ch_a)
+        alice.invite_mgr.publish_member_list(ch_b)
+
+        # Token is legitimately issued for channel A
+        token, expiry = alice.invite_mgr.generate_invite_token(
+            ch_a, carol.identity.hash, ttl=3600
+        )
+
+        # Submit it as a join request for channel B
+        fields = {
+            F_MSG_TYPE:     MT_JOIN_REQUEST,
+            F_CHANNEL_HASH: bytes.fromhex(ch_b),
+            F_INVITE_TOKEN: token,
+            F_INVITEE_HASH: carol.identity.hash,
+            F_EXPIRY_TS:    expiry,
+            F_ADMIN_HASH:   alice.identity.hash,
+        }
+        alice.invite_mgr._handle_join_request(fields, ch_b)
+
+        assert not alice.storage.is_member(ch_b, carol.identity.hash_hex), \
+            "Alice accepted a channel-A token as a valid join request for channel B"
+
+    def test_token_for_wrong_invitee_rejected(self, peer_factory):
+        """
+        A valid token issued for Carol is submitted by Dave, who swaps the
+        F_INVITEE_HASH field to his own hash.  The token payload includes the
+        invitee hash, so verification against Dave's hash must fail.
+        """
+        alice = peer_factory("alice")
+        carol = peer_factory("carol")
+        dave  = peer_factory("dave")
+
+        ch_hash = alice.channel_mgr.create_channel("swap-test", "", "invite")
+        alice.invite_mgr.publish_member_list(ch_hash)
+
+        # Token is legitimately issued for Carol
+        token, expiry = alice.invite_mgr.generate_invite_token(
+            ch_hash, carol.identity.hash, ttl=3600
+        )
+
+        # Dave submits Carol's token but claims to be the invitee
+        fields = {
+            F_MSG_TYPE:     MT_JOIN_REQUEST,
+            F_CHANNEL_HASH: bytes.fromhex(ch_hash),
+            F_INVITE_TOKEN: token,
+            F_INVITEE_HASH: dave.identity.hash,   # swapped to Dave
+            F_EXPIRY_TS:    expiry,
+            F_ADMIN_HASH:   alice.identity.hash,
+        }
+        alice.invite_mgr._handle_join_request(fields, ch_hash)
+
+        assert not alice.storage.is_member(ch_hash, dave.identity.hash_hex), \
+            "Alice added Dave using a token that was issued for Carol"
+        assert not alice.storage.is_member(ch_hash, carol.identity.hash_hex), \
+            "Carol was added even though she never sent a join request"
+
+
+# ---------------------------------------------------------------------------
+# MEMBER LIST INTEGRITY
+# ---------------------------------------------------------------------------
+
+def _build_crafted_doc(signer, ch_hash: str, version: int,
+                       members: list, admins: list, owners: list,
+                       permissions_blob: bytes = b"") -> dict:
+    """Build a member list doc signed by *signer* (an RNS.Identity)."""
+    published_at = time.time()
+    payload = _signed_payload(
+        bytes.fromhex(ch_hash), version, published_at,
+        members, admins, owners, permissions_blob,
+    )
+    sig = _sign(signer, payload)
+    signer_hash = signer.hash
+    return {
+        "channel_hash": bytes.fromhex(ch_hash),
+        "version":      version,
+        "published_at": published_at,
+        "members":      members,
+        "admins":       admins,
+        "owners":       owners,
+        "permissions":  permissions_blob,
+        "signatures":   {signer_hash: sig},
+    }
+
+
+class TestAdversarialMemberListIntegrity:
+    def test_replay_of_old_version_rejected(self, peer_factory):
+        """
+        Bob captures Alice's v1 member list doc and re-sends it after Alice
+        has already published v2.  The receiver must reject the older version.
+        """
+        alice, bob, ch_hash = _setup_channel_with_member(
+            peer_factory, member_perms=[SEND_MESSAGE]
+        )
+
+        # Alice is at v1 after _setup_channel_with_member.
+        # Capture the current (v1) blob before Alice advances to v2.
+        existing_v1 = alice.storage.get_member_list_version(ch_hash)
+        assert existing_v1 is not None
+        import msgpack as _msgpack
+        old_doc_raw = _msgpack.unpackb(existing_v1["document_blob"], raw=True)
+        old_doc = {
+            "channel_hash": old_doc_raw[b"channel_hash"],
+            "version":      old_doc_raw[b"version"],
+            "published_at": old_doc_raw[b"published_at"],
+            "members":      list(old_doc_raw[b"members"]),
+            "admins":       list(old_doc_raw[b"admins"]),
+            "owners":       list(old_doc_raw.get(b"owners", [])),
+            "permissions":  old_doc_raw.get(b"permissions", b""),
+            "signatures":   dict(old_doc_raw[b"signatures"]),
+        }
+
+        # Alice publishes v2 (adds nothing, just increments version)
+        alice.invite_mgr.publish_member_list(ch_hash)
+        assert alice.storage.get_member_list_version(ch_hash)["version"] == 2
+
+        # Bob replays the v1 doc at Alice's receiver
+        accepted = alice.invite_mgr._accept_document(old_doc, ch_hash)
+        assert not accepted, "Alice accepted a replayed older-version member list doc"
+        assert alice.storage.get_member_list_version(ch_hash)["version"] == 2, \
+            "Version was rolled back by a replayed doc"
+
+    def test_crafted_doc_cannot_demote_admin(self, peer_factory):
+        """
+        Bob crafts a doc that removes Alice from the admins list (demoting her
+        to a plain member), signed by Bob.  Alice must reject it and keep her
+        admin role.
+        """
+        alice, bob, ch_hash = _setup_channel_with_member(
+            peer_factory, member_perms=[SEND_MESSAGE]
+        )
+
+        existing = alice.storage.get_member_list_version(ch_hash)
+        current_v = existing["version"]
+
+        # Doc with Alice removed from admins, signed by Bob (non-admin)
+        members = [alice.identity.hash, bob.identity.hash]
+        admins_without_alice = []          # Alice demoted
+        owners = [alice.identity.hash]
+        doc = _build_crafted_doc(
+            bob.identity.rns_identity, ch_hash, current_v + 1,
+            members, admins_without_alice, owners,
+        )
+
+        accepted = alice.invite_mgr._accept_document(doc, ch_hash)
+        assert not accepted, "Alice accepted a doc that demotes her, signed by a non-admin"
+        assert alice.storage.is_admin(ch_hash, alice.identity.hash_hex), \
+            "Alice's admin role was removed by a crafted doc"
+
+    def test_crafted_doc_cannot_remove_owner(self, peer_factory):
+        """
+        Bob crafts a doc that removes Alice from the owners list entirely,
+        signed by Bob.  Must be rejected.
+        """
+        alice, bob, ch_hash = _setup_channel_with_member(
+            peer_factory, member_perms=[SEND_MESSAGE]
+        )
+
+        existing = alice.storage.get_member_list_version(ch_hash)
+        current_v = existing["version"]
+
+        members = [alice.identity.hash, bob.identity.hash]
+        admins  = [alice.identity.hash]
+        owners_without_alice = []          # Alice removed from owners
+        doc = _build_crafted_doc(
+            bob.identity.rns_identity, ch_hash, current_v + 1,
+            members, admins, owners_without_alice,
+        )
+
+        accepted = alice.invite_mgr._accept_document(doc, ch_hash)
+        assert not accepted, "Alice accepted a doc that strips her owner status"
+        assert alice.storage.get_role(ch_hash, alice.identity.hash_hex) == ROLE_OWNER, \
+            "Alice's owner role was stripped by a crafted doc"
+
+    def test_crafted_doc_cannot_add_self_to_owners(self, peer_factory):
+        """
+        Bob crafts a doc that adds himself to the owners list, signed by Bob.
+        Must be rejected — Bob is not a trusted signer.
+        """
+        alice, bob, ch_hash = _setup_channel_with_member(
+            peer_factory, member_perms=[SEND_MESSAGE]
+        )
+
+        existing = alice.storage.get_member_list_version(ch_hash)
+        current_v = existing["version"]
+
+        members = [alice.identity.hash, bob.identity.hash]
+        admins  = [alice.identity.hash]
+        owners_with_bob = [alice.identity.hash, bob.identity.hash]
+        doc = _build_crafted_doc(
+            bob.identity.rns_identity, ch_hash, current_v + 1,
+            members, admins, owners_with_bob,
+        )
+
+        accepted = alice.invite_mgr._accept_document(doc, ch_hash)
+        assert not accepted, "Alice accepted a doc that grants Bob owner status"
+        assert alice.storage.get_role(ch_hash, bob.identity.hash_hex) == ROLE_MEMBER, \
+            "Bob's role was elevated to owner by a crafted doc"
+
+    def test_version_tiebreak_higher_signer_hash_loses(self, peer_factory):
+        """
+        Two valid docs with the same version and timestamp compete.
+        The tiebreak rule is: lowest signing admin hash wins.
+        A doc signed by a higher hash must be rejected when a lower-hash doc
+        is already stored.
+        """
+        alice = peer_factory("alice")
+        bob   = peer_factory("bob")
+
+        ch_hash = alice.channel_mgr.create_channel("tiebreak-ch", "", "invite")
+        # Add Bob as admin so he is a trusted signer
+        alice.invite_mgr.publish_member_list(
+            ch_hash, add_members=[bob.identity.hash], add_admins=[bob.identity.hash]
+        )
+        assert wait_for_member(alice.storage, ch_hash, bob.identity.hash_hex)
+
+        existing = alice.storage.get_member_list_version(ch_hash)
+        current_v = existing["version"]
+        shared_ts = time.time()
+
+        members = [alice.identity.hash, bob.identity.hash]
+        admins  = [alice.identity.hash, bob.identity.hash]
+        owners  = [alice.identity.hash]
+
+        # Build two competing docs at the same version+timestamp
+        alice_payload = _signed_payload(
+            bytes.fromhex(ch_hash), current_v + 1, shared_ts,
+            members, admins, owners, b"",
+        )
+        bob_payload = _signed_payload(
+            bytes.fromhex(ch_hash), current_v + 1, shared_ts,
+            members, admins, owners, b"",
+        )
+        alice_sig = _sign(alice.identity.rns_identity, alice_payload)
+        bob_sig   = _sign(bob.identity.rns_identity, bob_payload)
+
+        alice_doc = {
+            "channel_hash": bytes.fromhex(ch_hash),
+            "version":      current_v + 1,
+            "published_at": shared_ts,
+            "members":      members,
+            "admins":       admins,
+            "owners":       owners,
+            "permissions":  b"",
+            "signatures":   {alice.identity.hash: alice_sig},
+        }
+        bob_doc = {
+            "channel_hash": bytes.fromhex(ch_hash),
+            "version":      current_v + 1,
+            "published_at": shared_ts,
+            "members":      members,
+            "admins":       admins,
+            "owners":       owners,
+            "permissions":  b"",
+            "signatures":   {bob.identity.hash: bob_sig},
+        }
+
+        # Determine which signer hash is lower — that doc should win
+        if alice.identity.hash < bob.identity.hash:
+            winner_doc, loser_doc = alice_doc, bob_doc
+            winner_name = "alice"
+        else:
+            winner_doc, loser_doc = bob_doc, alice_doc
+            winner_name = "bob"
+
+        # Accept the winner first, then try to accept the loser
+        assert alice.invite_mgr._accept_document(winner_doc, ch_hash), \
+            "Winner doc was rejected"
+        accepted_loser = alice.invite_mgr._accept_document(loser_doc, ch_hash)
+        assert not accepted_loser, \
+            f"Loser doc (higher signer hash) was accepted over the winner ({winner_name})"
+
+    def test_doc_for_wrong_channel_rejected(self, peer_factory):
+        """
+        A valid member list doc for channel A is submitted to _accept_document
+        as if it were for channel B.  The trusted signers for B do not include
+        Alice (the channel-A admin), so the doc must be rejected.
+        """
+        alice = peer_factory("alice")
+        bob   = peer_factory("bob")
+
+        ch_a = alice.channel_mgr.create_channel("channel-a", "", "invite")
+        ch_b = alice.channel_mgr.create_channel("channel-b", "", "invite")
+
+        # Publish initial member lists for both channels
+        alice.invite_mgr.publish_member_list(ch_a, add_members=[bob.identity.hash])
+        alice.invite_mgr.publish_member_list(ch_b, add_members=[bob.identity.hash])
+        assert wait_for_member(alice.storage, ch_a, bob.identity.hash_hex)
+        assert wait_for_member(alice.storage, ch_b, bob.identity.hash_hex)
+
+        # Build a legitimate doc for channel A (signed by Alice)
+        existing_a = alice.storage.get_member_list_version(ch_a)
+        current_v_a = existing_a["version"]
+        members = [alice.identity.hash, bob.identity.hash]
+        admins  = [alice.identity.hash]
+        owners  = [alice.identity.hash]
+        published_at = time.time()
+        payload = _signed_payload(
+            bytes.fromhex(ch_a), current_v_a + 1, published_at,
+            members, admins, owners, b"",
+        )
+        sig = _sign(alice.identity.rns_identity, payload)
+        doc_for_a = {
+            "channel_hash": bytes.fromhex(ch_a),
+            "version":      current_v_a + 1,
+            "published_at": published_at,
+            "members":      members,
+            "admins":       admins,
+            "owners":       owners,
+            "permissions":  b"",
+            "signatures":   {alice.identity.hash: sig},
+        }
+
+        # Now try to accept this channel-A doc as if it were for channel B.
+        # The payload was signed over ch_a's hash, so signature verification
+        # against the ch_b payload will fail.
+        existing_b_v = alice.storage.get_member_list_version(ch_b)["version"]
+        accepted = alice.invite_mgr._accept_document(doc_for_a, ch_b)
+        assert not accepted, \
+            "Alice accepted a member list doc whose payload was signed for a different channel"
+        assert alice.storage.get_member_list_version(ch_b)["version"] == existing_b_v, \
+            "Channel B's version was modified by a doc intended for channel A"
