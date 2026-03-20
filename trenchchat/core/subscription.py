@@ -118,6 +118,14 @@ class SubscriptionManager:
                 self._remove_subscriber(channel_hash_hex, sender_hex)
 
         elif msg_type == MT_SUBSCRIBER_LIST:
+            channel = self._storage.get_channel(channel_hash_hex)
+            if not channel or channel["creator_hash"] != sender_hex:
+                RNS.log(
+                    f"TrenchChat: rejected subscriber_list for {channel_hash_hex} "
+                    f"from non-owner {sender_hex}",
+                    RNS.LOG_WARNING,
+                )
+                return
             packed = fields.get(F_SUBSCRIBER_LIST)
             if packed:
                 try:
