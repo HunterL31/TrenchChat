@@ -86,15 +86,18 @@ class Messaging:
         last_seen = self._storage.get_latest_message_id(channel_hash_hex)
         msg_id = _compute_message_id(content, self._identity.hash_hex, ts)
 
-        # Params stored for pending retry and failure callbacks
+        # Params stored for pending retry and failure callbacks.
+        # subscriber_hashes is included so flush_pending can re-register the
+        # failed callback and broadcast missed-delivery hints if the retry fails.
         msg_params = {
-            "channel_hash_hex": channel_hash_hex,
-            "content":          content,
-            "timestamp":        ts,
-            "msg_id":           msg_id,
-            "display_name":     self._identity.display_name,
-            "reply_to":         reply_to,
-            "last_seen_id":     last_seen,
+            "channel_hash_hex":  channel_hash_hex,
+            "content":           content,
+            "timestamp":         ts,
+            "msg_id":            msg_id,
+            "display_name":      self._identity.display_name,
+            "reply_to":          reply_to,
+            "last_seen_id":      last_seen,
+            "subscriber_hashes": list(subscriber_hashes),
         }
 
         for dest_hex in subscriber_hashes:
@@ -148,6 +151,14 @@ class Messaging:
             for params in queued:
                 try:
                     lxm = self._build_lxm(dest_identity, params)
+                    subs = params.get("subscriber_hashes", [])
+                    lxm.register_failed_callback(
+                        lambda m, d=dest_hex,
+                               c=params["channel_hash_hex"],
+                               mi=params["msg_id"],
+                               s=subs:
+                            self._on_delivery_failed(d, c, mi, s)
+                    )
                     self._router.send(lxm)
                 except Exception as e:
                     RNS.log(f"TrenchChat: flush_pending send error to {dest_hex}: {e}",
