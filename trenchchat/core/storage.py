@@ -58,6 +58,17 @@ CREATE TABLE IF NOT EXISTS member_list_versions (
     document_blob BLOB NOT NULL,
     received_at   REAL NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS missed_deliveries (
+    channel_hash   TEXT NOT NULL,
+    recipient_hash TEXT NOT NULL,
+    message_id     TEXT NOT NULL,
+    recorded_at    REAL NOT NULL,
+    PRIMARY KEY (channel_hash, recipient_hash, message_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_missed_deliveries_recipient
+    ON missed_deliveries(recipient_hash, channel_hash);
 """
 
 
@@ -273,3 +284,49 @@ class Storage:
                     document_blob=excluded.document_blob,
                     received_at=excluded.received_at
             """, (channel_hash, version, published_at, document_blob, time.time()))
+
+    # --- message sync helpers ---
+
+    def get_messages_after(self, channel_hash: str, since_ts: float,
+                           limit: int = 50) -> list[sqlite3.Row]:
+        """Fetch up to `limit` messages for a channel with timestamp > since_ts."""
+        return self._conn.execute("""
+            SELECT * FROM messages
+            WHERE channel_hash = ? AND timestamp > ?
+            ORDER BY timestamp ASC, received_at ASC
+            LIMIT ?
+        """, (channel_hash, since_ts, limit)).fetchall()
+
+    # --- missed_deliveries ---
+
+    def record_missed_delivery(self, channel_hash: str,
+                                recipient_hash: str, message_id: str):
+        with self._tx():
+            self._conn.execute("""
+                INSERT OR IGNORE INTO missed_deliveries
+                    (channel_hash, recipient_hash, message_id, recorded_at)
+                VALUES (?, ?, ?, ?)
+            """, (channel_hash, recipient_hash, message_id, time.time()))
+
+    def get_missed_message_ids(self, channel_hash: str,
+                                recipient_hash: str) -> list[str]:
+        rows = self._conn.execute("""
+            SELECT message_id FROM missed_deliveries
+            WHERE channel_hash = ? AND recipient_hash = ?
+        """, (channel_hash, recipient_hash)).fetchall()
+        return [r["message_id"] for r in rows]
+
+    def clear_missed_deliveries(self, channel_hash: str, recipient_hash: str):
+        with self._tx():
+            self._conn.execute("""
+                DELETE FROM missed_deliveries
+                WHERE channel_hash = ? AND recipient_hash = ?
+            """, (channel_hash, recipient_hash))
+
+    def purge_old_missed_deliveries(self, before_ts: float):
+        """Remove hint records older than the sync window."""
+        with self._tx():
+            self._conn.execute(
+                "DELETE FROM missed_deliveries WHERE recorded_at < ?",
+                (before_ts,)
+            )

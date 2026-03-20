@@ -14,6 +14,8 @@ Layout:
   └──────────────┴──────────────────────────────┘
 """
 
+import RNS
+
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
     QListWidget, QListWidgetItem, QSplitter, QToolBar,
@@ -32,7 +34,9 @@ from trenchchat.core.channel import ChannelManager
 from trenchchat.core.messaging import Messaging
 from trenchchat.core.subscription import SubscriptionManager
 from trenchchat.core.invite import InviteManager
+from trenchchat.core.sync import SyncManager
 from trenchchat.network.router import Router
+from trenchchat.network.announce import PeerAnnounceHandler
 from trenchchat.gui.channel_view import ChannelView
 from trenchchat.gui.compose import ComposeWidget
 from trenchchat.gui.settings import SettingsDialog
@@ -214,6 +218,16 @@ class MainWindow(QMainWindow):
         invite_mgr.add_channel_joined_callback(self._on_channel_joined)
         invite_mgr.add_member_list_callback(self._on_member_list_updated)
         channel_mgr.add_channel_discovered_callback(self._on_channel_discovered)
+
+        self._sync_mgr = SyncManager(
+            identity, storage, router, messaging, subscription_mgr, invite_mgr
+        )
+        RNS.Transport.register_announce_handler(
+            PeerAnnounceHandler(self._sync_mgr.on_peer_appeared)
+        )
+        # Defer sync requests briefly so the RNS stack is fully ready
+        QTimer.singleShot(3000, self._sync_mgr.request_sync_all)
+
         self._refresh_channel_list()
 
     # --- UI construction ---
