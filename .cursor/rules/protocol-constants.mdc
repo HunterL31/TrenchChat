@@ -1,0 +1,71 @@
+---
+description: LXMF field key registry, message type constants, and msgpack conventions for TrenchChat
+globs: trenchchat/**/*.py
+alwaysApply: false
+---
+
+# Protocol Constants
+
+## Single source of truth
+
+All shared LXMF field keys and message type strings live in `trenchchat/core/messaging.py`.
+**Do not redefine** constants that already exist there. Import them instead:
+
+```python
+# ✅ CORRECT
+from trenchchat.core.messaging import (
+    F_CHANNEL_HASH, F_MSG_TYPE,
+    F_SYNC_WINDOW_START, F_SYNC_MESSAGES,
+    F_MISSED_FOR, F_MISSED_MSG_ID,
+)
+
+# ❌ WRONG — duplicate definition
+F_MSG_TYPE = 0x10
+F_CHANNEL_HASH = 0x01
+```
+
+Subsystem-specific constants (invite fields, subscription fields) may be defined in
+their own module but must not overlap with the ranges below.
+
+## Field key registry
+
+| Range | Owner | Examples |
+|-------|-------|---------|
+| `0x01–0x0F` | Common / messaging | `F_CHANNEL_HASH=0x01`, `F_DISPLAY_NAME=0x02`, `F_TIMESTAMP=0x03`, `F_MESSAGE_ID=0x04`, `F_REPLY_TO=0x05`, `F_LAST_SEEN_ID=0x06`, `F_SYNC_WINDOW_START=0x07`, `F_SYNC_MESSAGES=0x08`, `F_MISSED_FOR=0x09`, `F_MISSED_MSG_ID=0x0A` |
+| `0x10` | Control | `F_MSG_TYPE=0x10` (present on all control messages, absent on chat messages) |
+| `0x11–0x1F` | Invite | `F_INVITE_TOKEN=0x11`, `F_INVITEE_HASH=0x12`, `F_EXPIRY_TS=0x13`, `F_ADMIN_HASH=0x14` |
+| `0x20–0x2F` | Member list | `F_MEMBER_LIST_DOC=0x21`, `F_CHANNEL_NAME=0x22`, `F_CHANNEL_DESC=0x23`, `F_CHANNEL_CREATOR=0x24`, `F_CHANNEL_ACCESS=0x25`, `F_CHANNEL_CREATED_AT=0x26` |
+| `0x30–0x3F` | Subscription | `F_SUBSCRIBER_LIST=0x30` |
+
+When adding a new field:
+1. Pick the next unused key in the appropriate range.
+2. Add it to the field layout docstring at the top of `trenchchat/core/messaging.py`.
+3. Define the constant in the module that owns that range.
+
+## Message type strings
+
+Control messages are identified by `fields[F_MSG_TYPE]`. Defined values:
+
+| Constant | Value | Module |
+|----------|-------|--------|
+| `MT_SUBSCRIBE` | `"subscribe"` | `subscription.py` |
+| `MT_UNSUBSCRIBE` | `"unsubscribe"` | `subscription.py` |
+| `MT_SUBSCRIBER_LIST` | `"subscriber_list"` | `subscription.py` |
+| `MT_INVITE` | `"invite"` | `invite.py` |
+| `MT_JOIN_REQUEST` | `"join_request"` | `invite.py` |
+| `MT_MEMBER_LIST_UPDATE` | `"member_list_update"` | `invite.py` |
+| `MT_MISSED_DELIVERY` | `"missed_delivery"` | `sync.py` |
+| `MT_SYNC_REQUEST` | `"sync_request"` | `sync.py` |
+| `MT_SYNC_RESPONSE` | `"sync_response"` | `sync.py` |
+
+Chat messages have **no** `F_MSG_TYPE` field. Handlers should check `F_MSG_TYPE in fields`
+to distinguish control messages from chat messages.
+
+## msgpack conventions
+
+- Always pass `use_bin_type=True` when packing: `msgpack.packb(data, use_bin_type=True)`
+- Always pass `raw=False` when unpacking unless you specifically need bytes dict keys:
+  `msgpack.unpackb(blob, raw=False)`
+- When unpacking a document that uses bytes keys (e.g. stored member list blobs), pass
+  `raw=True` and access keys as `b"members"`, `b"admins"`, etc.
+- Channel announce `app_data` is always unpacked with `raw=False`.
