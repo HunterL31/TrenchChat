@@ -2,12 +2,16 @@
 Send and receive channel messages over LXMF.
 
 LXMF fields layout:
-    0x01  channel_hash   bytes[16]  — which channel
-    0x02  display_name   str        — sender display name
-    0x03  timestamp      float      — sender wall-clock Unix epoch
-    0x04  message_id     str        — hex SHA-256 of content+sender+timestamp
-    0x05  reply_to       str|None   — hex message_id of the message being replied to
-    0x06  last_seen_id   str|None   — hex message_id of the most recent msg sender had seen
+    0x01  channel_hash      bytes[16]   — which channel
+    0x02  display_name      str         — sender display name
+    0x03  timestamp         float       — sender wall-clock Unix epoch
+    0x04  message_id        str         — hex SHA-256 of content+sender+timestamp
+    0x05  reply_to          str|None    — hex message_id of the message being replied to
+    0x06  last_seen_id      str|None    — hex message_id of the most recent msg sender had seen
+    0x07  sync_window_start float       — unix timestamp: start of sync window (sync_request)
+    0x08  sync_messages     bytes       — msgpack list[dict] of full message records (sync_response)
+    0x09  missed_for        str         — identity hex of peer who missed a message (missed_delivery)
+    0x0A  missed_msg_id     str         — message_id that was not delivered (missed_delivery)
 """
 
 import hashlib
@@ -19,7 +23,7 @@ from trenchchat.core.identity import Identity
 from trenchchat.core.storage import Storage
 from trenchchat.network.router import Router
 
-# LXMF field keys
+# LXMF field keys — chat messages
 F_CHANNEL_HASH = 0x01
 F_DISPLAY_NAME = 0x02
 F_TIMESTAMP    = 0x03
@@ -27,7 +31,13 @@ F_MESSAGE_ID   = 0x04
 F_REPLY_TO     = 0x05
 F_LAST_SEEN_ID = 0x06
 
-# Control message type field (used by invite / member-list subsystem)
+# LXMF field keys — sync / missed-delivery control messages
+F_SYNC_WINDOW_START = 0x07
+F_SYNC_MESSAGES     = 0x08
+F_MISSED_FOR        = 0x09
+F_MISSED_MSG_ID     = 0x0A
+
+# Control message type field (used by invite / member-list / sync subsystems)
 F_MSG_TYPE     = 0x10
 
 # Threshold in seconds within which last_seen_id causal ordering is applied
@@ -45,8 +55,20 @@ class Messaging:
         self._storage = storage
         self._router = router
         self._message_callbacks: list = []
+        self._missed_delivery_callback = None
+
+        # dest_hex → list of message param dicts queued for offline peers
+        self._pending: dict[str, list[dict]] = {}
 
         router.add_delivery_callback(self._on_lxmf_message)
+
+    def set_missed_delivery_callback(self, callback):
+        """
+        callback(channel_hash_hex, missed_peer_hex, msg_id, all_subscriber_hashes)
+        Called when delivery to a peer fails (path unknown or LXMF failure).
+        SyncManager uses this to broadcast missed-delivery hints.
+        """
+        self._missed_delivery_callback = callback
 
     # --- send ---
 
@@ -67,6 +89,17 @@ class Messaging:
         last_seen = self._storage.get_latest_message_id(channel_hash_hex)
         msg_id = _compute_message_id(content, self._identity.hash_hex, ts)
 
+        # Params stored for pending retry and failure callbacks
+        msg_params = {
+            "channel_hash_hex": channel_hash_hex,
+            "content":          content,
+            "timestamp":        ts,
+            "msg_id":           msg_id,
+            "display_name":     self._identity.display_name,
+            "reply_to":         reply_to,
+            "last_seen_id":     last_seen,
+        }
+
         for dest_hex in subscriber_hashes:
             if dest_hex == self._identity.hash_hex:
                 continue
@@ -76,29 +109,15 @@ class Messaging:
                 dest_identity = RNS.Identity.recall(delivery_dest_hash)
                 if dest_identity is None:
                     RNS.Transport.request_path(delivery_dest_hash)
+                    self._pending.setdefault(dest_hex, []).append(msg_params)
+                    self._notify_missed(channel_hash_hex, dest_hex, msg_id, subscriber_hashes)
                     continue
 
-                dest = RNS.Destination(
-                    dest_identity,
-                    RNS.Destination.OUT,
-                    RNS.Destination.SINGLE,
-                    "lxmf",
-                    "delivery",
+                lxm = self._build_lxm(dest_identity, msg_params)
+                lxm.register_failed_callback(
+                    lambda m, d=dest_hex, c=channel_hash_hex, mi=msg_id, subs=subscriber_hashes:
+                        self._on_delivery_failed(d, c, mi, subs)
                 )
-                lxm = LXMF.LXMessage(
-                    dest,
-                    self._router.delivery_destination,
-                    content,
-                    desired_method=LXMF.LXMessage.DIRECT,
-                )
-                lxm.fields = {
-                    F_CHANNEL_HASH: bytes.fromhex(channel_hash_hex),
-                    F_DISPLAY_NAME: self._identity.display_name,
-                    F_TIMESTAMP:    ts,
-                    F_MESSAGE_ID:   msg_id,
-                    F_REPLY_TO:     reply_to,
-                    F_LAST_SEEN_ID: last_seen,
-                }
                 self._router.send(lxm)
             except Exception as e:
                 RNS.log(f"TrenchChat: failed to send to {dest_hex}: {e}", RNS.LOG_WARNING)
@@ -115,6 +134,68 @@ class Messaging:
             last_seen_id=last_seen,
             received_at=ts,
         )
+
+    def flush_pending(self, dest_hex: str):
+        """Attempt to deliver all queued messages for a peer whose path is now known."""
+        queued = self._pending.pop(dest_hex, [])
+        if not queued:
+            return
+        try:
+            identity_hash = bytes.fromhex(dest_hex)
+            delivery_dest_hash = RNS.Destination.hash(identity_hash, "lxmf", "delivery")
+            dest_identity = RNS.Identity.recall(delivery_dest_hash)
+            if dest_identity is None:
+                # Still unreachable — put back
+                self._pending[dest_hex] = queued
+                return
+            for params in queued:
+                try:
+                    lxm = self._build_lxm(dest_identity, params)
+                    self._router.send(lxm)
+                except Exception as e:
+                    RNS.log(f"TrenchChat: flush_pending send error to {dest_hex}: {e}",
+                            RNS.LOG_WARNING)
+        except Exception as e:
+            RNS.log(f"TrenchChat: flush_pending error for {dest_hex}: {e}", RNS.LOG_WARNING)
+
+    def _build_lxm(self, dest_identity: RNS.Identity,
+                   params: dict) -> LXMF.LXMessage:
+        dest = RNS.Destination(
+            dest_identity,
+            RNS.Destination.OUT,
+            RNS.Destination.SINGLE,
+            "lxmf",
+            "delivery",
+        )
+        lxm = LXMF.LXMessage(
+            dest,
+            self._router.delivery_destination,
+            params["content"],
+            desired_method=LXMF.LXMessage.DIRECT,
+        )
+        lxm.fields = {
+            F_CHANNEL_HASH: bytes.fromhex(params["channel_hash_hex"]),
+            F_DISPLAY_NAME: params["display_name"],
+            F_TIMESTAMP:    params["timestamp"],
+            F_MESSAGE_ID:   params["msg_id"],
+            F_REPLY_TO:     params["reply_to"],
+            F_LAST_SEEN_ID: params["last_seen_id"],
+        }
+        return lxm
+
+    def _on_delivery_failed(self, dest_hex: str, channel_hash_hex: str,
+                             msg_id: str, subscriber_hashes: list[str]):
+        self._notify_missed(channel_hash_hex, dest_hex, msg_id, subscriber_hashes)
+
+    def _notify_missed(self, channel_hash_hex: str, missed_peer_hex: str,
+                       msg_id: str, subscriber_hashes: list[str]):
+        if self._missed_delivery_callback:
+            try:
+                self._missed_delivery_callback(
+                    channel_hash_hex, missed_peer_hex, msg_id, subscriber_hashes
+                )
+            except Exception as e:
+                RNS.log(f"TrenchChat: missed_delivery_callback error: {e}", RNS.LOG_WARNING)
 
     # --- receive ---
 

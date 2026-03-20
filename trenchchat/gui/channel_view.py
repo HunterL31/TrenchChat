@@ -66,13 +66,18 @@ class ChannelView(QWidget):
     request_scroll_indicator = pyqtSignal(int)  # number of out-of-order messages
 
     def __init__(self, channel_hash_hex: str, storage: Storage,
-                 own_identity_hex: str, parent=None):
+                 own_identity_hex: str, restore_to_id: str | None = None,
+                 parent=None):
         super().__init__(parent)
         self._channel_hash = channel_hash_hex
         self._storage = storage
         self._own_hex = own_identity_hex
         self._displayed_ids: set[str] = set()
+        self._bubble_map: dict[str, MessageBubble] = {}
         self._out_of_order_count = 0
+        # Consumed on the first load_history() call; cleared afterwards so
+        # subsequent reloads (out-of-order messages) always scroll to bottom.
+        self._restore_to_id: str | None = restore_to_id
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -102,6 +107,7 @@ class ChannelView(QWidget):
     def load_history(self):
         """Load all stored messages for this channel."""
         self._displayed_ids.clear()
+        self._bubble_map.clear()
         # Clear existing bubbles (keep the stretch at index 0)
         while self._msg_layout.count() > 1:
             item = self._msg_layout.takeAt(1)
@@ -112,7 +118,14 @@ class ChannelView(QWidget):
         for row in rows:
             self._append_bubble(row, scroll=False)
 
-        self._scroll_to_bottom()
+        # Consume the restore point: scroll to it on first open, then clear so
+        # subsequent reloads (out-of-order arrivals) scroll to bottom instead.
+        restore = self._restore_to_id
+        self._restore_to_id = None
+        if restore and restore in self._bubble_map:
+            self._scroll_to_message(restore)
+        else:
+            self._scroll_to_bottom()
 
     def on_new_message(self, message_id: str):
         """Called when a new message arrives for this channel."""
@@ -156,6 +169,7 @@ class ChannelView(QWidget):
             received_at=row["received_at"],
             is_own=row["sender_hash"] == self._own_hex,
         )
+        self._bubble_map[msg_id] = bubble
         # Insert before the stretch (index 0)
         self._msg_layout.insertWidget(self._msg_layout.count(), bubble)
 
@@ -165,6 +179,16 @@ class ChannelView(QWidget):
     def _scroll_to_bottom(self):
         sb = self._scroll.verticalScrollBar()
         sb.setValue(sb.maximum())
+
+    def _scroll_to_message(self, message_id: str):
+        """Scroll the view so message_id is visible (at the bottom of the viewport).
+        Falls back to scrolling to the bottom if the message is not found.
+        """
+        bubble = self._bubble_map.get(message_id)
+        if bubble is None:
+            self._scroll_to_bottom()
+            return
+        QTimer.singleShot(50, lambda: self._scroll.ensureWidgetVisible(bubble))
 
     def clear_out_of_order_indicator(self):
         self._out_of_order_count = 0

@@ -14,6 +14,8 @@ Layout:
   └──────────────┴──────────────────────────────┘
 """
 
+import RNS
+
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
     QListWidget, QListWidgetItem, QSplitter, QToolBar,
@@ -22,7 +24,7 @@ from PyQt6.QtWidgets import (
     QPushButton, QFrame, QTableWidget, QTableWidgetItem, QHeaderView,
     QAbstractItemView,
 )
-from PyQt6.QtCore import Qt, pyqtSlot, QPoint, pyqtSignal, QTimer
+from PyQt6.QtCore import Qt, pyqtSlot, QPoint, pyqtSignal, QTimer, QSettings
 from PyQt6.QtGui import QAction, QFont
 
 from trenchchat.config import Config
@@ -32,7 +34,9 @@ from trenchchat.core.channel import ChannelManager
 from trenchchat.core.messaging import Messaging
 from trenchchat.core.subscription import SubscriptionManager
 from trenchchat.core.invite import InviteManager
+from trenchchat.core.sync import SyncManager
 from trenchchat.network.router import Router
+from trenchchat.network.announce import PeerAnnounceHandler
 from trenchchat.gui.channel_view import ChannelView
 from trenchchat.gui.compose import ComposeWidget
 from trenchchat.gui.settings import SettingsDialog
@@ -198,6 +202,7 @@ class MainWindow(QMainWindow):
 
         self._channel_views: dict[str, ChannelView] = {}
         self._current_channel: str | None = None
+        self._settings = QSettings("TrenchChat", "TrenchChat")
 
         self.setWindowTitle("TrenchChat")
         self.setMinimumSize(800, 600)
@@ -214,7 +219,18 @@ class MainWindow(QMainWindow):
         invite_mgr.add_channel_joined_callback(self._on_channel_joined)
         invite_mgr.add_member_list_callback(self._on_member_list_updated)
         channel_mgr.add_channel_discovered_callback(self._on_channel_discovered)
+
+        self._sync_mgr = SyncManager(
+            identity, storage, router, messaging, subscription_mgr, invite_mgr
+        )
+        RNS.Transport.register_announce_handler(
+            PeerAnnounceHandler(self._sync_mgr.on_peer_appeared)
+        )
+        # Defer sync requests briefly so the RNS stack is fully ready
+        QTimer.singleShot(3000, self._sync_mgr.request_sync_all)
+
         self._refresh_channel_list()
+        self._restore_channel_selection()
 
     # --- UI construction ---
 
@@ -401,6 +417,9 @@ class MainWindow(QMainWindow):
     # --- channel list ---
 
     def _refresh_channel_list(self):
+        # Suppress selection-change signals while rebuilding the list so we
+        # don't trigger a spurious channel switch on clear().
+        self._channel_list_widget.blockSignals(True)
         self._channel_list_widget.clear()
         for row in self._storage.get_all_channels():
             if not self._storage.is_subscribed(row["hash"]):
@@ -409,6 +428,33 @@ class MainWindow(QMainWindow):
             item = QListWidgetItem(f"# {row['name']}{lock}")
             item.setData(Qt.ItemDataRole.UserRole, row["hash"])
             self._channel_list_widget.addItem(item)
+        self._channel_list_widget.blockSignals(False)
+
+        # Re-highlight whichever channel is currently open (if still in list).
+        if self._current_channel:
+            self._highlight_channel_in_list(self._current_channel)
+
+    def _highlight_channel_in_list(self, channel_hash_hex: str):
+        """Select the list row for channel_hash_hex without triggering a switch."""
+        self._channel_list_widget.blockSignals(True)
+        for i in range(self._channel_list_widget.count()):
+            item = self._channel_list_widget.item(i)
+            if item.data(Qt.ItemDataRole.UserRole) == channel_hash_hex:
+                self._channel_list_widget.setCurrentItem(item)
+                break
+        self._channel_list_widget.blockSignals(False)
+
+    def _restore_channel_selection(self):
+        """On startup: open the last channel the user had open."""
+        last_channel = self._settings.value("last_channel")
+        if not last_channel:
+            return
+        for i in range(self._channel_list_widget.count()):
+            item = self._channel_list_widget.item(i)
+            if item.data(Qt.ItemDataRole.UserRole) == last_channel:
+                # Allow signals so _on_channel_selected fires and the view is built.
+                self._channel_list_widget.setCurrentItem(item)
+                return
 
     # --- channel selection ---
 
@@ -420,11 +466,21 @@ class MainWindow(QMainWindow):
         self._switch_to_channel(channel_hash)
 
     def _switch_to_channel(self, channel_hash_hex: str):
+        # Persist the last-read position for the channel we're leaving.
+        if self._current_channel and self._current_channel != channel_hash_hex:
+            last_msg = self._storage.get_latest_message_id(self._current_channel)
+            if last_msg:
+                self._settings.setValue(f"last_read/{self._current_channel}", last_msg)
+
+        self._settings.setValue("last_channel", channel_hash_hex)
         self._current_channel = channel_hash_hex
 
         if channel_hash_hex not in self._channel_views:
+            # Retrieve the scroll restore point saved from a previous session.
+            restore_id = self._settings.value(f"last_read/{channel_hash_hex}") or None
             view = ChannelView(channel_hash_hex, self._storage,
-                               self._identity.hash_hex)
+                               self._identity.hash_hex,
+                               restore_to_id=restore_id)
             self._channel_views[channel_hash_hex] = view
             self._stack.addWidget(view)
 
