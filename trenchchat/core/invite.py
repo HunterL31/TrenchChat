@@ -143,11 +143,47 @@ class InviteManager:
         }
 
     def _validate_document(self, doc: dict, channel_hash_hex: str) -> bool:
-        """Return True if the document has at least one valid admin/owner signature."""
+        """Return True if the document has at least one valid admin/owner signature.
+
+        The signer must be recognised as an admin or owner in the *previously
+        stored* member list for this channel (or be the channel creator when no
+        stored list exists yet).  Checking only the incoming doc's own admin/owner
+        lists would allow a malicious peer to grant themselves signing authority
+        by simply listing themselves as an admin in the doc they craft.
+        """
         admins_in_doc: list[bytes] = doc.get("admins", [])
         owners_in_doc: list[bytes] = doc.get("owners", [])
         sigs: dict = doc.get("signatures", {})
-        signers = set(admins_in_doc) | set(owners_in_doc)
+
+        # Determine the set of identities that are *currently* authorised to
+        # sign member list updates for this channel.
+        #
+        # Priority order:
+        #   1. Previously stored member list doc — most secure; prevents a peer
+        #      from granting themselves signing authority in a crafted doc.
+        #   2. Channel creator from local storage — used when we have a channel
+        #      record but no stored member list yet (e.g. first publish).
+        #   3. The doc's own admins/owners — bootstrap fallback for peers that
+        #      receive a member list before they have any local channel record
+        #      (e.g. auto-join on first invite).  The cryptographic signature
+        #      check still applies; we just can't cross-reference a stored list.
+        existing = self._storage.get_member_list_version(channel_hash_hex)
+        if existing:
+            old_doc = msgpack.unpackb(existing["document_blob"], raw=True)
+            trusted_signers: set[bytes] = (
+                set(old_doc.get(b"admins", []))
+                | set(old_doc.get(b"owners", []))
+            )
+        else:
+            channel = self._storage.get_channel(channel_hash_hex)
+            if channel and channel["creator_hash"]:
+                try:
+                    trusted_signers = {bytes.fromhex(channel["creator_hash"])}
+                except ValueError:
+                    trusted_signers = set(admins_in_doc) | set(owners_in_doc)
+            else:
+                # No local record at all — bootstrap: trust the doc's own signers.
+                trusted_signers = set(admins_in_doc) | set(owners_in_doc)
 
         is_v2 = "owners" in doc
         if is_v2:
@@ -163,13 +199,14 @@ class InviteManager:
             )
 
         for signer_hash_bytes, sig in sigs.items():
+            if signer_hash_bytes not in trusted_signers:
+                continue
             delivery_hash = RNS.Destination.hash(signer_hash_bytes, "lxmf", "delivery")
             signer_identity = RNS.Identity.recall(delivery_hash)
             if signer_identity is None:
                 continue
-            if signer_hash_bytes in signers:
-                if _verify(signer_identity, payload, sig):
-                    return True
+            if _verify(signer_identity, payload, sig):
+                return True
         return False
 
     def _accept_document(self, doc: dict, channel_hash_hex: str) -> bool:
