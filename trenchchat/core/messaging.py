@@ -20,6 +20,7 @@ import RNS
 import LXMF
 
 from trenchchat.core.identity import Identity
+from trenchchat.core.permissions import is_open_join, permissions_from_json
 from trenchchat.core.protocol import (
     F_CHANNEL_HASH, F_DISPLAY_NAME, F_TIMESTAMP, F_MESSAGE_ID,
     F_REPLY_TO, F_LAST_SEEN_ID, F_SYNC_WINDOW_START, F_SYNC_MESSAGES,
@@ -220,7 +221,7 @@ class Messaging:
             if sender_identity else (message.source_hash.hex() if message.source_hash else "")
 
         channel = self._storage.get_channel(channel_hash_hex)
-        if channel and channel["access_mode"] == "invite":
+        if channel and not is_open_join(permissions_from_json(channel["permissions"])):
             if not self._storage.is_member(channel_hash_hex, sender_hex):
                 return
         sender_name = fields.get(F_DISPLAY_NAME, "")

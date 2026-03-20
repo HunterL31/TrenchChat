@@ -14,6 +14,10 @@ import msgpack
 
 from trenchchat import APP_NAME, APP_ASPECT_CHANNEL
 from trenchchat.core.identity import Identity
+from trenchchat.core.permissions import (
+    PRESET_OPEN, PRESET_PRIVATE, PRESETS, ROLE_OWNER,
+    is_discoverable, is_open_join, permissions_from_json,
+)
 from trenchchat.core.storage import Storage
 from trenchchat.network.announce import ChannelAnnounceHandler
 
@@ -45,11 +49,22 @@ class ChannelManager:
     # --- create ---
 
     def create_channel(self, name: str, description: str = "",
-                       access_mode: str = "public") -> str:
-        """
-        Create a new channel owned by the local identity.
+                       access_mode: str = "public",
+                       permissions: dict | None = None) -> str:
+        """Create a new channel owned by the local identity.
+
+        *permissions* is the full permissions dict.  For backward compat,
+        *access_mode* (``"public"`` / ``"invite"``) is also accepted and
+        converted to the matching preset.
+
         Returns the channel hash hex string.
         """
+        if permissions is None:
+            permissions = PRESETS.get(
+                {"public": "open", "invite": "private"}.get(access_mode, access_mode),
+                PRESET_PRIVATE,
+            )
+
         aspect = _sanitise_name(name)
         dest = RNS.Destination(
             self._identity.rns_identity,
@@ -67,17 +82,15 @@ class ChannelManager:
             name=name,
             description=description,
             creator_hash=self._identity.hash_hex,
-            access_mode=access_mode,
+            permissions=permissions,
             created_at=time.time(),
         )
         self._storage.subscribe(hash_hex)
-        # Always add the creator as an admin member so access checks work
-        # immediately, even before a full member list document is published.
         self._storage.upsert_member(
             channel_hash=hash_hex,
             identity_hash=self._identity.hash_hex,
             display_name=self._identity.display_name,
-            is_admin=True,
+            role=ROLE_OWNER,
         )
         self.announce_channel(hash_hex)
         return hash_hex
@@ -91,10 +104,12 @@ class ChannelManager:
         channel = self._storage.get_channel(channel_hash_hex)
         if channel is None:
             return
+        perms = permissions_from_json(channel["permissions"])
+        access = "public" if is_open_join(perms) else "invite"
         app_data = msgpack.packb({
             "name": channel["name"],
             "description": channel["description"],
-            "access": channel["access_mode"],
+            "access": access,
             "creator": self._identity.hash_hex,
         }, use_bin_type=True)
         dest.announce(app_data=app_data)
@@ -125,8 +140,9 @@ class ChannelManager:
             created_at=time.time(),
         )
 
-        # Notify UI about newly discovered public channels so user can choose to join.
-        if not already_known and access_mode == "public":
+        channel = self._storage.get_channel(hash_hex)
+        perms = permissions_from_json(channel["permissions"]) if channel else {}
+        if not already_known and is_discoverable(perms):
             for cb in self._discovered_callbacks:
                 try:
                     cb(hash_hex, name)
@@ -156,10 +172,9 @@ class ChannelManager:
                     aspect,
                 )
                 self._owned_destinations[row["hash"]] = dest
-                # Ensure creator is always present as admin in the members table
                 self._storage.upsert_member(
                     channel_hash=row["hash"],
                     identity_hash=self._identity.hash_hex,
                     display_name=self._identity.display_name,
-                    is_admin=True,
+                    role=ROLE_OWNER,
                 )

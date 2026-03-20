@@ -241,7 +241,7 @@ class InviteManager:
             fields[F_CHANNEL_NAME]       = channel["name"]
             fields[F_CHANNEL_DESC]       = channel["description"] or ""
             fields[F_CHANNEL_CREATOR]    = channel["creator_hash"]
-            fields[F_CHANNEL_ACCESS]     = channel["access_mode"]
+            fields[F_CHANNEL_ACCESS]     = channel["permissions"]
             fields[F_CHANNEL_CREATED_AT] = channel["created_at"]
         for row in self._storage.get_members(channel_hash_hex):
             dest_hex = row["identity_hash"]

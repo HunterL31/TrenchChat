@@ -29,6 +29,7 @@ import msgpack
 
 from trenchchat.core.identity import Identity
 from trenchchat.core.messaging import Messaging
+from trenchchat.core.permissions import is_open_join, permissions_from_json
 from trenchchat.core.protocol import (
     F_CHANNEL_HASH, F_MSG_TYPE,
     F_SYNC_WINDOW_START, F_SYNC_MESSAGES,
@@ -166,9 +167,8 @@ class SyncManager:
         if not self._storage.is_subscribed(channel_hash_hex):
             return
 
-        # For invite-only channels, only respond to members
         channel = self._storage.get_channel(channel_hash_hex)
-        if channel and channel["access_mode"] == "invite":
+        if channel and not is_open_join(permissions_from_json(channel["permissions"])):
             if not self._storage.is_member(channel_hash_hex, requester_hex):
                 return
 
