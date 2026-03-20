@@ -30,7 +30,7 @@ from PyQt6.QtGui import QAction, QFont
 from trenchchat.config import Config
 from trenchchat.core.identity import Identity
 from trenchchat.core.permissions import (
-    INVITE, KICK, MANAGE_ROLES, PRESETS, PRESET_PRIVATE,
+    INVITE, KICK, MANAGE_CHANNEL, MANAGE_ROLES, PRESETS, PRESET_PRIVATE,
     is_discoverable, is_open_join, permissions_from_json,
 )
 from trenchchat.core.storage import Storage
@@ -44,7 +44,7 @@ from trenchchat.network.announce import PeerAnnounceHandler
 from trenchchat.gui.channel_view import ChannelView
 from trenchchat.gui.compose import ComposeWidget
 from trenchchat.gui.settings import SettingsDialog
-from trenchchat.gui.invite_dialogs import InviteDialog, MembersDialog
+from trenchchat.gui.invite_dialogs import ChannelPermissionsDialog, InviteDialog, MembersDialog
 
 _STARTUP_SYNC_DELAY_MS = 3_000
 
@@ -633,6 +633,7 @@ class MainWindow(QMainWindow):
 
         my_hex = self._identity.hash_hex
         can_invite = self._storage.has_permission(channel_hash, my_hex, INVITE)
+        can_manage_channel = self._storage.has_permission(channel_hash, my_hex, MANAGE_CHANNEL)
         is_member = self._storage.is_member(channel_hash, my_hex)
 
         menu = QMenu(self)
@@ -652,6 +653,12 @@ class MainWindow(QMainWindow):
             members_action = menu.addAction("View members…")
             members_action.triggered.connect(
                 lambda: self._on_view_members(channel_hash, channel["name"])
+            )
+
+        if can_manage_channel:
+            perms_action = menu.addAction("Edit permissions…")
+            perms_action.triggered.connect(
+                lambda: self._on_edit_permissions(channel_hash, channel["name"])
             )
 
         if menu.actions():
@@ -691,6 +698,18 @@ class MainWindow(QMainWindow):
                 add_admins=dlg.admins_to_add or None,
                 remove_admins=dlg.admins_to_remove or None,
             )
+
+    def _on_edit_permissions(self, channel_hash: str, channel_name: str):
+        current_perms = self._storage.get_channel_permissions(channel_hash)
+        dlg = ChannelPermissionsDialog(channel_name, current_perms, self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        new_perms = dlg.permissions
+        self._storage.set_channel_permissions(channel_hash, new_perms)
+        self._invite_mgr.broadcast_permissions(channel_hash)
+        self._refresh_channel_list()
+        if self._current_channel == channel_hash:
+            self._switch_to_channel(channel_hash)
 
     def _on_leave_channel(self, channel_hash: str):
         channel = self._storage.get_channel(channel_hash)

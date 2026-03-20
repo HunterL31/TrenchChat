@@ -7,19 +7,24 @@ Covers:
 - Owner immutability (always has all permissions)
 - Preset permission configurations
 - Member invite permission enables invite flow
+- ChannelPermissionsDialog UI: initial state and updated permissions property
 """
 
+import os
 import time
 
 import pytest
 
 from trenchchat.core.storage import Storage
 from trenchchat.core.permissions import (
-    ALL_PERMISSIONS, INVITE, KICK, MANAGE_CHANNEL, MANAGE_ROLES,
+    ALL_PERMISSIONS, FLAG_DISCOVERABLE, FLAG_OPEN_JOIN,
+    INVITE, KICK, MANAGE_CHANNEL, MANAGE_ROLES,
     PRESET_OPEN, PRESET_PRIVATE, ROLE_ADMIN, ROLE_MEMBER, ROLE_OWNER,
     SEND_MESSAGE, has_permission, is_discoverable, is_open_join,
     permissions_from_json, permissions_to_json, role_rank,
 )
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 
 @pytest.fixture
@@ -171,3 +176,127 @@ class TestMemberInvitePermission:
         from tests.helpers import wait_for_member
         assert wait_for_member(alice.storage, ch_hash, bob.identity.hash_hex)
         assert alice.storage.has_permission(ch_hash, bob.identity.hash_hex, INVITE)
+
+
+# ---------------------------------------------------------------------------
+# broadcast_permissions — owner role preserved after permissions update
+# ---------------------------------------------------------------------------
+
+class TestBroadcastPermissions:
+    def test_owner_role_preserved_after_broadcast(self, peer_factory):
+        """broadcast_permissions must not demote the owner in the local members table."""
+        alice = peer_factory("alice")
+        ch_hash = alice.channel_mgr.create_channel("perm-broadcast", "", "invite")
+        alice.invite_mgr.publish_member_list(ch_hash)
+
+        # Remove send_message from members (the scenario that triggered the bug)
+        custom = dict(PRESET_PRIVATE)
+        custom["member"] = []
+        alice.storage.set_channel_permissions(ch_hash, custom)
+        alice.invite_mgr.broadcast_permissions(ch_hash)
+
+        assert alice.storage.get_role(ch_hash, alice.identity.hash_hex) == ROLE_OWNER
+        assert alice.storage.has_permission(ch_hash, alice.identity.hash_hex, MANAGE_CHANNEL)
+
+    def test_permissions_updated_in_db_after_broadcast(self, peer_factory):
+        """The new permissions dict is persisted before broadcast_permissions is called."""
+        alice = peer_factory("alice")
+        ch_hash = alice.channel_mgr.create_channel("perm-db", "", "invite")
+
+        custom = dict(PRESET_PRIVATE)
+        custom["member"] = [SEND_MESSAGE, INVITE]
+        alice.storage.set_channel_permissions(ch_hash, custom)
+        alice.invite_mgr.broadcast_permissions(ch_hash)
+
+        assert alice.storage.has_permission(ch_hash, alice.identity.hash_hex, MANAGE_CHANNEL)
+        perms = alice.storage.get_channel_permissions(ch_hash)
+        assert INVITE in perms.get(ROLE_MEMBER, [])
+
+    def test_version_incremented_after_broadcast(self, peer_factory):
+        """broadcast_permissions increments the member list version."""
+        alice = peer_factory("alice")
+        ch_hash = alice.channel_mgr.create_channel("perm-ver", "", "invite")
+        alice.invite_mgr.publish_member_list(ch_hash)
+
+        before = alice.storage.get_member_list_version(ch_hash)
+        alice.invite_mgr.broadcast_permissions(ch_hash)
+        after = alice.storage.get_member_list_version(ch_hash)
+
+        assert after["version"] == before["version"] + 1
+
+
+# ---------------------------------------------------------------------------
+# ChannelPermissionsDialog GUI unit tests
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(scope="module")
+def qt_app():
+    """Module-scoped QApplication for headless GUI tests."""
+    from PyQt6.QtWidgets import QApplication
+    app = QApplication.instance() or QApplication([])
+    yield app
+
+
+class TestChannelPermissionsDialog:
+    def test_initial_state_reflects_preset(self, qt_app):
+        """Dialog checkboxes match the permissions dict passed in."""
+        from trenchchat.gui.invite_dialogs import ChannelPermissionsDialog
+        dlg = ChannelPermissionsDialog("test", dict(PRESET_PRIVATE))
+        perms = dlg.permissions
+        assert perms[FLAG_OPEN_JOIN] is False
+        assert perms[FLAG_DISCOVERABLE] is False
+        assert SEND_MESSAGE in perms[ROLE_ADMIN]
+        assert SEND_MESSAGE in perms[ROLE_MEMBER]
+        assert INVITE not in perms[ROLE_MEMBER]
+
+    def test_initial_state_open_preset(self, qt_app):
+        """Open preset flags and member invite permission are reflected."""
+        from trenchchat.gui.invite_dialogs import ChannelPermissionsDialog
+        dlg = ChannelPermissionsDialog("open", dict(PRESET_OPEN))
+        perms = dlg.permissions
+        assert perms[FLAG_OPEN_JOIN] is True
+        assert perms[FLAG_DISCOVERABLE] is True
+        assert INVITE in perms[ROLE_MEMBER]
+
+    def test_toggling_checkbox_updates_permissions(self, qt_app):
+        """Changing a checkbox is reflected in the permissions property."""
+        from trenchchat.gui.invite_dialogs import ChannelPermissionsDialog
+        dlg = ChannelPermissionsDialog("test", dict(PRESET_PRIVATE))
+        # Grant INVITE to members by checking the box
+        invite_cb = dlg._role_checks[ROLE_MEMBER][INVITE]
+        invite_cb.setChecked(True)
+        perms = dlg.permissions
+        assert INVITE in perms[ROLE_MEMBER]
+
+    def test_toggling_flag_updates_permissions(self, qt_app):
+        """Toggling the open_join flag is reflected in the permissions property."""
+        from trenchchat.gui.invite_dialogs import ChannelPermissionsDialog
+        dlg = ChannelPermissionsDialog("test", dict(PRESET_PRIVATE))
+        dlg._open_join_cb.setChecked(True)
+        dlg._discoverable_cb.setChecked(True)
+        perms = dlg.permissions
+        assert perms[FLAG_OPEN_JOIN] is True
+        assert perms[FLAG_DISCOVERABLE] is True
+
+    def test_owner_checkboxes_are_disabled(self, qt_app):
+        """Owner permission checkboxes are always checked and disabled."""
+        from PyQt6.QtWidgets import QGroupBox, QCheckBox
+        from trenchchat.gui.invite_dialogs import ChannelPermissionsDialog
+        dlg = ChannelPermissionsDialog("test", dict(PRESET_PRIVATE))
+        # Find the owner group box
+        owner_group = next(
+            w for w in dlg.findChildren(QGroupBox)
+            if "Owner" in w.title()
+        )
+        for cb in owner_group.findChildren(QCheckBox):
+            assert cb.isChecked()
+            assert not cb.isEnabled()
+
+    def test_revoking_permission_removes_from_list(self, qt_app):
+        """Unchecking a permission removes it from the returned list."""
+        from trenchchat.gui.invite_dialogs import ChannelPermissionsDialog
+        dlg = ChannelPermissionsDialog("test", dict(PRESET_PRIVATE))
+        send_cb = dlg._role_checks[ROLE_ADMIN][SEND_MESSAGE]
+        send_cb.setChecked(False)
+        perms = dlg.permissions
+        assert SEND_MESSAGE not in perms[ROLE_ADMIN]

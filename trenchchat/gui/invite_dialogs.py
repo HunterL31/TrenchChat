@@ -1,22 +1,33 @@
 """
 Invite-related dialogs:
-  - InviteDialog       : admin sends an invite (enters invitee hash)
-  - MembersDialog      : view/remove members for a channel
-  - IncomingInviteDialog: invitee accepts or declines an invite
+  - InviteDialog              : admin sends an invite (enters invitee hash)
+  - MembersDialog             : view/remove members for a channel
+  - IncomingInviteDialog      : invitee accepts or declines an invite
+  - ChannelPermissionsDialog  : owner/admin edits per-role permissions and channel flags
 """
 
 from PyQt6.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QFormLayout,
+    QDialog, QVBoxLayout, QHBoxLayout, QFormLayout, QGroupBox,
     QLabel, QLineEdit, QPushButton, QListWidget, QListWidgetItem,
-    QDialogButtonBox, QMessageBox, QWidget,
+    QDialogButtonBox, QMessageBox, QWidget, QCheckBox,
 )
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont
 
 from trenchchat.core.permissions import (
-    INVITE, KICK, MANAGE_ROLES, ROLE_ADMIN, ROLE_MEMBER, ROLE_OWNER,
+    ALL_PERMISSIONS, FLAG_DISCOVERABLE, FLAG_OPEN_JOIN,
+    INVITE, KICK, MANAGE_CHANNEL, MANAGE_ROLES, ROLE_ADMIN, ROLE_MEMBER, ROLE_OWNER,
+    SEND_MESSAGE,
 )
 from trenchchat.core.storage import Storage
+
+_PERMISSION_LABELS: dict[str, str] = {
+    SEND_MESSAGE:   "Send messages",
+    INVITE:         "Invite members",
+    KICK:           "Remove members",
+    MANAGE_ROLES:   "Manage roles",
+    MANAGE_CHANNEL: "Manage channel settings",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -186,6 +197,93 @@ class MembersDialog(QDialog):
         elif role == ROLE_MEMBER:
             self.admins_to_add.append(identity_bytes)
         self._populate()
+
+
+# ---------------------------------------------------------------------------
+# ChannelPermissionsDialog — owner / MANAGE_CHANNEL admin edits role permissions
+# ---------------------------------------------------------------------------
+
+class ChannelPermissionsDialog(QDialog):
+    """Edit per-role permissions and channel flags for a channel.
+
+    The caller is responsible for checking that the current user holds the
+    MANAGE_CHANNEL permission before opening this dialog.  On acceptance,
+    read back the updated permissions dict via the ``permissions`` property
+    and persist it through the appropriate core manager.
+    """
+
+    def __init__(self, channel_name: str, current_permissions: dict, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"Channel permissions — #{channel_name}")
+        self.setMinimumWidth(460)
+
+        self._perms = dict(current_permissions)
+
+        layout = QVBoxLayout(self)
+
+        # --- Channel flags ---
+        flags_group = QGroupBox("Channel flags")
+        flags_layout = QVBoxLayout(flags_group)
+
+        self._open_join_cb = QCheckBox("Open join (anyone can join without an invite)")
+        self._open_join_cb.setChecked(bool(self._perms.get(FLAG_OPEN_JOIN, False)))
+        flags_layout.addWidget(self._open_join_cb)
+
+        self._discoverable_cb = QCheckBox("Discoverable (visible in the Join Channel list)")
+        self._discoverable_cb.setChecked(bool(self._perms.get(FLAG_DISCOVERABLE, True)))
+        flags_layout.addWidget(self._discoverable_cb)
+
+        layout.addWidget(flags_group)
+
+        # --- Per-role permission checkboxes ---
+        # Owner always has every permission — display as read-only info row.
+        owner_group = QGroupBox(f"Owner  (always has all permissions)")
+        owner_layout = QVBoxLayout(owner_group)
+        for perm in ALL_PERMISSIONS:
+            cb = QCheckBox(_PERMISSION_LABELS[perm])
+            cb.setChecked(True)
+            cb.setEnabled(False)
+            owner_layout.addWidget(cb)
+        layout.addWidget(owner_group)
+
+        self._role_checks: dict[str, dict[str, QCheckBox]] = {}
+        for role in (ROLE_ADMIN, ROLE_MEMBER):
+            group = QGroupBox(role.capitalize())
+            group_layout = QVBoxLayout(group)
+            role_checks: dict[str, QCheckBox] = {}
+            current_role_perms: list[str] = self._perms.get(role, [])
+            for perm in ALL_PERMISSIONS:
+                cb = QCheckBox(_PERMISSION_LABELS[perm])
+                cb.setChecked(perm in current_role_perms)
+                group_layout.addWidget(cb)
+                role_checks[perm] = cb
+            self._role_checks[role] = role_checks
+            layout.addWidget(group)
+
+        hint = QLabel(
+            "Changes take effect immediately for this device. "
+            "Publish a new member list to propagate them to other members."
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #888; font-size: 11px; margin-top: 4px;")
+        layout.addWidget(hint)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    @property
+    def permissions(self) -> dict:
+        """Return the updated permissions dict reflecting the current checkbox state."""
+        result = dict(self._perms)
+        result[FLAG_OPEN_JOIN] = self._open_join_cb.isChecked()
+        result[FLAG_DISCOVERABLE] = self._discoverable_cb.isChecked()
+        for role, checks in self._role_checks.items():
+            result[role] = [perm for perm, cb in checks.items() if cb.isChecked()]
+        return result
 
 
 # ---------------------------------------------------------------------------

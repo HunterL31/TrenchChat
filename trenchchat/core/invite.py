@@ -298,6 +298,46 @@ class InviteManager:
         self._accept_document(doc, channel_hash_hex)
         self._broadcast_member_list(channel_hash_hex, doc)
 
+    def broadcast_permissions(self, channel_hash_hex: str):
+        """Publish a new member list doc carrying updated permissions without
+        touching the local members table.
+
+        Call this after saving new permissions via
+        ``Storage.set_channel_permissions`` to propagate the change to peers.
+        The local DB is already correct; only the version counter and the
+        broadcast need to happen.
+        """
+        existing = self._storage.get_member_list_version(channel_hash_hex)
+        if existing:
+            old_doc = msgpack.unpackb(existing["document_blob"], raw=True)
+            members = list(old_doc[b"members"])
+            admins  = list(old_doc[b"admins"])
+            owners  = list(old_doc.get(b"owners", []))
+            version = existing["version"] + 1
+        else:
+            members = [self._identity.hash]
+            admins  = [self._identity.hash]
+            owners  = [self._identity.hash]
+            version = 1
+
+        channel = self._storage.get_channel(channel_hash_hex)
+        perms = (permissions_from_json(channel["permissions"])
+                 if channel and channel["permissions"] else None)
+
+        published_at = time.time()
+        doc = self._build_document(channel_hash_hex, members, admins,
+                                   version, published_at,
+                                   owners=owners, permissions=perms)
+
+        # Persist the new version so peers cannot replay an older doc, but do
+        # NOT call _accept_document — the local members table is already correct
+        # and replace_members would wipe display names unnecessarily.
+        blob = msgpack.packb(doc, use_bin_type=True)
+        self._storage.upsert_member_list_version(
+            channel_hash_hex, version, published_at, blob
+        )
+        self._broadcast_member_list(channel_hash_hex, doc)
+
     def _broadcast_member_list(self, channel_hash_hex: str, doc: dict):
         blob = msgpack.packb(doc, use_bin_type=True)
         channel = self._storage.get_channel(channel_hash_hex)
