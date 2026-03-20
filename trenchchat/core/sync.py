@@ -28,18 +28,15 @@ import LXMF
 import msgpack
 
 from trenchchat.core.identity import Identity
-from trenchchat.core.storage import Storage
-from trenchchat.network.router import Router
-from trenchchat.core.messaging import (
-    Messaging,
+from trenchchat.core.messaging import Messaging
+from trenchchat.core.protocol import (
     F_CHANNEL_HASH, F_MSG_TYPE,
     F_SYNC_WINDOW_START, F_SYNC_MESSAGES,
     F_MISSED_FOR, F_MISSED_MSG_ID,
+    MT_MISSED_DELIVERY, MT_SYNC_REQUEST, MT_SYNC_RESPONSE,
 )
-
-MT_MISSED_DELIVERY = "missed_delivery"
-MT_SYNC_REQUEST    = "sync_request"
-MT_SYNC_RESPONSE   = "sync_response"
+from trenchchat.core.storage import Storage
+from trenchchat.network.router import Router
 
 # Sync window: how far back to look for missing messages
 SYNC_WINDOW_DAYS    = 7
@@ -235,12 +232,9 @@ class SyncManager:
                 if inserted:
                     inserted_any = True
                     self._storage.touch_channel(channel_hash_hex)
-                    for cb in self._messaging._message_callbacks:
-                        try:
-                            cb(channel_hash_hex, m.get("message_id", ""))
-                        except Exception as e:
-                            RNS.log(f"TrenchChat: sync message callback error: {e}",
-                                    RNS.LOG_ERROR)
+                    self._messaging.notify_message_received(
+                        channel_hash_hex, m.get("message_id", "")
+                    )
             except Exception as e:
                 RNS.log(f"TrenchChat: sync_response insert error: {e}", RNS.LOG_WARNING)
 

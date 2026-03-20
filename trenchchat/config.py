@@ -2,6 +2,8 @@ import json
 import os
 from pathlib import Path
 
+import RNS
+
 DATA_DIR = Path.home() / ".trenchchat"
 CONFIG_PATH = DATA_DIR / "config.json"
 
@@ -44,8 +46,8 @@ class Config:
             try:
                 with open(self._config_path, "r") as f:
                     return json.load(f)
-            except (json.JSONDecodeError, OSError):
-                pass
+            except (json.JSONDecodeError, OSError) as e:
+                RNS.log(f"TrenchChat: failed to load config from disk: {e}", RNS.LOG_WARNING)
         return {}
 
     def save(self):
@@ -117,6 +119,11 @@ class Config:
         if hex_hash in hashes:
             hashes.remove(hex_hash)
             self.save()
+
+    def set_channel_filter_hashes(self, hashes: list[str]) -> None:
+        """Replace the full set of channel filter hashes."""
+        self._data["propagation_node"]["channel_filter"]["channel_hashes"] = hashes
+        self.save()
 
     # --- outbound propagation node ---
 

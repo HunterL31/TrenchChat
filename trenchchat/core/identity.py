@@ -7,6 +7,7 @@ subsequent launches it is loaded from disk.
 """
 
 import RNS
+import msgpack
 
 from trenchchat import APP_NAME
 from trenchchat.config import Config, DATA_DIR
@@ -61,5 +62,4 @@ class Identity:
 
     def announce_data(self) -> bytes:
         """Serialised app_data payload included in announces."""
-        import msgpack
         return msgpack.packb({"display_name": self.display_name}, use_bin_type=True)

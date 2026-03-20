@@ -27,26 +27,15 @@ import LXMF
 import msgpack
 
 from trenchchat.core.identity import Identity
+from trenchchat.core.protocol import (
+    F_CHANNEL_HASH, F_MSG_TYPE,
+    F_INVITE_TOKEN, F_INVITEE_HASH, F_EXPIRY_TS, F_ADMIN_HASH,
+    F_MEMBER_LIST_DOC, F_CHANNEL_NAME, F_CHANNEL_DESC,
+    F_CHANNEL_CREATOR, F_CHANNEL_ACCESS, F_CHANNEL_CREATED_AT,
+    MT_JOIN_REQUEST, MT_MEMBER_LIST_UPDATE, MT_INVITE,
+)
 from trenchchat.core.storage import Storage
 from trenchchat.network.router import Router
-
-# LXMF field keys
-F_MSG_TYPE           = 0x10
-F_INVITE_TOKEN       = 0x11
-F_INVITEE_HASH       = 0x12
-F_EXPIRY_TS          = 0x13
-F_ADMIN_HASH         = 0x14
-F_CHANNEL_HASH       = 0x01
-F_MEMBER_LIST_DOC    = 0x21
-F_CHANNEL_NAME       = 0x22
-F_CHANNEL_DESC       = 0x23
-F_CHANNEL_CREATOR    = 0x24
-F_CHANNEL_ACCESS     = 0x25
-F_CHANNEL_CREATED_AT = 0x26
-
-MT_JOIN_REQUEST       = "join_request"
-MT_MEMBER_LIST_UPDATE = "member_list_update"
-MT_INVITE             = "invite"
 
 DEFAULT_TOKEN_TTL = 7 * 24 * 3600  # 7 days
 
@@ -461,17 +450,9 @@ class InviteManager:
             dest_identity = RNS.Identity.recall(delivery_dest_hash)
 
             if dest_identity is None:
-                RNS.log(f"TrenchChat [invite]: delivery dest for {dest_hex[:12]}… not known, "
-                        f"requesting path and waiting up to 10s…", RNS.LOG_DEBUG)
                 RNS.Transport.request_path(delivery_dest_hash)
-                timeout = time.time() + 10
-                while dest_identity is None and time.time() < timeout:
-                    time.sleep(0.5)
-                    dest_identity = RNS.Identity.recall(delivery_dest_hash)
-
-            if dest_identity is None:
                 RNS.log(f"TrenchChat [invite]: cannot deliver {msg_type!r} to "
-                        f"{dest_hex[:12]}… — identity not known after path request",
+                        f"{dest_hex[:12]}… — identity not known, path requested",
                         RNS.LOG_WARNING)
                 return
 

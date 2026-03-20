@@ -8,12 +8,14 @@ alwaysApply: false
 
 ## Single source of truth
 
-All shared LXMF field keys and message type strings live in `trenchchat/core/messaging.py`.
-**Do not redefine** constants that already exist there. Import them instead:
+All LXMF field keys and message type strings live in `trenchchat/core/protocol.py`.
+This module has **no local imports**, so it can be imported by any layer without
+creating circular dependencies. **Do not redefine** constants that already exist there.
+Import them instead:
 
 ```python
 # ✅ CORRECT
-from trenchchat.core.messaging import (
+from trenchchat.core.protocol import (
     F_CHANNEL_HASH, F_MSG_TYPE,
     F_SYNC_WINDOW_START, F_SYNC_MESSAGES,
     F_MISSED_FOR, F_MISSED_MSG_ID,
@@ -23,9 +25,6 @@ from trenchchat.core.messaging import (
 F_MSG_TYPE = 0x10
 F_CHANNEL_HASH = 0x01
 ```
-
-Subsystem-specific constants (invite fields, subscription fields) may be defined in
-their own module but must not overlap with the ranges below.
 
 ## Field key registry
 

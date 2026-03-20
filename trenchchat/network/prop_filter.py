@@ -6,9 +6,7 @@ Field 0x01 in TrenchChat LXMF messages carries the channel hash (bytes).
 """
 
 from trenchchat.config import Config
-
-# LXMF fields key for channel hash
-FIELD_CHANNEL_HASH = 0x01
+from trenchchat.core.protocol import F_CHANNEL_HASH
 
 
 class PropagationFilter:
@@ -24,7 +22,7 @@ class PropagationFilter:
 
         # allowlist mode: check fields[0x01] against configured hashes
         fields = getattr(message, "fields", None) or {}
-        channel_hash_bytes = fields.get(FIELD_CHANNEL_HASH)
+        channel_hash_bytes = fields.get(F_CHANNEL_HASH)
 
         if not channel_hash_bytes:
             return False
