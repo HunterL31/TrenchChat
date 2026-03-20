@@ -39,8 +39,9 @@ F_MEMBER_LIST_DOC   = 0x21   # bytes — msgpack-encoded member list document
 F_CHANNEL_NAME      = 0x22   # str   — channel display name
 F_CHANNEL_DESC      = 0x23   # str   — channel description
 F_CHANNEL_CREATOR   = 0x24   # str   — creator identity hash hex
-F_CHANNEL_ACCESS    = 0x25   # str   — access mode ("public" | "invite")
+F_CHANNEL_ACCESS    = 0x25   # str   — (legacy) access mode ("public" | "invite")
 F_CHANNEL_CREATED_AT = 0x26  # float — Unix timestamp of channel creation
+F_CHANNEL_PERMISSIONS = 0x27 # str   — JSON permissions dict (replaces F_CHANNEL_ACCESS)
 
 # --- Subscription fields ---
 F_SUBSCRIBER_LIST   = 0x30   # bytes — msgpack list of hex identity hashes
