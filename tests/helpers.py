@@ -6,6 +6,7 @@ import time
 import RNS
 
 from tests.conftest import TestPeer
+from trenchchat.core.permissions import is_open_join, permissions_from_json
 from trenchchat.core.storage import Storage
 
 
@@ -105,7 +106,7 @@ def get_subscriber_hashes(peer: TestPeer, channel_hash: str) -> list[str]:
 
     hashes: set[str] = set()
 
-    if channel["access_mode"] == "public":
+    if is_open_join(permissions_from_json(channel["permissions"])):
         hashes.update(peer.subscription_mgr.get_subscribers(channel_hash))
         # Always include the creator so they receive their own messages
         hashes.add(channel["creator_hash"])

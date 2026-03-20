@@ -246,13 +246,14 @@ class TestFlushPending:
         content = "Manually queued"
         msg_id = _compute_message_id(content, alice.identity.hash_hex, ts)
         msg_params = {
-            "channel_hash_hex": ch_hash,
-            "content":          content,
-            "timestamp":        ts,
-            "msg_id":           msg_id,
-            "display_name":     alice.identity.display_name,
-            "reply_to":         None,
-            "last_seen_id":     None,
+            "channel_hash_hex":  ch_hash,
+            "content":           content,
+            "timestamp":         ts,
+            "msg_id":            msg_id,
+            "display_name":      alice.identity.display_name,
+            "reply_to":          None,
+            "last_seen_id":      None,
+            "subscriber_hashes": [bob.identity.hash_hex],
         }
         alice.messaging._pending[bob.identity.hash_hex] = [msg_params]
 
@@ -288,13 +289,14 @@ class TestFlushPending:
         ts = time.time()
         msg_id = _compute_message_id("Clear me", alice.identity.hash_hex, ts)
         alice.messaging._pending[bob.identity.hash_hex] = [{
-            "channel_hash_hex": ch_hash,
-            "content":          "Clear me",
-            "timestamp":        ts,
-            "msg_id":           msg_id,
-            "display_name":     "Alice",
-            "reply_to":         None,
-            "last_seen_id":     None,
+            "channel_hash_hex":  ch_hash,
+            "content":           "Clear me",
+            "timestamp":         ts,
+            "msg_id":            msg_id,
+            "display_name":      "Alice",
+            "reply_to":          None,
+            "last_seen_id":      None,
+            "subscriber_hashes": [bob.identity.hash_hex],
         }]
 
         alice.messaging.flush_pending(bob.identity.hash_hex)
@@ -303,6 +305,82 @@ class TestFlushPending:
             lambda: bob.identity.hash_hex not in alice.messaging._pending,
             timeout=5,
         ), "Alice's pending queue was not cleared after flush_pending"
+
+    def test_flush_pending_failed_callback_broadcasts_hint(self, peer_factory):
+        """
+        Regression: flush_pending must register a failed callback so that if
+        the LXMF send fails after the path was resolved, a missed-delivery hint
+        is broadcast to other subscribers and the message can be recovered via sync.
+
+        We simulate the failure by intercepting the LXMessage after it is built
+        and directly invoking its failed callback, then verify that the hint was
+        recorded in Carol's storage (a third peer who was online).
+        """
+        alice = peer_factory("alice")
+        bob   = peer_factory("bob")
+        carol = peer_factory("carol")
+
+        ch_hash = alice.channel_mgr.create_channel("flush-fail-hint", "", "public")
+        _seed_channel_on_peer(bob,   ch_hash, "flush-fail-hint", alice.identity.hash_hex)
+        _seed_channel_on_peer(carol, ch_hash, "flush-fail-hint", alice.identity.hash_hex)
+
+        ts = time.time()
+        content = "Will fail on flush"
+        msg_id = _compute_message_id(content, alice.identity.hash_hex, ts)
+
+        # Seed the message in Alice's storage so Carol can serve it later if needed
+        alice.storage.insert_message(
+            channel_hash=ch_hash,
+            sender_hash=alice.identity.hash_hex,
+            sender_name="Alice",
+            content=content,
+            timestamp=ts,
+            message_id=msg_id,
+            reply_to=None,
+            last_seen_id=None,
+            received_at=ts,
+        )
+
+        # Queue the message as pending for Bob, including subscriber_hashes
+        alice.messaging._pending[bob.identity.hash_hex] = [{
+            "channel_hash_hex":  ch_hash,
+            "content":           content,
+            "timestamp":         ts,
+            "msg_id":            msg_id,
+            "display_name":      "Alice",
+            "reply_to":          None,
+            "last_seen_id":      None,
+            "subscriber_hashes": [bob.identity.hash_hex, carol.identity.hash_hex],
+        }]
+
+        # Intercept router.send to capture the LXMessage and trigger its failed callback
+        captured = []
+        original_send = alice.router.send
+        def _intercepting_send(lxm):
+            captured.append(lxm)
+        alice.router.send = _intercepting_send
+
+        alice.messaging.flush_pending(bob.identity.hash_hex)
+
+        # Restore send so other operations work normally
+        alice.router.send = original_send
+
+        assert captured, "flush_pending did not call router.send"
+        lxm = captured[0]
+
+        # Trigger the failed callback as LXMF would on delivery failure
+        assert hasattr(lxm, "failed_callback") and lxm.failed_callback is not None, \
+            "flush_pending did not register a failed callback on the LXMessage"
+        lxm.failed_callback(lxm)
+
+        # The missed-delivery hint should now be recorded in Carol's storage
+        # (broadcast via _on_missed_delivery_event → _send_raw to Carol)
+        assert wait_for(
+            lambda: msg_id in carol.storage.get_missed_message_ids(
+                ch_hash, bob.identity.hash_hex
+            ),
+            timeout=5,
+        ), "Missed-delivery hint was not broadcast to Carol after flush_pending failure"
 
 
 # ---------------------------------------------------------------------------

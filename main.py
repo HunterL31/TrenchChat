@@ -39,15 +39,26 @@ def main():
     parser = argparse.ArgumentParser(description="TrenchChat")
     parser.add_argument(
         "-v", "--verbose", action="store_true",
-        help="Enable verbose Reticulum + TrenchChat debug logging"
+        help="Enable TrenchChat debug logging (RNS stays at NOTICE level)",
+    )
+    parser.add_argument(
+        "--rns-debug", action="store_true",
+        help="Enable full Reticulum debug logging (very verbose — includes backbone/transport internals)",
     )
     args = parser.parse_args()
+
+    # --rns-debug enables the full RNS firehose; -v alone keeps RNS at NOTICE
+    # so backbone/transport chatter doesn't drown TrenchChat's own messages.
+    if args.rns_debug:
+        rns_loglevel = RNS.LOG_DEBUG
+    else:
+        rns_loglevel = RNS.LOG_NOTICE
 
     # --- config ---
     config = Config()
 
     # --- Reticulum ---
-    rns = RNS.Reticulum(loglevel=RNS.LOG_DEBUG if args.verbose else RNS.LOG_NOTICE)
+    rns = RNS.Reticulum(loglevel=rns_loglevel)
 
     # --- identity ---
     identity = Identity(config)

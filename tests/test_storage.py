@@ -34,7 +34,9 @@ class TestChannels:
         assert ch["name"] == "General"
         assert ch["description"] == "A test channel"
         assert ch["creator_hash"] == "creator01"
-        assert ch["access_mode"] == "public"
+        import json
+        perms = json.loads(ch["permissions"])
+        assert perms["open_join"] is True
 
     def test_upsert_updates_existing(self, db):
         ts = time.time()

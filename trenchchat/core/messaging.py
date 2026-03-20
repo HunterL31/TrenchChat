@@ -20,6 +20,7 @@ import RNS
 import LXMF
 
 from trenchchat.core.identity import Identity
+from trenchchat.core.permissions import SEND_MESSAGE, is_open_join, permissions_from_json
 from trenchchat.core.protocol import (
     F_CHANNEL_HASH, F_DISPLAY_NAME, F_TIMESTAMP, F_MESSAGE_ID,
     F_REPLY_TO, F_LAST_SEEN_ID, F_SYNC_WINDOW_START, F_SYNC_MESSAGES,
@@ -85,15 +86,18 @@ class Messaging:
         last_seen = self._storage.get_latest_message_id(channel_hash_hex)
         msg_id = _compute_message_id(content, self._identity.hash_hex, ts)
 
-        # Params stored for pending retry and failure callbacks
+        # Params stored for pending retry and failure callbacks.
+        # subscriber_hashes is included so flush_pending can re-register the
+        # failed callback and broadcast missed-delivery hints if the retry fails.
         msg_params = {
-            "channel_hash_hex": channel_hash_hex,
-            "content":          content,
-            "timestamp":        ts,
-            "msg_id":           msg_id,
-            "display_name":     self._identity.display_name,
-            "reply_to":         reply_to,
-            "last_seen_id":     last_seen,
+            "channel_hash_hex":  channel_hash_hex,
+            "content":           content,
+            "timestamp":         ts,
+            "msg_id":            msg_id,
+            "display_name":      self._identity.display_name,
+            "reply_to":          reply_to,
+            "last_seen_id":      last_seen,
+            "subscriber_hashes": list(subscriber_hashes),
         }
 
         for dest_hex in subscriber_hashes:
@@ -147,6 +151,14 @@ class Messaging:
             for params in queued:
                 try:
                     lxm = self._build_lxm(dest_identity, params)
+                    subs = params.get("subscriber_hashes", [])
+                    lxm.register_failed_callback(
+                        lambda m, d=dest_hex,
+                               c=params["channel_hash_hex"],
+                               mi=params["msg_id"],
+                               s=subs:
+                            self._on_delivery_failed(d, c, mi, s)
+                    )
                     self._router.send(lxm)
                 except Exception as e:
                     RNS.log(f"TrenchChat: flush_pending send error to {dest_hex}: {e}",
@@ -220,9 +232,18 @@ class Messaging:
             if sender_identity else (message.source_hash.hex() if message.source_hash else "")
 
         channel = self._storage.get_channel(channel_hash_hex)
-        if channel and channel["access_mode"] == "invite":
-            if not self._storage.is_member(channel_hash_hex, sender_hex):
-                return
+        if channel:
+            perms = permissions_from_json(channel["permissions"])
+            if not is_open_join(perms):
+                if not self._storage.is_member(channel_hash_hex, sender_hex):
+                    return
+                if not self._storage.has_permission(channel_hash_hex, sender_hex, SEND_MESSAGE):
+                    RNS.log(
+                        f"TrenchChat: dropping message from {sender_hex[:12]}… — "
+                        f"no {SEND_MESSAGE} permission on channel {channel_hash_hex[:12]}…",
+                        RNS.LOG_WARNING,
+                    )
+                    return
         sender_name = fields.get(F_DISPLAY_NAME, "")
         if isinstance(sender_name, bytes):
             sender_name = sender_name.decode(errors="replace")

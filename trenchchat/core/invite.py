@@ -1,17 +1,23 @@
 """
 Invite-only channel membership management.
 
-Member list document (msgpack):
+Member list document v2 (msgpack):
 {
     "channel_hash":  bytes,        # 16 bytes
     "version":       int,
     "published_at":  float,
-    "members":       [bytes, ...], # identity hashes (16 bytes each)
-    "admins":        [bytes, ...],
-    "signatures":    {bytes: bytes} # admin_hash -> Ed25519 signature
+    "members":       [bytes, ...], # all member identity hashes
+    "admins":        [bytes, ...], # subset of members
+    "owners":        [bytes],      # exactly one — the channel creator
+    "permissions":   bytes,        # msgpack-encoded permissions dict
+    "signatures":    {bytes: bytes} # admin/owner hash -> Ed25519 signature
 }
 
-Signed payload = msgpack of:
+v2 signed payload = msgpack of:
+    [channel_hash, version, published_at, sorted(members), sorted(admins),
+     sorted(owners), permissions_blob]
+
+v1 signed payload (legacy, no "owners" key in doc) = msgpack of:
     [channel_hash, version, published_at, sorted(members), sorted(admins)]
 
 Invite token = Ed25519 signature over:
@@ -27,11 +33,16 @@ import LXMF
 import msgpack
 
 from trenchchat.core.identity import Identity
+from trenchchat.core.permissions import (
+    INVITE, KICK, MANAGE_ROLES, ROLE_ADMIN, ROLE_MEMBER, ROLE_OWNER,
+    permissions_from_json, permissions_to_json,
+)
 from trenchchat.core.protocol import (
     F_CHANNEL_HASH, F_MSG_TYPE,
     F_INVITE_TOKEN, F_INVITEE_HASH, F_EXPIRY_TS, F_ADMIN_HASH,
     F_MEMBER_LIST_DOC, F_CHANNEL_NAME, F_CHANNEL_DESC,
     F_CHANNEL_CREATOR, F_CHANNEL_ACCESS, F_CHANNEL_CREATED_AT,
+    F_CHANNEL_PERMISSIONS,
     MT_JOIN_REQUEST, MT_MEMBER_LIST_UPDATE, MT_INVITE,
 )
 from trenchchat.core.storage import Storage
@@ -40,13 +51,38 @@ from trenchchat.network.router import Router
 DEFAULT_TOKEN_TTL = 7 * 24 * 3600  # 7 days
 
 
+def _recover_owners(owners: list[bytes], admins: list[bytes],
+                    channel: object | None) -> list[bytes]:
+    """Return a non-empty owners list, recovering from v1 docs that lack one.
+
+    v1 member list documents have no 'owners' key.  When upgrading such a doc
+    to v2, fall back to the channel creator hash so the owner is not silently
+    demoted to admin on the next publish.
+    """
+    if owners:
+        return owners
+    if channel and channel["creator_hash"]:
+        try:
+            return [bytes.fromhex(channel["creator_hash"])]
+        except ValueError:
+            pass
+    return list(admins)
+
+
 def _signed_payload(channel_hash: bytes, version: int, published_at: float,
-                    members: list[bytes], admins: list[bytes]) -> bytes:
-    return msgpack.packb(
-        [channel_hash, version, published_at,
-         sorted(members), sorted(admins)],
-        use_bin_type=True,
-    )
+                    members: list[bytes], admins: list[bytes],
+                    owners: list[bytes] | None = None,
+                    permissions_blob: bytes = b"") -> bytes:
+    """Build the payload that gets signed.
+
+    If *owners* is provided the v2 format is used (includes owners and
+    permissions_blob).  Otherwise the v1 format is used for backward compat.
+    """
+    items: list = [channel_hash, version, published_at,
+                   sorted(members), sorted(admins)]
+    if owners is not None:
+        items.extend([sorted(owners), permissions_blob])
+    return msgpack.packb(items, use_bin_type=True)
 
 
 def _sign(identity: RNS.Identity, data: bytes) -> bytes:
@@ -101,9 +137,16 @@ class InviteManager:
 
     def _build_document(self, channel_hash_hex: str,
                         members: list[bytes], admins: list[bytes],
-                        version: int, published_at: float) -> dict:
+                        version: int, published_at: float,
+                        owners: list[bytes] | None = None,
+                        permissions: dict | None = None) -> dict:
+        if owners is None:
+            owners = []
+        permissions_blob = (msgpack.packb(permissions, use_bin_type=True)
+                            if permissions else b"")
         payload = _signed_payload(
-            bytes.fromhex(channel_hash_hex), version, published_at, members, admins
+            bytes.fromhex(channel_hash_hex), version, published_at,
+            members, admins, owners, permissions_blob,
         )
         sig = _sign(self._identity.rns_identity, payload)
         return {
@@ -112,38 +155,98 @@ class InviteManager:
             "published_at": published_at,
             "members":      members,
             "admins":       admins,
+            "owners":       owners,
+            "permissions":  permissions_blob,
             "signatures":   {self._identity.hash: sig},
         }
 
     def _validate_document(self, doc: dict, channel_hash_hex: str) -> bool:
-        """Return True if the document has at least one valid admin signature."""
+        """Return True if the document has at least one valid admin/owner signature.
+
+        The signer must be recognised as an admin or owner in the *previously
+        stored* member list for this channel (or be the channel creator when no
+        stored list exists yet).  Checking only the incoming doc's own admin/owner
+        lists would allow a malicious peer to grant themselves signing authority
+        by simply listing themselves as an admin in the doc they craft.
+        """
         admins_in_doc: list[bytes] = doc.get("admins", [])
+        owners_in_doc: list[bytes] = doc.get("owners", [])
         sigs: dict = doc.get("signatures", {})
 
-        payload = _signed_payload(
-            doc["channel_hash"], doc["version"], doc["published_at"],
-            doc["members"], admins_in_doc,
-        )
+        # Determine the set of identities that are *currently* authorised to
+        # sign member list updates for this channel.
+        #
+        # Priority order:
+        #   1. Previously stored member list doc — most secure; prevents a peer
+        #      from granting themselves signing authority in a crafted doc.
+        #   2. Channel creator from local storage — used when we have a channel
+        #      record but no stored member list yet (e.g. first publish).
+        #   3. The doc's own admins/owners — bootstrap fallback for peers that
+        #      receive a member list before they have any local channel record
+        #      (e.g. auto-join on first invite).  The cryptographic signature
+        #      check still applies; we just can't cross-reference a stored list.
+        existing = self._storage.get_member_list_version(channel_hash_hex)
+        if existing:
+            old_doc = msgpack.unpackb(existing["document_blob"], raw=True)
+            trusted_signers: set[bytes] = (
+                set(old_doc.get(b"admins", []))
+                | set(old_doc.get(b"owners", []))
+            )
+        else:
+            channel = self._storage.get_channel(channel_hash_hex)
+            if channel and channel["creator_hash"]:
+                try:
+                    trusted_signers = {bytes.fromhex(channel["creator_hash"])}
+                except ValueError:
+                    trusted_signers = set(admins_in_doc) | set(owners_in_doc)
+            else:
+                # No local record at all — bootstrap: trust the doc's own signers.
+                trusted_signers = set(admins_in_doc) | set(owners_in_doc)
 
-        for admin_hash_bytes, sig in sigs.items():
-            admin_delivery_hash = RNS.Destination.hash(admin_hash_bytes, "lxmf", "delivery")
-            admin_identity = RNS.Identity.recall(admin_delivery_hash)
-            if admin_identity is None:
+        is_v2 = "owners" in doc
+        if is_v2:
+            payload = _signed_payload(
+                doc["channel_hash"], doc["version"], doc["published_at"],
+                doc["members"], admins_in_doc,
+                owners_in_doc, doc.get("permissions", b""),
+            )
+        else:
+            payload = _signed_payload(
+                doc["channel_hash"], doc["version"], doc["published_at"],
+                doc["members"], admins_in_doc,
+            )
+
+        for signer_hash_bytes, sig in sigs.items():
+            if signer_hash_bytes not in trusted_signers:
                 continue
-            if admin_hash_bytes in admins_in_doc:
-                if _verify(admin_identity, payload, sig):
-                    return True
+            delivery_hash = RNS.Destination.hash(signer_hash_bytes, "lxmf", "delivery")
+            signer_identity = RNS.Identity.recall(delivery_hash)
+            if signer_identity is None:
+                continue
+            if _verify(signer_identity, payload, sig):
+                return True
         return False
 
     def _accept_document(self, doc: dict, channel_hash_hex: str) -> bool:
         """
         Apply acceptance rules. Returns True if accepted.
         Rules (in order):
-          1. At least one valid admin signature.
-          2. version > local_version  → accept.
-          3. version == local_version, higher published_at → accept.
-          4. version == local_version, same published_at, lower admin hash → accept.
+          1. doc["channel_hash"] must match the expected channel.
+          2. At least one valid admin signature.
+          3. version > local_version  → accept.
+          4. version == local_version, higher published_at → accept.
+          5. version == local_version, same published_at, lower admin hash → accept.
         """
+        doc_channel_hex = doc.get("channel_hash", b"").hex() \
+            if isinstance(doc.get("channel_hash"), bytes) else str(doc.get("channel_hash", ""))
+        if doc_channel_hex != channel_hash_hex:
+            RNS.log(
+                f"TrenchChat [invite]: member list doc channel hash mismatch "
+                f"(doc={doc_channel_hex[:12]}… expected={channel_hash_hex[:12]}…) — rejected",
+                RNS.LOG_WARNING,
+            )
+            return False
+
         if not self._validate_document(doc, channel_hash_hex):
             return False
 
@@ -176,12 +279,29 @@ class InviteManager:
             channel_hash_hex, new_v, new_ts, blob
         )
 
-        # Rebuild members table
-        member_rows = [
-            (m.hex(), "", m in doc.get("admins", []))
-            for m in doc["members"]
-        ]
+        # Rebuild members table with role-based membership
+        owners_set = set(doc.get("owners", []))
+        admins_set = set(doc.get("admins", []))
+        member_rows: list[tuple[str, str, str]] = []
+        for m in doc["members"]:
+            if m in owners_set:
+                role = ROLE_OWNER
+            elif m in admins_set:
+                role = ROLE_ADMIN
+            else:
+                role = ROLE_MEMBER
+            member_rows.append((m.hex(), "", role))
         self._storage.replace_members(channel_hash_hex, member_rows)
+
+        # Apply permissions from the document if present
+        perms_blob = doc.get("permissions", b"")
+        if perms_blob:
+            try:
+                perms = msgpack.unpackb(perms_blob, raw=False)
+                if isinstance(perms, dict):
+                    self._storage.set_channel_permissions(channel_hash_hex, perms)
+            except Exception:
+                pass
 
         for cb in self._member_list_callbacks:
             try:
@@ -197,17 +317,52 @@ class InviteManager:
                             add_members: list[bytes] | None = None,
                             remove_members: list[bytes] | None = None,
                             add_admins: list[bytes] | None = None,
-                            remove_admins: list[bytes] | None = None):
-        """Build, sign, persist, and broadcast an updated member list."""
+                            remove_admins: list[bytes] | None = None,
+                            add_owners: list[bytes] | None = None,
+                            remove_owners: list[bytes] | None = None):
+        """Build, sign, persist, and broadcast an updated member list.
+
+        Mutations are silently dropped if the caller lacks the required permission:
+        - remove_members requires KICK
+        - add_admins / remove_admins requires MANAGE_ROLES
+        Owner-list mutations (add_owners / remove_owners) are always permitted
+        for the channel owner and are not separately gated here.
+        """
+        my_hex = self._identity.hash_hex
+        if remove_members and not self._storage.has_permission(
+            channel_hash_hex, my_hex, KICK
+        ):
+            RNS.log(
+                f"TrenchChat [invite]: {my_hex[:12]}… attempted remove_members "
+                f"without {KICK} — ignored",
+                RNS.LOG_WARNING,
+            )
+            remove_members = None
+        if (add_admins or remove_admins) and not self._storage.has_permission(
+            channel_hash_hex, my_hex, MANAGE_ROLES
+        ):
+            RNS.log(
+                f"TrenchChat [invite]: {my_hex[:12]}… attempted role change "
+                f"without {MANAGE_ROLES} — ignored",
+                RNS.LOG_WARNING,
+            )
+            add_admins = None
+            remove_admins = None
+
         existing = self._storage.get_member_list_version(channel_hash_hex)
         if existing:
             old_doc = msgpack.unpackb(existing["document_blob"], raw=True)
             members = list(old_doc[b"members"])
             admins  = list(old_doc[b"admins"])
+            owners  = _recover_owners(
+                list(old_doc.get(b"owners", [])), admins,
+                self._storage.get_channel(channel_hash_hex),
+            )
             version = existing["version"] + 1
         else:
             members = [self._identity.hash]
             admins  = [self._identity.hash]
+            owners  = [self._identity.hash]
             version = 1
 
         for m in (add_members or []):
@@ -222,11 +377,64 @@ class InviteManager:
         for a in (remove_admins or []):
             if a in admins:
                 admins.remove(a)
+        for o in (add_owners or []):
+            if o not in owners:
+                owners.append(o)
+        for o in (remove_owners or []):
+            if o in owners:
+                owners.remove(o)
+
+        channel = self._storage.get_channel(channel_hash_hex)
+        perms = (permissions_from_json(channel["permissions"])
+                 if channel and channel["permissions"] else None)
 
         published_at = time.time()
         doc = self._build_document(channel_hash_hex, members, admins,
-                                   version, published_at)
+                                   version, published_at,
+                                   owners=owners, permissions=perms)
         self._accept_document(doc, channel_hash_hex)
+        self._broadcast_member_list(channel_hash_hex, doc)
+
+    def broadcast_permissions(self, channel_hash_hex: str):
+        """Publish a new member list doc carrying updated permissions without
+        touching the local members table.
+
+        Call this after saving new permissions via
+        ``Storage.set_channel_permissions`` to propagate the change to peers.
+        The local DB is already correct; only the version counter and the
+        broadcast need to happen.
+        """
+        existing = self._storage.get_member_list_version(channel_hash_hex)
+        channel = self._storage.get_channel(channel_hash_hex)
+        if existing:
+            old_doc = msgpack.unpackb(existing["document_blob"], raw=True)
+            members = list(old_doc[b"members"])
+            admins  = list(old_doc[b"admins"])
+            owners  = _recover_owners(
+                list(old_doc.get(b"owners", [])), admins, channel,
+            )
+            version = existing["version"] + 1
+        else:
+            members = [self._identity.hash]
+            admins  = [self._identity.hash]
+            owners  = [self._identity.hash]
+            version = 1
+
+        perms = (permissions_from_json(channel["permissions"])
+                 if channel and channel["permissions"] else None)
+
+        published_at = time.time()
+        doc = self._build_document(channel_hash_hex, members, admins,
+                                   version, published_at,
+                                   owners=owners, permissions=perms)
+
+        # Persist the new version so peers cannot replay an older doc, but do
+        # NOT call _accept_document — the local members table is already correct
+        # and replace_members would wipe display names unnecessarily.
+        blob = msgpack.packb(doc, use_bin_type=True)
+        self._storage.upsert_member_list_version(
+            channel_hash_hex, version, published_at, blob
+        )
         self._broadcast_member_list(channel_hash_hex, doc)
 
     def _broadcast_member_list(self, channel_hash_hex: str, doc: dict):
@@ -238,11 +446,11 @@ class InviteManager:
             F_MEMBER_LIST_DOC: blob,
         }
         if channel:
-            fields[F_CHANNEL_NAME]       = channel["name"]
-            fields[F_CHANNEL_DESC]       = channel["description"] or ""
-            fields[F_CHANNEL_CREATOR]    = channel["creator_hash"]
-            fields[F_CHANNEL_ACCESS]     = channel["access_mode"]
-            fields[F_CHANNEL_CREATED_AT] = channel["created_at"]
+            fields[F_CHANNEL_NAME]        = channel["name"]
+            fields[F_CHANNEL_DESC]        = channel["description"] or ""
+            fields[F_CHANNEL_CREATOR]     = channel["creator_hash"]
+            fields[F_CHANNEL_PERMISSIONS] = channel["permissions"]
+            fields[F_CHANNEL_CREATED_AT]  = channel["created_at"]
         for row in self._storage.get_members(channel_hash_hex):
             dest_hex = row["identity_hash"]
             if dest_hex == self._identity.hash_hex:
@@ -303,7 +511,7 @@ class InviteManager:
             RNS.log(f"TrenchChat [invite]: cannot verify token — admin identity "
                     f"{admin_hash.hex()[:12]}… not known", RNS.LOG_WARNING)
             return False
-        if not self._storage.is_admin(channel_hash_hex, admin_hash.hex()):
+        if not self._storage.has_permission(channel_hash_hex, admin_hash.hex(), INVITE):
             return False
         payload = (invitee_hash
                    + bytes.fromhex(channel_hash_hex)
@@ -349,6 +557,10 @@ class InviteManager:
                         "admins":       list(doc[b"admins"]),
                         "signatures":   dict(doc[b"signatures"]),
                     }
+                    if b"owners" in doc:
+                        doc_clean["owners"] = list(doc[b"owners"])
+                    if b"permissions" in doc:
+                        doc_clean["permissions"] = doc[b"permissions"]
                     accepted = self._accept_document(doc_clean, channel_hash_hex)
                     RNS.log(f"TrenchChat [invite]: member list update v{doc_clean['version']} "
                             f"for {channel_hash_hex[:12]}… — {'accepted' if accepted else 'rejected'}",
@@ -367,16 +579,18 @@ class InviteManager:
                             creator = fields.get(F_CHANNEL_CREATOR, b"")
                             if isinstance(creator, bytes):
                                 creator = creator.decode("utf-8", errors="replace")
-                            access = fields.get(F_CHANNEL_ACCESS, b"invite")
-                            if isinstance(access, bytes):
-                                access = access.decode("utf-8", errors="replace")
+                            perms_field = fields.get(F_CHANNEL_PERMISSIONS)
+                            if perms_field is None:
+                                perms_field = fields.get(F_CHANNEL_ACCESS, b"invite")
+                            if isinstance(perms_field, bytes):
+                                perms_field = perms_field.decode("utf-8", errors="replace")
                             created_at = fields.get(F_CHANNEL_CREATED_AT, time.time())
                             self._storage.upsert_channel(
                                 hash=channel_hash_hex,
                                 name=channel_name,
                                 description=desc,
                                 creator_hash=creator,
-                                access_mode=access,
+                                permissions=perms_field,
                                 created_at=created_at,
                             )
                             self._storage.subscribe(channel_hash_hex)
@@ -424,7 +638,7 @@ class InviteManager:
         if not all([token, invitee_hash, expiry, admin_hash]):
             return
 
-        if not self._storage.is_admin(channel_hash_hex, self._identity.hash_hex):
+        if not self._storage.has_permission(channel_hash_hex, self._identity.hash_hex, INVITE):
             return
 
         if not self._verify_invite_token(token, invitee_hash, channel_hash_hex,

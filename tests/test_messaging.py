@@ -13,6 +13,7 @@ from tests.helpers import (
     wait_for_message,
 )
 from trenchchat.core.messaging import _compute_message_id
+from trenchchat.core.permissions import PRESET_PRIVATE, SEND_MESSAGE
 
 
 class TestSendReceive:
@@ -217,3 +218,72 @@ class TestSendReceive:
             "Bob did not receive the broadcast message"
         assert wait_for_message(carol.storage, ch_hash, msg_id, timeout=5), \
             "Carol did not receive the broadcast message"
+
+
+class TestSendMessagePermission:
+    def test_message_dropped_when_sender_lacks_send_permission(self, peer_factory):
+        """A message from a member whose send_message permission has been revoked
+        must be silently dropped by the receiver."""
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+
+        # Alice creates an invite-only channel and adds Bob as a member.
+        ch_hash = alice.channel_mgr.create_channel("restricted", "", "invite")
+        alice.invite_mgr.publish_member_list(
+            ch_hash, add_members=[bob.identity.hash]
+        )
+
+        from tests.helpers import wait_for_member
+        assert wait_for_member(alice.storage, ch_hash, bob.identity.hash_hex)
+
+        # Bob's storage also needs the channel and membership so his receiver accepts it.
+        bob.storage.upsert_channel(ch_hash, "restricted", "", alice.identity.hash_hex,
+                                   "invite", time.time())
+        bob.storage.subscribe(ch_hash)
+        bob.storage.upsert_member(ch_hash, bob.identity.hash_hex, "Bob", role="member")
+
+        # Alice revokes send_message from members.
+        no_send_perms = dict(PRESET_PRIVATE)
+        no_send_perms["member"] = []
+        alice.storage.set_channel_permissions(ch_hash, no_send_perms)
+        bob.storage.set_channel_permissions(ch_hash, no_send_perms)
+
+        # Bob tries to send — Alice's receiver should drop it.
+        bob.messaging.send_message(
+            channel_hash_hex=ch_hash,
+            content="Should be dropped",
+            subscriber_hashes=[alice.identity.hash_hex],
+        )
+
+        time.sleep(0.5)
+        msgs = alice.storage.get_messages(ch_hash)
+        assert all(m["sender_hash"] != bob.identity.hash_hex for m in msgs), \
+            "Alice stored a message from Bob even though he lacks send_message permission"
+
+    def test_owner_can_always_send(self, peer_factory):
+        """The owner always has send_message regardless of the member permission list."""
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+
+        ch_hash = alice.channel_mgr.create_channel("owner-send", "", "invite")
+        bob.storage.upsert_channel(ch_hash, "owner-send", "", alice.identity.hash_hex,
+                                   "invite", time.time())
+        bob.storage.subscribe(ch_hash)
+        bob.storage.upsert_member(ch_hash, alice.identity.hash_hex, "Alice", role="owner")
+
+        # Strip send_message from every non-owner role.
+        no_send_perms = dict(PRESET_PRIVATE)
+        no_send_perms["member"] = []
+        no_send_perms["admin"] = []
+        alice.storage.set_channel_permissions(ch_hash, no_send_perms)
+        bob.storage.set_channel_permissions(ch_hash, no_send_perms)
+
+        alice.messaging.send_message(
+            channel_hash_hex=ch_hash,
+            content="Owner message",
+            subscriber_hashes=[bob.identity.hash_hex],
+        )
+
+        msg_id = alice.storage.get_messages(ch_hash)[0]["message_id"]
+        assert wait_for_message(bob.storage, ch_hash, msg_id, timeout=5), \
+            "Bob did not receive Alice's message even though she is the owner"

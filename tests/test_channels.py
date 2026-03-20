@@ -5,8 +5,11 @@ These tests use real Reticulum + LXMF peers communicating over the
 shared AutoInterface transport.
 """
 
+import json
+
 import pytest
 
+from trenchchat.core.permissions import is_open_join, permissions_from_json
 from tests.helpers import (
     announce_and_wait,
     wait_for_channel,
@@ -23,23 +26,23 @@ class TestChannelCreation:
         assert ch is not None
         assert ch["name"] == "general"
         assert ch["description"] == "A public channel"
-        assert ch["access_mode"] == "public"
+        assert is_open_join(permissions_from_json(ch["permissions"]))
         assert ch["creator_hash"] == alice.identity.hash_hex
 
         # Creator is automatically subscribed
         assert alice.storage.is_subscribed(ch_hash)
 
-        # Creator is added as admin member
+        # Creator is added as owner
         assert alice.storage.is_admin(ch_hash, alice.identity.hash_hex)
 
     def test_create_invite_only_channel(self, peer_factory):
-        """Invite-only channel is stored with correct access_mode."""
+        """Invite-only channel is stored with the private permissions preset."""
         alice = peer_factory("alice")
         ch_hash = alice.channel_mgr.create_channel("secret", "Private channel", "invite")
 
         ch = alice.storage.get_channel(ch_hash)
         assert ch is not None
-        assert ch["access_mode"] == "invite"
+        assert not is_open_join(permissions_from_json(ch["permissions"]))
         assert alice.storage.is_admin(ch_hash, alice.identity.hash_hex)
 
     def test_channel_hash_is_deterministic(self, peer_factory):
@@ -145,7 +148,7 @@ class TestChannelDiscovery:
         assert ch is not None
         assert ch["name"] == "discoverable"
         assert ch["creator_hash"] == alice.identity.hash_hex
-        assert ch["access_mode"] == "public"
+        assert is_open_join(permissions_from_json(ch["permissions"]))
 
         assert any(h == ch_hash for h, _ in discovered), \
             "channel_discovered callback was not fired"
@@ -185,10 +188,10 @@ class TestChannelDiscovery:
         assert len(discovered) == 0, \
             "channel_discovered callback fired for an already-known channel"
 
-    def test_invite_channel_access_mode_preserved(self, peer_factory):
+    def test_invite_channel_permissions_preserved(self, peer_factory):
         """
-        When an invite-only channel announce is processed, access_mode is
-        correctly stored as 'invite'.
+        When an invite-only channel announce is processed, it is stored
+        with the private permissions preset (open_join=False).
         """
         alice = peer_factory("alice")
         bob = peer_factory("bob")
@@ -208,4 +211,4 @@ class TestChannelDiscovery:
 
         ch = bob.storage.get_channel(ch_hash)
         assert ch is not None
-        assert ch["access_mode"] == "invite"
+        assert not is_open_join(permissions_from_json(ch["permissions"]))

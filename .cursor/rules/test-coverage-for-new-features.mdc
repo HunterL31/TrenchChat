@@ -17,6 +17,8 @@ Any time you add new functionality to `trenchchat/`, you must verify it is cover
    - `test_subscriptions.py` — subscribe/unsubscribe protocol
    - `test_invites.py` — invite-only channel flow
    - `test_sync.py` — offline sync mechanisms
+   - `test_permissions.py` — role/permission logic and dialog
+   - `test_adversarial.py` — malicious clients bypassing permission checks
    - Create a new file if the feature doesn't fit any of the above.
 3. Run the full suite and confirm everything passes.
 
@@ -26,6 +28,8 @@ Any time you add new functionality to `trenchchat/`, you must verify it is cover
 - New message types or protocol fields
 - New config options that change runtime behaviour
 - Bug fixes — add a regression test that would have caught the bug
+- New permissions — add an adversarial test in `test_adversarial.py` that
+  calls the core method directly without going through the GUI
 
 ## What does not require a new test
 

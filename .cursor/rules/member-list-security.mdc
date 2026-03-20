@@ -1,0 +1,72 @@
+---
+description: Security rules for member list document validation and mutation
+globs: trenchchat/core/invite.py
+alwaysApply: false
+---
+
+# Member List Document Security
+
+## Document validation must use stored state
+
+`_validate_document` must cross-reference the signer against the **previously
+stored** member list, not the incoming doc's own admin/owner claims.
+
+Trusting the doc's own claims allows a malicious peer to grant themselves
+signing authority by listing themselves as an admin in the doc they craft.
+
+```python
+# ✅ CORRECT — trust the stored list
+existing = self._storage.get_member_list_version(channel_hash_hex)
+if existing:
+    old_doc = msgpack.unpackb(existing["document_blob"], raw=True)
+    trusted_signers = set(old_doc.get(b"admins", [])) | set(old_doc.get(b"owners", []))
+# ... then verify sig in trusted_signers only
+
+# ❌ WRONG — trusting the incoming doc's own claims
+signers = set(admins_in_doc) | set(owners_in_doc)
+# ... a malicious peer adds themselves to admins_in_doc to pass this check
+```
+
+### Fallback order when no stored list exists
+
+1. **Stored member list** → use its admins/owners as trusted signers.
+2. **Channel record exists, no stored list** → trust only the `creator_hash`
+   (first publish by the channel owner).
+3. **No local record at all** → bootstrap fallback: trust the doc's own
+   signers. This is necessary for auto-join on first invite, where the
+   receiver has no prior state. The cryptographic signature check still applies.
+
+## `_accept_document` must verify the channel hash matches
+
+Before validating signatures, `_accept_document` must confirm that
+`doc["channel_hash"]` matches the `channel_hash_hex` argument.
+Without this check, a valid doc for channel A (signed by an admin who also
+administers channel B) could be accepted as a member list update for channel B.
+
+```python
+# ✅ CORRECT — checked first, before signature validation
+doc_channel_hex = doc.get("channel_hash", b"").hex()
+if doc_channel_hex != channel_hash_hex:
+    return False
+```
+
+## Permissions-only updates must not call `_accept_document`
+
+`_accept_document` calls `replace_members`, which wipes and re-inserts the
+entire members table. This has two problems:
+- Clears display names (set to `""` on re-insert).
+- Can demote the owner if the stored doc's `owners` list is stale or missing.
+
+When only the permissions dict changes, use `broadcast_permissions` instead of
+`publish_member_list`. It persists the new doc version and broadcasts to peers
+without touching the local members table.
+
+```python
+# ✅ Permissions-only update
+self._storage.set_channel_permissions(channel_hash, new_perms)
+self._invite_mgr.broadcast_permissions(channel_hash)
+
+# ❌ Causes unnecessary replace_members side effect
+self._storage.set_channel_permissions(channel_hash, new_perms)
+self._invite_mgr.publish_member_list(channel_hash)
+```

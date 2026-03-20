@@ -1,3 +1,4 @@
+import json
 import sqlite3
 import threading
 import time
@@ -5,6 +6,11 @@ from pathlib import Path
 from contextlib import contextmanager
 
 from trenchchat.config import DATA_DIR
+from trenchchat.core.permissions import (
+    PRESET_OPEN, PRESET_PRIVATE, ROLE_ADMIN, ROLE_MEMBER, ROLE_OWNER,
+    has_permission as _check_permission,
+    permissions_from_json, permissions_to_json,
+)
 
 DB_PATH = DATA_DIR / "storage.db"
 
@@ -14,7 +20,7 @@ CREATE TABLE IF NOT EXISTS channels (
     name        TEXT NOT NULL,
     description TEXT NOT NULL DEFAULT '',
     creator_hash TEXT NOT NULL,
-    access_mode TEXT NOT NULL DEFAULT 'public',
+    permissions TEXT NOT NULL DEFAULT '{}',
     created_at  REAL NOT NULL,
     last_seen   REAL NOT NULL
 );
@@ -47,7 +53,7 @@ CREATE TABLE IF NOT EXISTS members (
     channel_hash  TEXT NOT NULL,
     identity_hash TEXT NOT NULL,
     display_name  TEXT NOT NULL DEFAULT '',
-    is_admin      INTEGER NOT NULL DEFAULT 0,
+    role          TEXT NOT NULL DEFAULT 'member',
     added_at      REAL NOT NULL,
     PRIMARY KEY (channel_hash, identity_hash)
 );
@@ -83,12 +89,69 @@ class Storage:
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._conn.executescript(SCHEMA)
         self._conn.commit()
+        self._migrate_permissions()
         # Serialise all connection use across threads.  SQLite's Python
         # binding shares a single connection object; concurrent execute/commit/
         # rollback calls from different threads corrupt cursor state even with
         # check_same_thread=False.  An RLock (reentrant) is used so that a
         # single thread can re-enter (e.g. _tx → insert → _tx).
         self._lock = threading.RLock()
+
+    # ------------------------------------------------------------------
+    # Schema migration from access_mode/is_admin to permissions/role
+    # ------------------------------------------------------------------
+
+    def _has_column(self, table: str, column: str) -> bool:
+        cols = self._conn.execute(f"PRAGMA table_info({table})").fetchall()
+        return any(c["name"] == column for c in cols)
+
+    def _migrate_permissions(self):
+        """One-time migration from the legacy access_mode / is_admin schema."""
+        changed = False
+
+        # --- channels: access_mode -> permissions ---
+        if self._has_column("channels", "access_mode"):
+            if not self._has_column("channels", "permissions"):
+                self._conn.execute(
+                    "ALTER TABLE channels ADD COLUMN permissions TEXT NOT NULL DEFAULT '{}'"
+                )
+                changed = True
+            rows = self._conn.execute(
+                "SELECT hash, access_mode FROM channels WHERE permissions = '{}'"
+            ).fetchall()
+            for row in rows:
+                preset = PRESET_OPEN if row["access_mode"] == "public" else PRESET_PRIVATE
+                self._conn.execute(
+                    "UPDATE channels SET permissions = ? WHERE hash = ?",
+                    (permissions_to_json(preset), row["hash"]),
+                )
+                changed = True
+
+        # --- members: is_admin -> role ---
+        if self._has_column("members", "is_admin"):
+            if not self._has_column("members", "role"):
+                self._conn.execute(
+                    "ALTER TABLE members ADD COLUMN role TEXT NOT NULL DEFAULT 'member'"
+                )
+                changed = True
+            self._conn.execute(
+                "UPDATE members SET role = 'admin' WHERE is_admin = 1 AND role = 'member'"
+            )
+            # Promote channel creators to owner
+            self._conn.execute("""
+                UPDATE members SET role = 'owner'
+                WHERE role IN ('admin', 'member')
+                  AND (channel_hash, identity_hash) IN (
+                      SELECT m.channel_hash, m.identity_hash
+                      FROM members m
+                      JOIN channels c ON m.channel_hash = c.hash
+                      WHERE m.identity_hash = c.creator_hash
+                  )
+            """)
+            changed = True
+
+        if changed:
+            self._conn.commit()
 
     @contextmanager
     def _tx(self):
@@ -117,17 +180,33 @@ class Storage:
     # --- channels ---
 
     def upsert_channel(self, hash: str, name: str, description: str,
-                       creator_hash: str, access_mode: str, created_at: float):
+                       creator_hash: str, permissions: str | dict = "",
+                       created_at: float = 0.0, *, access_mode: str = ""):
+        """Create or update a channel.
+
+        *permissions* can be a JSON string, a dict (will be serialised), or
+        a legacy access-mode string (``"public"`` / ``"invite"``).
+        The legacy *access_mode* keyword is also accepted.
+        """
+        if access_mode and not permissions:
+            permissions = access_mode
+        if isinstance(permissions, dict):
+            permissions = permissions_to_json(permissions)
+        elif permissions in ("public", "invite"):
+            preset = PRESET_OPEN if permissions == "public" else PRESET_PRIVATE
+            permissions = permissions_to_json(preset)
+        elif not permissions:
+            permissions = permissions_to_json(PRESET_PRIVATE)
         with self._tx():
             self._conn.execute("""
-                INSERT INTO channels (hash, name, description, creator_hash, access_mode, created_at, last_seen)
+                INSERT INTO channels (hash, name, description, creator_hash, permissions, created_at, last_seen)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(hash) DO UPDATE SET
                     name=excluded.name,
                     description=excluded.description,
-                    access_mode=excluded.access_mode,
+                    permissions=excluded.permissions,
                     last_seen=excluded.last_seen
-            """, (hash, name, description, creator_hash, access_mode, created_at, time.time()))
+            """, (hash, name, description, creator_hash, permissions, created_at, time.time()))
 
     def get_channel(self, hash: str) -> sqlite3.Row | None:
         return self._fetchone("SELECT * FROM channels WHERE hash = ?", (hash,))
@@ -224,15 +303,26 @@ class Storage:
     # --- members ---
 
     def upsert_member(self, channel_hash: str, identity_hash: str,
-                      display_name: str, is_admin: bool):
+                      display_name: str, role: str | bool = ROLE_MEMBER,
+                      *, is_admin: bool | None = None):
+        """Insert or update a member.
+
+        *role* should be one of ``ROLE_OWNER``, ``ROLE_ADMIN``, ``ROLE_MEMBER``.
+        For backward compatibility a bool is accepted (True → admin, False → member),
+        and the legacy *is_admin* keyword is also honoured.
+        """
+        if is_admin is not None:
+            role = ROLE_ADMIN if is_admin else ROLE_MEMBER
+        elif isinstance(role, bool):
+            role = ROLE_ADMIN if role else ROLE_MEMBER
         with self._tx():
             self._conn.execute("""
-                INSERT INTO members (channel_hash, identity_hash, display_name, is_admin, added_at)
+                INSERT INTO members (channel_hash, identity_hash, display_name, role, added_at)
                 VALUES (?, ?, ?, ?, ?)
                 ON CONFLICT(channel_hash, identity_hash) DO UPDATE SET
                     display_name=excluded.display_name,
-                    is_admin=excluded.is_admin
-            """, (channel_hash, identity_hash, display_name, int(is_admin), time.time()))
+                    role=excluded.role
+            """, (channel_hash, identity_hash, display_name, role, time.time()))
 
     def remove_member(self, channel_hash: str, identity_hash: str):
         with self._tx():
@@ -254,26 +344,69 @@ class Storage:
         ) is not None
 
     def is_admin(self, channel_hash: str, identity_hash: str) -> bool:
+        """Backward-compatible check: True if the member is an admin or owner."""
         row = self._fetchone(
-            "SELECT is_admin FROM members WHERE channel_hash = ? AND identity_hash = ?",
+            "SELECT role FROM members WHERE channel_hash = ? AND identity_hash = ?",
             (channel_hash, identity_hash)
         )
-        return bool(row and row["is_admin"])
+        return bool(row and row["role"] in (ROLE_ADMIN, ROLE_OWNER))
+
+    def get_role(self, channel_hash: str, identity_hash: str) -> str | None:
+        """Return the member's role, or None if not a member."""
+        row = self._fetchone(
+            "SELECT role FROM members WHERE channel_hash = ? AND identity_hash = ?",
+            (channel_hash, identity_hash)
+        )
+        return row["role"] if row else None
 
     def replace_members(self, channel_hash: str,
-                        members: list[tuple[str, str, bool]]):
+                        members: list[tuple[str, str, str | bool]]):
         """Replace the full member list for a channel atomically.
-        members: list of (identity_hash, display_name, is_admin)
+
+        members: list of (identity_hash, display_name, role).
+        For backward compatibility *role* may be a bool (True → admin).
         """
         with self._tx():
             self._conn.execute(
                 "DELETE FROM members WHERE channel_hash = ?", (channel_hash,)
             )
             now = time.time()
+            rows = []
+            for ih, dn, role_or_flag in members:
+                if isinstance(role_or_flag, bool):
+                    role_or_flag = ROLE_ADMIN if role_or_flag else ROLE_MEMBER
+                rows.append((channel_hash, ih, dn, role_or_flag, now))
             self._conn.executemany("""
-                INSERT INTO members (channel_hash, identity_hash, display_name, is_admin, added_at)
+                INSERT INTO members (channel_hash, identity_hash, display_name, role, added_at)
                 VALUES (?, ?, ?, ?, ?)
-            """, [(channel_hash, ih, dn, int(ia), now) for ih, dn, ia in members])
+            """, rows)
+
+    # --- channel permissions ---
+
+    def get_channel_permissions(self, channel_hash: str) -> dict:
+        """Return the parsed permissions dict for a channel."""
+        row = self._fetchone(
+            "SELECT permissions FROM channels WHERE hash = ?", (channel_hash,)
+        )
+        if not row or not row["permissions"]:
+            return {}
+        return permissions_from_json(row["permissions"])
+
+    def set_channel_permissions(self, channel_hash: str, permissions: dict):
+        with self._tx():
+            self._conn.execute(
+                "UPDATE channels SET permissions = ? WHERE hash = ?",
+                (permissions_to_json(permissions), channel_hash),
+            )
+
+    def has_permission(self, channel_hash: str, identity_hash: str,
+                       permission: str) -> bool:
+        """Check whether a user has a specific permission on a channel."""
+        role = self.get_role(channel_hash, identity_hash)
+        if role is None:
+            return False
+        perms = self.get_channel_permissions(channel_hash)
+        return _check_permission(perms, role, permission)
 
     # --- member list versions ---
 
