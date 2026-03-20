@@ -34,7 +34,7 @@ import msgpack
 
 from trenchchat.core.identity import Identity
 from trenchchat.core.permissions import (
-    ROLE_ADMIN, ROLE_MEMBER, ROLE_OWNER,
+    INVITE, ROLE_ADMIN, ROLE_MEMBER, ROLE_OWNER,
     permissions_from_json, permissions_to_json,
 )
 from trenchchat.core.protocol import (
@@ -372,7 +372,7 @@ class InviteManager:
             RNS.log(f"TrenchChat [invite]: cannot verify token — admin identity "
                     f"{admin_hash.hex()[:12]}… not known", RNS.LOG_WARNING)
             return False
-        if not self._storage.is_admin(channel_hash_hex, admin_hash.hex()):
+        if not self._storage.has_permission(channel_hash_hex, admin_hash.hex(), INVITE):
             return False
         payload = (invitee_hash
                    + bytes.fromhex(channel_hash_hex)
@@ -499,7 +499,7 @@ class InviteManager:
         if not all([token, invitee_hash, expiry, admin_hash]):
             return
 
-        if not self._storage.is_admin(channel_hash_hex, self._identity.hash_hex):
+        if not self._storage.has_permission(channel_hash_hex, self._identity.hash_hex, INVITE):
             return
 
         if not self._verify_invite_token(token, invitee_hash, channel_hash_hex,
