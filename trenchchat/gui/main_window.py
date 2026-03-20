@@ -29,6 +29,10 @@ from PyQt6.QtGui import QAction, QFont
 
 from trenchchat.config import Config
 from trenchchat.core.identity import Identity
+from trenchchat.core.permissions import (
+    INVITE, KICK, MANAGE_ROLES, PRESETS, PRESET_PRIVATE,
+    is_discoverable, is_open_join, permissions_from_json,
+)
 from trenchchat.core.storage import Storage
 from trenchchat.core.channel import ChannelManager
 from trenchchat.core.messaging import Messaging
@@ -58,9 +62,9 @@ class NewChannelDialog(QDialog):
         self._desc = QLineEdit()
         layout.addRow("Description:", self._desc)
 
-        self._access = QComboBox()
-        self._access.addItems(["public", "invite"])
-        layout.addRow("Access:", self._access)
+        self._preset = QComboBox()
+        self._preset.addItems(list(PRESETS.keys()))
+        layout.addRow("Preset:", self._preset)
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
@@ -78,8 +82,8 @@ class NewChannelDialog(QDialog):
         return self._desc.text().strip()
 
     @property
-    def access_mode(self) -> str:
-        return self._access.currentText()
+    def permissions(self) -> dict:
+        return dict(PRESETS.get(self._preset.currentText(), PRESET_PRIVATE))
 
 
 class JoinChannelDialog(QDialog):
@@ -142,7 +146,8 @@ class JoinChannelDialog(QDialog):
         for row in self._storage.get_all_channels():
             if self._storage.is_subscribed(row["hash"]):
                 continue
-            if row["access_mode"] != "public":
+            perms = permissions_from_json(row["permissions"])
+            if not is_discoverable(perms):
                 continue
             r = self._table.rowCount()
             self._table.insertRow(r)
@@ -425,7 +430,8 @@ class MainWindow(QMainWindow):
         for row in self._storage.get_all_channels():
             if not self._storage.is_subscribed(row["hash"]):
                 continue
-            lock = " 🔒" if row["access_mode"] == "invite" else ""
+            perms = permissions_from_json(row["permissions"])
+            lock = " 🔒" if not is_open_join(perms) else ""
             item = QListWidgetItem(f"# {row['name']}{lock}")
             item.setData(Qt.ItemDataRole.UserRole, row["hash"])
             self._channel_list_widget.addItem(item)
@@ -488,16 +494,17 @@ class MainWindow(QMainWindow):
         self._stack.setCurrentWidget(self._channel_views[channel_hash_hex])
 
         channel = self._storage.get_channel(channel_hash_hex)
-        if channel and channel["access_mode"] == "invite":
-            is_member = self._storage.is_member(channel_hash_hex, self._identity.hash_hex)
-            self._compose.set_enabled(is_member)
-            if is_member:
-                self._compose.set_placeholder(f"Message #{channel['name']}…  (Enter to send)")
+        if channel:
+            perms = permissions_from_json(channel["permissions"])
+            if not is_open_join(perms):
+                is_member = self._storage.is_member(channel_hash_hex, self._identity.hash_hex)
+                self._compose.set_enabled(is_member)
+                if is_member:
+                    self._compose.set_placeholder(f"Message #{channel['name']}…  (Enter to send)")
+                else:
+                    self._compose.set_placeholder("You are not a member of this channel")
             else:
-                self._compose.set_placeholder("You are not a member of this channel")
-        else:
-            self._compose.set_enabled(True)
-            if channel:
+                self._compose.set_enabled(True)
                 self._compose.set_placeholder(f"Message #{channel['name']}…  (Enter to send)")
 
     # --- new / join channel ---
@@ -540,12 +547,9 @@ class MainWindow(QMainWindow):
         hash_hex = self._channel_mgr.create_channel(
             name=name,
             description=dlg.description,
-            access_mode=dlg.access_mode,
+            permissions=dlg.permissions,
         )
-        # For invite-only channels, initialise the member list with the creator
-        # as the first admin. This also writes the creator into the members table
-        # so is_admin() returns True and the Invite Member menu item appears.
-        if dlg.access_mode == "invite":
+        if not is_open_join(dlg.permissions):
             self._invite_mgr.publish_member_list(hash_hex)
         self._refresh_channel_list()
         self._switch_to_channel(hash_hex)
@@ -558,8 +562,8 @@ class MainWindow(QMainWindow):
             return
 
         channel = self._storage.get_channel(self._current_channel)
-        if channel and channel["access_mode"] == "invite":
-            # For invite-only channels use the members table as the recipient list.
+        perms = permissions_from_json(channel["permissions"]) if channel else {}
+        if channel and not is_open_join(perms):
             all_dests = [
                 row["identity_hash"]
                 for row in self._storage.get_members(self._current_channel)
@@ -627,8 +631,9 @@ class MainWindow(QMainWindow):
         if channel is None:
             return
 
-        is_invite_channel = channel["access_mode"] == "invite"
-        is_admin = self._storage.is_admin(channel_hash, self._identity.hash_hex)
+        my_hex = self._identity.hash_hex
+        can_invite = self._storage.has_permission(channel_hash, my_hex, INVITE)
+        is_member = self._storage.is_member(channel_hash, my_hex)
 
         menu = QMenu(self)
         menu.setStyleSheet(
@@ -637,16 +642,16 @@ class MainWindow(QMainWindow):
             "QMenu::separator { background: #444; height: 1px; margin: 2px 0; }"
         )
 
-        if is_invite_channel and is_admin:
+        if can_invite:
             invite_action = menu.addAction("Invite member…")
             invite_action.triggered.connect(
                 lambda: self._on_invite_member(channel_hash, channel["name"])
             )
 
-        if is_invite_channel:
+        if is_member:
             members_action = menu.addAction("View members…")
             members_action.triggered.connect(
-                lambda: self._on_view_members(channel_hash, channel["name"], is_admin)
+                lambda: self._on_view_members(channel_hash, channel["name"])
             )
 
         if menu.actions():
@@ -670,10 +675,12 @@ class MainWindow(QMainWindow):
                 "They will be added once they accept."
             )
 
-    def _on_view_members(self, channel_hash: str, channel_name: str, is_admin: bool):
+    def _on_view_members(self, channel_hash: str, channel_name: str):
         dlg = MembersDialog(
             channel_hash, channel_name, self._storage,
-            self._identity.hash_hex, is_admin, self
+            self._identity.hash_hex,
+            self._storage.is_admin(channel_hash, self._identity.hash_hex),
+            self,
         )
         dlg.exec()
         # Apply any pending membership changes
