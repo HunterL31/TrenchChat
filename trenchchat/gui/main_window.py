@@ -25,7 +25,7 @@ from PyQt6.QtWidgets import (
     QAbstractItemView, QSizePolicy,
 )
 from PyQt6.QtCore import Qt, pyqtSlot, QPoint, pyqtSignal, QTimer, QSettings
-from PyQt6.QtGui import QAction, QFont
+from PyQt6.QtGui import QAction, QColor, QFont
 
 from trenchchat.config import Config
 from trenchchat.core.identity import Identity
@@ -33,6 +33,7 @@ from trenchchat.core.permissions import (
     INVITE, KICK, MANAGE_CHANNEL, MANAGE_ROLES, SEND_MESSAGE, PRESETS, PRESET_PRIVATE,
     is_discoverable, is_open_join, permissions_from_json,
 )
+from trenchchat.core.presence import PresenceManager
 from trenchchat.core.storage import Storage
 from trenchchat.core.channel import ChannelManager
 from trenchchat.core.messaging import Messaging
@@ -47,6 +48,7 @@ from trenchchat.gui.settings import SettingsDialog
 from trenchchat.gui.invite_dialogs import ChannelPermissionsDialog, InviteDialog, MembersDialog
 
 _STARTUP_SYNC_DELAY_MS = 3_000
+_PRESENCE_PRUNE_INTERVAL_MS = 30_000
 
 
 class NewChannelDialog(QDialog):
@@ -191,11 +193,12 @@ class MainWindow(QMainWindow):
     _channel_discovered   = pyqtSignal(str, str)   # channel_hash_hex, channel_name
     _channel_joined       = pyqtSignal(str, str)   # channel_hash_hex, channel_name
     _member_list_updated  = pyqtSignal(str)         # channel_hash_hex
+    _presence_changed     = pyqtSignal(str, bool)   # peer_hex, is_online
 
     def __init__(self, config: Config, identity: Identity, storage: Storage,
                  router: Router, channel_mgr: ChannelManager,
                  messaging: Messaging, subscription_mgr: SubscriptionManager,
-                 invite_mgr: InviteManager):
+                 invite_mgr: InviteManager, presence_mgr: PresenceManager):
         super().__init__()
         self._config = config
         self._identity = identity
@@ -205,6 +208,7 @@ class MainWindow(QMainWindow):
         self._messaging = messaging
         self._subscription_mgr = subscription_mgr
         self._invite_mgr = invite_mgr
+        self._presence_mgr = presence_mgr
 
         # Pending invites: list of (channel_hash_hex, channel_name, token, expiry, admin_hash_hex)
         self._pending_invites: list[tuple] = []
@@ -224,21 +228,33 @@ class MainWindow(QMainWindow):
         self._channel_discovered.connect(self._on_channel_discovered_main_thread)
         self._channel_joined.connect(self._on_channel_joined_main_thread)
         self._member_list_updated.connect(self._on_member_list_updated_main_thread)
+        self._presence_changed.connect(self._on_presence_changed_main_thread)
 
         messaging.add_message_callback(self._on_new_message)
         invite_mgr.add_invite_callback(self._on_incoming_invite)
         invite_mgr.add_channel_joined_callback(self._on_channel_joined)
         invite_mgr.add_member_list_callback(self._on_member_list_updated)
         channel_mgr.add_channel_discovered_callback(self._on_channel_discovered)
+        presence_mgr.add_presence_callback(self._on_presence_changed)
 
         self._sync_mgr = SyncManager(
             identity, storage, router, messaging, subscription_mgr, invite_mgr
         )
+
+        def _on_peer_appeared(peer_hex: str) -> None:
+            self._sync_mgr.on_peer_appeared(peer_hex)
+            self._presence_mgr.record_seen(peer_hex)
+
         RNS.Transport.register_announce_handler(
-            PeerAnnounceHandler(self._sync_mgr.on_peer_appeared)
+            PeerAnnounceHandler(_on_peer_appeared)
         )
         # Defer sync requests briefly so the RNS stack is fully ready
         QTimer.singleShot(_STARTUP_SYNC_DELAY_MS, self._sync_mgr.request_sync_all)
+
+        # Periodically prune stale presence entries and refresh the online panel
+        self._presence_timer = QTimer(self)
+        self._presence_timer.timeout.connect(self._on_presence_tick)
+        self._presence_timer.start(_PRESENCE_PRUNE_INTERVAL_MS)
 
         self._refresh_channel_list()
         self._restore_channel_selection()
@@ -310,6 +326,28 @@ class MainWindow(QMainWindow):
         self._channel_list_widget.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._channel_list_widget.customContextMenuRequested.connect(self._on_channel_context_menu)
         left_layout.addWidget(self._channel_list_widget)
+
+        # Online users panel
+        self._online_panel_expanded = True
+        self._online_header = QLabel("  ▾ Online")
+        self._online_header.setStyleSheet(
+            "font-weight: bold; padding: 6px 4px 4px 4px; color: #aaa; cursor: pointer;"
+        )
+        self._online_header.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._online_header.mousePressEvent = self._on_online_header_clicked
+        left_layout.addWidget(self._online_header)
+
+        self._online_list = QListWidget()
+        self._online_list.setStyleSheet(
+            "QListWidget { border: none; background: #1a1a1a; }"
+            "QListWidget::item { padding: 4px 12px; color: #ccc; font-size: 12px; }"
+            "QListWidget::item:selected { background: transparent; }"
+        )
+        self._online_list.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        self._online_list.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._online_list.setMaximumHeight(160)
+        left_layout.addWidget(self._online_list)
+
         left.setMinimumWidth(180)
         left.setMaximumWidth(260)
         splitter.addWidget(left)
@@ -511,6 +549,8 @@ class MainWindow(QMainWindow):
             else:
                 self._compose.set_enabled(True)
                 self._compose.set_placeholder(f"Message #{channel['name']}…  (Enter to send)")
+
+        self._refresh_online_panel()
 
     # --- new / join channel ---
 
@@ -745,6 +785,59 @@ class MainWindow(QMainWindow):
             self._current_channel = None
             self._compose.set_enabled(False)
             self._refresh_channel_list()
+
+    # --- online users panel ---
+
+    def _on_online_header_clicked(self, _event) -> None:
+        """Toggle the online users list visibility."""
+        self._online_panel_expanded = not self._online_panel_expanded
+        if self._online_panel_expanded:
+            self._online_list.show()
+            self._online_header.setText("  ▾ Online")
+        else:
+            self._online_list.hide()
+            self._online_header.setText("  ▸ Online")
+
+    def _refresh_online_panel(self) -> None:
+        """Repopulate the online users list for the currently selected channel."""
+        if self._current_channel is None:
+            self._online_list.clear()
+            self._online_header.setText("  ▾ Online")
+            return
+
+        entries = self._presence_mgr.get_online_for_channel(
+            self._current_channel,
+            self._storage,
+            self._subscription_mgr,
+        )
+
+        online_count = sum(1 for e in entries if e["is_online"])
+        self._online_header.setText(
+            f"  {'▾' if self._online_panel_expanded else '▸'} "
+            f"Online ({online_count})"
+        )
+
+        self._online_list.clear()
+        for entry in entries:
+            dot = "● " if entry["is_online"] else "○ "
+            color = "#4ec94e" if entry["is_online"] else "#666"
+            item = QListWidgetItem(dot + entry["display_name"])
+            item.setForeground(QColor(color))
+            self._online_list.addItem(item)
+
+    def _on_presence_changed(self, peer_hex: str, is_online: bool) -> None:
+        """Called from RNS background thread — marshal to main thread."""
+        self._presence_changed.emit(peer_hex, is_online)
+
+    @pyqtSlot(str, bool)
+    def _on_presence_changed_main_thread(self, peer_hex: str, is_online: bool) -> None:
+        """Refresh the online panel when any peer's status changes."""
+        self._refresh_online_panel()
+
+    def _on_presence_tick(self) -> None:
+        """Periodic timer: prune stale presence entries and refresh the panel."""
+        self._presence_mgr.prune()
+        self._refresh_online_panel()
 
     # --- incoming invite ---
 

@@ -26,6 +26,7 @@ from trenchchat.core.identity import Identity
 from trenchchat.core.storage import Storage
 from trenchchat.core.channel import ChannelManager
 from trenchchat.core.messaging import Messaging
+from trenchchat.core.presence import PresenceManager
 from trenchchat.core.subscription import SubscriptionManager
 from trenchchat.core.invite import InviteManager
 from trenchchat.network.router import Router
@@ -74,6 +75,7 @@ def main():
     messaging = Messaging(identity, storage, router)
     subscription_mgr = SubscriptionManager(identity, storage, router)
     invite_mgr = InviteManager(identity, storage, router)
+    presence_mgr = PresenceManager(identity.hash_hex)
 
     # Restore RNS destinations for channels we own
     channel_mgr.restore_owned_channels()
@@ -116,6 +118,7 @@ def main():
         messaging=messaging,
         subscription_mgr=subscription_mgr,
         invite_mgr=invite_mgr,
+        presence_mgr=presence_mgr,
     )
     window.show()
 

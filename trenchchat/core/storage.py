@@ -337,6 +337,15 @@ class Storage:
             (channel_hash,)
         )
 
+    def get_member_display_name(self, channel_hash: str,
+                                identity_hash: str) -> str | None:
+        """Return the stored display name for a member, or None if not found."""
+        row = self._fetchone(
+            "SELECT display_name FROM members WHERE channel_hash = ? AND identity_hash = ?",
+            (channel_hash, identity_hash),
+        )
+        return row["display_name"] if row else None
+
     def is_member(self, channel_hash: str, identity_hash: str) -> bool:
         return self._fetchone(
             "SELECT 1 FROM members WHERE channel_hash = ? AND identity_hash = ?",
