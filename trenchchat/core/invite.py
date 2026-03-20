@@ -34,7 +34,7 @@ import msgpack
 
 from trenchchat.core.identity import Identity
 from trenchchat.core.permissions import (
-    INVITE, ROLE_ADMIN, ROLE_MEMBER, ROLE_OWNER,
+    INVITE, KICK, MANAGE_ROLES, ROLE_ADMIN, ROLE_MEMBER, ROLE_OWNER,
     permissions_from_json, permissions_to_json,
 )
 from trenchchat.core.protocol import (
@@ -254,7 +254,35 @@ class InviteManager:
                             remove_admins: list[bytes] | None = None,
                             add_owners: list[bytes] | None = None,
                             remove_owners: list[bytes] | None = None):
-        """Build, sign, persist, and broadcast an updated member list."""
+        """Build, sign, persist, and broadcast an updated member list.
+
+        Mutations are silently dropped if the caller lacks the required permission:
+        - remove_members requires KICK
+        - add_admins / remove_admins requires MANAGE_ROLES
+        Owner-list mutations (add_owners / remove_owners) are always permitted
+        for the channel owner and are not separately gated here.
+        """
+        my_hex = self._identity.hash_hex
+        if remove_members and not self._storage.has_permission(
+            channel_hash_hex, my_hex, KICK
+        ):
+            RNS.log(
+                f"TrenchChat [invite]: {my_hex[:12]}… attempted remove_members "
+                f"without {KICK} — ignored",
+                RNS.LOG_WARNING,
+            )
+            remove_members = None
+        if (add_admins or remove_admins) and not self._storage.has_permission(
+            channel_hash_hex, my_hex, MANAGE_ROLES
+        ):
+            RNS.log(
+                f"TrenchChat [invite]: {my_hex[:12]}… attempted role change "
+                f"without {MANAGE_ROLES} — ignored",
+                RNS.LOG_WARNING,
+            )
+            add_admins = None
+            remove_admins = None
+
         existing = self._storage.get_member_list_version(channel_hash_hex)
         if existing:
             old_doc = msgpack.unpackb(existing["document_blob"], raw=True)

@@ -30,7 +30,7 @@ from PyQt6.QtGui import QAction, QFont
 from trenchchat.config import Config
 from trenchchat.core.identity import Identity
 from trenchchat.core.permissions import (
-    INVITE, KICK, MANAGE_CHANNEL, MANAGE_ROLES, PRESETS, PRESET_PRIVATE,
+    INVITE, KICK, MANAGE_CHANNEL, MANAGE_ROLES, SEND_MESSAGE, PRESETS, PRESET_PRIVATE,
     is_discoverable, is_open_join, permissions_from_json,
 )
 from trenchchat.core.storage import Storage
@@ -498,11 +498,16 @@ class MainWindow(QMainWindow):
             perms = permissions_from_json(channel["permissions"])
             if not is_open_join(perms):
                 is_member = self._storage.is_member(channel_hash_hex, self._identity.hash_hex)
-                self._compose.set_enabled(is_member)
-                if is_member:
-                    self._compose.set_placeholder(f"Message #{channel['name']}…  (Enter to send)")
-                else:
+                can_send = is_member and self._storage.has_permission(
+                    channel_hash_hex, self._identity.hash_hex, SEND_MESSAGE
+                )
+                self._compose.set_enabled(can_send)
+                if not is_member:
                     self._compose.set_placeholder("You are not a member of this channel")
+                elif not can_send:
+                    self._compose.set_placeholder("You do not have permission to send messages")
+                else:
+                    self._compose.set_placeholder(f"Message #{channel['name']}…  (Enter to send)")
             else:
                 self._compose.set_enabled(True)
                 self._compose.set_placeholder(f"Message #{channel['name']}…  (Enter to send)")
@@ -564,6 +569,10 @@ class MainWindow(QMainWindow):
         channel = self._storage.get_channel(self._current_channel)
         perms = permissions_from_json(channel["permissions"]) if channel else {}
         if channel and not is_open_join(perms):
+            if not self._storage.has_permission(
+                self._current_channel, self._identity.hash_hex, SEND_MESSAGE
+            ):
+                return
             all_dests = [
                 row["identity_hash"]
                 for row in self._storage.get_members(self._current_channel)
@@ -690,16 +699,23 @@ class MainWindow(QMainWindow):
             self,
         )
         dlg.exec()
-        # Apply any pending membership changes
-        if dlg.members_to_remove or dlg.admins_to_add or dlg.admins_to_remove:
+        my_hex = self._identity.hash_hex
+        can_kick = self._storage.has_permission(channel_hash, my_hex, KICK)
+        can_manage_roles = self._storage.has_permission(channel_hash, my_hex, MANAGE_ROLES)
+        remove_members = [m for m in dlg.members_to_remove] if can_kick else []
+        add_admins = [a for a in dlg.admins_to_add] if can_manage_roles else []
+        remove_admins = [a for a in dlg.admins_to_remove] if can_manage_roles else []
+        if remove_members or add_admins or remove_admins:
             self._invite_mgr.publish_member_list(
                 channel_hash,
-                remove_members=dlg.members_to_remove or None,
-                add_admins=dlg.admins_to_add or None,
-                remove_admins=dlg.admins_to_remove or None,
+                remove_members=remove_members or None,
+                add_admins=add_admins or None,
+                remove_admins=remove_admins or None,
             )
 
     def _on_edit_permissions(self, channel_hash: str, channel_name: str):
+        if not self._storage.has_permission(channel_hash, self._identity.hash_hex, MANAGE_CHANNEL):
+            return
         current_perms = self._storage.get_channel_permissions(channel_hash)
         dlg = ChannelPermissionsDialog(channel_name, current_perms, self)
         if dlg.exec() != QDialog.DialogCode.Accepted:
