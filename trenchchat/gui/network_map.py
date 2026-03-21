@@ -115,12 +115,19 @@ def gather_network_data(rns: RNS.Reticulum, self_hex: str,
     except Exception:
         _iface_stats = {}
 
-    iface_name_to_id: dict[str, str] = {
-        (iface.get("short_name") or iface.get("name", "")): (
-            f"__iface__{iface.get('short_name') or iface.get('name', '')}"
-        )
-        for iface in _iface_stats.get("interfaces", [])
-    }
+    # Build a lookup from any interface name variant → synthetic node ID.
+    # The path table uses the full name (e.g. "TCPInterface[TrenchChat Hub/…]")
+    # while interface stats expose both a short_name ("TrenchChat Hub") and the
+    # full name.  Index both so the match always works.
+    iface_name_to_id: dict[str, str] = {}
+    for iface in _iface_stats.get("interfaces", []):
+        short = iface.get("short_name") or ""
+        full  = iface.get("name") or ""
+        node_id = f"__iface__{short or full}"
+        if short:
+            iface_name_to_id[short] = node_id
+        if full:
+            iface_name_to_id[full] = node_id
 
     # Collect all transport (next-hop) hashes so we can classify them.
     # Only count a via-hash as a transport node when it differs from the
@@ -136,6 +143,10 @@ def gather_network_data(rns: RNS.Reticulum, self_hex: str,
                 transport_hashes.add(via_hex)
 
     seen_pairs: set[tuple] = set()
+    # Maps identity_hex → the canonical node ID already added for that identity.
+    # Multiple RNS destinations (lxmf.delivery, trenchchat.channel, …) can share
+    # the same underlying identity; we collapse them into one graph node.
+    identity_to_node: dict[str, str] = {self_hex: self_hex}
 
     for entry in path_table[:_MAX_NODES]:
         dest_hash = entry.get("hash")
@@ -148,27 +159,36 @@ def gather_network_data(rns: RNS.Reticulum, self_hex: str,
         # The interface name this path was learned through (may be None/empty)
         path_iface: str = entry.get("interface") or ""
 
-        # Classify the destination
+        # Resolve the identity behind this destination.
         identity = RNS.Identity.recall(dest_hash if isinstance(dest_hash, bytes)
                                        else bytes.fromhex(dest_hex))
-        if dest_hex == self_hex:
-            kind = "self"
-        elif dest_hex in transport_hashes:
-            kind = "transport"
-        elif identity is not None:
-            kind = "peer"
+        identity_hex: str | None = identity.hash.hex() if identity is not None else None
+
+        # If we already have a node for this identity, reuse it — skip adding a
+        # duplicate node and redirect edges to the canonical one.
+        if identity_hex and identity_hex in identity_to_node:
+            canonical_id = identity_to_node[identity_hex]
         else:
-            kind = "unknown"
+            canonical_id = dest_hex
+            # Classify
+            if dest_hex == self_hex:
+                kind = "self"
+            elif dest_hex in transport_hashes:
+                kind = "transport"
+            elif identity is not None:
+                kind = "peer"
+            else:
+                kind = "unknown"
 
-        label = _make_label(dest_hex, identity, kind, storage)
-
-        if dest_hex not in nodes:
-            nodes[dest_hex] = {
-                "id":    dest_hex,
-                "label": label,
-                "kind":  kind,
-                "hops":  hops,
-            }
+            if dest_hex not in nodes:
+                nodes[dest_hex] = {
+                    "id":    dest_hex,
+                    "label": _make_label(dest_hex, identity, kind, storage),
+                    "kind":  kind,
+                    "hops":  hops,
+                }
+            if identity_hex:
+                identity_to_node[identity_hex] = dest_hex
 
         # Determine the relay node to route through for multi-hop paths.
         # Prefer the interface diamond node (if the path came through a known
@@ -196,17 +216,17 @@ def gather_network_data(rns: RNS.Reticulum, self_hex: str,
                 seen_pairs.add(pair)
                 edges.append({"src": self_hex, "dst": relay_id, "hops": 1, "direct": True,
                                "kind": "interface" if relay_id.startswith("__iface__") else "path"})
-            # relay → dest
-            pair2 = (relay_id, dest_hex)
+            # relay → canonical peer node
+            pair2 = (relay_id, canonical_id)
             if pair2 not in seen_pairs:
                 seen_pairs.add(pair2)
-                edges.append({"src": relay_id, "dst": dest_hex,
+                edges.append({"src": relay_id, "dst": canonical_id,
                                "hops": hops, "direct": False})
         else:
-            pair = (self_hex, dest_hex)
+            pair = (self_hex, canonical_id)
             if pair not in seen_pairs:
                 seen_pairs.add(pair)
-                edges.append({"src": self_hex, "dst": dest_hex,
+                edges.append({"src": self_hex, "dst": canonical_id,
                                "hops": hops, "direct": hops <= 1})
 
     # --- interface stats + interface nodes ---
@@ -295,6 +315,7 @@ def _make_label(hex_id: str, identity, kind: str, storage=None) -> str:
             pass
 
     # 2. LXMF announce app_data
+    # LXMF encodes app_data as a msgpack list: [display_name_bytes, stamp_cost]
     if identity is not None:
         try:
             raw = RNS.Identity.recall_app_data(
@@ -303,7 +324,13 @@ def _make_label(hex_id: str, identity, kind: str, storage=None) -> str:
             if raw:
                 import msgpack
                 parsed = msgpack.unpackb(raw, raw=False)
-                app_data = parsed.get("display_name") or parsed.get("name")
+                # List format: [display_name, stamp_cost, ...]
+                if isinstance(parsed, list) and len(parsed) >= 1:
+                    app_data = parsed[0]
+                elif isinstance(parsed, dict):
+                    app_data = parsed.get("display_name") or parsed.get("name")
+                else:
+                    app_data = None
                 if isinstance(app_data, bytes):
                     app_data = app_data.decode(errors="replace")
                 if app_data:
