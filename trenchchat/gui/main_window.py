@@ -252,6 +252,20 @@ class MainWindow(QMainWindow):
             PeerAnnounceHandler(_on_peer_appeared)
         )
 
+        # Also mark a peer as seen when any of their channel announces arrive.
+        # trenchchat.channel announces fire once per owned channel per announce
+        # cycle, so they are a reliable additional presence signal.
+        def _on_channel_announce(destination_hash: bytes,
+                                 announced_identity: "RNS.Identity",
+                                 metadata: dict) -> None:
+            if announced_identity is not None:
+                self._presence_mgr.record_seen(announced_identity.hash.hex())
+
+        from trenchchat.network.announce import ChannelAnnounceHandler
+        RNS.Transport.register_announce_handler(
+            ChannelAnnounceHandler(_on_channel_announce)
+        )
+
         # Also mark a peer as seen when we receive any inbound LXMF message from
         # them.  This covers the case where a peer connects via a backchannel link
         # and sends a message without having announced their delivery destination

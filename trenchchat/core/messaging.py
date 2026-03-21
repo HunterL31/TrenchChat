@@ -56,6 +56,8 @@ class Messaging:
 
         # dest_hex → list of message param dicts queued for offline peers
         self._pending: dict[str, list[dict]] = {}
+        # msg_id → msg_params, kept so failed deliveries can be re-queued
+        self._params_by_id: dict[str, dict] = {}
 
         router.add_delivery_callback(self._on_lxmf_message)
 
@@ -99,6 +101,13 @@ class Messaging:
             "last_seen_id":      last_seen,
             "subscriber_hashes": list(subscriber_hashes),
         }
+
+        # Keep params so failed-delivery callbacks can re-queue the message.
+        # Prune old entries to avoid unbounded growth (keep the 200 most recent).
+        self._params_by_id[msg_id] = msg_params
+        if len(self._params_by_id) > 200:
+            oldest = next(iter(self._params_by_id))
+            del self._params_by_id[oldest]
 
         for dest_hex in subscriber_hashes:
             if dest_hex == self._identity.hash_hex:
@@ -193,6 +202,21 @@ class Messaging:
 
     def _on_delivery_failed(self, dest_hex: str, channel_hash_hex: str,
                              msg_id: str, subscriber_hashes: list[str]):
+        """Re-queue the message for retry when the peer's path returns, and record a missed hint."""
+        params = self._params_by_id.get(msg_id)
+        if params:
+            RNS.log(
+                f"TrenchChat: delivery failed to {dest_hex[:12]}…, re-queuing {msg_id[:12]}…",
+                RNS.LOG_DEBUG,
+            )
+            # Request the path so flush_pending fires when it resolves
+            identity_hash = bytes.fromhex(dest_hex)
+            delivery_dest_hash = RNS.Destination.hash(identity_hash, "lxmf", "delivery")
+            RNS.Transport.request_path(delivery_dest_hash)
+            # Only re-queue if not already pending (avoid duplicates)
+            pending_ids = {p["msg_id"] for p in self._pending.get(dest_hex, [])}
+            if msg_id not in pending_ids:
+                self._pending.setdefault(dest_hex, []).append(params)
         self._notify_missed(channel_hash_hex, dest_hex, msg_id, subscriber_hashes)
 
     def _notify_missed(self, channel_hash_hex: str, missed_peer_hex: str,
