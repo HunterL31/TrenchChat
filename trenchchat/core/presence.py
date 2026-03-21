@@ -13,6 +13,7 @@ import time
 import threading
 
 import RNS
+import msgpack
 
 PRESENCE_TIMEOUT_SECS = 180
 
@@ -89,7 +90,6 @@ class PresenceManager:
 
         if is_open_join(perms):
             online = self.get_online_peers()
-            # Include self if subscribed
             all_peers = set(online)
             all_peers.add(self._self_hex)
             subs = subscription_mgr.get_subscribers(channel_hash_hex)
@@ -98,14 +98,16 @@ class PresenceManager:
                     continue
                 results.append({
                     "identity_hash": peer_hex,
-                    "display_name": peer_hex[:12] + "…",
+                    "display_name": self._resolve_display_name(peer_hex, storage),
                     "is_online": self.is_online(peer_hex),
                 })
         else:
             members = storage.get_members(channel_hash_hex)
             for row in members:
                 peer_hex = row["identity_hash"]
-                display = row["display_name"] or peer_hex[:12] + "…"
+                # Prefer the stored member name; fall back to announce app_data
+                display = (row["display_name"]
+                           or self._resolve_display_name(peer_hex, storage))
                 results.append({
                     "identity_hash": peer_hex,
                     "display_name": display,
@@ -114,6 +116,53 @@ class PresenceManager:
 
         results.sort(key=lambda r: (not r["is_online"], r["display_name"].lower()))
         return results
+
+    # --- private helpers ---
+
+    def _resolve_display_name(self, identity_hex: str, storage) -> str:
+        """Return the best available display name for a peer identity.
+
+        Resolution order:
+          1. Members table (any channel) — name from a published member list
+          2. LXMF announce app_data — name the peer broadcasts in their announce
+          3. Identity hash prefix — consistent fallback used across the UI
+        """
+        if identity_hex == self._self_hex:
+            return "You"
+
+        # 1. Storage lookup across all channels
+        try:
+            stored = storage.get_display_name_for_identity(identity_hex)
+            if stored:
+                return stored
+        except Exception:
+            pass
+
+        # 2. LXMF announce app_data — packed as [display_name_bytes, stamp_cost]
+        try:
+            identity_bytes = bytes.fromhex(identity_hex)
+            # recall() needs a delivery destination hash, not a raw identity hash
+            delivery_hash = RNS.Destination.hash_from_name_and_identity(
+                "lxmf.delivery", identity_bytes
+            )
+            raw = RNS.Identity.recall_app_data(delivery_hash)
+            if raw:
+                parsed = msgpack.unpackb(raw, raw=False)
+                if isinstance(parsed, list) and len(parsed) >= 1:
+                    name = parsed[0]
+                elif isinstance(parsed, dict):
+                    name = parsed.get("display_name") or parsed.get("name")
+                else:
+                    name = None
+                if isinstance(name, bytes):
+                    name = name.decode(errors="replace")
+                if name:
+                    return str(name)
+        except Exception:
+            pass
+
+        # 3. Hash prefix fallback
+        return identity_hex[:12] + "…"
 
     def prune(self) -> None:
         """Remove stale entries and fire callbacks for peers that went offline."""
