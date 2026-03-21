@@ -75,7 +75,7 @@ def main():
     messaging = Messaging(identity, storage, router)
     subscription_mgr = SubscriptionManager(identity, storage, router)
     invite_mgr = InviteManager(identity, storage, router)
-    presence_mgr = PresenceManager(identity.hash_hex, config.display_name)
+    presence_mgr = PresenceManager(identity.hash_hex, config)
 
     # Restore RNS destinations for channels we own
     channel_mgr.restore_owned_channels()

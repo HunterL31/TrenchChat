@@ -116,6 +116,11 @@ class Router:
                 self._identity.rns_identity
             )
 
+    def set_display_name(self, display_name: str) -> None:
+        """Update the display name broadcast in LXMF delivery announces."""
+        self._delivery_dest.display_name = display_name
+        self._config.display_name = display_name
+
     # --- announce ---
 
     def announce(self):

@@ -296,13 +296,10 @@ class MainWindow(QMainWindow):
 
         toolbar.addSeparator()
 
-        identity_label = QLabel(
-            f"  {self._config.display_name}  "
-            f"<span style='color:#555;font-size:10px'>"
-            f"{self._identity.hash_hex[:12]}…</span>"
-        )
-        identity_label.setTextFormat(Qt.TextFormat.RichText)
-        toolbar.addWidget(identity_label)
+        self._identity_label = QLabel()
+        self._identity_label.setTextFormat(Qt.TextFormat.RichText)
+        self._update_identity_label()
+        toolbar.addWidget(self._identity_label)
 
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
@@ -935,9 +932,22 @@ class MainWindow(QMainWindow):
     # --- settings ---
 
     @pyqtSlot()
+    def _update_identity_label(self) -> None:
+        """Refresh the toolbar identity label to reflect the current display name."""
+        self._identity_label.setText(
+            f"  {self._config.display_name}  "
+            f"<span style='color:#555;font-size:10px'>"
+            f"{self._identity.hash_hex[:12]}…</span>"
+        )
+
     def _on_settings(self):
         dlg = SettingsDialog(
             self._config, self._identity, self._storage, self._router, self
         )
         if dlg.exec() == QDialog.DialogCode.Accepted:
+            # Propagate the (possibly new) display name to all live components
+            self._router.set_display_name(self._config.display_name)
+            self._router.announce()
+            self._update_identity_label()
+            self._refresh_online_panel()
             self._refresh_channel_list()
