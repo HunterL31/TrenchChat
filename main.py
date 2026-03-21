@@ -113,6 +113,7 @@ def main():
         config=config,
         identity=identity,
         storage=storage,
+        rns=rns,
         router=router,
         channel_mgr=channel_mgr,
         messaging=messaging,

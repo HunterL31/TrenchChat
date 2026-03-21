@@ -5,12 +5,12 @@ Layout:
   ┌─────────────────────────────────────────────┐
   │  [+] New Channel   [Settings]               │  ← toolbar
   ├──────────────┬──────────────────────────────┤
+  │              │  [Chat] [Network Map]         │  ← tabs
+  │  Channel     ├──────────────────────────────┤
+  │  list        │   Message view / map canvas  │
   │              │                              │
-  │  Channel     │   Message view               │
-  │  list        │   (ChannelView)              │
-  │              │                              │
-  │              ├──────────────────────────────┤
-  │              │   Compose (ComposeWidget)    │
+  │  Online      ├──────────────────────────────┤
+  │  users       │   Compose (chat tab only)    │
   └──────────────┴──────────────────────────────┘
 """
 
@@ -22,7 +22,7 @@ from PyQt6.QtWidgets import (
     QLabel, QDialog, QFormLayout, QLineEdit, QComboBox,
     QDialogButtonBox, QMessageBox, QStackedWidget, QMenu,
     QPushButton, QFrame, QTableWidget, QTableWidgetItem, QHeaderView,
-    QAbstractItemView, QSizePolicy,
+    QAbstractItemView, QSizePolicy, QTabWidget,
 )
 from PyQt6.QtCore import Qt, pyqtSlot, QPoint, pyqtSignal, QTimer, QSettings
 from PyQt6.QtGui import QAction, QColor, QFont
@@ -44,6 +44,7 @@ from trenchchat.network.router import Router
 from trenchchat.network.announce import PeerAnnounceHandler
 from trenchchat.gui.channel_view import ChannelView
 from trenchchat.gui.compose import ComposeWidget
+from trenchchat.gui.network_map import NetworkMapWidget, gather_network_data
 from trenchchat.gui.settings import SettingsDialog
 from trenchchat.gui.invite_dialogs import ChannelPermissionsDialog, InviteDialog, MembersDialog
 
@@ -196,13 +197,14 @@ class MainWindow(QMainWindow):
     _presence_changed     = pyqtSignal(str, bool)   # peer_hex, is_online
 
     def __init__(self, config: Config, identity: Identity, storage: Storage,
-                 router: Router, channel_mgr: ChannelManager,
+                 rns: "RNS.Reticulum", router: Router, channel_mgr: ChannelManager,
                  messaging: Messaging, subscription_mgr: SubscriptionManager,
                  invite_mgr: InviteManager, presence_mgr: PresenceManager):
         super().__init__()
         self._config = config
         self._identity = identity
         self._storage = storage
+        self._rns = rns
         self._router = router
         self._channel_mgr = channel_mgr
         self._messaging = messaging
@@ -220,6 +222,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("TrenchChat")
         self.setMinimumSize(800, 600)
         self._apply_dark_theme()
+        self._network_map_timer: QTimer | None = None  # created after _build_ui
         self._build_ui()
 
         # Connect thread-safe signals to main-thread handlers
@@ -248,6 +251,19 @@ class MainWindow(QMainWindow):
         RNS.Transport.register_announce_handler(
             PeerAnnounceHandler(_on_peer_appeared)
         )
+
+        # Also mark a peer as seen when we receive any inbound LXMF message from
+        # them.  This covers the case where a peer connects via a backchannel link
+        # and sends a message without having announced their delivery destination
+        # first (which is the normal LXMF direct-delivery flow).
+        def _on_inbound_message(message: "LXMF.LXMessage") -> None:
+            if not message.source_hash:
+                return
+            sender_identity = RNS.Identity.recall(message.source_hash)
+            if sender_identity is not None:
+                self._presence_mgr.record_seen(sender_identity.hash.hex())
+
+        router.add_delivery_callback(_on_inbound_message)
         # Defer sync requests briefly so the RNS stack is fully ready
         QTimer.singleShot(_STARTUP_SYNC_DELAY_MS, self._sync_mgr.request_sync_all)
 
@@ -255,6 +271,10 @@ class MainWindow(QMainWindow):
         self._presence_timer = QTimer(self)
         self._presence_timer.timeout.connect(self._on_presence_tick)
         self._presence_timer.start(_PRESENCE_PRUNE_INTERVAL_MS)
+
+        # Network map auto-refresh timer — only runs while the map tab is visible
+        self._network_map_timer = QTimer(self)
+        self._network_map_timer.timeout.connect(self._refresh_network_map)
 
         self._refresh_channel_list()
         self._restore_channel_selection()
@@ -352,25 +372,36 @@ class MainWindow(QMainWindow):
         left.setMaximumWidth(260)
         splitter.addWidget(left)
 
-        # Right: stacked message views + compose
-        right = QWidget()
-        right_layout = QVBoxLayout(right)
-        right_layout.setContentsMargins(0, 0, 0, 0)
-        right_layout.setSpacing(0)
+        # Right: tab widget — Chat tab and Network Map tab
+        self._tabs = QTabWidget()
+        self._tabs.setDocumentMode(True)
+        self._tabs.currentChanged.connect(self._on_tab_changed)
+
+        # --- Chat tab ---
+        chat_tab = QWidget()
+        chat_layout = QVBoxLayout(chat_tab)
+        chat_layout.setContentsMargins(0, 0, 0, 0)
+        chat_layout.setSpacing(0)
 
         self._stack = QStackedWidget()
         placeholder = QLabel("Select a channel to start chatting")
         placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
         placeholder.setStyleSheet("color: #555; font-size: 16px;")
         self._stack.addWidget(placeholder)
-        right_layout.addWidget(self._stack, 1)
+        chat_layout.addWidget(self._stack, 1)
 
         self._compose = ComposeWidget()
         self._compose.message_ready.connect(self._on_send_message)
         self._compose.set_enabled(False)
-        right_layout.addWidget(self._compose)
+        chat_layout.addWidget(self._compose)
 
-        splitter.addWidget(right)
+        self._tabs.addTab(chat_tab, "💬 Chat")
+
+        # --- Network Map tab ---
+        self._network_map_widget = NetworkMapWidget(self_hex=self._identity.hash_hex)
+        self._tabs.addTab(self._network_map_widget, "⬡ Network Map")
+
+        splitter.addWidget(self._tabs)
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
 
@@ -877,6 +908,29 @@ class MainWindow(QMainWindow):
             # Rotate to show the next pending invite
             self._pending_invites.append(self._pending_invites.pop(0))
         self._update_invite_bar()
+
+    # --- network map tab ---
+
+    _TAB_CHAT = 0
+    _TAB_NETWORK_MAP = 1
+    _NETWORK_MAP_REFRESH_MS = 10_000
+
+    @pyqtSlot(int)
+    def _on_tab_changed(self, index: int) -> None:
+        """Start or stop the network map refresh timer based on active tab."""
+        if self._network_map_timer is None:
+            return
+        if index == self._TAB_NETWORK_MAP:
+            self._refresh_network_map()
+            self._network_map_timer.start(self._NETWORK_MAP_REFRESH_MS)
+        else:
+            self._network_map_timer.stop()
+
+    @pyqtSlot()
+    def _refresh_network_map(self) -> None:
+        """Fetch current network topology and push it to the map widget."""
+        data = gather_network_data(self._rns, self._identity.hash_hex, self._storage)
+        self._network_map_widget.set_data(data["nodes"], data["edges"])
 
     # --- settings ---
 
