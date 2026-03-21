@@ -21,8 +21,9 @@ PRESENCE_TIMEOUT_SECS = 180
 class PresenceManager:
     """Tracks peer online/offline status based on LXMF delivery announces."""
 
-    def __init__(self, self_hex: str):
+    def __init__(self, self_hex: str, self_display_name: str = ""):
         self._self_hex = self_hex
+        self._self_display_name = self_display_name
         # identity_hash_hex -> last announce timestamp
         self._last_seen: dict[str, float] = {}
         self._lock = threading.Lock()
@@ -128,7 +129,7 @@ class PresenceManager:
           3. Identity hash prefix — consistent fallback used across the UI
         """
         if identity_hex == self._self_hex:
-            return "You"
+            return self._self_display_name or identity_hex[:12] + "…"
 
         # 1. Storage lookup across all channels
         try:
