@@ -195,6 +195,7 @@ class MainWindow(QMainWindow):
     _channel_joined       = pyqtSignal(str, str)   # channel_hash_hex, channel_name
     _member_list_updated  = pyqtSignal(str)         # channel_hash_hex
     _presence_changed     = pyqtSignal(str, bool)   # peer_hex, is_online
+    _peer_announced       = pyqtSignal()            # any announce → maybe refresh map
 
     def __init__(self, config: Config, identity: Identity, storage: Storage,
                  rns: "RNS.Reticulum", router: Router, channel_mgr: ChannelManager,
@@ -222,7 +223,8 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("TrenchChat")
         self.setMinimumSize(800, 600)
         self._apply_dark_theme()
-        self._network_map_timer: QTimer | None = None  # created after _build_ui
+        self._network_map_timer: QTimer | None = None   # periodic refresh; created after _build_ui
+        self._map_debounce_timer: QTimer | None = None  # debounce for announce-triggered refreshes
         self._build_ui()
 
         # Connect thread-safe signals to main-thread handlers
@@ -232,6 +234,7 @@ class MainWindow(QMainWindow):
         self._channel_joined.connect(self._on_channel_joined_main_thread)
         self._member_list_updated.connect(self._on_member_list_updated_main_thread)
         self._presence_changed.connect(self._on_presence_changed_main_thread)
+        self._peer_announced.connect(self._schedule_map_refresh)
 
         messaging.add_message_callback(self._on_new_message)
         invite_mgr.add_invite_callback(self._on_incoming_invite)
@@ -247,6 +250,7 @@ class MainWindow(QMainWindow):
         def _on_peer_appeared(peer_hex: str) -> None:
             self._sync_mgr.on_peer_appeared(peer_hex)
             self._presence_mgr.record_seen(peer_hex)
+            self._peer_announced.emit()
 
         RNS.Transport.register_announce_handler(
             PeerAnnounceHandler(_on_peer_appeared)
@@ -260,6 +264,7 @@ class MainWindow(QMainWindow):
                                  metadata: dict) -> None:
             if announced_identity is not None:
                 self._presence_mgr.record_seen(announced_identity.hash.hex())
+            self._peer_announced.emit()
 
         from trenchchat.network.announce import ChannelAnnounceHandler
         RNS.Transport.register_announce_handler(
@@ -289,6 +294,14 @@ class MainWindow(QMainWindow):
         # Network map auto-refresh timer — only runs while the map tab is visible
         self._network_map_timer = QTimer(self)
         self._network_map_timer.timeout.connect(self._refresh_network_map)
+
+        # Debounce timer for announce-triggered map refreshes.
+        # Announces arrive in bursts (one per destination per peer); we wait a
+        # short window after the last one so the RNS path table has time to
+        # populate before we read it.
+        self._map_debounce_timer = QTimer(self)
+        self._map_debounce_timer.setSingleShot(True)
+        self._map_debounce_timer.timeout.connect(self._refresh_network_map_if_visible)
 
         self._refresh_channel_list()
         self._restore_channel_selection()
@@ -409,8 +422,45 @@ class MainWindow(QMainWindow):
         self._tabs.addTab(chat_tab, "💬 Chat")
 
         # --- Network Map tab ---
+        map_tab = QWidget()
+        map_tab_layout = QVBoxLayout(map_tab)
+        map_tab_layout.setContentsMargins(0, 0, 0, 0)
+        map_tab_layout.setSpacing(0)
+
         self._network_map_widget = NetworkMapWidget(self_hex=self._identity.hash_hex)
-        self._tabs.addTab(self._network_map_widget, "⬡ Network Map")
+        map_tab_layout.addWidget(self._network_map_widget, 1)
+
+        # Bottom bar: legend + refresh button
+        map_bar = QWidget()
+        map_bar.setStyleSheet("background: #111; border-top: 1px solid #333;")
+        map_bar_layout = QHBoxLayout(map_bar)
+        map_bar_layout.setContentsMargins(8, 4, 8, 4)
+
+        map_legend = QLabel(
+            "★ This device   ◆ Interface/Hub   ■ Transport node   ● Known peer   ○ Unknown"
+            "      "
+            "<span style='color:#3ddc3d'>━</span> Excellent  "
+            "<span style='color:#e8e83a'>━</span> Good  "
+            "<span style='color:#e8963a'>━</span> Fair  "
+            "<span style='color:#e83a3a'>━</span> Poor"
+        )
+        map_legend.setTextFormat(Qt.TextFormat.RichText)
+        map_legend.setStyleSheet("color: #888; font-size: 11px; background: transparent;")
+        map_bar_layout.addWidget(map_legend, 1)
+
+        self._map_refresh_btn = QPushButton("↻ Refresh")
+        self._map_refresh_btn.setFixedWidth(80)
+        self._map_refresh_btn.setStyleSheet(
+            "QPushButton { background: #2a2a2a; color: #aaa; border: 1px solid #444;"
+            " border-radius: 3px; padding: 2px 6px; font-size: 11px; }"
+            "QPushButton:hover { background: #3a3a3a; }"
+        )
+        self._map_refresh_btn.clicked.connect(self._on_map_refresh_clicked)
+        map_bar_layout.addWidget(self._map_refresh_btn)
+
+        map_tab_layout.addWidget(map_bar)
+
+        self._tabs.addTab(map_tab, "⬡ Network Map")
 
         splitter.addWidget(self._tabs)
         splitter.setStretchFactor(0, 0)
@@ -936,6 +986,39 @@ class MainWindow(QMainWindow):
             self._network_map_timer.start(self._NETWORK_MAP_REFRESH_MS)
         else:
             self._network_map_timer.stop()
+            if self._map_debounce_timer is not None:
+                self._map_debounce_timer.stop()
+
+    @pyqtSlot()
+    def _on_map_refresh_clicked(self) -> None:
+        """Manual refresh button — briefly disable to give visual feedback."""
+        self._map_refresh_btn.setEnabled(False)
+        self._map_refresh_btn.setText("…")
+        self._refresh_network_map()
+        QTimer.singleShot(800, lambda: (
+            self._map_refresh_btn.setEnabled(True),
+            self._map_refresh_btn.setText("↻ Refresh"),
+        ))
+
+    # Delay between the last announce and the resulting map refresh.
+    # Long enough for RNS to populate path-table entries after a burst of
+    # announces, short enough to feel responsive.
+    _MAP_ANNOUNCE_DEBOUNCE_MS = 2_000
+
+    def _schedule_map_refresh(self) -> None:
+        """Restart the debounce timer on every announce.
+
+        The actual refresh fires _MAP_ANNOUNCE_DEBOUNCE_MS after the *last*
+        announce in a burst, by which time the RNS path table is populated.
+        """
+        if self._map_debounce_timer is None:
+            return
+        self._map_debounce_timer.start(self._MAP_ANNOUNCE_DEBOUNCE_MS)
+
+    def _refresh_network_map_if_visible(self) -> None:
+        """Refresh the map only when the Network Map tab is currently active."""
+        if self._tabs.currentIndex() == self._TAB_NETWORK_MAP:
+            self._refresh_network_map()
 
     @pyqtSlot()
     def _refresh_network_map(self) -> None:

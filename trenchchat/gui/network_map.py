@@ -31,6 +31,8 @@ import time
 
 import RNS
 
+from trenchchat.core.link_quality import LinkQuality, score_path
+
 from PyQt6.QtCore import Qt, QTimer, QRectF, QPointF
 from PyQt6.QtGui import (
     QPainter, QPen, QBrush, QColor, QFont, QPainterPath,
@@ -62,6 +64,15 @@ _COL_EDGE_MULTI     = QColor("#3a3a3a")
 _COL_EDGE_INTERFACE = QColor("#664422")   # dim orange — interface link
 _COL_LABEL          = QColor("#cccccc")
 _COL_BG             = QColor("#1a1a1a")
+
+# Edge / ring colours by link quality tier — bright enough to read on dark bg
+_COL_QUALITY = {
+    LinkQuality.EXCELLENT: QColor("#3ddc3d"),   # vivid green
+    LinkQuality.GOOD:      QColor("#e8e83a"),   # vivid yellow
+    LinkQuality.FAIR:      QColor("#e8963a"),   # vivid orange
+    LinkQuality.POOR:      QColor("#e83a3a"),   # vivid red
+    LinkQuality.UNKNOWN:   QColor("#666666"),   # mid grey
+}
 
 _NODE_R_SELF      = 14
 _NODE_R_INTERFACE = 12
@@ -96,10 +107,11 @@ def gather_network_data(rns: RNS.Reticulum, self_hex: str,
 
     # --- self node ---
     nodes[self_hex] = {
-        "id":    self_hex,
-        "label": "This device",
-        "kind":  "self",
-        "hops":  0,
+        "id":      self_hex,
+        "label":   "This device",
+        "kind":    "self",
+        "hops":    0,
+        "quality": int(LinkQuality.EXCELLENT),
     }
 
     # --- path table ---
@@ -209,25 +221,38 @@ def gather_network_data(rns: RNS.Reticulum, self_hex: str,
                         "hops":  1,
                     }
 
+        # Score the quality of the path to this destination
+        quality = score_path(dest_hex, hops, via_hex)
+        quality_val = int(quality)
+
         if relay_id:
             # self → relay
             pair = (self_hex, relay_id)
             if pair not in seen_pairs:
                 seen_pairs.add(pair)
+                relay_quality = int(score_path(relay_id, 1, None))
                 edges.append({"src": self_hex, "dst": relay_id, "hops": 1, "direct": True,
-                               "kind": "interface" if relay_id.startswith("__iface__") else "path"})
+                               "kind": "interface" if relay_id.startswith("__iface__") else "path",
+                               "quality": relay_quality})
             # relay → canonical peer node
             pair2 = (relay_id, canonical_id)
             if pair2 not in seen_pairs:
                 seen_pairs.add(pair2)
                 edges.append({"src": relay_id, "dst": canonical_id,
-                               "hops": hops, "direct": False})
+                               "hops": hops, "direct": False,
+                               "quality": quality_val})
         else:
             pair = (self_hex, canonical_id)
             if pair not in seen_pairs:
                 seen_pairs.add(pair)
                 edges.append({"src": self_hex, "dst": canonical_id,
-                               "hops": hops, "direct": hops <= 1})
+                               "hops": hops, "direct": hops <= 1,
+                               "quality": quality_val})
+
+        # Propagate the best quality score seen for this node
+        if canonical_id in nodes:
+            existing_q = nodes[canonical_id].get("quality", 0)
+            nodes[canonical_id]["quality"] = max(existing_q, quality_val)
 
     # --- interface stats + interface nodes ---
     interfaces: list[dict] = []
@@ -258,22 +283,27 @@ def gather_network_data(rns: RNS.Reticulum, self_hex: str,
             label = f"{status_dot} {iface_name}"
             if type_short:
                 label += f" ({type_short})"
+            iface_quality = int(
+                LinkQuality.EXCELLENT if iface_status else LinkQuality.POOR
+            )
             nodes[iface_id] = {
-                "id":    iface_id,
-                "label": label,
-                "kind":  "interface",
-                "hops":  0,
+                "id":      iface_id,
+                "label":   label,
+                "kind":    "interface",
+                "hops":    0,
+                "quality": iface_quality,
             }
             # Edge: self → interface
             pair = (self_hex, iface_id)
             if pair not in seen_pairs:
                 seen_pairs.add(pair)
                 edges.append({
-                    "src":    self_hex,
-                    "dst":    iface_id,
-                    "hops":   0,
-                    "direct": True,
-                    "kind":   "interface",
+                    "src":     self_hex,
+                    "dst":     iface_id,
+                    "hops":    0,
+                    "direct":  True,
+                    "kind":    "interface",
+                    "quality": iface_quality,
                 })
     except Exception:
         pass
@@ -479,7 +509,7 @@ class NetworkMapWidget(QWidget):
 
         pos = self._positions
 
-        # Draw edges
+        # Draw edges — coloured by link quality tier
         for edge in self._edges:
             src, dst = edge["src"], edge["dst"]
             if src not in pos or dst not in pos:
@@ -487,16 +517,24 @@ class NetworkMapWidget(QWidget):
             sx, sy = pos[src]
             dx, dy = pos[dst]
             is_iface_edge = edge.get("kind") == "interface"
+            quality = LinkQuality(edge.get("quality", int(LinkQuality.UNKNOWN)))
+            q_col = _COL_QUALITY[quality]
+
+            # Glow pass — wider, semi-transparent line underneath
+            glow_col = QColor(q_col)
+            glow_col.setAlpha(60)
+            glow_pen = QPen(glow_col, 6.0)
+            painter.setPen(glow_pen)
+            painter.drawLine(int(sx), int(sy), int(dx), int(dy))
+
+            # Main line
             if is_iface_edge:
-                col = _COL_EDGE_INTERFACE
-                pen = QPen(col, 1.5)
+                pen = QPen(q_col, 1.5)
                 pen.setStyle(Qt.PenStyle.DotLine)
             elif edge.get("direct"):
-                col = _COL_EDGE_DIRECT
-                pen = QPen(col, 1.2)
+                pen = QPen(q_col, 2.5)
             else:
-                col = _COL_EDGE_MULTI
-                pen = QPen(col, 1.2)
+                pen = QPen(q_col, 2.0)
                 pen.setStyle(Qt.PenStyle.DashLine)
             painter.setPen(pen)
             painter.drawLine(int(sx), int(sy), int(dx), int(dy))
@@ -519,6 +557,16 @@ class NetworkMapWidget(QWidget):
             nx, ny = pos[nid]
             kind = node.get("kind", "unknown")
             col, r = _node_style(kind)
+
+            # Quality ring around peer/transport/interface nodes
+            if kind not in ("self",):
+                quality = LinkQuality(node.get("quality", int(LinkQuality.UNKNOWN)))
+                ring_col = _COL_QUALITY[quality]
+                ring_pen = QPen(ring_col, 2.0)
+                painter.setBrush(QBrush(Qt.BrushStyle.NoBrush))
+                painter.setPen(ring_pen)
+                rr = r + 4
+                painter.drawEllipse(QRectF(nx - rr, ny - rr, rr * 2, rr * 2))
 
             painter.setBrush(QBrush(col))
             painter.setPen(QPen(col.darker(140), 1.5))
@@ -645,7 +693,13 @@ class NetworkMapDialog(QDialog):
 
         self._legend = QLabel(
             "  ★ This device   ◆ Interface/Hub   ■ Transport node   ● Known peer   ○ Unknown"
+            "      "
+            "<span style='color:#3ddc3d'>━</span> Excellent  "
+            "<span style='color:#e8e83a'>━</span> Good  "
+            "<span style='color:#e8963a'>━</span> Fair  "
+            "<span style='color:#e83a3a'>━</span> Poor"
         )
+        self._legend.setTextFormat(Qt.TextFormat.RichText)
         self._legend.setStyleSheet("color: #888; font-size: 11px;")
         toolbar.addWidget(self._legend)
 
