@@ -5,12 +5,12 @@ Layout:
   ┌─────────────────────────────────────────────┐
   │  [+] New Channel   [Settings]               │  ← toolbar
   ├──────────────┬──────────────────────────────┤
+  │              │  [Chat] [Network Map]         │  ← tabs
+  │  Channel     ├──────────────────────────────┤
+  │  list        │   Message view / map canvas  │
   │              │                              │
-  │  Channel     │   Message view               │
-  │  list        │   (ChannelView)              │
-  │              │                              │
-  │              ├──────────────────────────────┤
-  │              │   Compose (ComposeWidget)    │
+  │  Online      ├──────────────────────────────┤
+  │  users       │   Compose (chat tab only)    │
   └──────────────┴──────────────────────────────┘
 """
 
@@ -22,10 +22,10 @@ from PyQt6.QtWidgets import (
     QLabel, QDialog, QFormLayout, QLineEdit, QComboBox,
     QDialogButtonBox, QMessageBox, QStackedWidget, QMenu,
     QPushButton, QFrame, QTableWidget, QTableWidgetItem, QHeaderView,
-    QAbstractItemView, QSizePolicy,
+    QAbstractItemView, QSizePolicy, QTabWidget,
 )
 from PyQt6.QtCore import Qt, pyqtSlot, QPoint, pyqtSignal, QTimer, QSettings
-from PyQt6.QtGui import QAction, QFont
+from PyQt6.QtGui import QAction, QColor, QFont
 
 from trenchchat.config import Config
 from trenchchat.core.identity import Identity
@@ -33,6 +33,7 @@ from trenchchat.core.permissions import (
     INVITE, KICK, MANAGE_CHANNEL, MANAGE_ROLES, SEND_MESSAGE, PRESETS, PRESET_PRIVATE,
     is_discoverable, is_open_join, permissions_from_json,
 )
+from trenchchat.core.presence import PresenceManager
 from trenchchat.core.storage import Storage
 from trenchchat.core.channel import ChannelManager
 from trenchchat.core.messaging import Messaging
@@ -43,10 +44,12 @@ from trenchchat.network.router import Router
 from trenchchat.network.announce import PeerAnnounceHandler
 from trenchchat.gui.channel_view import ChannelView
 from trenchchat.gui.compose import ComposeWidget
+from trenchchat.gui.network_map import NetworkMapWidget, gather_network_data
 from trenchchat.gui.settings import SettingsDialog
 from trenchchat.gui.invite_dialogs import ChannelPermissionsDialog, InviteDialog, MembersDialog
 
 _STARTUP_SYNC_DELAY_MS = 3_000
+_PRESENCE_PRUNE_INTERVAL_MS = 30_000
 
 
 class NewChannelDialog(QDialog):
@@ -191,20 +194,24 @@ class MainWindow(QMainWindow):
     _channel_discovered   = pyqtSignal(str, str)   # channel_hash_hex, channel_name
     _channel_joined       = pyqtSignal(str, str)   # channel_hash_hex, channel_name
     _member_list_updated  = pyqtSignal(str)         # channel_hash_hex
+    _presence_changed     = pyqtSignal(str, bool)   # peer_hex, is_online
+    _peer_announced       = pyqtSignal()            # any announce → maybe refresh map
 
     def __init__(self, config: Config, identity: Identity, storage: Storage,
-                 router: Router, channel_mgr: ChannelManager,
+                 rns: "RNS.Reticulum", router: Router, channel_mgr: ChannelManager,
                  messaging: Messaging, subscription_mgr: SubscriptionManager,
-                 invite_mgr: InviteManager):
+                 invite_mgr: InviteManager, presence_mgr: PresenceManager):
         super().__init__()
         self._config = config
         self._identity = identity
         self._storage = storage
+        self._rns = rns
         self._router = router
         self._channel_mgr = channel_mgr
         self._messaging = messaging
         self._subscription_mgr = subscription_mgr
         self._invite_mgr = invite_mgr
+        self._presence_mgr = presence_mgr
 
         # Pending invites: list of (channel_hash_hex, channel_name, token, expiry, admin_hash_hex)
         self._pending_invites: list[tuple] = []
@@ -216,6 +223,8 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("TrenchChat")
         self.setMinimumSize(800, 600)
         self._apply_dark_theme()
+        self._network_map_timer: QTimer | None = None   # periodic refresh; created after _build_ui
+        self._map_debounce_timer: QTimer | None = None  # debounce for announce-triggered refreshes
         self._build_ui()
 
         # Connect thread-safe signals to main-thread handlers
@@ -224,21 +233,75 @@ class MainWindow(QMainWindow):
         self._channel_discovered.connect(self._on_channel_discovered_main_thread)
         self._channel_joined.connect(self._on_channel_joined_main_thread)
         self._member_list_updated.connect(self._on_member_list_updated_main_thread)
+        self._presence_changed.connect(self._on_presence_changed_main_thread)
+        self._peer_announced.connect(self._schedule_map_refresh)
 
         messaging.add_message_callback(self._on_new_message)
         invite_mgr.add_invite_callback(self._on_incoming_invite)
         invite_mgr.add_channel_joined_callback(self._on_channel_joined)
         invite_mgr.add_member_list_callback(self._on_member_list_updated)
         channel_mgr.add_channel_discovered_callback(self._on_channel_discovered)
+        presence_mgr.add_presence_callback(self._on_presence_changed)
 
         self._sync_mgr = SyncManager(
             identity, storage, router, messaging, subscription_mgr, invite_mgr
         )
+
+        def _on_peer_appeared(peer_hex: str) -> None:
+            self._sync_mgr.on_peer_appeared(peer_hex)
+            self._presence_mgr.record_seen(peer_hex)
+            self._peer_announced.emit()
+
         RNS.Transport.register_announce_handler(
-            PeerAnnounceHandler(self._sync_mgr.on_peer_appeared)
+            PeerAnnounceHandler(_on_peer_appeared)
         )
+
+        # Also mark a peer as seen when any of their channel announces arrive.
+        # trenchchat.channel announces fire once per owned channel per announce
+        # cycle, so they are a reliable additional presence signal.
+        def _on_channel_announce(destination_hash: bytes,
+                                 announced_identity: "RNS.Identity",
+                                 metadata: dict) -> None:
+            if announced_identity is not None:
+                self._presence_mgr.record_seen(announced_identity.hash.hex())
+            self._peer_announced.emit()
+
+        from trenchchat.network.announce import ChannelAnnounceHandler
+        RNS.Transport.register_announce_handler(
+            ChannelAnnounceHandler(_on_channel_announce)
+        )
+
+        # Also mark a peer as seen when we receive any inbound LXMF message from
+        # them.  This covers the case where a peer connects via a backchannel link
+        # and sends a message without having announced their delivery destination
+        # first (which is the normal LXMF direct-delivery flow).
+        def _on_inbound_message(message: "LXMF.LXMessage") -> None:
+            if not message.source_hash:
+                return
+            sender_identity = RNS.Identity.recall(message.source_hash)
+            if sender_identity is not None:
+                self._presence_mgr.record_seen(sender_identity.hash.hex())
+
+        router.add_delivery_callback(_on_inbound_message)
         # Defer sync requests briefly so the RNS stack is fully ready
         QTimer.singleShot(_STARTUP_SYNC_DELAY_MS, self._sync_mgr.request_sync_all)
+
+        # Periodically prune stale presence entries and refresh the online panel
+        self._presence_timer = QTimer(self)
+        self._presence_timer.timeout.connect(self._on_presence_tick)
+        self._presence_timer.start(_PRESENCE_PRUNE_INTERVAL_MS)
+
+        # Network map auto-refresh timer — only runs while the map tab is visible
+        self._network_map_timer = QTimer(self)
+        self._network_map_timer.timeout.connect(self._refresh_network_map)
+
+        # Debounce timer for announce-triggered map refreshes.
+        # Announces arrive in bursts (one per destination per peer); we wait a
+        # short window after the last one so the RNS path table has time to
+        # populate before we read it.
+        self._map_debounce_timer = QTimer(self)
+        self._map_debounce_timer.setSingleShot(True)
+        self._map_debounce_timer.timeout.connect(self._refresh_network_map_if_visible)
 
         self._refresh_channel_list()
         self._restore_channel_selection()
@@ -260,13 +323,10 @@ class MainWindow(QMainWindow):
 
         toolbar.addSeparator()
 
-        identity_label = QLabel(
-            f"  {self._config.display_name}  "
-            f"<span style='color:#555;font-size:10px'>"
-            f"{self._identity.hash_hex[:12]}…</span>"
-        )
-        identity_label.setTextFormat(Qt.TextFormat.RichText)
-        toolbar.addWidget(identity_label)
+        self._identity_label = QLabel()
+        self._identity_label.setTextFormat(Qt.TextFormat.RichText)
+        self._update_identity_label()
+        toolbar.addWidget(self._identity_label)
 
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
@@ -310,29 +370,99 @@ class MainWindow(QMainWindow):
         self._channel_list_widget.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._channel_list_widget.customContextMenuRequested.connect(self._on_channel_context_menu)
         left_layout.addWidget(self._channel_list_widget)
+
+        # Online users panel
+        self._online_panel_expanded = True
+        self._online_header = QLabel("  ▾ Online")
+        self._online_header.setStyleSheet(
+            "font-weight: bold; padding: 6px 4px 4px 4px; color: #aaa; cursor: pointer;"
+        )
+        self._online_header.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._online_header.mousePressEvent = self._on_online_header_clicked
+        left_layout.addWidget(self._online_header)
+
+        self._online_list = QListWidget()
+        self._online_list.setStyleSheet(
+            "QListWidget { border: none; background: #1a1a1a; }"
+            "QListWidget::item { padding: 4px 12px; color: #ccc; font-size: 12px; }"
+            "QListWidget::item:selected { background: transparent; }"
+        )
+        self._online_list.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        self._online_list.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._online_list.setMaximumHeight(160)
+        left_layout.addWidget(self._online_list)
+
         left.setMinimumWidth(180)
         left.setMaximumWidth(260)
         splitter.addWidget(left)
 
-        # Right: stacked message views + compose
-        right = QWidget()
-        right_layout = QVBoxLayout(right)
-        right_layout.setContentsMargins(0, 0, 0, 0)
-        right_layout.setSpacing(0)
+        # Right: tab widget — Chat tab and Network Map tab
+        self._tabs = QTabWidget()
+        self._tabs.setDocumentMode(True)
+        self._tabs.currentChanged.connect(self._on_tab_changed)
+
+        # --- Chat tab ---
+        chat_tab = QWidget()
+        chat_layout = QVBoxLayout(chat_tab)
+        chat_layout.setContentsMargins(0, 0, 0, 0)
+        chat_layout.setSpacing(0)
 
         self._stack = QStackedWidget()
         placeholder = QLabel("Select a channel to start chatting")
         placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
         placeholder.setStyleSheet("color: #555; font-size: 16px;")
         self._stack.addWidget(placeholder)
-        right_layout.addWidget(self._stack, 1)
+        chat_layout.addWidget(self._stack, 1)
 
         self._compose = ComposeWidget()
         self._compose.message_ready.connect(self._on_send_message)
         self._compose.set_enabled(False)
-        right_layout.addWidget(self._compose)
+        chat_layout.addWidget(self._compose)
 
-        splitter.addWidget(right)
+        self._tabs.addTab(chat_tab, "💬 Chat")
+
+        # --- Network Map tab ---
+        map_tab = QWidget()
+        map_tab_layout = QVBoxLayout(map_tab)
+        map_tab_layout.setContentsMargins(0, 0, 0, 0)
+        map_tab_layout.setSpacing(0)
+
+        self._network_map_widget = NetworkMapWidget(self_hex=self._identity.hash_hex)
+        map_tab_layout.addWidget(self._network_map_widget, 1)
+
+        # Bottom bar: legend + refresh button
+        map_bar = QWidget()
+        map_bar.setStyleSheet("background: #111; border-top: 1px solid #333;")
+        map_bar_layout = QHBoxLayout(map_bar)
+        map_bar_layout.setContentsMargins(8, 4, 8, 4)
+
+        map_legend = QLabel(
+            "★ This device   ◆ Interface/Hub   ■ Transport node   ● Known peer   ○ Unknown"
+            "      "
+            "<span style='color:#3ddc3d'>━</span> Excellent  "
+            "<span style='color:#e8e83a'>━</span> Good  "
+            "<span style='color:#e8963a'>━</span> Fair  "
+            "<span style='color:#e83a3a'>━</span> Poor"
+        )
+        map_legend.setTextFormat(Qt.TextFormat.RichText)
+        map_legend.setStyleSheet("color: #888; font-size: 11px; background: transparent;")
+        map_bar_layout.addWidget(map_legend, 1)
+
+        self._map_refresh_btn = QPushButton("↻ Refresh")
+        self._map_refresh_btn.setFixedWidth(80)
+        self._map_refresh_btn.setStyleSheet(
+            "QPushButton { background: #2a2a2a; color: #aaa; border: 1px solid #444;"
+            " border-radius: 3px; padding: 2px 6px; font-size: 11px; }"
+            "QPushButton:hover { background: #3a3a3a; }"
+        )
+        self._map_refresh_btn.clicked.connect(self._on_map_refresh_clicked)
+        map_bar_layout.addWidget(self._map_refresh_btn)
+
+        map_tab_layout.addWidget(map_bar)
+
+        self._tabs.addTab(map_tab, "⬡ Network Map")
+
+        splitter.addWidget(self._tabs)
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
 
@@ -511,6 +641,8 @@ class MainWindow(QMainWindow):
             else:
                 self._compose.set_enabled(True)
                 self._compose.set_placeholder(f"Message #{channel['name']}…  (Enter to send)")
+
+        self._refresh_online_panel()
 
     # --- new / join channel ---
 
@@ -746,6 +878,59 @@ class MainWindow(QMainWindow):
             self._compose.set_enabled(False)
             self._refresh_channel_list()
 
+    # --- online users panel ---
+
+    def _on_online_header_clicked(self, _event) -> None:
+        """Toggle the online users list visibility."""
+        self._online_panel_expanded = not self._online_panel_expanded
+        if self._online_panel_expanded:
+            self._online_list.show()
+            self._online_header.setText("  ▾ Online")
+        else:
+            self._online_list.hide()
+            self._online_header.setText("  ▸ Online")
+
+    def _refresh_online_panel(self) -> None:
+        """Repopulate the online users list for the currently selected channel."""
+        if self._current_channel is None:
+            self._online_list.clear()
+            self._online_header.setText("  ▾ Online")
+            return
+
+        entries = self._presence_mgr.get_online_for_channel(
+            self._current_channel,
+            self._storage,
+            self._subscription_mgr,
+        )
+
+        online_count = sum(1 for e in entries if e["is_online"])
+        self._online_header.setText(
+            f"  {'▾' if self._online_panel_expanded else '▸'} "
+            f"Online ({online_count})"
+        )
+
+        self._online_list.clear()
+        for entry in entries:
+            dot = "● " if entry["is_online"] else "○ "
+            color = "#4ec94e" if entry["is_online"] else "#666"
+            item = QListWidgetItem(dot + entry["display_name"])
+            item.setForeground(QColor(color))
+            self._online_list.addItem(item)
+
+    def _on_presence_changed(self, peer_hex: str, is_online: bool) -> None:
+        """Called from RNS background thread — marshal to main thread."""
+        self._presence_changed.emit(peer_hex, is_online)
+
+    @pyqtSlot(str, bool)
+    def _on_presence_changed_main_thread(self, peer_hex: str, is_online: bool) -> None:
+        """Refresh the online panel when any peer's status changes."""
+        self._refresh_online_panel()
+
+    def _on_presence_tick(self) -> None:
+        """Periodic timer: prune stale presence entries and refresh the panel."""
+        self._presence_mgr.prune()
+        self._refresh_online_panel()
+
     # --- incoming invite ---
 
     def _on_incoming_invite(self, channel_hash_hex: str, channel_name: str,
@@ -785,12 +970,81 @@ class MainWindow(QMainWindow):
             self._pending_invites.append(self._pending_invites.pop(0))
         self._update_invite_bar()
 
+    # --- network map tab ---
+
+    _TAB_CHAT = 0
+    _TAB_NETWORK_MAP = 1
+    _NETWORK_MAP_REFRESH_MS = 10_000
+
+    @pyqtSlot(int)
+    def _on_tab_changed(self, index: int) -> None:
+        """Start or stop the network map refresh timer based on active tab."""
+        if self._network_map_timer is None:
+            return
+        if index == self._TAB_NETWORK_MAP:
+            self._refresh_network_map()
+            self._network_map_timer.start(self._NETWORK_MAP_REFRESH_MS)
+        else:
+            self._network_map_timer.stop()
+            if self._map_debounce_timer is not None:
+                self._map_debounce_timer.stop()
+
+    @pyqtSlot()
+    def _on_map_refresh_clicked(self) -> None:
+        """Manual refresh button — briefly disable to give visual feedback."""
+        self._map_refresh_btn.setEnabled(False)
+        self._map_refresh_btn.setText("…")
+        self._refresh_network_map()
+        QTimer.singleShot(800, lambda: (
+            self._map_refresh_btn.setEnabled(True),
+            self._map_refresh_btn.setText("↻ Refresh"),
+        ))
+
+    # Delay between the last announce and the resulting map refresh.
+    # Long enough for RNS to populate path-table entries after a burst of
+    # announces, short enough to feel responsive.
+    _MAP_ANNOUNCE_DEBOUNCE_MS = 2_000
+
+    def _schedule_map_refresh(self) -> None:
+        """Restart the debounce timer on every announce.
+
+        The actual refresh fires _MAP_ANNOUNCE_DEBOUNCE_MS after the *last*
+        announce in a burst, by which time the RNS path table is populated.
+        """
+        if self._map_debounce_timer is None:
+            return
+        self._map_debounce_timer.start(self._MAP_ANNOUNCE_DEBOUNCE_MS)
+
+    def _refresh_network_map_if_visible(self) -> None:
+        """Refresh the map only when the Network Map tab is currently active."""
+        if self._tabs.currentIndex() == self._TAB_NETWORK_MAP:
+            self._refresh_network_map()
+
+    @pyqtSlot()
+    def _refresh_network_map(self) -> None:
+        """Fetch current network topology and push it to the map widget."""
+        data = gather_network_data(self._rns, self._identity.hash_hex, self._storage)
+        self._network_map_widget.set_data(data["nodes"], data["edges"])
+
     # --- settings ---
 
     @pyqtSlot()
+    def _update_identity_label(self) -> None:
+        """Refresh the toolbar identity label to reflect the current display name."""
+        self._identity_label.setText(
+            f"  {self._config.display_name}  "
+            f"<span style='color:#555;font-size:10px'>"
+            f"{self._identity.hash_hex[:12]}…</span>"
+        )
+
     def _on_settings(self):
         dlg = SettingsDialog(
             self._config, self._identity, self._storage, self._router, self
         )
         if dlg.exec() == QDialog.DialogCode.Accepted:
+            # Propagate the (possibly new) display name to all live components
+            self._router.set_display_name(self._config.display_name)
+            self._router.announce()
+            self._update_identity_label()
+            self._refresh_online_panel()
             self._refresh_channel_list()

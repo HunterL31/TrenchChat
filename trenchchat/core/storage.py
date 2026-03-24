@@ -337,6 +337,29 @@ class Storage:
             (channel_hash,)
         )
 
+    def get_member_display_name(self, channel_hash: str,
+                                identity_hash: str) -> str | None:
+        """Return the stored display name for a member, or None if not found."""
+        row = self._fetchone(
+            "SELECT display_name FROM members WHERE channel_hash = ? AND identity_hash = ?",
+            (channel_hash, identity_hash),
+        )
+        return row["display_name"] if row else None
+
+    def get_display_name_for_identity(self, identity_hash: str) -> str | None:
+        """Return the most recently stored display name for an identity across all channels.
+
+        Searches the members table without requiring a specific channel hash, so
+        it works for any peer we have ever seen in any channel.
+        """
+        row = self._fetchone(
+            "SELECT display_name FROM members WHERE identity_hash = ?"
+            " AND display_name IS NOT NULL AND display_name != ''"
+            " ORDER BY added_at DESC LIMIT 1",
+            (identity_hash,),
+        )
+        return row["display_name"] if row else None
+
     def is_member(self, channel_hash: str, identity_hash: str) -> bool:
         return self._fetchone(
             "SELECT 1 FROM members WHERE channel_hash = ? AND identity_hash = ?",
