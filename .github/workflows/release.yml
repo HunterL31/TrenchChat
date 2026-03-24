@@ -101,10 +101,10 @@ jobs:
             # No tags yet — treat the current pyproject.toml version as the base
             # and produce the first release without a "since" boundary.
             PREV_VERSION=$(python3 - <<'EOF'
-          import tomllib
-          with open("pyproject.toml", "rb") as f:
-              print(tomllib.load(f)["project"]["version"])
-          EOF
+import tomllib
+with open("pyproject.toml", "rb") as f:
+    print(tomllib.load(f)["project"]["version"])
+EOF
             )
             PREV_TAG=""
           else
@@ -147,17 +147,17 @@ jobs:
           if [ "$IS_MAIN" = "true" ]; then
             # --- REAL RELEASE: write version, commit, tag ---
             python3 - <<EOF
-          import re, pathlib
-          path = pathlib.Path("pyproject.toml")
-          content = path.read_text()
-          content = re.sub(
-              r'^(version\s*=\s*")[^"]*(")',
-              r'\g<1>${NEW_VERSION}\g<2>',
-              content,
-              flags=re.MULTILINE,
-          )
-          path.write_text(content)
-          EOF
+import re, pathlib
+path = pathlib.Path("pyproject.toml")
+content = path.read_text()
+content = re.sub(
+    r'^(version\s*=\s*")[^"]*(")',
+    r'\g<1>${NEW_VERSION}\g<2>',
+    content,
+    flags=re.MULTILINE,
+)
+path.write_text(content)
+EOF
 
             git config user.name  "github-actions[bot]"
             git config user.email "github-actions[bot]@users.noreply.github.com"
