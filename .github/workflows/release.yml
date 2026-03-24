@@ -90,6 +90,11 @@ jobs:
           # and collect all commits since it.
           fetch-depth: 0
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
       - name: Bump version, write pyproject.toml, collect changelog
         id: bump
         run: |
