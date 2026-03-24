@@ -1,0 +1,18 @@
+Package: trenchchat
+Version: 0.1.0
+Section: net
+Priority: optional
+Architecture: amd64
+Depends: libxcb-cursor0, libxcb1, libx11-6, libgl1
+Replaces: trenchchat
+Conflicts: trenchchat
+Maintainer: TrenchChat <https://github.com/HunterL31/TrenchChat>
+Homepage: https://github.com/HunterL31/TrenchChat
+Description: Decentralised encrypted mesh chat over Reticulum
+ TrenchChat is a peer-to-peer encrypted chat application built on the
+ Reticulum network stack and LXMF messaging protocol. It supports
+ channel-based group messaging, offline message sync, and invite-only
+ channels with role-based permissions.
+ .
+ User data (identity keys, channels, message history) is stored in
+ ~/.trenchchat/ and is preserved across upgrades.

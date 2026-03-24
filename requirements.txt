@@ -5,3 +5,4 @@ msgpack
 
 # Development / testing
 pytest>=7.0
+pyinstaller>=6.0
