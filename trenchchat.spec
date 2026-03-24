@@ -56,10 +56,6 @@ is_windows = sys.platform == "win32"
 is_macos = sys.platform == "darwin"
 
 icon_path = None
-if is_windows:
-    icon_path = "packaging/windows/trenchchat.ico"
-elif is_macos:
-    icon_path = "packaging/macos/trenchchat.icns"
 
 # No console window on GUI platforms; keep it on Linux for terminal users
 no_console = is_windows or is_macos

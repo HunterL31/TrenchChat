@@ -29,14 +29,12 @@ AppPublisher={#AppPublisher}
 AppPublisherURL={#AppURL}
 AppSupportURL={#AppURL}
 AppUpdatesURL={#AppURL}/releases
-; Reuse the directory the user chose on first install
-UsePreviousDir=yes
 DefaultDirName={autopf}\{#AppName}
 DefaultGroupName={#AppName}
 ; Allow per-user installs without admin rights
 PrivilegesRequiredOverridesAllowed=dialog
 ; Output
-OutputDir=dist\installer
+OutputDir=..\..\dist\installer
 OutputBaseFilename=TrenchChat-Setup-{#AppVersion}
 Compression=lzma2/ultra64
 SolidCompression=yes
@@ -55,7 +53,7 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 
 [Files]
 ; The entire PyInstaller onedir output — all binaries, Qt libs, Python runtime
-Source: "dist\TrenchChat\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "..\..\dist\TrenchChat\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{group}\{#AppName}"; Filename: "{app}\{#AppExeName}"
