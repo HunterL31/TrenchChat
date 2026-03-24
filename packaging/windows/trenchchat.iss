@@ -29,8 +29,6 @@ AppPublisher={#AppPublisher}
 AppPublisherURL={#AppURL}
 AppSupportURL={#AppURL}
 AppUpdatesURL={#AppURL}/releases
-; Reuse the directory the user chose on first install
-UsePreviousDir=yes
 DefaultDirName={autopf}\{#AppName}
 DefaultGroupName={#AppName}
 ; Allow per-user installs without admin rights
