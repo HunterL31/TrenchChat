@@ -51,6 +51,13 @@ jobs:
   #
   # To trigger a major bump, include "[major]" anywhere in a commit message,
   # e.g.:  "feat: redesign network layer [major]"
+  #
+  # DRY-RUN MODE (workflow_dispatch on any non-main branch):
+  #   - Version is computed but NOT written back to pyproject.toml.
+  #   - No commit, no push, no tag is created.
+  #   - Version string gets a "-dry-run" suffix so it is clearly not a real release.
+  #   - Build artifacts are still produced and uploaded to the Actions run summary.
+  #   - The release job is skipped entirely.
   # ---------------------------------------------------------------------------
   bump_version:
     name: Bump version & collect changelog
@@ -62,6 +69,7 @@ jobs:
       new_version: ${{ steps.bump.outputs.new_version }}
       tag: ${{ steps.bump.outputs.tag }}
       changelog: ${{ steps.bump.outputs.changelog }}
+      is_real_release: ${{ steps.bump.outputs.is_real_release }}
 
     steps:
       - uses: actions/checkout@v4
@@ -73,6 +81,8 @@ jobs:
       - name: Bump version, write pyproject.toml, collect changelog
         id: bump
         run: |
+          IS_MAIN=${{ github.ref == 'refs/heads/main' }}
+
           # --- Find the most recent vX.Y.Z tag ---
           PREV_TAG=$(git tag --list 'v*.*.*' --sort=-version:refname | head -1)
           if [ -z "$PREV_TAG" ]; then
@@ -122,8 +132,9 @@ jobs:
           NEW_TAG="v${NEW_VERSION}"
           echo "Bump type: ${BUMP_TYPE}  →  ${NEW_VERSION}"
 
-          # --- Write new version to pyproject.toml ---
-          python3 - <<EOF
+          if [ "$IS_MAIN" = "true" ]; then
+            # --- REAL RELEASE: write version, commit, tag ---
+            python3 - <<EOF
           import re, pathlib
           path = pathlib.Path("pyproject.toml")
           content = path.read_text()
@@ -136,21 +147,26 @@ jobs:
           path.write_text(content)
           EOF
 
-          # --- Commit the version bump back to main ---
-          git config user.name  "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add pyproject.toml
-          git commit -m "chore: release ${NEW_VERSION} [skip ci]"
-          git push origin main
+            git config user.name  "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add pyproject.toml
+            git commit -m "chore: release ${NEW_VERSION} [skip ci]"
+            git push origin main
+
+            echo "is_real_release=true" >> "$GITHUB_OUTPUT"
+          else
+            # --- DRY-RUN: append suffix so it is clearly not a real release ---
+            NEW_VERSION="${NEW_VERSION}-dry-run"
+            NEW_TAG="v${NEW_VERSION}"
+            echo "DRY-RUN mode — no commit, no tag, no GitHub Release will be created."
+            echo "is_real_release=false" >> "$GITHUB_OUTPUT"
+          fi
 
           # --- Build the changelog block ---
-          # Escape percent signs so GitHub Actions doesn't interpret them.
           if [ -z "$COMMITS" ]; then
             COMMITS="- No user-facing changes"
           fi
-          CHANGELOG_ESCAPED=$(echo "$COMMITS" | sed 's/%/%25/g')
 
-          # Write multi-line output using the EOF delimiter syntax
           {
             echo "new_version=${NEW_VERSION}"
             echo "tag=${NEW_TAG}"
@@ -159,8 +175,9 @@ jobs:
             echo "CHANGELOG_EOF"
           } >> "$GITHUB_OUTPUT"
 
-      # Tag is created here (after the commit) so it points at the version-bump commit.
+      # Only create and push the tag on real releases (main branch).
       - name: Create and push release tag
+        if: steps.bump.outputs.is_real_release == 'true'
         run: |
           TAG="${{ steps.bump.outputs.tag }}"
           git tag "$TAG"
@@ -192,8 +209,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # Check out the version-bump commit (not the pre-bump HEAD)
-          ref: ${{ needs.bump_version.outputs.tag }}
+          # On real releases check out the tagged version-bump commit.
+          # In dry-run mode no tag exists, so check out the branch HEAD.
+          ref: ${{ needs.bump_version.outputs.is_real_release == 'true' && needs.bump_version.outputs.tag || github.sha }}
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -263,10 +281,13 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # release — collect all three installers and publish a GitHub Release.
+  # Skipped entirely in dry-run mode (workflow_dispatch on non-main branches).
+  # Artifacts from dry-run builds are still accessible in the Actions run summary.
   # ---------------------------------------------------------------------------
   release:
     name: Publish GitHub Release
     needs: [bump_version, build]
+    if: needs.bump_version.outputs.is_real_release == 'true'
     runs-on: ubuntu-22.04
     permissions:
       contents: write
