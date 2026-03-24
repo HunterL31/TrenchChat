@@ -5,9 +5,9 @@ Layout:
   ┌─────────────────────────────────────────────┐
   │  [+] New Channel   [Settings]               │  ← toolbar
   ├──────────────┬──────────────────────────────┤
-  │              │  [Chat] [Network Map]         │  ← tabs
+  │              │  [Chat] [Network Map] [⚙ Interfaces] │  ← tabs
   │  Channel     ├──────────────────────────────┤
-  │  list        │   Message view / map canvas  │
+  │  list        │   Message view / map / iface │
   │              │                              │
   │  Online      ├──────────────────────────────┤
   │  users       │   Compose (chat tab only)    │
@@ -47,6 +47,7 @@ from trenchchat.gui.compose import ComposeWidget
 from trenchchat.gui.network_map import NetworkMapWidget, gather_network_data
 from trenchchat.gui.settings import SettingsDialog
 from trenchchat.gui.invite_dialogs import ChannelPermissionsDialog, InviteDialog, MembersDialog
+from trenchchat.gui.interfaces_widget import InterfacesWidget
 
 _STARTUP_SYNC_DELAY_MS = 3_000
 _PRESENCE_PRUNE_INTERVAL_MS = 30_000
@@ -461,6 +462,10 @@ class MainWindow(QMainWindow):
         map_tab_layout.addWidget(map_bar)
 
         self._tabs.addTab(map_tab, "⬡ Network Map")
+
+        # --- Interfaces tab ---
+        self._interfaces_widget = InterfacesWidget(self._rns)
+        self._tabs.addTab(self._interfaces_widget, "⚙ Interfaces")
 
         splitter.addWidget(self._tabs)
         splitter.setStretchFactor(0, 0)
@@ -974,11 +979,12 @@ class MainWindow(QMainWindow):
 
     _TAB_CHAT = 0
     _TAB_NETWORK_MAP = 1
+    _TAB_INTERFACES = 2
     _NETWORK_MAP_REFRESH_MS = 10_000
 
     @pyqtSlot(int)
     def _on_tab_changed(self, index: int) -> None:
-        """Start or stop the network map refresh timer based on active tab."""
+        """Start or stop refresh timers based on the active tab."""
         if self._network_map_timer is None:
             return
         if index == self._TAB_NETWORK_MAP:
@@ -988,6 +994,11 @@ class MainWindow(QMainWindow):
             self._network_map_timer.stop()
             if self._map_debounce_timer is not None:
                 self._map_debounce_timer.stop()
+
+        if index == self._TAB_INTERFACES:
+            self._interfaces_widget.start_refresh_timer()
+        else:
+            self._interfaces_widget.stop_refresh_timer()
 
     @pyqtSlot()
     def _on_map_refresh_clicked(self) -> None:
