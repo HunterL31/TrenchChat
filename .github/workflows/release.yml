@@ -1,0 +1,321 @@
+name: Build & Release
+
+# Trigger on every push to main (i.e. every merged PR).
+# Also triggerable manually from the GitHub Actions UI on any branch,
+# which is useful for testing the pipeline without merging to main.
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+# Prevent concurrent release runs on the same branch.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # test — run the full test suite before building anything.
+  # The build matrix only starts if this job succeeds.
+  # ---------------------------------------------------------------------------
+  test:
+    name: Run tests
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run test suite
+        run: python -m pytest tests/ -v
+
+  # ---------------------------------------------------------------------------
+  # bump_version — compute the next semver, write it to pyproject.toml,
+  # commit back to main, and collect the release changelog.
+  #
+  # Versioning rules:
+  #   - The previous version is read from the latest git tag (v*.*.*).
+  #   - If any commit message since that tag contains "[major]", bump major
+  #     and reset minor and patch to 0.
+  #   - Otherwise bump minor and reset patch to 0.
+  #   - The new version is written to pyproject.toml and committed to main
+  #     so the repo always reflects the released version.
+  #
+  # To trigger a major bump, include "[major]" anywhere in a commit message,
+  # e.g.:  "feat: redesign network layer [major]"
+  # ---------------------------------------------------------------------------
+  bump_version:
+    name: Bump version & collect changelog
+    runs-on: ubuntu-22.04
+    needs: test
+    permissions:
+      contents: write
+    outputs:
+      new_version: ${{ steps.bump.outputs.new_version }}
+      tag: ${{ steps.bump.outputs.tag }}
+      changelog: ${{ steps.bump.outputs.changelog }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Fetch full history and tags so we can read the previous release tag
+          # and collect all commits since it.
+          fetch-depth: 0
+
+      - name: Bump version, write pyproject.toml, collect changelog
+        id: bump
+        run: |
+          # --- Find the most recent vX.Y.Z tag ---
+          PREV_TAG=$(git tag --list 'v*.*.*' --sort=-version:refname | head -1)
+          if [ -z "$PREV_TAG" ]; then
+            # No tags yet — treat the current pyproject.toml version as the base
+            # and produce the first release without a "since" boundary.
+            PREV_VERSION=$(python3 - <<'EOF'
+          import tomllib
+          with open("pyproject.toml", "rb") as f:
+              print(tomllib.load(f)["project"]["version"])
+          EOF
+            )
+            PREV_TAG=""
+          else
+            PREV_VERSION="${PREV_TAG#v}"
+          fi
+
+          echo "Previous version: ${PREV_VERSION}"
+
+          # --- Parse major.minor.patch ---
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$PREV_VERSION"
+          MAJOR=${MAJOR:-0}
+          MINOR=${MINOR:-0}
+          PATCH=${PATCH:-0}
+
+          # --- Collect commits since the last tag ---
+          if [ -n "$PREV_TAG" ]; then
+            COMMITS=$(git log "${PREV_TAG}..HEAD" --pretty=format:"- %s (%h)" --no-merges)
+          else
+            COMMITS=$(git log --pretty=format:"- %s (%h)" --no-merges)
+          fi
+
+          # --- Decide bump type ---
+          # Any commit message containing "[major]" triggers a major bump.
+          if echo "$COMMITS" | grep -qi '\[major\]'; then
+            BUMP_TYPE="major"
+            NEW_MAJOR=$((MAJOR + 1))
+            NEW_MINOR=0
+            NEW_PATCH=0
+          else
+            BUMP_TYPE="minor"
+            NEW_MAJOR=$MAJOR
+            NEW_MINOR=$((MINOR + 1))
+            NEW_PATCH=0
+          fi
+
+          NEW_VERSION="${NEW_MAJOR}.${NEW_MINOR}.${NEW_PATCH}"
+          NEW_TAG="v${NEW_VERSION}"
+          echo "Bump type: ${BUMP_TYPE}  →  ${NEW_VERSION}"
+
+          # --- Write new version to pyproject.toml ---
+          python3 - <<EOF
+          import re, pathlib
+          path = pathlib.Path("pyproject.toml")
+          content = path.read_text()
+          content = re.sub(
+              r'^(version\s*=\s*")[^"]*(")',
+              r'\g<1>${NEW_VERSION}\g<2>',
+              content,
+              flags=re.MULTILINE,
+          )
+          path.write_text(content)
+          EOF
+
+          # --- Commit the version bump back to main ---
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add pyproject.toml
+          git commit -m "chore: release ${NEW_VERSION} [skip ci]"
+          git push origin main
+
+          # --- Build the changelog block ---
+          # Escape percent signs so GitHub Actions doesn't interpret them.
+          if [ -z "$COMMITS" ]; then
+            COMMITS="- No user-facing changes"
+          fi
+          CHANGELOG_ESCAPED=$(echo "$COMMITS" | sed 's/%/%25/g')
+
+          # Write multi-line output using the EOF delimiter syntax
+          {
+            echo "new_version=${NEW_VERSION}"
+            echo "tag=${NEW_TAG}"
+            echo "changelog<<CHANGELOG_EOF"
+            echo "$COMMITS"
+            echo "CHANGELOG_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      # Tag is created here (after the commit) so it points at the version-bump commit.
+      - name: Create and push release tag
+        run: |
+          TAG="${{ steps.bump.outputs.tag }}"
+          git tag "$TAG"
+          git push origin "$TAG"
+
+  # ---------------------------------------------------------------------------
+  # build — matrix across Windows / Ubuntu / macOS.
+  # Each runner: installs deps, freezes with PyInstaller, packages natively.
+  # ---------------------------------------------------------------------------
+  build:
+    name: Build (${{ matrix.os }})
+    needs: bump_version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            artifact_name: TrenchChat-Setup
+            artifact_ext: .exe
+          - os: ubuntu-22.04
+            artifact_name: trenchchat
+            artifact_ext: .deb
+          - os: macos-latest
+            artifact_name: TrenchChat
+            artifact_ext: -macos.dmg
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Check out the version-bump commit (not the pre-bump HEAD)
+          ref: ${{ needs.bump_version.outputs.tag }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt pyinstaller>=6.0
+
+      # ---- PyInstaller freeze ----
+      - name: Freeze application (PyInstaller)
+        run: pyinstaller trenchchat.spec
+
+      # ---- Windows: Inno Setup installer ----
+      - name: Build Windows installer (Inno Setup)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $version = "${{ needs.bump_version.outputs.new_version }}"
+          # Inno Setup is pre-installed on windows-latest runners
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          & $iscc /DAppVersion="$version" packaging\windows\trenchchat.iss
+          # Fallback: find whatever .exe was produced and rename it consistently
+          $exe = Get-ChildItem dist\installer\*.exe | Select-Object -First 1
+          if ($exe) { Copy-Item $exe.FullName "dist\TrenchChat-Setup-${version}.exe" }
+
+      # ---- Ubuntu: dpkg-deb package ----
+      - name: Build Debian package
+        if: runner.os == 'Linux'
+        run: |
+          VERSION="${{ needs.bump_version.outputs.new_version }}"
+          bash packaging/linux/build-deb.sh "$VERSION"
+
+      # ---- macOS: create-dmg disk image ----
+      - name: Install create-dmg
+        if: runner.os == 'macOS'
+        run: brew install create-dmg
+
+      - name: Build macOS disk image
+        if: runner.os == 'macOS'
+        run: |
+          VERSION="${{ needs.bump_version.outputs.new_version }}"
+          bash packaging/macos/build-dmg.sh "$VERSION"
+
+      # ---- Upload artifact for the release job ----
+      - name: Locate built artifact
+        id: find_artifact
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            ARTIFACT=$(find dist -name "TrenchChat-Setup-*.exe" | head -1)
+          elif [ "$RUNNER_OS" = "Linux" ]; then
+            ARTIFACT=$(find dist -name "trenchchat-*.deb" | head -1)
+          else
+            ARTIFACT=$(find dist -name "TrenchChat-*-macos.dmg" | head -1)
+          fi
+          echo "path=${ARTIFACT}" >> "$GITHUB_OUTPUT"
+          echo "Artifact: ${ARTIFACT}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: installer-${{ matrix.os }}
+          path: ${{ steps.find_artifact.outputs.path }}
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # release — collect all three installers and publish a GitHub Release.
+  # ---------------------------------------------------------------------------
+  release:
+    name: Publish GitHub Release
+    needs: [bump_version, build]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all installer artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: installer-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: List release assets
+        run: ls -lh release-assets/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.bump_version.outputs.tag }}
+          name: "TrenchChat ${{ needs.bump_version.outputs.new_version }}"
+          body: |
+            ## TrenchChat ${{ needs.bump_version.outputs.new_version }}
+
+            ### What's in this release
+
+            ${{ needs.bump_version.outputs.changelog }}
+
+            ---
+
+            ### Installation
+
+            | Platform | File | Notes |
+            |---|---|---|
+            | Windows | `TrenchChat-Setup-*.exe` | Run the installer; upgrades existing installs in-place |
+            | Ubuntu/Debian | `trenchchat-*.deb` | `sudo dpkg -i trenchchat-*.deb` |
+            | macOS | `TrenchChat-*-macos.dmg` | Open and drag TrenchChat.app to Applications |
+
+            ### User data
+
+            Your identity, channels, and message history in `~/.trenchchat/` are
+            preserved across upgrades on all platforms.
+
+            > **Note:** Binaries are not code-signed. Windows will show a SmartScreen
+            > warning; macOS will show an "unidentified developer" dialog. You can
+            > bypass these in your OS security settings.
+          files: release-assets/*
+          draft: false
+          prerelease: false
+          generate_release_notes: false
+          fail_on_unmatched_files: true

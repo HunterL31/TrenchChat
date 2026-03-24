@@ -1,0 +1,11 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=TrenchChat
+Comment=Decentralised encrypted mesh chat over Reticulum
+Exec=/opt/trenchchat/TrenchChat
+Icon=trenchchat
+Categories=Network;Chat;
+Terminal=false
+StartupNotify=true
+StartupWMClass=TrenchChat
