@@ -1,15 +1,17 @@
 name: Build & Release
 
-# Trigger on every push to main (i.e. every merged PR).
-# Also triggerable manually from the GitHub Actions UI on any branch,
-# which is useful for testing the pipeline without merging to main.
+# PR branches: run tests and produce a dry-run build so you can inspect
+# artifacts before merging.
+# main: run tests, bump version (tag only — no commit back), build, release.
 on:
   push:
     branches:
       - main
-  workflow_dispatch:
+  pull_request:
+    branches:
+      - main
 
-# Prevent concurrent release runs on the same branch.
+# Prevent concurrent runs on the same ref.
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: true
@@ -17,7 +19,6 @@ concurrency:
 jobs:
   # ---------------------------------------------------------------------------
   # test — run the full test suite before building anything.
-  # The build matrix only starts if this job succeeds.
   # ---------------------------------------------------------------------------
   test:
     name: Run tests
@@ -50,26 +51,21 @@ jobs:
         run: python -m pytest tests/ -v
 
   # ---------------------------------------------------------------------------
-  # bump_version — compute the next semver, write it to pyproject.toml,
-  # commit back to main, and collect the release changelog.
+  # bump_version — compute the next semver from git tags.
+  #
+  # On main (real release):
+  #   - Creates and pushes a vX.Y.Z tag. The tag is the sole source of truth
+  #     for the version — nothing is committed back to pyproject.toml.
+  #
+  # On a PR (dry-run):
+  #   - Computes the version but does NOT create a tag.
+  #   - Version string gets a "-pr-{number}" suffix.
+  #   - The release job is skipped entirely; artifacts are still uploaded.
   #
   # Versioning rules:
-  #   - The previous version is read from the latest git tag (v*.*.*).
-  #   - If any commit message since that tag contains "[major]", bump major
-  #     and reset minor and patch to 0.
+  #   - Previous version is read from the latest vX.Y.Z git tag.
+  #   - If any commit since that tag contains "[major]", bump major.
   #   - Otherwise bump minor and reset patch to 0.
-  #   - The new version is written to pyproject.toml and committed to main
-  #     so the repo always reflects the released version.
-  #
-  # To trigger a major bump, include "[major]" anywhere in a commit message,
-  # e.g.:  "feat: redesign network layer [major]"
-  #
-  # DRY-RUN MODE (workflow_dispatch on any non-main branch):
-  #   - Version is computed but NOT written back to pyproject.toml.
-  #   - No commit, no push, no tag is created.
-  #   - Version string gets a "-dry-run" suffix so it is clearly not a real release.
-  #   - Build artifacts are still produced and uploaded to the Actions run summary.
-  #   - The release job is skipped entirely.
   # ---------------------------------------------------------------------------
   bump_version:
     name: Bump version & collect changelog
@@ -86,8 +82,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # Fetch full history and tags so we can read the previous release tag
-          # and collect all commits since it.
           fetch-depth: 0
 
       - name: Set up Python
@@ -95,17 +89,14 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Bump version, write pyproject.toml, collect changelog
+      - name: Compute version and collect changelog
         id: bump
         run: |
-          IS_MAIN="${{ github.ref }}"
-          IS_MAIN=$([[ "$IS_MAIN" == "refs/heads/main" ]] && echo "true" || echo "false")
+          IS_MAIN=$([[ "${{ github.ref }}" == "refs/heads/main" ]] && echo "true" || echo "false")
 
           # --- Find the most recent vX.Y.Z tag ---
           PREV_TAG=$(git tag --list 'v*.*.*' --sort=-version:refname | head -1)
           if [ -z "$PREV_TAG" ]; then
-            # No tags yet — treat the current pyproject.toml version as the base
-            # and produce the first release without a "since" boundary.
             PREV_VERSION=$(python3 -c "import tomllib; f=open('pyproject.toml','rb'); print(tomllib.load(f)['project']['version'])")
             PREV_TAG=""
           else
@@ -114,7 +105,6 @@ jobs:
 
           echo "Previous version: ${PREV_VERSION}"
 
-          # --- Parse major.minor.patch ---
           IFS='.' read -r MAJOR MINOR PATCH <<< "$PREV_VERSION"
           MAJOR=${MAJOR:-0}
           MINOR=${MINOR:-0}
@@ -128,43 +118,30 @@ jobs:
           fi
 
           # --- Decide bump type ---
-          # Any commit message containing "[major]" triggers a major bump.
           if echo "$COMMITS" | grep -qi '\[major\]'; then
-            BUMP_TYPE="major"
-            NEW_MAJOR=$((MAJOR + 1))
-            NEW_MINOR=0
-            NEW_PATCH=0
+            NEW_MAJOR=$((MAJOR + 1)); NEW_MINOR=0; NEW_PATCH=0
           else
-            BUMP_TYPE="minor"
-            NEW_MAJOR=$MAJOR
-            NEW_MINOR=$((MINOR + 1))
-            NEW_PATCH=0
+            NEW_MAJOR=$MAJOR; NEW_MINOR=$((MINOR + 1)); NEW_PATCH=0
           fi
 
           NEW_VERSION="${NEW_MAJOR}.${NEW_MINOR}.${NEW_PATCH}"
           NEW_TAG="v${NEW_VERSION}"
-          echo "Bump type: ${BUMP_TYPE}  →  ${NEW_VERSION}"
 
           if [ "$IS_MAIN" = "true" ]; then
-            # --- REAL RELEASE: write version, commit, tag ---
-            python3 -c "import re, pathlib; path=pathlib.Path('pyproject.toml'); content=path.read_text(); content=re.sub(r'^(version\s*=\s*\")[^\"]*\"', r'\g<1>${NEW_VERSION}\"', content, flags=re.MULTILINE); path.write_text(content)"
-
+            echo "Real release: ${NEW_VERSION}"
             git config user.name  "github-actions[bot]"
             git config user.email "github-actions[bot]@users.noreply.github.com"
-            git add pyproject.toml
-            git commit -m "chore: release ${NEW_VERSION} [skip ci]"
-            git push origin main
-
+            git tag "$NEW_TAG"
+            git push origin "$NEW_TAG"
             echo "is_real_release=true" >> "$GITHUB_OUTPUT"
           else
-            # --- DRY-RUN: append suffix so it is clearly not a real release ---
-            NEW_VERSION="${NEW_VERSION}-dry-run"
+            PR_NUMBER="${{ github.event.pull_request.number }}"
+            NEW_VERSION="${NEW_VERSION}-pr-${PR_NUMBER}"
             NEW_TAG="v${NEW_VERSION}"
-            echo "DRY-RUN mode — no commit, no tag, no GitHub Release will be created."
+            echo "Dry-run: ${NEW_VERSION} (no tag created)"
             echo "is_real_release=false" >> "$GITHUB_OUTPUT"
           fi
 
-          # --- Build the changelog block ---
           if [ -z "$COMMITS" ]; then
             COMMITS="- No user-facing changes"
           fi
@@ -177,17 +154,8 @@ jobs:
             echo "CHANGELOG_EOF"
           } >> "$GITHUB_OUTPUT"
 
-      # Only create and push the tag on real releases (main branch).
-      - name: Create and push release tag
-        if: steps.bump.outputs.is_real_release == 'true'
-        run: |
-          TAG="${{ steps.bump.outputs.tag }}"
-          git tag "$TAG"
-          git push origin "$TAG"
-
   # ---------------------------------------------------------------------------
   # build — matrix across Windows / Ubuntu / macOS.
-  # Each runner: installs deps, freezes with PyInstaller, packages natively.
   # ---------------------------------------------------------------------------
   build:
     name: Build (${{ matrix.os }})
@@ -211,8 +179,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # On real releases check out the tagged version-bump commit.
-          # In dry-run mode no tag exists, so check out the branch HEAD.
+          # On real releases check out the tagged commit; on PRs use the HEAD.
           ref: ${{ needs.bump_version.outputs.is_real_release == 'true' && needs.bump_version.outputs.tag || github.sha }}
 
       - name: Set up Python
@@ -224,31 +191,25 @@ jobs:
       - name: Install Python dependencies
         run: pip install -r requirements.txt pyinstaller>=6.0
 
-      # ---- PyInstaller freeze ----
       - name: Freeze application (PyInstaller)
         run: pyinstaller trenchchat.spec
 
-      # ---- Windows: Inno Setup installer ----
       - name: Build Windows installer (Inno Setup)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           $version = "${{ needs.bump_version.outputs.new_version }}"
-          # Inno Setup is pre-installed on windows-latest runners
           $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
           & $iscc /DAppVersion="$version" packaging\windows\trenchchat.iss
-          # Fallback: find whatever .exe was produced and rename it consistently
           $exe = Get-ChildItem dist\installer\*.exe | Select-Object -First 1
           if ($exe) { Copy-Item $exe.FullName "dist\TrenchChat-Setup-${version}.exe" }
 
-      # ---- Ubuntu: dpkg-deb package ----
       - name: Build Debian package
         if: runner.os == 'Linux'
         run: |
           VERSION="${{ needs.bump_version.outputs.new_version }}"
           bash packaging/linux/build-deb.sh "$VERSION"
 
-      # ---- macOS: create-dmg disk image ----
       - name: Install create-dmg
         if: runner.os == 'macOS'
         run: brew install create-dmg
@@ -259,7 +220,6 @@ jobs:
           VERSION="${{ needs.bump_version.outputs.new_version }}"
           bash packaging/macos/build-dmg.sh "$VERSION"
 
-      # ---- Upload artifact for the release job ----
       - name: Locate built artifact
         id: find_artifact
         shell: bash
@@ -282,9 +242,8 @@ jobs:
           if-no-files-found: error
 
   # ---------------------------------------------------------------------------
-  # release — collect all three installers and publish a GitHub Release.
-  # Skipped entirely in dry-run mode (workflow_dispatch on non-main branches).
-  # Artifacts from dry-run builds are still accessible in the Actions run summary.
+  # release — publish a GitHub Release from the three built installers.
+  # Skipped entirely on PRs.
   # ---------------------------------------------------------------------------
   release:
     name: Publish GitHub Release
