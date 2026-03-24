@@ -9,7 +9,6 @@ Produces a onedir bundle in dist/TrenchChat/ that is then wrapped by the
 platform-specific installer (Inno Setup / dpkg-deb / create-dmg).
 """
 
-import os
 import sys
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
@@ -57,10 +56,6 @@ is_windows = sys.platform == "win32"
 is_macos = sys.platform == "darwin"
 
 icon_path = None
-if is_windows and os.path.exists("packaging/windows/trenchchat.ico"):
-    icon_path = "packaging/windows/trenchchat.ico"
-elif is_macos and os.path.exists("packaging/macos/trenchchat.icns"):
-    icon_path = "packaging/macos/trenchchat.icns"
 
 # No console window on GUI platforms; keep it on Linux for terminal users
 no_console = is_windows or is_macos
