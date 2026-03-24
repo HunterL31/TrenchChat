@@ -93,7 +93,8 @@ jobs:
       - name: Bump version, write pyproject.toml, collect changelog
         id: bump
         run: |
-          IS_MAIN=${{ github.ref == 'refs/heads/main' }}
+          IS_MAIN="${{ github.ref }}"
+          IS_MAIN=$([[ "$IS_MAIN" == "refs/heads/main" ]] && echo "true" || echo "false")
 
           # --- Find the most recent vX.Y.Z tag ---
           PREV_TAG=$(git tag --list 'v*.*.*' --sort=-version:refname | head -1)
