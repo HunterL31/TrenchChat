@@ -346,6 +346,16 @@ class Storage:
         )
         return row["display_name"] if row else None
 
+    def get_trenchchat_peer_identities(self) -> set[str]:
+        """Return the set of all identity hashes known to be TrenchChat users.
+
+        Includes every identity that appears in any channel's member list.
+        This is used to filter the network map to show only nodes that are
+        part of the TrenchChat network.
+        """
+        rows = self._fetchall("SELECT DISTINCT identity_hash FROM members")
+        return {row["identity_hash"] for row in rows}
+
     def get_display_name_for_identity(self, identity_hash: str) -> str | None:
         """Return the most recently stored display name for an identity across all channels.
 

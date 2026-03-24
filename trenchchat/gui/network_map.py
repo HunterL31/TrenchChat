@@ -194,11 +194,16 @@ def gather_network_data(rns: RNS.Reticulum, self_hex: str,
 
             if dest_hex not in nodes:
                 nodes[dest_hex] = {
-                    "id":    dest_hex,
-                    "label": _make_label(dest_hex, identity, kind, storage),
-                    "kind":  kind,
-                    "hops":  hops,
+                    "id":           dest_hex,
+                    "identity_hex": identity_hex,
+                    "label":        _make_label(dest_hex, identity, kind, storage),
+                    "kind":         kind,
+                    "hops":         hops,
                 }
+            elif identity_hex and nodes[dest_hex].get("identity_hex") is None:
+                # A later path-table entry resolved the identity — backfill it.
+                nodes[dest_hex]["identity_hex"] = identity_hex
+                nodes[dest_hex]["label"] = _make_label(dest_hex, identity, kind, storage)
             if identity_hex:
                 identity_to_node[identity_hex] = dest_hex
 
@@ -464,6 +469,8 @@ class NetworkMapWidget(QWidget):
         self._edges: list[dict] = []
         self._layout: _SpringLayout | None = None
         self._positions: dict[str, tuple[float, float]] = {}
+        # When not None, only peer/unknown nodes whose ID is in this set are shown.
+        self._peer_filter: set[str] | None = None
 
         # Pan / zoom state
         self._zoom = 1.0
@@ -492,6 +499,17 @@ class NetworkMapWidget(QWidget):
         self._self_hex = self_hex
         self.set_data(data.get("nodes", []), data.get("edges", []))
 
+    def set_peer_filter(self, peer_identity_hexes: set[str] | None) -> None:
+        """Restrict visible nodes to TrenchChat peers only.
+
+        When peer_identity_hexes is a set of identity hashes, only nodes whose
+        kind is 'self', 'interface', or 'transport' — plus peer/unknown nodes
+        whose identity_hex appears in peer_identity_hexes — are drawn.
+        Pass None to disable the filter and show all nodes.
+        """
+        self._peer_filter = peer_identity_hexes
+        self.update()
+
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -509,10 +527,41 @@ class NetworkMapWidget(QWidget):
 
         pos = self._positions
 
+        # When a peer filter is active, build the set of visible node IDs.
+        # Pass 1: always include self and interface nodes, plus peer/unknown
+        #         nodes whose identity_hex is in the filter set.
+        # Pass 2: include transport nodes only when they lie on a path to a
+        #         visible peer (i.e. they have an edge whose dst is already
+        #         visible). This keeps relay hops that connect our device to
+        #         a TrenchChat peer while hiding unrelated transport nodes.
+        if self._peer_filter is not None:
+            node_kind: dict[str, str] = {n["id"]: n.get("kind", "unknown")
+                                         for n in self._nodes}
+            visible_ids: set[str] | None = set()
+            # Pass 1: self, interfaces, and TrenchChat peers.
+            for node in self._nodes:
+                nid = node["id"]
+                kind = node.get("kind", "unknown")
+                if kind in ("self", "interface"):
+                    visible_ids.add(nid)
+                elif kind != "transport" and node.get("identity_hex") in self._peer_filter:
+                    visible_ids.add(nid)
+            # Pass 2: transport nodes that lie on a path to a visible node.
+            for edge in self._edges:
+                if (edge["dst"] in visible_ids
+                        and edge["src"] not in visible_ids
+                        and node_kind.get(edge["src"]) == "transport"):
+                    visible_ids.add(edge["src"])
+        else:
+            visible_ids = None  # no filter — all nodes visible
+
         # Draw edges — coloured by link quality tier
         for edge in self._edges:
             src, dst = edge["src"], edge["dst"]
             if src not in pos or dst not in pos:
+                continue
+            # Skip edges where either endpoint is filtered out
+            if visible_ids is not None and (src not in visible_ids or dst not in visible_ids):
                 continue
             sx, sy = pos[src]
             dx, dy = pos[dst]
@@ -553,6 +602,8 @@ class NetworkMapWidget(QWidget):
         for node in self._nodes:
             nid = node["id"]
             if nid not in pos:
+                continue
+            if visible_ids is not None and nid not in visible_ids:
                 continue
             nx, ny = pos[nid]
             kind = node.get("kind", "unknown")
