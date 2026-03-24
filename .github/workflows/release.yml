@@ -31,6 +31,16 @@ jobs:
           python-version: "3.12"
           cache: "pip"
 
+      - name: Install Qt system dependencies
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y --no-install-recommends \
+            libegl1 \
+            libxcb-cursor0 \
+            libxcb1 \
+            libx11-6 \
+            libgl1
+
       - name: Install dependencies
         run: pip install -r requirements.txt
 
