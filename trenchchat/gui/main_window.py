@@ -5,9 +5,9 @@ Layout:
   ┌─────────────────────────────────────────────┐
   │  [+] New Channel   [Settings]               │  ← toolbar
   ├──────────────┬──────────────────────────────┤
-  │              │  [Chat] [Network Map]         │  ← tabs
+  │              │  [Chat] [Network Map] [⚙ Interfaces] │  ← tabs
   │  Channel     ├──────────────────────────────┤
-  │  list        │   Message view / map canvas  │
+  │  list        │   Message view / map / iface │
   │              │                              │
   │  Online      ├──────────────────────────────┤
   │  users       │   Compose (chat tab only)    │
@@ -22,7 +22,7 @@ from PyQt6.QtWidgets import (
     QLabel, QDialog, QFormLayout, QLineEdit, QComboBox,
     QDialogButtonBox, QMessageBox, QStackedWidget, QMenu,
     QPushButton, QFrame, QTableWidget, QTableWidgetItem, QHeaderView,
-    QAbstractItemView, QSizePolicy, QTabWidget,
+    QAbstractItemView, QSizePolicy, QTabWidget, QCheckBox,
 )
 from PyQt6.QtCore import Qt, pyqtSlot, QPoint, pyqtSignal, QTimer, QSettings
 from PyQt6.QtGui import QAction, QColor, QFont
@@ -47,6 +47,7 @@ from trenchchat.gui.compose import ComposeWidget
 from trenchchat.gui.network_map import NetworkMapWidget, gather_network_data
 from trenchchat.gui.settings import SettingsDialog
 from trenchchat.gui.invite_dialogs import ChannelPermissionsDialog, InviteDialog, MembersDialog
+from trenchchat.gui.interfaces_widget import InterfacesWidget
 
 _STARTUP_SYNC_DELAY_MS = 3_000
 _PRESENCE_PRUNE_INTERVAL_MS = 30_000
@@ -448,6 +449,20 @@ class MainWindow(QMainWindow):
         map_legend.setStyleSheet("color: #888; font-size: 11px; background: transparent;")
         map_bar_layout.addWidget(map_legend, 1)
 
+        self._map_tc_only_check = QCheckBox("TrenchChat Network only")
+        self._map_tc_only_check.setStyleSheet(
+            "QCheckBox { color: #aaa; font-size: 11px; background: transparent; }"
+            "QCheckBox::indicator { width: 13px; height: 13px; }"
+        )
+        self._map_tc_only_check.setToolTip(
+            "When checked, only nodes that have been seen on the TrenchChat network "
+            "(peers from your channels) are shown. Interface and transport nodes are "
+            "always visible."
+        )
+        self._map_tc_only_check.toggled.connect(self._on_map_tc_only_toggled)
+        self._map_tc_only_check.setChecked(True)
+        map_bar_layout.addWidget(self._map_tc_only_check)
+
         self._map_refresh_btn = QPushButton("↻ Refresh")
         self._map_refresh_btn.setFixedWidth(80)
         self._map_refresh_btn.setStyleSheet(
@@ -461,6 +476,10 @@ class MainWindow(QMainWindow):
         map_tab_layout.addWidget(map_bar)
 
         self._tabs.addTab(map_tab, "⬡ Network Map")
+
+        # --- Interfaces tab ---
+        self._interfaces_widget = InterfacesWidget(self._rns)
+        self._tabs.addTab(self._interfaces_widget, "⚙ Interfaces")
 
         splitter.addWidget(self._tabs)
         splitter.setStretchFactor(0, 0)
@@ -974,11 +993,12 @@ class MainWindow(QMainWindow):
 
     _TAB_CHAT = 0
     _TAB_NETWORK_MAP = 1
+    _TAB_INTERFACES = 2
     _NETWORK_MAP_REFRESH_MS = 10_000
 
     @pyqtSlot(int)
     def _on_tab_changed(self, index: int) -> None:
-        """Start or stop the network map refresh timer based on active tab."""
+        """Start or stop refresh timers based on the active tab."""
         if self._network_map_timer is None:
             return
         if index == self._TAB_NETWORK_MAP:
@@ -988,6 +1008,11 @@ class MainWindow(QMainWindow):
             self._network_map_timer.stop()
             if self._map_debounce_timer is not None:
                 self._map_debounce_timer.stop()
+
+        if index == self._TAB_INTERFACES:
+            self._interfaces_widget.start_refresh_timer()
+        else:
+            self._interfaces_widget.stop_refresh_timer()
 
     @pyqtSlot()
     def _on_map_refresh_clicked(self) -> None:
@@ -999,6 +1024,16 @@ class MainWindow(QMainWindow):
             self._map_refresh_btn.setEnabled(True),
             self._map_refresh_btn.setText("↻ Refresh"),
         ))
+
+    @pyqtSlot(bool)
+    def _on_map_tc_only_toggled(self, checked: bool) -> None:
+        """Apply or remove the TrenchChat-peers-only filter on the network map."""
+        if checked:
+            self._network_map_widget.set_peer_filter(
+                self._storage.get_trenchchat_peer_identities()
+            )
+        else:
+            self._network_map_widget.set_peer_filter(None)
 
     # Delay between the last announce and the resulting map refresh.
     # Long enough for RNS to populate path-table entries after a burst of
@@ -1025,6 +1060,11 @@ class MainWindow(QMainWindow):
         """Fetch current network topology and push it to the map widget."""
         data = gather_network_data(self._rns, self._identity.hash_hex, self._storage)
         self._network_map_widget.set_data(data["nodes"], data["edges"])
+        # Keep the peer filter up to date if it is currently active.
+        if self._map_tc_only_check.isChecked():
+            self._network_map_widget.set_peer_filter(
+                self._storage.get_trenchchat_peer_identities()
+            )
 
     # --- settings ---
 

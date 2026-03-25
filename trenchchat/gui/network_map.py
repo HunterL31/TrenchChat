@@ -35,7 +35,7 @@ from trenchchat.core.link_quality import LinkQuality, score_path
 
 from PyQt6.QtCore import Qt, QTimer, QRectF, QPointF
 from PyQt6.QtGui import (
-    QPainter, QPen, QBrush, QColor, QFont, QPainterPath,
+    QPainter, QPen, QBrush, QColor, QFont, QFontMetrics, QPainterPath,
     QWheelEvent, QMouseEvent,
 )
 from PyQt6.QtWidgets import (
@@ -46,11 +46,13 @@ from PyQt6.QtWidgets import (
 # --- constants ---
 
 _AUTO_REFRESH_MS   = 10_000   # 10 s
-_LAYOUT_ITERATIONS = 80       # spring-layout steps per refresh
-_REPULSION         = 8_000.0  # node-node repulsion constant
-_ATTRACTION        = 0.04     # edge spring constant
-_DAMPING           = 0.85     # velocity damping per step
-_MIN_EDGE_LEN      = 120.0    # natural edge length (pixels)
+_LAYOUT_ITERATIONS    = 80       # spring-layout steps per refresh
+_REPULSION_BASE       = 8_000.0  # base node-node repulsion constant (scaled by node count)
+_ATTRACTION           = 0.04     # edge spring constant
+_DAMPING              = 0.85     # velocity damping per step
+_MIN_EDGE_LEN_BASE    = 120.0    # base natural edge length (pixels, scaled by node count)
+_MIN_EDGE_LEN_MAX     = 350.0    # cap on scaled edge length
+_LAYOUT_MARGIN        = 60       # initial placement margin (px); no boundary clamp during layout
 
 # Node colours
 _COL_SELF      = QColor("#f5c518")   # yellow — this device
@@ -194,11 +196,16 @@ def gather_network_data(rns: RNS.Reticulum, self_hex: str,
 
             if dest_hex not in nodes:
                 nodes[dest_hex] = {
-                    "id":    dest_hex,
-                    "label": _make_label(dest_hex, identity, kind, storage),
-                    "kind":  kind,
-                    "hops":  hops,
+                    "id":           dest_hex,
+                    "identity_hex": identity_hex,
+                    "label":        _make_label(dest_hex, identity, kind, storage),
+                    "kind":         kind,
+                    "hops":         hops,
                 }
+            elif identity_hex and nodes[dest_hex].get("identity_hex") is None:
+                # A later path-table entry resolved the identity — backfill it.
+                nodes[dest_hex]["identity_hex"] = identity_hex
+                nodes[dest_hex]["label"] = _make_label(dest_hex, identity, kind, storage)
             if identity_hex:
                 identity_to_node[identity_hex] = dest_hex
 
@@ -378,16 +385,27 @@ def _make_label(hex_id: str, identity, kind: str, storage=None) -> str:
 # ---------------------------------------------------------------------------
 
 class _SpringLayout:
-    """Fruchterman-Reingold spring layout for a set of nodes."""
+    """Fruchterman-Reingold spring layout for a set of nodes.
 
-    def __init__(self, node_ids: list[str], width: float, height: float):
+    Repulsion and minimum edge length are scaled by the caller based on node
+    count so the layout spreads proportionally for dense graphs.  There is no
+    hard boundary clamp — the auto-fit zoom in NetworkMapWidget handles viewport
+    fitting, so nodes are free to occupy whatever space the forces require.
+    """
+
+    def __init__(self, node_ids: list[str], width: float, height: float,
+                 repulsion: float = _REPULSION_BASE,
+                 min_edge_len: float = _MIN_EDGE_LEN_BASE):
         self._ids = node_ids
+        self._repulsion = repulsion
+        self._min_edge_len = min_edge_len
         self._pos: dict[str, list[float]] = {}
         self._vel: dict[str, list[float]] = {}
         cx, cy = width / 2, height / 2
+        spread = max(min(width, height) * 0.4, min_edge_len * len(node_ids) ** 0.5 / 4)
         for nid in node_ids:
             angle = random.uniform(0, 2 * math.pi)
-            r = random.uniform(50, min(width, height) * 0.35)
+            r = random.uniform(_LAYOUT_MARGIN, spread)
             self._pos[nid] = [cx + r * math.cos(angle), cy + r * math.sin(angle)]
             self._vel[nid] = [0.0, 0.0]
 
@@ -398,6 +416,7 @@ class _SpringLayout:
 
     def step(self, edges: list[dict], width: float, height: float,
              iterations: int = 1) -> None:
+        """Advance the layout by the given number of integration steps."""
         for _ in range(iterations):
             forces: dict[str, list[float]] = {nid: [0.0, 0.0] for nid in self._ids}
 
@@ -410,7 +429,7 @@ class _SpringLayout:
                     dy = self._pos[a][1] - self._pos[b][1]
                     dist2 = dx * dx + dy * dy + 0.01
                     dist = math.sqrt(dist2)
-                    f = _REPULSION / dist2
+                    f = self._repulsion / dist2
                     fx, fy = f * dx / dist, f * dy / dist
                     forces[a][0] += fx
                     forces[a][1] += fy
@@ -425,22 +444,20 @@ class _SpringLayout:
                 dx = self._pos[dst][0] - self._pos[src][0]
                 dy = self._pos[dst][1] - self._pos[src][1]
                 dist = math.sqrt(dx * dx + dy * dy) + 0.01
-                f = _ATTRACTION * (dist - _MIN_EDGE_LEN)
+                f = _ATTRACTION * (dist - self._min_edge_len)
                 fx, fy = f * dx / dist, f * dy / dist
                 forces[src][0] += fx
                 forces[src][1] += fy
                 forces[dst][0] -= fx
                 forces[dst][1] -= fy
 
-            # Integrate
+            # Integrate — no boundary clamp; auto-fit zoom handles viewport
             for nid in self._ids:
                 vx = (self._vel[nid][0] + forces[nid][0]) * _DAMPING
                 vy = (self._vel[nid][1] + forces[nid][1]) * _DAMPING
                 self._vel[nid] = [vx, vy]
-                self._pos[nid][0] = max(30, min(width - 30,
-                                                self._pos[nid][0] + vx))
-                self._pos[nid][1] = max(30, min(height - 30,
-                                                self._pos[nid][1] + vy))
+                self._pos[nid][0] += vx
+                self._pos[nid][1] += vy
 
     def positions(self) -> dict[str, tuple[float, float]]:
         return {nid: (p[0], p[1]) for nid, p in self._pos.items()}
@@ -464,33 +481,91 @@ class NetworkMapWidget(QWidget):
         self._edges: list[dict] = []
         self._layout: _SpringLayout | None = None
         self._positions: dict[str, tuple[float, float]] = {}
+        # When not None, only peer/unknown nodes whose ID is in this set are shown.
+        self._peer_filter: set[str] | None = None
 
         # Pan / zoom state
         self._zoom = 1.0
         self._offset = QPointF(0, 0)
         self._drag_start: QPointF | None = None
         self._drag_offset_start: QPointF | None = None
+        # True once the first auto-fit has been applied; subsequent refreshes
+        # leave the user's zoom/pan untouched.
+        self._fitted = False
 
     def set_data(self, nodes: list[dict], edges: list[dict]) -> None:
         """Update topology data and rebuild the layout."""
         node_ids = [n["id"] for n in nodes]
         w, h = float(self.width() or 600), float(self.height() or 400)
 
-        if self._layout is None or set(node_ids) != set(self._positions.keys()):
-            self._layout = _SpringLayout(node_ids, w, h)
+        n = max(len(node_ids), 1)
+        repulsion = _REPULSION_BASE * (1.0 + n / 15.0)
+        min_edge_len = min(_MIN_EDGE_LEN_BASE + n * 4.0, _MIN_EDGE_LEN_MAX)
+
+        is_new_layout = self._layout is None or set(node_ids) != set(self._positions.keys())
+        if is_new_layout:
+            self._layout = _SpringLayout(node_ids, w, h,
+                                         repulsion=repulsion,
+                                         min_edge_len=min_edge_len)
             if self._self_hex in node_ids:
                 self._layout.pin(self._self_hex, w / 2, h / 2)
+            self._fitted = False
+        else:
+            # Update scaling if node count changed significantly
+            self._layout._repulsion = repulsion
+            self._layout._min_edge_len = min_edge_len
 
         self._layout.step(edges, w, h, iterations=_LAYOUT_ITERATIONS)
         self._positions = self._layout.positions()
         self._nodes = nodes
         self._edges = edges
+        if not self._fitted:
+            self._auto_fit()
+            self._fitted = True
         self.update()
 
     def load_data(self, data: dict, self_hex: str) -> None:
         """Load new topology data from a raw data dict (used by NetworkMapDialog)."""
         self._self_hex = self_hex
         self.set_data(data.get("nodes", []), data.get("edges", []))
+
+    def set_peer_filter(self, peer_identity_hexes: set[str] | None) -> None:
+        """Restrict visible nodes to TrenchChat peers only.
+
+        When peer_identity_hexes is a set of identity hashes, only nodes whose
+        kind is 'self', 'interface', or 'transport' — plus peer/unknown nodes
+        whose identity_hex appears in peer_identity_hexes — are drawn.
+        Pass None to disable the filter and show all nodes.
+        """
+        self._peer_filter = peer_identity_hexes
+        self.update()
+
+    def _auto_fit(self) -> None:
+        """Adjust zoom and pan so all nodes fit within the visible viewport.
+
+        Called automatically after each layout step in set_data.  The user can
+        still pan and zoom freely after the fit is applied.
+        """
+        if not self._positions:
+            return
+        xs = [p[0] for p in self._positions.values()]
+        ys = [p[1] for p in self._positions.values()]
+        min_x, max_x = min(xs), max(xs)
+        min_y, max_y = min(ys), max(ys)
+        graph_w = max(max_x - min_x, 1.0)
+        graph_h = max(max_y - min_y, 1.0)
+        pad = 80
+        w = self.width() or 600
+        h = self.height() or 400
+        zoom_x = (w - pad * 2) / graph_w
+        zoom_y = (h - pad * 2) / graph_h
+        self._zoom = max(0.2, min(2.0, min(zoom_x, zoom_y)))
+        cx = (min_x + max_x) / 2
+        cy = (min_y + max_y) / 2
+        self._offset = QPointF(
+            w / 2 - cx * self._zoom,
+            h / 2 - cy * self._zoom,
+        )
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -509,10 +584,41 @@ class NetworkMapWidget(QWidget):
 
         pos = self._positions
 
+        # When a peer filter is active, build the set of visible node IDs.
+        # Pass 1: always include self and interface nodes, plus peer/unknown
+        #         nodes whose identity_hex is in the filter set.
+        # Pass 2: include transport nodes only when they lie on a path to a
+        #         visible peer (i.e. they have an edge whose dst is already
+        #         visible). This keeps relay hops that connect our device to
+        #         a TrenchChat peer while hiding unrelated transport nodes.
+        if self._peer_filter is not None:
+            node_kind: dict[str, str] = {n["id"]: n.get("kind", "unknown")
+                                         for n in self._nodes}
+            visible_ids: set[str] | None = set()
+            # Pass 1: self, interfaces, and TrenchChat peers.
+            for node in self._nodes:
+                nid = node["id"]
+                kind = node.get("kind", "unknown")
+                if kind in ("self", "interface"):
+                    visible_ids.add(nid)
+                elif kind != "transport" and node.get("identity_hex") in self._peer_filter:
+                    visible_ids.add(nid)
+            # Pass 2: transport nodes that lie on a path to a visible node.
+            for edge in self._edges:
+                if (edge["dst"] in visible_ids
+                        and edge["src"] not in visible_ids
+                        and node_kind.get(edge["src"]) == "transport"):
+                    visible_ids.add(edge["src"])
+        else:
+            visible_ids = None  # no filter — all nodes visible
+
         # Draw edges — coloured by link quality tier
         for edge in self._edges:
             src, dst = edge["src"], edge["dst"]
             if src not in pos or dst not in pos:
+                continue
+            # Skip edges where either endpoint is filtered out
+            if visible_ids is not None and (src not in visible_ids or dst not in visible_ids):
                 continue
             sx, sy = pos[src]
             dx, dy = pos[dst]
@@ -550,9 +656,14 @@ class NetworkMapWidget(QWidget):
 
         # Draw nodes
         font_label = QFont("monospace", 8)
+        fm = QFontMetrics(font_label)
+        _label_max_w = 160   # hard cap to prevent very long labels from overlapping
+        _label_h = 28
         for node in self._nodes:
             nid = node["id"]
             if nid not in pos:
+                continue
+            if visible_ids is not None and nid not in visible_ids:
                 continue
             nx, ny = pos[nid]
             kind = node.get("kind", "unknown")
@@ -580,14 +691,14 @@ class NetworkMapWidget(QWidget):
             else:
                 painter.drawEllipse(QRectF(nx - r, ny - r, r * 2, r * 2))
 
-            # Label below node — wide enough for long interface names
+            # Label below node — width fitted to the actual text, capped at _label_max_w
             painter.setFont(font_label)
             painter.setPen(QPen(_COL_LABEL))
             label = node.get("label", nid[:8])
-            label_w = 180
-            label_h = 28
+            text_w = min(fm.horizontalAdvance(label) + 8, _label_max_w)
+            label_w = max(text_w, r * 2)
             painter.drawText(
-                QRectF(nx - label_w / 2, ny + r + 3, label_w, label_h),
+                QRectF(nx - label_w / 2, ny + r + 3, label_w, _label_h),
                 Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop
                 | Qt.TextFlag.TextWordWrap,
                 label,

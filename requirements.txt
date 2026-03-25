@@ -2,6 +2,7 @@ rns
 lxmf
 PyQt6
 msgpack
+configobj
 
 # Development / testing
 pytest>=7.0

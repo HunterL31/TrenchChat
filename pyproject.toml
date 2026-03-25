@@ -11,6 +11,7 @@ dependencies = [
     "lxmf",
     "PyQt6",
     "msgpack",
+    "configobj",
 ]
 
 [project.gui-scripts]
