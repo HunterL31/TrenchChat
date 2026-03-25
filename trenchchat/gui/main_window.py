@@ -460,6 +460,7 @@ class MainWindow(QMainWindow):
             "always visible."
         )
         self._map_tc_only_check.toggled.connect(self._on_map_tc_only_toggled)
+        self._map_tc_only_check.setChecked(True)
         map_bar_layout.addWidget(self._map_tc_only_check)
 
         self._map_refresh_btn = QPushButton("↻ Refresh")

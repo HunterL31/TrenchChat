@@ -6,6 +6,7 @@ real Reticulum stack is needed.  Only the pure data-gathering function
 gather_network_data() is tested here — no Qt widgets are instantiated.
 """
 
+import math
 from unittest.mock import MagicMock, patch
 
 from trenchchat.gui.network_map import gather_network_data, _fmt_bytes
@@ -297,3 +298,51 @@ def test_fmt_bytes_kb():
 
 def test_fmt_bytes_mb():
     assert "MB" in _fmt_bytes(2 * 1024 * 1024)
+
+
+# ---------------------------------------------------------------------------
+# Dense graph — layout separation
+# ---------------------------------------------------------------------------
+
+def test_dense_graph_nodes_do_not_overlap():
+    """30 direct peers connected to a single interface should not overlap.
+
+    After the spring layout settles, every pair of nodes must be at least
+    one node-diameter apart (using the peer radius as the minimum unit).
+    This verifies that the adaptive repulsion/edge-length scaling keeps the
+    graph readable with many connections.
+    """
+    from trenchchat.gui.network_map import _SpringLayout, _REPULSION_BASE, _MIN_EDGE_LEN_BASE, _MIN_EDGE_LEN_MAX
+
+    num_peers = 30
+    iface_id = "__iface__TestHub"
+    self_id = "aa" * 16
+    peer_ids = [f"{i:02x}" * 16 for i in range(1, num_peers + 1)]
+
+    node_ids = [self_id, iface_id] + peer_ids
+    n = len(node_ids)
+    repulsion = _REPULSION_BASE * (1.0 + n / 15.0)
+    min_edge_len = min(_MIN_EDGE_LEN_BASE + n * 4.0, _MIN_EDGE_LEN_MAX)
+
+    edges = (
+        [{"src": self_id, "dst": iface_id}]
+        + [{"src": iface_id, "dst": pid} for pid in peer_ids]
+    )
+
+    layout = _SpringLayout(node_ids, 800.0, 600.0,
+                           repulsion=repulsion, min_edge_len=min_edge_len)
+    layout.pin(self_id, 400.0, 300.0)
+    layout.step(edges, 800.0, 600.0, iterations=200)
+    positions = layout.positions()
+
+    min_separation = 9 * 2  # _NODE_R_PEER * 2 — nodes must not visually overlap
+    ids = list(positions.keys())
+    for i in range(len(ids)):
+        for j in range(i + 1, len(ids)):
+            ax, ay = positions[ids[i]]
+            bx, by = positions[ids[j]]
+            dist = math.sqrt((ax - bx) ** 2 + (ay - by) ** 2)
+            assert dist >= min_separation, (
+                f"Nodes {ids[i][:8]} and {ids[j][:8]} overlap: "
+                f"distance {dist:.1f} < {min_separation}"
+            )
