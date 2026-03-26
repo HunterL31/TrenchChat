@@ -505,8 +505,11 @@ class InviteManager:
                               admin_hash: bytes) -> bool:
         if time.time() > expiry:
             return False
-        admin_delivery_hash = RNS.Destination.hash(admin_hash, "lxmf", "delivery")
-        admin_identity = RNS.Identity.recall(admin_delivery_hash)
+        if admin_hash == self._identity.hash:
+            admin_identity = self._identity.rns_identity
+        else:
+            admin_delivery_hash = RNS.Destination.hash(admin_hash, "lxmf", "delivery")
+            admin_identity = RNS.Identity.recall(admin_delivery_hash)
         if admin_identity is None:
             RNS.log(f"TrenchChat [invite]: cannot verify token — admin identity "
                     f"{admin_hash.hex()[:12]}… not known", RNS.LOG_WARNING)

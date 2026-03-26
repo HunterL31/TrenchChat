@@ -7,6 +7,7 @@ flow, expired tokens, and member list versioning/tiebreak rules.
 
 import time
 import struct
+from unittest.mock import patch
 
 import pytest
 
@@ -68,6 +69,45 @@ class TestInviteTokens:
 
         assert not alice.storage.is_member(ch_hash, bob.identity.hash_hex), \
             "Expired token was incorrectly accepted"
+
+    def test_join_request_accepted_when_admin_identity_not_in_rns_recall(
+        self, peer_factory
+    ):
+        """
+        Regression: _verify_invite_token must not fail when the admin is the
+        local node itself.
+
+        RNS.Identity.recall() only returns identities learned from the network;
+        it never returns the local identity.  Before this fix, an admin handling
+        their own join request would get None from recall() and log
+        "identity not known, path requested" — causing the invite to be silently
+        dropped even though both peers were connected.
+        """
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+
+        ch_hash = alice.channel_mgr.create_channel("self-admin-test", "", "invite")
+
+        token, expiry = alice.invite_mgr.generate_invite_token(
+            ch_hash, bob.identity.hash, ttl=3600
+        )
+
+        fields = {
+            0x10: "join_request",
+            0x01: bytes.fromhex(ch_hash),
+            0x11: token,
+            0x12: bob.identity.hash,
+            0x13: expiry,
+            0x14: alice.identity.hash,
+        }
+
+        # Patch RNS.Identity.recall to always return None, simulating a fresh
+        # install where the local identity is not in the recall cache.
+        with patch("RNS.Identity.recall", return_value=None):
+            alice.invite_mgr._handle_join_request(fields, ch_hash)
+
+        assert alice.storage.is_member(ch_hash, bob.identity.hash_hex), \
+            "Join request was rejected even though the admin is the local node"
 
 
 class TestInviteFlow:
