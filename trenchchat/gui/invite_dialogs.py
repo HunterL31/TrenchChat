@@ -11,7 +11,7 @@ from PyQt6.QtWidgets import (
     QLabel, QLineEdit, QPushButton, QListWidget, QListWidgetItem,
     QDialogButtonBox, QMessageBox, QWidget, QCheckBox,
 )
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QFont
 
 from trenchchat.core.permissions import (
@@ -114,10 +114,25 @@ class InviteDialog(QDialog):
 
         self._populate_list("")
 
+        # Refresh the list every 5 seconds so newly discovered peers appear
+        # without the user having to close and reopen the dialog.
+        self._refresh_timer = QTimer(self)
+        self._refresh_timer.timeout.connect(self._on_refresh_tick)
+        self._refresh_timer.start(5_000)
+
     # --- private helpers ---
 
     def _populate_list(self, query: str) -> None:
-        """Refresh the user list for the given search query."""
+        """Refresh the user list for the given search query.
+
+        Preserves the current selection by identity hash so that a periodic
+        refresh does not discard the user's chosen item.
+        """
+        selected_hex = None
+        current = self._user_list.currentItem()
+        if current is not None:
+            selected_hex = current.data(Qt.ItemDataRole.UserRole)
+
         self._user_list.clear()
         entries = self._user_directory.search(query)
         for entry in entries:
@@ -127,8 +142,15 @@ class InviteDialog(QDialog):
             item = QListWidgetItem(label)
             item.setData(Qt.ItemDataRole.UserRole, peer_hex)
             self._user_list.addItem(item)
+            if peer_hex == selected_hex:
+                self._user_list.setCurrentItem(item)
+
         has_entries = self._user_list.count() > 0
         self._no_peers_hint.setVisible(not has_entries and not query)
+
+    def _on_refresh_tick(self) -> None:
+        """Periodic refresh: repopulate the list without disturbing the search text."""
+        self._populate_list(self._search_edit.text())
 
     def _update_ok_button(self) -> None:
         """Enable OK if a list item is selected or a valid hash is typed manually."""

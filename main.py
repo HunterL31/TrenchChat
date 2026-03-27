@@ -39,7 +39,8 @@ from trenchchat.gui.main_window import MainWindow
 from trenchchat.gui.pin_dialog import UnlockDialog
 
 _REANNOUNCE_INTERVAL_MS = 60_000
-_STARTUP_ANNOUNCE_DELAY_MS = 10_000
+_STARTUP_ANNOUNCE_DELAY_MS_FAST = 3_000
+_STARTUP_ANNOUNCE_DELAY_MS_SLOW = 10_000
 
 
 def main():
@@ -131,8 +132,11 @@ def main():
     reannounce_timer.timeout.connect(_reannounce)
     reannounce_timer.start(_REANNOUNCE_INTERVAL_MS)
 
-    # Extra early announce to catch interfaces that come up late
-    QTimer.singleShot(_STARTUP_ANNOUNCE_DELAY_MS, _reannounce)
+    # Two deferred re-announces to catch interfaces that come up late.
+    # The fast one (3s) covers most TCP interfaces; the slow one (10s) covers
+    # slower or congested links that take longer to establish.
+    QTimer.singleShot(_STARTUP_ANNOUNCE_DELAY_MS_FAST, _reannounce)
+    QTimer.singleShot(_STARTUP_ANNOUNCE_DELAY_MS_SLOW, _reannounce)
 
     window = MainWindow(
         config=config,

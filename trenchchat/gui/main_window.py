@@ -33,7 +33,7 @@ from trenchchat.core.permissions import (
     INVITE, KICK, MANAGE_CHANNEL, MANAGE_ROLES, SEND_MESSAGE, PRESETS, PRESET_PRIVATE,
     is_discoverable, is_open_join, permissions_from_json,
 )
-from trenchchat.core.presence import PresenceManager
+from trenchchat.core.presence import PresenceManager, resolve_display_name
 from trenchchat.core.storage import Storage
 from trenchchat.core.channel import ChannelManager
 from trenchchat.core.messaging import Messaging
@@ -263,11 +263,19 @@ class MainWindow(QMainWindow):
         # Also mark a peer as seen when any of their channel announces arrive.
         # trenchchat.channel announces fire once per owned channel per announce
         # cycle, so they are a reliable additional presence signal.
+        # We also seed the user directory from channel announces: any peer that
+        # announces a trenchchat.channel destination is definitively a TrenchChat
+        # user, so we can add them without waiting for a trenchchat.user announce.
         def _on_channel_announce(destination_hash: bytes,
                                  announced_identity: "RNS.Identity",
                                  metadata: dict) -> None:
             if announced_identity is not None:
-                self._presence_mgr.record_seen(announced_identity.hash.hex())
+                peer_hex = announced_identity.hash.hex()
+                self._presence_mgr.record_seen(peer_hex)
+                display_name = resolve_display_name(
+                    peer_hex, self._identity.hash_hex, self._storage, self._config
+                )
+                self._user_directory.record_user(peer_hex, display_name)
             self._peer_announced.emit()
 
         from trenchchat.network.announce import ChannelAnnounceHandler
