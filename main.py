@@ -34,6 +34,7 @@ from trenchchat.core.subscription import SubscriptionManager
 from trenchchat.core.invite import InviteManager
 from trenchchat.core.user_directory import UserDirectory
 from trenchchat.network.router import Router
+from trenchchat.network.announce import UserAnnounceHandler
 from trenchchat.gui.main_window import MainWindow
 from trenchchat.gui.pin_dialog import UnlockDialog
 
@@ -97,6 +98,14 @@ def main():
     invite_mgr = InviteManager(identity, storage, router)
     presence_mgr = PresenceManager(identity.hash_hex, config)
     user_directory = UserDirectory(identity.hash_hex)
+
+    # Register the user announce handler before any announces go out so we
+    # never miss a trenchchat.user announce from a peer that is already online.
+    def _on_user_announced(peer_hex: str, display_name: str) -> None:
+        user_directory.record_user(peer_hex, display_name)
+        presence_mgr.record_seen(peer_hex)
+
+    RNS.Transport.register_announce_handler(UserAnnounceHandler(_on_user_announced))
 
     # Restore RNS destinations for channels we own
     channel_mgr.restore_owned_channels()

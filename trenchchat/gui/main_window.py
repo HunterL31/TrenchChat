@@ -42,7 +42,7 @@ from trenchchat.core.invite import InviteManager
 from trenchchat.core.sync import SyncManager
 from trenchchat.core.user_directory import UserDirectory
 from trenchchat.network.router import Router
-from trenchchat.network.announce import PeerAnnounceHandler, UserAnnounceHandler
+from trenchchat.network.announce import PeerAnnounceHandler
 from trenchchat.gui.channel_view import ChannelView
 from trenchchat.gui.compose import ComposeWidget
 from trenchchat.gui.network_map import NetworkMapWidget, gather_network_data
@@ -258,14 +258,6 @@ class MainWindow(QMainWindow):
 
         RNS.Transport.register_announce_handler(
             PeerAnnounceHandler(_on_peer_appeared)
-        )
-
-        def _on_user_announced(peer_hex: str, display_name: str) -> None:
-            self._user_directory.record_user(peer_hex, display_name)
-            self._presence_mgr.record_seen(peer_hex)
-
-        RNS.Transport.register_announce_handler(
-            UserAnnounceHandler(_on_user_announced)
         )
 
         # Also mark a peer as seen when any of their channel announces arrive.
