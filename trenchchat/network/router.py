@@ -135,21 +135,29 @@ class Router:
 
     # --- announce ---
 
-    def announce(self):
-        """Announce our LXMF delivery destination."""
-        self._router.announce(self._delivery_dest.hash)
+    def announce(self, attached_interface=None) -> None:
+        """Announce our LXMF delivery destination.
 
-    def announce_user(self) -> None:
+        If attached_interface is given the announce is sent only on that
+        interface; otherwise it is broadcast on all interfaces.
+        """
+        self._router.announce(self._delivery_dest.hash,
+                              attached_interface=attached_interface)
+
+    def announce_user(self, attached_interface=None) -> None:
         """Announce our trenchchat.user destination with the current display name.
 
         This allows other TrenchChat instances to identify us as a TrenchChat
         peer and add us to their user directory for discovery and invite lookup.
+        If attached_interface is given the announce is sent only on that
+        interface; otherwise it is broadcast on all interfaces.
         """
         app_data = msgpack.packb(
             {"name": self._config.display_name or ""},
             use_bin_type=True,
         )
-        self._user_dest.announce(app_data=app_data)
+        self._user_dest.announce(app_data=app_data,
+                                 attached_interface=attached_interface)
 
     @property
     def lxmf_router(self) -> LXMF.LXMRouter:

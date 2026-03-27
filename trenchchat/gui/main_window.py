@@ -52,6 +52,7 @@ from trenchchat.gui.interfaces_widget import InterfacesWidget
 
 _STARTUP_SYNC_DELAY_MS = 3_000
 _PRESENCE_PRUNE_INTERVAL_MS = 30_000
+_ANNOUNCE_DEBOUNCE_MS = 2_000
 
 
 class NewChannelDialog(QDialog):
@@ -251,10 +252,12 @@ class MainWindow(QMainWindow):
             identity, storage, router, messaging, subscription_mgr, invite_mgr
         )
 
-        def _on_peer_appeared(peer_hex: str) -> None:
+        def _on_peer_appeared(peer_hex: str, iface) -> None:
             self._sync_mgr.on_peer_appeared(peer_hex)
             self._presence_mgr.record_seen(peer_hex)
             self._peer_announced.emit()
+            self._pending_reannounce_iface = iface
+            self._reannounce_debounce_timer.start(_ANNOUNCE_DEBOUNCE_MS)
 
         RNS.Transport.register_announce_handler(
             PeerAnnounceHandler(_on_peer_appeared)
@@ -268,7 +271,8 @@ class MainWindow(QMainWindow):
         # user, so we can add them without waiting for a trenchchat.user announce.
         def _on_channel_announce(destination_hash: bytes,
                                  announced_identity: "RNS.Identity",
-                                 metadata: dict) -> None:
+                                 metadata: dict,
+                                 iface) -> None:
             if announced_identity is not None:
                 peer_hex = announced_identity.hash.hex()
                 self._presence_mgr.record_seen(peer_hex)
@@ -277,6 +281,8 @@ class MainWindow(QMainWindow):
                 )
                 self._user_directory.record_user(peer_hex, display_name)
             self._peer_announced.emit()
+            self._pending_reannounce_iface = iface
+            self._reannounce_debounce_timer.start(_ANNOUNCE_DEBOUNCE_MS)
 
         from trenchchat.network.announce import ChannelAnnounceHandler
         RNS.Transport.register_announce_handler(
@@ -314,6 +320,18 @@ class MainWindow(QMainWindow):
         self._map_debounce_timer = QTimer(self)
         self._map_debounce_timer.setSingleShot(True)
         self._map_debounce_timer.timeout.connect(self._refresh_network_map_if_visible)
+
+        # Debounce timer for announce-triggered re-announces.  When we receive
+        # any trenchchat announce it means the network path is live, so we
+        # re-announce ourselves on the same interface.  Debounced so a burst of
+        # channel announces from one peer only triggers a single re-announce.
+        # _pending_reannounce_iface holds the most recently seen interface; if
+        # multiple interfaces fire before the debounce expires we fall back to
+        # None (broadcast) since we can't target both simultaneously.
+        self._pending_reannounce_iface = None
+        self._reannounce_debounce_timer = QTimer(self)
+        self._reannounce_debounce_timer.setSingleShot(True)
+        self._reannounce_debounce_timer.timeout.connect(self._on_reannounce_debounced)
 
         self._refresh_channel_list()
         self._restore_channel_selection()
@@ -961,6 +979,30 @@ class MainWindow(QMainWindow):
         self._presence_mgr.prune()
         self._user_directory.prune()
         self._refresh_online_panel()
+
+    def _on_reannounce_debounced(self) -> None:
+        """Re-announce after receiving a trenchchat announce from a peer.
+
+        Receiving any trenchchat announce means the network path to the hub is
+        live.  Re-announcing on the same interface ensures the peer hears us
+        even if our startup announce was sent before the interface was ready,
+        without spamming unrelated interfaces.
+        """
+        iface = self._pending_reannounce_iface
+        self._pending_reannounce_iface = None
+        self._router.announce(attached_interface=iface)
+        self._router.announce_user(attached_interface=iface)
+        self._channel_mgr.announce_all_owned(attached_interface=iface)
+        if iface is not None:
+            RNS.log(
+                f"TrenchChat: re-announced on {iface} after peer announce",
+                RNS.LOG_DEBUG,
+            )
+        else:
+            RNS.log(
+                "TrenchChat: re-announced on all interfaces after peer announce",
+                RNS.LOG_DEBUG,
+            )
 
     # --- incoming invite ---
 

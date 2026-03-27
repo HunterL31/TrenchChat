@@ -39,8 +39,8 @@ from trenchchat.gui.main_window import MainWindow
 from trenchchat.gui.pin_dialog import UnlockDialog
 
 _REANNOUNCE_INTERVAL_MS = 60_000
-_STARTUP_ANNOUNCE_DELAY_MS_FAST = 3_000
-_STARTUP_ANNOUNCE_DELAY_MS_SLOW = 10_000
+_INTERFACE_POLL_INTERVAL_MS = 500
+_INTERFACE_POLL_TIMEOUT_MS = 30_000
 
 
 def main():
@@ -102,7 +102,7 @@ def main():
 
     # Register the user announce handler before any announces go out so we
     # never miss a trenchchat.user announce from a peer that is already online.
-    def _on_user_announced(peer_hex: str, display_name: str) -> None:
+    def _on_user_announced(peer_hex: str, display_name: str, iface) -> None:
         user_directory.record_user(peer_hex, display_name)
         presence_mgr.record_seen(peer_hex)
 
@@ -122,21 +122,55 @@ def main():
     # Re-announce every minute so newly connected peers can discover us.
     # Also fires a second announce shortly after startup in case the TCP
     # interface to the hub wasn't ready when the first announce fired.
-    def _reannounce():
-        router.announce()
-        router.announce_user()
-        channel_mgr.announce_all_owned()
-        RNS.log("TrenchChat: re-announced delivery destination and channels", RNS.LOG_DEBUG)
+    def _reannounce(attached_interface=None):
+        """Announce on all interfaces (periodic) or a specific one (triggered)."""
+        router.announce(attached_interface=attached_interface)
+        router.announce_user(attached_interface=attached_interface)
+        channel_mgr.announce_all_owned(attached_interface=attached_interface)
+        if attached_interface is not None:
+            RNS.log(
+                f"TrenchChat: re-announced on {attached_interface}",
+                RNS.LOG_DEBUG,
+            )
+        else:
+            RNS.log("TrenchChat: re-announced on all interfaces", RNS.LOG_DEBUG)
 
     reannounce_timer = QTimer()
     reannounce_timer.timeout.connect(_reannounce)
     reannounce_timer.start(_REANNOUNCE_INTERVAL_MS)
 
-    # Two deferred re-announces to catch interfaces that come up late.
-    # The fast one (3s) covers most TCP interfaces; the slow one (10s) covers
-    # slower or congested links that take longer to establish.
-    QTimer.singleShot(_STARTUP_ANNOUNCE_DELAY_MS_FAST, _reannounce)
-    QTimer.singleShot(_STARTUP_ANNOUNCE_DELAY_MS_SLOW, _reannounce)
+    # Poll for the first interface to come online, then re-announce on it
+    # immediately.  This replaces blind startup timers: we announce as soon as
+    # the network is actually ready rather than guessing at a fixed delay.
+    # The poller stops itself once an online interface is found or after a
+    # timeout, at which point it falls back to a broadcast announce.
+    _interface_poll_elapsed = [0]
+    _seen_interfaces: set = set()
+
+    def _poll_for_interface():
+        _interface_poll_elapsed[0] += _INTERFACE_POLL_INTERVAL_MS
+        for iface in RNS.Transport.interfaces:
+            if getattr(iface, "online", False) and iface not in _seen_interfaces:
+                _seen_interfaces.add(iface)
+                RNS.log(
+                    f"TrenchChat: interface {iface} online, announcing on it",
+                    RNS.LOG_DEBUG,
+                )
+                _reannounce(attached_interface=iface)
+
+        if _seen_interfaces:
+            _interface_poll_timer.stop()
+        elif _interface_poll_elapsed[0] >= _INTERFACE_POLL_TIMEOUT_MS:
+            RNS.log(
+                "TrenchChat: interface poll timed out, announcing on all interfaces",
+                RNS.LOG_WARNING,
+            )
+            _interface_poll_timer.stop()
+            _reannounce()
+
+    _interface_poll_timer = QTimer()
+    _interface_poll_timer.timeout.connect(_poll_for_interface)
+    _interface_poll_timer.start(_INTERFACE_POLL_INTERVAL_MS)
 
     window = MainWindow(
         config=config,
