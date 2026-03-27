@@ -199,6 +199,7 @@ class MainWindow(QMainWindow):
     _member_list_updated  = pyqtSignal(str)         # channel_hash_hex
     _presence_changed     = pyqtSignal(str, bool)   # peer_hex, is_online
     _peer_announced       = pyqtSignal()            # any announce → maybe refresh map
+    _reannounce_requested = pyqtSignal(object)      # iface or None → start debounce timer
 
     def __init__(self, config: Config, identity: Identity, storage: Storage,
                  rns: "RNS.Reticulum", router: Router, channel_mgr: ChannelManager,
@@ -256,8 +257,7 @@ class MainWindow(QMainWindow):
             self._sync_mgr.on_peer_appeared(peer_hex)
             self._presence_mgr.record_seen(peer_hex)
             self._peer_announced.emit()
-            self._pending_reannounce_iface = iface
-            self._reannounce_debounce_timer.start(_ANNOUNCE_DEBOUNCE_MS)
+            self._reannounce_requested.emit(iface)
 
         RNS.Transport.register_announce_handler(
             PeerAnnounceHandler(_on_peer_appeared)
@@ -281,8 +281,7 @@ class MainWindow(QMainWindow):
                 )
                 self._user_directory.record_user(peer_hex, display_name)
             self._peer_announced.emit()
-            self._pending_reannounce_iface = iface
-            self._reannounce_debounce_timer.start(_ANNOUNCE_DEBOUNCE_MS)
+            self._reannounce_requested.emit(iface)
 
         from trenchchat.network.announce import ChannelAnnounceHandler
         RNS.Transport.register_announce_handler(
@@ -332,6 +331,7 @@ class MainWindow(QMainWindow):
         self._reannounce_debounce_timer = QTimer(self)
         self._reannounce_debounce_timer.setSingleShot(True)
         self._reannounce_debounce_timer.timeout.connect(self._on_reannounce_debounced)
+        self._reannounce_requested.connect(self._on_reannounce_requested)
 
         self._refresh_channel_list()
         self._restore_channel_selection()
@@ -405,7 +405,7 @@ class MainWindow(QMainWindow):
         self._online_panel_expanded = True
         self._online_header = QLabel("  ▾ Online")
         self._online_header.setStyleSheet(
-            "font-weight: bold; padding: 6px 4px 4px 4px; color: #aaa; cursor: pointer;"
+            "font-weight: bold; padding: 6px 4px 4px 4px; color: #aaa;"
         )
         self._online_header.setCursor(Qt.CursorShape.PointingHandCursor)
         self._online_header.mousePressEvent = self._on_online_header_clicked
@@ -980,6 +980,23 @@ class MainWindow(QMainWindow):
         self._user_directory.prune()
         self._refresh_online_panel()
 
+    def _on_reannounce_requested(self, iface) -> None:
+        """Slot called on the main thread when an announce is received.
+
+        Updates the pending interface and (re)starts the debounce timer.  If
+        two different interfaces fire before the timer expires we fall back to
+        None (broadcast) since we can't target both simultaneously.
+        """
+        if self._reannounce_debounce_timer.isActive():
+            # Second (or later) trigger within the debounce window — if the
+            # interface differs from what we already have, clear it so we
+            # broadcast rather than pick one arbitrarily.
+            if iface is not self._pending_reannounce_iface:
+                self._pending_reannounce_iface = None
+        else:
+            self._pending_reannounce_iface = iface
+        self._reannounce_debounce_timer.start(_ANNOUNCE_DEBOUNCE_MS)
+
     def _on_reannounce_debounced(self) -> None:
         """Re-announce after receiving a trenchchat announce from a peer.
 
@@ -988,8 +1005,7 @@ class MainWindow(QMainWindow):
         even if our startup announce was sent before the interface was ready,
         without spamming unrelated interfaces.
         """
-        iface = self._pending_reannounce_iface
-        self._pending_reannounce_iface = None
+        iface, self._pending_reannounce_iface = self._pending_reannounce_iface, None
         self._router.announce(attached_interface=iface)
         self._router.announce_user(attached_interface=iface)
         self._channel_mgr.announce_all_owned(attached_interface=iface)
