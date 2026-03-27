@@ -11,50 +11,17 @@ when loading an existing one, so that installations predating this change
 are hardened automatically on next launch.
 """
 
-import os
-import stat
-from pathlib import Path
-
 import RNS
 import msgpack
 
 from trenchchat import APP_NAME
 from trenchchat.config import Config, DATA_DIR
+from trenchchat.core.fileutils import secure_file
 
 # The aspect used to derive TrenchChat's stable delivery destination.
 _DELIVERY_ASPECT = "delivery"
 
 _IDENTITY_PATH = DATA_DIR / "identity"
-
-# Owner read+write only — no group or other access.
-_IDENTITY_FILE_MODE = 0o600
-
-
-def _secure_identity_file(path: Path) -> None:
-    """Enforce owner-only permissions on the identity file.
-
-    On POSIX systems (Linux, macOS) this sets mode 0o600.  On Windows the
-    POSIX chmod call is a no-op for group/other bits, so we additionally
-    strip the read-only ACL entries using the standard ``stat`` module
-    approach that works without third-party dependencies.  If the platform
-    does not support the operation we log a warning and continue — a
-    permission failure must never prevent the application from starting.
-    """
-    try:
-        if os.name == "nt":
-            # On Windows, remove the read-only flag and rely on the user's
-            # home-directory ACL for broader protection.  A full ACL
-            # manipulation would require pywin32 which is not a declared
-            # dependency; the chmod below at least removes the read-only bit.
-            current = os.stat(path).st_mode
-            os.chmod(path, current | stat.S_IWRITE)
-        else:
-            os.chmod(path, _IDENTITY_FILE_MODE)
-    except OSError as e:
-        RNS.log(
-            f"TrenchChat: could not set permissions on identity file {path}: {e}",
-            RNS.LOG_WARNING,
-        )
 
 
 class Identity:
@@ -65,11 +32,11 @@ class Identity:
         if path.exists():
             self._identity: RNS.Identity = RNS.Identity.from_file(str(path))
             # Harden existing installations that predate permission enforcement.
-            _secure_identity_file(path)
+            secure_file(path)
         else:
             self._identity = RNS.Identity()
             self._identity.to_file(str(path))
-            _secure_identity_file(path)
+            secure_file(path)
         self._destination: RNS.Destination = RNS.Destination(
             self._identity,
             RNS.Destination.IN,

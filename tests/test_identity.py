@@ -16,7 +16,8 @@ import pytest
 import RNS
 
 from trenchchat.config import Config
-from trenchchat.core.identity import Identity, _IDENTITY_FILE_MODE, _secure_identity_file
+from trenchchat.core.fileutils import OWNER_RW_MODE, secure_file
+from trenchchat.core.identity import Identity
 
 
 # ---------------------------------------------------------------------------
@@ -43,9 +44,9 @@ class TestSecureIdentityFile:
         # Start with permissive mode to confirm it gets tightened.
         os.chmod(f, 0o644)
 
-        _secure_identity_file(f)
+        secure_file(f)
 
-        assert _posix_mode(f) == _IDENTITY_FILE_MODE
+        assert _posix_mode(f) == OWNER_RW_MODE
 
     def test_tightens_world_readable_existing_file(self, tmp_path):
         """An existing world-readable identity file is locked down."""
@@ -56,12 +57,12 @@ class TestSecureIdentityFile:
         f.write_bytes(b"\x00" * 64)
         os.chmod(f, 0o755)
 
-        _secure_identity_file(f)
+        secure_file(f)
 
-        assert _posix_mode(f) == _IDENTITY_FILE_MODE
+        assert _posix_mode(f) == OWNER_RW_MODE
 
     def test_already_correct_mode_is_idempotent(self, tmp_path):
-        """Calling _secure_identity_file on a file already at 0o600 is a no-op."""
+        """Calling secure_file on a file already at 0o600 is a no-op."""
         if os.name == "nt":
             pytest.skip("POSIX permission test not applicable on Windows")
 
@@ -69,9 +70,9 @@ class TestSecureIdentityFile:
         f.write_bytes(b"\x00" * 64)
         os.chmod(f, 0o600)
 
-        _secure_identity_file(f)
+        secure_file(f)
 
-        assert _posix_mode(f) == _IDENTITY_FILE_MODE
+        assert _posix_mode(f) == OWNER_RW_MODE
 
     def test_oserror_is_logged_not_raised(self, tmp_path):
         """A permission failure must not propagate — it is logged as a warning."""
@@ -80,7 +81,7 @@ class TestSecureIdentityFile:
 
         with patch("os.chmod", side_effect=OSError("permission denied")):
             # Must not raise.
-            _secure_identity_file(f)
+            secure_file(f)
 
 
 # ---------------------------------------------------------------------------
@@ -100,7 +101,7 @@ class TestIdentityFilePermissions:
         Identity(config, identity_path=identity_path)
 
         assert identity_path.exists()
-        assert _posix_mode(identity_path) == _IDENTITY_FILE_MODE
+        assert _posix_mode(identity_path) == OWNER_RW_MODE
 
     def test_existing_permissive_identity_file_is_hardened(self, rns_instance, tmp_path):
         """An existing identity file with loose permissions is tightened on load.
@@ -122,6 +123,6 @@ class TestIdentityFilePermissions:
         os.chmod(identity_path, 0o644)
         assert _posix_mode(identity_path) == 0o644
 
-        # _secure_identity_file is the function called by Identity.__init__ on load.
-        _secure_identity_file(identity_path)
-        assert _posix_mode(identity_path) == _IDENTITY_FILE_MODE
+        # secure_file is the function called by Identity.__init__ on load.
+        secure_file(identity_path)
+        assert _posix_mode(identity_path) == OWNER_RW_MODE

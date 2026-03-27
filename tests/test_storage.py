@@ -5,11 +5,14 @@ These tests exercise the database layer directly with no networking.
 Each test gets its own in-memory SQLite database via a tmp_path fixture.
 """
 
+import os
+import stat
 import time
 from pathlib import Path
 
 import pytest
 
+from trenchchat.core.fileutils import OWNER_RW_MODE
 from trenchchat.core.storage import Storage
 
 
@@ -315,3 +318,63 @@ class TestMissedDeliveries:
         ids = db.get_missed_message_ids("ch01", "bob")
         assert "old_msg" not in ids
         assert "new_msg" in ids
+
+
+# ---------------------------------------------------------------------------
+# File permissions
+# ---------------------------------------------------------------------------
+
+class TestDatabaseFilePermissions:
+    def test_new_db_file_is_owner_only(self, tmp_path):
+        """A freshly created database file must have owner-only permissions."""
+        if os.name == "nt":
+            pytest.skip("POSIX permission test not applicable on Windows")
+
+        db_path = tmp_path / "storage.db"
+        s = Storage(db_path=db_path)
+        s.close()
+
+        mode = stat.S_IMODE(os.stat(db_path).st_mode)
+        assert mode == OWNER_RW_MODE
+
+    def test_existing_permissive_db_file_is_hardened(self, tmp_path):
+        """An existing DB file with loose permissions is tightened on open."""
+        if os.name == "nt":
+            pytest.skip("POSIX permission test not applicable on Windows")
+
+        db_path = tmp_path / "storage.db"
+
+        # Create with default permissions first.
+        s = Storage(db_path=db_path)
+        s.close()
+
+        # Loosen them to simulate a pre-existing installation.
+        os.chmod(db_path, 0o644)
+        assert stat.S_IMODE(os.stat(db_path).st_mode) == 0o644
+
+        # Re-opening must harden the file.
+        s2 = Storage(db_path=db_path)
+        s2.close()
+        assert stat.S_IMODE(os.stat(db_path).st_mode) == OWNER_RW_MODE
+
+    def test_wal_sidecar_is_secured_if_present(self, tmp_path):
+        """The -wal sidecar file is also locked down when it exists."""
+        if os.name == "nt":
+            pytest.skip("POSIX permission test not applicable on Windows")
+
+        db_path = tmp_path / "storage.db"
+        wal_path = tmp_path / "storage.db-wal"
+
+        s = Storage(db_path=db_path)
+        # Force a checkpoint so WAL is flushed and sidecar exists.
+        s._conn.execute("PRAGMA wal_checkpoint(FULL)")
+        s.close()
+
+        if not wal_path.exists():
+            pytest.skip("WAL sidecar not present after checkpoint on this platform")
+
+        os.chmod(wal_path, 0o644)
+
+        s2 = Storage(db_path=db_path)
+        s2.close()
+        assert stat.S_IMODE(os.stat(wal_path).st_mode) == OWNER_RW_MODE

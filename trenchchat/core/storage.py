@@ -6,6 +6,7 @@ from pathlib import Path
 from contextlib import contextmanager
 
 from trenchchat.config import DATA_DIR
+from trenchchat.core.fileutils import secure_file
 from trenchchat.core.permissions import (
     PRESET_OPEN, PRESET_PRIVATE, ROLE_ADMIN, ROLE_MEMBER, ROLE_OWNER,
     has_permission as _check_permission,
@@ -90,12 +91,31 @@ class Storage:
         self._conn.executescript(SCHEMA)
         self._conn.commit()
         self._migrate_permissions()
+        self._secure_db_files()
         # Serialise all connection use across threads.  SQLite's Python
         # binding shares a single connection object; concurrent execute/commit/
         # rollback calls from different threads corrupt cursor state even with
         # check_same_thread=False.  An RLock (reentrant) is used so that a
         # single thread can re-enter (e.g. _tx → insert → _tx).
         self._lock = threading.RLock()
+
+    # ------------------------------------------------------------------
+    # File permission hardening
+    # ------------------------------------------------------------------
+
+    def _secure_db_files(self) -> None:
+        """Enforce owner-only permissions on the database file and its WAL sidecars.
+
+        SQLite in WAL mode creates two sidecar files alongside the main database
+        (<db>-wal and <db>-shm).  All three files contain sensitive data and must
+        be restricted to the owner.  Sidecars are only secured if they already
+        exist; absent sidecars are left for SQLite to create with the OS umask
+        (they will be re-secured on the next application launch).
+        """
+        db = Path(self._path)
+        for candidate in (db, db.parent / (db.name + "-wal"), db.parent / (db.name + "-shm")):
+            if candidate.exists():
+                secure_file(candidate)
 
     # ------------------------------------------------------------------
     # Schema migration from access_mode/is_admin to permissions/role
