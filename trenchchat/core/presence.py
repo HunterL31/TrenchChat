@@ -18,6 +18,53 @@ import msgpack
 PRESENCE_TIMEOUT_SECS = 180
 
 
+def resolve_display_name(identity_hex: str, self_hex: str, storage, config=None) -> str:
+    """Return the best available display name for a peer identity.
+
+    Resolution order:
+      1. Members table (any channel) -- name from a published member list
+      2. LXMF announce app_data -- name the peer broadcasts in their announce
+      3. Identity hash prefix -- consistent fallback used across the UI
+    """
+    if identity_hex == self_hex:
+        name = (config.display_name if config else None)
+        return name or identity_hex[:12] + "\u2026"
+
+    # 1. Storage lookup across all channels
+    try:
+        stored = storage.get_display_name_for_identity(identity_hex)
+        if stored:
+            return stored
+    except Exception:
+        pass
+
+    # 2. LXMF announce app_data -- packed as [display_name_bytes, stamp_cost]
+    try:
+        identity_bytes = bytes.fromhex(identity_hex)
+        # recall() needs a delivery destination hash, not a raw identity hash
+        delivery_hash = RNS.Destination.hash_from_name_and_identity(
+            "lxmf.delivery", identity_bytes
+        )
+        raw = RNS.Identity.recall_app_data(delivery_hash)
+        if raw:
+            parsed = msgpack.unpackb(raw, raw=False)
+            if isinstance(parsed, list) and len(parsed) >= 1:
+                name = parsed[0]
+            elif isinstance(parsed, dict):
+                name = parsed.get("display_name") or parsed.get("name")
+            else:
+                name = None
+            if isinstance(name, bytes):
+                name = name.decode(errors="replace")
+            if name:
+                return str(name)
+    except Exception:
+        pass
+
+    # 3. Hash prefix fallback
+    return identity_hex[:12] + "\u2026"
+
+
 class PresenceManager:
     """Tracks peer online/offline status based on LXMF delivery announces."""
 
@@ -121,50 +168,8 @@ class PresenceManager:
     # --- private helpers ---
 
     def _resolve_display_name(self, identity_hex: str, storage) -> str:
-        """Return the best available display name for a peer identity.
-
-        Resolution order:
-          1. Members table (any channel) — name from a published member list
-          2. LXMF announce app_data — name the peer broadcasts in their announce
-          3. Identity hash prefix — consistent fallback used across the UI
-        """
-        if identity_hex == self._self_hex:
-            name = (self._config.display_name if self._config else None)
-            return name or identity_hex[:12] + "…"
-
-        # 1. Storage lookup across all channels
-        try:
-            stored = storage.get_display_name_for_identity(identity_hex)
-            if stored:
-                return stored
-        except Exception:
-            pass
-
-        # 2. LXMF announce app_data — packed as [display_name_bytes, stamp_cost]
-        try:
-            identity_bytes = bytes.fromhex(identity_hex)
-            # recall() needs a delivery destination hash, not a raw identity hash
-            delivery_hash = RNS.Destination.hash_from_name_and_identity(
-                "lxmf.delivery", identity_bytes
-            )
-            raw = RNS.Identity.recall_app_data(delivery_hash)
-            if raw:
-                parsed = msgpack.unpackb(raw, raw=False)
-                if isinstance(parsed, list) and len(parsed) >= 1:
-                    name = parsed[0]
-                elif isinstance(parsed, dict):
-                    name = parsed.get("display_name") or parsed.get("name")
-                else:
-                    name = None
-                if isinstance(name, bytes):
-                    name = name.decode(errors="replace")
-                if name:
-                    return str(name)
-        except Exception:
-            pass
-
-        # 3. Hash prefix fallback
-        return identity_hex[:12] + "…"
+        """Return the best available display name for a peer identity."""
+        return resolve_display_name(identity_hex, self._self_hex, storage, self._config)
 
     def prune(self) -> None:
         """Remove stale entries and fire callbacks for peers that went offline."""

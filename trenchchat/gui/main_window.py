@@ -40,8 +40,9 @@ from trenchchat.core.messaging import Messaging
 from trenchchat.core.subscription import SubscriptionManager
 from trenchchat.core.invite import InviteManager
 from trenchchat.core.sync import SyncManager
+from trenchchat.core.user_directory import UserDirectory
 from trenchchat.network.router import Router
-from trenchchat.network.announce import PeerAnnounceHandler
+from trenchchat.network.announce import PeerAnnounceHandler, UserAnnounceHandler
 from trenchchat.gui.channel_view import ChannelView
 from trenchchat.gui.compose import ComposeWidget
 from trenchchat.gui.network_map import NetworkMapWidget, gather_network_data
@@ -201,7 +202,8 @@ class MainWindow(QMainWindow):
     def __init__(self, config: Config, identity: Identity, storage: Storage,
                  rns: "RNS.Reticulum", router: Router, channel_mgr: ChannelManager,
                  messaging: Messaging, subscription_mgr: SubscriptionManager,
-                 invite_mgr: InviteManager, presence_mgr: PresenceManager):
+                 invite_mgr: InviteManager, presence_mgr: PresenceManager,
+                 user_directory: UserDirectory):
         super().__init__()
         self._config = config
         self._identity = identity
@@ -213,6 +215,7 @@ class MainWindow(QMainWindow):
         self._subscription_mgr = subscription_mgr
         self._invite_mgr = invite_mgr
         self._presence_mgr = presence_mgr
+        self._user_directory = user_directory
 
         # Pending invites: list of (channel_hash_hex, channel_name, token, expiry, admin_hash_hex)
         self._pending_invites: list[tuple] = []
@@ -255,6 +258,14 @@ class MainWindow(QMainWindow):
 
         RNS.Transport.register_announce_handler(
             PeerAnnounceHandler(_on_peer_appeared)
+        )
+
+        def _on_user_announced(peer_hex: str, display_name: str) -> None:
+            self._user_directory.record_user(peer_hex, display_name)
+            self._presence_mgr.record_seen(peer_hex)
+
+        RNS.Transport.register_announce_handler(
+            UserAnnounceHandler(_on_user_announced)
         )
 
         # Also mark a peer as seen when any of their channel announces arrive.
@@ -830,7 +841,7 @@ class MainWindow(QMainWindow):
         menu.exec(self._channel_list_widget.mapToGlobal(pos))
 
     def _on_invite_member(self, channel_hash: str, channel_name: str):
-        dlg = InviteDialog(channel_name, self)
+        dlg = InviteDialog(channel_name, self._user_directory, self._storage, self)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
         invitee_hex = dlg.invitee_hash
@@ -946,8 +957,9 @@ class MainWindow(QMainWindow):
         self._refresh_online_panel()
 
     def _on_presence_tick(self) -> None:
-        """Periodic timer: prune stale presence entries and refresh the panel."""
+        """Periodic timer: prune stale presence and user directory entries, refresh the panel."""
         self._presence_mgr.prune()
+        self._user_directory.prune()
         self._refresh_online_panel()
 
     # --- incoming invite ---

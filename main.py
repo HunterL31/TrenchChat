@@ -32,6 +32,7 @@ from trenchchat.core.messaging import Messaging
 from trenchchat.core.presence import PresenceManager
 from trenchchat.core.subscription import SubscriptionManager
 from trenchchat.core.invite import InviteManager
+from trenchchat.core.user_directory import UserDirectory
 from trenchchat.network.router import Router
 from trenchchat.gui.main_window import MainWindow
 from trenchchat.gui.pin_dialog import UnlockDialog
@@ -95,12 +96,14 @@ def main():
     subscription_mgr = SubscriptionManager(identity, storage, router)
     invite_mgr = InviteManager(identity, storage, router)
     presence_mgr = PresenceManager(identity.hash_hex, config)
+    user_directory = UserDirectory(identity.hash_hex)
 
     # Restore RNS destinations for channels we own
     channel_mgr.restore_owned_channels()
 
-    # Announce our delivery destination and all owned channels
+    # Announce our delivery destination, trenchchat.user, and all owned channels
     router.announce()
+    router.announce_user()
     channel_mgr.announce_all_owned()
 
     # Sync from propagation node on startup if configured
@@ -111,6 +114,7 @@ def main():
     # interface to the hub wasn't ready when the first announce fired.
     def _reannounce():
         router.announce()
+        router.announce_user()
         channel_mgr.announce_all_owned()
         RNS.log("TrenchChat: re-announced delivery destination and channels", RNS.LOG_DEBUG)
 
@@ -132,6 +136,7 @@ def main():
         subscription_mgr=subscription_mgr,
         invite_mgr=invite_mgr,
         presence_mgr=presence_mgr,
+        user_directory=user_directory,
     )
     window.show()
 
