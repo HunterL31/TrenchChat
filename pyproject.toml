@@ -12,6 +12,8 @@ dependencies = [
     "PyQt6",
     "msgpack",
     "configobj",
+    "sqlcipher3",
+    "cryptography",
 ]
 
 [project.gui-scripts]

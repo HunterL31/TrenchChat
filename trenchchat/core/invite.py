@@ -219,8 +219,11 @@ class InviteManager:
         for signer_hash_bytes, sig in sigs.items():
             if signer_hash_bytes not in trusted_signers:
                 continue
-            delivery_hash = RNS.Destination.hash(signer_hash_bytes, "lxmf", "delivery")
-            signer_identity = RNS.Identity.recall(delivery_hash)
+            if signer_hash_bytes == self._identity.hash:
+                signer_identity = self._identity.rns_identity
+            else:
+                delivery_hash = RNS.Destination.hash(signer_hash_bytes, "lxmf", "delivery")
+                signer_identity = RNS.Identity.recall(delivery_hash)
             if signer_identity is None:
                 continue
             if _verify(signer_identity, payload, sig):
@@ -505,8 +508,11 @@ class InviteManager:
                               admin_hash: bytes) -> bool:
         if time.time() > expiry:
             return False
-        admin_delivery_hash = RNS.Destination.hash(admin_hash, "lxmf", "delivery")
-        admin_identity = RNS.Identity.recall(admin_delivery_hash)
+        if admin_hash == self._identity.hash:
+            admin_identity = self._identity.rns_identity
+        else:
+            admin_delivery_hash = RNS.Destination.hash(admin_hash, "lxmf", "delivery")
+            admin_identity = RNS.Identity.recall(admin_delivery_hash)
         if admin_identity is None:
             RNS.log(f"TrenchChat [invite]: cannot verify token — admin identity "
                     f"{admin_hash.hex()[:12]}… not known", RNS.LOG_WARNING)

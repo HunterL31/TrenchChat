@@ -5,12 +5,16 @@ These tests exercise the database layer directly with no networking.
 Each test gets its own in-memory SQLite database via a tmp_path fixture.
 """
 
+import os
+import stat
 import time
 from pathlib import Path
 
 import pytest
 
+from trenchchat.core.fileutils import OWNER_RW_MODE
 from trenchchat.core.storage import Storage
+from trenchchat.core.lockbox import sqlcipher_hex_key
 
 
 @pytest.fixture
@@ -315,3 +319,161 @@ class TestMissedDeliveries:
         ids = db.get_missed_message_ids("ch01", "bob")
         assert "old_msg" not in ids
         assert "new_msg" in ids
+
+
+# ---------------------------------------------------------------------------
+# File permissions
+# ---------------------------------------------------------------------------
+
+class TestDatabaseFilePermissions:
+    def test_new_db_file_is_owner_only(self, tmp_path):
+        """A freshly created database file must have owner-only permissions."""
+        if os.name == "nt":
+            pytest.skip("POSIX permission test not applicable on Windows")
+
+        db_path = tmp_path / "storage.db"
+        s = Storage(db_path=db_path)
+        s.close()
+
+        mode = stat.S_IMODE(os.stat(db_path).st_mode)
+        assert mode == OWNER_RW_MODE
+
+    def test_existing_permissive_db_file_is_hardened(self, tmp_path):
+        """An existing DB file with loose permissions is tightened on open."""
+        if os.name == "nt":
+            pytest.skip("POSIX permission test not applicable on Windows")
+
+        db_path = tmp_path / "storage.db"
+
+        # Create with default permissions first.
+        s = Storage(db_path=db_path)
+        s.close()
+
+        # Loosen them to simulate a pre-existing installation.
+        os.chmod(db_path, 0o644)
+        assert stat.S_IMODE(os.stat(db_path).st_mode) == 0o644
+
+        # Re-opening must harden the file.
+        s2 = Storage(db_path=db_path)
+        s2.close()
+        assert stat.S_IMODE(os.stat(db_path).st_mode) == OWNER_RW_MODE
+
+    def test_wal_sidecar_is_secured_if_present(self, tmp_path):
+        """The -wal sidecar file is also locked down when it exists."""
+        if os.name == "nt":
+            pytest.skip("POSIX permission test not applicable on Windows")
+
+        db_path = tmp_path / "storage.db"
+        wal_path = tmp_path / "storage.db-wal"
+
+        s = Storage(db_path=db_path)
+        # Force a checkpoint so WAL is flushed and sidecar exists.
+        s._conn.execute("PRAGMA wal_checkpoint(FULL)")
+        s.close()
+
+        if not wal_path.exists():
+            pytest.skip("WAL sidecar not present after checkpoint on this platform")
+
+        os.chmod(wal_path, 0o644)
+
+        s2 = Storage(db_path=db_path)
+        s2.close()
+        assert stat.S_IMODE(os.stat(wal_path).st_mode) == OWNER_RW_MODE
+
+
+# ---------------------------------------------------------------------------
+# SQLCipher encryption
+# ---------------------------------------------------------------------------
+
+class TestStorageEncryption:
+    """Tests for Storage encrypted (SQLCipher) mode."""
+
+    def test_encrypted_db_opens_and_accepts_writes(self, tmp_path):
+        """An encrypted Storage instance can write and read data."""
+        key = os.urandom(32)
+        db_path = tmp_path / "enc.db"
+        s = Storage(db_path=db_path, encryption_key=key)
+        try:
+            s.upsert_channel("aabb", "Enc Chan", "", "creator01", "public", time.time())
+            ch = s.get_channel("aabb")
+            assert ch is not None
+            assert ch["name"] == "Enc Chan"
+        finally:
+            s.close()
+
+    def test_encrypted_db_is_not_readable_as_plain_sqlite(self, tmp_path):
+        """A SQLCipher-encrypted file must not be openable via plain sqlite3."""
+        import sqlite3 as _sqlite3
+
+        key = os.urandom(32)
+        db_path = tmp_path / "enc.db"
+        s = Storage(db_path=db_path, encryption_key=key)
+        s.upsert_channel("aabb", "Secret", "", "c1", "public", time.time())
+        s.close()
+
+        # Attempting to query via plain sqlite3 should raise DatabaseError
+        # (the file header is encrypted).
+        conn = _sqlite3.connect(str(db_path))
+        with pytest.raises(_sqlite3.DatabaseError):
+            conn.execute("SELECT * FROM channels").fetchall()
+        conn.close()
+
+    def test_wrong_key_raises_on_open(self, tmp_path):
+        """Opening a SQLCipher DB with the wrong key raises an error."""
+        import sqlcipher3.dbapi2 as _sqlcipher  # type: ignore[import]
+
+        key = os.urandom(32)
+        wrong_key = os.urandom(32)
+        db_path = tmp_path / "enc.db"
+
+        s = Storage(db_path=db_path, encryption_key=key)
+        s.upsert_channel("aabb", "Hidden", "", "c1", "public", time.time())
+        s.close()
+
+        with pytest.raises(Exception):
+            bad = Storage(db_path=db_path, encryption_key=wrong_key)
+            # Force a read to trigger the decryption error.
+            bad.get_all_channels()
+            bad.close()
+
+    def test_encrypt_database_migration(self, tmp_path):
+        """encrypt_database converts a plain DB to SQLCipher in-place."""
+        db_path = tmp_path / "plain.db"
+        key = os.urandom(32)
+
+        # Create plain DB and write a record.
+        s = Storage(db_path=db_path)
+        s.upsert_channel("cc11", "MigChan", "", "creator", "public", time.time())
+        s.close()
+
+        # Migrate to encrypted using a temporary helper instance.
+        helper = Storage.__new__(Storage)
+        helper.encrypt_database(new_key=key, db_path=db_path)
+
+        # Re-open with the key and verify data survived.
+        s2 = Storage(db_path=db_path, encryption_key=key)
+        ch = s2.get_channel("cc11")
+        s2.close()
+        assert ch is not None
+        assert ch["name"] == "MigChan"
+
+    def test_decrypt_database_migration(self, tmp_path):
+        """decrypt_database converts a SQLCipher DB back to plaintext in-place."""
+        db_path = tmp_path / "enc.db"
+        key = os.urandom(32)
+
+        # Create encrypted DB.
+        s = Storage(db_path=db_path, encryption_key=key)
+        s.upsert_channel("dd22", "DecChan", "", "creator", "public", time.time())
+        s.close()
+
+        # Migrate to plaintext using a temporary helper instance.
+        helper = Storage.__new__(Storage)
+        helper.decrypt_database(current_key=key, db_path=db_path)
+
+        # Re-open without a key and verify data survived.
+        s2 = Storage(db_path=db_path)
+        ch = s2.get_channel("dd22")
+        s2.close()
+        assert ch is not None
+        assert ch["name"] == "DecChan"

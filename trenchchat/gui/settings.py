@@ -1,22 +1,31 @@
 """
-Settings dialog: identity, propagation node configuration, channel filter.
+Settings dialog: identity, propagation node configuration, channel filter,
+and security (PIN lock).
 """
+
+from pathlib import Path
 
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QFormLayout,
     QLabel, QLineEdit, QPushButton, QCheckBox, QSpinBox,
     QComboBox, QListWidget, QListWidgetItem, QGroupBox,
-    QDialogButtonBox, QWidget, QTabWidget,
+    QDialogButtonBox, QWidget, QTabWidget, QMessageBox,
 )
 from PyQt6.QtCore import Qt
 
+import RNS
+
 from trenchchat.config import Config
+from trenchchat.core import lockbox
 from trenchchat.core.identity import Identity
 from trenchchat.core.storage import Storage
 from trenchchat.network.router import Router
+from trenchchat.gui.pin_dialog import SetPinDialog, ChangePinDialog
 
 
 class SettingsDialog(QDialog):
+    """Application settings dialog with Identity, Propagation, and Security tabs."""
+
     def __init__(self, config: Config, identity: Identity,
                  storage: Storage, router: Router, parent=None):
         super().__init__(parent)
@@ -32,6 +41,7 @@ class SettingsDialog(QDialog):
         tabs = QTabWidget()
         tabs.addTab(self._build_identity_tab(), "Identity")
         tabs.addTab(self._build_propagation_tab(), "Propagation Node")
+        tabs.addTab(self._build_security_tab(), "Security")
         layout.addWidget(tabs)
 
         buttons = QDialogButtonBox(
@@ -133,6 +143,162 @@ class SettingsDialog(QDialog):
         self._channel_group.setEnabled(
             self._prop_enabled.isChecked() and mode == "allowlist"
         )
+
+    # --- security tab ---
+
+    def _build_security_tab(self) -> QWidget:
+        """Build the Security tab with PIN lock controls."""
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(12)
+
+        group = QGroupBox("PIN Lock")
+        grp_layout = QVBoxLayout(group)
+        grp_layout.setSpacing(8)
+
+        if lockbox.is_locked():
+            status_text = (
+                "Your identity and message database are protected by a PIN."
+            )
+        else:
+            status_text = (
+                "No PIN is set. Your identity file and message database are "
+                "stored unencrypted."
+            )
+        self._pin_status_label = QLabel(status_text)
+        self._pin_status_label.setWordWrap(True)
+        grp_layout.addWidget(self._pin_status_label)
+
+        btn_row = QHBoxLayout()
+
+        if lockbox.is_locked():
+            change_btn = QPushButton("Change PIN…")
+            change_btn.clicked.connect(self._on_change_pin)
+            btn_row.addWidget(change_btn)
+
+            remove_btn = QPushButton("Remove PIN…")
+            remove_btn.clicked.connect(self._on_remove_pin)
+            btn_row.addWidget(remove_btn)
+        else:
+            set_btn = QPushButton("Set PIN…")
+            set_btn.clicked.connect(self._on_set_pin)
+            btn_row.addWidget(set_btn)
+
+        btn_row.addStretch()
+        grp_layout.addLayout(btn_row)
+
+        warning = QLabel(
+            "<i>Note: changing or removing the PIN re-encrypts or decrypts "
+            "your data files immediately. TrenchChat must be restarted for "
+            "the new lock state to take effect on startup.</i>"
+        )
+        warning.setWordWrap(True)
+        warning.setStyleSheet("color: #888; font-size: 11px;")
+        grp_layout.addWidget(warning)
+
+        layout.addWidget(group)
+        layout.addStretch()
+        return widget
+
+    def _reopen_storage(self, encryption_key: bytes | None) -> None:
+        """Re-initialise the storage connection after a PIN change.
+
+        The path is preserved from the current (closed) instance.
+        """
+        db_path = Path(self._storage._path)
+        self._storage.__init__(db_path=db_path, encryption_key=encryption_key)
+
+    def _on_set_pin(self):
+        """Set a new PIN, encrypting identity and database."""
+        dlg = SetPinDialog(self)
+        if dlg.exec() != SetPinDialog.DialogCode.Accepted or dlg.pin is None:
+            return
+
+        try:
+            new_key = lockbox.create_lock(dlg.pin)
+            # Re-encrypt identity file with the new key.
+            self._identity.reencrypt(old_key=None, new_key=new_key)
+            # Close the storage connection, encrypt the DB, then reopen.
+            self._storage.close()
+            self._storage.encrypt_database(new_key)
+            self._reopen_storage(new_key)
+        except Exception as exc:
+            RNS.log(f"TrenchChat: failed to set PIN: {exc}", RNS.LOG_ERROR)
+            QMessageBox.critical(self, "Error", f"Failed to set PIN:\n{exc}")
+            return
+
+        self._pin_status_label.setText(
+            "Your identity and message database are protected by a PIN."
+        )
+        QMessageBox.information(
+            self, "PIN Set",
+            "PIN lock enabled. You will need your PIN the next time you start TrenchChat."
+        )
+        RNS.log("TrenchChat: PIN lock enabled via settings", RNS.LOG_NOTICE)
+
+    def _on_change_pin(self):
+        """Change the existing PIN, re-keying the database."""
+        dlg = ChangePinDialog(self)
+        if dlg.exec() != ChangePinDialog.DialogCode.Accepted:
+            return
+        if dlg.new_pin is None:
+            # User decided to remove — delegate to remove logic.
+            self._remove_pin_with_key(dlg.current_raw_key)
+            return
+
+        try:
+            # Remove old lock metadata and create fresh salt + verify for new PIN.
+            lockbox.remove_lock()
+            new_key = lockbox.create_lock(dlg.new_pin)
+
+            self._identity.reencrypt(
+                old_key=dlg.current_raw_key,
+                new_key=new_key,
+            )
+            self._storage.close()
+            self._storage.rekey_database(dlg.current_raw_key, new_key)
+            self._reopen_storage(new_key)
+        except Exception as exc:
+            RNS.log(f"TrenchChat: failed to change PIN: {exc}", RNS.LOG_ERROR)
+            QMessageBox.critical(self, "Error", f"Failed to change PIN:\n{exc}")
+            return
+
+        QMessageBox.information(self, "PIN Changed", "Your PIN has been updated.")
+        RNS.log("TrenchChat: PIN changed via settings", RNS.LOG_NOTICE)
+
+    def _on_remove_pin(self):
+        """Remove the PIN, decrypting identity and database."""
+        dlg = ChangePinDialog(self)
+        dlg.setWindowTitle("Remove PIN")
+        if dlg.exec() != ChangePinDialog.DialogCode.Accepted:
+            return
+        self._remove_pin_with_key(dlg.current_raw_key)
+
+    def _remove_pin_with_key(self, current_key: bytes | None) -> None:
+        """Decrypt data and remove the lock using a pre-verified key."""
+        if current_key is None:
+            return
+        try:
+            self._identity.reencrypt(old_key=current_key, new_key=None)
+            self._storage.close()
+            self._storage.decrypt_database(current_key)
+            lockbox.remove_lock()
+            self._reopen_storage(None)
+        except Exception as exc:
+            RNS.log(f"TrenchChat: failed to remove PIN: {exc}", RNS.LOG_ERROR)
+            QMessageBox.critical(self, "Error", f"Failed to remove PIN:\n{exc}")
+            return
+
+        self._pin_status_label.setText(
+            "No PIN is set. Your identity file and message database are "
+            "stored unencrypted."
+        )
+        QMessageBox.information(
+            self, "PIN Removed",
+            "PIN lock removed. Your data is no longer encrypted at rest."
+        )
+        RNS.log("TrenchChat: PIN lock removed via settings", RNS.LOG_NOTICE)
 
     # --- accept ---
 

@@ -3,6 +3,7 @@ lxmf
 PyQt6
 msgpack
 configobj
+sqlcipher3
 
 # Development / testing
 pytest>=7.0
