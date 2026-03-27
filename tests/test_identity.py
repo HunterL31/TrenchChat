@@ -1,5 +1,5 @@
 """
-Tests for identity file permission enforcement.
+Tests for identity file permission enforcement and PIN encryption.
 
 These tests verify that _secure_identity_file sets owner-only permissions
 on both new and pre-existing identity files.  The tests are POSIX-only
@@ -18,6 +18,7 @@ import RNS
 from trenchchat.config import Config
 from trenchchat.core.fileutils import OWNER_RW_MODE, secure_file
 from trenchchat.core.identity import Identity
+from trenchchat.core.lockbox import WrongPinError, decrypt_bytes, encrypt_bytes
 
 
 # ---------------------------------------------------------------------------
@@ -126,3 +127,93 @@ class TestIdentityFilePermissions:
         # secure_file is the function called by Identity.__init__ on load.
         secure_file(identity_path)
         assert _posix_mode(identity_path) == OWNER_RW_MODE
+
+
+# ---------------------------------------------------------------------------
+# Identity PIN encryption tests
+# ---------------------------------------------------------------------------
+
+class TestIdentityEncryption:
+    """Tests for Identity encryption_key support."""
+
+    def test_new_encrypted_identity_file_is_not_plaintext_key(self, rns_instance, tmp_path):
+        """When a key is set, the on-disk file must not contain the raw 64-byte key."""
+        import os as _os
+        key = _os.urandom(32)
+        identity_path = tmp_path / "identity_enc"
+
+        config = Config(data_dir=tmp_path)
+        identity = Identity(config, identity_path=identity_path, encryption_key=key)
+
+        raw_on_disk = identity_path.read_bytes()
+        # Fernet ciphertext is longer than 64 bytes and starts with a version byte.
+        assert len(raw_on_disk) > 64
+        # The on-disk bytes must not equal the plaintext private key.
+        assert raw_on_disk != identity.rns_identity.get_private_key()
+
+    def test_encrypted_identity_survives_round_trip(self, rns_instance, tmp_path):
+        """An encrypted identity file decrypts back to the original private key bytes."""
+        import os as _os
+        key = _os.urandom(32)
+        identity_path = tmp_path / "identity_enc_rt"
+
+        config = Config(data_dir=tmp_path)
+        id1 = Identity(config, identity_path=identity_path, encryption_key=key)
+        original_private_key = id1.rns_identity.get_private_key()
+
+        # Decrypt the on-disk file manually and confirm the bytes match.
+        ciphertext = identity_path.read_bytes()
+        recovered = decrypt_bytes(ciphertext, key)
+        assert recovered == original_private_key
+
+    def test_wrong_key_raises_on_load(self, rns_instance, tmp_path):
+        """Loading an encrypted identity with the wrong key raises WrongPinError."""
+        import os as _os
+        key = _os.urandom(32)
+        wrong_key = _os.urandom(32)
+        identity_path = tmp_path / "identity_enc"
+
+        config = Config(data_dir=tmp_path)
+        Identity(config, identity_path=identity_path, encryption_key=key)
+
+        with pytest.raises(WrongPinError):
+            Identity(config, identity_path=identity_path, encryption_key=wrong_key)
+
+    def test_reencrypt_changes_on_disk_bytes(self, rns_instance, tmp_path):
+        """reencrypt() with a new key produces different ciphertext on disk."""
+        import os as _os
+        old_key = _os.urandom(32)
+        new_key = _os.urandom(32)
+        identity_path = tmp_path / "identity_enc"
+
+        config = Config(data_dir=tmp_path)
+        identity = Identity(config, identity_path=identity_path, encryption_key=old_key)
+        before = identity_path.read_bytes()
+
+        identity.reencrypt(identity_path, old_key=old_key, new_key=new_key)
+        after = identity_path.read_bytes()
+
+        assert before != after
+
+    def test_reencrypt_to_none_produces_plaintext_key(self, rns_instance, tmp_path):
+        """reencrypt(new_key=None) strips encryption; the file contains the raw key."""
+        import os as _os
+        key = _os.urandom(32)
+        identity_path = tmp_path / "identity_enc"
+
+        config = Config(data_dir=tmp_path)
+        identity = Identity(config, identity_path=identity_path, encryption_key=key)
+        private_key_bytes = identity.rns_identity.get_private_key()
+
+        identity.reencrypt(identity_path, old_key=key, new_key=None)
+
+        assert identity_path.read_bytes() == private_key_bytes
+
+    def test_no_key_plain_file_loads_correctly(self, rns_instance, tmp_path):
+        """Without an encryption key the file is stored as raw 64-byte key material."""
+        identity_path = tmp_path / "identity_plain_nc"
+        config = Config(data_dir=tmp_path)
+
+        id1 = Identity(config, identity_path=identity_path)
+        # In unencrypted mode the on-disk bytes must equal the raw private key.
+        assert identity_path.read_bytes() == id1.rns_identity.get_private_key()

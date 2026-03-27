@@ -1,12 +1,16 @@
 import json
 import sqlite3
+import shutil
 import threading
 import time
 from pathlib import Path
 from contextlib import contextmanager
 
+import RNS
+
 from trenchchat.config import DATA_DIR
 from trenchchat.core.fileutils import secure_file
+from trenchchat.core.lockbox import sqlcipher_hex_key
 from trenchchat.core.permissions import (
     PRESET_OPEN, PRESET_PRIVATE, ROLE_ADMIN, ROLE_MEMBER, ROLE_OWNER,
     has_permission as _check_permission,
@@ -14,6 +18,28 @@ from trenchchat.core.permissions import (
 )
 
 DB_PATH = DATA_DIR / "storage.db"
+
+
+def _connect_plain(path: str) -> sqlite3.Connection:
+    """Open a plain SQLite connection."""
+    conn = sqlite3.connect(path, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def _connect_encrypted(path: str, raw_key: bytes) -> sqlite3.Connection:
+    """Open a SQLCipher-encrypted connection with the given 32-byte raw key.
+
+    The PRAGMA key must be issued immediately after connect and before any
+    schema access; SQLCipher applies it to decrypt the file header.
+    """
+    import sqlcipher3.dbapi2 as _sqlcipher  # type: ignore[import]
+
+    conn = _sqlcipher.connect(path, check_same_thread=False)
+    conn.row_factory = _sqlcipher.Row
+    hex_key = sqlcipher_hex_key(raw_key)
+    conn.execute(f"PRAGMA key = \"x'{hex_key}'\"")
+    return conn
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS channels (
@@ -81,11 +107,24 @@ CREATE INDEX IF NOT EXISTS idx_missed_deliveries_recipient
 
 
 class Storage:
-    def __init__(self, db_path: Path = DB_PATH):
+    """SQLite-backed persistent store for TrenchChat.
+
+    When *encryption_key* is supplied the database is opened via SQLCipher
+    with the provided 32-byte raw key.  When None the stdlib sqlite3 module
+    is used and the file is stored in plaintext (backward-compatible default).
+    """
+
+    def __init__(self, db_path: Path = DB_PATH,
+                 encryption_key: bytes | None = None):
         db_path.parent.mkdir(parents=True, exist_ok=True)
         self._path = str(db_path)
-        self._conn = sqlite3.connect(self._path, check_same_thread=False)
-        self._conn.row_factory = sqlite3.Row
+        self._encryption_key = encryption_key
+
+        if encryption_key is not None:
+            self._conn = _connect_encrypted(self._path, encryption_key)
+        else:
+            self._conn = _connect_plain(self._path)
+
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._conn.executescript(SCHEMA)
@@ -194,8 +233,90 @@ class Storage:
         with self._lock:
             return self._conn.execute(sql, params).fetchone()
 
-    def close(self):
+    def close(self) -> None:
+        """Close the underlying database connection."""
         self._conn.close()
+
+    # ------------------------------------------------------------------
+    # PIN migration helpers
+    # ------------------------------------------------------------------
+
+    def encrypt_database(self, new_key: bytes, db_path: Path = DB_PATH) -> None:
+        """Re-key the database from plaintext to SQLCipher encryption.
+
+        Opens the current (plain) database via sqlcipher3 (without issuing
+        PRAGMA key so it reads the file as plaintext), attaches a new
+        encrypted copy, copies all data via SQLCipher's ``sqlcipher_export``,
+        then replaces the original file with the encrypted one.  The Storage
+        instance must be closed before this is called.
+
+        This is a class method-style helper called from the settings dialog
+        when the user sets a PIN for the first time.
+        """
+        import sqlcipher3.dbapi2 as _sqlcipher  # type: ignore[import]
+
+        enc_path = str(db_path) + ".encrypted"
+        hex_key = sqlcipher_hex_key(new_key)
+
+        # Open the plaintext DB with sqlcipher3 but WITHOUT issuing PRAGMA key;
+        # sqlcipher3 can read plain sqlite files when no key pragma is issued.
+        plain_conn = _sqlcipher.connect(str(db_path))
+        try:
+            plain_conn.execute(
+                f"ATTACH DATABASE '{enc_path}' AS encrypted KEY \"x'{hex_key}'\""
+            )
+            plain_conn.execute("SELECT sqlcipher_export('encrypted')")
+            plain_conn.execute("DETACH DATABASE encrypted")
+        finally:
+            plain_conn.close()
+
+        shutil.move(enc_path, str(db_path))
+        secure_file(db_path)
+        RNS.log("TrenchChat [storage]: database encrypted with PIN key", RNS.LOG_NOTICE)
+
+    def decrypt_database(self, current_key: bytes, db_path: Path = DB_PATH) -> None:
+        """Export the database from SQLCipher back to plaintext.
+
+        Used when the user removes their PIN.  The Storage instance must be
+        closed before this is called.
+        """
+        import sqlcipher3.dbapi2 as _sqlcipher  # type: ignore[import]
+
+        plain_path = str(db_path) + ".plain"
+        hex_key = sqlcipher_hex_key(current_key)
+
+        enc_conn = _sqlcipher.connect(str(db_path))
+        try:
+            enc_conn.execute(f"PRAGMA key = \"x'{hex_key}'\"")
+            enc_conn.execute(
+                f"ATTACH DATABASE '{plain_path}' AS plaintext KEY ''"
+            )
+            enc_conn.execute("SELECT sqlcipher_export('plaintext')")
+            enc_conn.execute("DETACH DATABASE plaintext")
+        finally:
+            enc_conn.close()
+
+        shutil.move(plain_path, str(db_path))
+        secure_file(db_path)
+        RNS.log("TrenchChat [storage]: database decrypted (PIN removed)", RNS.LOG_NOTICE)
+
+    def rekey_database(self, old_key: bytes, new_key: bytes,
+                       db_path: Path = DB_PATH) -> None:
+        """Change the SQLCipher key (used when the user changes their PIN).
+
+        The Storage instance must be closed before this is called.
+        """
+        import sqlcipher3.dbapi2 as _sqlcipher  # type: ignore[import]
+
+        new_hex = sqlcipher_hex_key(new_key)
+
+        conn = _connect_encrypted(str(db_path), old_key)
+        try:
+            conn.execute(f"PRAGMA rekey = \"x'{new_hex}'\"")
+        finally:
+            conn.close()
+
+        RNS.log("TrenchChat [storage]: database re-keyed with new PIN", RNS.LOG_NOTICE)
 
     # --- channels ---
 
