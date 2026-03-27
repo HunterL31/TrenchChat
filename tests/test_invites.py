@@ -103,7 +103,12 @@ class TestInviteTokens:
 
         # Patch RNS.Identity.recall to always return None, simulating a fresh
         # install where the local identity is not in the recall cache.
-        with patch("RNS.Identity.recall", return_value=None):
+        # Use patch.object on the Identity class directly because RNS.Identity
+        # may resolve to the module (not the class) depending on the RNS version,
+        # which makes patch("RNS.Identity.recall") fail in that case.
+        import RNS as _RNS
+        _identity_cls = _RNS.Identity if isinstance(_RNS.Identity, type) else _RNS.Identity.Identity
+        with patch.object(_identity_cls, "recall", return_value=None):
             alice.invite_mgr._handle_join_request(fields, ch_hash)
 
         assert alice.storage.is_member(ch_hash, bob.identity.hash_hex), \
