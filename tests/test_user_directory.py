@@ -223,6 +223,32 @@ def test_get_all_empty_when_no_entries():
 
 
 # ---------------------------------------------------------------------------
+# contains
+# ---------------------------------------------------------------------------
+
+def test_contains_returns_true_for_recorded_peer():
+    d = make_dir()
+    d.record_user(PEER_A, "Alice")
+    assert d.contains(PEER_A) is True
+
+
+def test_contains_returns_false_for_unknown_peer():
+    d = make_dir()
+    assert d.contains(PEER_A) is False
+
+
+def test_contains_returns_false_for_expired_peer():
+    d = make_dir()
+    now = time.time()
+    with patch("trenchchat.core.user_directory.time") as mock_time:
+        mock_time.time.return_value = now
+        d.record_user(PEER_A, "Alice")
+
+        mock_time.time.return_value = now + DIRECTORY_TTL_SECS + 1
+        assert d.contains(PEER_A) is False
+
+
+# ---------------------------------------------------------------------------
 # custom TTL
 # ---------------------------------------------------------------------------
 

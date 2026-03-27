@@ -75,6 +75,15 @@ class UserDirectory:
         results.sort(key=lambda r: r["display_name"].lower())
         return results
 
+    def contains(self, peer_hex: str) -> bool:
+        """Return True if the peer has a non-expired entry in the directory."""
+        now = time.time()
+        with self._lock:
+            entry = self._entries.get(peer_hex)
+            if entry is None:
+                return False
+            return now - entry[1] < self._ttl
+
     def get_all(self) -> list[dict]:
         """Return all non-expired entries sorted by display name.
 

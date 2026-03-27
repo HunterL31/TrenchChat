@@ -256,6 +256,7 @@ class MainWindow(QMainWindow):
         def _on_peer_appeared(peer_hex: str, iface) -> None:
             self._sync_mgr.on_peer_appeared(peer_hex)
             self._presence_mgr.record_seen(peer_hex)
+            self._seed_user_directory(peer_hex)
             self._peer_announced.emit()
             self._reannounce_requested.emit(iface)
 
@@ -297,7 +298,9 @@ class MainWindow(QMainWindow):
                 return
             sender_identity = RNS.Identity.recall(message.source_hash)
             if sender_identity is not None:
-                self._presence_mgr.record_seen(sender_identity.hash.hex())
+                sender_hex = sender_identity.hash.hex()
+                self._presence_mgr.record_seen(sender_hex)
+                self._seed_user_directory(sender_hex)
 
         router.add_delivery_callback(_on_inbound_message)
         # Defer sync requests briefly so the RNS stack is fully ready
@@ -979,6 +982,25 @@ class MainWindow(QMainWindow):
         self._presence_mgr.prune()
         self._user_directory.prune()
         self._refresh_online_panel()
+
+    def _seed_user_directory(self, peer_hex: str) -> None:
+        """Add a peer to the user directory if they are a known TrenchChat user.
+
+        Called from lxmf.delivery announces and inbound messages — signals that
+        do not inherently confirm a peer as TrenchChat.  We check the members
+        table (any channel) and the existing directory as evidence that the peer
+        is a TrenchChat user, and refresh or create their directory entry so they
+        appear in the invite picker.
+        """
+        if self._user_directory.contains(peer_hex):
+            display_name = resolve_display_name(
+                peer_hex, self._identity.hash_hex, self._storage, self._config
+            )
+            self._user_directory.record_user(peer_hex, display_name)
+            return
+        stored_name = self._storage.get_display_name_for_identity(peer_hex)
+        if stored_name:
+            self._user_directory.record_user(peer_hex, stored_name)
 
     def _on_reannounce_requested(self, iface) -> None:
         """Slot called on the main thread when an announce is received.
