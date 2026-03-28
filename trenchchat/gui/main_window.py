@@ -987,10 +987,11 @@ class MainWindow(QMainWindow):
         """Add a peer to the user directory if they are a known TrenchChat user.
 
         Called from lxmf.delivery announces and inbound messages — signals that
-        do not inherently confirm a peer as TrenchChat.  We check the members
-        table (any channel) and the existing directory as evidence that the peer
-        is a TrenchChat user, and refresh or create their directory entry so they
-        appear in the invite picker.
+        do not inherently confirm a peer as TrenchChat.  We treat a peer as
+        confirmed TrenchChat if they are already in the directory (from a prior
+        trenchchat.user announce) or if they appear in any channel's members
+        table (added via a signed member list update).  In either case we
+        resolve the best available display name and refresh their entry.
         """
         if self._user_directory.contains(peer_hex):
             display_name = resolve_display_name(
@@ -998,9 +999,11 @@ class MainWindow(QMainWindow):
             )
             self._user_directory.record_user(peer_hex, display_name)
             return
-        stored_name = self._storage.get_display_name_for_identity(peer_hex)
-        if stored_name:
-            self._user_directory.record_user(peer_hex, stored_name)
+        if peer_hex in self._storage.get_trenchchat_peer_identities():
+            display_name = resolve_display_name(
+                peer_hex, self._identity.hash_hex, self._storage, self._config
+            )
+            self._user_directory.record_user(peer_hex, display_name)
 
     def _on_reannounce_requested(self, iface) -> None:
         """Slot called on the main thread when an announce is received.
