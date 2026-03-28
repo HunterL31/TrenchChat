@@ -150,6 +150,22 @@ class TestSetAvatar:
         with pytest.raises(ValueError, match="max is"):
             avatar_mgr.set_avatar(oversized, lambda _: set())
 
+    def test_set_avatar_fires_callback_with_own_identity(self, avatar_mgr):
+        fired = []
+        avatar_mgr.add_avatar_callback(fired.append)
+        jpeg = compress_avatar(_make_test_jpeg())
+        avatar_mgr.set_avatar(jpeg, lambda _: set())
+        assert fired == [avatar_mgr._identity.hash_hex]
+
+    def test_remove_avatar_fires_callback_with_own_identity(self, avatar_mgr, config):
+        jpeg = compress_avatar(_make_test_jpeg())
+        avatar_mgr.set_avatar(jpeg, lambda _: set())
+        avatar_mgr._last_changed = 0.0
+        fired = []
+        avatar_mgr.add_avatar_callback(fired.append)
+        avatar_mgr.remove_avatar(lambda _: set())
+        assert fired == [avatar_mgr._identity.hash_hex]
+
     def test_set_avatar_clears_delivery_records(self, avatar_mgr):
         jpeg = compress_avatar(_make_test_jpeg())
         peer_hex = "bb" * 16

@@ -130,6 +130,7 @@ class AvatarManager:
             f"notifying {len(peers)} peer(s)",
             RNS.LOG_NOTICE,
         )
+        self._fire_avatar_callbacks(self._identity.hash_hex)
 
     def remove_avatar(self, subscriber_lookup: "callable[[str], set[str]]") -> None:
         """Clear our own avatar and notify all reachable peers.
@@ -161,6 +162,7 @@ class AvatarManager:
             f"notifying {len(peers)} peer(s)",
             RNS.LOG_NOTICE,
         )
+        self._fire_avatar_callbacks(self._identity.hash_hex)
 
     def get_own_avatar(self) -> bytes | None:
         """Return our own avatar bytes, or None if not set."""
@@ -192,8 +194,16 @@ class AvatarManager:
     # --- callbacks ---
 
     def add_avatar_callback(self, cb) -> None:
-        """Register a callback fired with (identity_hash_hex: str) when a peer avatar arrives."""
+        """Register a callback fired with (identity_hash_hex: str) when any avatar changes."""
         self._avatar_callbacks.append(cb)
+
+    def _fire_avatar_callbacks(self, identity_hex: str) -> None:
+        """Invoke all registered callbacks for an avatar change."""
+        for cb in self._avatar_callbacks:
+            try:
+                cb(identity_hex)
+            except Exception as e:
+                RNS.log(f"TrenchChat [avatar]: callback error: {e}", RNS.LOG_ERROR)
 
     # --- inbound ---
 
@@ -267,11 +277,7 @@ class AvatarManager:
                 RNS.LOG_NOTICE,
             )
 
-        for cb in self._avatar_callbacks:
-            try:
-                cb(sender_hex)
-            except Exception as e:
-                RNS.log(f"TrenchChat [avatar]: callback error: {e}", RNS.LOG_ERROR)
+        self._fire_avatar_callbacks(sender_hex)
 
     # --- private helpers ---
 
