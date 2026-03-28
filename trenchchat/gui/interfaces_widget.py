@@ -127,6 +127,34 @@ _TYPE_FIELDS: dict[str, list[tuple[str, str, object, object]]] = {
 }
 
 
+# Community-hosted interfaces offered as one-click suggested defaults.
+# Keys are the interface names as they will appear in the Reticulum config.
+SUGGESTED_DEFAULTS: dict[str, dict[str, str]] = {
+    "RMAP": {
+        "type": "TCPClientInterface",
+        "enabled": "Yes",
+        "target_host": "rmap.world",
+        "target_port": "4242",
+        "kiss_framing": "No",
+        "i2p_tunneled": "No",
+        "connect_timeout": "5",
+        "interface_mode": "full",
+        "announce_cap": "2.0",
+    },
+    "QUAD4": {
+        "type": "TCPClientInterface",
+        "enabled": "Yes",
+        "target_host": "62.151.179.77",
+        "target_port": "45657",
+        "kiss_framing": "No",
+        "i2p_tunneled": "No",
+        "connect_timeout": "5",
+        "interface_mode": "full",
+        "announce_cap": "2.0",
+    },
+}
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -179,6 +207,26 @@ def build_interface_config_dict(
         if value != "":
             cfg[key] = str(value)
     return cfg
+
+
+def get_missing_suggested_defaults(config_path: str) -> dict[str, dict[str, str]]:
+    """Return suggested defaults not already present in the config.
+
+    An interface is considered present if any existing interface has the same
+    target_host and target_port as the suggested default, regardless of the
+    name it was saved under.
+    """
+    existing = load_interfaces_config(config_path)
+    existing_endpoints: set[tuple[str, str]] = {
+        (iface.get("target_host", ""), iface.get("target_port", ""))
+        for iface in existing.values()
+    }
+    result = {}
+    for name, cfg in SUGGESTED_DEFAULTS.items():
+        endpoint = (cfg.get("target_host", ""), cfg.get("target_port", ""))
+        if endpoint not in existing_endpoints:
+            result[name] = cfg
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -431,6 +479,7 @@ class InterfacesWidget(QWidget):
         tb_layout.setSpacing(6)
 
         self._add_btn = QPushButton("+ Add")
+        self._suggested_btn = QPushButton("+ Suggested Defaults")
         self._edit_btn = QPushButton("✎ Edit")
         self._delete_btn = QPushButton("✕ Delete")
         self._refresh_btn = QPushButton("↻ Refresh")
@@ -441,15 +490,18 @@ class InterfacesWidget(QWidget):
             "QPushButton:hover { background: #3a3a3a; }"
             "QPushButton:disabled { color: #555; }"
         )
-        for btn in (self._add_btn, self._edit_btn, self._delete_btn, self._refresh_btn):
+        for btn in (self._add_btn, self._suggested_btn, self._edit_btn,
+                    self._delete_btn, self._refresh_btn):
             btn.setStyleSheet(_btn_style)
 
         self._add_btn.clicked.connect(self._on_add)
+        self._suggested_btn.clicked.connect(self._on_add_suggested_defaults)
         self._edit_btn.clicked.connect(self._on_edit)
         self._delete_btn.clicked.connect(self._on_delete)
         self._refresh_btn.clicked.connect(self._on_refresh)
 
         tb_layout.addWidget(self._add_btn)
+        tb_layout.addWidget(self._suggested_btn)
         tb_layout.addWidget(self._edit_btn)
         tb_layout.addWidget(self._delete_btn)
         tb_layout.addStretch()
@@ -635,6 +687,61 @@ class InterfacesWidget(QWidget):
             if tx_item:
                 tx_item.setText(_fmt_bytes(txb) if txb is not None else "—")
 
+    def _on_add_suggested_defaults(self) -> None:
+        """Prompt the user to add any missing community-hosted suggested interfaces."""
+        missing = get_missing_suggested_defaults(self._config_path)
+        if not missing:
+            QMessageBox.information(
+                self, "Suggested Defaults",
+                "All suggested defaults are already configured.",
+            )
+            return
+
+        lines = []
+        for name, cfg in missing.items():
+            host = cfg.get("target_host", "")
+            port = cfg.get("target_port", "")
+            lines.append(f"  \u2022 {name}  ({host}:{port})")
+        iface_list = "\n".join(lines)
+
+        reply = QMessageBox.question(
+            self,
+            "Add Suggested Defaults",
+            f"The following community-hosted interfaces will be added to your "
+            f"Reticulum config:\n\n{iface_list}\n\n"
+            "You can edit or remove them at any time. "
+            "A restart will be required for them to take effect.\n\n"
+            "Add these interfaces?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        try:
+            file_cfg = ConfigObj(self._config_path)
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Could not read config file:\n{e}")
+            return
+
+        if "interfaces" not in file_cfg:
+            file_cfg["interfaces"] = {}
+
+        for name, cfg in missing.items():
+            file_cfg["interfaces"][name] = cfg
+            RNS.log(
+                f"TrenchChat [interfaces]: added suggested default '{name}'",
+                RNS.LOG_NOTICE,
+            )
+
+        try:
+            file_cfg.write()
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Could not write config file:\n{e}")
+            return
+
+        self.load_interfaces()
+        self._show_restart_prompt()
+
     def _on_add(self) -> None:
         """Open the add-interface dialog."""
         dlg = InterfaceDialog(parent=self)
@@ -712,10 +819,12 @@ class InterfacesWidget(QWidget):
         return item.data(Qt.ItemDataRole.UserRole) if item else None
 
     def _update_button_states(self) -> None:
-        """Enable/disable Edit and Delete based on whether a row is selected."""
+        """Enable/disable Edit and Delete based on selection; show/hide Suggested Defaults."""
         has_selection = self._table.currentRow() >= 0
         self._edit_btn.setEnabled(has_selection)
         self._delete_btn.setEnabled(has_selection)
+        missing = get_missing_suggested_defaults(self._config_path)
+        self._suggested_btn.setVisible(bool(missing))
 
     def _write_interface(self, name: str, cfg_dict: dict[str, str],
                          is_new: bool) -> None:
