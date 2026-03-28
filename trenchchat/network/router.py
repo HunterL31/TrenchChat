@@ -5,8 +5,10 @@ and wires the propagation filter into the inbound delivery callback.
 
 import RNS
 import LXMF
+import msgpack
 
 from pathlib import Path
+from trenchchat import APP_NAME, APP_ASPECT_USER
 from trenchchat.config import Config, DATA_DIR
 from trenchchat.network.prop_filter import PropagationFilter
 
@@ -35,6 +37,16 @@ class Router:
         self._delivery_dest = self._router.register_delivery_identity(
             identity.rns_identity,
             display_name=config.display_name,
+        )
+
+        # Register a dedicated trenchchat.user destination so TrenchChat peers
+        # can be distinguished from generic LXMF clients on the network.
+        self._user_dest = RNS.Destination(
+            identity.rns_identity,
+            RNS.Destination.IN,
+            RNS.Destination.SINGLE,
+            APP_NAME,
+            APP_ASPECT_USER,
         )
 
         self._router.register_delivery_callback(self._on_message_received)
@@ -123,8 +135,29 @@ class Router:
 
     # --- announce ---
 
-    def announce(self):
-        self._router.announce(self._delivery_dest.hash)
+    def announce(self, attached_interface=None) -> None:
+        """Announce our LXMF delivery destination.
+
+        If attached_interface is given the announce is sent only on that
+        interface; otherwise it is broadcast on all interfaces.
+        """
+        self._router.announce(self._delivery_dest.hash,
+                              attached_interface=attached_interface)
+
+    def announce_user(self, attached_interface=None) -> None:
+        """Announce our trenchchat.user destination with the current display name.
+
+        This allows other TrenchChat instances to identify us as a TrenchChat
+        peer and add us to their user directory for discovery and invite lookup.
+        If attached_interface is given the announce is sent only on that
+        interface; otherwise it is broadcast on all interfaces.
+        """
+        app_data = msgpack.packb(
+            {"name": self._config.display_name or ""},
+            use_bin_type=True,
+        )
+        self._user_dest.announce(app_data=app_data,
+                                 attached_interface=attached_interface)
 
     @property
     def lxmf_router(self) -> LXMF.LXMRouter:

@@ -97,7 +97,13 @@ class ChannelManager:
 
     # --- announce ---
 
-    def announce_channel(self, channel_hash_hex: str):
+    def announce_channel(self, channel_hash_hex: str,
+                         attached_interface=None) -> None:
+        """Announce a single owned channel.
+
+        If attached_interface is given the announce is sent only on that
+        interface; otherwise it is broadcast on all interfaces.
+        """
         dest = self._owned_destinations.get(channel_hash_hex)
         if dest is None:
             return
@@ -112,17 +118,23 @@ class ChannelManager:
             "access": access,
             "creator": self._identity.hash_hex,
         }, use_bin_type=True)
-        dest.announce(app_data=app_data)
+        dest.announce(app_data=app_data, attached_interface=attached_interface)
 
-    def announce_all_owned(self):
+    def announce_all_owned(self, attached_interface=None) -> None:
+        """Announce all owned channels.
+
+        If attached_interface is given the announce is sent only on that
+        interface; otherwise it is broadcast on all interfaces.
+        """
         for hash_hex in self._owned_destinations:
-            self.announce_channel(hash_hex)
+            self.announce_channel(hash_hex, attached_interface=attached_interface)
 
     # --- discover ---
 
     def _on_channel_discovered(self, destination_hash: bytes,
                                 announced_identity: RNS.Identity,
-                                metadata: dict):
+                                metadata: dict,
+                                iface=None):
         hash_hex = destination_hash.hex()
         name = metadata.get("name", hash_hex[:8])
         description = metadata.get("description", "")
