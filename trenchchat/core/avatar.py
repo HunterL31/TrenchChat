@@ -2,7 +2,7 @@
 Avatar management for TrenchChat user profile pictures.
 
 Profile pictures are:
-  - Stored locally as 48x48 JPEG blobs (own avatar in Config, peers in SQLite)
+  - Stored locally as 128x128 JPEG blobs (own avatar in Config, peers in SQLite)
   - Transmitted as a dedicated LXMF control message (MT_AVATAR_UPDATE)
   - Sent once per peer per avatar version -- not attached to every chat message
   - Delivered immediately to reachable peers on change; deferred to
@@ -30,16 +30,16 @@ from trenchchat.core.protocol import (
 from trenchchat.core.storage import Storage
 from trenchchat.network.router import Router
 
-AVATAR_SIZE_PX = 48
-AVATAR_JPEG_QUALITY = 70
-MAX_AVATAR_BYTES = 4096
+AVATAR_SIZE_PX = 128
+AVATAR_JPEG_QUALITY = 80
+MAX_AVATAR_BYTES = 16384
 
 SEND_RATE_LIMIT_SECS = 60
 RECEIVE_RATE_LIMIT_SECS = 300
 
 
 def compress_avatar(image_bytes: bytes) -> bytes:
-    """Resize and JPEG-compress raw image bytes to a 48x48 avatar.
+    """Resize and JPEG-compress raw image bytes to a 128x128 avatar.
 
     Center-crops the source image to a square before resizing so the
     subject is not distorted.  Raises ValueError if the resulting JPEG

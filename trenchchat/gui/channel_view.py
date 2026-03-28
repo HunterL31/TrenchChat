@@ -26,7 +26,7 @@ from trenchchat.core.storage import Storage
 LATE_THRESHOLD_SECS = 30.0
 
 _MESSAGE_HISTORY_LIMIT = 500
-_AVATAR_SIZE = 36              # avatar circle diameter in pixels
+_AVATAR_SIZE = 40              # avatar circle diameter in pixels
 _ROW_LEFT_PAD = 12             # padding left of avatar
 _ROW_RIGHT_PAD = 16            # padding right edge
 _ROW_V_PAD = 4                 # vertical padding for header rows

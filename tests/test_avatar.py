@@ -93,7 +93,7 @@ def avatar_mgr(tmp_path, config):
 # ---------------------------------------------------------------------------
 
 class TestCompressAvatar:
-    def test_resizes_to_48x48(self):
+    def test_resizes_to_avatar_size(self):
         jpeg = _make_test_jpeg(200, 300)
         result = compress_avatar(jpeg)
         img = Image.open(io.BytesIO(result))
@@ -111,7 +111,7 @@ class TestCompressAvatar:
         assert len(result) <= MAX_AVATAR_BYTES
 
     def test_center_crops_non_square(self):
-        """A 200×100 image should produce a 48×48 output (not stretched)."""
+        """A 200×100 image should produce a square output at AVATAR_SIZE_PX (not stretched)."""
         jpeg = _make_test_jpeg(200, 100)
         result = compress_avatar(jpeg)
         img = Image.open(io.BytesIO(result))

@@ -20,7 +20,9 @@ import RNS
 
 from trenchchat.config import Config
 from trenchchat.core import lockbox
-from trenchchat.core.avatar import compress_avatar, MAX_AVATAR_BYTES
+from trenchchat.core.avatar import (
+    compress_avatar, MAX_AVATAR_BYTES, AVATAR_SIZE_PX, AVATAR_JPEG_QUALITY,
+)
 from trenchchat.core.identity import Identity
 from trenchchat.core.storage import Storage
 from trenchchat.network.router import Router
@@ -91,7 +93,7 @@ class AvatarCropDialog(QDialog):
         layout.addWidget(buttons)
 
     def _on_accept(self) -> None:
-        """Render the current crop region into a 48×48 JPEG."""
+        """Render the current crop region into a compressed square JPEG."""
         crop_pixmap = self._canvas.get_crop_pixmap()
         if crop_pixmap is None or crop_pixmap.isNull():
             self.reject()
@@ -104,9 +106,9 @@ class AvatarCropDialog(QDialog):
         pil_img = _PILImage.frombytes(
             "RGB", (qimage.width(), qimage.height()), bytes(ptr)
         )
-        pil_img = pil_img.resize((48, 48), _PILImage.LANCZOS)
+        pil_img = pil_img.resize((AVATAR_SIZE_PX, AVATAR_SIZE_PX), _PILImage.LANCZOS)
         buf = io.BytesIO()
-        pil_img.save(buf, format="JPEG", quality=70, optimize=True)
+        pil_img.save(buf, format="JPEG", quality=AVATAR_JPEG_QUALITY, optimize=True)
         result = buf.getvalue()
 
         if len(result) > MAX_AVATAR_BYTES:
