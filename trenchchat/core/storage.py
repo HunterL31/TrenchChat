@@ -103,6 +103,17 @@ CREATE TABLE IF NOT EXISTS missed_deliveries (
 
 CREATE INDEX IF NOT EXISTS idx_missed_deliveries_recipient
     ON missed_deliveries(recipient_hash, channel_hash);
+
+CREATE TABLE IF NOT EXISTS membership_tenure (
+    channel_hash  TEXT NOT NULL,
+    identity_hash TEXT NOT NULL,
+    joined_at     REAL NOT NULL,
+    left_at       REAL,
+    PRIMARY KEY (channel_hash, identity_hash, joined_at)
+);
+
+CREATE INDEX IF NOT EXISTS idx_tenure_lookup
+    ON membership_tenure(channel_hash, identity_hash, joined_at);
 """
 
 
@@ -211,6 +222,27 @@ class Storage:
 
         if changed:
             self._conn.commit()
+
+        self._migrate_tenure()
+
+    def _migrate_tenure(self):
+        """Create membership_tenure table and backfill current members if the table is new."""
+        # The table is created by SCHEMA, but it may be empty on first run with
+        # an existing database.  Backfill open intervals from current members.
+        count = self._conn.execute(
+            "SELECT COUNT(*) FROM membership_tenure"
+        ).fetchone()[0]
+        if count == 0:
+            rows = self._conn.execute(
+                "SELECT channel_hash, identity_hash, added_at FROM members"
+            ).fetchall()
+            if rows:
+                self._conn.executemany("""
+                    INSERT OR IGNORE INTO membership_tenure
+                        (channel_hash, identity_hash, joined_at, left_at)
+                    VALUES (?, ?, ?, NULL)
+                """, [(r["channel_hash"], r["identity_hash"], r["added_at"]) for r in rows])
+                self._conn.commit()
 
     @contextmanager
     def _tx(self):
@@ -554,6 +586,97 @@ class Storage:
                 INSERT INTO members (channel_hash, identity_hash, display_name, role, added_at)
                 VALUES (?, ?, ?, ?, ?)
             """, rows)
+
+    # --- membership tenure ---
+
+    def open_tenure(self, channel_hash: str, identity_hash: str, joined_at: float):
+        """Record that an identity joined a channel at *joined_at*.
+
+        Inserts a new open interval row (left_at IS NULL).  If an identical
+        (channel_hash, identity_hash, joined_at) row already exists it is left
+        unchanged (idempotent).
+        """
+        with self._tx():
+            self._conn.execute("""
+                INSERT OR IGNORE INTO membership_tenure
+                    (channel_hash, identity_hash, joined_at, left_at)
+                VALUES (?, ?, ?, NULL)
+            """, (channel_hash, identity_hash, joined_at))
+
+    def close_tenure(self, channel_hash: str, identity_hash: str, left_at: float):
+        """Close the most recent open tenure interval for an identity on a channel.
+
+        Sets left_at on the row with the highest joined_at that still has
+        left_at IS NULL.  If no open interval exists, does nothing.
+        """
+        with self._tx():
+            self._conn.execute("""
+                UPDATE membership_tenure
+                SET left_at = ?
+                WHERE channel_hash = ? AND identity_hash = ? AND left_at IS NULL
+                  AND joined_at = (
+                      SELECT MAX(joined_at) FROM membership_tenure
+                      WHERE channel_hash = ? AND identity_hash = ? AND left_at IS NULL
+                  )
+            """, (left_at, channel_hash, identity_hash, channel_hash, identity_hash))
+
+    def update_tenure(self, channel_hash: str, old_members: set[str],
+                      new_members: set[str], published_at: float):
+        """Diff old vs new member sets and update tenure records accordingly.
+
+        Members in old_members but not new_members get their open interval
+        closed at published_at.  Members in new_members but not old_members
+        get a new open interval starting at published_at.  Members in both
+        sets are unchanged.
+        """
+        removed = old_members - new_members
+        added = new_members - old_members
+        with self._tx():
+            for ih in removed:
+                self._conn.execute("""
+                    UPDATE membership_tenure
+                    SET left_at = ?
+                    WHERE channel_hash = ? AND identity_hash = ? AND left_at IS NULL
+                      AND joined_at = (
+                          SELECT MAX(joined_at) FROM membership_tenure
+                          WHERE channel_hash = ? AND identity_hash = ? AND left_at IS NULL
+                      )
+                """, (published_at, channel_hash, ih, channel_hash, ih))
+            for ih in added:
+                self._conn.execute("""
+                    INSERT OR IGNORE INTO membership_tenure
+                        (channel_hash, identity_hash, joined_at, left_at)
+                    VALUES (?, ?, ?, NULL)
+                """, (channel_hash, ih, published_at))
+
+    def was_member_at(self, channel_hash: str, identity_hash: str,
+                      timestamp: float) -> bool:
+        """Return True if the identity was a member of the channel at *timestamp*.
+
+        Checks whether any tenure interval covers the given timestamp:
+        joined_at <= timestamp < left_at  (or left_at IS NULL for open intervals).
+        Returns False if no tenure data exists for the identity (unknown history).
+        """
+        row = self._fetchone("""
+            SELECT 1 FROM membership_tenure
+            WHERE channel_hash = ? AND identity_hash = ?
+              AND joined_at <= ? AND (left_at IS NULL OR left_at > ?)
+            LIMIT 1
+        """, (channel_hash, identity_hash, timestamp, timestamp))
+        return row is not None
+
+    def has_any_tenure(self, channel_hash: str) -> bool:
+        """Return True if the membership_tenure table has any rows for this channel.
+
+        Used to decide whether to apply tenure checks — if no tenure data exists
+        (e.g. an open-join channel or a channel bootstrapped before this feature),
+        tenure checks are skipped rather than incorrectly rejecting all messages.
+        """
+        row = self._fetchone(
+            "SELECT 1 FROM membership_tenure WHERE channel_hash = ? LIMIT 1",
+            (channel_hash,)
+        )
+        return row is not None
 
     # --- channel permissions ---
 

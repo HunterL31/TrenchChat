@@ -34,7 +34,7 @@ __all__ = [
     "F_CHANNEL_HASH", "F_DISPLAY_NAME", "F_TIMESTAMP", "F_MESSAGE_ID",
     "F_REPLY_TO", "F_LAST_SEEN_ID", "F_SYNC_WINDOW_START", "F_SYNC_MESSAGES",
     "F_MISSED_FOR", "F_MISSED_MSG_ID", "F_MSG_TYPE",
-    "CAUSAL_WINDOW_SECS", "Messaging",
+    "CAUSAL_WINDOW_SECS", "Messaging", "cancel_pending_for_channel",
 ]
 
 # Threshold in seconds within which last_seen_id causal ordering is applied
@@ -143,6 +143,21 @@ class Messaging:
             last_seen_id=last_seen,
             received_at=ts,
         )
+
+    def cancel_pending_for_channel(self, channel_hash_hex: str):
+        """Discard all queued outbound messages for a specific channel.
+
+        Called when the local identity is removed from a channel so messages
+        composed during the gap period are not delivered if the peer later
+        becomes reachable.
+        """
+        for dest_hex in list(self._pending.keys()):
+            self._pending[dest_hex] = [
+                p for p in self._pending[dest_hex]
+                if p.get("channel_hash_hex") != channel_hash_hex
+            ]
+            if not self._pending[dest_hex]:
+                del self._pending[dest_hex]
 
     def flush_pending(self, dest_hex: str):
         """Attempt to deliver all queued messages for a peer whose path is now known."""

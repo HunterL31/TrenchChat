@@ -477,3 +477,118 @@ class TestStorageEncryption:
         s2.close()
         assert ch is not None
         assert ch["name"] == "DecChan"
+
+
+# ---------------------------------------------------------------------------
+# Membership tenure
+# ---------------------------------------------------------------------------
+
+CHAN = "aabbccddeeff0011"
+ID_A = "aaaaaaaaaaaaaaaa"
+ID_B = "bbbbbbbbbbbbbbbb"
+
+
+class TestMembershipTenure:
+    def test_open_tenure_makes_member_at_timestamp(self, db):
+        t0 = 1_000_000.0
+        db.open_tenure(CHAN, ID_A, t0)
+        assert db.was_member_at(CHAN, ID_A, t0)
+        assert db.was_member_at(CHAN, ID_A, t0 + 100)
+
+    def test_was_member_before_join_returns_false(self, db):
+        t0 = 1_000_000.0
+        db.open_tenure(CHAN, ID_A, t0)
+        assert not db.was_member_at(CHAN, ID_A, t0 - 1)
+
+    def test_close_tenure_excludes_timestamp_at_or_after_left_at(self, db):
+        t0 = 1_000_000.0
+        t1 = t0 + 500.0
+        db.open_tenure(CHAN, ID_A, t0)
+        db.close_tenure(CHAN, ID_A, t1)
+        assert db.was_member_at(CHAN, ID_A, t0)
+        assert db.was_member_at(CHAN, ID_A, t1 - 1)
+        assert not db.was_member_at(CHAN, ID_A, t1)
+        assert not db.was_member_at(CHAN, ID_A, t1 + 1)
+
+    def test_gap_after_kick_and_before_rejoin(self, db):
+        t0 = 1_000_000.0
+        kick = t0 + 300.0
+        rejoin = t0 + 600.0
+        db.open_tenure(CHAN, ID_A, t0)
+        db.close_tenure(CHAN, ID_A, kick)
+        db.open_tenure(CHAN, ID_A, rejoin)
+        # Before kick — valid
+        assert db.was_member_at(CHAN, ID_A, t0)
+        assert db.was_member_at(CHAN, ID_A, kick - 1)
+        # In the gap — invalid
+        assert not db.was_member_at(CHAN, ID_A, kick)
+        assert not db.was_member_at(CHAN, ID_A, rejoin - 1)
+        # After rejoin — valid
+        assert db.was_member_at(CHAN, ID_A, rejoin)
+        assert db.was_member_at(CHAN, ID_A, rejoin + 1000)
+
+    def test_update_tenure_adds_removed_and_added(self, db):
+        t0 = 1_000_000.0
+        t1 = t0 + 300.0
+        id_c = "cccccccccccccccc"
+        db.open_tenure(CHAN, ID_A, t0)
+        db.open_tenure(CHAN, ID_B, t0)
+        # ID_B is removed, ID_A stays, new member id_c is added
+        db.update_tenure(CHAN, {ID_A, ID_B}, {ID_A, id_c}, t1)
+        # A: unchanged open interval
+        assert db.was_member_at(CHAN, ID_A, t1)
+        # B: closed at t1
+        assert db.was_member_at(CHAN, ID_B, t1 - 1)
+        assert not db.was_member_at(CHAN, ID_B, t1)
+        # C: new open interval from t1
+        assert db.was_member_at(CHAN, id_c, t1)
+        assert not db.was_member_at(CHAN, id_c, t1 - 1)
+
+    def test_update_tenure_no_change_idempotent(self, db):
+        t0 = 1_000_000.0
+        t1 = t0 + 200.0
+        db.open_tenure(CHAN, ID_A, t0)
+        # Same set in and out — nothing changes
+        db.update_tenure(CHAN, {ID_A}, {ID_A}, t1)
+        assert db.was_member_at(CHAN, ID_A, t1)
+
+    def test_close_tenure_with_no_open_interval_is_noop(self, db):
+        # Should not raise
+        db.close_tenure(CHAN, ID_A, 1_000_000.0)
+
+    def test_open_tenure_idempotent(self, db):
+        t0 = 1_000_000.0
+        db.open_tenure(CHAN, ID_A, t0)
+        db.open_tenure(CHAN, ID_A, t0)  # duplicate — ignored
+        # Should still be a member
+        assert db.was_member_at(CHAN, ID_A, t0)
+
+    def test_has_any_tenure_empty(self, db):
+        assert not db.has_any_tenure(CHAN)
+
+    def test_has_any_tenure_after_open(self, db):
+        db.open_tenure(CHAN, ID_A, 1_000_000.0)
+        assert db.has_any_tenure(CHAN)
+
+    def test_was_member_at_unknown_identity_returns_false(self, db):
+        db.open_tenure(CHAN, ID_A, 1_000_000.0)
+        assert not db.was_member_at(CHAN, ID_B, 1_000_000.0)
+
+    def test_backfill_from_members_table(self, tmp_path):
+        """Existing members are backfilled into tenure on first open."""
+        db = Storage(db_path=tmp_path / "bf.db")
+        # Manually insert a member row — bypassing tenure so we can test backfill
+        db.upsert_channel(CHAN, "Test", "", "creator", "invite", time.time())
+        t0 = time.time() - 10
+        db._conn.execute(
+            "INSERT INTO members (channel_hash, identity_hash, display_name, role, added_at)"
+            " VALUES (?, ?, '', 'member', ?)",
+            (CHAN, ID_A, t0)
+        )
+        db._conn.commit()
+        # Clear tenure so _migrate_tenure will backfill
+        db._conn.execute("DELETE FROM membership_tenure")
+        db._conn.commit()
+        db._migrate_tenure()
+        assert db.was_member_at(CHAN, ID_A, t0 + 1)
+        db.close()

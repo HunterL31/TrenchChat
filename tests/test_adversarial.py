@@ -760,3 +760,188 @@ class TestAdversarialMemberListIntegrity:
             "Alice accepted a member list doc whose payload was signed for a different channel"
         assert alice.storage.get_member_list_version(ch_b)["version"] == existing_b_v, \
             "Channel B's version was modified by a doc intended for channel A"
+
+
+# ---------------------------------------------------------------------------
+# MEMBERSHIP TENURE — sync replay by kicked members
+# ---------------------------------------------------------------------------
+
+class TestAdversarialTenure:
+    def test_tenure_recorded_on_kick(self, peer_factory):
+        """
+        When Alice kicks Bob, Bob's tenure interval is closed at published_at.
+        Messages Bob sends after the kick timestamp are invalid.
+        """
+        alice, bob, ch_hash = _setup_channel_with_member(
+            peer_factory, member_perms=[SEND_MESSAGE]
+        )
+        # publish_member_list in _setup already created tenure rows for alice and bob.
+        # No need to manually open tenure — doing so would create stale open intervals.
+        assert alice.storage.has_any_tenure(ch_hash), \
+            "Tenure should be populated by publish_member_list"
+
+        # Capture Bob's join timestamp before the kick
+        bob_joined_ts = alice.storage.get_member_list_version(ch_hash)["published_at"]
+
+        alice.invite_mgr.publish_member_list(
+            ch_hash, remove_members=[bob.identity.hash]
+        )
+        assert wait_for(
+            lambda: not alice.storage.is_member(ch_hash, bob.identity.hash_hex),
+            timeout=5,
+        ), "Bob was not removed from the member list"
+
+        # Bob was a member before the kick
+        assert alice.storage.was_member_at(ch_hash, bob.identity.hash_hex, bob_joined_ts)
+        # Bob is not a member at or after the published_at of the kick doc
+        kick_published_at = alice.storage.get_member_list_version(ch_hash)["published_at"]
+        assert not alice.storage.was_member_at(
+            ch_hash, bob.identity.hash_hex, kick_published_at
+        )
+
+    def test_synced_message_from_kicked_member_in_gap_is_rejected(self, peer_factory):
+        """
+        Bob is kicked and sends a message locally during the gap period.
+        When that gap message arrives in a sync response, Alice must reject it
+        because Bob's tenure interval is closed at the kick's published_at.
+        The rejection must happen before any potential re-add opens a new interval.
+        """
+        from trenchchat.core.messaging import _compute_message_id
+
+        alice, bob, ch_hash = _setup_channel_with_member(
+            peer_factory, member_perms=[SEND_MESSAGE]
+        )
+        # publish_member_list already created tenure rows — confirm they exist
+        assert alice.storage.has_any_tenure(ch_hash)
+
+        # Alice kicks Bob
+        alice.invite_mgr.publish_member_list(
+            ch_hash, remove_members=[bob.identity.hash]
+        )
+        assert wait_for(
+            lambda: not alice.storage.is_member(ch_hash, bob.identity.hash_hex),
+            timeout=5,
+        )
+        kick_published_at = alice.storage.get_member_list_version(ch_hash)["published_at"]
+
+        # Bob sends a message locally during the gap (after kick_published_at).
+        # Verify the tenure check works before any re-add could widen the window.
+        gap_ts = kick_published_at + 10
+        gap_content = "Message during gap — invalid"
+        gap_msg_id = _compute_message_id(gap_content, bob.identity.hash_hex, gap_ts)
+
+        assert not alice.storage.was_member_at(ch_hash, bob.identity.hash_hex, gap_ts), \
+            "Tenure says Bob was a member during the gap — test setup error"
+
+        # Simulate a sync response delivering Bob's gap message
+        alice.sync_mgr._handle_sync_response(
+            {0x08: __import__("msgpack").packb([{
+                "sender_hash":  bob.identity.hash_hex,
+                "sender_name":  "Bob",
+                "content":      gap_content,
+                "timestamp":    gap_ts,
+                "message_id":   gap_msg_id,
+                "reply_to":     None,
+                "last_seen_id": None,
+            }], use_bin_type=True)},
+            ch_hash,
+        )
+
+        assert not alice.storage.message_exists(gap_msg_id), \
+            "Alice accepted a gap message from a kicked member via sync"
+
+    def test_synced_message_from_valid_tenure_is_accepted(self, peer_factory):
+        """
+        A message sent before Bob was kicked (within valid tenure) must be
+        accepted by the sync response handler.
+        """
+        from trenchchat.core.messaging import _compute_message_id
+
+        alice, bob, ch_hash = _setup_channel_with_member(
+            peer_factory, member_perms=[SEND_MESSAGE]
+        )
+        # publish_member_list already created tenure rows
+        assert alice.storage.has_any_tenure(ch_hash)
+
+        # Legitimate message timestamped before the kick (use the join published_at)
+        bob_join_ts = alice.storage.get_member_list_version(ch_hash)["published_at"]
+        valid_ts = bob_join_ts - 1  # technically before the signed doc, but within open interval
+        # Use a timestamp clearly within the tenure window
+        valid_ts = bob_join_ts + 0.001
+        valid_content = "Message before kick — valid"
+        valid_msg_id = _compute_message_id(valid_content, bob.identity.hash_hex, valid_ts)
+
+        # Alice kicks Bob — the kick published_at must be > valid_ts
+        time.sleep(0.01)  # ensure kick timestamp is strictly after valid_ts
+        alice.invite_mgr.publish_member_list(
+            ch_hash, remove_members=[bob.identity.hash]
+        )
+        assert wait_for(
+            lambda: not alice.storage.is_member(ch_hash, bob.identity.hash_hex),
+            timeout=5,
+        )
+        kick_published_at = alice.storage.get_member_list_version(ch_hash)["published_at"]
+        assert kick_published_at > valid_ts, \
+            "Test setup error: kick_published_at must be after valid_ts"
+
+        # Sync delivers the pre-kick message — must be accepted
+        alice.sync_mgr._handle_sync_response(
+            {0x08: __import__("msgpack").packb([{
+                "sender_hash":  bob.identity.hash_hex,
+                "sender_name":  "Bob",
+                "content":      valid_content,
+                "timestamp":    valid_ts,
+                "message_id":   valid_msg_id,
+                "reply_to":     None,
+                "last_seen_id": None,
+            }], use_bin_type=True)},
+            ch_hash,
+        )
+
+        assert alice.storage.message_exists(valid_msg_id), \
+            "Alice rejected a legitimate pre-kick message via sync"
+
+    def test_cancel_pending_on_kick(self, peer_factory):
+        """
+        When the local identity is removed from a channel, pending outbound
+        messages for that channel are discarded.
+        """
+        from trenchchat.core.messaging import _compute_message_id
+
+        alice, bob, ch_hash = _setup_channel_with_member(
+            peer_factory, member_perms=[SEND_MESSAGE]
+        )
+
+        # Manually queue a pending outbound message on Bob's side
+        ts = time.time()
+        content = "Queued while member"
+        msg_id = _compute_message_id(content, bob.identity.hash_hex, ts)
+        bob.messaging._pending[alice.identity.hash_hex] = [{
+            "channel_hash_hex":  ch_hash,
+            "content":           content,
+            "timestamp":         ts,
+            "msg_id":            msg_id,
+            "display_name":      "Bob",
+            "reply_to":          None,
+            "last_seen_id":      None,
+            "subscriber_hashes": [alice.identity.hash_hex],
+        }]
+
+        # Mirror kick on Bob's storage so the member list callback fires correctly
+        bob.storage.upsert_channel(ch_hash, "test-ch", "", alice.identity.hash_hex,
+                                   "invite", time.time())
+        bob.storage.subscribe(ch_hash)
+
+        # Simulate receiving the kick by calling the member list callback on Bob's SyncManager
+        # (remove Bob from Bob's own member table to reflect the kick)
+        bob.storage.remove_member(ch_hash, bob.identity.hash_hex)
+        bob.sync_mgr._on_member_list_updated(ch_hash)
+
+        # Pending messages for that channel should be gone
+        pending_for_channel = [
+            p for msgs in bob.messaging._pending.values()
+            for p in msgs
+            if p.get("channel_hash_hex") == ch_hash
+        ]
+        assert not pending_for_channel, \
+            "Pending outbound messages were not cleared after Bob was kicked"
