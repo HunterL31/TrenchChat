@@ -3,6 +3,7 @@ Settings dialog: identity, propagation node configuration, channel filter,
 and security (PIN lock).
 """
 
+import io
 from pathlib import Path
 
 from PyQt6.QtWidgets import (
@@ -10,29 +11,243 @@ from PyQt6.QtWidgets import (
     QLabel, QLineEdit, QPushButton, QCheckBox, QSpinBox,
     QComboBox, QListWidget, QListWidgetItem, QGroupBox,
     QDialogButtonBox, QWidget, QTabWidget, QMessageBox,
+    QFileDialog, QScrollArea, QSizePolicy,
 )
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QPoint, QRect, QSize
+from PyQt6.QtGui import QPixmap, QPainter, QPainterPath, QColor, QImage, QPen
 
 import RNS
 
 from trenchchat.config import Config
 from trenchchat.core import lockbox
+from trenchchat.core.avatar import compress_avatar, MAX_AVATAR_BYTES
 from trenchchat.core.identity import Identity
 from trenchchat.core.storage import Storage
 from trenchchat.network.router import Router
 from trenchchat.gui.pin_dialog import SetPinDialog, ChangePinDialog
+
+_PREVIEW_SIZE = 80   # displayed avatar size in the settings dialog (px)
+_CROP_PREVIEW_SIZE = 280   # crop dialog canvas size (px)
+
+
+def _make_circular_pixmap(pixmap: QPixmap, size: int) -> QPixmap:
+    """Return a new size×size pixmap with the source rendered as a circle."""
+    scaled = pixmap.scaled(size, size, Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                           Qt.TransformationMode.SmoothTransformation)
+    # Center-crop if the scaled result isn't square
+    if scaled.width() > size or scaled.height() > size:
+        x = (scaled.width() - size) // 2
+        y = (scaled.height() - size) // 2
+        scaled = scaled.copy(x, y, size, size)
+
+    result = QPixmap(size, size)
+    result.fill(Qt.GlobalColor.transparent)
+
+    painter = QPainter(result)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    path = QPainterPath()
+    path.addEllipse(0, 0, size, size)
+    painter.setClipPath(path)
+    painter.drawPixmap(0, 0, scaled)
+    painter.end()
+    return result
+
+
+class AvatarCropDialog(QDialog):
+    """Displays a loaded image with a draggable circular crop overlay.
+
+    The user drags the image (or the crop circle) to position the crop area.
+    On accept, cropped_bytes contains the final 48x48 JPEG bytes.
+    """
+
+    def __init__(self, image_path: str, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Crop Profile Picture")
+        self.setFixedSize(_CROP_PREVIEW_SIZE + 40, _CROP_PREVIEW_SIZE + 100)
+        self.cropped_bytes: bytes | None = None
+
+        self._source = QPixmap(image_path)
+        if self._source.isNull():
+            QMessageBox.critical(self, "Error", "Could not load the selected image.")
+            return
+
+        # Scale source so its shorter side equals _CROP_PREVIEW_SIZE for display
+        src_w = self._source.width()
+        src_h = self._source.height()
+        if src_w < src_h:
+            self._display = self._source.scaledToWidth(
+                _CROP_PREVIEW_SIZE, Qt.TransformationMode.SmoothTransformation
+            )
+        else:
+            self._display = self._source.scaledToHeight(
+                _CROP_PREVIEW_SIZE, Qt.TransformationMode.SmoothTransformation
+            )
+
+        # Pan offset: how many pixels into the display image the view starts
+        self._offset = QPoint(0, 0)
+        self._drag_start: QPoint | None = None
+        self._drag_offset_start: QPoint | None = None
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 16, 20, 16)
+
+        self._canvas = _CropCanvas(
+            self._display, _CROP_PREVIEW_SIZE, self
+        )
+        layout.addWidget(self._canvas, alignment=Qt.AlignmentFlag.AlignCenter)
+
+        hint = QLabel("Drag to reposition the image within the circle.")
+        hint.setStyleSheet("color: #888; font-size: 11px;")
+        hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(hint)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self._on_accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _on_accept(self) -> None:
+        """Extract the crop region and compress to JPEG."""
+        crop_pixmap = self._canvas.get_crop_pixmap()
+        if crop_pixmap is None or crop_pixmap.isNull():
+            self.reject()
+            return
+
+        buf = io.BytesIO()
+        qimage = crop_pixmap.toImage().convertToFormat(QImage.Format.Format_RGB888)
+        ptr = qimage.bits()
+        ptr.setsize(qimage.sizeInBytes())
+        from PIL import Image as _PILImage
+        pil_img = _PILImage.frombytes(
+            "RGB", (qimage.width(), qimage.height()), bytes(ptr)
+        )
+        pil_img = pil_img.resize((48, 48), _PILImage.LANCZOS)
+        pil_img.save(buf, format="JPEG", quality=70, optimize=True)
+        result = buf.getvalue()
+
+        if len(result) > MAX_AVATAR_BYTES:
+            QMessageBox.warning(
+                self, "Image Too Large",
+                f"The cropped image is {len(result)} bytes after compression "
+                f"(max {MAX_AVATAR_BYTES}).\nTry a simpler image."
+            )
+            return
+
+        self.cropped_bytes = result
+        self.accept()
+
+
+class _CropCanvas(QWidget):
+    """Canvas widget that renders an image with a circular crop overlay.
+
+    The user drags the image to reposition it relative to the fixed circular
+    crop area centered in the canvas.
+    """
+
+    def __init__(self, display_pixmap: QPixmap, canvas_size: int, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(canvas_size, canvas_size)
+        self._pixmap = display_pixmap
+        self._canvas_size = canvas_size
+
+        # Position of the top-left corner of the image relative to the canvas
+        self._img_x = (canvas_size - display_pixmap.width()) // 2
+        self._img_y = (canvas_size - display_pixmap.height()) // 2
+        self._drag_start: QPoint | None = None
+        self._img_start: tuple[int, int] | None = None
+
+    def get_crop_pixmap(self) -> QPixmap | None:
+        """Return the square region of the image inside the crop circle."""
+        r = self._canvas_size // 2
+        # Crop square in canvas coords
+        crop_x = r - r  # = 0 (circle is centered)
+        crop_y = r - r  # = 0
+        # Map canvas crop region back to image coords
+        img_crop_x = -self._img_x
+        img_crop_y = -self._img_y
+        crop_size = self._canvas_size
+
+        # Clamp to image boundaries
+        src_rect = QRect(img_crop_x, img_crop_y, crop_size, crop_size)
+        return self._pixmap.copy(src_rect).scaled(
+            self._canvas_size, self._canvas_size,
+            Qt.AspectRatioMode.IgnoreAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        # Background
+        painter.fillRect(self.rect(), QColor("#1a1a1a"))
+
+        # Draw image at current offset
+        painter.drawPixmap(self._img_x, self._img_y, self._pixmap)
+
+        # Darken everything outside the circle
+        r = self._canvas_size // 2
+        overlay_path = QPainterPath()
+        overlay_path.addRect(0, 0, self._canvas_size, self._canvas_size)
+        inner = QPainterPath()
+        inner.addEllipse(0, 0, self._canvas_size, self._canvas_size)
+        overlay_path = overlay_path.subtracted(inner)
+
+        painter.fillPath(overlay_path, QColor(0, 0, 0, 160))
+
+        # Draw circle border
+        pen = QPen(QColor("#4a9eff"), 2)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawEllipse(1, 1, self._canvas_size - 2, self._canvas_size - 2)
+
+        painter.end()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_start = event.pos()
+            self._img_start = (self._img_x, self._img_y)
+
+    def mouseMoveEvent(self, event):
+        if self._drag_start is not None and self._img_start is not None:
+            delta = event.pos() - self._drag_start
+            new_x = self._img_start[0] + delta.x()
+            new_y = self._img_start[1] + delta.y()
+            # Clamp so the crop circle always lands inside the image
+            cs = self._canvas_size
+            pw = self._pixmap.width()
+            ph = self._pixmap.height()
+            new_x = min(0, max(cs - pw, new_x))
+            new_y = min(0, max(cs - ph, new_y))
+            self._img_x = new_x
+            self._img_y = new_y
+            self.update()
+
+    def mouseReleaseEvent(self, event):
+        self._drag_start = None
+        self._img_start = None
 
 
 class SettingsDialog(QDialog):
     """Application settings dialog with Identity, Propagation, and Security tabs."""
 
     def __init__(self, config: Config, identity: Identity,
-                 storage: Storage, router: Router, parent=None):
+                 storage: Storage, router: Router,
+                 avatar_mgr=None, subscriber_lookup=None,
+                 parent=None):
         super().__init__(parent)
         self._config = config
         self._identity = identity
         self._storage = storage
         self._router = router
+        self._avatar_mgr = avatar_mgr
+        self._subscriber_lookup = subscriber_lookup or (lambda _: set())
+
+        # Pending avatar state: None means no change; b"" means remove
+        self._pending_avatar: bytes | None = None
+        self._avatar_changed = False
 
         self.setWindowTitle("TrenchChat Settings")
         self.setMinimumWidth(500)
@@ -55,8 +270,41 @@ class SettingsDialog(QDialog):
 
     def _build_identity_tab(self) -> QWidget:
         widget = QWidget()
-        form = QFormLayout(widget)
-        form.setContentsMargins(12, 12, 12, 12)
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(12)
+
+        # --- Avatar section ---
+        avatar_group = QGroupBox("Profile Picture")
+        avatar_layout = QHBoxLayout(avatar_group)
+        avatar_layout.setSpacing(16)
+
+        self._avatar_label = QLabel()
+        self._avatar_label.setFixedSize(_PREVIEW_SIZE, _PREVIEW_SIZE)
+        self._avatar_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._avatar_label.setStyleSheet(
+            "border-radius: 40px; background: #2a2a2a;"
+        )
+        self._refresh_avatar_preview()
+        avatar_layout.addWidget(self._avatar_label)
+
+        btn_col = QVBoxLayout()
+        choose_btn = QPushButton("Choose Image…")
+        choose_btn.clicked.connect(self._on_choose_avatar)
+        btn_col.addWidget(choose_btn)
+
+        remove_btn = QPushButton("Remove")
+        remove_btn.clicked.connect(self._on_remove_avatar)
+        btn_col.addWidget(remove_btn)
+
+        btn_col.addStretch()
+        avatar_layout.addLayout(btn_col)
+        avatar_layout.addStretch()
+        layout.addWidget(avatar_group)
+
+        # --- Identity fields ---
+        form = QFormLayout()
+        form.setSpacing(8)
 
         self._display_name_edit = QLineEdit(self._config.display_name)
         form.addRow("Display name:", self._display_name_edit)
@@ -66,12 +314,62 @@ class SettingsDialog(QDialog):
         id_label.setStyleSheet("color: #888; font-family: monospace; font-size: 11px;")
         form.addRow("Identity hash:", id_label)
 
-        outbound_label = QLabel("Outbound propagation node (hex hash):")
         self._outbound_edit = QLineEdit(self._config.outbound_propagation_node or "")
         self._outbound_edit.setPlaceholderText("Leave blank to use direct delivery only")
         form.addRow("Propagation node:", self._outbound_edit)
 
+        layout.addLayout(form)
+        layout.addStretch()
         return widget
+
+    def _refresh_avatar_preview(self) -> None:
+        """Update the avatar preview label from pending state or config."""
+        if self._avatar_changed and self._pending_avatar:
+            pixmap = QPixmap()
+            pixmap.loadFromData(self._pending_avatar)
+        elif self._config.avatar_bytes:
+            pixmap = QPixmap()
+            pixmap.loadFromData(self._config.avatar_bytes)
+        else:
+            pixmap = None
+
+        if pixmap and not pixmap.isNull():
+            circular = _make_circular_pixmap(pixmap, _PREVIEW_SIZE)
+            self._avatar_label.setPixmap(circular)
+        else:
+            self._avatar_label.setPixmap(QPixmap())
+            self._avatar_label.setText("No photo")
+            self._avatar_label.setStyleSheet(
+                "border-radius: 40px; background: #2a2a2a; color: #666;"
+                " font-size: 11px;"
+            )
+
+    def _on_choose_avatar(self) -> None:
+        """Open file dialog, then show the crop dialog."""
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Choose Profile Picture",
+            "",
+            "Images (*.png *.jpg *.jpeg *.bmp *.gif *.webp)",
+        )
+        if not path:
+            return
+
+        dlg = AvatarCropDialog(path, self)
+        if dlg.exec() == QDialog.DialogCode.Accepted and dlg.cropped_bytes:
+            self._pending_avatar = dlg.cropped_bytes
+            self._avatar_changed = True
+            self._refresh_avatar_preview()
+
+    def _on_remove_avatar(self) -> None:
+        """Mark the avatar for removal."""
+        self._pending_avatar = b""
+        self._avatar_changed = True
+        self._avatar_label.setPixmap(QPixmap())
+        self._avatar_label.setText("No photo")
+        self._avatar_label.setStyleSheet(
+            "border-radius: 40px; background: #2a2a2a; color: #666; font-size: 11px;"
+        )
 
     # --- propagation node tab ---
 
@@ -308,6 +606,20 @@ class SettingsDialog(QDialog):
         outbound = self._outbound_edit.text().strip()
         if outbound != (self._config.outbound_propagation_node or ""):
             self._router.set_outbound_propagation_node(outbound or None)
+
+        # Avatar
+        if self._avatar_changed and self._avatar_mgr is not None:
+            try:
+                if self._pending_avatar:
+                    self._avatar_mgr.set_avatar(
+                        self._pending_avatar, self._subscriber_lookup
+                    )
+                else:
+                    self._avatar_mgr.remove_avatar(self._subscriber_lookup)
+            except RuntimeError as e:
+                QMessageBox.warning(self, "Avatar Rate Limit", str(e))
+            except Exception as e:
+                QMessageBox.critical(self, "Avatar Error", str(e))
 
         # Propagation node
         new_enabled = self._prop_enabled.isChecked()

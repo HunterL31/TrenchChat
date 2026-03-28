@@ -25,6 +25,7 @@ from PyQt6.QtWidgets import QApplication
 
 from trenchchat.config import Config
 from trenchchat.core import lockbox
+from trenchchat.core.avatar import AvatarManager
 from trenchchat.core.identity import Identity
 from trenchchat.core.storage import Storage
 from trenchchat.core.channel import ChannelManager
@@ -99,6 +100,7 @@ def main():
     invite_mgr = InviteManager(identity, storage, router)
     presence_mgr = PresenceManager(identity.hash_hex, config)
     user_directory = UserDirectory(identity.hash_hex)
+    avatar_mgr = AvatarManager(identity, config, storage, router)
 
     # Register the user announce handler before any announces go out so we
     # never miss a trenchchat.user announce from a peer that is already online.
@@ -184,6 +186,7 @@ def main():
         invite_mgr=invite_mgr,
         presence_mgr=presence_mgr,
         user_directory=user_directory,
+        avatar_mgr=avatar_mgr,
     )
     window.show()
 

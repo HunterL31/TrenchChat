@@ -114,6 +114,19 @@ CREATE TABLE IF NOT EXISTS membership_tenure (
 
 CREATE INDEX IF NOT EXISTS idx_tenure_lookup
     ON membership_tenure(channel_hash, identity_hash, joined_at);
+
+CREATE TABLE IF NOT EXISTS peer_avatars (
+    identity_hash  TEXT PRIMARY KEY,
+    avatar_data    BLOB NOT NULL,
+    avatar_version INTEGER NOT NULL DEFAULT 0,
+    updated_at     REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS avatar_deliveries (
+    identity_hash  TEXT PRIMARY KEY,
+    avatar_version INTEGER NOT NULL,
+    delivered_at   REAL NOT NULL
+);
 """
 
 
@@ -772,3 +785,65 @@ class Storage:
                 "DELETE FROM missed_deliveries WHERE recorded_at < ?",
                 (before_ts,)
             )
+
+    # --- peer avatars ---
+
+    def upsert_peer_avatar(self, identity_hash: str, avatar_data: bytes,
+                           avatar_version: int) -> None:
+        """Store or update the cached avatar for a peer identity."""
+        with self._tx():
+            self._conn.execute("""
+                INSERT INTO peer_avatars
+                    (identity_hash, avatar_data, avatar_version, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(identity_hash) DO UPDATE SET
+                    avatar_data=excluded.avatar_data,
+                    avatar_version=excluded.avatar_version,
+                    updated_at=excluded.updated_at
+            """, (identity_hash, avatar_data, avatar_version, time.time()))
+
+    def get_peer_avatar(self, identity_hash: str) -> dict | None:
+        """Return cached avatar info for a peer, or None if not stored.
+
+        Result dict has keys: identity_hash, avatar_data, avatar_version, updated_at.
+        """
+        row = self._fetchone(
+            "SELECT * FROM peer_avatars WHERE identity_hash = ?",
+            (identity_hash,)
+        )
+        return dict(row) if row else None
+
+    def delete_peer_avatar(self, identity_hash: str) -> None:
+        """Remove a peer's cached avatar."""
+        with self._tx():
+            self._conn.execute(
+                "DELETE FROM peer_avatars WHERE identity_hash = ?",
+                (identity_hash,)
+            )
+
+    # --- avatar delivery tracking ---
+
+    def upsert_avatar_delivery(self, identity_hash: str, avatar_version: int) -> None:
+        """Record that a peer has received our avatar at the given version."""
+        with self._tx():
+            self._conn.execute("""
+                INSERT INTO avatar_deliveries
+                    (identity_hash, avatar_version, delivered_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(identity_hash) DO UPDATE SET
+                    avatar_version=excluded.avatar_version,
+                    delivered_at=excluded.delivered_at
+            """, (identity_hash, avatar_version, time.time()))
+
+    def get_avatar_delivery_version(self, identity_hash: str) -> int | None:
+        """Return the avatar version last delivered to a peer, or None if never sent."""
+        row = self._fetchone(
+            "SELECT avatar_version FROM avatar_deliveries WHERE identity_hash = ?",
+            (identity_hash,)
+        )
+        return row["avatar_version"] if row else None
+
+    def clear_avatar_deliveries(self) -> None:
+        """Remove all delivery records. Called when our own avatar changes."""
+        with self._tx():
+            self._conn.execute("DELETE FROM avatar_deliveries")

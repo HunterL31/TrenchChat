@@ -14,6 +14,7 @@ dependencies = [
     "configobj",
     "sqlcipher3",
     "cryptography",
+    "Pillow",
 ]
 
 [project.gui-scripts]

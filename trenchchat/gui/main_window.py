@@ -200,12 +200,13 @@ class MainWindow(QMainWindow):
     _presence_changed     = pyqtSignal(str, bool)   # peer_hex, is_online
     _peer_announced       = pyqtSignal()            # any announce → maybe refresh map
     _reannounce_requested = pyqtSignal(object)      # iface or None → start debounce timer
+    _avatar_updated       = pyqtSignal(str)         # identity_hash_hex
 
     def __init__(self, config: Config, identity: Identity, storage: Storage,
                  rns: "RNS.Reticulum", router: Router, channel_mgr: ChannelManager,
                  messaging: Messaging, subscription_mgr: SubscriptionManager,
                  invite_mgr: InviteManager, presence_mgr: PresenceManager,
-                 user_directory: UserDirectory):
+                 user_directory: UserDirectory, avatar_mgr=None):
         super().__init__()
         self._config = config
         self._identity = identity
@@ -218,6 +219,7 @@ class MainWindow(QMainWindow):
         self._invite_mgr = invite_mgr
         self._presence_mgr = presence_mgr
         self._user_directory = user_directory
+        self._avatar_mgr = avatar_mgr
 
         # Pending invites: list of (channel_hash_hex, channel_name, token, expiry, admin_hash_hex)
         self._pending_invites: list[tuple] = []
@@ -249,6 +251,10 @@ class MainWindow(QMainWindow):
         channel_mgr.add_channel_discovered_callback(self._on_channel_discovered)
         presence_mgr.add_presence_callback(self._on_presence_changed)
 
+        self._avatar_updated.connect(self._on_avatar_updated_main_thread)
+        if avatar_mgr is not None:
+            avatar_mgr.add_avatar_callback(self._avatar_updated.emit)
+
         self._sync_mgr = SyncManager(
             identity, storage, router, messaging, subscription_mgr, invite_mgr
         )
@@ -257,6 +263,8 @@ class MainWindow(QMainWindow):
             self._sync_mgr.on_peer_appeared(peer_hex)
             self._presence_mgr.record_seen(peer_hex)
             self._seed_user_directory(peer_hex)
+            if self._avatar_mgr is not None:
+                self._avatar_mgr.flush_avatar(peer_hex)
             self._peer_announced.emit()
             self._reannounce_requested.emit(iface)
 
@@ -668,7 +676,8 @@ class MainWindow(QMainWindow):
             restore_id = self._settings.value(f"last_read/{channel_hash_hex}") or None
             view = ChannelView(channel_hash_hex, self._storage,
                                self._identity.hash_hex,
-                               restore_to_id=restore_id)
+                               restore_to_id=restore_id,
+                               config=self._config)
             self._channel_views[channel_hash_hex] = view
             self._stack.addWidget(view)
 
@@ -977,6 +986,12 @@ class MainWindow(QMainWindow):
         """Refresh the online panel when any peer's status changes."""
         self._refresh_online_panel()
 
+    @pyqtSlot(str)
+    def _on_avatar_updated_main_thread(self, identity_hex: str) -> None:
+        """Refresh channel views so updated avatars are reflected immediately."""
+        for view in self._channel_views.values():
+            view.refresh_avatars(identity_hex)
+
     def _on_presence_tick(self) -> None:
         """Periodic timer: prune stale presence and user directory entries, refresh the panel."""
         self._presence_mgr.prune()
@@ -1174,7 +1189,10 @@ class MainWindow(QMainWindow):
 
     def _on_settings(self):
         dlg = SettingsDialog(
-            self._config, self._identity, self._storage, self._router, self
+            self._config, self._identity, self._storage, self._router,
+            avatar_mgr=self._avatar_mgr,
+            subscriber_lookup=self._subscription_mgr.get_subscribers,
+            parent=self,
         )
         if dlg.exec() == QDialog.DialogCode.Accepted:
             # Propagate the (possibly new) display name to all live components

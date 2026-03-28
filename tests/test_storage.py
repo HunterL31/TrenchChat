@@ -592,3 +592,63 @@ class TestMembershipTenure:
         db._migrate_tenure()
         assert db.was_member_at(CHAN, ID_A, t0 + 1)
         db.close()
+
+
+# ---------------------------------------------------------------------------
+# Peer avatars
+# ---------------------------------------------------------------------------
+
+class TestPeerAvatars:
+    def test_upsert_and_get_peer_avatar(self, db):
+        peer = "aa" * 16
+        data = b"\xff\xd8\xff\xe0" + b"\x00" * 50   # fake JPEG header
+        db.upsert_peer_avatar(peer, data, avatar_version=1)
+        row = db.get_peer_avatar(peer)
+        assert row is not None
+        assert bytes(row["avatar_data"]) == data
+        assert row["avatar_version"] == 1
+        assert row["identity_hash"] == peer
+
+    def test_upsert_peer_avatar_updates_existing(self, db):
+        peer = "bb" * 16
+        db.upsert_peer_avatar(peer, b"old", avatar_version=1)
+        db.upsert_peer_avatar(peer, b"new", avatar_version=2)
+        row = db.get_peer_avatar(peer)
+        assert bytes(row["avatar_data"]) == b"new"
+        assert row["avatar_version"] == 2
+
+    def test_get_peer_avatar_missing_returns_none(self, db):
+        assert db.get_peer_avatar("cc" * 16) is None
+
+    def test_delete_peer_avatar(self, db):
+        peer = "dd" * 16
+        db.upsert_peer_avatar(peer, b"data", avatar_version=1)
+        db.delete_peer_avatar(peer)
+        assert db.get_peer_avatar(peer) is None
+
+
+# ---------------------------------------------------------------------------
+# Avatar delivery tracking
+# ---------------------------------------------------------------------------
+
+class TestAvatarDeliveryTracking:
+    def test_upsert_and_get_delivery_version(self, db):
+        peer = "ee" * 16
+        db.upsert_avatar_delivery(peer, avatar_version=3)
+        assert db.get_avatar_delivery_version(peer) == 3
+
+    def test_upsert_delivery_updates_existing(self, db):
+        peer = "ff" * 16
+        db.upsert_avatar_delivery(peer, avatar_version=1)
+        db.upsert_avatar_delivery(peer, avatar_version=5)
+        assert db.get_avatar_delivery_version(peer) == 5
+
+    def test_get_delivery_version_missing_returns_none(self, db):
+        assert db.get_avatar_delivery_version("11" * 16) is None
+
+    def test_clear_avatar_deliveries(self, db):
+        db.upsert_avatar_delivery("22" * 16, avatar_version=1)
+        db.upsert_avatar_delivery("33" * 16, avatar_version=2)
+        db.clear_avatar_deliveries()
+        assert db.get_avatar_delivery_version("22" * 16) is None
+        assert db.get_avatar_delivery_version("33" * 16) is None

@@ -6,12 +6,13 @@ Late-arriving messages are flagged visually.
 """
 
 import datetime
+import hashlib
 import time
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QScrollArea, QLabel, QFrame, QSizePolicy
+    QWidget, QVBoxLayout, QHBoxLayout, QScrollArea, QLabel, QFrame, QSizePolicy
 )
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QFont, QColor, QPalette
+from PyQt6.QtGui import QFont, QColor, QPalette, QPixmap, QPainter, QPainterPath
 
 from trenchchat.core.storage import Storage
 
@@ -19,6 +20,7 @@ from trenchchat.core.storage import Storage
 LATE_THRESHOLD_SECS = 30.0
 
 _MESSAGE_HISTORY_LIMIT = 500
+_AVATAR_DISPLAY_SIZE = 32   # px, displayed in message bubbles
 
 
 def _format_ts(ts: float) -> str:
@@ -26,40 +28,130 @@ def _format_ts(ts: float) -> str:
     return dt.strftime("%H:%M")
 
 
+def _make_circular_pixmap(pixmap: QPixmap, size: int) -> QPixmap:
+    """Return a size×size pixmap with the source rendered inside a circle."""
+    scaled = pixmap.scaled(size, size, Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                           Qt.TransformationMode.SmoothTransformation)
+    if scaled.width() > size or scaled.height() > size:
+        x = (scaled.width() - size) // 2
+        y = (scaled.height() - size) // 2
+        scaled = scaled.copy(x, y, size, size)
+
+    result = QPixmap(size, size)
+    result.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(result)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    path = QPainterPath()
+    path.addEllipse(0, 0, size, size)
+    painter.setClipPath(path)
+    painter.drawPixmap(0, 0, scaled)
+    painter.end()
+    return result
+
+
+def _make_placeholder_pixmap(identity_hex: str, display_name: str, size: int) -> QPixmap:
+    """Return a colored circle with the first letter of the display name."""
+    # Derive a stable color from the identity hash
+    digest = hashlib.md5(identity_hex.encode()).digest()
+    hue = int.from_bytes(digest[:2], "big") % 360
+    color = QColor.fromHsv(hue, 160, 180)
+
+    result = QPixmap(size, size)
+    result.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(result)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+    path = QPainterPath()
+    path.addEllipse(0, 0, size, size)
+    painter.fillPath(path, color)
+
+    letter = (display_name[:1] or "?").upper()
+    font = painter.font()
+    font.setPointSize(max(8, size // 2 - 2))
+    font.setBold(True)
+    painter.setFont(font)
+    painter.setPen(QColor("#ffffff"))
+    painter.drawText(result.rect(), Qt.AlignmentFlag.AlignCenter, letter)
+    painter.end()
+    return result
+
+
 class MessageBubble(QFrame):
+    """A single message row showing avatar, sender name, time, and content."""
+
     def __init__(self, sender: str, sender_hash: str, content: str, timestamp: float,
-                 received_at: float, is_own: bool = False, parent=None):
+                 received_at: float, is_own: bool = False,
+                 avatar_pixmap: QPixmap | None = None, parent=None):
         super().__init__(parent)
         self.setFrameShape(QFrame.Shape.NoFrame)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
+        self._sender_hash = sender_hash
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(8, 4, 8, 4)
-        layout.setSpacing(2)
+        outer = QHBoxLayout(self)
+        outer.setContentsMargins(8, 4, 8, 4)
+        outer.setSpacing(8)
+        outer.setAlignment(Qt.AlignmentFlag.AlignTop)
+
+        # Avatar label
+        self._avatar_label = QLabel()
+        self._avatar_label.setFixedSize(_AVATAR_DISPLAY_SIZE, _AVATAR_DISPLAY_SIZE)
+        self._avatar_label.setAlignment(Qt.AlignmentFlag.AlignTop)
+        self._set_avatar_pixmap(avatar_pixmap, sender, sender_hash)
+
+        inner = QVBoxLayout()
+        inner.setSpacing(2)
 
         # Header: sender + truncated hash badge + time
         hash_badge = f"<span style='color:#666;font-size:10px'>[{sender_hash[:8]}]</span>"
-        header = QLabel(f"<b>{sender}</b> {hash_badge}  <span style='color:#888;font-size:11px'>"
-                        f"{_format_ts(timestamp)}</span>")
+        header = QLabel(
+            f"<b>{sender}</b> {hash_badge}  "
+            f"<span style='color:#888;font-size:11px'>{_format_ts(timestamp)}</span>"
+        )
         header.setTextFormat(Qt.TextFormat.RichText)
-        layout.addWidget(header)
+        inner.addWidget(header)
 
         # Content
         body = QLabel(content)
         body.setWordWrap(True)
         body.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        layout.addWidget(body)
+        inner.addWidget(body)
 
         # Late indicator
         if received_at - timestamp > LATE_THRESHOLD_SECS:
             late_label = QLabel("⟳ received late")
             late_label.setStyleSheet("color: #888; font-size: 10px; font-style: italic;")
-            layout.addWidget(late_label)
+            inner.addWidget(late_label)
 
         if is_own:
-            self.setStyleSheet("background: #1e3a5f; border-radius: 6px; margin: 2px 40px 2px 8px;")
+            outer.addStretch()
+            outer.addWidget(self._avatar_label)
+            outer.addLayout(inner)
+            self.setStyleSheet(
+                "background: #1e3a5f; border-radius: 6px; margin: 2px 8px 2px 40px;"
+            )
         else:
-            self.setStyleSheet("background: #2a2a2a; border-radius: 6px; margin: 2px 8px 2px 40px;")
+            outer.addWidget(self._avatar_label)
+            outer.addLayout(inner)
+            outer.addStretch()
+            self.setStyleSheet(
+                "background: #2a2a2a; border-radius: 6px; margin: 2px 40px 2px 8px;"
+            )
+
+    def update_avatar(self, avatar_pixmap: QPixmap | None,
+                      display_name: str) -> None:
+        """Replace the avatar image (called when a new avatar arrives for this sender)."""
+        self._set_avatar_pixmap(avatar_pixmap, display_name, self._sender_hash)
+
+    def _set_avatar_pixmap(self, avatar_pixmap: QPixmap | None,
+                           display_name: str, sender_hash: str) -> None:
+        if avatar_pixmap and not avatar_pixmap.isNull():
+            self._avatar_label.setPixmap(
+                _make_circular_pixmap(avatar_pixmap, _AVATAR_DISPLAY_SIZE)
+            )
+        else:
+            self._avatar_label.setPixmap(
+                _make_placeholder_pixmap(sender_hash, display_name, _AVATAR_DISPLAY_SIZE)
+            )
 
 
 class ChannelView(QWidget):
@@ -67,13 +159,18 @@ class ChannelView(QWidget):
 
     def __init__(self, channel_hash_hex: str, storage: Storage,
                  own_identity_hex: str, restore_to_id: str | None = None,
-                 parent=None):
+                 config=None, parent=None):
         super().__init__(parent)
         self._channel_hash = channel_hash_hex
         self._storage = storage
         self._own_hex = own_identity_hex
+        self._config = config
         self._displayed_ids: set[str] = set()
         self._bubble_map: dict[str, MessageBubble] = {}
+        # identity_hash_hex -> QPixmap (raw, before circular clip)
+        self._avatar_cache: dict[str, QPixmap] = {}
+        # identity_hash_hex -> list of MessageBubble (for batch refresh)
+        self._bubbles_by_sender: dict[str, list[MessageBubble]] = {}
         self._out_of_order_count = 0
         # Consumed on the first load_history() call; cleared afterwards so
         # subsequent reloads (out-of-order messages) always scroll to bottom.
@@ -108,6 +205,8 @@ class ChannelView(QWidget):
         """Load all stored messages for this channel."""
         self._displayed_ids.clear()
         self._bubble_map.clear()
+        self._avatar_cache.clear()
+        self._bubbles_by_sender.clear()
         # Clear existing bubbles (keep the stretch at index 0)
         while self._msg_layout.count() > 1:
             item = self._msg_layout.takeAt(1)
@@ -155,26 +254,79 @@ class ChannelView(QWidget):
                     self._append_bubble(row, scroll=True)
                 break
 
+    def _get_avatar_pixmap(self, sender_hash: str) -> QPixmap | None:
+        """Return a cached raw QPixmap for a sender, loading from DB on first access."""
+        if sender_hash in self._avatar_cache:
+            return self._avatar_cache[sender_hash]
+
+        # Own avatar from config
+        if sender_hash == self._own_hex and self._config is not None:
+            avatar_bytes = self._config.avatar_bytes
+            if avatar_bytes:
+                pix = QPixmap()
+                pix.loadFromData(avatar_bytes)
+                if not pix.isNull():
+                    self._avatar_cache[sender_hash] = pix
+                    return pix
+            return None
+
+        row = self._storage.get_peer_avatar(sender_hash)
+        if row and row.get("avatar_data"):
+            pix = QPixmap()
+            pix.loadFromData(bytes(row["avatar_data"]))
+            if not pix.isNull():
+                self._avatar_cache[sender_hash] = pix
+                return pix
+        return None
+
     def _append_bubble(self, row, scroll: bool = True):
         msg_id = row["message_id"]
         if msg_id in self._displayed_ids:
             return
         self._displayed_ids.add(msg_id)
 
+        sender_hash = row["sender_hash"]
+        sender_name = row["sender_name"] or sender_hash[:8]
+        avatar_pix = self._get_avatar_pixmap(sender_hash)
+
         bubble = MessageBubble(
-            sender=row["sender_name"] or row["sender_hash"][:8],
-            sender_hash=row["sender_hash"],
+            sender=sender_name,
+            sender_hash=sender_hash,
             content=row["content"],
             timestamp=row["timestamp"],
             received_at=row["received_at"],
-            is_own=row["sender_hash"] == self._own_hex,
+            is_own=sender_hash == self._own_hex,
+            avatar_pixmap=avatar_pix,
         )
         self._bubble_map[msg_id] = bubble
+        self._bubbles_by_sender.setdefault(sender_hash, []).append(bubble)
+
         # Insert before the stretch (index 0)
         self._msg_layout.insertWidget(self._msg_layout.count(), bubble)
 
         if scroll:
             QTimer.singleShot(50, self._scroll_to_bottom)
+
+    def refresh_avatars(self, identity_hex: str) -> None:
+        """Refresh avatar display for all visible bubbles from a given sender.
+
+        Called from the main thread when a new avatar arrives (via _avatar_updated signal).
+        """
+        # Invalidate cache for this identity so we re-read from DB
+        self._avatar_cache.pop(identity_hex, None)
+        new_pix = self._get_avatar_pixmap(identity_hex)
+
+        for bubble in self._bubbles_by_sender.get(identity_hex, []):
+            # Retrieve sender_name from the bubble's header is not straightforward,
+            # so look it up from storage instead.
+            display_name = identity_hex[:8]
+            try:
+                row = self._storage.get_display_name_for_identity(identity_hex)
+                if row:
+                    display_name = row
+            except Exception:
+                pass
+            bubble.update_avatar(new_pix, display_name)
 
     def _scroll_to_bottom(self):
         sb = self._scroll.verticalScrollBar()
