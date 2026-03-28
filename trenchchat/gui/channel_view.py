@@ -76,47 +76,70 @@ def _make_placeholder_pixmap(identity_hex: str, display_name: str, size: int) ->
     return result
 
 
-class MessageBubble(QFrame):
-    """A single message row showing avatar, sender name, time, and content."""
+class _AvatarWidget(QWidget):
+    """Fixed-size widget that paints a circular avatar without leaking stylesheet."""
+
+    def __init__(self, size: int, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(size, size)
+        self._pixmap: QPixmap | None = None
+
+    def set_pixmap(self, pixmap: QPixmap) -> None:
+        self._pixmap = pixmap
+        self.update()
+
+    def paintEvent(self, event):
+        if self._pixmap and not self._pixmap.isNull():
+            painter = QPainter(self)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            painter.drawPixmap(0, 0, self._pixmap)
+            painter.end()
+
+
+class MessageBubble(QWidget):
+    """A single message row showing avatar, sender name, time, and content.
+
+    Uses QWidget (not QFrame) so that the bubble background stylesheet does not
+    cascade into child labels and corrupt their text rendering.
+    """
 
     def __init__(self, sender: str, sender_hash: str, content: str, timestamp: float,
                  received_at: float, is_own: bool = False,
                  avatar_pixmap: QPixmap | None = None, parent=None):
         super().__init__(parent)
-        self.setFrameShape(QFrame.Shape.NoFrame)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self._sender_hash = sender_hash
+        self._is_own = is_own
 
+        # Outer row: avatar + text block, with spacer on the appropriate side
         outer = QHBoxLayout(self)
-        outer.setContentsMargins(8, 4, 8, 4)
+        outer.setContentsMargins(8, 6, 8, 6)
         outer.setSpacing(8)
         outer.setAlignment(Qt.AlignmentFlag.AlignTop)
 
-        # Avatar label
-        self._avatar_label = QLabel()
-        self._avatar_label.setFixedSize(_AVATAR_DISPLAY_SIZE, _AVATAR_DISPLAY_SIZE)
-        self._avatar_label.setAlignment(Qt.AlignmentFlag.AlignTop)
+        # Avatar widget — uses custom paint so stylesheet doesn't affect it
+        self._avatar_widget = _AvatarWidget(_AVATAR_DISPLAY_SIZE, self)
         self._set_avatar_pixmap(avatar_pixmap, sender, sender_hash)
 
+        # Text block
         inner = QVBoxLayout()
         inner.setSpacing(2)
+        inner.setContentsMargins(0, 0, 0, 0)
 
-        # Header: sender + truncated hash badge + time
-        hash_badge = f"<span style='color:#666;font-size:10px'>[{sender_hash[:8]}]</span>"
+        hash_badge = f"<span style='color:#888;font-size:10px'>[{sender_hash[:8]}]</span>"
         header = QLabel(
-            f"<b>{sender}</b> {hash_badge}  "
-            f"<span style='color:#888;font-size:11px'>{_format_ts(timestamp)}</span>"
+            f"<b>{sender}</b> {hash_badge}"
+            f"&nbsp;&nbsp;<span style='color:#999;font-size:10px'>{_format_ts(timestamp)}</span>"
         )
         header.setTextFormat(Qt.TextFormat.RichText)
         inner.addWidget(header)
 
-        # Content
         body = QLabel(content)
         body.setWordWrap(True)
         body.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         inner.addWidget(body)
 
-        # Late indicator
         if received_at - timestamp > LATE_THRESHOLD_SECS:
             late_label = QLabel("⟳ received late")
             late_label.setStyleSheet("color: #888; font-size: 10px; font-style: italic;")
@@ -124,17 +147,19 @@ class MessageBubble(QFrame):
 
         if is_own:
             outer.addStretch()
-            outer.addWidget(self._avatar_label)
             outer.addLayout(inner)
+            outer.addWidget(self._avatar_widget)
             self.setStyleSheet(
-                "background: #1e3a5f; border-radius: 6px; margin: 2px 8px 2px 40px;"
+                "MessageBubble { background: #1e3a5f; border-radius: 6px;"
+                " margin: 2px 8px 2px 56px; }"
             )
         else:
-            outer.addWidget(self._avatar_label)
+            outer.addWidget(self._avatar_widget)
             outer.addLayout(inner)
             outer.addStretch()
             self.setStyleSheet(
-                "background: #2a2a2a; border-radius: 6px; margin: 2px 40px 2px 8px;"
+                "MessageBubble { background: #2a2a2a; border-radius: 6px;"
+                " margin: 2px 56px 2px 8px; }"
             )
 
     def update_avatar(self, avatar_pixmap: QPixmap | None,
@@ -145,13 +170,10 @@ class MessageBubble(QFrame):
     def _set_avatar_pixmap(self, avatar_pixmap: QPixmap | None,
                            display_name: str, sender_hash: str) -> None:
         if avatar_pixmap and not avatar_pixmap.isNull():
-            self._avatar_label.setPixmap(
-                _make_circular_pixmap(avatar_pixmap, _AVATAR_DISPLAY_SIZE)
-            )
+            pix = _make_circular_pixmap(avatar_pixmap, _AVATAR_DISPLAY_SIZE)
         else:
-            self._avatar_label.setPixmap(
-                _make_placeholder_pixmap(sender_hash, display_name, _AVATAR_DISPLAY_SIZE)
-            )
+            pix = _make_placeholder_pixmap(sender_hash, display_name, _AVATAR_DISPLAY_SIZE)
+        self._avatar_widget.set_pixmap(pix)
 
 
 class ChannelView(QWidget):

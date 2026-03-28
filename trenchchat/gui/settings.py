@@ -54,16 +54,16 @@ def _make_circular_pixmap(pixmap: QPixmap, size: int) -> QPixmap:
 
 
 class AvatarCropDialog(QDialog):
-    """Displays a loaded image with a draggable circular crop overlay.
+    """Displays a loaded image with a draggable, zoomable circular crop overlay.
 
-    The user drags the image (or the crop circle) to position the crop area.
-    On accept, cropped_bytes contains the final 48x48 JPEG bytes.
+    Drag to pan; scroll wheel to zoom in/out.  On accept, cropped_bytes
+    contains the final 48x48 JPEG bytes.
     """
 
     def __init__(self, image_path: str, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Crop Profile Picture")
-        self.setFixedSize(_CROP_PREVIEW_SIZE + 40, _CROP_PREVIEW_SIZE + 100)
+        self.setFixedSize(_CROP_PREVIEW_SIZE + 40, _CROP_PREVIEW_SIZE + 140)
         self.cropped_bytes: bytes | None = None
 
         self._source = QPixmap(image_path)
@@ -71,32 +71,14 @@ class AvatarCropDialog(QDialog):
             QMessageBox.critical(self, "Error", "Could not load the selected image.")
             return
 
-        # Scale source so its shorter side equals _CROP_PREVIEW_SIZE for display
-        src_w = self._source.width()
-        src_h = self._source.height()
-        if src_w < src_h:
-            self._display = self._source.scaledToWidth(
-                _CROP_PREVIEW_SIZE, Qt.TransformationMode.SmoothTransformation
-            )
-        else:
-            self._display = self._source.scaledToHeight(
-                _CROP_PREVIEW_SIZE, Qt.TransformationMode.SmoothTransformation
-            )
-
-        # Pan offset: how many pixels into the display image the view starts
-        self._offset = QPoint(0, 0)
-        self._drag_start: QPoint | None = None
-        self._drag_offset_start: QPoint | None = None
-
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 16, 20, 16)
+        layout.setSpacing(10)
 
-        self._canvas = _CropCanvas(
-            self._display, _CROP_PREVIEW_SIZE, self
-        )
+        self._canvas = _CropCanvas(self._source, _CROP_PREVIEW_SIZE, self)
         layout.addWidget(self._canvas, alignment=Qt.AlignmentFlag.AlignCenter)
 
-        hint = QLabel("Drag to reposition the image within the circle.")
+        hint = QLabel("Drag to pan  •  Scroll to zoom")
         hint.setStyleSheet("color: #888; font-size: 11px;")
         hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(hint)
@@ -109,13 +91,12 @@ class AvatarCropDialog(QDialog):
         layout.addWidget(buttons)
 
     def _on_accept(self) -> None:
-        """Extract the crop region and compress to JPEG."""
+        """Render the current crop region into a 48×48 JPEG."""
         crop_pixmap = self._canvas.get_crop_pixmap()
         if crop_pixmap is None or crop_pixmap.isNull():
             self.reject()
             return
 
-        buf = io.BytesIO()
         qimage = crop_pixmap.toImage().convertToFormat(QImage.Format.Format_RGB888)
         ptr = qimage.bits()
         ptr.setsize(qimage.sizeInBytes())
@@ -124,6 +105,7 @@ class AvatarCropDialog(QDialog):
             "RGB", (qimage.width(), qimage.height()), bytes(ptr)
         )
         pil_img = pil_img.resize((48, 48), _PILImage.LANCZOS)
+        buf = io.BytesIO()
         pil_img.save(buf, format="JPEG", quality=70, optimize=True)
         result = buf.getvalue()
 
@@ -140,68 +122,94 @@ class AvatarCropDialog(QDialog):
 
 
 class _CropCanvas(QWidget):
-    """Canvas widget that renders an image with a circular crop overlay.
+    """Canvas that shows the source image with a fixed circular crop window.
 
-    The user drags the image to reposition it relative to the fixed circular
-    crop area centered in the canvas.
+    Pan:  drag with left mouse button.
+    Zoom: scroll wheel (the image is scaled around the canvas centre).
+
+    The circular crop window is always the full canvas diameter.  The source
+    image is scaled and translated so that the region inside the circle is
+    what will be cropped.
     """
 
-    def __init__(self, display_pixmap: QPixmap, canvas_size: int, parent=None):
+    _ZOOM_STEP = 0.1
+    _ZOOM_MIN = 0.5
+    _ZOOM_MAX = 8.0
+
+    def __init__(self, source_pixmap: QPixmap, canvas_size: int, parent=None):
         super().__init__(parent)
         self.setFixedSize(canvas_size, canvas_size)
-        self._pixmap = display_pixmap
+        self.setFocusPolicy(Qt.FocusPolicy.WheelFocus)
+        self._source = source_pixmap
         self._canvas_size = canvas_size
 
-        # Position of the top-left corner of the image relative to the canvas
-        self._img_x = (canvas_size - display_pixmap.width()) // 2
-        self._img_y = (canvas_size - display_pixmap.height()) // 2
+        # Start zoom so the shorter side fills the canvas exactly
+        src_w = source_pixmap.width()
+        src_h = source_pixmap.height()
+        shorter = min(src_w, src_h)
+        self._zoom = canvas_size / shorter if shorter > 0 else 1.0
+        self._zoom = max(self._ZOOM_MIN, min(self._ZOOM_MAX, self._zoom))
+
+        # Image origin in canvas coords (top-left of the scaled image)
+        self._img_x: float = 0.0
+        self._img_y: float = 0.0
+        self._center_image()
+
         self._drag_start: QPoint | None = None
-        self._img_start: tuple[int, int] | None = None
+        self._img_start: tuple[float, float] | None = None
 
-    def get_crop_pixmap(self) -> QPixmap | None:
-        """Return the square region of the image inside the crop circle."""
-        r = self._canvas_size // 2
-        # Crop square in canvas coords
-        crop_x = r - r  # = 0 (circle is centered)
-        crop_y = r - r  # = 0
-        # Map canvas crop region back to image coords
-        img_crop_x = -self._img_x
-        img_crop_y = -self._img_y
-        crop_size = self._canvas_size
+    # --- public ---
 
-        # Clamp to image boundaries
-        src_rect = QRect(img_crop_x, img_crop_y, crop_size, crop_size)
-        return self._pixmap.copy(src_rect).scaled(
-            self._canvas_size, self._canvas_size,
+    def get_crop_pixmap(self) -> QPixmap:
+        """Render the current view into a canvas_size × canvas_size pixmap."""
+        result = QPixmap(self._canvas_size, self._canvas_size)
+        result.fill(Qt.GlobalColor.black)
+        painter = QPainter(result)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        scaled_w = int(self._source.width() * self._zoom)
+        scaled_h = int(self._source.height() * self._zoom)
+        scaled = self._source.scaled(
+            scaled_w, scaled_h,
             Qt.AspectRatioMode.IgnoreAspectRatio,
             Qt.TransformationMode.SmoothTransformation,
         )
+        painter.drawPixmap(int(self._img_x), int(self._img_y), scaled)
+        painter.end()
+        return result
+
+    # --- Qt events ---
 
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
 
-        # Background
-        painter.fillRect(self.rect(), QColor("#1a1a1a"))
+        painter.fillRect(self.rect(), QColor("#111111"))
 
-        # Draw image at current offset
-        painter.drawPixmap(self._img_x, self._img_y, self._pixmap)
+        # Draw scaled image
+        scaled_w = int(self._source.width() * self._zoom)
+        scaled_h = int(self._source.height() * self._zoom)
+        scaled = self._source.scaled(
+            scaled_w, scaled_h,
+            Qt.AspectRatioMode.IgnoreAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        painter.drawPixmap(int(self._img_x), int(self._img_y), scaled)
 
-        # Darken everything outside the circle
-        r = self._canvas_size // 2
-        overlay_path = QPainterPath()
-        overlay_path.addRect(0, 0, self._canvas_size, self._canvas_size)
-        inner = QPainterPath()
-        inner.addEllipse(0, 0, self._canvas_size, self._canvas_size)
-        overlay_path = overlay_path.subtracted(inner)
+        # Darken outside the crop circle
+        cs = self._canvas_size
+        overlay = QPainterPath()
+        overlay.addRect(0, 0, cs, cs)
+        circle = QPainterPath()
+        circle.addEllipse(0, 0, cs, cs)
+        overlay = overlay.subtracted(circle)
+        painter.fillPath(overlay, QColor(0, 0, 0, 170))
 
-        painter.fillPath(overlay_path, QColor(0, 0, 0, 160))
-
-        # Draw circle border
+        # Circle border
         pen = QPen(QColor("#4a9eff"), 2)
         painter.setPen(pen)
         painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.drawEllipse(1, 1, self._canvas_size - 2, self._canvas_size - 2)
+        painter.drawEllipse(1, 1, cs - 2, cs - 2)
 
         painter.end()
 
@@ -213,21 +221,54 @@ class _CropCanvas(QWidget):
     def mouseMoveEvent(self, event):
         if self._drag_start is not None and self._img_start is not None:
             delta = event.pos() - self._drag_start
-            new_x = self._img_start[0] + delta.x()
-            new_y = self._img_start[1] + delta.y()
-            # Clamp so the crop circle always lands inside the image
-            cs = self._canvas_size
-            pw = self._pixmap.width()
-            ph = self._pixmap.height()
-            new_x = min(0, max(cs - pw, new_x))
-            new_y = min(0, max(cs - ph, new_y))
-            self._img_x = new_x
-            self._img_y = new_y
+            self._img_x = self._img_start[0] + delta.x()
+            self._img_y = self._img_start[1] + delta.y()
+            self._clamp()
             self.update()
 
     def mouseReleaseEvent(self, event):
         self._drag_start = None
         self._img_start = None
+
+    def wheelEvent(self, event):
+        """Zoom around the canvas centre on scroll."""
+        delta = event.angleDelta().y()
+        if delta == 0:
+            return
+
+        old_zoom = self._zoom
+        step = self._ZOOM_STEP * (1 if delta > 0 else -1)
+        new_zoom = max(self._ZOOM_MIN, min(self._ZOOM_MAX, old_zoom + step))
+        if new_zoom == old_zoom:
+            return
+
+        # Keep the canvas centre fixed in image space
+        cx = self._canvas_size / 2.0
+        cy = self._canvas_size / 2.0
+        ratio = new_zoom / old_zoom
+        self._img_x = cx - ratio * (cx - self._img_x)
+        self._img_y = cy - ratio * (cy - self._img_y)
+        self._zoom = new_zoom
+        self._clamp()
+        self.update()
+
+    # --- private ---
+
+    def _center_image(self) -> None:
+        """Position the scaled image so it is centred in the canvas."""
+        scaled_w = self._source.width() * self._zoom
+        scaled_h = self._source.height() * self._zoom
+        self._img_x = (self._canvas_size - scaled_w) / 2.0
+        self._img_y = (self._canvas_size - scaled_h) / 2.0
+
+    def _clamp(self) -> None:
+        """Prevent the image from being panned so far that the crop circle leaves it."""
+        cs = self._canvas_size
+        scaled_w = self._source.width() * self._zoom
+        scaled_h = self._source.height() * self._zoom
+        # Image must cover the full canvas width/height so the circle is always inside
+        self._img_x = min(0.0, max(cs - scaled_w, self._img_x))
+        self._img_y = min(0.0, max(cs - scaled_h, self._img_y))
 
 
 class SettingsDialog(QDialog):
