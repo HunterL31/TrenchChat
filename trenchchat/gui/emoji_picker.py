@@ -19,7 +19,7 @@ from PyQt6.QtWidgets import (
     QMessageBox, QSizePolicy, QFrame,
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QSize
-from PyQt6.QtGui import QPixmap, QCursor
+from PyQt6.QtGui import QPixmap, QIcon, QCursor
 
 from trenchchat.core.storage import Storage
 from trenchchat.core.reaction import MAX_EMOJI_BYTES, compute_emoji_hash
@@ -50,7 +50,7 @@ class _EmojiButton(QPushButton):
                 Qt.AspectRatioMode.KeepAspectRatio,
                 Qt.TransformationMode.SmoothTransformation,
             )
-            self.setIcon(scaled)
+            self.setIcon(QIcon(scaled))
             self.setIconSize(QSize(_THUMB_SIZE, _THUMB_SIZE))
         else:
             self.setText("?")

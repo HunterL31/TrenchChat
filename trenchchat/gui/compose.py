@@ -10,7 +10,7 @@ from PyQt6.QtWidgets import (
     QLabel, QFileDialog, QSizePolicy, QListWidget, QListWidgetItem, QAbstractItemView,
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QPoint, QSize
-from PyQt6.QtGui import QKeyEvent, QPixmap, QTextCursor
+from PyQt6.QtGui import QKeyEvent, QIcon, QPixmap, QTextCursor
 
 from trenchchat.core.storage import Storage
 
@@ -55,13 +55,11 @@ class _EmojiAutocompletePopup(QListWidget):
             pix = QPixmap()
             pix.loadFromData(bytes(row["image_data"]))
             if not pix.isNull():
-                item.setIcon(
-                    pix.scaled(
-                        _AUTOCOMPLETE_ICON_SIZE, _AUTOCOMPLETE_ICON_SIZE,
-                        Qt.AspectRatioMode.KeepAspectRatio,
-                        Qt.TransformationMode.SmoothTransformation,
-                    )
-                )
+                item.setIcon(QIcon(pix.scaled(
+                    _AUTOCOMPLETE_ICON_SIZE, _AUTOCOMPLETE_ICON_SIZE,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )))
             item.setData(Qt.ItemDataRole.UserRole, (row["name"], row["emoji_hash"]))
             self.addItem(item)
 

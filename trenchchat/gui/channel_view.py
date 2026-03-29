@@ -19,7 +19,7 @@ from PyQt6.QtWidgets import (
     QPushButton,
 )
 from PyQt6.QtCore import Qt, QTimer, QBuffer, QByteArray, QIODevice, pyqtSignal
-from PyQt6.QtGui import QColor, QPixmap, QPainter, QPainterPath, QMovie
+from PyQt6.QtGui import QColor, QIcon, QPixmap, QPainter, QPainterPath, QMovie
 
 from trenchchat.core.storage import Storage
 
@@ -359,7 +359,7 @@ class _ReactionChip(QPushButton):
                 Qt.AspectRatioMode.KeepAspectRatio,
                 Qt.TransformationMode.SmoothTransformation,
             )
-            self.setIcon(scaled)
+            self.setIcon(QIcon(scaled))
             from PyQt6.QtCore import QSize
             self.setIconSize(QSize(_CHIP_EMOJI_SIZE, _CHIP_EMOJI_SIZE))
         else:
