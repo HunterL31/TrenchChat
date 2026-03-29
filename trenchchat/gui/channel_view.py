@@ -15,7 +15,7 @@ import datetime
 import hashlib
 import time
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QScrollArea, QLabel, QSizePolicy
+    QWidget, QVBoxLayout, QHBoxLayout, QScrollArea, QLabel, QSizePolicy, QDialog,
 )
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QColor, QPixmap, QPainter, QPainterPath
@@ -34,6 +34,8 @@ _ROW_V_PAD_CONT = 1            # vertical padding for continuation rows
 _AVATAR_TEXT_GAP = 10          # gap between avatar column and text column
 # Seconds within which consecutive messages from the same sender are grouped
 GROUP_WINDOW_SECS = 300
+# Max width of an inline image thumbnail (height scales proportionally)
+_INLINE_IMAGE_MAX_PX = 400
 
 
 def _format_ts(ts: float) -> str:
@@ -103,6 +105,60 @@ def _name_color(identity_hex: str, is_own: bool) -> str:
     return c.name()
 
 
+class _ClickableImageLabel(QLabel):
+    """An image label that opens a full-size view dialog on click."""
+
+    def __init__(self, pixmap: QPixmap, parent=None):
+        super().__init__(parent)
+        self._full_pixmap = pixmap
+        scaled = pixmap.scaledToWidth(
+            min(_INLINE_IMAGE_MAX_PX, pixmap.width()),
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        self.setPixmap(scaled)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setToolTip("Click to view full size")
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._open_full_view()
+        super().mousePressEvent(event)
+
+    def _open_full_view(self):
+        """Show the full-resolution image in a scrollable dialog."""
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Image")
+        layout = QVBoxLayout(dlg)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(False)
+        img_label = QLabel()
+        img_label.setPixmap(self._full_pixmap)
+        scroll.setWidget(img_label)
+        layout.addWidget(scroll)
+
+        screen = self.screen()
+        if screen:
+            geo = screen.availableGeometry()
+            dlg.resize(
+                min(self._full_pixmap.width() + 20, int(geo.width() * 0.9)),
+                min(self._full_pixmap.height() + 20, int(geo.height() * 0.9)),
+            )
+        dlg.exec()
+
+
+def _build_image_widget(image_data: bytes | None) -> QLabel | None:
+    """Return a _ClickableImageLabel for the given JPEG bytes, or None."""
+    if not image_data:
+        return None
+    pix = QPixmap()
+    pix.loadFromData(bytes(image_data))
+    if pix.isNull():
+        return None
+    return _ClickableImageLabel(pix)
+
+
 class _AvatarWidget(QWidget):
     """Fixed-size widget that paints a circular avatar without stylesheet cascade."""
 
@@ -132,7 +188,8 @@ class MessageBubble(QWidget):
 
     def __init__(self, sender: str, sender_hash: str, content: str, timestamp: float,
                  received_at: float, is_own: bool = False,
-                 avatar_pixmap: QPixmap | None = None, parent=None):
+                 avatar_pixmap: QPixmap | None = None,
+                 image_data: bytes | None = None, parent=None):
         super().__init__(parent)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
         self._sender_hash = sender_hash
@@ -163,11 +220,16 @@ class MessageBubble(QWidget):
         header.setTextFormat(Qt.TextFormat.RichText)
         col.addWidget(header)
 
-        body = QLabel(content)
-        body.setWordWrap(True)
-        body.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        body.setStyleSheet("color: #dcddde; font-size: 13px;")
-        col.addWidget(body)
+        if content:
+            body = QLabel(content)
+            body.setWordWrap(True)
+            body.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            body.setStyleSheet("color: #dcddde; font-size: 13px;")
+            col.addWidget(body)
+
+        img_widget = _build_image_widget(image_data)
+        if img_widget:
+            col.addWidget(img_widget)
 
         if received_at - timestamp > LATE_THRESHOLD_SECS:
             late = QLabel("⟳ received late")
@@ -212,7 +274,7 @@ class MessageContinuation(QWidget):
     _GUTTER = _ROW_LEFT_PAD + _AVATAR_SIZE + _AVATAR_TEXT_GAP
 
     def __init__(self, sender_hash: str, content: str, timestamp: float,
-                 received_at: float, parent=None):
+                 received_at: float, image_data: bytes | None = None, parent=None):
         super().__init__(parent)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
 
@@ -234,11 +296,16 @@ class MessageContinuation(QWidget):
         col.setSpacing(1)
         col.setContentsMargins(0, 0, 0, 0)
 
-        self._body = QLabel(content)
-        self._body.setWordWrap(True)
-        self._body.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        self._body.setStyleSheet("color: #dcddde; font-size: 13px;")
-        col.addWidget(self._body)
+        if content:
+            self._body = QLabel(content)
+            self._body.setWordWrap(True)
+            self._body.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            self._body.setStyleSheet("color: #dcddde; font-size: 13px;")
+            col.addWidget(self._body)
+
+        img_widget = _build_image_widget(image_data)
+        if img_widget:
+            col.addWidget(img_widget)
 
         if received_at - timestamp > LATE_THRESHOLD_SECS:
             late = QLabel("⟳ received late")
@@ -415,12 +482,17 @@ class ChannelView(QWidget):
         self._last_sender = sender_hash
         self._last_ts = ts
 
+        image_data = row["image_data"] if "image_data" in row.keys() else None
+        if image_data is not None:
+            image_data = bytes(image_data)
+
         if grouped:
             widget: QWidget = MessageContinuation(
                 sender_hash=sender_hash,
                 content=row["content"],
                 timestamp=ts,
                 received_at=received_at,
+                image_data=image_data,
             )
         else:
             avatar_pix = self._get_avatar_pixmap(sender_hash)
@@ -432,6 +504,7 @@ class ChannelView(QWidget):
                 received_at=received_at,
                 is_own=sender_hash == self._own_hex,
                 avatar_pixmap=avatar_pix,
+                image_data=image_data,
             )
             self._bubbles_by_sender.setdefault(sender_hash, []).append(bubble)
             widget = bubble

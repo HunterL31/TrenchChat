@@ -565,3 +565,99 @@ class TestTenureSyncFiltering:
 
         assert wait_for_message(bob.storage, ch_hash, msg_id, timeout=5), \
             "Message was incorrectly rejected when no tenure data exists"
+
+
+# ---------------------------------------------------------------------------
+# Image data in sync
+# ---------------------------------------------------------------------------
+
+_FAKE_JPEG = b"\xff\xd8\xff\xe0" + b"\x00" * 100
+
+
+class TestImageSync:
+    def test_row_to_dict_includes_image_data(self):
+        """_row_to_dict serialises image_data as bytes."""
+        from trenchchat.core.sync import SyncManager
+
+        class _FakeRow(dict):
+            """Minimal sqlite3.Row substitute for testing."""
+            def keys(self):
+                return list(self.keys()) if False else list(super().keys())
+
+        # Use a real sqlite3.Row via a temp database
+        import sqlite3
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.execute("""
+            CREATE TABLE t (
+                sender_hash TEXT, sender_name TEXT, content TEXT,
+                timestamp REAL, message_id TEXT, reply_to TEXT,
+                last_seen_id TEXT, image_data BLOB
+            )
+        """)
+        conn.execute(
+            "INSERT INTO t VALUES (?,?,?,?,?,?,?,?)",
+            ("aabb", "Alice", "hi", 1000.0, "mid1", None, None, _FAKE_JPEG),
+        )
+        conn.commit()
+        row = conn.execute("SELECT * FROM t").fetchone()
+
+        result = SyncManager._row_to_dict(row)
+        assert "image_data" in result
+        assert result["image_data"] == _FAKE_JPEG
+
+    def test_row_to_dict_excludes_null_image_data(self):
+        """_row_to_dict omits image_data key when the column is NULL."""
+        from trenchchat.core.sync import SyncManager
+        import sqlite3
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.execute("""
+            CREATE TABLE t (
+                sender_hash TEXT, sender_name TEXT, content TEXT,
+                timestamp REAL, message_id TEXT, reply_to TEXT,
+                last_seen_id TEXT, image_data BLOB
+            )
+        """)
+        conn.execute(
+            "INSERT INTO t VALUES (?,?,?,?,?,?,?,?)",
+            ("aabb", "Alice", "no image", 1000.0, "mid2", None, None, None),
+        )
+        conn.commit()
+        row = conn.execute("SELECT * FROM t").fetchone()
+
+        result = SyncManager._row_to_dict(row)
+        assert "image_data" not in result
+
+    def test_sync_round_trip_preserves_image(self, peer_factory):
+        """An image attached to a message survives a sync request/response cycle."""
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+
+        ch_hash = alice.channel_mgr.create_channel("img-sync", "", "public")
+        _seed_channel_on_peer(bob, ch_hash, "img-sync", alice.identity.hash_hex)
+
+        ts = time.time()
+        msg_id = alice.storage.get_messages(ch_hash)
+        # Insert directly with image data
+        alice.storage.insert_message(
+            channel_hash=ch_hash,
+            sender_hash=alice.identity.hash_hex,
+            sender_name="Alice",
+            content="synced image",
+            timestamp=ts - 10,
+            message_id="sync_img_001",
+            reply_to=None,
+            last_seen_id=None,
+            received_at=ts - 10,
+            image_data=_FAKE_JPEG,
+        )
+
+        bob.sync_mgr._send_sync_request(alice.identity.hash_hex, ch_hash, ts - 100)
+
+        assert wait_for_message(bob.storage, ch_hash, "sync_img_001", timeout=5), \
+            "Bob did not receive the synced image message"
+
+        bob_msgs = bob.storage.get_messages(ch_hash)
+        synced = next(m for m in bob_msgs if m["message_id"] == "sync_img_001")
+        assert bytes(synced["image_data"]) == _FAKE_JPEG

@@ -275,6 +275,12 @@ class SyncManager:
                     )
                     continue
 
+                image_data = m.get("image_data")
+                if isinstance(image_data, str):
+                    image_data = image_data.encode()
+                if not image_data:
+                    image_data = None
+
                 inserted = self._storage.insert_message(
                     channel_hash=channel_hash_hex,
                     sender_hash=sender_hash,
@@ -285,6 +291,7 @@ class SyncManager:
                     reply_to=m.get("reply_to"),
                     last_seen_id=m.get("last_seen_id"),
                     received_at=time.time(),
+                    image_data=image_data,
                 )
                 if inserted:
                     inserted_any = True
@@ -335,7 +342,7 @@ class SyncManager:
 
     @staticmethod
     def _row_to_dict(row) -> dict:
-        return {
+        d = {
             "sender_hash":  row["sender_hash"],
             "sender_name":  row["sender_name"],
             "content":      row["content"],
@@ -344,6 +351,10 @@ class SyncManager:
             "reply_to":     row["reply_to"],
             "last_seen_id": row["last_seen_id"],
         }
+        image_data = row["image_data"] if "image_data" in row.keys() else None
+        if image_data:
+            d["image_data"] = bytes(image_data)
+        return d
 
     def _send_sync_request(self, dest_hex: str, channel_hash_hex: str, since_ts: float):
         self._send_raw(dest_hex, {

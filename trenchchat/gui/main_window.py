@@ -29,6 +29,7 @@ from PyQt6.QtGui import QAction, QColor, QFont
 
 from trenchchat.config import Config
 from trenchchat.core.identity import Identity
+from trenchchat.core.image import compress_image, MAX_IMAGE_BYTES
 from trenchchat.core.permissions import (
     INVITE, KICK, MANAGE_CHANNEL, MANAGE_ROLES, SEND_MESSAGE, PRESETS, PRESET_PRIVATE,
     is_discoverable, is_open_join, permissions_from_json,
@@ -753,8 +754,8 @@ class MainWindow(QMainWindow):
 
     # --- send ---
 
-    @pyqtSlot(str)
-    def _on_send_message(self, text: str):
+    @pyqtSlot(str, object)
+    def _on_send_message(self, text: str, raw_image: object):
         if not self._current_channel:
             return
 
@@ -776,10 +777,20 @@ class MainWindow(QMainWindow):
             if self._identity.hash_hex not in all_dests:
                 all_dests.append(self._identity.hash_hex)
 
+        image_data: bytes | None = None
+        if raw_image:
+            try:
+                image_data = compress_image(bytes(raw_image))
+            except Exception as exc:
+                RNS.log(f"TrenchChat: image compression failed: {exc}", RNS.LOG_WARNING)
+                if len(bytes(raw_image)) <= MAX_IMAGE_BYTES:
+                    image_data = bytes(raw_image)
+
         self._messaging.send_message(
             channel_hash_hex=self._current_channel,
             content=text,
             subscriber_hashes=all_dests,
+            image_data=image_data,
         )
         # Refresh our own view immediately (message was stored locally in send_message)
         if self._current_channel in self._channel_views:

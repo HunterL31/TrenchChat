@@ -652,3 +652,104 @@ class TestAvatarDeliveryTracking:
         db.clear_avatar_deliveries()
         assert db.get_avatar_delivery_version("22" * 16) is None
         assert db.get_avatar_delivery_version("33" * 16) is None
+
+
+# ---------------------------------------------------------------------------
+# Image data in messages
+# ---------------------------------------------------------------------------
+
+class TestMessageImageData:
+    _CHAN = "aa" * 16
+    _SENDER = "bb" * 16
+    _FAKE_JPEG = b"\xff\xd8\xff\xe0" + b"\x00" * 100
+
+    def _setup_channel(self, db):
+        db.upsert_channel(self._CHAN, "Test", "", self._SENDER, "public", 1.0)
+        db.subscribe(self._CHAN)
+
+    def test_insert_message_with_image_stores_blob(self, db):
+        """image_data is persisted and retrievable via get_messages."""
+        self._setup_channel(db)
+        ts = 1000.0
+        db.insert_message(
+            channel_hash=self._CHAN,
+            sender_hash=self._SENDER,
+            sender_name="Alice",
+            content="Look at this",
+            timestamp=ts,
+            message_id="img_msg_001",
+            reply_to=None,
+            last_seen_id=None,
+            received_at=ts,
+            image_data=self._FAKE_JPEG,
+        )
+        msgs = db.get_messages(self._CHAN)
+        assert len(msgs) == 1
+        assert bytes(msgs[0]["image_data"]) == self._FAKE_JPEG
+
+    def test_insert_message_without_image_is_null(self, db):
+        """Messages without image_data have a NULL image_data column."""
+        self._setup_channel(db)
+        ts = 1001.0
+        db.insert_message(
+            channel_hash=self._CHAN,
+            sender_hash=self._SENDER,
+            sender_name="Alice",
+            content="No image",
+            timestamp=ts,
+            message_id="txt_msg_001",
+            reply_to=None,
+            last_seen_id=None,
+            received_at=ts,
+        )
+        msgs = db.get_messages(self._CHAN)
+        assert len(msgs) == 1
+        assert msgs[0]["image_data"] is None
+
+    def test_image_only_message_has_empty_content(self, db):
+        """An image-only message stores empty text and non-null image_data."""
+        self._setup_channel(db)
+        ts = 1002.0
+        db.insert_message(
+            channel_hash=self._CHAN,
+            sender_hash=self._SENDER,
+            sender_name="Alice",
+            content="",
+            timestamp=ts,
+            message_id="img_only_001",
+            reply_to=None,
+            last_seen_id=None,
+            received_at=ts,
+            image_data=self._FAKE_JPEG,
+        )
+        msgs = db.get_messages(self._CHAN)
+        assert len(msgs) == 1
+        assert msgs[0]["content"] == ""
+        assert bytes(msgs[0]["image_data"]) == self._FAKE_JPEG
+
+    def test_schema_migration_adds_image_data_column(self, tmp_path):
+        """_migrate_image_data() adds image_data to a database that lacks it."""
+        import sqlite3
+        db_path = tmp_path / "legacy.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("""
+            CREATE TABLE messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                channel_hash TEXT NOT NULL,
+                sender_hash TEXT NOT NULL,
+                sender_name TEXT NOT NULL DEFAULT '',
+                content TEXT NOT NULL DEFAULT '',
+                timestamp REAL NOT NULL,
+                message_id TEXT NOT NULL UNIQUE,
+                reply_to TEXT,
+                last_seen_id TEXT,
+                received_at REAL NOT NULL
+            )
+        """)
+        conn.commit()
+        conn.close()
+
+        s = Storage(db_path=db_path)
+        cols = [c["name"] for c in s._conn.execute("PRAGMA table_info(messages)").fetchall()]
+        assert "image_data" in cols
+        s.close()

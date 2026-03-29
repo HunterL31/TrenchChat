@@ -63,6 +63,7 @@ CREATE TABLE IF NOT EXISTS messages (
     reply_to     TEXT,
     last_seen_id TEXT,
     received_at  REAL NOT NULL,
+    image_data   BLOB,
     FOREIGN KEY (channel_hash) REFERENCES channels(hash)
 );
 
@@ -237,6 +238,7 @@ class Storage:
             self._conn.commit()
 
         self._migrate_tenure()
+        self._migrate_image_data()
 
     def _migrate_tenure(self):
         """Create membership_tenure table and backfill current members if the table is new."""
@@ -256,6 +258,14 @@ class Storage:
                     VALUES (?, ?, ?, NULL)
                 """, [(r["channel_hash"], r["identity_hash"], r["added_at"]) for r in rows])
                 self._conn.commit()
+
+    def _migrate_image_data(self):
+        """Add image_data BLOB column to messages table for existing databases."""
+        if not self._has_column("messages", "image_data"):
+            self._conn.execute(
+                "ALTER TABLE messages ADD COLUMN image_data BLOB"
+            )
+            self._conn.commit()
 
     @contextmanager
     def _tx(self):
@@ -411,17 +421,18 @@ class Storage:
     def insert_message(self, channel_hash: str, sender_hash: str, sender_name: str,
                        content: str, timestamp: float, message_id: str,
                        reply_to: str | None, last_seen_id: str | None,
-                       received_at: float) -> bool:
+                       received_at: float,
+                       image_data: bytes | None = None) -> bool:
         """Returns True if inserted, False if duplicate."""
         try:
             with self._tx():
                 self._conn.execute("""
                     INSERT INTO messages
                         (channel_hash, sender_hash, sender_name, content, timestamp,
-                         message_id, reply_to, last_seen_id, received_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         message_id, reply_to, last_seen_id, received_at, image_data)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (channel_hash, sender_hash, sender_name, content, timestamp,
-                      message_id, reply_to, last_seen_id, received_at))
+                      message_id, reply_to, last_seen_id, received_at, image_data))
             return True
         except sqlite3.IntegrityError:
             return False

@@ -26,6 +26,7 @@ F_MISSED_FOR        = 0x09   # str       — identity hex of peer who missed a m
 F_MISSED_MSG_ID     = 0x0A   # str       — message_id that was not delivered
 F_AVATAR_DATA       = 0x0B   # bytes     — JPEG avatar payload (max 4 KB)
 F_AVATAR_VERSION    = 0x0C   # int       — monotonic counter; receiver uses to detect stale updates
+F_IMAGE_DATA        = 0x0D   # bytes     — JPEG image attachment payload (max 320 KB)
 
 # --- Control discriminator ---
 F_MSG_TYPE          = 0x10   # str — present on all control messages; absent on chat messages
