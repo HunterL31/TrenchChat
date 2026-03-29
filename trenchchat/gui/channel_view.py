@@ -17,8 +17,8 @@ import time
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QScrollArea, QLabel, QSizePolicy, QDialog,
 )
-from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtGui import QColor, QPixmap, QPainter, QPainterPath
+from PyQt6.QtCore import Qt, QTimer, QBuffer, QByteArray, QIODevice
+from PyQt6.QtGui import QColor, QPixmap, QPainter, QPainterPath, QMovie
 
 from trenchchat.core.storage import Storage
 
@@ -36,6 +36,8 @@ _AVATAR_TEXT_GAP = 10          # gap between avatar column and text column
 GROUP_WINDOW_SECS = 300
 # Max width of an inline image thumbnail (height scales proportionally)
 _INLINE_IMAGE_MAX_PX = 400
+# Number of times an inline GIF loops before freezing on the last frame
+_GIF_INLINE_LOOPS = 2
 
 
 def _format_ts(ts: float) -> str:
@@ -105,12 +107,191 @@ def _name_color(identity_hex: str, is_own: bool) -> str:
     return c.name()
 
 
-class _ClickableImageLabel(QLabel):
-    """An image label that opens a full-size view dialog on click."""
+def _make_qmovie(image_data: bytes) -> QMovie:
+    """Wrap raw GIF bytes in a QBuffer and return a QMovie ready to play."""
+    buf = QBuffer()
+    buf.setData(QByteArray(image_data))
+    buf.open(QIODevice.OpenModeFlag.ReadOnly)
+    movie = QMovie()
+    movie.setDevice(buf)
+    movie._buf = buf  # keep buffer alive for the lifetime of the movie
+    return movie
 
-    def __init__(self, pixmap: QPixmap, parent=None):
+
+_GIF_MAGIC = (b"GIF87a", b"GIF89a")
+
+
+class _ImageOverlay(QDialog):
+    """Frameless full-window overlay; click outside the image to dismiss.
+
+    Supports both static images and animated GIFs.  GIFs play on a loop
+    while the overlay is open.
+    """
+
+    def __init__(self, image_data: bytes, parent=None):
+        super().__init__(parent, Qt.WindowType.FramelessWindowHint |
+                         Qt.WindowType.Tool)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setModal(True)
+
+        self._backdrop = QLabel(self)
+        self._backdrop.setStyleSheet("background: rgba(0, 0, 0, 180);")
+
+        self._is_gif = image_data[:6] in _GIF_MAGIC
+
+        if self._is_gif:
+            self._movie = _make_qmovie(image_data)
+            self._movie.setCacheMode(QMovie.CacheMode.CacheAll)
+            self._img_widget = QLabel(self)
+            self._img_widget.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self._img_widget.setMovie(self._movie)
+        else:
+            pix = QPixmap()
+            pix.loadFromData(bytes(image_data))
+            self._full_pixmap = pix
+            self._img_widget = QLabel(self)
+            self._img_widget.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+    def showEvent(self, event):
+        self._layout_contents()
+        super().showEvent(event)
+
+    def resizeEvent(self, event):
+        self._layout_contents()
+        super().resizeEvent(event)
+
+    def _layout_contents(self):
+        self._backdrop.setGeometry(self.rect())
+        max_w = max(1, int(self.width() * 0.9))
+        max_h = max(1, int(self.height() * 0.9))
+
+        if self._is_gif:
+            self._movie.jumpToFrame(0)
+            natural = self._movie.currentPixmap().size()
+            if natural.isEmpty():
+                QTimer.singleShot(50, self._layout_contents)
+                return
+            scale = min(max_w / natural.width(), max_h / natural.height(), 1.0)
+            from PyQt6.QtCore import QSize
+            self._movie.setScaledSize(
+                QSize(int(natural.width() * scale), int(natural.height() * scale))
+            )
+            sw = int(natural.width() * scale)
+            sh = int(natural.height() * scale)
+            self._img_widget.resize(sw, sh)
+            self._img_widget.move(
+                (self.width() - sw) // 2,
+                (self.height() - sh) // 2,
+            )
+            self._movie.start()
+        else:
+            scaled = self._full_pixmap.scaled(
+                max_w, max_h,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            self._img_widget.setPixmap(scaled)
+            self._img_widget.resize(scaled.width(), scaled.height())
+            self._img_widget.move(
+                (self.width() - scaled.width()) // 2,
+                (self.height() - scaled.height()) // 2,
+            )
+
+    def mousePressEvent(self, event):
+        if not self._img_widget.geometry().contains(event.pos()):
+            if self._is_gif:
+                self._movie.stop()
+            self.close()
+        else:
+            super().mousePressEvent(event)
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Escape:
+            if self._is_gif:
+                self._movie.stop()
+            self.close()
+        else:
+            super().keyPressEvent(event)
+
+
+class _AnimatedGifLabel(QLabel):
+    """Inline GIF thumbnail that loops _GIF_INLINE_LOOPS times then freezes.
+
+    Clicking resumes the inline animation and also opens the full overlay
+    where the GIF loops continuously.  After the overlay closes the inline
+    animation restarts from the beginning.
+    """
+
+    def __init__(self, image_data: bytes, parent=None):
         super().__init__(parent)
-        self._full_pixmap = pixmap
+        self._image_data = image_data
+        self._loop_count = 0
+        self._prev_frame = -1
+        self._frozen = False
+
+        self._movie = _make_qmovie(image_data)
+        self._movie.setCacheMode(QMovie.CacheMode.CacheAll)
+
+        # Scale to thumbnail width
+        self._movie.jumpToFrame(0)
+        natural = self._movie.currentPixmap().size()
+        if not natural.isEmpty() and natural.width() > _INLINE_IMAGE_MAX_PX:
+            scale = _INLINE_IMAGE_MAX_PX / natural.width()
+            from PyQt6.QtCore import QSize
+            self._movie.setScaledSize(
+                QSize(int(natural.width() * scale), int(natural.height() * scale))
+            )
+
+        self.setMovie(self._movie)
+        self._movie.frameChanged.connect(self._on_frame_changed)
+        self._movie.start()
+
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setToolTip("Click to replay / view full size")
+
+    def _on_frame_changed(self, frame_number: int):
+        if self._frozen:
+            return
+        # Frame wrapped back to 0 → one full loop completed
+        if frame_number == 0 and self._prev_frame > 0:
+            self._loop_count += 1
+            if self._loop_count >= _GIF_INLINE_LOOPS:
+                last = self._movie.frameCount() - 1
+                if last >= 0:
+                    self._movie.jumpToFrame(last)
+                self._movie.stop()
+                self._frozen = True
+        self._prev_frame = frame_number
+
+    def _resume(self):
+        """Restart the inline animation for another _GIF_INLINE_LOOPS loops."""
+        self._loop_count = 0
+        self._prev_frame = -1
+        self._frozen = False
+        self._movie.jumpToFrame(0)
+        self._movie.start()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._open_full_view()
+        super().mousePressEvent(event)
+
+    def _open_full_view(self):
+        """Show the GIF in a full-window overlay then restart inline on close."""
+        top = self.window()
+        overlay = _ImageOverlay(self._image_data, top)
+        overlay.move(top.mapToGlobal(top.rect().topLeft()))
+        overlay.resize(top.size())
+        overlay.exec()
+        self._resume()
+
+
+class _ClickableImageLabel(QLabel):
+    """Static image thumbnail (JPEG/PNG) that opens a full-size overlay on click."""
+
+    def __init__(self, pixmap: QPixmap, image_data: bytes, parent=None):
+        super().__init__(parent)
+        self._image_data = image_data
         scaled = pixmap.scaledToWidth(
             min(_INLINE_IMAGE_MAX_PX, pixmap.width()),
             Qt.TransformationMode.SmoothTransformation,
@@ -125,38 +306,25 @@ class _ClickableImageLabel(QLabel):
         super().mousePressEvent(event)
 
     def _open_full_view(self):
-        """Show the full-resolution image in a scrollable dialog."""
-        dlg = QDialog(self)
-        dlg.setWindowTitle("Image")
-        layout = QVBoxLayout(dlg)
-        layout.setContentsMargins(0, 0, 0, 0)
-
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(False)
-        img_label = QLabel()
-        img_label.setPixmap(self._full_pixmap)
-        scroll.setWidget(img_label)
-        layout.addWidget(scroll)
-
-        screen = self.screen()
-        if screen:
-            geo = screen.availableGeometry()
-            dlg.resize(
-                min(self._full_pixmap.width() + 20, int(geo.width() * 0.9)),
-                min(self._full_pixmap.height() + 20, int(geo.height() * 0.9)),
-            )
-        dlg.exec()
+        top = self.window()
+        overlay = _ImageOverlay(self._image_data, top)
+        overlay.move(top.mapToGlobal(top.rect().topLeft()))
+        overlay.resize(top.size())
+        overlay.exec()
 
 
-def _build_image_widget(image_data: bytes | None) -> QLabel | None:
-    """Return a _ClickableImageLabel for the given JPEG bytes, or None."""
+def _build_image_widget(image_data: bytes | None) -> QWidget | None:
+    """Return the appropriate inline widget for the given image bytes, or None."""
     if not image_data:
         return None
+    data = bytes(image_data)
+    if data[:6] in _GIF_MAGIC:
+        return _AnimatedGifLabel(data)
     pix = QPixmap()
-    pix.loadFromData(bytes(image_data))
+    pix.loadFromData(data)
     if pix.isNull():
         return None
-    return _ClickableImageLabel(pix)
+    return _ClickableImageLabel(pix, data)
 
 
 class _AvatarWidget(QWidget):

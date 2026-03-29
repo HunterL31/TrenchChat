@@ -29,7 +29,7 @@ from PyQt6.QtGui import QAction, QColor, QFont
 
 from trenchchat.config import Config
 from trenchchat.core.identity import Identity
-from trenchchat.core.image import compress_image, MAX_IMAGE_BYTES
+from trenchchat.core.image import prepare_image, MAX_IMAGE_BYTES
 from trenchchat.core.permissions import (
     INVITE, KICK, MANAGE_CHANNEL, MANAGE_ROLES, SEND_MESSAGE, PRESETS, PRESET_PRIVATE,
     is_discoverable, is_open_join, permissions_from_json,
@@ -780,9 +780,9 @@ class MainWindow(QMainWindow):
         image_data: bytes | None = None
         if raw_image:
             try:
-                image_data = compress_image(bytes(raw_image))
+                image_data, _ = prepare_image(bytes(raw_image))
             except Exception as exc:
-                RNS.log(f"TrenchChat: image compression failed: {exc}", RNS.LOG_WARNING)
+                RNS.log(f"TrenchChat: image preparation failed: {exc}", RNS.LOG_WARNING)
                 if len(bytes(raw_image)) <= MAX_IMAGE_BYTES:
                     image_data = bytes(raw_image)
 

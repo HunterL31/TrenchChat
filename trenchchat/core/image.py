@@ -5,6 +5,9 @@ Images attached to messages are resized and JPEG-compressed before being
 embedded inline in the LXMF message fields.  LXMF automatically promotes
 large messages to RNS Resource transfer, so images within the size limit
 are delivered transparently over any transport.
+
+GIFs are transmitted as-is (no JPEG conversion) so animation is preserved.
+They are only rejected if their raw size exceeds MAX_IMAGE_BYTES.
 """
 
 import io
@@ -23,6 +26,9 @@ def compress_image(image_bytes: bytes) -> bytes:
     Raises ValueError if the compressed result exceeds MAX_IMAGE_BYTES (which
     should not occur for typical photos at this resolution and quality, but
     acts as a hard safety check).
+
+    GIFs should be handled via prepare_image() instead, which preserves
+    animation by skipping JPEG conversion.
     """
     img = Image.open(io.BytesIO(image_bytes))
     img = img.convert("RGB")
@@ -40,3 +46,28 @@ def compress_image(image_bytes: bytes) -> bytes:
             f"Compressed image is {len(result)} bytes, exceeds {MAX_IMAGE_BYTES} limit"
         )
     return result
+
+
+def is_gif(image_bytes: bytes) -> bool:
+    """Return True if the raw bytes represent a GIF image."""
+    return image_bytes[:6] in (b"GIF87a", b"GIF89a")
+
+
+def prepare_image(image_bytes: bytes) -> tuple[bytes, bool]:
+    """Prepare image bytes for transmission.
+
+    Returns (data, gif) where gif is True when the original file is a GIF.
+
+    GIFs are passed through without re-encoding so animation frames are
+    preserved.  They are rejected only if the raw size exceeds MAX_IMAGE_BYTES.
+
+    All other formats are JPEG-compressed via compress_image().
+    """
+    if is_gif(image_bytes):
+        if len(image_bytes) > MAX_IMAGE_BYTES:
+            raise ValueError(
+                f"GIF is {len(image_bytes)} bytes, exceeds {MAX_IMAGE_BYTES} limit"
+            )
+        return image_bytes, True
+
+    return compress_image(image_bytes), False
