@@ -213,45 +213,59 @@ class ComposeWidget(QWidget):
 
         outer.addWidget(row)
 
-        # Autocomplete popup (parented to window, shown above the compose area)
+        # Autocomplete popup — created lazily on first query so that self.window()
+        # resolves to the actual top-level window rather than the widget itself.
         self._autocomplete: _EmojiAutocompletePopup | None = None
         if self._storage is not None:
-            self._autocomplete = _EmojiAutocompletePopup(self.window())
-            self._autocomplete.emoji_chosen.connect(self._on_emoji_chosen)
-            self._autocomplete.hide()
             self._editor.set_key_interceptor(self._forward_autocomplete_key)
 
     # ------------------------------------------------------------------
     # Emoji autocomplete
     # ------------------------------------------------------------------
 
+    def _get_autocomplete(self) -> "_EmojiAutocompletePopup | None":
+        """Return the autocomplete popup, creating it lazily on first call."""
+        if self._storage is None:
+            return None
+        if self._autocomplete is None:
+            self._autocomplete = _EmojiAutocompletePopup(self.window())
+            self._autocomplete.emoji_chosen.connect(self._on_emoji_chosen)
+            self._autocomplete.hide()
+        return self._autocomplete
+
     def _on_emoji_query(self, prefix: str) -> None:
         """Show, update, or hide the autocomplete popup based on the current prefix."""
-        if self._autocomplete is None or self._storage is None:
+        if self._storage is None:
             return
-        if not prefix and len(prefix) == 0:
-            self._autocomplete.hide()
+        popup = self._get_autocomplete()
+        if popup is None:
+            return
+
+        if not prefix:
+            popup.hide()
             return
 
         rows = self._storage.search_emojis(prefix)
         if not rows:
-            self._autocomplete.hide()
+            popup.hide()
             return
 
-        self._autocomplete.populate(rows)
+        popup.populate(rows)
 
         # Position the popup above the compose row
         editor_global = self._editor.mapToGlobal(QPoint(0, 0))
         popup_x = editor_global.x()
-        popup_y = editor_global.y() - self._autocomplete.height() - 4
-        self._autocomplete.move(popup_x, popup_y)
-        self._autocomplete.setFixedWidth(self._editor.width())
-        self._autocomplete.show()
-        self._autocomplete.raise_()
+        popup_y = editor_global.y() - popup.height() - 4
+        popup.move(popup_x, popup_y)
+        popup.setFixedWidth(self._editor.width())
+        popup.show()
+        popup.raise_()
 
     def _on_emoji_chosen(self, name: str, emoji_hash: str) -> None:
         """Replace the active :prefix token with :name: in the editor."""
-        self._autocomplete.hide()
+        popup = self._get_autocomplete()
+        if popup:
+            popup.hide()
 
         cursor = self._editor.textCursor()
         # Move anchor to start of current block to get the full line text
@@ -277,20 +291,21 @@ class ComposeWidget(QWidget):
 
         Returns True if the event was consumed.
         """
-        if self._autocomplete is None or not self._autocomplete.isVisible():
+        popup = self._autocomplete  # use cached ref — don't create lazily on keypress
+        if popup is None or not popup.isVisible():
             return False
         key = event.key()
         if key == Qt.Key.Key_Up:
-            self._autocomplete.move_selection(-1)
+            popup.move_selection(-1)
             return True
         if key == Qt.Key.Key_Down:
-            self._autocomplete.move_selection(1)
+            popup.move_selection(1)
             return True
         if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Tab):
-            self._autocomplete.accept_current()
+            popup.accept_current()
             return True
         if key == Qt.Key.Key_Escape:
-            self._autocomplete.hide()
+            popup.hide()
             return True
         return False
 

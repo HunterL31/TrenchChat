@@ -1037,13 +1037,34 @@ class MainWindow(QMainWindow):
         picker.move(QCursor.pos())
         picker.show()
 
+    def _get_reaction_peers(self, channel_hash_hex: str) -> list[str]:
+        """Return the list of peers to broadcast a reaction to.
+
+        Uses the same dual-path logic as _on_send_message: member table for
+        invite-only channels, subscriber list for open-join channels.
+        """
+        channel = self._storage.get_channel(channel_hash_hex)
+        perms = permissions_from_json(channel["permissions"]) if channel else {}
+        if channel and not is_open_join(perms):
+            return [
+                row["identity_hash"]
+                for row in self._storage.get_members(channel_hash_hex)
+            ]
+        subs = self._subscription_mgr.get_subscribers(channel_hash_hex)
+        peers = list(subs) if subs else []
+        if self._identity.hash_hex not in peers:
+            peers.append(self._identity.hash_hex)
+        return peers
+
     def _do_add_reaction(self, channel_hash_hex: str, message_id: str,
                          emoji_hash: str) -> None:
         """Send the add-reaction command via ReactionManager."""
         if self._reaction_mgr is None:
             return
-        subs = self._subscription_mgr.get_subscribers(channel_hash_hex)
-        self._reaction_mgr.add_reaction(channel_hash_hex, message_id, emoji_hash, list(subs))
+        self._reaction_mgr.add_reaction(
+            channel_hash_hex, message_id, emoji_hash,
+            self._get_reaction_peers(channel_hash_hex),
+        )
 
     @pyqtSlot(str, str, str)
     def _on_reaction_remove_requested(self, channel_hash_hex: str, message_id: str,
@@ -1051,9 +1072,9 @@ class MainWindow(QMainWindow):
         """User clicked a reaction chip they already reacted with -- remove it."""
         if self._reaction_mgr is None:
             return
-        subs = self._subscription_mgr.get_subscribers(channel_hash_hex)
         self._reaction_mgr.remove_reaction(
-            channel_hash_hex, message_id, emoji_hash, list(subs)
+            channel_hash_hex, message_id, emoji_hash,
+            self._get_reaction_peers(channel_hash_hex),
         )
 
     def _on_presence_tick(self) -> None:
