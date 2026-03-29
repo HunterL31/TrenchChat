@@ -1,34 +1,131 @@
 """
-Message compose widget with send button, image attachment, and Shift+Enter newline support.
+Message compose widget with send button, image attachment, Shift+Enter newline support,
+and Discord-style :emoji_name: inline autocomplete.
 """
+
+import re
 
 from PyQt6.QtWidgets import (
     QWidget, QHBoxLayout, QVBoxLayout, QTextEdit, QPushButton,
-    QLabel, QFileDialog, QSizePolicy,
+    QLabel, QFileDialog, QSizePolicy, QListWidget, QListWidgetItem, QAbstractItemView,
 )
-from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QKeyEvent, QPixmap
+from PyQt6.QtCore import Qt, pyqtSignal, QPoint, QSize
+from PyQt6.QtGui import QKeyEvent, QPixmap, QTextCursor
+
+from trenchchat.core.storage import Storage
 
 
 _ATTACH_BTN_WIDTH = 36
 _SEND_BTN_WIDTH = 70
 _COMPOSE_HEIGHT = 60
 _PREVIEW_MAX_PX = 80     # thumbnail max dimension in the preview area
+_AUTOCOMPLETE_MAX = 8    # max emoji results shown in the autocomplete popup
+_AUTOCOMPLETE_ICON_SIZE = 24  # px
 
 _IMAGE_FILTER = "Images (*.png *.jpg *.jpeg *.gif *.bmp *.webp)"
+# Characters that are valid inside a :name: token
+_EMOJI_NAME_RE = re.compile(r":([a-zA-Z0-9_-]*)$")
+
+
+class _EmojiAutocompletePopup(QListWidget):
+    """Floating list of emoji completions shown while the user types :prefix."""
+
+    emoji_chosen = pyqtSignal(str, str)  # (name, emoji_hash)
+
+    def __init__(self, parent=None):
+        super().__init__(parent, Qt.WindowType.Popup)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.setStyleSheet(
+            "QListWidget { background: #2a2a2a; border: 1px solid #555; color: #ddd; "
+            "font-size: 12px; outline: none; }"
+            "QListWidget::item:selected { background: #3a5080; }"
+            "QListWidget::item:hover { background: #3a3a3a; }"
+        )
+        self.setIconSize(QSize(_AUTOCOMPLETE_ICON_SIZE, _AUTOCOMPLETE_ICON_SIZE))
+        self.itemClicked.connect(self._on_item_clicked)
+
+    def populate(self, rows: list) -> None:
+        """Rebuild list from storage rows, each having emoji_hash / name / image_data."""
+        self.clear()
+        for row in rows[:_AUTOCOMPLETE_MAX]:
+            item = QListWidgetItem(f"  :{row['name']}:")
+            pix = QPixmap()
+            pix.loadFromData(bytes(row["image_data"]))
+            if not pix.isNull():
+                item.setIcon(
+                    pix.scaled(
+                        _AUTOCOMPLETE_ICON_SIZE, _AUTOCOMPLETE_ICON_SIZE,
+                        Qt.AspectRatioMode.KeepAspectRatio,
+                        Qt.TransformationMode.SmoothTransformation,
+                    )
+                )
+            item.setData(Qt.ItemDataRole.UserRole, (row["name"], row["emoji_hash"]))
+            self.addItem(item)
+
+        if self.count():
+            self.setCurrentRow(0)
+
+        row_height = _AUTOCOMPLETE_ICON_SIZE + 6
+        self.setFixedHeight(min(self.count(), _AUTOCOMPLETE_MAX) * row_height + 4)
+
+    def move_selection(self, delta: int) -> None:
+        """Move the highlighted item up (-1) or down (+1)."""
+        if not self.count():
+            return
+        current = self.currentRow()
+        self.setCurrentRow(max(0, min(self.count() - 1, current + delta)))
+
+    def accept_current(self) -> None:
+        item = self.currentItem()
+        if item:
+            name, emoji_hash = item.data(Qt.ItemDataRole.UserRole)
+            self.emoji_chosen.emit(name, emoji_hash)
+
+    def _on_item_clicked(self, item: QListWidgetItem) -> None:
+        name, emoji_hash = item.data(Qt.ItemDataRole.UserRole)
+        self.emoji_chosen.emit(name, emoji_hash)
 
 
 class ComposeBox(QTextEdit):
     """Text input that sends on Enter and inserts newline on Shift+Enter."""
 
     send_requested = pyqtSignal()
+    emoji_query_changed = pyqtSignal(str)   # prefix after ':', or "" to dismiss
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        # Optional callback to forward navigation keys to an autocomplete popup.
+        # ComposeWidget sets this when storage is provided.
+        self._key_interceptor = None
+
+    def set_key_interceptor(self, cb) -> None:
+        """cb(event) -> bool: return True if the event was consumed."""
+        self._key_interceptor = cb
 
     def keyPressEvent(self, event: QKeyEvent):
-        if (event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter)
-                and not event.modifiers() & Qt.KeyboardModifier.ShiftModifier):
-            self.send_requested.emit()
+        if self._key_interceptor and self._key_interceptor(event):
+            return
+        key = event.key()
+        if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            if not event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+                self.send_requested.emit()
+                return
+        super().keyPressEvent(event)
+        # After every keystroke, check whether we are inside a :name: sequence
+        self._update_emoji_query()
+
+    def _update_emoji_query(self) -> None:
+        """Emit emoji_query_changed with the current colon-prefix, or '' to dismiss."""
+        cursor = self.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.StartOfBlock, QTextCursor.MoveMode.KeepAnchor)
+        line_up_to_cursor = cursor.selectedText()
+        m = _EMOJI_NAME_RE.search(line_up_to_cursor)
+        if m:
+            self.emoji_query_changed.emit(m.group(1))
         else:
-            super().keyPressEvent(event)
+            self.emoji_query_changed.emit("")
 
 
 class ComposeWidget(QWidget):
@@ -38,13 +135,16 @@ class ComposeWidget(QWidget):
     Emits message_ready(text, image_data) when the user sends.  image_data is
     raw bytes of the selected file, or None when no image is attached.  Either
     text or image_data (or both) will be non-empty/non-None.
+
+    Pass *storage* to enable the :name: inline emoji autocomplete.
     """
 
     message_ready = pyqtSignal(str, object)
 
-    def __init__(self, parent=None):
+    def __init__(self, storage: Storage | None = None, parent=None):
         super().__init__(parent)
         self._pending_image: bytes | None = None
+        self._storage = storage
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -103,6 +203,7 @@ class ComposeWidget(QWidget):
         self._editor.setPlaceholderText("Message…  (Enter to send, Shift+Enter for newline)")
         self._editor.setFixedHeight(_COMPOSE_HEIGHT)
         self._editor.send_requested.connect(self._on_send)
+        self._editor.emoji_query_changed.connect(self._on_emoji_query)
         row_layout.addWidget(self._editor)
 
         self._send_btn = QPushButton("Send")
@@ -112,6 +213,87 @@ class ComposeWidget(QWidget):
         row_layout.addWidget(self._send_btn)
 
         outer.addWidget(row)
+
+        # Autocomplete popup (parented to window, shown above the compose area)
+        self._autocomplete: _EmojiAutocompletePopup | None = None
+        if self._storage is not None:
+            self._autocomplete = _EmojiAutocompletePopup(self.window())
+            self._autocomplete.emoji_chosen.connect(self._on_emoji_chosen)
+            self._autocomplete.hide()
+            self._editor.set_key_interceptor(self._forward_autocomplete_key)
+
+    # ------------------------------------------------------------------
+    # Emoji autocomplete
+    # ------------------------------------------------------------------
+
+    def _on_emoji_query(self, prefix: str) -> None:
+        """Show, update, or hide the autocomplete popup based on the current prefix."""
+        if self._autocomplete is None or self._storage is None:
+            return
+        if not prefix and len(prefix) == 0:
+            self._autocomplete.hide()
+            return
+
+        rows = self._storage.search_emojis(prefix)
+        if not rows:
+            self._autocomplete.hide()
+            return
+
+        self._autocomplete.populate(rows)
+
+        # Position the popup above the compose row
+        editor_global = self._editor.mapToGlobal(QPoint(0, 0))
+        popup_x = editor_global.x()
+        popup_y = editor_global.y() - self._autocomplete.height() - 4
+        self._autocomplete.move(popup_x, popup_y)
+        self._autocomplete.setFixedWidth(self._editor.width())
+        self._autocomplete.show()
+        self._autocomplete.raise_()
+
+    def _on_emoji_chosen(self, name: str, emoji_hash: str) -> None:
+        """Replace the active :prefix token with :name: in the editor."""
+        self._autocomplete.hide()
+
+        cursor = self._editor.textCursor()
+        # Move anchor to start of current block to get the full line text
+        block_start = cursor.position() - cursor.positionInBlock()
+        text_up_to_cursor = self._editor.toPlainText()[:cursor.position()]
+        m = _EMOJI_NAME_RE.search(text_up_to_cursor)
+        if not m:
+            return
+
+        # Remove the :prefix and insert :name:
+        prefix_len = len(m.group(0))   # includes the leading ':'
+        cursor.movePosition(
+            QTextCursor.MoveOperation.Left,
+            QTextCursor.MoveMode.KeepAnchor,
+            prefix_len,
+        )
+        cursor.insertText(f":{name}:")
+        self._editor.setTextCursor(cursor)
+        self._editor.setFocus()
+
+    def _forward_autocomplete_key(self, event: QKeyEvent) -> bool:
+        """Forward Up/Down/Enter/Tab/Escape to the autocomplete popup if visible.
+
+        Returns True if the event was consumed.
+        """
+        if self._autocomplete is None or not self._autocomplete.isVisible():
+            return False
+        key = event.key()
+        if key == Qt.Key.Key_Up:
+            self._autocomplete.move_selection(-1)
+            return True
+        if key == Qt.Key.Key_Down:
+            self._autocomplete.move_selection(1)
+            return True
+        if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Tab):
+            self._autocomplete.accept_current()
+            return True
+        if key == Qt.Key.Key_Escape:
+            self._autocomplete.hide()
+            return True
+        return False
 
     # ------------------------------------------------------------------
     # Internal handlers

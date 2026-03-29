@@ -128,6 +128,25 @@ CREATE TABLE IF NOT EXISTS avatar_deliveries (
     avatar_version INTEGER NOT NULL,
     delivered_at   REAL NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS custom_emojis (
+    emoji_hash   TEXT PRIMARY KEY,
+    name         TEXT NOT NULL,
+    image_data   BLOB NOT NULL,
+    added_at     REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS reactions (
+    message_id    TEXT NOT NULL,
+    emoji_hash    TEXT NOT NULL,
+    reactor_hash  TEXT NOT NULL,
+    channel_hash  TEXT NOT NULL,
+    reacted_at    REAL NOT NULL,
+    PRIMARY KEY (message_id, emoji_hash, reactor_hash)
+);
+
+CREATE INDEX IF NOT EXISTS idx_reactions_message
+    ON reactions(message_id);
 """
 
 
@@ -239,6 +258,7 @@ class Storage:
 
         self._migrate_tenure()
         self._migrate_image_data()
+        self._migrate_reactions()
 
     def _migrate_tenure(self):
         """Create membership_tenure table and backfill current members if the table is new."""
@@ -264,6 +284,37 @@ class Storage:
         if not self._has_column("messages", "image_data"):
             self._conn.execute(
                 "ALTER TABLE messages ADD COLUMN image_data BLOB"
+            )
+            self._conn.commit()
+
+    def _migrate_reactions(self):
+        """Create custom_emojis and reactions tables for existing databases."""
+        tables = {r[0] for r in self._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()}
+        if "custom_emojis" not in tables:
+            self._conn.execute("""
+                CREATE TABLE custom_emojis (
+                    emoji_hash   TEXT PRIMARY KEY,
+                    name         TEXT NOT NULL,
+                    image_data   BLOB NOT NULL,
+                    added_at     REAL NOT NULL
+                )
+            """)
+            self._conn.commit()
+        if "reactions" not in tables:
+            self._conn.execute("""
+                CREATE TABLE reactions (
+                    message_id    TEXT NOT NULL,
+                    emoji_hash    TEXT NOT NULL,
+                    reactor_hash  TEXT NOT NULL,
+                    channel_hash  TEXT NOT NULL,
+                    reacted_at    REAL NOT NULL,
+                    PRIMARY KEY (message_id, emoji_hash, reactor_hash)
+                )
+            """)
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_reactions_message ON reactions(message_id)"
             )
             self._conn.commit()
 
@@ -858,3 +909,81 @@ class Storage:
         """Remove all delivery records. Called when our own avatar changes."""
         with self._tx():
             self._conn.execute("DELETE FROM avatar_deliveries")
+
+    # --- custom emojis ---
+
+    def insert_emoji(self, emoji_hash: str, name: str,
+                     image_data: bytes, added_at: float) -> bool:
+        """Store a custom emoji. Returns True if inserted, False if the hash already exists."""
+        try:
+            with self._tx():
+                self._conn.execute("""
+                    INSERT INTO custom_emojis (emoji_hash, name, image_data, added_at)
+                    VALUES (?, ?, ?, ?)
+                """, (emoji_hash, name, image_data, added_at))
+            return True
+        except sqlite3.IntegrityError:
+            return False
+
+    def get_emoji(self, emoji_hash: str) -> sqlite3.Row | None:
+        """Return the custom emoji row for a given hash, or None if not found."""
+        return self._fetchone(
+            "SELECT * FROM custom_emojis WHERE emoji_hash = ?", (emoji_hash,)
+        )
+
+    def search_emojis(self, query: str) -> list[sqlite3.Row]:
+        """Return emojis whose name contains query (case-insensitive), up to 20 results."""
+        return self._fetchall(
+            "SELECT * FROM custom_emojis WHERE name LIKE ? ORDER BY name LIMIT 20",
+            (f"%{query}%",),
+        )
+
+    def list_emojis(self) -> list[sqlite3.Row]:
+        """Return all custom emojis ordered by name."""
+        return self._fetchall("SELECT * FROM custom_emojis ORDER BY name")
+
+    def delete_emoji(self, emoji_hash: str) -> None:
+        """Remove a custom emoji from the local library."""
+        with self._tx():
+            self._conn.execute(
+                "DELETE FROM custom_emojis WHERE emoji_hash = ?", (emoji_hash,)
+            )
+
+    def emoji_exists(self, emoji_hash: str) -> bool:
+        """Return True if the emoji hash is already in the local library."""
+        return self._fetchone(
+            "SELECT 1 FROM custom_emojis WHERE emoji_hash = ?", (emoji_hash,)
+        ) is not None
+
+    # --- reactions ---
+
+    def insert_reaction(self, message_id: str, emoji_hash: str,
+                        reactor_hash: str, channel_hash: str,
+                        reacted_at: float) -> bool:
+        """Record a reaction. Returns True if inserted, False if it already exists."""
+        try:
+            with self._tx():
+                self._conn.execute("""
+                    INSERT INTO reactions
+                        (message_id, emoji_hash, reactor_hash, channel_hash, reacted_at)
+                    VALUES (?, ?, ?, ?, ?)
+                """, (message_id, emoji_hash, reactor_hash, channel_hash, reacted_at))
+            return True
+        except sqlite3.IntegrityError:
+            return False
+
+    def remove_reaction(self, message_id: str, emoji_hash: str,
+                        reactor_hash: str) -> None:
+        """Remove a reaction row."""
+        with self._tx():
+            self._conn.execute("""
+                DELETE FROM reactions
+                WHERE message_id = ? AND emoji_hash = ? AND reactor_hash = ?
+            """, (message_id, emoji_hash, reactor_hash))
+
+    def get_reactions(self, message_id: str) -> list[sqlite3.Row]:
+        """Return all reactions for a message, ordered by earliest first."""
+        return self._fetchall(
+            "SELECT * FROM reactions WHERE message_id = ? ORDER BY reacted_at ASC",
+            (message_id,),
+        )

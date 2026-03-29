@@ -40,12 +40,14 @@ from trenchchat.core.channel import ChannelManager
 from trenchchat.core.messaging import Messaging
 from trenchchat.core.subscription import SubscriptionManager
 from trenchchat.core.invite import InviteManager
+from trenchchat.core.reaction import ReactionManager
 from trenchchat.core.sync import SyncManager
 from trenchchat.core.user_directory import UserDirectory
 from trenchchat.network.router import Router
 from trenchchat.network.announce import PeerAnnounceHandler
 from trenchchat.gui.channel_view import ChannelView
 from trenchchat.gui.compose import ComposeWidget
+from trenchchat.gui.emoji_picker import EmojiPicker
 from trenchchat.gui.network_map import NetworkMapWidget, gather_network_data
 from trenchchat.gui.settings import SettingsDialog
 from trenchchat.gui.invite_dialogs import ChannelPermissionsDialog, InviteDialog, MembersDialog
@@ -202,12 +204,13 @@ class MainWindow(QMainWindow):
     _peer_announced       = pyqtSignal()            # any announce → maybe refresh map
     _reannounce_requested = pyqtSignal(object)      # iface or None → start debounce timer
     _avatar_updated       = pyqtSignal(str)         # identity_hash_hex
+    _reaction_updated     = pyqtSignal(str, str)    # channel_hash_hex, message_id
 
     def __init__(self, config: Config, identity: Identity, storage: Storage,
                  rns: "RNS.Reticulum", router: Router, channel_mgr: ChannelManager,
                  messaging: Messaging, subscription_mgr: SubscriptionManager,
                  invite_mgr: InviteManager, presence_mgr: PresenceManager,
-                 user_directory: UserDirectory, avatar_mgr=None):
+                 user_directory: UserDirectory, avatar_mgr=None, reaction_mgr=None):
         super().__init__()
         self._config = config
         self._identity = identity
@@ -221,6 +224,7 @@ class MainWindow(QMainWindow):
         self._presence_mgr = presence_mgr
         self._user_directory = user_directory
         self._avatar_mgr = avatar_mgr
+        self._reaction_mgr: ReactionManager | None = reaction_mgr
 
         # Pending invites: list of (channel_hash_hex, channel_name, token, expiry, admin_hash_hex)
         self._pending_invites: list[tuple] = []
@@ -255,6 +259,10 @@ class MainWindow(QMainWindow):
         self._avatar_updated.connect(self._on_avatar_updated_main_thread)
         if avatar_mgr is not None:
             avatar_mgr.add_avatar_callback(self._avatar_updated.emit)
+
+        self._reaction_updated.connect(self._on_reaction_updated_main_thread)
+        if reaction_mgr is not None:
+            reaction_mgr.add_reaction_callback(self._reaction_updated.emit)
 
         self._sync_mgr = SyncManager(
             identity, storage, router, messaging, subscription_mgr, invite_mgr
@@ -456,7 +464,7 @@ class MainWindow(QMainWindow):
         self._stack.addWidget(placeholder)
         chat_layout.addWidget(self._stack, 1)
 
-        self._compose = ComposeWidget()
+        self._compose = ComposeWidget(storage=self._storage)
         self._compose.message_ready.connect(self._on_send_message)
         self._compose.set_enabled(False)
         chat_layout.addWidget(self._compose)
@@ -679,6 +687,8 @@ class MainWindow(QMainWindow):
                                self._identity.hash_hex,
                                restore_to_id=restore_id,
                                config=self._config)
+            view.react_requested.connect(self._on_react_requested)
+            view.reaction_remove_requested.connect(self._on_reaction_remove_requested)
             self._channel_views[channel_hash_hex] = view
             self._stack.addWidget(view)
 
@@ -1002,6 +1012,49 @@ class MainWindow(QMainWindow):
         """Refresh channel views so updated avatars are reflected immediately."""
         for view in self._channel_views.values():
             view.refresh_avatars(identity_hex)
+
+    @pyqtSlot(str, str)
+    def _on_reaction_updated_main_thread(self, channel_hash_hex: str,
+                                         message_id: str) -> None:
+        """Refresh the reaction bar for a specific message."""
+        view = self._channel_views.get(channel_hash_hex)
+        if view is not None:
+            view.on_reaction_updated(message_id)
+
+    @pyqtSlot(str, str)
+    def _on_react_requested(self, channel_hash_hex: str, message_id: str) -> None:
+        """User clicked the react button -- show the EmojiPicker popup."""
+        if self._reaction_mgr is None:
+            return
+        picker = EmojiPicker(self._storage, self)
+        picker.emoji_selected.connect(
+            lambda emoji_hash, ch=channel_hash_hex, mid=message_id:
+                self._do_add_reaction(ch, mid, emoji_hash)
+        )
+        picker.focus_search()
+        # Position near the cursor
+        from PyQt6.QtGui import QCursor
+        picker.move(QCursor.pos())
+        picker.show()
+
+    def _do_add_reaction(self, channel_hash_hex: str, message_id: str,
+                         emoji_hash: str) -> None:
+        """Send the add-reaction command via ReactionManager."""
+        if self._reaction_mgr is None:
+            return
+        subs = self._subscription_mgr.get_subscribers(channel_hash_hex)
+        self._reaction_mgr.add_reaction(channel_hash_hex, message_id, emoji_hash, list(subs))
+
+    @pyqtSlot(str, str, str)
+    def _on_reaction_remove_requested(self, channel_hash_hex: str, message_id: str,
+                                      emoji_hash: str) -> None:
+        """User clicked a reaction chip they already reacted with -- remove it."""
+        if self._reaction_mgr is None:
+            return
+        subs = self._subscription_mgr.get_subscribers(channel_hash_hex)
+        self._reaction_mgr.remove_reaction(
+            channel_hash_hex, message_id, emoji_hash, list(subs)
+        )
 
     def _on_presence_tick(self) -> None:
         """Periodic timer: prune stale presence and user directory entries, refresh the panel."""

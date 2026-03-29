@@ -6,11 +6,12 @@ This module has no local imports so it can be safely imported by any layer
 
 Field key registry
 ------------------
-0x01–0x0F  Common / messaging / avatar fields
+0x01–0x0F  Common / messaging / avatar / emoji fields
 0x10       Control: msg_type discriminator
 0x11–0x1F  Invite fields
 0x20–0x2F  Member-list fields
 0x30–0x3F  Subscription fields
+0x40–0x4F  Reaction fields
 """
 
 # --- Common / messaging fields ---
@@ -27,6 +28,12 @@ F_MISSED_MSG_ID     = 0x0A   # str       — message_id that was not delivered
 F_AVATAR_DATA       = 0x0B   # bytes     — JPEG avatar payload (max 4 KB)
 F_AVATAR_VERSION    = 0x0C   # int       — monotonic counter; receiver uses to detect stale updates
 F_IMAGE_DATA        = 0x0D   # bytes     — JPEG image attachment payload (max 320 KB)
+F_EMOJI_HASH        = 0x0E   # bytes[32] — SHA-256 of the emoji image data
+F_EMOJI_DATA        = 0x0F   # bytes     — raw emoji image (PNG/GIF, max 64 KB)
+
+# --- Reaction fields ---
+F_REACTION_MSG_ID   = 0x40   # str  — message_id being reacted to
+F_REACTION_REMOVE   = 0x41   # bool — True if this is a reaction removal
 
 # --- Control discriminator ---
 F_MSG_TYPE          = 0x10   # str — present on all control messages; absent on chat messages
@@ -60,3 +67,6 @@ MT_MISSED_DELIVERY  = "missed_delivery"
 MT_SYNC_REQUEST     = "sync_request"
 MT_SYNC_RESPONSE    = "sync_response"
 MT_AVATAR_UPDATE    = "avatar_update"
+MT_REACTION         = "reaction"        # notify channel: reactor added/removed emoji on a message
+MT_EMOJI_REQUEST    = "emoji_request"   # ask a peer for emoji image data by hash
+MT_EMOJI_RESPONSE   = "emoji_response"  # respond with the emoji image bytes

@@ -16,8 +16,9 @@ import hashlib
 import time
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QScrollArea, QLabel, QSizePolicy, QDialog,
+    QPushButton,
 )
-from PyQt6.QtCore import Qt, QTimer, QBuffer, QByteArray, QIODevice
+from PyQt6.QtCore import Qt, QTimer, QBuffer, QByteArray, QIODevice, pyqtSignal
 from PyQt6.QtGui import QColor, QPixmap, QPainter, QPainterPath, QMovie
 
 from trenchchat.core.storage import Storage
@@ -327,6 +328,111 @@ def _build_image_widget(image_data: bytes | None) -> QWidget | None:
     return _ClickableImageLabel(pix, data)
 
 
+_REACT_BTN_SIZE = 22        # reaction button diameter in px
+_CHIP_EMOJI_SIZE = 18       # emoji thumbnail size inside a reaction chip
+_CHIP_MAX_EMOJIS = 20       # maximum distinct emojis to show per message
+
+
+class _ReactionChip(QPushButton):
+    """A single reaction chip: emoji thumbnail + reactor count.
+
+    Highlighted when the local user is one of the reactors.
+    Clicking the chip emits ``toggled(emoji_hash, currently_reacted)``
+    so the parent can add or remove the reaction.
+    """
+
+    toggled_reaction = pyqtSignal(str, bool)   # (emoji_hash, currently_reacted_by_user)
+
+    def __init__(self, emoji_hash: str, image_data: bytes | None,
+                 count: int, user_reacted: bool, parent=None):
+        super().__init__(parent)
+        self._emoji_hash = emoji_hash
+        self._user_reacted = user_reacted
+
+        pix = QPixmap()
+        if image_data:
+            pix.loadFromData(image_data)
+        icon_str = ""
+        if not pix.isNull():
+            scaled = pix.scaled(
+                _CHIP_EMOJI_SIZE, _CHIP_EMOJI_SIZE,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            self.setIcon(scaled)
+            from PyQt6.QtCore import QSize
+            self.setIconSize(QSize(_CHIP_EMOJI_SIZE, _CHIP_EMOJI_SIZE))
+        else:
+            icon_str = "?"
+
+        label = f"{icon_str} {count}" if icon_str else str(count)
+        self.setText(label)
+
+        bg = "#3a5080" if user_reacted else "#2a2a2a"
+        border = "#5a80c0" if user_reacted else "#444"
+        self.setStyleSheet(
+            f"QPushButton {{ background: {bg}; color: #ddd; border: 1px solid {border}; "
+            f"border-radius: 10px; padding: 1px 6px; font-size: 11px; }}"
+            f"QPushButton:hover {{ background: {'#4a6090' if user_reacted else '#3a3a3a'}; }}"
+        )
+        self.clicked.connect(self._on_click)
+
+    def _on_click(self) -> None:
+        self.toggled_reaction.emit(self._emoji_hash, self._user_reacted)
+
+
+class _ReactionBar(QWidget):
+    """Horizontal flow of reaction chips beneath a message.
+
+    Rebuild by calling ``refresh(reactions, storage, own_hash)``.
+    """
+
+    reaction_toggled = pyqtSignal(str, bool)   # (emoji_hash, currently_reacted_by_user)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._layout = QHBoxLayout(self)
+        self._layout.setContentsMargins(0, 2, 0, 0)
+        self._layout.setSpacing(4)
+        self._layout.addStretch()
+        self.hide()
+
+    def refresh(self, message_id: str, storage: Storage, own_hash: str) -> None:
+        """Rebuild chips from the current reactions for *message_id*."""
+        while self._layout.count() > 1:
+            item = self._layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        rows = storage.get_reactions(message_id)
+        if not rows:
+            self.hide()
+            return
+
+        # Group by emoji_hash
+        counts: dict[str, int] = {}
+        user_reacted: dict[str, bool] = {}
+        ordered: list[str] = []
+        for r in rows:
+            eh = r["emoji_hash"]
+            if eh not in counts:
+                counts[eh] = 0
+                user_reacted[eh] = False
+                ordered.append(eh)
+            counts[eh] += 1
+            if r["reactor_hash"] == own_hash:
+                user_reacted[eh] = True
+
+        for eh in ordered[:_CHIP_MAX_EMOJIS]:
+            row = storage.get_emoji(eh)
+            img_data = bytes(row["image_data"]) if row else None
+            chip = _ReactionChip(eh, img_data, counts[eh], user_reacted[eh])
+            chip.toggled_reaction.connect(self.reaction_toggled)
+            self._layout.insertWidget(self._layout.count() - 1, chip)
+
+        self.show()
+
+
 class _AvatarWidget(QWidget):
     """Fixed-size widget that paints a circular avatar without stylesheet cascade."""
 
@@ -354,13 +460,16 @@ class MessageBubble(QWidget):
     the same sender within GROUP_WINDOW_SECS use MessageContinuation instead.
     """
 
+    react_requested = pyqtSignal(str)   # message_id — user clicked the react button
+
     def __init__(self, sender: str, sender_hash: str, content: str, timestamp: float,
-                 received_at: float, is_own: bool = False,
+                 received_at: float, message_id: str = "", is_own: bool = False,
                  avatar_pixmap: QPixmap | None = None,
                  image_data: bytes | None = None, parent=None):
         super().__init__(parent)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
         self._sender_hash = sender_hash
+        self._message_id = message_id
 
         row = QHBoxLayout(self)
         row.setContentsMargins(_ROW_LEFT_PAD, _ROW_V_PAD, _ROW_RIGHT_PAD, _ROW_V_PAD)
@@ -404,7 +513,43 @@ class MessageBubble(QWidget):
             late.setStyleSheet("color: #666; font-size: 10px; font-style: italic;")
             col.addWidget(late)
 
+        self._reaction_bar = _ReactionBar()
+        self._reaction_bar.reaction_toggled.connect(
+            lambda eh, reacted: self.react_requested.emit(self._message_id)
+            if not reacted else self._on_remove_reaction(eh)
+        )
+        col.addWidget(self._reaction_bar)
+
         row.addLayout(col, 1)
+
+        # Hover react button — shown top-right on enterEvent
+        self._react_btn = QPushButton("😊", self)
+        self._react_btn.setFixedSize(_REACT_BTN_SIZE, _REACT_BTN_SIZE)
+        self._react_btn.setStyleSheet(
+            "QPushButton { background: #333; color: #aaa; border: 1px solid #555; "
+            "border-radius: 11px; font-size: 11px; }"
+            "QPushButton:hover { background: #444; color: #fff; }"
+        )
+        self._react_btn.setToolTip("Add reaction")
+        self._react_btn.hide()
+        self._react_btn.clicked.connect(
+            lambda: self.react_requested.emit(self._message_id)
+        )
+
+        # store for _on_remove_reaction signal routing
+        self._reaction_remove_cb = None
+
+    def set_reaction_remove_callback(self, cb) -> None:
+        """cb(message_id, emoji_hash) -- called when user clicks a reacted chip."""
+        self._reaction_remove_cb = cb
+
+    def _on_remove_reaction(self, emoji_hash: str) -> None:
+        if self._reaction_remove_cb:
+            self._reaction_remove_cb(self._message_id, emoji_hash)
+
+    def refresh_reactions(self, storage: Storage, own_hash: str) -> None:
+        """Rebuild the reaction chip bar from current DB state."""
+        self._reaction_bar.refresh(self._message_id, storage, own_hash)
 
     def update_avatar(self, avatar_pixmap: QPixmap | None,
                       display_name: str) -> None:
@@ -419,14 +564,22 @@ class MessageBubble(QWidget):
             pix = _make_placeholder_pixmap(sender_hash, display_name, _AVATAR_SIZE)
         self._avatar_widget.set_pixmap(pix)
 
+    def resizeEvent(self, event):
+        self._react_btn.move(self.width() - _REACT_BTN_SIZE - 4, 4)
+        super().resizeEvent(event)
+
     def enterEvent(self, event):
         self.setAutoFillBackground(True)
         p = self.palette()
         p.setColor(self.backgroundRole(), QColor(255, 255, 255, 12))
         self.setPalette(p)
+        self._react_btn.move(self.width() - _REACT_BTN_SIZE - 4, 4)
+        self._react_btn.raise_()
+        self._react_btn.show()
 
     def leaveEvent(self, event):
         self.setAutoFillBackground(False)
+        self._react_btn.hide()
 
 
 class MessageContinuation(QWidget):
@@ -437,14 +590,19 @@ class MessageContinuation(QWidget):
     and the row gets a subtle background highlight.
     """
 
+    react_requested = pyqtSignal(str)   # message_id
+
     # Width of the "gutter" that replaces the avatar column so text aligns.
     # Must equal _ROW_LEFT_PAD + _AVATAR_SIZE + _AVATAR_TEXT_GAP.
     _GUTTER = _ROW_LEFT_PAD + _AVATAR_SIZE + _AVATAR_TEXT_GAP
 
     def __init__(self, sender_hash: str, content: str, timestamp: float,
-                 received_at: float, image_data: bytes | None = None, parent=None):
+                 received_at: float, message_id: str = "",
+                 image_data: bytes | None = None, parent=None):
         super().__init__(parent)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
+        self._message_id = message_id
+        self._reaction_remove_cb = None
 
         row = QHBoxLayout(self)
         row.setContentsMargins(0, _ROW_V_PAD_CONT, _ROW_RIGHT_PAD, _ROW_V_PAD_CONT)
@@ -480,7 +638,44 @@ class MessageContinuation(QWidget):
             late.setStyleSheet("color: #666; font-size: 10px; font-style: italic;")
             col.addWidget(late)
 
+        self._reaction_bar = _ReactionBar()
+        self._reaction_bar.reaction_toggled.connect(
+            lambda eh, reacted: self.react_requested.emit(self._message_id)
+            if not reacted else self._on_remove_reaction(eh)
+        )
+        col.addWidget(self._reaction_bar)
+
         row.addLayout(col, 1)
+
+        # Hover react button
+        self._react_btn = QPushButton("😊", self)
+        self._react_btn.setFixedSize(_REACT_BTN_SIZE, _REACT_BTN_SIZE)
+        self._react_btn.setStyleSheet(
+            "QPushButton { background: #333; color: #aaa; border: 1px solid #555; "
+            "border-radius: 11px; font-size: 11px; }"
+            "QPushButton:hover { background: #444; color: #fff; }"
+        )
+        self._react_btn.setToolTip("Add reaction")
+        self._react_btn.hide()
+        self._react_btn.clicked.connect(
+            lambda: self.react_requested.emit(self._message_id)
+        )
+
+    def set_reaction_remove_callback(self, cb) -> None:
+        """cb(message_id, emoji_hash) -- called when user clicks a reacted chip."""
+        self._reaction_remove_cb = cb
+
+    def _on_remove_reaction(self, emoji_hash: str) -> None:
+        if self._reaction_remove_cb:
+            self._reaction_remove_cb(self._message_id, emoji_hash)
+
+    def refresh_reactions(self, storage: Storage, own_hash: str) -> None:
+        """Rebuild the reaction chip bar from current DB state."""
+        self._reaction_bar.refresh(self._message_id, storage, own_hash)
+
+    def resizeEvent(self, event):
+        self._react_btn.move(self.width() - _REACT_BTN_SIZE - 4, 4)
+        super().resizeEvent(event)
 
     def enterEvent(self, event):
         self._ts_label.setStyleSheet(
@@ -490,16 +685,23 @@ class MessageContinuation(QWidget):
         p = self.palette()
         p.setColor(self.backgroundRole(), QColor(255, 255, 255, 12))
         self.setPalette(p)
+        self._react_btn.move(self.width() - _REACT_BTN_SIZE - 4, 4)
+        self._react_btn.raise_()
+        self._react_btn.show()
 
     def leaveEvent(self, event):
         self._ts_label.setStyleSheet(
             "color: transparent; font-size: 10px; padding-right: 6px;"
         )
         self.setAutoFillBackground(False)
+        self._react_btn.hide()
 
 
 class ChannelView(QWidget):
     """Displays the message history for a single channel."""
+
+    react_requested = pyqtSignal(str, str)    # (channel_hash_hex, message_id)
+    reaction_remove_requested = pyqtSignal(str, str, str)  # (channel_hash_hex, message_id, emoji_hash)
 
     def __init__(self, channel_hash_hex: str, storage: Storage,
                  own_identity_hex: str, restore_to_id: str | None = None,
@@ -660,7 +862,15 @@ class ChannelView(QWidget):
                 content=row["content"],
                 timestamp=ts,
                 received_at=received_at,
+                message_id=msg_id,
                 image_data=image_data,
+            )
+            widget.react_requested.connect(
+                lambda mid, ch=self._channel_hash: self.react_requested.emit(ch, mid)
+            )
+            widget.set_reaction_remove_callback(
+                lambda mid, eh, ch=self._channel_hash:
+                    self.reaction_remove_requested.emit(ch, mid, eh)
             )
         else:
             avatar_pix = self._get_avatar_pixmap(sender_hash)
@@ -670,18 +880,38 @@ class ChannelView(QWidget):
                 content=row["content"],
                 timestamp=ts,
                 received_at=received_at,
+                message_id=msg_id,
                 is_own=sender_hash == self._own_hex,
                 avatar_pixmap=avatar_pix,
                 image_data=image_data,
             )
+            bubble.react_requested.connect(
+                lambda mid, ch=self._channel_hash: self.react_requested.emit(ch, mid)
+            )
+            bubble.set_reaction_remove_callback(
+                lambda mid, eh, ch=self._channel_hash:
+                    self.reaction_remove_requested.emit(ch, mid, eh)
+            )
             self._bubbles_by_sender.setdefault(sender_hash, []).append(bubble)
             widget = bubble
+
+        # Pre-populate reactions for existing messages
+        widget.refresh_reactions(self._storage, self._own_hex)
 
         self._bubble_map[msg_id] = widget
         self._msg_layout.insertWidget(self._msg_layout.count(), widget)
 
         if scroll:
             QTimer.singleShot(50, self._scroll_to_bottom)
+
+    def on_reaction_updated(self, message_id: str) -> None:
+        """Refresh the reaction bar for a single message when reactions change.
+
+        Called from the main thread via a Qt signal when ReactionManager fires.
+        """
+        widget = self._bubble_map.get(message_id)
+        if widget is not None:
+            widget.refresh_reactions(self._storage, self._own_hex)
 
     def refresh_avatars(self, identity_hex: str) -> None:
         """Refresh avatar display for all visible bubbles from a given sender.
