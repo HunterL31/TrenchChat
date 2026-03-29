@@ -33,7 +33,8 @@ class _EmojiAutocompletePopup(QListWidget):
     emoji_chosen = pyqtSignal(str, str)  # (name, emoji_hash)
 
     def __init__(self, parent=None):
-        super().__init__(parent, Qt.WindowType.Popup)
+        super().__init__(parent)
+        self.setWindowFlags(Qt.WindowType.Popup)
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
