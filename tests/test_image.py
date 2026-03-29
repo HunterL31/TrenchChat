@@ -9,9 +9,11 @@ from PIL import Image
 
 from trenchchat.core.image import (
     compress_image,
+    compress_gif,
     is_gif,
     prepare_image,
     MAX_IMAGE_BYTES,
+    MAX_GIF_BYTES,
     MAX_IMAGE_DIMENSION,
 )
 
@@ -109,12 +111,39 @@ class TestCompressImage:
 _GIF89_HEADER = b"GIF89a" + b"\x01\x00\x01\x00\x00\x00\x00" + b"\xff\xff\xff" + b"\x00" * 10 + b";"
 
 
-def _make_gif() -> bytes:
-    """Return a minimal single-frame GIF89a as bytes."""
-    img = Image.new("P", (1, 1), 0)
+def _make_gif(width: int = 1, height: int = 1, frames: int = 1) -> bytes:
+    """Return a minimal GIF89a with the given dimensions and frame count."""
+    first = Image.new("P", (width, height), 0)
+    rest = [Image.new("P", (width, height), 0) for _ in range(frames - 1)]
     buf = io.BytesIO()
-    img.save(buf, format="GIF")
+    first.save(buf, format="GIF", save_all=True, append_images=rest, loop=0, duration=100)
     return buf.getvalue()
+
+
+def _make_large_gif(target_bytes: int = MAX_GIF_BYTES + 1) -> bytes:
+    """Return a real multi-frame animated GIF that exceeds target_bytes.
+
+    Uses noise-filled frames so data doesn't compress away, and pre-computes a
+    per-frame target so we can stop as soon as we exceed the threshold without
+    encoding the whole GIF on every iteration.
+    """
+    import random
+
+    frame_size = (200, 200)
+    n_pixels = frame_size[0] * frame_size[1]
+
+    frames: list[Image.Image] = []
+    while True:
+        # Random noise: each pixel gets a random palette index, resisting LZW compression
+        noise = bytes(random.randint(0, 255) for _ in range(n_pixels))
+        frame = Image.frombytes("P", frame_size, noise)
+        frames.append(frame)
+
+        buf = io.BytesIO()
+        frames[0].save(buf, format="GIF", save_all=True, append_images=frames[1:],
+                       loop=0, duration=100)
+        if len(buf.getvalue()) >= target_bytes:
+            return buf.getvalue()
 
 
 class TestIsGif:
@@ -164,29 +193,81 @@ class TestPrepareImage:
         img = Image.open(io.BytesIO(result))
         assert img.format == "JPEG"
 
-    def test_gif_passes_through_unchanged(self):
-        """prepare_image returns GIF bytes unchanged and gif=True."""
+    def test_gif_passes_through_unchanged_when_small(self):
+        """A small GIF is returned unchanged by prepare_image."""
         data = _make_gif()
+        assert len(data) < MAX_GIF_BYTES
         result, gif_flag = prepare_image(data)
         assert gif_flag
         assert result == data
 
-    def test_gif_within_size_limit_is_accepted(self):
-        """A GIF smaller than MAX_IMAGE_BYTES passes through without error."""
+    def test_gif_flag_is_true(self):
+        """prepare_image sets gif=True for GIF input."""
         data = _make_gif()
-        assert len(data) < MAX_IMAGE_BYTES
+        _, gif_flag = prepare_image(data)
+        assert gif_flag
+
+    def test_oversized_gif_is_compressed_not_raised(self):
+        """A GIF exceeding MAX_GIF_BYTES is scaled down, not rejected."""
+        data = _make_large_gif()
+        assert len(data) > MAX_GIF_BYTES
         result, gif_flag = prepare_image(data)
         assert gif_flag
-        assert len(result) == len(data)
+        assert len(result) <= MAX_GIF_BYTES
 
-    def test_oversized_gif_raises(self):
-        """A GIF exceeding MAX_IMAGE_BYTES raises ValueError."""
-        oversized = b"GIF89a" + b"\x00" * (MAX_IMAGE_BYTES + 1)
-        with pytest.raises(ValueError, match="GIF"):
-            prepare_image(oversized)
+    def test_compressed_gif_is_still_valid_gif(self):
+        """The result of compressing an oversized GIF can be read back by PIL."""
+        data = _make_large_gif()
+        result, _ = prepare_image(data)
+        img = Image.open(io.BytesIO(result))
+        assert img.format == "GIF"
 
     def test_jpeg_result_within_size_limit(self):
         """Compressed JPEG from prepare_image stays within MAX_IMAGE_BYTES."""
         data = _make_jpeg(800, 600)
         result, _ = prepare_image(data)
         assert len(result) <= MAX_IMAGE_BYTES
+
+
+# ---------------------------------------------------------------------------
+# compress_gif
+# ---------------------------------------------------------------------------
+
+class TestCompressGif:
+    def test_small_gif_returned_unchanged(self):
+        """compress_gif fast-paths GIFs already within MAX_GIF_BYTES."""
+        data = _make_gif(10, 10, frames=3)
+        result = compress_gif(data)
+        assert result == data
+
+    def test_oversized_gif_fits_after_compression(self):
+        """compress_gif reduces an oversized GIF to fit within MAX_GIF_BYTES."""
+        data = _make_large_gif()
+        result = compress_gif(data)
+        assert len(result) <= MAX_GIF_BYTES
+
+    def test_result_is_valid_gif(self):
+        """The compressed output is a valid GIF PIL can open."""
+        data = _make_large_gif()
+        result = compress_gif(data)
+        img = Image.open(io.BytesIO(result))
+        assert img.format == "GIF"
+
+    def test_all_frames_preserved(self):
+        """Frame count is preserved after compression (using a real multi-frame GIF)."""
+        # Build a real animated GIF using distinct solid colours so frames
+        # survive the RGBA round-trip inside compress_gif without collapsing.
+        colours = [(255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 0), (0, 255, 255)]
+        pil_frames = [
+            Image.new("RGB", (400, 400), c).convert("P", palette=Image.ADAPTIVE)
+            for c in colours * 20  # 100 frames — enough to push past MAX_GIF_BYTES
+        ]
+        buf = io.BytesIO()
+        pil_frames[0].save(buf, format="GIF", save_all=True, append_images=pil_frames[1:],
+                           loop=0, duration=100)
+        data = buf.getvalue()
+
+        n_original = Image.open(io.BytesIO(data)).n_frames
+        result = compress_gif(data)
+        n_compressed = Image.open(io.BytesIO(result)).n_frames
+        assert n_compressed == n_original
