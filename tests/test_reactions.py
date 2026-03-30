@@ -25,7 +25,7 @@ import pytest
 from PIL import Image
 
 from trenchchat.core.protocol import (
-    F_MSG_TYPE, F_CHANNEL_HASH, F_EMOJI_HASH, F_EMOJI_DATA,
+    F_MSG_TYPE, F_CHANNEL_HASH, F_EMOJI_HASH, F_EMOJI_DATA, F_EMOJI_NAME,
     F_REACTION_MSG_ID, F_REACTION_REMOVE,
     MT_REACTION, MT_EMOJI_REQUEST, MT_EMOJI_RESPONSE,
 )
@@ -601,6 +601,51 @@ class TestEmojiRequestResponse:
         row = storage.get_emoji(emoji_hash)
         assert bytes(row["image_data"]) == img
 
+    def test_emoji_response_stores_correct_name(self, reaction_mgr):
+        """The name carried in F_EMOJI_NAME is stored, not the truncated hash."""
+        mgr, storage, identity, router = reaction_mgr
+        img = _make_png()
+        emoji_hash = compute_emoji_hash(img)
+
+        sender_hex = "dd" * 16
+        sender_identity_mock = MagicMock()
+        sender_identity_mock.hash = bytes.fromhex(sender_hex)
+
+        lxm = _make_lxm({
+            F_MSG_TYPE:   MT_EMOJI_RESPONSE,
+            F_EMOJI_HASH: bytes.fromhex(emoji_hash),
+            F_EMOJI_DATA: img,
+            F_EMOJI_NAME: "wave",
+        }, source_hash_hex=sender_hex)
+
+        with patch(_REACTION_RECALL, return_value=sender_identity_mock):
+            self._deliver(router, lxm)
+
+        row = storage.get_emoji(emoji_hash)
+        assert row["name"] == "wave"
+
+    def test_emoji_response_falls_back_to_hash_prefix_when_no_name(self, reaction_mgr):
+        """When F_EMOJI_NAME is absent the first 8 chars of the hash are used as name."""
+        mgr, storage, identity, router = reaction_mgr
+        img = _make_png()
+        emoji_hash = compute_emoji_hash(img)
+
+        sender_hex = "dd" * 16
+        sender_identity_mock = MagicMock()
+        sender_identity_mock.hash = bytes.fromhex(sender_hex)
+
+        lxm = _make_lxm({
+            F_MSG_TYPE:   MT_EMOJI_RESPONSE,
+            F_EMOJI_HASH: bytes.fromhex(emoji_hash),
+            F_EMOJI_DATA: img,
+        }, source_hash_hex=sender_hex)
+
+        with patch(_REACTION_RECALL, return_value=sender_identity_mock):
+            self._deliver(router, lxm)
+
+        row = storage.get_emoji(emoji_hash)
+        assert row["name"] == emoji_hash[:8]
+
     def test_emoji_response_rejected_if_hash_mismatch(self, reaction_mgr):
         mgr, storage, identity, router = reaction_mgr
         img = _make_png()
@@ -873,7 +918,7 @@ class TestRenderContent:
 
         _render_content(f":missing@{h}:", storage, mock_mgr, sender)
 
-        mock_mgr.request_emoji.assert_called_once_with(sender, h)
+        mock_mgr.request_emoji.assert_called_once_with(sender, h, name="missing")
         storage.close()
 
     def test_legacy_name_token_renders_when_emoji_found(self, tmp_path):

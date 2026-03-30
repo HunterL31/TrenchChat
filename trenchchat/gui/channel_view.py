@@ -90,9 +90,10 @@ def _render_content(
                 emoji_hash = row["emoji_hash"]
 
         if row is None:
-            # Not in local library — request it from the sender by hash
+            # Not in local library — request it from the sender by hash,
+            # passing the name so the sender echoes it back in the response.
             if reaction_mgr is not None and sender_hex and emoji_hash:
-                reaction_mgr.request_emoji(sender_hex, emoji_hash)
+                reaction_mgr.request_emoji(sender_hex, emoji_hash, name=name)
             continue
 
         found_any = True

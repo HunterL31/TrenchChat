@@ -34,6 +34,8 @@ F_EMOJI_DATA        = 0x0F   # bytes     — raw emoji image (PNG/GIF, max 64 KB
 # --- Reaction fields ---
 F_REACTION_MSG_ID   = 0x40   # str  — message_id being reacted to
 F_REACTION_REMOVE   = 0x41   # bool — True if this is a reaction removal
+F_EMOJI_NAME        = 0x42   # str  — human-readable emoji name; sent with request and response
+#                              so the receiver can store the emoji under the correct name
 
 # --- Control discriminator ---
 F_MSG_TYPE          = 0x10   # str — present on all control messages; absent on chat messages

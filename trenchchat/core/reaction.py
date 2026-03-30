@@ -26,7 +26,7 @@ import LXMF
 from trenchchat.core.identity import Identity
 from trenchchat.core.protocol import (
     F_MSG_TYPE, F_CHANNEL_HASH,
-    F_EMOJI_HASH, F_EMOJI_DATA,
+    F_EMOJI_HASH, F_EMOJI_DATA, F_EMOJI_NAME,
     F_REACTION_MSG_ID, F_REACTION_REMOVE,
     MT_REACTION, MT_EMOJI_REQUEST, MT_EMOJI_RESPONSE,
 )
@@ -133,14 +133,16 @@ class ReactionManager:
         """Register cb(emoji_hash: str) fired when a new emoji image is received."""
         self._emoji_callbacks.append(cb)
 
-    def request_emoji(self, peer_hex: str, emoji_hash: str) -> None:
+    def request_emoji(self, peer_hex: str, emoji_hash: str,
+                      name: str = "") -> None:
         """Request the emoji image for a specific hash from a peer.
 
         Used when a received message contains a :name@hash: token whose image
-        is not yet stored locally.  Delegates to the internal helper so the
-        deduplication and send logic lives in one place.
+        is not yet stored locally.  *name* is passed along so the sender can
+        include it in the response and the receiver stores the emoji under the
+        correct human-readable name.
         """
-        self._request_emoji(peer_hex, emoji_hash)
+        self._request_emoji(peer_hex, emoji_hash, name=name)
 
     # ------------------------------------------------------------------
     # LXMF inbound
@@ -211,7 +213,11 @@ class ReactionManager:
         self._fire_reaction_callbacks(channel_hash_hex, msg_id)
 
     def _handle_emoji_request(self, message: LXMF.LXMessage, fields: dict) -> None:
-        """Respond to an MT_EMOJI_REQUEST by sending the emoji image if we have it."""
+        """Respond to an MT_EMOJI_REQUEST by sending the emoji image if we have it.
+
+        The name from the request is echoed back so the receiver can store the
+        emoji under the correct human-readable name.
+        """
         requester_hex = self._resolve_sender_hex(message)
         if not requester_hex:
             return
@@ -224,6 +230,12 @@ class ReactionManager:
         if not emoji_hash:
             return
 
+        # Recover the name the requester sent so we can echo it in the response.
+        name_raw = fields.get(F_EMOJI_NAME, "")
+        if isinstance(name_raw, bytes):
+            name_raw = name_raw.decode(errors="replace")
+        requested_name = str(name_raw)
+
         row = self._storage.get_emoji(emoji_hash)
         if not row:
             RNS.log(
@@ -232,7 +244,9 @@ class ReactionManager:
             )
             return
 
-        self._send_emoji_response(requester_hex, emoji_hash, bytes(row["image_data"]))
+        # Prefer the sender's own stored name; fall back to what the requester asked for.
+        name = row["name"] or requested_name
+        self._send_emoji_response(requester_hex, emoji_hash, bytes(row["image_data"]), name)
 
     def _handle_emoji_response(self, message: LXMF.LXMessage, fields: dict) -> None:
         """Store a received emoji image in the local library."""
@@ -267,9 +281,14 @@ class ReactionManager:
         with self._lock:
             self._pending_emoji_requests.discard(emoji_hash)
 
+        name_raw = fields.get(F_EMOJI_NAME, "")
+        if isinstance(name_raw, bytes):
+            name_raw = name_raw.decode(errors="replace")
+        name = str(name_raw) or emoji_hash[:8]
+
         if not self._storage.emoji_exists(emoji_hash):
             self._storage.insert_emoji(
-                emoji_hash, emoji_hash[:8], emoji_data, time.time()
+                emoji_hash, name, emoji_data, time.time()
             )
             RNS.log(
                 f"TrenchChat [reaction]: stored new emoji {emoji_hash[:12]}…",
@@ -331,8 +350,13 @@ class ReactionManager:
                     RNS.LOG_WARNING,
                 )
 
-    def _request_emoji(self, peer_hex: str, emoji_hash: str) -> None:
-        """Send MT_EMOJI_REQUEST to a peer to obtain the emoji image bytes."""
+    def _request_emoji(self, peer_hex: str, emoji_hash: str,
+                       name: str = "") -> None:
+        """Send MT_EMOJI_REQUEST to a peer to obtain the emoji image bytes.
+
+        *name* is included so the sender echoes it back in the response, letting
+        the receiver store the emoji under the correct human-readable name.
+        """
         with self._lock:
             if emoji_hash in self._pending_emoji_requests:
                 return
@@ -360,10 +384,13 @@ class ReactionManager:
                 "",
                 desired_method=LXMF.LXMessage.DIRECT,
             )
-            lxm.fields = {
-                F_MSG_TYPE:  MT_EMOJI_REQUEST,
+            fields = {
+                F_MSG_TYPE:   MT_EMOJI_REQUEST,
                 F_EMOJI_HASH: bytes.fromhex(emoji_hash),
             }
+            if name:
+                fields[F_EMOJI_NAME] = name
+            lxm.fields = fields
             self._router.send(lxm)
             RNS.log(
                 f"TrenchChat [reaction]: requested emoji {emoji_hash[:12]}… from {peer_hex[:12]}…",
@@ -378,8 +405,8 @@ class ReactionManager:
             )
 
     def _send_emoji_response(self, peer_hex: str, emoji_hash: str,
-                             image_data: bytes) -> None:
-        """Send MT_EMOJI_RESPONSE with the emoji image to a requesting peer."""
+                             image_data: bytes, name: str = "") -> None:
+        """Send MT_EMOJI_RESPONSE with the emoji image and name to a requesting peer."""
         try:
             identity_hash = bytes.fromhex(peer_hex)
             delivery_dest_hash = RNS.Destination.hash(identity_hash, "lxmf", "delivery")
@@ -400,11 +427,14 @@ class ReactionManager:
                 "",
                 desired_method=LXMF.LXMessage.DIRECT,
             )
-            lxm.fields = {
-                F_MSG_TYPE:  MT_EMOJI_RESPONSE,
+            fields = {
+                F_MSG_TYPE:   MT_EMOJI_RESPONSE,
                 F_EMOJI_HASH: bytes.fromhex(emoji_hash),
                 F_EMOJI_DATA: image_data,
             }
+            if name:
+                fields[F_EMOJI_NAME] = name
+            lxm.fields = fields
             self._router.send(lxm)
             RNS.log(
                 f"TrenchChat [reaction]: sent emoji {emoji_hash[:12]}… to {peer_hex[:12]}…",
