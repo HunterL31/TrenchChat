@@ -33,7 +33,7 @@ LATE_THRESHOLD_SECS = 30.0
 _MESSAGE_HISTORY_LIMIT = 500
 _AVATAR_SIZE = 40              # avatar circle diameter in pixels
 _ROW_LEFT_PAD = 12             # padding left of avatar
-_ROW_RIGHT_PAD = 16            # padding right edge
+_ROW_RIGHT_PAD = 36            # padding right edge — wide enough to hold the react button
 _ROW_V_PAD = 4                 # vertical padding for header rows
 _ROW_V_PAD_CONT = 1            # vertical padding for continuation rows
 _AVATAR_TEXT_GAP = 10          # gap between avatar column and text column
@@ -101,10 +101,14 @@ def _render_content(
         img_bytes = bytes(row["image_data"])
         b64 = base64.b64encode(img_bytes).decode()
         mime = "image/gif" if img_bytes[:3] == b"GIF" else "image/png"
+        # Wrap in a <big> tag whose font-size matches the image height so Qt's
+        # rich-text engine allocates a line box tall enough to avoid clipping.
         parts.append(
+            f'<span style="font-size:{_INLINE_EMOJI_PX}px">'
             f'<img src="data:{mime};base64,{b64}" '
             f'height="{_INLINE_EMOJI_PX}" '
             f'title=":{name}:" style="vertical-align:middle"/>'
+            f'</span>'
         )
         last = m.end()
 
@@ -580,12 +584,17 @@ class MessageBubble(QWidget):
                 )
             else:
                 body_text, is_rich = content, False
-            body = QLabel(body_text)
+            body = QLabel()
             body.setWordWrap(True)
             body.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-            body.setStyleSheet("color: #dcddde; font-size: 13px;")
             if is_rich:
                 body.setTextFormat(Qt.TextFormat.RichText)
+                body.setText(
+                    f'<span style="color:#dcddde;font-size:13px">{body_text}</span>'
+                )
+            else:
+                body.setStyleSheet("color: #dcddde; font-size: 13px;")
+                body.setText(body_text)
             col.addWidget(body)
 
         img_widget = _build_image_widget(image_data)
@@ -648,8 +657,11 @@ class MessageBubble(QWidget):
             pix = _make_placeholder_pixmap(sender_hash, display_name, _AVATAR_SIZE)
         self._avatar_widget.set_pixmap(pix)
 
+    def _react_btn_x(self) -> int:
+        return self.width() - _REACT_BTN_SIZE - (_ROW_RIGHT_PAD - _REACT_BTN_SIZE) // 2
+
     def resizeEvent(self, event):
-        self._react_btn.move(self.width() - _REACT_BTN_SIZE - 4, 4)
+        self._react_btn.move(self._react_btn_x(), 4)
         super().resizeEvent(event)
 
     def enterEvent(self, event):
@@ -657,7 +669,7 @@ class MessageBubble(QWidget):
         p = self.palette()
         p.setColor(self.backgroundRole(), QColor(255, 255, 255, 12))
         self.setPalette(p)
-        self._react_btn.move(self.width() - _REACT_BTN_SIZE - 4, 4)
+        self._react_btn.move(self._react_btn_x(), 4)
         self._react_btn.raise_()
         self._react_btn.show()
 
@@ -715,12 +727,17 @@ class MessageContinuation(QWidget):
                 )
             else:
                 body_text, is_rich = content, False
-            self._body = QLabel(body_text)
+            self._body = QLabel()
             self._body.setWordWrap(True)
             self._body.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-            self._body.setStyleSheet("color: #dcddde; font-size: 13px;")
             if is_rich:
                 self._body.setTextFormat(Qt.TextFormat.RichText)
+                self._body.setText(
+                    f'<span style="color:#dcddde;font-size:13px">{body_text}</span>'
+                )
+            else:
+                self._body.setStyleSheet("color: #dcddde; font-size: 13px;")
+                self._body.setText(body_text)
             col.addWidget(self._body)
 
         img_widget = _build_image_widget(image_data)
@@ -767,8 +784,11 @@ class MessageContinuation(QWidget):
         """Rebuild the reaction chip bar from current DB state."""
         self._reaction_bar.refresh(self._message_id, storage, own_hash)
 
+    def _react_btn_x(self) -> int:
+        return self.width() - _REACT_BTN_SIZE - (_ROW_RIGHT_PAD - _REACT_BTN_SIZE) // 2
+
     def resizeEvent(self, event):
-        self._react_btn.move(self.width() - _REACT_BTN_SIZE - 4, 4)
+        self._react_btn.move(self._react_btn_x(), 4)
         super().resizeEvent(event)
 
     def enterEvent(self, event):
@@ -779,7 +799,7 @@ class MessageContinuation(QWidget):
         p = self.palette()
         p.setColor(self.backgroundRole(), QColor(255, 255, 255, 12))
         self.setPalette(p)
-        self._react_btn.move(self.width() - _REACT_BTN_SIZE - 4, 4)
+        self._react_btn.move(self._react_btn_x(), 4)
         self._react_btn.raise_()
         self._react_btn.show()
 
