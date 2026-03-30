@@ -282,19 +282,33 @@ class InviteManager:
             channel_hash_hex, new_v, new_ts, blob
         )
 
+        # Capture the old member set for tenure diffing before we replace it
+        old_member_hashes: set[str] = {
+            row["identity_hash"]
+            for row in self._storage.get_members(channel_hash_hex)
+        }
+
         # Rebuild members table with role-based membership
         owners_set = set(doc.get("owners", []))
         admins_set = set(doc.get("admins", []))
         member_rows: list[tuple[str, str, str]] = []
+        new_member_hashes: set[str] = set()
         for m in doc["members"]:
+            m_hex = m.hex()
+            new_member_hashes.add(m_hex)
             if m in owners_set:
                 role = ROLE_OWNER
             elif m in admins_set:
                 role = ROLE_ADMIN
             else:
                 role = ROLE_MEMBER
-            member_rows.append((m.hex(), "", role))
+            member_rows.append((m_hex, "", role))
         self._storage.replace_members(channel_hash_hex, member_rows)
+
+        # Update tenure log: close intervals for removed members, open for added
+        self._storage.update_tenure(
+            channel_hash_hex, old_member_hashes, new_member_hashes, new_ts
+        )
 
         # Apply permissions from the document if present
         perms_blob = doc.get("permissions", b"")

@@ -4,6 +4,7 @@ PyQt6
 msgpack
 configobj
 sqlcipher3
+Pillow
 
 # Development / testing
 pytest>=7.0

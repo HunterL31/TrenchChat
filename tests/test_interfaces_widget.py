@@ -13,8 +13,10 @@ from configobj import ConfigObj
 
 from trenchchat.gui.interfaces_widget import (
     EDITABLE_TYPES,
+    SUGGESTED_DEFAULTS,
     _fmt_bytes,
     build_interface_config_dict,
+    get_missing_suggested_defaults,
     load_interfaces_config,
 )
 
@@ -273,3 +275,75 @@ def test_unsupported_types_not_in_editable_types():
                    "I2PInterface", "WeaveInterface"]
     for t in unsupported:
         assert t not in EDITABLE_TYPES, f"{t} should not be editable"
+
+
+# ---------------------------------------------------------------------------
+# get_missing_suggested_defaults
+# ---------------------------------------------------------------------------
+
+def test_missing_suggested_defaults_all_missing(tmp_path):
+    """When no suggested defaults are present, all are returned as missing."""
+    cfg_path = tmp_path / "config"
+    cfg_path.write_text("[reticulum]\nenable_transport = No\n\n[interfaces]\n")
+    missing = get_missing_suggested_defaults(str(cfg_path))
+    assert set(missing.keys()) == set(SUGGESTED_DEFAULTS.keys())
+
+
+def test_missing_suggested_defaults_none_missing(tmp_path):
+    """When all suggested defaults are already configured, returns empty dict."""
+    cfg_path = tmp_path / "config"
+    lines = ["[interfaces]\n"]
+    for name, cfg in SUGGESTED_DEFAULTS.items():
+        lines.append(f"  [[{name}]]\n")
+        for k, v in cfg.items():
+            lines.append(f"    {k} = {v}\n")
+    cfg_path.write_text("".join(lines))
+    missing = get_missing_suggested_defaults(str(cfg_path))
+    assert missing == {}
+
+
+def test_missing_suggested_defaults_one_present(tmp_path):
+    """When only one suggested default is present, the other is returned as missing."""
+    cfg_path = tmp_path / "config"
+    # Add only the first suggested default
+    first_name = next(iter(SUGGESTED_DEFAULTS))
+    first_cfg = SUGGESTED_DEFAULTS[first_name]
+    lines = [f"[interfaces]\n  [[{first_name}]]\n"]
+    for k, v in first_cfg.items():
+        lines.append(f"    {k} = {v}\n")
+    cfg_path.write_text("".join(lines))
+    missing = get_missing_suggested_defaults(str(cfg_path))
+    assert first_name not in missing
+    remaining = set(SUGGESTED_DEFAULTS.keys()) - {first_name}
+    assert set(missing.keys()) == remaining
+
+
+def test_missing_suggested_defaults_empty_config_file(tmp_path):
+    """When the config file does not exist, all suggested defaults are missing."""
+    missing = get_missing_suggested_defaults(str(tmp_path / "nonexistent"))
+    assert set(missing.keys()) == set(SUGGESTED_DEFAULTS.keys())
+
+
+def test_missing_suggested_defaults_returns_correct_config(tmp_path):
+    """Missing entries carry the full config dict from SUGGESTED_DEFAULTS."""
+    cfg_path = tmp_path / "config"
+    cfg_path.write_text("[reticulum]\nenable_transport = No\n\n[interfaces]\n")
+    missing = get_missing_suggested_defaults(str(cfg_path))
+    for name, cfg in missing.items():
+        assert cfg == SUGGESTED_DEFAULTS[name]
+
+
+def test_missing_suggested_defaults_different_name_same_endpoint(tmp_path):
+    """An interface already present under a different name is not reported as missing."""
+    cfg_path = tmp_path / "config"
+    lines = ["[interfaces]\n"]
+    for _name, cfg in SUGGESTED_DEFAULTS.items():
+        lines.append("  [[My Custom Name]]\n")
+        for k, v in cfg.items():
+            lines.append(f"    {k} = {v}\n")
+        # Only write the first one under a different name; break after first
+        break
+    cfg_path.write_text("".join(lines))
+    missing = get_missing_suggested_defaults(str(cfg_path))
+    first_name = next(iter(SUGGESTED_DEFAULTS))
+    assert first_name not in missing

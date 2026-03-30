@@ -1,3 +1,4 @@
+import base64
 import json
 import os
 from pathlib import Path
@@ -11,6 +12,8 @@ _DEFAULT_DATA_DIR = DATA_DIR
 
 _DEFAULTS = {
     "display_name": "Anonymous",
+    "avatar_bytes": None,
+    "avatar_version": 0,
     "propagation_node": {
         "enabled": False,
         "node_name": "",
@@ -63,6 +66,34 @@ class Config:
     @display_name.setter
     def display_name(self, value: str):
         self._data["display_name"] = value
+        self.save()
+
+    # --- avatar ---
+
+    @property
+    def avatar_bytes(self) -> bytes | None:
+        """The local user's current avatar as raw JPEG bytes, or None if not set."""
+        encoded = self._data.get("avatar_bytes")
+        if not encoded:
+            return None
+        try:
+            return base64.b64decode(encoded)
+        except Exception:
+            return None
+
+    @avatar_bytes.setter
+    def avatar_bytes(self, value: bytes | None):
+        self._data["avatar_bytes"] = base64.b64encode(value).decode() if value else None
+        self.save()
+
+    @property
+    def avatar_version(self) -> int:
+        """Monotonic counter incremented each time the avatar changes."""
+        return int(self._data.get("avatar_version", 0))
+
+    @avatar_version.setter
+    def avatar_version(self, value: int):
+        self._data["avatar_version"] = value
         self.save()
 
     # --- propagation node ---

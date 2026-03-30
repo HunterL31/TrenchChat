@@ -29,6 +29,7 @@ from PyQt6.QtGui import QAction, QColor, QFont
 
 from trenchchat.config import Config
 from trenchchat.core.identity import Identity
+from trenchchat.core.image import prepare_image, MAX_IMAGE_BYTES
 from trenchchat.core.permissions import (
     INVITE, KICK, MANAGE_CHANNEL, MANAGE_ROLES, SEND_MESSAGE, PRESETS, PRESET_PRIVATE,
     is_discoverable, is_open_join, permissions_from_json,
@@ -39,12 +40,14 @@ from trenchchat.core.channel import ChannelManager
 from trenchchat.core.messaging import Messaging
 from trenchchat.core.subscription import SubscriptionManager
 from trenchchat.core.invite import InviteManager
+from trenchchat.core.reaction import ReactionManager
 from trenchchat.core.sync import SyncManager
 from trenchchat.core.user_directory import UserDirectory
 from trenchchat.network.router import Router
 from trenchchat.network.announce import PeerAnnounceHandler
 from trenchchat.gui.channel_view import ChannelView
 from trenchchat.gui.compose import ComposeWidget
+from trenchchat.gui.emoji_picker import EmojiPicker
 from trenchchat.gui.network_map import NetworkMapWidget, gather_network_data
 from trenchchat.gui.settings import SettingsDialog
 from trenchchat.gui.invite_dialogs import ChannelPermissionsDialog, InviteDialog, MembersDialog
@@ -200,12 +203,15 @@ class MainWindow(QMainWindow):
     _presence_changed     = pyqtSignal(str, bool)   # peer_hex, is_online
     _peer_announced       = pyqtSignal()            # any announce → maybe refresh map
     _reannounce_requested = pyqtSignal(object)      # iface or None → start debounce timer
+    _avatar_updated       = pyqtSignal(str)         # identity_hash_hex
+    _reaction_updated     = pyqtSignal(str, str)    # channel_hash_hex, message_id
+    _emoji_received       = pyqtSignal(str)         # emoji_hash — new emoji image arrived
 
     def __init__(self, config: Config, identity: Identity, storage: Storage,
                  rns: "RNS.Reticulum", router: Router, channel_mgr: ChannelManager,
                  messaging: Messaging, subscription_mgr: SubscriptionManager,
                  invite_mgr: InviteManager, presence_mgr: PresenceManager,
-                 user_directory: UserDirectory):
+                 user_directory: UserDirectory, avatar_mgr=None, reaction_mgr=None):
         super().__init__()
         self._config = config
         self._identity = identity
@@ -218,6 +224,8 @@ class MainWindow(QMainWindow):
         self._invite_mgr = invite_mgr
         self._presence_mgr = presence_mgr
         self._user_directory = user_directory
+        self._avatar_mgr = avatar_mgr
+        self._reaction_mgr: ReactionManager | None = reaction_mgr
 
         # Pending invites: list of (channel_hash_hex, channel_name, token, expiry, admin_hash_hex)
         self._pending_invites: list[tuple] = []
@@ -249,6 +257,16 @@ class MainWindow(QMainWindow):
         channel_mgr.add_channel_discovered_callback(self._on_channel_discovered)
         presence_mgr.add_presence_callback(self._on_presence_changed)
 
+        self._avatar_updated.connect(self._on_avatar_updated_main_thread)
+        if avatar_mgr is not None:
+            avatar_mgr.add_avatar_callback(self._avatar_updated.emit)
+
+        self._reaction_updated.connect(self._on_reaction_updated_main_thread)
+        self._emoji_received.connect(self._on_emoji_received_main_thread)
+        if reaction_mgr is not None:
+            reaction_mgr.add_reaction_callback(self._reaction_updated.emit)
+            reaction_mgr.add_emoji_callback(self._emoji_received.emit)
+
         self._sync_mgr = SyncManager(
             identity, storage, router, messaging, subscription_mgr, invite_mgr
         )
@@ -257,6 +275,8 @@ class MainWindow(QMainWindow):
             self._sync_mgr.on_peer_appeared(peer_hex)
             self._presence_mgr.record_seen(peer_hex)
             self._seed_user_directory(peer_hex)
+            if self._avatar_mgr is not None:
+                self._avatar_mgr.flush_avatar(peer_hex)
             self._peer_announced.emit()
             self._reannounce_requested.emit(iface)
 
@@ -447,7 +467,7 @@ class MainWindow(QMainWindow):
         self._stack.addWidget(placeholder)
         chat_layout.addWidget(self._stack, 1)
 
-        self._compose = ComposeWidget()
+        self._compose = ComposeWidget(storage=self._storage)
         self._compose.message_ready.connect(self._on_send_message)
         self._compose.set_enabled(False)
         chat_layout.addWidget(self._compose)
@@ -668,7 +688,11 @@ class MainWindow(QMainWindow):
             restore_id = self._settings.value(f"last_read/{channel_hash_hex}") or None
             view = ChannelView(channel_hash_hex, self._storage,
                                self._identity.hash_hex,
-                               restore_to_id=restore_id)
+                               restore_to_id=restore_id,
+                               config=self._config,
+                               reaction_mgr=self._reaction_mgr)
+            view.react_requested.connect(self._on_react_requested)
+            view.reaction_remove_requested.connect(self._on_reaction_remove_requested)
             self._channel_views[channel_hash_hex] = view
             self._stack.addWidget(view)
 
@@ -744,8 +768,8 @@ class MainWindow(QMainWindow):
 
     # --- send ---
 
-    @pyqtSlot(str)
-    def _on_send_message(self, text: str):
+    @pyqtSlot(str, object)
+    def _on_send_message(self, text: str, raw_image: object):
         if not self._current_channel:
             return
 
@@ -767,10 +791,20 @@ class MainWindow(QMainWindow):
             if self._identity.hash_hex not in all_dests:
                 all_dests.append(self._identity.hash_hex)
 
+        image_data: bytes | None = None
+        if raw_image:
+            try:
+                image_data, _ = prepare_image(bytes(raw_image))
+            except Exception as exc:
+                RNS.log(f"TrenchChat: image preparation failed: {exc}", RNS.LOG_WARNING)
+                if len(bytes(raw_image)) <= MAX_IMAGE_BYTES:
+                    image_data = bytes(raw_image)
+
         self._messaging.send_message(
             channel_hash_hex=self._current_channel,
             content=text,
             subscriber_hashes=all_dests,
+            image_data=image_data,
         )
         # Refresh our own view immediately (message was stored locally in send_message)
         if self._current_channel in self._channel_views:
@@ -977,6 +1011,88 @@ class MainWindow(QMainWindow):
         """Refresh the online panel when any peer's status changes."""
         self._refresh_online_panel()
 
+    @pyqtSlot(str)
+    def _on_avatar_updated_main_thread(self, identity_hex: str) -> None:
+        """Refresh channel views so updated avatars are reflected immediately."""
+        for view in self._channel_views.values():
+            view.refresh_avatars(identity_hex)
+
+    @pyqtSlot(str, str)
+    def _on_reaction_updated_main_thread(self, channel_hash_hex: str,
+                                         message_id: str) -> None:
+        """Refresh the reaction bar for a specific message."""
+        view = self._channel_views.get(channel_hash_hex)
+        if view is not None:
+            view.on_reaction_updated(message_id)
+
+    @pyqtSlot(str)
+    def _on_emoji_received_main_thread(self, emoji_hash: str) -> None:
+        """A new custom emoji image just arrived -- reload all open channel views.
+
+        Any message that contained an unknown :name: token will now be able to
+        render it as an inline image on the next load.  The easiest correct
+        approach is to call load_history() on every visible channel view so
+        the messages are rebuilt with the newly available emoji data.
+        """
+        for view in self._channel_views.values():
+            view.load_history()
+
+    @pyqtSlot(str, str)
+    def _on_react_requested(self, channel_hash_hex: str, message_id: str) -> None:
+        """User clicked the react button -- show the EmojiPicker popup."""
+        if self._reaction_mgr is None:
+            return
+        picker = EmojiPicker(self._storage, self)
+        picker.emoji_selected.connect(
+            lambda emoji_hash, ch=channel_hash_hex, mid=message_id:
+                self._do_add_reaction(ch, mid, emoji_hash)
+        )
+        picker.focus_search()
+        # Position near the cursor
+        from PyQt6.QtGui import QCursor
+        picker.move(QCursor.pos())
+        picker.show()
+
+    def _get_reaction_peers(self, channel_hash_hex: str) -> list[str]:
+        """Return the list of peers to broadcast a reaction to.
+
+        Uses the same dual-path logic as _on_send_message: member table for
+        invite-only channels, subscriber list for open-join channels.
+        """
+        channel = self._storage.get_channel(channel_hash_hex)
+        perms = permissions_from_json(channel["permissions"]) if channel else {}
+        if channel and not is_open_join(perms):
+            return [
+                row["identity_hash"]
+                for row in self._storage.get_members(channel_hash_hex)
+            ]
+        subs = self._subscription_mgr.get_subscribers(channel_hash_hex)
+        peers = list(subs) if subs else []
+        if self._identity.hash_hex not in peers:
+            peers.append(self._identity.hash_hex)
+        return peers
+
+    def _do_add_reaction(self, channel_hash_hex: str, message_id: str,
+                         emoji_hash: str) -> None:
+        """Send the add-reaction command via ReactionManager."""
+        if self._reaction_mgr is None:
+            return
+        self._reaction_mgr.add_reaction(
+            channel_hash_hex, message_id, emoji_hash,
+            self._get_reaction_peers(channel_hash_hex),
+        )
+
+    @pyqtSlot(str, str, str)
+    def _on_reaction_remove_requested(self, channel_hash_hex: str, message_id: str,
+                                      emoji_hash: str) -> None:
+        """User clicked a reaction chip they already reacted with -- remove it."""
+        if self._reaction_mgr is None:
+            return
+        self._reaction_mgr.remove_reaction(
+            channel_hash_hex, message_id, emoji_hash,
+            self._get_reaction_peers(channel_hash_hex),
+        )
+
     def _on_presence_tick(self) -> None:
         """Periodic timer: prune stale presence and user directory entries, refresh the panel."""
         self._presence_mgr.prune()
@@ -1174,7 +1290,10 @@ class MainWindow(QMainWindow):
 
     def _on_settings(self):
         dlg = SettingsDialog(
-            self._config, self._identity, self._storage, self._router, self
+            self._config, self._identity, self._storage, self._router,
+            avatar_mgr=self._avatar_mgr,
+            subscriber_lookup=self._subscription_mgr.get_subscribers,
+            parent=self,
         )
         if dlg.exec() == QDialog.DialogCode.Accepted:
             # Propagate the (possibly new) display name to all live components

@@ -477,3 +477,279 @@ class TestStorageEncryption:
         s2.close()
         assert ch is not None
         assert ch["name"] == "DecChan"
+
+
+# ---------------------------------------------------------------------------
+# Membership tenure
+# ---------------------------------------------------------------------------
+
+CHAN = "aabbccddeeff0011"
+ID_A = "aaaaaaaaaaaaaaaa"
+ID_B = "bbbbbbbbbbbbbbbb"
+
+
+class TestMembershipTenure:
+    def test_open_tenure_makes_member_at_timestamp(self, db):
+        t0 = 1_000_000.0
+        db.open_tenure(CHAN, ID_A, t0)
+        assert db.was_member_at(CHAN, ID_A, t0)
+        assert db.was_member_at(CHAN, ID_A, t0 + 100)
+
+    def test_was_member_before_join_returns_false(self, db):
+        t0 = 1_000_000.0
+        db.open_tenure(CHAN, ID_A, t0)
+        assert not db.was_member_at(CHAN, ID_A, t0 - 1)
+
+    def test_close_tenure_excludes_timestamp_at_or_after_left_at(self, db):
+        t0 = 1_000_000.0
+        t1 = t0 + 500.0
+        db.open_tenure(CHAN, ID_A, t0)
+        db.close_tenure(CHAN, ID_A, t1)
+        assert db.was_member_at(CHAN, ID_A, t0)
+        assert db.was_member_at(CHAN, ID_A, t1 - 1)
+        assert not db.was_member_at(CHAN, ID_A, t1)
+        assert not db.was_member_at(CHAN, ID_A, t1 + 1)
+
+    def test_gap_after_kick_and_before_rejoin(self, db):
+        t0 = 1_000_000.0
+        kick = t0 + 300.0
+        rejoin = t0 + 600.0
+        db.open_tenure(CHAN, ID_A, t0)
+        db.close_tenure(CHAN, ID_A, kick)
+        db.open_tenure(CHAN, ID_A, rejoin)
+        # Before kick — valid
+        assert db.was_member_at(CHAN, ID_A, t0)
+        assert db.was_member_at(CHAN, ID_A, kick - 1)
+        # In the gap — invalid
+        assert not db.was_member_at(CHAN, ID_A, kick)
+        assert not db.was_member_at(CHAN, ID_A, rejoin - 1)
+        # After rejoin — valid
+        assert db.was_member_at(CHAN, ID_A, rejoin)
+        assert db.was_member_at(CHAN, ID_A, rejoin + 1000)
+
+    def test_update_tenure_adds_removed_and_added(self, db):
+        t0 = 1_000_000.0
+        t1 = t0 + 300.0
+        id_c = "cccccccccccccccc"
+        db.open_tenure(CHAN, ID_A, t0)
+        db.open_tenure(CHAN, ID_B, t0)
+        # ID_B is removed, ID_A stays, new member id_c is added
+        db.update_tenure(CHAN, {ID_A, ID_B}, {ID_A, id_c}, t1)
+        # A: unchanged open interval
+        assert db.was_member_at(CHAN, ID_A, t1)
+        # B: closed at t1
+        assert db.was_member_at(CHAN, ID_B, t1 - 1)
+        assert not db.was_member_at(CHAN, ID_B, t1)
+        # C: new open interval from t1
+        assert db.was_member_at(CHAN, id_c, t1)
+        assert not db.was_member_at(CHAN, id_c, t1 - 1)
+
+    def test_update_tenure_no_change_idempotent(self, db):
+        t0 = 1_000_000.0
+        t1 = t0 + 200.0
+        db.open_tenure(CHAN, ID_A, t0)
+        # Same set in and out — nothing changes
+        db.update_tenure(CHAN, {ID_A}, {ID_A}, t1)
+        assert db.was_member_at(CHAN, ID_A, t1)
+
+    def test_close_tenure_with_no_open_interval_is_noop(self, db):
+        # Should not raise
+        db.close_tenure(CHAN, ID_A, 1_000_000.0)
+
+    def test_open_tenure_idempotent(self, db):
+        t0 = 1_000_000.0
+        db.open_tenure(CHAN, ID_A, t0)
+        db.open_tenure(CHAN, ID_A, t0)  # duplicate — ignored
+        # Should still be a member
+        assert db.was_member_at(CHAN, ID_A, t0)
+
+    def test_has_any_tenure_empty(self, db):
+        assert not db.has_any_tenure(CHAN)
+
+    def test_has_any_tenure_after_open(self, db):
+        db.open_tenure(CHAN, ID_A, 1_000_000.0)
+        assert db.has_any_tenure(CHAN)
+
+    def test_was_member_at_unknown_identity_returns_false(self, db):
+        db.open_tenure(CHAN, ID_A, 1_000_000.0)
+        assert not db.was_member_at(CHAN, ID_B, 1_000_000.0)
+
+    def test_backfill_from_members_table(self, tmp_path):
+        """Existing members are backfilled into tenure on first open."""
+        db = Storage(db_path=tmp_path / "bf.db")
+        # Manually insert a member row — bypassing tenure so we can test backfill
+        db.upsert_channel(CHAN, "Test", "", "creator", "invite", time.time())
+        t0 = time.time() - 10
+        db._conn.execute(
+            "INSERT INTO members (channel_hash, identity_hash, display_name, role, added_at)"
+            " VALUES (?, ?, '', 'member', ?)",
+            (CHAN, ID_A, t0)
+        )
+        db._conn.commit()
+        # Clear tenure so _migrate_tenure will backfill
+        db._conn.execute("DELETE FROM membership_tenure")
+        db._conn.commit()
+        db._migrate_tenure()
+        assert db.was_member_at(CHAN, ID_A, t0 + 1)
+        db.close()
+
+
+# ---------------------------------------------------------------------------
+# Peer avatars
+# ---------------------------------------------------------------------------
+
+class TestPeerAvatars:
+    def test_upsert_and_get_peer_avatar(self, db):
+        peer = "aa" * 16
+        data = b"\xff\xd8\xff\xe0" + b"\x00" * 50   # fake JPEG header
+        db.upsert_peer_avatar(peer, data, avatar_version=1)
+        row = db.get_peer_avatar(peer)
+        assert row is not None
+        assert bytes(row["avatar_data"]) == data
+        assert row["avatar_version"] == 1
+        assert row["identity_hash"] == peer
+
+    def test_upsert_peer_avatar_updates_existing(self, db):
+        peer = "bb" * 16
+        db.upsert_peer_avatar(peer, b"old", avatar_version=1)
+        db.upsert_peer_avatar(peer, b"new", avatar_version=2)
+        row = db.get_peer_avatar(peer)
+        assert bytes(row["avatar_data"]) == b"new"
+        assert row["avatar_version"] == 2
+
+    def test_get_peer_avatar_missing_returns_none(self, db):
+        assert db.get_peer_avatar("cc" * 16) is None
+
+    def test_delete_peer_avatar(self, db):
+        peer = "dd" * 16
+        db.upsert_peer_avatar(peer, b"data", avatar_version=1)
+        db.delete_peer_avatar(peer)
+        assert db.get_peer_avatar(peer) is None
+
+
+# ---------------------------------------------------------------------------
+# Avatar delivery tracking
+# ---------------------------------------------------------------------------
+
+class TestAvatarDeliveryTracking:
+    def test_upsert_and_get_delivery_version(self, db):
+        peer = "ee" * 16
+        db.upsert_avatar_delivery(peer, avatar_version=3)
+        assert db.get_avatar_delivery_version(peer) == 3
+
+    def test_upsert_delivery_updates_existing(self, db):
+        peer = "ff" * 16
+        db.upsert_avatar_delivery(peer, avatar_version=1)
+        db.upsert_avatar_delivery(peer, avatar_version=5)
+        assert db.get_avatar_delivery_version(peer) == 5
+
+    def test_get_delivery_version_missing_returns_none(self, db):
+        assert db.get_avatar_delivery_version("11" * 16) is None
+
+    def test_clear_avatar_deliveries(self, db):
+        db.upsert_avatar_delivery("22" * 16, avatar_version=1)
+        db.upsert_avatar_delivery("33" * 16, avatar_version=2)
+        db.clear_avatar_deliveries()
+        assert db.get_avatar_delivery_version("22" * 16) is None
+        assert db.get_avatar_delivery_version("33" * 16) is None
+
+
+# ---------------------------------------------------------------------------
+# Image data in messages
+# ---------------------------------------------------------------------------
+
+class TestMessageImageData:
+    _CHAN = "aa" * 16
+    _SENDER = "bb" * 16
+    _FAKE_JPEG = b"\xff\xd8\xff\xe0" + b"\x00" * 100
+
+    def _setup_channel(self, db):
+        db.upsert_channel(self._CHAN, "Test", "", self._SENDER, "public", 1.0)
+        db.subscribe(self._CHAN)
+
+    def test_insert_message_with_image_stores_blob(self, db):
+        """image_data is persisted and retrievable via get_messages."""
+        self._setup_channel(db)
+        ts = 1000.0
+        db.insert_message(
+            channel_hash=self._CHAN,
+            sender_hash=self._SENDER,
+            sender_name="Alice",
+            content="Look at this",
+            timestamp=ts,
+            message_id="img_msg_001",
+            reply_to=None,
+            last_seen_id=None,
+            received_at=ts,
+            image_data=self._FAKE_JPEG,
+        )
+        msgs = db.get_messages(self._CHAN)
+        assert len(msgs) == 1
+        assert bytes(msgs[0]["image_data"]) == self._FAKE_JPEG
+
+    def test_insert_message_without_image_is_null(self, db):
+        """Messages without image_data have a NULL image_data column."""
+        self._setup_channel(db)
+        ts = 1001.0
+        db.insert_message(
+            channel_hash=self._CHAN,
+            sender_hash=self._SENDER,
+            sender_name="Alice",
+            content="No image",
+            timestamp=ts,
+            message_id="txt_msg_001",
+            reply_to=None,
+            last_seen_id=None,
+            received_at=ts,
+        )
+        msgs = db.get_messages(self._CHAN)
+        assert len(msgs) == 1
+        assert msgs[0]["image_data"] is None
+
+    def test_image_only_message_has_empty_content(self, db):
+        """An image-only message stores empty text and non-null image_data."""
+        self._setup_channel(db)
+        ts = 1002.0
+        db.insert_message(
+            channel_hash=self._CHAN,
+            sender_hash=self._SENDER,
+            sender_name="Alice",
+            content="",
+            timestamp=ts,
+            message_id="img_only_001",
+            reply_to=None,
+            last_seen_id=None,
+            received_at=ts,
+            image_data=self._FAKE_JPEG,
+        )
+        msgs = db.get_messages(self._CHAN)
+        assert len(msgs) == 1
+        assert msgs[0]["content"] == ""
+        assert bytes(msgs[0]["image_data"]) == self._FAKE_JPEG
+
+    def test_schema_migration_adds_image_data_column(self, tmp_path):
+        """_migrate_image_data() adds image_data to a database that lacks it."""
+        import sqlite3
+        db_path = tmp_path / "legacy.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("""
+            CREATE TABLE messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                channel_hash TEXT NOT NULL,
+                sender_hash TEXT NOT NULL,
+                sender_name TEXT NOT NULL DEFAULT '',
+                content TEXT NOT NULL DEFAULT '',
+                timestamp REAL NOT NULL,
+                message_id TEXT NOT NULL UNIQUE,
+                reply_to TEXT,
+                last_seen_id TEXT,
+                received_at REAL NOT NULL
+            )
+        """)
+        conn.commit()
+        conn.close()
+
+        s = Storage(db_path=db_path)
+        cols = [c["name"] for c in s._conn.execute("PRAGMA table_info(messages)").fetchall()]
+        assert "image_data" in cols
+        s.close()

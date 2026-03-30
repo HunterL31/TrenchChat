@@ -59,6 +59,7 @@ class SyncManager:
 
         messaging.set_missed_delivery_callback(self._on_missed_delivery_event)
         router.add_delivery_callback(self._on_lxmf_message)
+        invite_mgr.add_member_list_callback(self._on_member_list_updated)
 
         # Purge stale hints from previous sessions on startup
         self._storage.purge_old_missed_deliveries(time.time() - SYNC_WINDOW_SECS)
@@ -76,6 +77,24 @@ class SyncManager:
             peers = self._get_channel_peers(channel_hash_hex)
             for peer_hex in peers:
                 self._send_sync_request(peer_hex, channel_hash_hex, since_ts)
+
+    def _on_member_list_updated(self, channel_hash_hex: str):
+        """Clear pending outbound messages for this channel if we were removed.
+
+        When a member list update is accepted and the local identity is no
+        longer in the roster, any queued messages for that channel cannot be
+        delivered to legitimate members.  Discarding them prevents the kicked
+        client from accumulating messages during the gap that could later be
+        replayed after re-admission.
+        """
+        my_hex = self._identity.hash_hex
+        if not self._storage.is_member(channel_hash_hex, my_hex):
+            self._messaging.cancel_pending_for_channel(channel_hash_hex)
+            RNS.log(
+                f"TrenchChat [sync]: local identity removed from "
+                f"{channel_hash_hex[:12]}… — pending outbound messages cleared",
+                RNS.LOG_NOTICE,
+            )
 
     def on_peer_appeared(self, peer_hex: str):
         """
@@ -192,6 +211,28 @@ class SyncManager:
         if not rows:
             return
 
+        # Filter out messages whose sender was not a member at the claimed timestamp.
+        # Only apply this filter when tenure data exists for the channel (skips
+        # open-join channels and channels bootstrapped before this feature).
+        has_tenure = self._storage.has_any_tenure(channel_hash_hex)
+        if has_tenure:
+            valid_rows = []
+            for r in rows:
+                if self._storage.was_member_at(channel_hash_hex, r["sender_hash"],
+                                               r["timestamp"]):
+                    valid_rows.append(r)
+                else:
+                    RNS.log(
+                        f"TrenchChat [sync]: omitting message {r['message_id'][:12]}… "
+                        f"from sync response — sender {r['sender_hash'][:12]}… "
+                        f"was not a member at ts={r['timestamp']:.0f}",
+                        RNS.LOG_WARNING,
+                    )
+            rows = valid_rows
+
+        if not rows:
+            return
+
         packed = msgpack.packb(
             [self._row_to_dict(r) for r in rows],
             use_bin_type=True,
@@ -215,19 +256,42 @@ class SyncManager:
             RNS.log(f"TrenchChat: sync_response unpack error: {e}", RNS.LOG_WARNING)
             return
 
+        has_tenure = self._storage.has_any_tenure(channel_hash_hex)
         inserted_any = False
         for m in messages:
             try:
+                sender_hash = m.get("sender_hash", "")
+                msg_ts = float(m.get("timestamp", time.time()))
+
+                # Validate tenure for invite-only channels with tenure data.
+                if has_tenure and not self._storage.was_member_at(
+                    channel_hash_hex, sender_hash, msg_ts
+                ):
+                    RNS.log(
+                        f"TrenchChat [sync]: dropping synced message "
+                        f"{str(m.get('message_id', ''))[:12]}… — sender "
+                        f"{sender_hash[:12]}… was not a member at ts={msg_ts:.0f}",
+                        RNS.LOG_WARNING,
+                    )
+                    continue
+
+                image_data = m.get("image_data")
+                if isinstance(image_data, str):
+                    image_data = image_data.encode()
+                if not image_data:
+                    image_data = None
+
                 inserted = self._storage.insert_message(
                     channel_hash=channel_hash_hex,
-                    sender_hash=m.get("sender_hash", ""),
+                    sender_hash=sender_hash,
                     sender_name=m.get("sender_name", ""),
                     content=m.get("content", ""),
-                    timestamp=float(m.get("timestamp", time.time())),
+                    timestamp=msg_ts,
                     message_id=m.get("message_id", ""),
                     reply_to=m.get("reply_to"),
                     last_seen_id=m.get("last_seen_id"),
                     received_at=time.time(),
+                    image_data=image_data,
                 )
                 if inserted:
                     inserted_any = True
@@ -278,7 +342,7 @@ class SyncManager:
 
     @staticmethod
     def _row_to_dict(row) -> dict:
-        return {
+        d = {
             "sender_hash":  row["sender_hash"],
             "sender_name":  row["sender_name"],
             "content":      row["content"],
@@ -287,6 +351,10 @@ class SyncManager:
             "reply_to":     row["reply_to"],
             "last_seen_id": row["last_seen_id"],
         }
+        image_data = row["image_data"] if "image_data" in row.keys() else None
+        if image_data:
+            d["image_data"] = bytes(image_data)
+        return d
 
     def _send_sync_request(self, dest_hex: str, channel_hash_hex: str, since_ts: float):
         self._send_raw(dest_hex, {

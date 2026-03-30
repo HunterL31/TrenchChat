@@ -6,11 +6,12 @@ This module has no local imports so it can be safely imported by any layer
 
 Field key registry
 ------------------
-0x01–0x0F  Common / messaging fields
+0x01–0x0F  Common / messaging / avatar / emoji fields
 0x10       Control: msg_type discriminator
 0x11–0x1F  Invite fields
 0x20–0x2F  Member-list fields
 0x30–0x3F  Subscription fields
+0x40–0x4F  Reaction fields
 """
 
 # --- Common / messaging fields ---
@@ -24,6 +25,17 @@ F_SYNC_WINDOW_START = 0x07   # float     — unix timestamp: start of sync windo
 F_SYNC_MESSAGES     = 0x08   # bytes     — msgpack list[dict] of full message records (sync_response)
 F_MISSED_FOR        = 0x09   # str       — identity hex of peer who missed a message
 F_MISSED_MSG_ID     = 0x0A   # str       — message_id that was not delivered
+F_AVATAR_DATA       = 0x0B   # bytes     — JPEG avatar payload (max 4 KB)
+F_AVATAR_VERSION    = 0x0C   # int       — monotonic counter; receiver uses to detect stale updates
+F_IMAGE_DATA        = 0x0D   # bytes     — JPEG image attachment payload (max 320 KB)
+F_EMOJI_HASH        = 0x0E   # bytes[32] — SHA-256 of the emoji image data
+F_EMOJI_DATA        = 0x0F   # bytes     — raw emoji image (PNG/GIF, max 64 KB)
+
+# --- Reaction fields ---
+F_REACTION_MSG_ID   = 0x40   # str  — message_id being reacted to
+F_REACTION_REMOVE   = 0x41   # bool — True if this is a reaction removal
+F_EMOJI_NAME        = 0x42   # str  — human-readable emoji name; sent with request and response
+#                              so the receiver can store the emoji under the correct name
 
 # --- Control discriminator ---
 F_MSG_TYPE          = 0x10   # str — present on all control messages; absent on chat messages
@@ -56,3 +68,7 @@ MT_MEMBER_LIST_UPDATE = "member_list_update"
 MT_MISSED_DELIVERY  = "missed_delivery"
 MT_SYNC_REQUEST     = "sync_request"
 MT_SYNC_RESPONSE    = "sync_response"
+MT_AVATAR_UPDATE    = "avatar_update"
+MT_REACTION         = "reaction"        # notify channel: reactor added/removed emoji on a message
+MT_EMOJI_REQUEST    = "emoji_request"   # ask a peer for emoji image data by hash
+MT_EMOJI_RESPONSE   = "emoji_response"  # respond with the emoji image bytes

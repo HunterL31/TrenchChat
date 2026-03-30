@@ -12,6 +12,7 @@ LXMF fields layout:
     0x08  sync_messages     bytes       — msgpack list[dict] of full message records (sync_response)
     0x09  missed_for        str         — identity hex of peer who missed a message (missed_delivery)
     0x0A  missed_msg_id     str         — message_id that was not delivered (missed_delivery)
+    0x0D  image_data        bytes|None  — JPEG image attachment payload (max 320 KB)
 """
 
 import hashlib
@@ -24,7 +25,7 @@ from trenchchat.core.permissions import SEND_MESSAGE, is_open_join, permissions_
 from trenchchat.core.protocol import (
     F_CHANNEL_HASH, F_DISPLAY_NAME, F_TIMESTAMP, F_MESSAGE_ID,
     F_REPLY_TO, F_LAST_SEEN_ID, F_SYNC_WINDOW_START, F_SYNC_MESSAGES,
-    F_MISSED_FOR, F_MISSED_MSG_ID, F_MSG_TYPE,
+    F_MISSED_FOR, F_MISSED_MSG_ID, F_MSG_TYPE, F_IMAGE_DATA,
 )
 from trenchchat.core.storage import Storage
 from trenchchat.network.router import Router
@@ -33,8 +34,8 @@ from trenchchat.network.router import Router
 __all__ = [
     "F_CHANNEL_HASH", "F_DISPLAY_NAME", "F_TIMESTAMP", "F_MESSAGE_ID",
     "F_REPLY_TO", "F_LAST_SEEN_ID", "F_SYNC_WINDOW_START", "F_SYNC_MESSAGES",
-    "F_MISSED_FOR", "F_MISSED_MSG_ID", "F_MSG_TYPE",
-    "CAUSAL_WINDOW_SECS", "Messaging",
+    "F_MISSED_FOR", "F_MISSED_MSG_ID", "F_MSG_TYPE", "F_IMAGE_DATA",
+    "CAUSAL_WINDOW_SECS", "Messaging", "cancel_pending_for_channel",
 ]
 
 # Threshold in seconds within which last_seen_id causal ordering is applied
@@ -73,13 +74,15 @@ class Messaging:
 
     def send_message(self, channel_hash_hex: str, content: str,
                      reply_to: str | None = None,
-                     subscriber_hashes: list[str] | None = None):
+                     subscriber_hashes: list[str] | None = None,
+                     image_data: bytes | None = None):
         """
         Send a channel message to all known subscribers.
 
         subscriber_hashes: list of hex identity hashes to deliver to.
         If None, the caller is responsible for providing the list
         (retrieved from subscription.py).
+        image_data: optional JPEG bytes to attach to the message.
         """
         if not subscriber_hashes:
             return
@@ -100,6 +103,7 @@ class Messaging:
             "reply_to":          reply_to,
             "last_seen_id":      last_seen,
             "subscriber_hashes": list(subscriber_hashes),
+            "image_data":        image_data,
         }
 
         # Keep params so failed-delivery callbacks can re-queue the message.
@@ -142,7 +146,23 @@ class Messaging:
             reply_to=reply_to,
             last_seen_id=last_seen,
             received_at=ts,
+            image_data=image_data,
         )
+
+    def cancel_pending_for_channel(self, channel_hash_hex: str):
+        """Discard all queued outbound messages for a specific channel.
+
+        Called when the local identity is removed from a channel so messages
+        composed during the gap period are not delivered if the peer later
+        becomes reachable.
+        """
+        for dest_hex in list(self._pending.keys()):
+            self._pending[dest_hex] = [
+                p for p in self._pending[dest_hex]
+                if p.get("channel_hash_hex") != channel_hash_hex
+            ]
+            if not self._pending[dest_hex]:
+                del self._pending[dest_hex]
 
     def flush_pending(self, dest_hex: str):
         """Attempt to deliver all queued messages for a peer whose path is now known."""
@@ -190,7 +210,7 @@ class Messaging:
             params["content"],
             desired_method=LXMF.LXMessage.DIRECT,
         )
-        lxm.fields = {
+        fields = {
             F_CHANNEL_HASH: bytes.fromhex(params["channel_hash_hex"]),
             F_DISPLAY_NAME: params["display_name"],
             F_TIMESTAMP:    params["timestamp"],
@@ -198,6 +218,9 @@ class Messaging:
             F_REPLY_TO:     params["reply_to"],
             F_LAST_SEEN_ID: params["last_seen_id"],
         }
+        if params.get("image_data"):
+            fields[F_IMAGE_DATA] = params["image_data"]
+        lxm.fields = fields
         return lxm
 
     def _on_delivery_failed(self, dest_hex: str, channel_hash_hex: str,
@@ -289,6 +312,12 @@ class Messaging:
         if isinstance(content, bytes):
             content = content.decode(errors="replace")
 
+        image_data = fields.get(F_IMAGE_DATA)
+        if isinstance(image_data, str):
+            image_data = image_data.encode()
+        if not image_data:
+            image_data = None
+
         if not msg_id:
             msg_id = _compute_message_id(content, sender_hex, timestamp)
 
@@ -302,6 +331,7 @@ class Messaging:
             reply_to=reply_to,
             last_seen_id=last_seen_id,
             received_at=time.time(),
+            image_data=image_data,
         )
 
         if inserted:

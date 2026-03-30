@@ -414,3 +414,250 @@ class TestStartupSync:
 
         assert wait_for_message(bob.storage, ch_hash, msg_id, timeout=5), \
             "Bob did not receive message via request_sync_all"
+
+
+# ---------------------------------------------------------------------------
+# Membership tenure — sync filtering
+# ---------------------------------------------------------------------------
+
+from trenchchat.core.permissions import PRESET_PRIVATE, ROLE_MEMBER, ROLE_OWNER, SEND_MESSAGE
+from tests.helpers import wait_for_member
+
+
+def _setup_invite_channel(peer_factory):
+    """Create alice (owner) and bob (member) on a shared invite-only channel."""
+    alice = peer_factory("alice")
+    bob = peer_factory("bob")
+    perms = dict(PRESET_PRIVATE)
+    perms[ROLE_MEMBER] = [SEND_MESSAGE]
+    ch_hash = alice.channel_mgr.create_channel("tenure-ch", "", permissions=perms)
+    alice.invite_mgr.publish_member_list(ch_hash, add_members=[bob.identity.hash])
+    assert wait_for_member(alice.storage, ch_hash, bob.identity.hash_hex)
+    bob.storage.upsert_channel(ch_hash, "tenure-ch", "", alice.identity.hash_hex,
+                               perms, time.time())
+    bob.storage.subscribe(ch_hash)
+    bob.storage.upsert_member(ch_hash, bob.identity.hash_hex, "Bob", role=ROLE_MEMBER)
+    bob.storage.upsert_member(ch_hash, alice.identity.hash_hex, "Alice", role=ROLE_OWNER)
+    bob.storage.set_channel_permissions(ch_hash, perms)
+    return alice, bob, ch_hash, perms
+
+
+class TestTenureSyncFiltering:
+    def test_sync_response_rejects_gap_message(self, peer_factory):
+        """
+        Bob is kicked and sends a message locally during the gap.
+        When that message appears in a sync response to Carol, Carol drops it.
+        """
+        alice, bob, ch_hash, perms = _setup_invite_channel(peer_factory)
+        carol = peer_factory("carol")
+        carol.storage.upsert_channel(ch_hash, "tenure-ch", "", alice.identity.hash_hex,
+                                     perms, time.time())
+        carol.storage.subscribe(ch_hash)
+
+        join_ts = time.time() - 300
+
+        # Seed tenure on Carol's side
+        carol.storage.open_tenure(ch_hash, alice.identity.hash_hex, join_ts)
+        carol.storage.open_tenure(ch_hash, bob.identity.hash_hex, join_ts)
+        carol.storage.upsert_member(ch_hash, bob.identity.hash_hex, "Bob", role=ROLE_MEMBER)
+        carol.storage.upsert_member(ch_hash, alice.identity.hash_hex, "Alice",
+                                    role=ROLE_OWNER)
+        carol.storage.set_channel_permissions(ch_hash, perms)
+
+        # Kick Bob on Carol's side to close tenure
+        kick_ts = join_ts + 100
+        carol.storage.close_tenure(ch_hash, bob.identity.hash_hex, kick_ts)
+        carol.storage.remove_member(ch_hash, bob.identity.hash_hex)
+
+        # Seed a gap message from Bob (after kick)
+        gap_ts = kick_ts + 50
+        gap_content = "Gap message"
+        gap_msg_id = _compute_message_id(gap_content, bob.identity.hash_hex, gap_ts)
+        carol.storage.insert_message(
+            channel_hash=ch_hash,
+            sender_hash=bob.identity.hash_hex,
+            sender_name="Bob",
+            content=gap_content,
+            timestamp=gap_ts,
+            message_id=gap_msg_id,
+            reply_to=None,
+            last_seen_id=None,
+            received_at=gap_ts,
+        )
+
+        # Alice requests sync from Carol — Carol must NOT serve the gap message
+        alice.storage.open_tenure(ch_hash, alice.identity.hash_hex, join_ts)
+        alice.storage.open_tenure(ch_hash, bob.identity.hash_hex, join_ts)
+        alice.sync_mgr._send_sync_request(carol.identity.hash_hex, ch_hash, join_ts)
+
+        time.sleep(0.5)
+        assert not alice.storage.message_exists(gap_msg_id), \
+            "Carol served a gap message from a kicked member in a sync response"
+
+    def test_sync_response_accepts_pre_kick_message(self, peer_factory):
+        """
+        A message sent before Bob was kicked (valid tenure) must be served
+        and accepted through sync.
+        """
+        alice, bob, ch_hash, perms = _setup_invite_channel(peer_factory)
+        carol = peer_factory("carol")
+        carol.storage.upsert_channel(ch_hash, "tenure-ch", "", alice.identity.hash_hex,
+                                     perms, time.time())
+        carol.storage.subscribe(ch_hash)
+
+        join_ts = time.time() - 300
+
+        carol.storage.open_tenure(ch_hash, alice.identity.hash_hex, join_ts)
+        carol.storage.open_tenure(ch_hash, bob.identity.hash_hex, join_ts)
+        carol.storage.upsert_member(ch_hash, bob.identity.hash_hex, "Bob", role=ROLE_MEMBER)
+        carol.storage.upsert_member(ch_hash, alice.identity.hash_hex, "Alice",
+                                    role=ROLE_OWNER)
+        carol.storage.set_channel_permissions(ch_hash, perms)
+
+        # Legitimate message before kick
+        valid_ts = join_ts + 50
+        valid_content = "Before kick"
+        valid_msg_id = _compute_message_id(valid_content, bob.identity.hash_hex, valid_ts)
+        carol.storage.insert_message(
+            channel_hash=ch_hash,
+            sender_hash=bob.identity.hash_hex,
+            sender_name="Bob",
+            content=valid_content,
+            timestamp=valid_ts,
+            message_id=valid_msg_id,
+            reply_to=None,
+            last_seen_id=None,
+            received_at=valid_ts,
+        )
+
+        # Kick Bob on Carol's side
+        kick_ts = join_ts + 100
+        carol.storage.close_tenure(ch_hash, bob.identity.hash_hex, kick_ts)
+        carol.storage.remove_member(ch_hash, bob.identity.hash_hex)
+
+        # Alice requests sync — Carol should serve the pre-kick message
+        alice.storage.open_tenure(ch_hash, alice.identity.hash_hex, join_ts)
+        alice.storage.open_tenure(ch_hash, bob.identity.hash_hex, join_ts)
+        alice.sync_mgr._send_sync_request(carol.identity.hash_hex, ch_hash, join_ts)
+
+        assert wait_for_message(alice.storage, ch_hash, valid_msg_id, timeout=5), \
+            "Carol did not serve Bob's pre-kick message in a sync response"
+
+    def test_no_tenure_data_allows_sync_without_filtering(self, peer_factory):
+        """
+        When no tenure data exists for a channel (e.g. open-join channel or
+        legacy data), sync proceeds without filtering — no false rejections.
+        """
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+
+        ch_hash = alice.channel_mgr.create_channel("no-tenure-sync", "", "public")
+        _seed_channel_on_peer(bob, ch_hash, "no-tenure-sync", alice.identity.hash_hex)
+
+        ts = time.time()
+        msg_id = _insert_message(alice.storage, ch_hash, alice.identity.hash_hex,
+                                  "No tenure check needed", ts + 1)
+
+        # No tenure rows — has_any_tenure returns False, filter is bypassed
+        assert not bob.storage.has_any_tenure(ch_hash)
+
+        bob.sync_mgr._send_sync_request(alice.identity.hash_hex, ch_hash, ts)
+
+        assert wait_for_message(bob.storage, ch_hash, msg_id, timeout=5), \
+            "Message was incorrectly rejected when no tenure data exists"
+
+
+# ---------------------------------------------------------------------------
+# Image data in sync
+# ---------------------------------------------------------------------------
+
+_FAKE_JPEG = b"\xff\xd8\xff\xe0" + b"\x00" * 100
+
+
+class TestImageSync:
+    def test_row_to_dict_includes_image_data(self):
+        """_row_to_dict serialises image_data as bytes."""
+        from trenchchat.core.sync import SyncManager
+
+        class _FakeRow(dict):
+            """Minimal sqlite3.Row substitute for testing."""
+            def keys(self):
+                return list(self.keys()) if False else list(super().keys())
+
+        # Use a real sqlite3.Row via a temp database
+        import sqlite3
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.execute("""
+            CREATE TABLE t (
+                sender_hash TEXT, sender_name TEXT, content TEXT,
+                timestamp REAL, message_id TEXT, reply_to TEXT,
+                last_seen_id TEXT, image_data BLOB
+            )
+        """)
+        conn.execute(
+            "INSERT INTO t VALUES (?,?,?,?,?,?,?,?)",
+            ("aabb", "Alice", "hi", 1000.0, "mid1", None, None, _FAKE_JPEG),
+        )
+        conn.commit()
+        row = conn.execute("SELECT * FROM t").fetchone()
+
+        result = SyncManager._row_to_dict(row)
+        assert "image_data" in result
+        assert result["image_data"] == _FAKE_JPEG
+
+    def test_row_to_dict_excludes_null_image_data(self):
+        """_row_to_dict omits image_data key when the column is NULL."""
+        from trenchchat.core.sync import SyncManager
+        import sqlite3
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.execute("""
+            CREATE TABLE t (
+                sender_hash TEXT, sender_name TEXT, content TEXT,
+                timestamp REAL, message_id TEXT, reply_to TEXT,
+                last_seen_id TEXT, image_data BLOB
+            )
+        """)
+        conn.execute(
+            "INSERT INTO t VALUES (?,?,?,?,?,?,?,?)",
+            ("aabb", "Alice", "no image", 1000.0, "mid2", None, None, None),
+        )
+        conn.commit()
+        row = conn.execute("SELECT * FROM t").fetchone()
+
+        result = SyncManager._row_to_dict(row)
+        assert "image_data" not in result
+
+    def test_sync_round_trip_preserves_image(self, peer_factory):
+        """An image attached to a message survives a sync request/response cycle."""
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+
+        ch_hash = alice.channel_mgr.create_channel("img-sync", "", "public")
+        _seed_channel_on_peer(bob, ch_hash, "img-sync", alice.identity.hash_hex)
+
+        ts = time.time()
+        msg_id = alice.storage.get_messages(ch_hash)
+        # Insert directly with image data
+        alice.storage.insert_message(
+            channel_hash=ch_hash,
+            sender_hash=alice.identity.hash_hex,
+            sender_name="Alice",
+            content="synced image",
+            timestamp=ts - 10,
+            message_id="sync_img_001",
+            reply_to=None,
+            last_seen_id=None,
+            received_at=ts - 10,
+            image_data=_FAKE_JPEG,
+        )
+
+        bob.sync_mgr._send_sync_request(alice.identity.hash_hex, ch_hash, ts - 100)
+
+        assert wait_for_message(bob.storage, ch_hash, "sync_img_001", timeout=5), \
+            "Bob did not receive the synced image message"
+
+        bob_msgs = bob.storage.get_messages(ch_hash)
+        synced = next(m for m in bob_msgs if m["message_id"] == "sync_img_001")
+        assert bytes(synced["image_data"]) == _FAKE_JPEG

@@ -287,3 +287,101 @@ class TestSendMessagePermission:
         msg_id = alice.storage.get_messages(ch_hash)[0]["message_id"]
         assert wait_for_message(bob.storage, ch_hash, msg_id, timeout=5), \
             "Bob did not receive Alice's message even though she is the owner"
+
+
+# ---------------------------------------------------------------------------
+# Image attachment in messages
+# ---------------------------------------------------------------------------
+
+_FAKE_JPEG = b"\xff\xd8\xff\xe0" + b"\x00" * 100
+
+
+class TestImageMessages:
+    def test_send_image_stored_locally(self, peer_factory):
+        """Sending a message with image_data stores the blob in the sender's DB."""
+        alice = peer_factory("alice")
+        ch_hash = alice.channel_mgr.create_channel("img-local", "", "public")
+        alice.messaging.send_message(
+            channel_hash_hex=ch_hash,
+            content="Here is a photo",
+            subscriber_hashes=[alice.identity.hash_hex],
+            image_data=_FAKE_JPEG,
+        )
+        msgs = alice.storage.get_messages(ch_hash)
+        assert len(msgs) == 1
+        assert bytes(msgs[0]["image_data"]) == _FAKE_JPEG
+
+    def test_send_image_received_by_peer(self, peer_factory):
+        """Bob receives a message with its image_data intact."""
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+
+        ch_hash = alice.channel_mgr.create_channel("img-peer", "", "public")
+        bob.storage.upsert_channel(ch_hash, "img-peer", "", alice.identity.hash_hex,
+                                   "public", time.time())
+        bob.storage.subscribe(ch_hash)
+
+        alice.messaging.send_message(
+            channel_hash_hex=ch_hash,
+            content="Photo for Bob",
+            subscriber_hashes=[bob.identity.hash_hex],
+            image_data=_FAKE_JPEG,
+        )
+
+        msg_id = alice.storage.get_messages(ch_hash)[0]["message_id"]
+        assert wait_for_message(bob.storage, ch_hash, msg_id, timeout=5), \
+            "Bob did not receive Alice's image message"
+
+        bob_msgs = bob.storage.get_messages(ch_hash)
+        assert len(bob_msgs) == 1
+        assert bytes(bob_msgs[0]["image_data"]) == _FAKE_JPEG
+        assert bob_msgs[0]["content"] == "Photo for Bob"
+
+    def test_image_only_message(self, peer_factory):
+        """A message with no text but with an image is sent and received."""
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+
+        ch_hash = alice.channel_mgr.create_channel("img-only", "", "public")
+        bob.storage.upsert_channel(ch_hash, "img-only", "", alice.identity.hash_hex,
+                                   "public", time.time())
+        bob.storage.subscribe(ch_hash)
+
+        alice.messaging.send_message(
+            channel_hash_hex=ch_hash,
+            content="",
+            subscriber_hashes=[bob.identity.hash_hex],
+            image_data=_FAKE_JPEG,
+        )
+
+        msg_id = alice.storage.get_messages(ch_hash)[0]["message_id"]
+        assert wait_for_message(bob.storage, ch_hash, msg_id, timeout=5), \
+            "Bob did not receive Alice's image-only message"
+
+        bob_msgs = bob.storage.get_messages(ch_hash)
+        assert bob_msgs[0]["content"] == ""
+        assert bytes(bob_msgs[0]["image_data"]) == _FAKE_JPEG
+
+    def test_message_without_image_still_works(self, peer_factory):
+        """Plain text messages (no image_data) continue to work after the change."""
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+
+        ch_hash = alice.channel_mgr.create_channel("no-img", "", "public")
+        bob.storage.upsert_channel(ch_hash, "no-img", "", alice.identity.hash_hex,
+                                   "public", time.time())
+        bob.storage.subscribe(ch_hash)
+
+        alice.messaging.send_message(
+            channel_hash_hex=ch_hash,
+            content="Just text",
+            subscriber_hashes=[bob.identity.hash_hex],
+        )
+
+        msg_id = alice.storage.get_messages(ch_hash)[0]["message_id"]
+        assert wait_for_message(bob.storage, ch_hash, msg_id, timeout=5), \
+            "Bob did not receive Alice's plain text message"
+
+        bob_msgs = bob.storage.get_messages(ch_hash)
+        assert bob_msgs[0]["content"] == "Just text"
+        assert bob_msgs[0]["image_data"] is None
