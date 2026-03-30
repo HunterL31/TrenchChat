@@ -11,8 +11,11 @@ subsequent ones show only the indented text.  Hovering a continuation row
 reveals a faint timestamp to the left of the text.
 """
 
+import base64
 import datetime
 import hashlib
+import html
+import re
 import time
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QScrollArea, QLabel, QSizePolicy, QDialog,
@@ -39,6 +42,52 @@ GROUP_WINDOW_SECS = 300
 _INLINE_IMAGE_MAX_PX = 400
 # Number of times an inline GIF loops before freezing on the last frame
 _GIF_INLINE_LOOPS = 2
+
+
+_EMOJI_TOKEN_RE = re.compile(r":([a-zA-Z0-9_-]+):")
+_INLINE_EMOJI_PX = 20   # height of inline emoji images in message text
+
+
+def _render_content(content: str, storage: Storage) -> tuple[str, bool]:
+    """Convert message content to a displayable form.
+
+    If the content contains :name: emoji tokens that resolve to known local
+    emojis, returns an HTML string with inline <img> tags and True.
+    Otherwise returns the plain text and False (use QLabel plain-text mode).
+    """
+    if ":" not in content:
+        return content, False
+
+    parts: list[str] = []
+    last = 0
+    found_any = False
+
+    for m in _EMOJI_TOKEN_RE.finditer(content):
+        name = m.group(1)
+        rows = storage.search_emojis(name)
+        # Must be an exact name match, not just a prefix match
+        row = next((r for r in rows if r["name"] == name), None)
+        if row is None:
+            continue
+        found_any = True
+        # Append everything before this token as escaped plain text
+        parts.append(html.escape(content[last:m.start()]))
+        img_bytes = bytes(row["image_data"])
+        b64 = base64.b64encode(img_bytes).decode()
+        # Guess mime type from magic bytes
+        mime = "image/gif" if img_bytes[:3] == b"GIF" else "image/png"
+        parts.append(
+            f'<img src="data:{mime};base64,{b64}" '
+            f'height="{_INLINE_EMOJI_PX}" '
+            f'title=":{name}:" style="vertical-align:middle"/>'
+        )
+        last = m.end()
+
+    if not found_any:
+        return content, False
+
+    parts.append(html.escape(content[last:]))
+    return "".join(parts), True
 
 
 def _format_ts(ts: float) -> str:
@@ -465,7 +514,8 @@ class MessageBubble(QWidget):
     def __init__(self, sender: str, sender_hash: str, content: str, timestamp: float,
                  received_at: float, message_id: str = "", is_own: bool = False,
                  avatar_pixmap: QPixmap | None = None,
-                 image_data: bytes | None = None, parent=None):
+                 image_data: bytes | None = None,
+                 storage: Storage | None = None, parent=None):
         super().__init__(parent)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
         self._sender_hash = sender_hash
@@ -498,10 +548,16 @@ class MessageBubble(QWidget):
         col.addWidget(header)
 
         if content:
-            body = QLabel(content)
+            if storage is not None:
+                body_text, is_rich = _render_content(content, storage)
+            else:
+                body_text, is_rich = content, False
+            body = QLabel(body_text)
             body.setWordWrap(True)
             body.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
             body.setStyleSheet("color: #dcddde; font-size: 13px;")
+            if is_rich:
+                body.setTextFormat(Qt.TextFormat.RichText)
             col.addWidget(body)
 
         img_widget = _build_image_widget(image_data)
@@ -598,7 +654,8 @@ class MessageContinuation(QWidget):
 
     def __init__(self, sender_hash: str, content: str, timestamp: float,
                  received_at: float, message_id: str = "",
-                 image_data: bytes | None = None, parent=None):
+                 image_data: bytes | None = None,
+                 storage: Storage | None = None, parent=None):
         super().__init__(parent)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
         self._message_id = message_id
@@ -623,10 +680,16 @@ class MessageContinuation(QWidget):
         col.setContentsMargins(0, 0, 0, 0)
 
         if content:
-            self._body = QLabel(content)
+            if storage is not None:
+                body_text, is_rich = _render_content(content, storage)
+            else:
+                body_text, is_rich = content, False
+            self._body = QLabel(body_text)
             self._body.setWordWrap(True)
             self._body.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
             self._body.setStyleSheet("color: #dcddde; font-size: 13px;")
+            if is_rich:
+                self._body.setTextFormat(Qt.TextFormat.RichText)
             col.addWidget(self._body)
 
         img_widget = _build_image_widget(image_data)
@@ -864,6 +927,7 @@ class ChannelView(QWidget):
                 received_at=received_at,
                 message_id=msg_id,
                 image_data=image_data,
+                storage=self._storage,
             )
             widget.react_requested.connect(
                 lambda mid, ch=self._channel_hash: self.react_requested.emit(ch, mid)
@@ -884,6 +948,7 @@ class ChannelView(QWidget):
                 is_own=sender_hash == self._own_hex,
                 avatar_pixmap=avatar_pix,
                 image_data=image_data,
+                storage=self._storage,
             )
             bubble.react_requested.connect(
                 lambda mid, ch=self._channel_hash: self.react_requested.emit(ch, mid)

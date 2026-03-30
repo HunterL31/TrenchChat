@@ -34,7 +34,11 @@ class _EmojiAutocompletePopup(QListWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowFlags(Qt.WindowType.Popup)
+        self.setWindowFlags(
+            Qt.WindowType.Tool
+            | Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+        )
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
@@ -203,6 +207,7 @@ class ComposeWidget(QWidget):
         self._editor.setFixedHeight(_COMPOSE_HEIGHT)
         self._editor.send_requested.connect(self._on_send)
         self._editor.emoji_query_changed.connect(self._on_emoji_query)
+        self._editor.focusOutEvent = self._on_editor_focus_out
         row_layout.addWidget(self._editor)
 
         self._send_btn = QPushButton("Send")
@@ -268,11 +273,10 @@ class ComposeWidget(QWidget):
             popup.hide()
 
         cursor = self._editor.textCursor()
-        # Move anchor to start of current block to get the full line text
-        block_start = cursor.position() - cursor.positionInBlock()
         text_up_to_cursor = self._editor.toPlainText()[:cursor.position()]
         m = _EMOJI_NAME_RE.search(text_up_to_cursor)
         if not m:
+            self._editor.setFocus()
             return
 
         # Remove the :prefix and insert :name:
@@ -282,9 +286,15 @@ class ComposeWidget(QWidget):
             QTextCursor.MoveMode.KeepAnchor,
             prefix_len,
         )
-        cursor.insertText(f":{name}:")
+        cursor.insertText(f":{name}: ")
         self._editor.setTextCursor(cursor)
         self._editor.setFocus()
+
+    def _on_editor_focus_out(self, event) -> None:
+        """Hide the autocomplete popup when the editor loses keyboard focus."""
+        if self._autocomplete is not None:
+            self._autocomplete.hide()
+        QTextEdit.focusOutEvent(self._editor, event)
 
     def _forward_autocomplete_key(self, event: QKeyEvent) -> bool:
         """Forward Up/Down/Enter/Tab/Escape to the autocomplete popup if visible.
