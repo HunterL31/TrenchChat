@@ -205,6 +205,7 @@ class MainWindow(QMainWindow):
     _reannounce_requested = pyqtSignal(object)      # iface or None → start debounce timer
     _avatar_updated       = pyqtSignal(str)         # identity_hash_hex
     _reaction_updated     = pyqtSignal(str, str)    # channel_hash_hex, message_id
+    _emoji_received       = pyqtSignal(str)         # emoji_hash — new emoji image arrived
 
     def __init__(self, config: Config, identity: Identity, storage: Storage,
                  rns: "RNS.Reticulum", router: Router, channel_mgr: ChannelManager,
@@ -261,8 +262,10 @@ class MainWindow(QMainWindow):
             avatar_mgr.add_avatar_callback(self._avatar_updated.emit)
 
         self._reaction_updated.connect(self._on_reaction_updated_main_thread)
+        self._emoji_received.connect(self._on_emoji_received_main_thread)
         if reaction_mgr is not None:
             reaction_mgr.add_reaction_callback(self._reaction_updated.emit)
+            reaction_mgr.add_emoji_callback(self._emoji_received.emit)
 
         self._sync_mgr = SyncManager(
             identity, storage, router, messaging, subscription_mgr, invite_mgr
@@ -686,7 +689,8 @@ class MainWindow(QMainWindow):
             view = ChannelView(channel_hash_hex, self._storage,
                                self._identity.hash_hex,
                                restore_to_id=restore_id,
-                               config=self._config)
+                               config=self._config,
+                               reaction_mgr=self._reaction_mgr)
             view.react_requested.connect(self._on_react_requested)
             view.reaction_remove_requested.connect(self._on_reaction_remove_requested)
             self._channel_views[channel_hash_hex] = view
@@ -1020,6 +1024,18 @@ class MainWindow(QMainWindow):
         view = self._channel_views.get(channel_hash_hex)
         if view is not None:
             view.on_reaction_updated(message_id)
+
+    @pyqtSlot(str)
+    def _on_emoji_received_main_thread(self, emoji_hash: str) -> None:
+        """A new custom emoji image just arrived -- reload all open channel views.
+
+        Any message that contained an unknown :name: token will now be able to
+        render it as an inline image on the next load.  The easiest correct
+        approach is to call load_history() on every visible channel view so
+        the messages are rebuilt with the newly available emoji data.
+        """
+        for view in self._channel_views.values():
+            view.load_history()
 
     @pyqtSlot(str, str)
     def _on_react_requested(self, channel_hash_hex: str, message_id: str) -> None:

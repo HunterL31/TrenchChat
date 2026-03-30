@@ -133,6 +133,15 @@ class ReactionManager:
         """Register cb(emoji_hash: str) fired when a new emoji image is received."""
         self._emoji_callbacks.append(cb)
 
+    def request_emoji(self, peer_hex: str, emoji_hash: str) -> None:
+        """Request the emoji image for a specific hash from a peer.
+
+        Used when a received message contains a :name@hash: token whose image
+        is not yet stored locally.  Delegates to the internal helper so the
+        deduplication and send logic lives in one place.
+        """
+        self._request_emoji(peer_hex, emoji_hash)
+
     # ------------------------------------------------------------------
     # LXMF inbound
     # ------------------------------------------------------------------

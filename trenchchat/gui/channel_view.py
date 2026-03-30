@@ -24,6 +24,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QTimer, QBuffer, QByteArray, QIODevice, pyqtSignal
 from PyQt6.QtGui import QColor, QIcon, QPixmap, QPainter, QPainterPath, QMovie
 
+from trenchchat.core.reaction import ReactionManager
 from trenchchat.core.storage import Storage
 
 # Messages received more than this many seconds after their timestamp are "late"
@@ -44,16 +45,29 @@ _INLINE_IMAGE_MAX_PX = 400
 _GIF_INLINE_LOOPS = 2
 
 
-_EMOJI_TOKEN_RE = re.compile(r":([a-zA-Z0-9_-]+):")
 _INLINE_EMOJI_PX = 20   # height of inline emoji images in message text
 
+# Matches :name@hexhash: (new unambiguous format) or :name: (legacy).
+# Group 1 = name, group 2 = 64-char hex hash (may be absent for legacy tokens).
+_EMOJI_TOKEN_RE = re.compile(
+    r":([a-zA-Z0-9_-]+)(?:@([0-9a-fA-F]{64}))?:"
+)
 
-def _render_content(content: str, storage: Storage) -> tuple[str, bool]:
+
+def _render_content(
+    content: str,
+    storage: Storage,
+    reaction_mgr: "ReactionManager | None" = None,
+    sender_hex: str = "",
+) -> tuple[str, bool]:
     """Convert message content to a displayable form.
 
-    If the content contains :name: emoji tokens that resolve to known local
-    emojis, returns an HTML string with inline <img> tags and True.
-    Otherwise returns the plain text and False (use QLabel plain-text mode).
+    Tokens take two forms:
+      :name@hexhash:  — unambiguous; look up by the 64-char SHA-256 hash
+      :name:          — legacy; fall back to a name-based exact match
+
+    When *reaction_mgr* and *sender_hex* are provided, any token whose emoji
+    is not found locally triggers a background fetch request to the sender.
     """
     if ":" not in content:
         return content, False
@@ -64,17 +78,27 @@ def _render_content(content: str, storage: Storage) -> tuple[str, bool]:
 
     for m in _EMOJI_TOKEN_RE.finditer(content):
         name = m.group(1)
-        rows = storage.search_emojis(name)
-        # Must be an exact name match, not just a prefix match
-        row = next((r for r in rows if r["name"] == name), None)
+        emoji_hash = m.group(2)  # None for legacy :name: tokens
+
+        if emoji_hash:
+            row = storage.get_emoji(emoji_hash)
+        else:
+            # Legacy :name: token — exact name match
+            rows = storage.search_emojis(name)
+            row = next((r for r in rows if r["name"] == name), None)
+            if row:
+                emoji_hash = row["emoji_hash"]
+
         if row is None:
+            # Not in local library — request it from the sender by hash
+            if reaction_mgr is not None and sender_hex and emoji_hash:
+                reaction_mgr.request_emoji(sender_hex, emoji_hash)
             continue
+
         found_any = True
-        # Append everything before this token as escaped plain text
         parts.append(html.escape(content[last:m.start()]))
         img_bytes = bytes(row["image_data"])
         b64 = base64.b64encode(img_bytes).decode()
-        # Guess mime type from magic bytes
         mime = "image/gif" if img_bytes[:3] == b"GIF" else "image/png"
         parts.append(
             f'<img src="data:{mime};base64,{b64}" '
@@ -515,7 +539,8 @@ class MessageBubble(QWidget):
                  received_at: float, message_id: str = "", is_own: bool = False,
                  avatar_pixmap: QPixmap | None = None,
                  image_data: bytes | None = None,
-                 storage: Storage | None = None, parent=None):
+                 storage: Storage | None = None,
+                 reaction_mgr: ReactionManager | None = None, parent=None):
         super().__init__(parent)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
         self._sender_hash = sender_hash
@@ -549,7 +574,9 @@ class MessageBubble(QWidget):
 
         if content:
             if storage is not None:
-                body_text, is_rich = _render_content(content, storage)
+                body_text, is_rich = _render_content(
+                    content, storage, reaction_mgr, sender_hash
+                )
             else:
                 body_text, is_rich = content, False
             body = QLabel(body_text)
@@ -655,7 +682,8 @@ class MessageContinuation(QWidget):
     def __init__(self, sender_hash: str, content: str, timestamp: float,
                  received_at: float, message_id: str = "",
                  image_data: bytes | None = None,
-                 storage: Storage | None = None, parent=None):
+                 storage: Storage | None = None,
+                 reaction_mgr: ReactionManager | None = None, parent=None):
         super().__init__(parent)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
         self._message_id = message_id
@@ -681,7 +709,9 @@ class MessageContinuation(QWidget):
 
         if content:
             if storage is not None:
-                body_text, is_rich = _render_content(content, storage)
+                body_text, is_rich = _render_content(
+                    content, storage, reaction_mgr, sender_hash
+                )
             else:
                 body_text, is_rich = content, False
             self._body = QLabel(body_text)
@@ -768,11 +798,13 @@ class ChannelView(QWidget):
 
     def __init__(self, channel_hash_hex: str, storage: Storage,
                  own_identity_hex: str, restore_to_id: str | None = None,
-                 config=None, parent=None):
+                 config=None, reaction_mgr: ReactionManager | None = None,
+                 parent=None):
         super().__init__(parent)
         self._channel_hash = channel_hash_hex
         self._storage = storage
         self._own_hex = own_identity_hex
+        self._reaction_mgr = reaction_mgr
         self._config = config
         self._displayed_ids: set[str] = set()
         # message_id -> QWidget (MessageBubble or MessageContinuation)
@@ -928,6 +960,7 @@ class ChannelView(QWidget):
                 message_id=msg_id,
                 image_data=image_data,
                 storage=self._storage,
+                reaction_mgr=self._reaction_mgr,
             )
             widget.react_requested.connect(
                 lambda mid, ch=self._channel_hash: self.react_requested.emit(ch, mid)
@@ -949,6 +982,7 @@ class ChannelView(QWidget):
                 avatar_pixmap=avatar_pix,
                 image_data=image_data,
                 storage=self._storage,
+                reaction_mgr=self._reaction_mgr,
             )
             bubble.react_requested.connect(
                 lambda mid, ch=self._channel_hash: self.react_requested.emit(ch, mid)

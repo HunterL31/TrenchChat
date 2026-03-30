@@ -286,7 +286,7 @@ class ComposeWidget(QWidget):
             QTextCursor.MoveMode.KeepAnchor,
             prefix_len,
         )
-        cursor.insertText(f":{name}: ")
+        cursor.insertText(f":{name}@{emoji_hash}: ")
         self._editor.setTextCursor(cursor)
         self._editor.setFocus()
 

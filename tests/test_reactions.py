@@ -753,3 +753,144 @@ class TestAdversarialReactions:
         # The response body is valid so the emoji IS stored even without sender resolve.
         # (The manager uses sender only for request routing, not emoji validation.)
         assert storage.emoji_exists(emoji_hash)
+
+
+# ---------------------------------------------------------------------------
+# ReactionManager.request_emoji (public wrapper)
+# ---------------------------------------------------------------------------
+
+class TestRequestEmoji:
+    """request_emoji() is the public surface for requesting an emoji by hash."""
+
+    def test_request_emoji_sends_lxm_when_peer_known(self, reaction_mgr):
+        mgr, storage, identity, router = reaction_mgr
+        img = _make_png()
+        emoji_hash = compute_emoji_hash(img)
+        peer_hex = "bb" * 32
+
+        mock_identity = MagicMock()
+        sent_lxms = []
+
+        with patch(_REACTION_RECALL, return_value=mock_identity), \
+             patch(_REACTION_DEST_HASH, return_value=b"\xde" * 32), \
+             patch(_REACTION_DEST) as MockDest, \
+             patch("trenchchat.core.reaction.LXMF.LXMessage") as MockLXM:
+            MockDest.OUT = "OUT"
+            MockDest.SINGLE = "SINGLE"
+            lxm_instance = MagicMock()
+            MockLXM.return_value = lxm_instance
+            router.send = lambda lxm: sent_lxms.append(lxm)
+
+            mgr.request_emoji(peer_hex, emoji_hash)
+
+        assert len(sent_lxms) == 1
+        fields = lxm_instance.fields
+        assert fields[F_MSG_TYPE] == MT_EMOJI_REQUEST
+        assert fields[F_EMOJI_HASH] == bytes.fromhex(emoji_hash)
+
+    def test_request_emoji_deduplicated(self, reaction_mgr):
+        mgr, storage, identity, router = reaction_mgr
+        img = _make_png()
+        emoji_hash = compute_emoji_hash(img)
+        peer_hex = "bb" * 32
+
+        mock_identity = MagicMock()
+        sent_lxms = []
+
+        with patch(_REACTION_RECALL, return_value=mock_identity), \
+             patch(_REACTION_DEST_HASH, return_value=b"\xde" * 32), \
+             patch(_REACTION_DEST) as MockDest, \
+             patch("trenchchat.core.reaction.LXMF.LXMessage") as MockLXM:
+            MockDest.OUT = "OUT"
+            MockDest.SINGLE = "SINGLE"
+            MockLXM.return_value = MagicMock()
+            router.send = lambda lxm: sent_lxms.append(lxm)
+
+            mgr.request_emoji(peer_hex, emoji_hash)
+            mgr.request_emoji(peer_hex, emoji_hash)   # second call deduped
+
+        assert len(sent_lxms) == 1
+
+
+# ---------------------------------------------------------------------------
+# _render_content token format
+# ---------------------------------------------------------------------------
+
+class TestRenderContent:
+    """Unit tests for the :name@hash: / :name: rendering helper."""
+
+    def _make_storage(self, tmp_path):
+        from trenchchat.core.storage import Storage
+        return Storage(tmp_path / "tc.db")
+
+    def _import(self, storage, name, img):
+        h = compute_emoji_hash(img)
+        storage.insert_emoji(h, name, img, time.time())
+        return h
+
+    def test_hashed_token_renders_known_emoji(self, tmp_path):
+        from trenchchat.gui.channel_view import _render_content
+        storage = self._make_storage(tmp_path)
+        img = _make_png()
+        h = self._import(storage, "hello", img)
+        content = f":hello@{h}:"
+        text, is_rich = _render_content(content, storage)
+        assert is_rich
+        assert "<img" in text
+        assert "hello" in text
+        storage.close()
+
+    def test_hashed_token_same_name_different_hash_renders_correct_one(self, tmp_path):
+        """Two emojis with the same name — the hash in the token picks the right one."""
+        from trenchchat.gui.channel_view import _render_content
+        storage = self._make_storage(tmp_path)
+        img_a = _make_png(color=(255, 0, 0))
+        img_b = _make_png(color=(0, 255, 0))
+        h_a = self._import(storage, "hello", img_a)
+        h_b = self._import(storage, "hello", img_b)
+        assert h_a != h_b
+
+        text_a, _ = _render_content(f":hello@{h_a}:", storage)
+        text_b, _ = _render_content(f":hello@{h_b}:", storage)
+
+        import base64
+        b64_a = base64.b64encode(img_a).decode()
+        b64_b = base64.b64encode(img_b).decode()
+        assert b64_a in text_a
+        assert b64_b not in text_a
+        assert b64_b in text_b
+        assert b64_a not in text_b
+        storage.close()
+
+    def test_unknown_hashed_token_triggers_request(self, tmp_path):
+        """A :name@hash: token not in local DB fires request_emoji on the mgr."""
+        from trenchchat.gui.channel_view import _render_content
+        storage = self._make_storage(tmp_path)
+        img = _make_png()
+        h = compute_emoji_hash(img)  # NOT inserted into storage
+        mock_mgr = MagicMock()
+        sender = "cc" * 32
+
+        _render_content(f":missing@{h}:", storage, mock_mgr, sender)
+
+        mock_mgr.request_emoji.assert_called_once_with(sender, h)
+        storage.close()
+
+    def test_legacy_name_token_renders_when_emoji_found(self, tmp_path):
+        """Legacy :name: tokens still render if the emoji is present locally."""
+        from trenchchat.gui.channel_view import _render_content
+        storage = self._make_storage(tmp_path)
+        img = _make_png()
+        self._import(storage, "wave", img)
+        text, is_rich = _render_content(":wave:", storage)
+        assert is_rich
+        assert "<img" in text
+        storage.close()
+
+    def test_plain_text_unchanged_when_no_emojis(self, tmp_path):
+        from trenchchat.gui.channel_view import _render_content
+        storage = self._make_storage(tmp_path)
+        text, is_rich = _render_content("hello world", storage)
+        assert not is_rich
+        assert text == "hello world"
+        storage.close()
