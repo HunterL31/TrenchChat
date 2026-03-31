@@ -65,6 +65,7 @@ jobs:
   # Versioning rules:
   #   - Previous version is read from the latest vX.Y.Z git tag.
   #   - If any commit since that tag contains "[major]", bump major.
+  #   - If any commit contains "[patch]", bump patch only.
   #   - Otherwise bump minor and reset patch to 0.
   # ---------------------------------------------------------------------------
   bump_version:
@@ -118,8 +119,14 @@ jobs:
           fi
 
           # --- Decide bump type ---
+          # Commit keyword rules (case-insensitive, checked in priority order):
+          #   [major]  → bump major, reset minor and patch to 0
+          #   [patch]  → bump patch only
+          #   (none)   → bump minor, reset patch to 0
           if echo "$COMMITS" | grep -qi '\[major\]'; then
             NEW_MAJOR=$((MAJOR + 1)); NEW_MINOR=0; NEW_PATCH=0
+          elif echo "$COMMITS" | grep -qi '\[patch\]'; then
+            NEW_MAJOR=$MAJOR; NEW_MINOR=$MINOR; NEW_PATCH=$((PATCH + 1))
           else
             NEW_MAJOR=$MAJOR; NEW_MINOR=$((MINOR + 1)); NEW_PATCH=0
           fi
