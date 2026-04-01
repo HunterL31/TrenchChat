@@ -1,5 +1,6 @@
 rns
 lxmf
+lxst
 PyQt6
 msgpack
 configobj

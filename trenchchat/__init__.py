@@ -1,4 +1,6 @@
 APP_NAME = "trenchchat"
 APP_ASPECT_CHANNEL = "channel"
 APP_ASPECT_USER = "user"
+APP_ASPECT_VOICE = "voice"
+APP_ASPECT_RELAY = "relay"
 DATA_DIR_NAME = ".trenchchat"

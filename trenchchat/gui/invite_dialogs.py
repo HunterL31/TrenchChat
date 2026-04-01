@@ -28,6 +28,8 @@ _PERMISSION_LABELS: dict[str, str] = {
     KICK:           "Remove members",
     MANAGE_ROLES:   "Manage roles",
     MANAGE_CHANNEL: "Manage channel settings",
+    "speak":        "Speak in voice channel",
+    "manage_relay": "Manage voice relay",
 }
 
 

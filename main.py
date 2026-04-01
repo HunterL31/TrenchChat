@@ -34,6 +34,7 @@ from trenchchat.core.messaging import Messaging
 from trenchchat.core.presence import PresenceManager
 from trenchchat.core.subscription import SubscriptionManager
 from trenchchat.core.invite import InviteManager
+from trenchchat.core.voice import VoiceManager
 from trenchchat.core.user_directory import UserDirectory
 from trenchchat.network.router import Router
 from trenchchat.network.announce import UserAnnounceHandler
@@ -103,6 +104,8 @@ def main():
     user_directory = UserDirectory(identity.hash_hex)
     avatar_mgr = AvatarManager(identity, config, storage, router)
     reaction_mgr = ReactionManager(identity, storage, router)
+    voice_mgr = VoiceManager(identity, storage, router)
+    voice_mgr.register_lxmf_handler(router)
 
     # Register the user announce handler before any announces go out so we
     # never miss a trenchchat.user announce from a peer that is already online.
@@ -114,6 +117,9 @@ def main():
 
     # Restore RNS destinations for channels we own
     channel_mgr.restore_owned_channels()
+
+    # Restore voice destinations for owned voice channels (non-relayed).
+    voice_mgr.restore_voice_destinations()
 
     # Announce our delivery destination, trenchchat.user, and all owned channels
     router.announce()
@@ -190,6 +196,7 @@ def main():
         user_directory=user_directory,
         avatar_mgr=avatar_mgr,
         reaction_mgr=reaction_mgr,
+        voice_mgr=voice_mgr,
     )
     window.show()
 

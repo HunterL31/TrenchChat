@@ -43,13 +43,15 @@ def _connect_encrypted(path: str, raw_key: bytes) -> sqlite3.Connection:
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS channels (
-    hash        TEXT PRIMARY KEY,
-    name        TEXT NOT NULL,
-    description TEXT NOT NULL DEFAULT '',
-    creator_hash TEXT NOT NULL,
-    permissions TEXT NOT NULL DEFAULT '{}',
-    created_at  REAL NOT NULL,
-    last_seen   REAL NOT NULL
+    hash            TEXT PRIMARY KEY,
+    name            TEXT NOT NULL,
+    description     TEXT NOT NULL DEFAULT '',
+    creator_hash    TEXT NOT NULL,
+    permissions     TEXT NOT NULL DEFAULT '{}',
+    created_at      REAL NOT NULL,
+    last_seen       REAL NOT NULL,
+    channel_type    TEXT NOT NULL DEFAULT 'text',
+    relay_dest_hash TEXT
 );
 
 CREATE TABLE IF NOT EXISTS messages (
@@ -259,6 +261,7 @@ class Storage:
         self._migrate_tenure()
         self._migrate_image_data()
         self._migrate_reactions()
+        self._migrate_voice_columns()
 
     def _migrate_tenure(self):
         """Create membership_tenure table and backfill current members if the table is new."""
@@ -285,6 +288,22 @@ class Storage:
             self._conn.execute(
                 "ALTER TABLE messages ADD COLUMN image_data BLOB"
             )
+            self._conn.commit()
+
+    def _migrate_voice_columns(self) -> None:
+        """Add channel_type and relay_dest_hash columns for existing databases."""
+        changed = False
+        if not self._has_column("channels", "channel_type"):
+            self._conn.execute(
+                "ALTER TABLE channels ADD COLUMN channel_type TEXT NOT NULL DEFAULT 'text'"
+            )
+            changed = True
+        if not self._has_column("channels", "relay_dest_hash"):
+            self._conn.execute(
+                "ALTER TABLE channels ADD COLUMN relay_dest_hash TEXT"
+            )
+            changed = True
+        if changed:
             self._conn.commit()
 
     def _migrate_reactions(self):
@@ -428,12 +447,14 @@ class Storage:
 
     def upsert_channel(self, hash: str, name: str, description: str,
                        creator_hash: str, permissions: str | dict = "",
-                       created_at: float = 0.0, *, access_mode: str = ""):
+                       created_at: float = 0.0, *, access_mode: str = "",
+                       channel_type: str = "text"):
         """Create or update a channel.
 
         *permissions* can be a JSON string, a dict (will be serialised), or
         a legacy access-mode string (``"public"`` / ``"invite"``).
         The legacy *access_mode* keyword is also accepted.
+        *channel_type* is ``"text"`` or ``"voice"``.
         """
         if access_mode and not permissions:
             permissions = access_mode
@@ -446,14 +467,18 @@ class Storage:
             permissions = permissions_to_json(PRESET_PRIVATE)
         with self._tx():
             self._conn.execute("""
-                INSERT INTO channels (hash, name, description, creator_hash, permissions, created_at, last_seen)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO channels
+                    (hash, name, description, creator_hash, permissions, created_at, last_seen,
+                     channel_type)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(hash) DO UPDATE SET
                     name=excluded.name,
                     description=excluded.description,
                     permissions=excluded.permissions,
-                    last_seen=excluded.last_seen
-            """, (hash, name, description, creator_hash, permissions, created_at, time.time()))
+                    last_seen=excluded.last_seen,
+                    channel_type=excluded.channel_type
+            """, (hash, name, description, creator_hash, permissions, created_at, time.time(),
+                  channel_type))
 
     def get_channel(self, hash: str) -> sqlite3.Row | None:
         return self._fetchone("SELECT * FROM channels WHERE hash = ?", (hash,))
@@ -466,6 +491,20 @@ class Storage:
             self._conn.execute(
                 "UPDATE channels SET last_seen = ? WHERE hash = ?", (time.time(), hash)
             )
+
+    def set_channel_relay(self, channel_hash: str, relay_dest_hash: str | None) -> None:
+        """Store or clear the voice relay destination hash for a channel."""
+        with self._tx():
+            self._conn.execute(
+                "UPDATE channels SET relay_dest_hash = ? WHERE hash = ?",
+                (relay_dest_hash, channel_hash),
+            )
+
+    def get_voice_channels(self) -> list[sqlite3.Row]:
+        """Return all channels with channel_type = 'voice'."""
+        return self._fetchall(
+            "SELECT * FROM channels WHERE channel_type = 'voice' ORDER BY name"
+        )
 
     # --- messages ---
 

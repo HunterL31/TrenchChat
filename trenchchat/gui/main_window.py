@@ -31,18 +31,20 @@ from trenchchat.config import Config
 from trenchchat.core.identity import Identity
 from trenchchat.core.image import prepare_image, MAX_IMAGE_BYTES
 from trenchchat.core.permissions import (
-    INVITE, KICK, MANAGE_CHANNEL, MANAGE_ROLES, SEND_MESSAGE, PRESETS, PRESET_PRIVATE,
+    INVITE, KICK, MANAGE_CHANNEL, MANAGE_ROLES, SEND_MESSAGE, SPEAK, MANAGE_RELAY,
+    PRESETS, PRESET_PRIVATE,
     is_discoverable, is_open_join, permissions_from_json,
 )
 from trenchchat.core.presence import PresenceManager, resolve_display_name
 from trenchchat.core.storage import Storage
-from trenchchat.core.channel import ChannelManager
+from trenchchat.core.channel import ChannelManager, CHANNEL_TYPE_TEXT, CHANNEL_TYPE_VOICE
 from trenchchat.core.messaging import Messaging
 from trenchchat.core.subscription import SubscriptionManager
 from trenchchat.core.invite import InviteManager
 from trenchchat.core.reaction import ReactionManager
 from trenchchat.core.sync import SyncManager
 from trenchchat.core.user_directory import UserDirectory
+from trenchchat.core.voice import VoiceManager
 from trenchchat.network.router import Router
 from trenchchat.network.announce import PeerAnnounceHandler
 from trenchchat.gui.channel_view import ChannelView
@@ -52,6 +54,7 @@ from trenchchat.gui.network_map import NetworkMapWidget, gather_network_data
 from trenchchat.gui.settings import SettingsDialog
 from trenchchat.gui.invite_dialogs import ChannelPermissionsDialog, InviteDialog, MembersDialog
 from trenchchat.gui.interfaces_widget import InterfacesWidget
+from trenchchat.gui.voice_panel import VoicePanel
 
 _STARTUP_SYNC_DELAY_MS = 3_000
 _PRESENCE_PRUNE_INTERVAL_MS = 30_000
@@ -70,6 +73,14 @@ class NewChannelDialog(QDialog):
 
         self._desc = QLineEdit()
         layout.addRow("Description:", self._desc)
+
+        self._type = QComboBox()
+        self._type.addItems(["Text", "Voice"])
+        self._type.setToolTip(
+            "Text: standard chat channel.\n"
+            "Voice: real-time audio channel using LXST."
+        )
+        layout.addRow("Type:", self._type)
 
         self._preset = QComboBox()
         self._preset.addItems(list(PRESETS.keys()))
@@ -91,8 +102,100 @@ class NewChannelDialog(QDialog):
         return self._desc.text().strip()
 
     @property
+    def channel_type(self) -> str:
+        return CHANNEL_TYPE_VOICE if self._type.currentIndex() == 1 else CHANNEL_TYPE_TEXT
+
+    @property
     def permissions(self) -> dict:
         return dict(PRESETS.get(self._preset.currentText(), PRESET_PRIVATE))
+
+
+class _RelaySettingsDialog(QDialog):
+    """Voice relay assignment/revocation dialog for channel owners."""
+
+    def __init__(self, channel_hash_hex: str, storage: Storage,
+                 voice_mgr: VoiceManager, parent=None):
+        super().__init__(parent)
+        self._channel_hash_hex = channel_hash_hex
+        self._storage = storage
+        self._voice_mgr = voice_mgr
+
+        channel = storage.get_channel(channel_hash_hex)
+        name = channel["name"] if channel else channel_hash_hex[:8]
+        relay_hex = channel["relay_dest_hash"] if channel and "relay_dest_hash" in channel.keys() else None
+
+        self.setWindowTitle(f"Voice Relay — #{name}")
+        self.setMinimumWidth(420)
+        layout = QVBoxLayout(self)
+
+        if relay_hex:
+            info = QLabel(f"Relay assigned: {relay_hex[:16]}…")
+            info.setStyleSheet("color: #4caf50; font-size: 12px;")
+        else:
+            info = QLabel("No relay assigned. The channel owner hosts voice directly.")
+            info.setStyleSheet("color: #888; font-size: 12px;")
+        info.setWordWrap(True)
+        layout.addWidget(info)
+
+        layout.addSpacing(8)
+        form = QFormLayout()
+
+        self._relay_input = QLineEdit()
+        self._relay_input.setPlaceholderText("Relay identity hash hex (64 chars)")
+        if relay_hex:
+            self._relay_input.setText(relay_hex)
+        form.addRow("Relay identity:", self._relay_input)
+        layout.addLayout(form)
+
+        hint = QLabel(
+            "Enter the identity hash of a running TrenchChat Voice Relay node.  "
+            "The relay must be reachable on the Reticulum network."
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #888; font-size: 11px;")
+        layout.addWidget(hint)
+
+        layout.addSpacing(8)
+        btn_row = QHBoxLayout()
+
+        assign_btn = QPushButton("Assign Relay")
+        assign_btn.clicked.connect(self._on_assign)
+        btn_row.addWidget(assign_btn)
+
+        if relay_hex:
+            revoke_btn = QPushButton("Revoke Relay")
+            revoke_btn.setStyleSheet("background: #7a2020;")
+            revoke_btn.clicked.connect(self._on_revoke)
+            btn_row.addWidget(revoke_btn)
+
+        btn_row.addStretch()
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.reject)
+        btn_row.addWidget(close_btn)
+        layout.addLayout(btn_row)
+
+    def _on_assign(self) -> None:
+        relay_hex = self._relay_input.text().strip()
+        if len(relay_hex) < 16:
+            QMessageBox.warning(self, "Invalid", "Please enter a valid relay identity hash.")
+            return
+        self._voice_mgr.assign_relay(self._channel_hash_hex, relay_hex)
+        QMessageBox.information(
+            self, "Relay assignment sent",
+            f"Assignment request sent to relay {relay_hex[:16]}…\n"
+            "The relay destination will be stored once the relay confirms."
+        )
+        self.accept()
+
+    def _on_revoke(self) -> None:
+        confirm = QMessageBox.question(
+            self, "Revoke relay",
+            "Revoke the current relay assignment? Active voice sessions will be disconnected.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if confirm == QMessageBox.StandardButton.Yes:
+            self._voice_mgr.revoke_relay(self._channel_hash_hex)
+            self.accept()
 
 
 class JoinChannelDialog(QDialog):
@@ -211,7 +314,8 @@ class MainWindow(QMainWindow):
                  rns: "RNS.Reticulum", router: Router, channel_mgr: ChannelManager,
                  messaging: Messaging, subscription_mgr: SubscriptionManager,
                  invite_mgr: InviteManager, presence_mgr: PresenceManager,
-                 user_directory: UserDirectory, avatar_mgr=None, reaction_mgr=None):
+                 user_directory: UserDirectory, avatar_mgr=None, reaction_mgr=None,
+                 voice_mgr: VoiceManager | None = None):
         super().__init__()
         self._config = config
         self._identity = identity
@@ -226,6 +330,8 @@ class MainWindow(QMainWindow):
         self._user_directory = user_directory
         self._avatar_mgr = avatar_mgr
         self._reaction_mgr: ReactionManager | None = reaction_mgr
+        self._voice_mgr: VoiceManager | None = voice_mgr
+        self._voice_panels: dict[str, VoicePanel] = {}
 
         # Pending invites: list of (channel_hash_hex, channel_name, token, expiry, admin_hash_hex)
         self._pending_invites: list[tuple] = []
@@ -633,7 +739,12 @@ class MainWindow(QMainWindow):
                 continue
             perms = permissions_from_json(row["permissions"])
             lock = " 🔒" if not is_open_join(perms) else ""
-            item = QListWidgetItem(f"# {row['name']}{lock}")
+            is_voice = (
+                "channel_type" in row.keys()
+                and row["channel_type"] == CHANNEL_TYPE_VOICE
+            )
+            prefix = "🔊" if is_voice else "#"
+            item = QListWidgetItem(f"{prefix} {row['name']}{lock}")
             item.setData(Qt.ItemDataRole.UserRole, row["hash"])
             self._channel_list_widget.addItem(item)
         self._channel_list_widget.blockSignals(False)
@@ -683,6 +794,13 @@ class MainWindow(QMainWindow):
         self._settings.setValue("last_channel", channel_hash_hex)
         self._current_channel = channel_hash_hex
 
+        channel = self._storage.get_channel(channel_hash_hex)
+        is_voice = (
+            channel is not None
+            and "channel_type" in channel.keys()
+            and channel["channel_type"] == CHANNEL_TYPE_VOICE
+        )
+
         if channel_hash_hex not in self._channel_views:
             # Retrieve the scroll restore point saved from a previous session.
             restore_id = self._settings.value(f"last_read/{channel_hash_hex}") or None
@@ -698,24 +816,47 @@ class MainWindow(QMainWindow):
 
         self._stack.setCurrentWidget(self._channel_views[channel_hash_hex])
 
-        channel = self._storage.get_channel(channel_hash_hex)
-        if channel:
-            perms = permissions_from_json(channel["permissions"])
-            if not is_open_join(perms):
-                is_member = self._storage.is_member(channel_hash_hex, self._identity.hash_hex)
-                can_send = is_member and self._storage.has_permission(
-                    channel_hash_hex, self._identity.hash_hex, SEND_MESSAGE
+        if is_voice and self._voice_mgr is not None:
+            # Show voice panel instead of compose for voice channels.
+            self._compose.setVisible(False)
+            if channel_hash_hex not in self._voice_panels:
+                panel = VoicePanel(
+                    self._voice_mgr, self._storage, self._identity.hash_hex, self
                 )
-                self._compose.set_enabled(can_send)
-                if not is_member:
-                    self._compose.set_placeholder("You are not a member of this channel")
-                elif not can_send:
-                    self._compose.set_placeholder("You do not have permission to send messages")
+                panel.join_requested.connect(self._on_voice_join)
+                panel.leave_requested.connect(self._on_voice_leave)
+                panel.relay_settings_requested.connect(self._on_relay_settings)
+                self._voice_panels[channel_hash_hex] = panel
+                # Insert the panel into the chat tab layout below the stack.
+                chat_tab = self._stack.parent()
+                if chat_tab and chat_tab.layout():
+                    chat_tab.layout().addWidget(panel)
+            voice_panel = self._voice_panels[channel_hash_hex]
+            voice_panel.set_channel(channel_hash_hex)
+            voice_panel.setVisible(True)
+        else:
+            # Text channel: hide any voice panel, show compose.
+            for panel in self._voice_panels.values():
+                panel.setVisible(False)
+            self._compose.setVisible(True)
+
+            if channel:
+                perms = permissions_from_json(channel["permissions"])
+                if not is_open_join(perms):
+                    is_member = self._storage.is_member(channel_hash_hex, self._identity.hash_hex)
+                    can_send = is_member and self._storage.has_permission(
+                        channel_hash_hex, self._identity.hash_hex, SEND_MESSAGE
+                    )
+                    self._compose.set_enabled(can_send)
+                    if not is_member:
+                        self._compose.set_placeholder("You are not a member of this channel")
+                    elif not can_send:
+                        self._compose.set_placeholder("You do not have permission to send messages")
+                    else:
+                        self._compose.set_placeholder(f"Message #{channel['name']}…  (Enter to send)")
                 else:
+                    self._compose.set_enabled(True)
                     self._compose.set_placeholder(f"Message #{channel['name']}…  (Enter to send)")
-            else:
-                self._compose.set_enabled(True)
-                self._compose.set_placeholder(f"Message #{channel['name']}…  (Enter to send)")
 
         self._refresh_online_panel()
 
@@ -756,13 +897,18 @@ class MainWindow(QMainWindow):
         if not name:
             QMessageBox.warning(self, "TrenchChat", "Channel name cannot be empty.")
             return
+        channel_type = dlg.channel_type
         hash_hex = self._channel_mgr.create_channel(
             name=name,
             description=dlg.description,
             permissions=dlg.permissions,
+            channel_type=channel_type,
         )
         if not is_open_join(dlg.permissions):
             self._invite_mgr.publish_member_list(hash_hex)
+        # Create voice destination for owned voice channels.
+        if channel_type == CHANNEL_TYPE_VOICE and self._voice_mgr is not None:
+            self._voice_mgr.create_voice_destination(hash_hex)
         self._refresh_channel_list()
         self._switch_to_channel(hash_hex)
 
@@ -860,7 +1006,12 @@ class MainWindow(QMainWindow):
         my_hex = self._identity.hash_hex
         can_invite = self._storage.has_permission(channel_hash, my_hex, INVITE)
         can_manage_channel = self._storage.has_permission(channel_hash, my_hex, MANAGE_CHANNEL)
+        can_manage_relay = self._storage.has_permission(channel_hash, my_hex, MANAGE_RELAY)
         is_member = self._storage.is_member(channel_hash, my_hex)
+        is_voice = (
+            "channel_type" in channel.keys()
+            and channel["channel_type"] == CHANNEL_TYPE_VOICE
+        )
 
         menu = QMenu(self)
         menu.setStyleSheet(
@@ -885,6 +1036,12 @@ class MainWindow(QMainWindow):
             perms_action = menu.addAction("Edit permissions…")
             perms_action.triggered.connect(
                 lambda: self._on_edit_permissions(channel_hash, channel["name"])
+            )
+
+        if is_voice and can_manage_relay and self._voice_mgr is not None:
+            relay_action = menu.addAction("Voice relay settings…")
+            relay_action.triggered.connect(
+                lambda: self._on_relay_settings(channel_hash)
             )
 
         if menu.actions():
@@ -955,13 +1112,47 @@ class MainWindow(QMainWindow):
         if confirm == QMessageBox.StandardButton.Yes:
             owner_hash = channel["creator_hash"] if channel else None
             self._subscription_mgr.unsubscribe(channel_hash, owner_hash)
+            # If this was a voice channel, also leave any active session.
+            if self._voice_mgr is not None:
+                self._voice_mgr.leave_voice(channel_hash)
             if channel_hash in self._channel_views:
                 view = self._channel_views.pop(channel_hash)
                 self._stack.removeWidget(view)
                 view.deleteLater()
+            if channel_hash in self._voice_panels:
+                panel = self._voice_panels.pop(channel_hash)
+                panel._disconnect_signals()
+                panel.deleteLater()
             self._current_channel = None
             self._compose.set_enabled(False)
             self._refresh_channel_list()
+
+    @pyqtSlot(str)
+    def _on_voice_join(self, channel_hash_hex: str) -> None:
+        """GUI outbound guard: re-check SPEAK before delegating to VoiceManager."""
+        if self._voice_mgr is None:
+            return
+        if not self._storage.has_permission(channel_hash_hex, self._identity.hash_hex, SPEAK):
+            return
+        self._voice_mgr.join_voice(channel_hash_hex)
+
+    @pyqtSlot(str)
+    def _on_voice_leave(self, channel_hash_hex: str) -> None:
+        if self._voice_mgr is None:
+            return
+        self._voice_mgr.leave_voice(channel_hash_hex)
+
+    @pyqtSlot(str)
+    def _on_relay_settings(self, channel_hash_hex: str) -> None:
+        """Show voice relay assignment/revocation dialog."""
+        if self._voice_mgr is None:
+            return
+        if not self._storage.has_permission(
+            channel_hash_hex, self._identity.hash_hex, MANAGE_RELAY
+        ):
+            return
+        dlg = _RelaySettingsDialog(channel_hash_hex, self._storage, self._voice_mgr, self)
+        dlg.exec()
 
     # --- online users panel ---
 

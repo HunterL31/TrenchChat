@@ -12,6 +12,8 @@ Field key registry
 0x20–0x2F  Member-list fields
 0x30–0x3F  Subscription fields
 0x40–0x4F  Reaction fields
+0x50–0x5F  Voice fields
+0x60–0x6F  Relay fields
 """
 
 # --- Common / messaging fields ---
@@ -72,3 +74,30 @@ MT_AVATAR_UPDATE    = "avatar_update"
 MT_REACTION         = "reaction"        # notify channel: reactor added/removed emoji on a message
 MT_EMOJI_REQUEST    = "emoji_request"   # ask a peer for emoji image data by hash
 MT_EMOJI_RESPONSE   = "emoji_response"  # respond with the emoji image bytes
+
+# --- Voice fields ---
+F_VOICE_DEST_HASH    = 0x50   # bytes — RNS destination hash of the voice endpoint (owner or relay)
+F_VOICE_PARTICIPANTS = 0x51   # bytes — msgpack list of participant identity hash hex strings
+F_VOICE_CODEC_PROFILE = 0x52  # int   — LXST Opus profile constant
+F_VOICE_SIGNAL       = 0x53   # int   — in-band signal type (see VS_* constants below)
+
+# --- Relay fields ---
+F_RELAY_TOKEN        = 0x60   # bytes — Ed25519 signature authorizing relay assignment
+F_RELAY_DEST_HASH    = 0x61   # bytes — relay's LXMF delivery destination hash
+
+# --- Voice message types ---
+MT_VOICE_JOIN        = "voice_join"    # participant requests to join voice
+MT_VOICE_LEAVE       = "voice_leave"   # participant announces departure
+MT_VOICE_STATE       = "voice_state"   # host broadcasts current participant list + voice dest hash
+
+# --- Relay message types ---
+MT_RELAY_ASSIGN        = "relay_assign"         # owner assigns a channel to a relay
+MT_RELAY_ACCEPT        = "relay_accept"          # relay confirms assignment, provides voice dest hash
+MT_RELAY_REVOKE        = "relay_revoke"          # owner revokes relay assignment
+MT_RELAY_MEMBER_UPDATE = "relay_member_update"  # owner pushes updated member list to relay
+
+# --- In-band voice signal constants (sent over LXST SignallingReceiver, not LXMF) ---
+VS_MUTE    = 0x01   # participant muted their mic
+VS_UNMUTE  = 0x02   # participant unmuted their mic
+VS_SPEAKING = 0x03  # VAD detected speech start
+VS_SILENT  = 0x04   # VAD detected speech end

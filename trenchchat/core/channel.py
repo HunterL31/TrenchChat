@@ -21,6 +21,9 @@ from trenchchat.core.permissions import (
 from trenchchat.core.storage import Storage
 from trenchchat.network.announce import ChannelAnnounceHandler
 
+CHANNEL_TYPE_TEXT = "text"
+CHANNEL_TYPE_VOICE = "voice"
+
 
 def _sanitise_name(name: str) -> str:
     """Lower-case, alphanumeric + hyphens only, max 32 chars."""
@@ -50,12 +53,14 @@ class ChannelManager:
 
     def create_channel(self, name: str, description: str = "",
                        access_mode: str = "public",
-                       permissions: dict | None = None) -> str:
+                       permissions: dict | None = None,
+                       channel_type: str = CHANNEL_TYPE_TEXT) -> str:
         """Create a new channel owned by the local identity.
 
         *permissions* is the full permissions dict.  For backward compat,
         *access_mode* (``"public"`` / ``"invite"``) is also accepted and
         converted to the matching preset.
+        *channel_type* is ``"text"`` (default) or ``"voice"``.
 
         Returns the channel hash hex string.
         """
@@ -84,6 +89,7 @@ class ChannelManager:
             creator_hash=self._identity.hash_hex,
             permissions=permissions,
             created_at=time.time(),
+            channel_type=channel_type,
         )
         self._storage.subscribe(hash_hex)
         self._storage.upsert_member(
@@ -117,6 +123,7 @@ class ChannelManager:
             "description": channel["description"],
             "access": access,
             "creator": self._identity.hash_hex,
+            "channel_type": channel["channel_type"] if "channel_type" in channel.keys() else "text",
         }, use_bin_type=True)
         dest.announce(app_data=app_data, attached_interface=attached_interface)
 
@@ -141,6 +148,7 @@ class ChannelManager:
         access_mode = metadata.get("access", "public")
         creator_hash = metadata.get("creator", announced_identity.hash.hex()
                                     if announced_identity else "")
+        channel_type = metadata.get("channel_type", CHANNEL_TYPE_TEXT)
 
         already_known = self._storage.get_channel(hash_hex) is not None
         self._storage.upsert_channel(
@@ -150,6 +158,7 @@ class ChannelManager:
             creator_hash=creator_hash,
             access_mode=access_mode,
             created_at=time.time(),
+            channel_type=channel_type,
         )
 
         channel = self._storage.get_channel(hash_hex)
