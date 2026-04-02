@@ -42,7 +42,7 @@ from trenchchat.core.protocol import (
     F_INVITE_TOKEN, F_INVITEE_HASH, F_EXPIRY_TS, F_ADMIN_HASH,
     F_MEMBER_LIST_DOC, F_CHANNEL_NAME, F_CHANNEL_DESC,
     F_CHANNEL_CREATOR, F_CHANNEL_ACCESS, F_CHANNEL_CREATED_AT,
-    F_CHANNEL_PERMISSIONS,
+    F_CHANNEL_PERMISSIONS, F_CHANNEL_TYPE,
     MT_JOIN_REQUEST, MT_MEMBER_LIST_UPDATE, MT_INVITE,
 )
 from trenchchat.core.storage import Storage
@@ -468,6 +468,8 @@ class InviteManager:
             fields[F_CHANNEL_CREATOR]     = channel["creator_hash"]
             fields[F_CHANNEL_PERMISSIONS] = channel["permissions"]
             fields[F_CHANNEL_CREATED_AT]  = channel["created_at"]
+            fields[F_CHANNEL_TYPE]        = (channel["channel_type"]
+                                              if "channel_type" in channel.keys() else "text")
         for row in self._storage.get_members(channel_hash_hex):
             dest_hex = row["identity_hash"]
             if dest_hex == self._identity.hash_hex:
@@ -605,6 +607,9 @@ class InviteManager:
                             if isinstance(perms_field, bytes):
                                 perms_field = perms_field.decode("utf-8", errors="replace")
                             created_at = fields.get(F_CHANNEL_CREATED_AT, time.time())
+                            channel_type = fields.get(F_CHANNEL_TYPE, "text")
+                            if isinstance(channel_type, bytes):
+                                channel_type = channel_type.decode("utf-8", errors="replace")
                             self._storage.upsert_channel(
                                 hash=channel_hash_hex,
                                 name=channel_name,
@@ -612,6 +617,7 @@ class InviteManager:
                                 creator_hash=creator,
                                 permissions=perms_field,
                                 created_at=created_at,
+                                channel_type=channel_type,
                             )
                             self._storage.subscribe(channel_hash_hex)
                             RNS.log(f"TrenchChat [invite]: auto-joined channel "

@@ -56,6 +56,7 @@ F_CHANNEL_CREATOR   = 0x24   # str   — creator identity hash hex
 F_CHANNEL_ACCESS    = 0x25   # str   — (legacy) access mode ("public" | "invite")
 F_CHANNEL_CREATED_AT = 0x26  # float — Unix timestamp of channel creation
 F_CHANNEL_PERMISSIONS = 0x27 # str   — JSON permissions dict (replaces F_CHANNEL_ACCESS)
+F_CHANNEL_TYPE        = 0x28 # str   — channel type ("text" | "voice")
 
 # --- Subscription fields ---
 F_SUBSCRIBER_LIST   = 0x30   # bytes — msgpack list of hex identity hashes
