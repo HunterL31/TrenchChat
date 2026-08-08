@@ -2,6 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>TrenchChat test environment</title>
 <style>
   :root {
@@ -16,13 +17,13 @@
     flex-direction: column;
   }
   header {
-    display: flex; align-items: center; justify-content: space-between;
+    display: flex; align-items: center; justify-content: space-between; gap: 10px;
     padding: 10px 16px; background: var(--panel2); border-bottom: 1px solid var(--border);
   }
-  header h1 { font-size: 15px; margin: 0; font-weight: 600; color: var(--dim); }
+  header h1 { font-size: 15px; margin: 0; font-weight: 600; color: var(--dim); min-width: 0; }
   #reset-btn {
     background: var(--danger); color: white; border: none; border-radius: 4px;
-    padding: 7px 14px; cursor: pointer; font-size: 13px; font-weight: 600;
+    padding: 7px 14px; cursor: pointer; font-size: 13px; font-weight: 600; flex-shrink: 0;
   }
   #reset-btn:hover { background: #c62d31; }
   #reset-btn:disabled { opacity: 0.5; cursor: default; }
@@ -112,7 +113,7 @@
   .modal-backdrop.show { display: flex; }
   .modal {
     background: var(--panel2); border: 1px solid var(--border); border-radius: 8px;
-    padding: 18px; width: 320px;
+    padding: 18px; width: min(320px, 90vw);
   }
   .modal h3 { margin: 0 0 12px 0; font-size: 14px; }
   .modal label { display: block; font-size: 12px; color: var(--dim); margin: 10px 0 4px; }
@@ -126,6 +127,45 @@
   }
   .modal-actions .cancel { background: var(--panel); color: var(--text); }
   .modal-actions .confirm { background: var(--accent); color: white; }
+
+  /* --- Mobile: stack the two tester panes instead of squeezing them
+     side by side into unusable slivers. --- */
+  @media (max-width: 860px) {
+    header {
+      flex-wrap: wrap;
+    }
+    header h1 { font-size: 13px; }
+    #hint { display: none; }
+    main {
+      flex-direction: column;
+      overflow-y: auto;
+      overflow-x: hidden;
+    }
+    .pane {
+      border-right: none;
+      border-bottom: 2px solid var(--border);
+      flex: none;
+      height: 48vh;
+      min-height: 320px;
+    }
+    .pane:last-child { border-bottom: none; }
+    .channel-list {
+      width: 120px;
+    }
+    .chat-toolbar {
+      flex-wrap: wrap;
+      row-gap: 4px;
+    }
+  }
+
+  /* --- Very narrow phones: channel list gets tight, drop it further
+     and shrink the compose button so the input stays usable. --- */
+  @media (max-width: 420px) {
+    .channel-list { width: 96px; padding: 6px; }
+    .channel-item { font-size: 12px; padding: 6px; }
+    .compose button { padding: 8px 10px; }
+    .pane-hash { font-size: 10px; }
+  }
 </style>
 </head>
 <body>

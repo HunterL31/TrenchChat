@@ -7,7 +7,13 @@ API over uvicorn. Launched by orchestrator.py via multiprocessing.
 """
 
 import sys
+import threading
 from pathlib import Path
+
+# Matches main_window.py's _STARTUP_SYNC_DELAY_MS -- give the peer link a
+# moment to come up before requesting sync, same as the real GUI does via
+# QTimer.singleShot(_STARTUP_SYNC_DELAY_MS, self._sync_mgr.request_sync_all).
+_STARTUP_SYNC_DELAY_SECS = 3.0
 
 _TESTENV_DIR = Path(__file__).resolve().parent
 if str(_TESTENV_DIR) not in sys.path:
@@ -29,6 +35,7 @@ def run(tag: str, data_dir: str, display_name: str, role: str, listen_port: int,
     )
     backend.write_identity_file()
     backend.start_heartbeat(interval=15.0)
+    threading.Timer(_STARTUP_SYNC_DELAY_SECS, backend.sync_mgr.request_sync_all).start()
 
     app = create_app(backend)
     uvicorn.run(app, host="0.0.0.0", port=api_port, log_level="warning")
