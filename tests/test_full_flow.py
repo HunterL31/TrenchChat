@@ -87,7 +87,16 @@ class TestPublicChannelFullLifecycle:
         assert bob.storage.get_messages(ch_hash)[0]["content"] == "Hello everyone!"
         assert carol.storage.get_messages(ch_hash)[0]["content"] == "Hello everyone!"
 
-        # Bob replies to the group.
+        # Bob replies to the group. His own subscriber_mgr learns about
+        # Carol via a subscriber_list broadcast -- a separate async message
+        # from the greeting he just received, with no ordering guarantee
+        # relative to it. Confirm his local view has caught up before
+        # computing recipients from it, or his reply can legitimately
+        # exclude her (no bug, just an unwaited race in the test itself).
+        assert wait_for(
+            lambda: carol.identity.hash_hex in bob.subscription_mgr.get_subscribers(ch_hash),
+            timeout=5,
+        ), "Bob's local subscriber list never caught up to include Carol"
         bob_recipients = get_subscriber_hashes(bob, ch_hash)
         bob.messaging.send_message(
             channel_hash_hex=ch_hash,
