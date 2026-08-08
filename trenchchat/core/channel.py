@@ -76,6 +76,7 @@ class ChannelManager:
         )
         hash_hex = dest.hash.hex()
 
+        created_at = time.time()
         self._owned_destinations[hash_hex] = dest
         self._storage.upsert_channel(
             hash=hash_hex,
@@ -83,7 +84,7 @@ class ChannelManager:
             description=description,
             creator_hash=self._identity.hash_hex,
             permissions=permissions,
-            created_at=time.time(),
+            created_at=created_at,
         )
         self._storage.subscribe(hash_hex)
         self._storage.upsert_member(
@@ -92,6 +93,18 @@ class ChannelManager:
             display_name=self._identity.display_name,
             role=ROLE_OWNER,
         )
+        if not is_open_join(permissions):
+            # Without this, the owner never gets a membership_tenure row: when
+            # publish_member_list() runs right after channel creation (for
+            # invite-only channels), its old-vs-new member diff sees the owner
+            # as already present in both sets (added above) and never opens a
+            # tenure interval for them. was_member_at() then permanently
+            # returns False for the owner, so sync silently omits every one of
+            # their messages from every sync response to every peer, forever.
+            # Open-join channels are untouched here: tenure tracking is scoped
+            # to invite-only channels (has_any_tenure() gates the sync filter
+            # entirely, so a public channel must stay at zero tenure rows).
+            self._storage.open_tenure(hash_hex, self._identity.hash_hex, created_at)
         self.announce_channel(hash_hex)
         return hash_hex
 

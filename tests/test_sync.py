@@ -14,6 +14,7 @@ import pytest
 
 from tests.helpers import (
     wait_for,
+    wait_for_member,
     wait_for_message,
 )
 from trenchchat.core.messaging import _compute_message_id
@@ -416,12 +417,65 @@ class TestStartupSync:
             "Bob did not receive message via request_sync_all"
 
 
+class TestSyncOnChannelJoin:
+    def test_join_triggers_sync_request_to_channel_peers(self, peer_factory):
+        """
+        Regression test for: SyncManager never requested sync when a
+        channel_joined event fired. request_sync_all() only runs once, 3s
+        after app startup, over channels already subscribed at that
+        moment -- a channel joined later in the session was never covered,
+        so a new member never even asked anyone for history.
+
+        This only verifies the *request* goes out on join (the fix in
+        SyncManager). It does not assert the requester ends up with the
+        channel's pre-join history -- that also requires every message's
+        sender to have a locally-known membership_tenure interval covering
+        its timestamp, which for a brand-new joiner is only true for
+        activity within their own local view. Making a joiner trust an
+        existing member's *claimed* earlier history is a separate,
+        security-relevant design question (see the linked bug report) --
+        the signed member-list document carries no per-member join
+        timestamp, so there's no verified source for how far back to
+        trust someone without weakening the tenure/replay protections.
+        """
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+
+        ch_hash = alice.channel_mgr.create_channel("history-on-join", "", "invite")
+        alice.invite_mgr.publish_member_list(ch_hash)
+
+        # Spy on Bob's SyncManager -- his join is what should trigger an
+        # outbound sync request to Alice.
+        sync_requests_seen = []
+        orig_send_sync_request = bob.sync_mgr._send_sync_request
+
+        def spy(dest_hex, channel_hash_hex, since_ts):
+            sync_requests_seen.append((dest_hex, channel_hash_hex))
+            return orig_send_sync_request(dest_hex, channel_hash_hex, since_ts)
+
+        bob.sync_mgr._send_sync_request = spy
+
+        def on_invite(channel_hash_hex, channel_name, token, expiry, admin_hex):
+            bob.invite_mgr.send_join_request(channel_hash_hex, token, expiry, admin_hex)
+
+        bob.invite_mgr.add_invite_callback(on_invite)
+        alice.invite_mgr.send_invite(ch_hash, bob.identity.hash_hex)
+
+        assert wait_for_member(alice.storage, ch_hash, bob.identity.hash_hex, timeout=5), \
+            "Bob never joined"
+
+        assert wait_for(
+            lambda: any(dest == alice.identity.hash_hex and ch == ch_hash
+                       for dest, ch in sync_requests_seen),
+            timeout=5,
+        ), "Bob's SyncManager never sent a sync request to Alice after joining"
+
+
 # ---------------------------------------------------------------------------
 # Membership tenure — sync filtering
 # ---------------------------------------------------------------------------
 
 from trenchchat.core.permissions import PRESET_PRIVATE, ROLE_MEMBER, ROLE_OWNER, SEND_MESSAGE
-from tests.helpers import wait_for_member
 
 
 def _setup_invite_channel(peer_factory):
