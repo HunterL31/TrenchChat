@@ -1,0 +1,414 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>TrenchChat test environment</title>
+<style>
+  :root {
+    --bg: #1e1f22; --panel: #2b2d31; --panel2: #313338; --border: #3f4147;
+    --text: #dbdee1; --dim: #949ba4; --accent: #5865f2; --accent2: #4752c4;
+    --danger: #da373c; --ok: #23a55a;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; font-family: -apple-system, Segoe UI, Roboto, sans-serif;
+    background: var(--bg); color: var(--text); height: 100vh; display: flex;
+    flex-direction: column;
+  }
+  header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 10px 16px; background: var(--panel2); border-bottom: 1px solid var(--border);
+  }
+  header h1 { font-size: 15px; margin: 0; font-weight: 600; color: var(--dim); }
+  #reset-btn {
+    background: var(--danger); color: white; border: none; border-radius: 4px;
+    padding: 7px 14px; cursor: pointer; font-size: 13px; font-weight: 600;
+  }
+  #reset-btn:hover { background: #c62d31; }
+  #reset-btn:disabled { opacity: 0.5; cursor: default; }
+  main { flex: 1; display: flex; overflow: hidden; }
+  .pane {
+    flex: 1; display: flex; flex-direction: column; min-width: 0;
+    border-right: 1px solid var(--border);
+  }
+  .pane:last-child { border-right: none; }
+  .pane-header {
+    padding: 10px 14px; background: var(--panel2); border-bottom: 1px solid var(--border);
+  }
+  .pane-name { font-weight: 700; font-size: 14px; }
+  .pane-hash { font-size: 11px; color: var(--dim); font-family: monospace; }
+  .invite-bar {
+    display: none; align-items: center; justify-content: space-between;
+    background: #3a3f2a; border-bottom: 1px solid var(--border);
+    padding: 8px 14px; font-size: 12px;
+  }
+  .invite-bar.show { display: flex; }
+  .invite-bar button {
+    border: none; border-radius: 4px; padding: 4px 10px; font-size: 11px;
+    cursor: pointer; margin-left: 6px; color: white;
+  }
+  .invite-bar .accept { background: var(--ok); }
+  .invite-bar .decline { background: var(--danger); }
+  .pane-body { flex: 1; display: flex; overflow: hidden; }
+  .channel-list {
+    width: 200px; background: var(--panel); border-right: 1px solid var(--border);
+    overflow-y: auto; padding: 8px; flex-shrink: 0;
+  }
+  .channel-item {
+    padding: 7px 8px; border-radius: 4px; cursor: pointer; font-size: 13px;
+    color: var(--dim); margin-bottom: 2px;
+  }
+  .channel-item:hover { background: var(--panel2); }
+  .channel-item.active { background: var(--accent); color: white; }
+  .channel-item .badge {
+    font-size: 10px; opacity: 0.7; display: block;
+  }
+  .new-channel-btn {
+    width: 100%; margin-top: 6px; padding: 6px; background: var(--panel2);
+    color: var(--text); border: 1px dashed var(--border); border-radius: 4px;
+    cursor: pointer; font-size: 12px;
+  }
+  .new-channel-btn:hover { border-color: var(--accent); }
+  .chat-area { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  .chat-toolbar {
+    padding: 8px 12px; border-bottom: 1px solid var(--border); font-size: 12px;
+    color: var(--dim); display: flex; justify-content: space-between; align-items: center;
+  }
+  .chat-toolbar button {
+    background: var(--panel2); color: var(--text); border: 1px solid var(--border);
+    border-radius: 4px; padding: 4px 10px; font-size: 11px; cursor: pointer; margin-left: 6px;
+  }
+  .chat-toolbar button:hover { border-color: var(--accent); }
+  .messages { flex: 1; overflow-y: auto; padding: 10px 14px; font-size: 13px; }
+  .msg { margin-bottom: 8px; }
+  .msg .sender { font-weight: 700; margin-right: 6px; }
+  .msg .content { color: var(--text); }
+  .msg .self .sender { color: #ffa057; }
+  .empty-state { color: var(--dim); font-size: 12px; padding: 20px; text-align: center; }
+  .compose { display: flex; padding: 10px; border-top: 1px solid var(--border); gap: 8px; }
+  .compose input {
+    flex: 1; background: var(--panel2); border: 1px solid var(--border); border-radius: 4px;
+    color: var(--text); padding: 8px 10px; font-size: 13px;
+  }
+  .compose button {
+    background: var(--accent); color: white; border: none; border-radius: 4px;
+    padding: 8px 14px; cursor: pointer; font-size: 13px;
+  }
+  .compose button:hover { background: var(--accent2); }
+  .status-dot {
+    display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+    background: var(--dim); margin-right: 6px;
+  }
+  .status-dot.up { background: var(--ok); }
+  #toast {
+    position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%);
+    background: var(--panel2); border: 1px solid var(--border); border-radius: 6px;
+    padding: 10px 18px; font-size: 13px; display: none; z-index: 10;
+  }
+  .modal-backdrop {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.5); display: none;
+    align-items: center; justify-content: center; z-index: 20;
+  }
+  .modal-backdrop.show { display: flex; }
+  .modal {
+    background: var(--panel2); border: 1px solid var(--border); border-radius: 8px;
+    padding: 18px; width: 320px;
+  }
+  .modal h3 { margin: 0 0 12px 0; font-size: 14px; }
+  .modal label { display: block; font-size: 12px; color: var(--dim); margin: 10px 0 4px; }
+  .modal input, .modal select {
+    width: 100%; background: var(--bg); border: 1px solid var(--border); border-radius: 4px;
+    color: var(--text); padding: 7px 9px; font-size: 13px;
+  }
+  .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+  .modal-actions button {
+    padding: 7px 14px; border-radius: 4px; border: none; cursor: pointer; font-size: 12px;
+  }
+  .modal-actions .cancel { background: var(--panel); color: var(--text); }
+  .modal-actions .confirm { background: var(--accent); color: white; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>TrenchChat test environment &mdash; <span id="hint">two isolated testers, real backend, no manual key exchange</span></h1>
+  <button id="reset-btn" onclick="resetEnvironment()">Reset environment</button>
+</header>
+
+<main id="panes"></main>
+
+<div id="toast"></div>
+
+<div class="modal-backdrop" id="new-channel-modal">
+  <div class="modal">
+    <h3>New channel</h3>
+    <label>Name</label>
+    <input id="nc-name" placeholder="general">
+    <label>Access</label>
+    <select id="nc-access">
+      <option value="public">Public (open join)</option>
+      <option value="invite">Invite-only</option>
+    </select>
+    <div class="modal-actions">
+      <button class="cancel" onclick="closeNewChannelModal()">Cancel</button>
+      <button class="confirm" onclick="submitNewChannel()">Create</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const TESTERS = ['A', 'B'];
+const state = {
+  A: { port: null, me: null, channels: [], activeChannel: null, ws: null, invites: [] },
+  B: { port: null, me: null, channels: [], activeChannel: null, ws: null, invites: [] },
+};
+let newChannelForTag = null;
+
+function apiBase(tag) {
+  return `http://${location.hostname}:${state[tag].port}`;
+}
+function wsBase(tag) {
+  return `ws://${location.hostname}:${state[tag].port}`;
+}
+function other(tag) { return tag === 'A' ? 'B' : 'A'; }
+
+function toast(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.style.display = 'block';
+  clearTimeout(toast._t);
+  toast._t = setTimeout(() => t.style.display = 'none', 3000);
+}
+
+async function api(tag, path, opts) {
+  const res = await fetch(apiBase(tag) + path, opts);
+  if (!res.ok) throw new Error(`${tag} ${path} -> ${res.status}`);
+  return res.json();
+}
+
+function renderShell() {
+  const panes = document.getElementById('panes');
+  panes.innerHTML = TESTERS.map(tag => `
+    <div class="pane" id="pane-${tag}">
+      <div class="pane-header">
+        <div class="pane-name"><span class="status-dot" id="dot-${tag}"></span>Tester ${tag}</div>
+        <div class="pane-hash" id="hash-${tag}">connecting...</div>
+      </div>
+      <div class="invite-bar" id="invite-bar-${tag}">
+        <span id="invite-text-${tag}"></span>
+        <span>
+          <button class="accept" onclick="respondInvite('${tag}', true)">Accept</button>
+          <button class="decline" onclick="respondInvite('${tag}', false)">Decline</button>
+        </span>
+      </div>
+      <div class="pane-body">
+        <div class="channel-list">
+          <div id="channels-${tag}"></div>
+          <button class="new-channel-btn" onclick="openNewChannelModal('${tag}')">+ New channel</button>
+        </div>
+        <div class="chat-area">
+          <div class="chat-toolbar">
+            <span id="active-channel-${tag}">No channel selected</span>
+            <span>
+              <button onclick="inviteOther('${tag}')" title="Invite the other tester to this channel">Invite ${other(tag)}</button>
+            </span>
+          </div>
+          <div class="messages" id="messages-${tag}">
+            <div class="empty-state">Select or create a channel to get started.</div>
+          </div>
+          <div class="compose">
+            <input id="compose-${tag}" placeholder="Message..." onkeydown="if(event.key==='Enter') sendMessage('${tag}')">
+            <button onclick="sendMessage('${tag}')">Send</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  `).join('');
+}
+
+async function connectTester(tag) {
+  const cfg = await (await fetch('/config')).json();
+  state[tag].port = tag === 'A' ? cfg.a_api_port : cfg.b_api_port;
+
+  for (let i = 0; i < 20; i++) {
+    try {
+      state[tag].me = await api(tag, '/me');
+      break;
+    } catch (e) {
+      await new Promise(r => setTimeout(r, 500));
+    }
+  }
+  if (!state[tag].me) {
+    document.getElementById(`hash-${tag}`).textContent = 'failed to connect';
+    return;
+  }
+  document.getElementById(`dot-${tag}`).classList.add('up');
+  document.getElementById(`hash-${tag}`).textContent = state[tag].me.hash_hex.slice(0, 16) + '…';
+
+  await refreshChannels(tag);
+  await refreshInvites(tag);
+  connectWs(tag);
+}
+
+function connectWs(tag) {
+  const ws = new WebSocket(wsBase(tag) + '/ws');
+  ws.onmessage = (evt) => {
+    const msg = JSON.parse(evt.data);
+    if (msg.type === 'message' && msg.channel_hash === state[tag].activeChannel) {
+      renderMessages(tag);
+    } else if (msg.type === 'invite_received') {
+      toast(`Tester ${tag}: invite received for #${msg.channel_name}`);
+      refreshInvites(tag);
+    } else if (msg.type === 'channel_joined' || msg.type === 'member_list_updated') {
+      refreshChannels(tag);
+      if (msg.channel_hash === state[tag].activeChannel) renderMessages(tag);
+    }
+  };
+  ws.onclose = () => setTimeout(() => connectWs(tag), 2000);
+  state[tag].ws = ws;
+}
+
+async function refreshInvites(tag) {
+  state[tag].invites = await api(tag, '/invites');
+  const bar = document.getElementById(`invite-bar-${tag}`);
+  const text = document.getElementById(`invite-text-${tag}`);
+  if (state[tag].invites.length === 0) {
+    bar.classList.remove('show');
+    return;
+  }
+  const inv = state[tag].invites[0];
+  const more = state[tag].invites.length > 1 ? ` (+${state[tag].invites.length - 1} more)` : '';
+  text.textContent = `Invited to #${inv.channel_name}${more}`;
+  bar.classList.add('show');
+  bar.dataset.channelHash = inv.channel_hash_hex;
+}
+
+async function respondInvite(tag, accept) {
+  const bar = document.getElementById(`invite-bar-${tag}`);
+  const channelHash = bar.dataset.channelHash;
+  if (!channelHash) return;
+  await api(tag, `/invites/${channelHash}/${accept ? 'accept' : 'decline'}`, {method: 'POST'});
+  await refreshInvites(tag);
+  if (accept) toast(`Tester ${tag}: join request sent, waiting for admin approval`);
+}
+
+async function refreshChannels(tag) {
+  state[tag].channels = await api(tag, '/channels');
+  const list = document.getElementById(`channels-${tag}`);
+  if (state[tag].channels.length === 0) {
+    list.innerHTML = '<div class="empty-state">No channels yet</div>';
+    return;
+  }
+  list.innerHTML = state[tag].channels.map(c => `
+    <div class="channel-item ${c.hash === state[tag].activeChannel ? 'active' : ''}"
+        onclick="selectChannel('${tag}', '${c.hash}')">
+      #${c.name}
+      <span class="badge">${c.open_join ? 'public' : 'invite-only'}</span>
+    </div>
+  `).join('');
+}
+
+async function selectChannel(tag, hash) {
+  state[tag].activeChannel = hash;
+  await refreshChannels(tag);
+  const ch = state[tag].channels.find(c => c.hash === hash);
+  document.getElementById(`active-channel-${tag}`).textContent = ch ? `#${ch.name}` : hash;
+  await renderMessages(tag);
+}
+
+async function renderMessages(tag) {
+  if (!state[tag].activeChannel) return;
+  const msgs = await api(tag, `/channels/${state[tag].activeChannel}/messages`);
+  const box = document.getElementById(`messages-${tag}`);
+  if (msgs.length === 0) {
+    box.innerHTML = '<div class="empty-state">No messages yet</div>';
+    return;
+  }
+  const myHash = state[tag].me.hash_hex;
+  box.innerHTML = msgs.map(m => `
+    <div class="msg ${m.sender_hash === myHash ? 'self' : ''}">
+      <span class="sender">${escapeHtml(m.sender_name || m.sender_hash.slice(0, 8))}</span>
+      <span class="content">${escapeHtml(m.content)}</span>
+    </div>
+  `).join('');
+  box.scrollTop = box.scrollHeight;
+}
+
+function escapeHtml(s) {
+  const d = document.createElement('div');
+  d.textContent = s || '';
+  return d.innerHTML;
+}
+
+async function sendMessage(tag) {
+  const input = document.getElementById(`compose-${tag}`);
+  const content = input.value.trim();
+  if (!content || !state[tag].activeChannel) return;
+  input.value = '';
+  const result = await api(tag, `/channels/${state[tag].activeChannel}/messages`, {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({content}),
+  });
+  if (!result.ok) toast(`Tester ${tag}: message not sent (permission?)`);
+  await renderMessages(tag);
+}
+
+async function inviteOther(tag) {
+  if (!state[tag].activeChannel) { toast('Select a channel first'); return; }
+  const target = other(tag);
+  if (!state[target].me) { toast(`Tester ${target} not connected yet`); return; }
+  await api(tag, `/channels/${state[tag].activeChannel}/invite`, {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({peer_hash_hex: state[target].me.hash_hex}),
+  });
+  toast(`Invite sent to Tester ${target}`);
+}
+
+function openNewChannelModal(tag) {
+  newChannelForTag = tag;
+  document.getElementById('nc-name').value = '';
+  document.getElementById('new-channel-modal').classList.add('show');
+}
+function closeNewChannelModal() {
+  document.getElementById('new-channel-modal').classList.remove('show');
+}
+async function submitNewChannel() {
+  const name = document.getElementById('nc-name').value.trim();
+  const access = document.getElementById('nc-access').value;
+  if (!name || !newChannelForTag) return;
+  const tag = newChannelForTag;
+  closeNewChannelModal();
+  const result = await api(tag, '/channels', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({name, access}),
+  });
+  await refreshChannels(tag);
+  await selectChannel(tag, result.hash);
+}
+
+async function resetEnvironment() {
+  const btn = document.getElementById('reset-btn');
+  btn.disabled = true;
+  btn.textContent = 'Resetting...';
+  TESTERS.forEach(tag => {
+    if (state[tag].ws) state[tag].ws.close();
+    state[tag] = { port: null, me: null, channels: [], activeChannel: null, ws: null, invites: [] };
+  });
+  renderShell();
+  try {
+    const res = await fetch('/reset', {method: 'POST'});
+    const body = await res.json();
+    if (!body.ok) toast('Reset had trouble bringing both testers back up');
+  } catch (e) {
+    toast('Reset request failed: ' + e);
+  }
+  await Promise.all(TESTERS.map(connectTester));
+  btn.disabled = false;
+  btn.textContent = 'Reset environment';
+}
+
+renderShell();
+TESTERS.forEach(connectTester);
+</script>
+</body>
+</html>

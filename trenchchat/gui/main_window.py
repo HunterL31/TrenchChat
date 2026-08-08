@@ -28,10 +28,11 @@ from PyQt6.QtCore import Qt, pyqtSlot, QPoint, pyqtSignal, QTimer, QSettings
 from PyQt6.QtGui import QAction, QColor, QFont
 
 from trenchchat.config import Config
+from trenchchat.core import actions
 from trenchchat.core.identity import Identity
 from trenchchat.core.image import prepare_image, MAX_IMAGE_BYTES
 from trenchchat.core.permissions import (
-    INVITE, KICK, MANAGE_CHANNEL, MANAGE_ROLES, SEND_MESSAGE, PRESETS, PRESET_PRIVATE,
+    INVITE, MANAGE_CHANNEL, SEND_MESSAGE, PRESETS, PRESET_PRIVATE,
     is_discoverable, is_open_join, permissions_from_json,
 )
 from trenchchat.core.presence import PresenceManager, resolve_display_name
@@ -729,9 +730,7 @@ class MainWindow(QMainWindow):
         channel_hash = dlg.selected_channel_hash
         if not channel_hash:
             return
-        channel = self._storage.get_channel(channel_hash)
-        owner_hash = channel["creator_hash"] if channel else None
-        self._subscription_mgr.subscribe(channel_hash, owner_hash)
+        actions.join_public_channel(self._storage, self._subscription_mgr, channel_hash)
         self._refresh_channel_list()
         self._switch_to_channel(channel_hash)
 
@@ -756,13 +755,10 @@ class MainWindow(QMainWindow):
         if not name:
             QMessageBox.warning(self, "TrenchChat", "Channel name cannot be empty.")
             return
-        hash_hex = self._channel_mgr.create_channel(
-            name=name,
-            description=dlg.description,
-            permissions=dlg.permissions,
+        hash_hex = actions.create_channel(
+            self._channel_mgr, self._invite_mgr,
+            name=name, description=dlg.description, permissions=dlg.permissions,
         )
-        if not is_open_join(dlg.permissions):
-            self._invite_mgr.publish_member_list(hash_hex)
         self._refresh_channel_list()
         self._switch_to_channel(hash_hex)
 
@@ -773,24 +769,6 @@ class MainWindow(QMainWindow):
         if not self._current_channel:
             return
 
-        channel = self._storage.get_channel(self._current_channel)
-        perms = permissions_from_json(channel["permissions"]) if channel else {}
-        if channel and not is_open_join(perms):
-            if not self._storage.has_permission(
-                self._current_channel, self._identity.hash_hex, SEND_MESSAGE
-            ):
-                return
-            all_dests = [
-                row["identity_hash"]
-                for row in self._storage.get_members(self._current_channel)
-            ]
-        else:
-            subs = self._subscription_mgr.get_subscribers(self._current_channel)
-            all_dests = list(subs) if subs else []
-            # Always include self so the message is stored locally even with no subscribers.
-            if self._identity.hash_hex not in all_dests:
-                all_dests.append(self._identity.hash_hex)
-
         image_data: bytes | None = None
         if raw_image:
             try:
@@ -800,12 +778,13 @@ class MainWindow(QMainWindow):
                 if len(bytes(raw_image)) <= MAX_IMAGE_BYTES:
                     image_data = bytes(raw_image)
 
-        self._messaging.send_message(
-            channel_hash_hex=self._current_channel,
-            content=text,
-            subscriber_hashes=all_dests,
+        sent = actions.send_message(
+            self._storage, self._subscription_mgr, self._messaging,
+            self._current_channel, self._identity.hash_hex, text,
             image_data=image_data,
         )
+        if not sent:
+            return
         # Refresh our own view immediately (message was stored locally in send_message)
         if self._current_channel in self._channel_views:
             msg_id = self._storage.get_latest_message_id(self._current_channel)
@@ -916,19 +895,12 @@ class MainWindow(QMainWindow):
             self,
         )
         dlg.exec()
-        my_hex = self._identity.hash_hex
-        can_kick = self._storage.has_permission(channel_hash, my_hex, KICK)
-        can_manage_roles = self._storage.has_permission(channel_hash, my_hex, MANAGE_ROLES)
-        remove_members = [m for m in dlg.members_to_remove] if can_kick else []
-        add_admins = [a for a in dlg.admins_to_add] if can_manage_roles else []
-        remove_admins = [a for a in dlg.admins_to_remove] if can_manage_roles else []
-        if remove_members or add_admins or remove_admins:
-            self._invite_mgr.publish_member_list(
-                channel_hash,
-                remove_members=remove_members or None,
-                add_admins=add_admins or None,
-                remove_admins=remove_admins or None,
-            )
+        actions.update_membership(
+            self._storage, self._invite_mgr, channel_hash, self._identity.hash_hex,
+            remove_members=dlg.members_to_remove,
+            add_admins=dlg.admins_to_add,
+            remove_admins=dlg.admins_to_remove,
+        )
 
     def _on_edit_permissions(self, channel_hash: str, channel_name: str):
         if not self._storage.has_permission(channel_hash, self._identity.hash_hex, MANAGE_CHANNEL):
@@ -938,8 +910,10 @@ class MainWindow(QMainWindow):
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
         new_perms = dlg.permissions
-        self._storage.set_channel_permissions(channel_hash, new_perms)
-        self._invite_mgr.broadcast_permissions(channel_hash)
+        actions.edit_channel_permissions(
+            self._storage, self._invite_mgr, channel_hash,
+            self._identity.hash_hex, new_perms,
+        )
         self._refresh_channel_list()
         if self._current_channel == channel_hash:
             self._switch_to_channel(channel_hash)
@@ -953,8 +927,7 @@ class MainWindow(QMainWindow):
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
         if confirm == QMessageBox.StandardButton.Yes:
-            owner_hash = channel["creator_hash"] if channel else None
-            self._subscription_mgr.unsubscribe(channel_hash, owner_hash)
+            actions.leave_channel(self._storage, self._subscription_mgr, channel_hash)
             if channel_hash in self._channel_views:
                 view = self._channel_views.pop(channel_hash)
                 self._stack.removeWidget(view)
@@ -1056,21 +1029,14 @@ class MainWindow(QMainWindow):
     def _get_reaction_peers(self, channel_hash_hex: str) -> list[str]:
         """Return the list of peers to broadcast a reaction to.
 
-        Uses the same dual-path logic as _on_send_message: member table for
-        invite-only channels, subscriber list for open-join channels.
+        Delegates to actions.compute_channel_recipients -- the same
+        recipient logic _on_send_message uses (minus the SEND_MESSAGE
+        gate, which doesn't apply to reactions).
         """
-        channel = self._storage.get_channel(channel_hash_hex)
-        perms = permissions_from_json(channel["permissions"]) if channel else {}
-        if channel and not is_open_join(perms):
-            return [
-                row["identity_hash"]
-                for row in self._storage.get_members(channel_hash_hex)
-            ]
-        subs = self._subscription_mgr.get_subscribers(channel_hash_hex)
-        peers = list(subs) if subs else []
-        if self._identity.hash_hex not in peers:
-            peers.append(self._identity.hash_hex)
-        return peers
+        return actions.compute_channel_recipients(
+            self._storage, self._subscription_mgr, channel_hash_hex,
+            self._identity.hash_hex,
+        )
 
     def _do_add_reaction(self, channel_hash_hex: str, message_id: str,
                          emoji_hash: str) -> None:
