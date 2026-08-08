@@ -57,7 +57,7 @@ class KickRequest(BaseModel):
 
 def _channel_to_dict(row) -> dict[str, Any]:
     return {
-        "hash": row["channel_hash"],
+        "hash": row["hash"],
         "name": row["name"],
         "description": row["description"],
         "creator_hash": row["creator_hash"],
