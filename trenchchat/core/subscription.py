@@ -59,7 +59,16 @@ class SubscriptionManager:
     # --- subscriber list (owner side) ---
 
     def get_subscribers(self, channel_hash_hex: str) -> set[str]:
-        return self._subscribers.get(channel_hash_hex, set())
+        """Return a snapshot of the current subscriber set.
+
+        Returns a copy, not the live internal set: RNS/LXMF delivery
+        callbacks mutate the internal set in place from background
+        threads (_add_subscriber/_remove_subscriber), so callers that
+        iterate the live set (including our own _broadcast_subscriber_list)
+        can otherwise race a concurrent mutation and raise
+        "set changed size during iteration".
+        """
+        return set(self._subscribers.get(channel_hash_hex, set()))
 
     def _add_subscriber(self, channel_hash_hex: str, identity_hex: str):
         if channel_hash_hex not in self._subscribers:
