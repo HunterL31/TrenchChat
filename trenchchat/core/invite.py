@@ -72,16 +72,24 @@ def _recover_owners(owners: list[bytes], admins: list[bytes],
 def _signed_payload(channel_hash: bytes, version: int, published_at: float,
                     members: list[bytes], admins: list[bytes],
                     owners: list[bytes] | None = None,
-                    permissions_blob: bytes = b"") -> bytes:
+                    permissions_blob: bytes = b"",
+                    joined_at: dict[bytes, float] | None = None) -> bytes:
     """Build the payload that gets signed.
 
     If *owners* is provided the v2 format is used (includes owners and
-    permissions_blob).  Otherwise the v1 format is used for backward compat.
+    permissions_blob). If *joined_at* is also provided the v3 format is
+    used, additionally covering each member's original join timestamp so
+    a peer seeing the roster for the first time can trust how far back
+    into history that member's messages go, instead of only trusting
+    messages from the moment the peer personally observed them. Each
+    earlier format is backward compatible with the last.
     """
     items: list = [channel_hash, version, published_at,
                    sorted(members), sorted(admins)]
     if owners is not None:
         items.extend([sorted(owners), permissions_blob])
+    if joined_at is not None:
+        items.append(sorted(joined_at.items()))
     return msgpack.packb(items, use_bin_type=True)
 
 
@@ -139,14 +147,17 @@ class InviteManager:
                         members: list[bytes], admins: list[bytes],
                         version: int, published_at: float,
                         owners: list[bytes] | None = None,
-                        permissions: dict | None = None) -> dict:
+                        permissions: dict | None = None,
+                        joined_at: dict[bytes, float] | None = None) -> dict:
         if owners is None:
             owners = []
+        if joined_at is None:
+            joined_at = {}
         permissions_blob = (msgpack.packb(permissions, use_bin_type=True)
                             if permissions else b"")
         payload = _signed_payload(
             bytes.fromhex(channel_hash_hex), version, published_at,
-            members, admins, owners, permissions_blob,
+            members, admins, owners, permissions_blob, joined_at,
         )
         sig = _sign(self._identity.rns_identity, payload)
         return {
@@ -157,6 +168,7 @@ class InviteManager:
             "admins":       admins,
             "owners":       owners,
             "permissions":  permissions_blob,
+            "joined_at":    joined_at,
             "signatures":   {self._identity.hash: sig},
         }
 
@@ -203,8 +215,16 @@ class InviteManager:
                 # No local record at all — bootstrap: trust the doc's own signers.
                 trusted_signers = set(admins_in_doc) | set(owners_in_doc)
 
+        is_v3 = "joined_at" in doc
         is_v2 = "owners" in doc
-        if is_v2:
+        if is_v3:
+            payload = _signed_payload(
+                doc["channel_hash"], doc["version"], doc["published_at"],
+                doc["members"], admins_in_doc,
+                owners_in_doc, doc.get("permissions", b""),
+                doc["joined_at"],
+            )
+        elif is_v2:
             payload = _signed_payload(
                 doc["channel_hash"], doc["version"], doc["published_at"],
                 doc["members"], admins_in_doc,
@@ -305,9 +325,19 @@ class InviteManager:
             member_rows.append((m_hex, "", role))
         self._storage.replace_members(channel_hash_hex, member_rows)
 
-        # Update tenure log: close intervals for removed members, open for added
+        # Update tenure log: close intervals for removed members, open for added.
+        # doc["joined_at"] (signed, so not spoofable by an untrusted party --
+        # the signer must already be a trusted admin/owner per the check
+        # above) carries each member's real original join time, so a peer
+        # seeing this roster for the first time can trust history further
+        # back than the moment they personally observed it. Falls back to
+        # new_ts for documents from before this field existed.
+        joined_at_map = {
+            m.hex(): ts for m, ts in doc.get("joined_at", {}).items()
+        }
         self._storage.update_tenure(
-            channel_hash_hex, old_member_hashes, new_member_hashes, new_ts
+            channel_hash_hex, old_member_hashes, new_member_hashes, new_ts,
+            joined_at_map=joined_at_map,
         )
 
         # Apply permissions from the document if present
@@ -406,9 +436,21 @@ class InviteManager:
                  if channel and channel["permissions"] else None)
 
         published_at = time.time()
+
+        # Each member's real join time, not just "now": continuing members
+        # keep the joined_at we already have on file for them (our own
+        # local tenure log is authoritative for that); a member appearing
+        # for the first time in this call is genuinely joining right now.
+        joined_at = {
+            m: (self._storage.get_open_tenure_joined_at(channel_hash_hex, m.hex())
+                or published_at)
+            for m in members
+        }
+
         doc = self._build_document(channel_hash_hex, members, admins,
                                    version, published_at,
-                                   owners=owners, permissions=perms)
+                                   owners=owners, permissions=perms,
+                                   joined_at=joined_at)
         self._accept_document(doc, channel_hash_hex)
         self._broadcast_member_list(channel_hash_hex, doc)
 
@@ -581,6 +623,8 @@ class InviteManager:
                         doc_clean["owners"] = list(doc[b"owners"])
                     if b"permissions" in doc:
                         doc_clean["permissions"] = doc[b"permissions"]
+                    if b"joined_at" in doc:
+                        doc_clean["joined_at"] = dict(doc[b"joined_at"])
                     accepted = self._accept_document(doc_clean, channel_hash_hex)
                     RNS.log(f"TrenchChat [invite]: member list update v{doc_clean['version']} "
                             f"for {channel_hash_hex[:12]}… — {'accepted' if accepted else 'rejected'}",

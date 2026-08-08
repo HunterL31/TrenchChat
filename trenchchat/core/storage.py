@@ -696,16 +696,21 @@ class Storage:
             """, (left_at, channel_hash, identity_hash, channel_hash, identity_hash))
 
     def update_tenure(self, channel_hash: str, old_members: set[str],
-                      new_members: set[str], published_at: float):
+                      new_members: set[str], published_at: float,
+                      joined_at_map: dict[str, float] | None = None):
         """Diff old vs new member sets and update tenure records accordingly.
 
         Members in old_members but not new_members get their open interval
         closed at published_at.  Members in new_members but not old_members
-        get a new open interval starting at published_at.  Members in both
-        sets are unchanged.
+        get a new open interval starting at published_at, UNLESS
+        joined_at_map supplies that member's real (signed, so trusted)
+        original join time -- letting a peer seeing this roster for the
+        first time trust history further back than the moment they
+        personally observed it. Members in both sets are unchanged.
         """
         removed = old_members - new_members
         added = new_members - old_members
+        joined_at_map = joined_at_map or {}
         with self._tx():
             for ih in removed:
                 self._conn.execute("""
@@ -718,11 +723,29 @@ class Storage:
                       )
                 """, (published_at, channel_hash, ih, channel_hash, ih))
             for ih in added:
+                # Clamp: never in the future relative to this document's own
+                # publish time, never negative. The signer is already
+                # trusted (checked before this is ever called) to attest to
+                # membership at all; this just bounds how far a claimed
+                # join time can stray from something sane.
+                joined_at = joined_at_map.get(ih, published_at)
+                joined_at = min(max(joined_at, 0.0), published_at)
                 self._conn.execute("""
                     INSERT OR IGNORE INTO membership_tenure
                         (channel_hash, identity_hash, joined_at, left_at)
                     VALUES (?, ?, ?, NULL)
-                """, (channel_hash, ih, published_at))
+                """, (channel_hash, ih, joined_at))
+
+    def get_open_tenure_joined_at(self, channel_hash: str,
+                                  identity_hash: str) -> float | None:
+        """Return the joined_at of this identity's current open tenure
+        interval on this channel, or None if they have no open interval."""
+        row = self._fetchone("""
+            SELECT joined_at FROM membership_tenure
+            WHERE channel_hash = ? AND identity_hash = ? AND left_at IS NULL
+            ORDER BY joined_at DESC LIMIT 1
+        """, (channel_hash, identity_hash))
+        return row["joined_at"] if row else None
 
     def was_member_at(self, channel_hash: str, identity_hash: str,
                       timestamp: float) -> bool:

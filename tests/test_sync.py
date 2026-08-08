@@ -470,6 +470,84 @@ class TestSyncOnChannelJoin:
             timeout=5,
         ), "Bob's SyncManager never sent a sync request to Alice after joining"
 
+    def test_new_member_receives_history_from_before_they_joined(self, peer_factory):
+        """
+        End-to-end: joining an invite-only channel backfills the channel's
+        existing history, not just future messages.
+
+        This depends on the member-list document carrying each member's
+        real (signed) original join time (invite.py's joined_at field) --
+        without it, a new joiner's local tenure view only starts at the
+        moment they personally observed each member, and an existing
+        member's genuinely older messages get filtered by the *receiver's*
+        own tenure check even once the sync request itself is working.
+        """
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+
+        ch_hash = alice.channel_mgr.create_channel("history-on-join", "", "invite")
+        alice.invite_mgr.publish_member_list(ch_hash)
+
+        alice.messaging.send_message(
+            channel_hash_hex=ch_hash,
+            content="sent before Bob was even invited",
+            subscriber_hashes=[alice.identity.hash_hex],
+        )
+        pre_join_id = alice.storage.get_messages(ch_hash)[0]["message_id"]
+
+        def on_invite(channel_hash_hex, channel_name, token, expiry, admin_hex):
+            bob.invite_mgr.send_join_request(channel_hash_hex, token, expiry, admin_hex)
+
+        bob.invite_mgr.add_invite_callback(on_invite)
+        alice.invite_mgr.send_invite(ch_hash, bob.identity.hash_hex)
+
+        assert wait_for_member(alice.storage, ch_hash, bob.identity.hash_hex, timeout=5), \
+            "Bob never joined"
+
+        assert wait_for_message(bob.storage, ch_hash, pre_join_id, timeout=5), \
+            "Bob did not receive the message Alice sent before he joined"
+
+    def test_forged_tenure_claim_from_untrusted_signer_still_rejected(self, peer_factory):
+        """
+        Security regression test: joined_at only extends trust as far as
+        the signer was already trusted to vouch for -- it must not let an
+        untrusted party inject messages attributed to someone who was
+        never actually a legitimately-signed member.
+
+        Bob crafts a member-list doc claiming Carol has been a member
+        since the dawn of time (and signs it himself, since he's not an
+        admin and has no legitimate signature to offer). Alice must
+        reject the whole document, same as she would without any
+        joined_at claim at all -- _validate_document's signer-trust check
+        runs before joined_at is ever consulted.
+        """
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+        carol = peer_factory("carol")
+
+        ch_hash = alice.channel_mgr.create_channel("no-forged-tenure", "", "invite")
+        alice.invite_mgr.publish_member_list(ch_hash, add_members=[bob.identity.hash])
+        assert wait_for_member(alice.storage, ch_hash, bob.identity.hash_hex, timeout=5)
+
+        bob.storage.upsert_channel(ch_hash, "no-forged-tenure", "", alice.identity.hash_hex,
+                                   "invite", time.time())
+        bob.storage.subscribe(ch_hash)
+
+        forged_doc = bob.invite_mgr._build_document(
+            ch_hash,
+            members=[alice.identity.hash, bob.identity.hash, carol.identity.hash],
+            admins=[alice.identity.hash],
+            version=99,
+            published_at=time.time(),
+            owners=[alice.identity.hash],
+            joined_at={carol.identity.hash: 0.0},  # claims Carol joined at the Unix epoch
+        )
+        accepted = alice.invite_mgr._accept_document(forged_doc, ch_hash)
+
+        assert not accepted, "Alice accepted a member list doc signed by a non-admin"
+        assert not alice.storage.is_member(ch_hash, carol.identity.hash_hex), \
+            "Carol was added to Alice's member list via a forged, unsigned-by-a-trusted-party doc"
+
 
 # ---------------------------------------------------------------------------
 # Membership tenure — sync filtering
