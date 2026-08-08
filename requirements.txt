@@ -1,5 +1,5 @@
-rns
-lxmf
+rns>=1.4.2
+lxmf>=1.1.1
 PyQt6
 msgpack
 configobj

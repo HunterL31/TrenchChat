@@ -7,8 +7,8 @@ name = "TrenchChat"
 version = "0.1.0"
 requires-python = ">=3.10"
 dependencies = [
-    "rns",
-    "lxmf",
+    "rns>=1.4.2",
+    "lxmf>=1.1.1",
     "PyQt6",
     "msgpack",
     "configobj",
