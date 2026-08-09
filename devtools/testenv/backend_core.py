@@ -88,6 +88,7 @@ class Backend:
         rns_dir = data_dir / "reticulum"
         _write_reticulum_config(rns_dir, instance_name, role,
                                 listen_port, peer_host, peer_port)
+        self.rns_config_path = str(rns_dir / "config")
 
         self.config = Config(data_dir=data_dir)
         self.config.display_name = display_name

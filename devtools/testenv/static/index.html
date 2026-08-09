@@ -246,6 +246,17 @@
   </div>
 </div>
 
+<div class="modal-backdrop" id="network-modal">
+  <div class="modal" style="width:min(560px, 92vw)">
+    <h3>Network &mdash; <span id="net-title"></span></h3>
+    <div id="net-content" style="max-height:60vh; overflow-y:auto; font-size:12px;"></div>
+    <div class="modal-actions">
+      <button class="cancel" onclick="refreshNetworkModal()">Refresh</button>
+      <button class="confirm" onclick="closeNetworkModal()">Close</button>
+    </div>
+  </div>
+</div>
+
 <div class="modal-backdrop" id="invite-modal">
   <div class="modal">
     <h3>Invite a peer</h3>
@@ -351,6 +362,7 @@ function renderShell() {
             <span id="active-channel-${tag}">No channel selected</span>
             <span>
               <button onclick="openInviteModal('${tag}')" title="Search the peer directory and invite someone to this channel">Invite...</button>
+              <button onclick="openNetworkModal('${tag}')" title="View network topology and configured interfaces">Network</button>
             </span>
           </div>
           <div class="messages" id="messages-${tag}">
@@ -754,6 +766,53 @@ async function submitNewChannel() {
   await selectChannel(tag, result.hash);
 }
 
+let networkForTag = null;
+
+async function openNetworkModal(tag) {
+  networkForTag = tag;
+  document.getElementById('net-title').textContent = `Tester ${tag}`;
+  document.getElementById('network-modal').classList.add('show');
+  await refreshNetworkModal();
+}
+function closeNetworkModal() {
+  document.getElementById('network-modal').classList.remove('show');
+  networkForTag = null;
+}
+async function refreshNetworkModal() {
+  if (!networkForTag) return;
+  const tag = networkForTag;
+  const [map, ifaces] = await Promise.all([
+    api(tag, '/network/map'),
+    api(tag, '/reticulum/interfaces'),
+  ]);
+  const ifaceRows = ifaces.map(i => `
+    <tr>
+      <td>${escapeHtml(i.name)}</td><td>${escapeHtml(i.type)}</td>
+      <td>${i.enabled ? 'yes' : 'no'}</td>
+      <td>${i.status === null ? '—' : (i.status ? 'online' : 'offline')}</td>
+      <td>${i.rxb ?? '—'}</td><td>${i.txb ?? '—'}</td>
+    </tr>`).join('');
+  const nodeRows = map.nodes.map(n => `
+    <tr><td>${escapeHtml(n.label || n.id.slice(0, 10))}</td><td>${n.kind}</td><td>${n.hops}</td></tr>
+  `).join('');
+  document.getElementById('net-content').innerHTML = `
+    <div><b>Stats:</b> ${map.stats.node_count} nodes, ${map.stats.path_count} paths,
+      ${map.stats.interface_count} interfaces</div>
+    <h4 style="margin:10px 0 4px;">Interfaces</h4>
+    <table style="width:100%; border-collapse:collapse;">
+      <tr style="color:var(--dim); text-align:left;">
+        <th>Name</th><th>Type</th><th>Enabled</th><th>Status</th><th>Rx</th><th>Tx</th>
+      </tr>
+      ${ifaceRows || '<tr><td colspan="6">none configured</td></tr>'}
+    </table>
+    <h4 style="margin:10px 0 4px;">Nodes</h4>
+    <table style="width:100%; border-collapse:collapse;">
+      <tr style="color:var(--dim); text-align:left;"><th>Label</th><th>Kind</th><th>Hops</th></tr>
+      ${nodeRows || '<tr><td colspan="3">none</td></tr>'}
+    </table>
+  `;
+}
+
 async function resetEnvironment() {
   const btn = document.getElementById('reset-btn');
   btn.disabled = true;
@@ -765,6 +824,7 @@ async function resetEnvironment() {
     emojiLibrary[tag] = [];
   });
   closeEmojiPicker();
+  closeNetworkModal();
   renderShell();
   try {
     const res = await fetch('/reset', {method: 'POST'});

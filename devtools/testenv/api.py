@@ -228,6 +228,46 @@ def create_app(backend: Backend) -> FastAPI:
             "is_online": backend.presence_mgr.is_online(peer_hash),
         }
 
+    @app.get("/network/map")
+    def get_network_map():
+        # Same free function NetworkMapDialog calls -- no GUI coupling.
+        from trenchchat.gui.network_map import gather_network_data
+        return gather_network_data(backend.rns, backend.identity.hash_hex, backend.storage)
+
+    @app.get("/reticulum/interfaces")
+    def get_interfaces():
+        # Same data source InterfacesWidget.load_interfaces() merges: the
+        # configured [interfaces] section plus live rns.get_interface_stats().
+        # Read-only -- live editing is a separate, bigger scope-add.
+        from trenchchat.gui.interfaces_widget import load_interfaces_config
+
+        cfg_interfaces = load_interfaces_config(backend.rns_config_path)
+        try:
+            stats_result = backend.rns.get_interface_stats()
+            stats_list = stats_result.get("interfaces", []) if stats_result else []
+        except Exception:
+            stats_list = []
+        stats_by_name: dict[str, dict] = {}
+        for iface in stats_list:
+            name = iface.get("name", "")
+            short = iface.get("short_name", name)
+            stats_by_name[name] = iface
+            stats_by_name[short] = iface
+
+        result = []
+        for name, cfg in cfg_interfaces.items():
+            stats = stats_by_name.get(name, {})
+            enabled_str = cfg.get("enabled", cfg.get("interface_enabled", "Yes"))
+            result.append({
+                "name": name,
+                "type": cfg.get("type", "Unknown"),
+                "enabled": enabled_str.lower() in ("yes", "true", "1"),
+                "status": stats.get("status"),
+                "rxb": stats.get("rxb"),
+                "txb": stats.get("txb"),
+            })
+        return result
+
     @app.get("/directory")
     def search_directory(q: str = ""):
         results = backend.user_directory.search(q)
