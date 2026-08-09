@@ -102,6 +102,32 @@
   .msg .sender { font-weight: 700; margin-right: 6px; }
   .msg .content { color: var(--text); }
   .msg .self .sender { color: #ffa057; }
+  .msg-row { display: flex; align-items: flex-start; gap: 2px; }
+  .msg-body { flex: 1; min-width: 0; }
+  .react-btn {
+    background: none; border: none; color: var(--dim); cursor: pointer; font-size: 12px;
+    padding: 0 4px; opacity: 0; visibility: hidden;
+  }
+  .msg:hover .react-btn { opacity: 1; visibility: visible; }
+  .reactions { margin-top: 2px; display: flex; flex-wrap: wrap; gap: 4px; }
+  .reaction-chip {
+    display: inline-flex; align-items: center; gap: 4px; background: var(--panel2);
+    border: 1px solid var(--border); border-radius: 10px; padding: 1px 7px 1px 4px;
+    cursor: pointer; font-size: 11px;
+  }
+  .reaction-chip.mine { border-color: var(--accent); background: #333a6b; }
+  .reaction-chip img { width: 14px; height: 14px; object-fit: contain; }
+  .emoji-picker {
+    position: absolute; background: var(--panel2); border: 1px solid var(--border);
+    border-radius: 6px; padding: 8px; z-index: 30; display: flex; flex-wrap: wrap;
+    gap: 6px; width: 180px;
+  }
+  .emoji-picker img { width: 24px; height: 24px; object-fit: contain; cursor: pointer; }
+  .emoji-picker .empty-state { padding: 4px; width: 100%; }
+  .emoji-picker .import-row { width: 100%; border-top: 1px solid var(--border); margin-top: 6px; padding-top: 6px; }
+  .emoji-picker .import-row label {
+    font-size: 11px; color: var(--dim); cursor: pointer; text-decoration: underline;
+  }
   .empty-state { color: var(--dim); font-size: 12px; padding: 20px; text-align: center; }
   .compose { display: flex; padding: 10px; border-top: 1px solid var(--border); gap: 8px; }
   .compose input {
@@ -365,6 +391,7 @@ async function connectTester(tag) {
   connectWs(tag);
   refreshPeerPresence(tag);
   refreshOwnAvatar(tag);
+  refreshEmojiLibrary(tag);
 }
 
 function avatarDataUrl(b64) {
@@ -455,6 +482,12 @@ function connectWs(tag) {
       delete avatarCache[tag][msg.identity_hash];
       if (state[tag].me && msg.identity_hash === state[tag].me.hash_hex) refreshOwnAvatar(tag);
       if (state[tag].activeChannel) renderMessages(tag);
+    } else if (msg.type === 'reaction_updated') {
+      if (msg.channel_hash === state[tag].activeChannel) renderMessages(tag);
+    } else if (msg.type === 'emoji_received') {
+      refreshEmojiLibrary(tag).then(() => {
+        if (state[tag].activeChannel) renderMessages(tag);
+      });
     }
   };
   ws.onclose = () => setTimeout(() => connectWs(tag), 2000);
@@ -521,15 +554,122 @@ async function renderMessages(tag) {
   const rendered = await Promise.all(msgs.map(async m => {
     const avatarUrl = await getPeerAvatarUrl(tag, m.sender_hash);
     const style = avatarUrl ? ` style="background-image:url(${avatarUrl})"` : '';
+    const chips = (m.reactions || []).map(r => reactionChipHtml(tag, m.message_id, r)).join('');
     return `
     <div class="msg ${m.sender_hash === myHash ? 'self' : ''}">
-      <span class="avatar-thumb-sm"${style}></span>
-      <span class="sender">${escapeHtml(m.sender_name || m.sender_hash.slice(0, 8))}</span>
-      <span class="content">${escapeHtml(m.content)}</span>
+      <div class="msg-row">
+        <span class="avatar-thumb-sm"${style}></span>
+        <div class="msg-body">
+          <span class="sender">${escapeHtml(m.sender_name || m.sender_hash.slice(0, 8))}</span>
+          <span class="content">${escapeHtml(m.content)}</span>
+          <button class="react-btn" onclick="toggleEmojiPicker(event, '${tag}', '${m.message_id}')">+react</button>
+          <div class="reactions">${chips}</div>
+        </div>
+      </div>
     </div>`;
   }));
   box.innerHTML = rendered.join('');
   box.scrollTop = box.scrollHeight;
+}
+
+function sniffImageMime(b64) {
+  const bytes = atob(b64.slice(0, 12));
+  if (bytes.startsWith('\x89PNG')) return 'image/png';
+  if (bytes.startsWith('\xff\xd8')) return 'image/jpeg';
+  if (bytes.startsWith('GIF8')) return 'image/gif';
+  return 'image/png';
+}
+
+function reactionChipHtml(tag, messageId, r) {
+  const entry = (emojiLibrary[tag] || []).find(e => e.emoji_hash === r.emoji_hash);
+  const img = entry
+    ? `<img src="data:${sniffImageMime(entry.image_data_b64)};base64,${entry.image_data_b64}">`
+    : '';
+  return `<span class="reaction-chip ${r.reacted_by_me ? 'mine' : ''}"
+      onclick="toggleReaction('${tag}', '${messageId}', '${r.emoji_hash}', ${r.reacted_by_me})">
+      ${img}<span>${r.count}</span>
+    </span>`;
+}
+
+const emojiLibrary = { A: [], B: [] };
+
+async function refreshEmojiLibrary(tag) {
+  emojiLibrary[tag] = await api(tag, '/emoji');
+}
+
+let openPicker = null;
+
+function closeEmojiPicker() {
+  if (openPicker) { openPicker.el.remove(); openPicker = null; }
+}
+document.addEventListener('click', (e) => {
+  if (openPicker && !openPicker.el.contains(e.target)) closeEmojiPicker();
+});
+
+async function toggleEmojiPicker(evt, tag, messageId) {
+  evt.stopPropagation();
+  if (openPicker && openPicker.messageId === messageId) { closeEmojiPicker(); return; }
+  closeEmojiPicker();
+  await refreshEmojiLibrary(tag);
+  const picker = document.createElement('div');
+  picker.className = 'emoji-picker';
+  const rect = evt.target.getBoundingClientRect();
+  picker.style.left = `${rect.left + window.scrollX}px`;
+  picker.style.top = `${rect.bottom + window.scrollY + 4}px`;
+  const items = emojiLibrary[tag];
+  const itemsHtml = items.length === 0
+    ? '<div class="empty-state">No emoji yet</div>'
+    : items.map(e => `<img src="data:${sniffImageMime(e.image_data_b64)};base64,${e.image_data_b64}"
+        title="${escapeHtml(e.name)}" onclick="pickEmoji('${tag}', '${messageId}', '${e.emoji_hash}')">`).join('');
+  picker.innerHTML = itemsHtml + `<div class="import-row">
+      <label>Import emoji...<input type="file" accept="image/*" style="display:none"
+          onchange="importEmoji(event, '${tag}', '${messageId}')"></label>
+    </div>`;
+  document.body.appendChild(picker);
+  openPicker = { el: picker, tag, messageId };
+}
+
+function pickEmoji(tag, messageId, emojiHash) {
+  closeEmojiPicker();
+  toggleReaction(tag, messageId, emojiHash, false);
+}
+
+function importEmoji(evt, tag, messageId) {
+  const file = evt.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = async () => {
+    const b64 = reader.result.split(',')[1];
+    try {
+      const res = await api(tag, '/emoji/import', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({name: file.name.replace(/\.[^.]+$/, ''), image_data_b64: b64}),
+      });
+      closeEmojiPicker();
+      await refreshEmojiLibrary(tag);
+      await toggleReaction(tag, messageId, res.emoji_hash, false);
+    } catch (e) {
+      toast(`Tester ${tag}: emoji import failed`);
+    }
+  };
+  reader.readAsDataURL(file);
+}
+
+async function toggleReaction(tag, messageId, emojiHash, alreadyMine) {
+  try {
+    if (alreadyMine) {
+      await api(tag, `/channels/${state[tag].activeChannel}/messages/${messageId}/reactions/${emojiHash}`,
+          {method: 'DELETE'});
+    } else {
+      await api(tag, `/channels/${state[tag].activeChannel}/messages/${messageId}/reactions`, {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({emoji_hash: emojiHash}),
+      });
+    }
+  } catch (e) {
+    toast(`Tester ${tag}: reaction failed`);
+  }
+  await renderMessages(tag);
 }
 
 function escapeHtml(s) {
@@ -622,7 +762,9 @@ async function resetEnvironment() {
     if (state[tag].ws) state[tag].ws.close();
     state[tag] = { port: null, me: null, channels: [], activeChannel: null, ws: null, invites: [] };
     avatarCache[tag] = {};
+    emojiLibrary[tag] = [];
   });
+  closeEmojiPicker();
   renderShell();
   try {
     const res = await fetch('/reset', {method: 'POST'});

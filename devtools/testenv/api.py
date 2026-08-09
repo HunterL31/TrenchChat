@@ -45,6 +45,15 @@ class SetAvatarRequest(BaseModel):
     image_data_b64: str
 
 
+class AddReactionRequest(BaseModel):
+    emoji_hash: str
+
+
+class ImportEmojiRequest(BaseModel):
+    name: str
+    image_data_b64: str
+
+
 class SendMessageRequest(BaseModel):
     content: str
     reply_to: str | None = None
@@ -76,7 +85,20 @@ def _channel_to_dict(row) -> dict[str, Any]:
     }
 
 
-def _message_to_dict(row) -> dict[str, Any]:
+def _reactions_summary(storage, message_id: str, self_hex: str) -> list[dict[str, Any]]:
+    """Group raw reaction rows into one entry per emoji: {emoji_hash, count, reacted_by_me}."""
+    by_emoji: dict[str, dict[str, Any]] = {}
+    for r in storage.get_reactions(message_id):
+        entry = by_emoji.setdefault(
+            r["emoji_hash"], {"emoji_hash": r["emoji_hash"], "count": 0, "reacted_by_me": False}
+        )
+        entry["count"] += 1
+        if r["reactor_hash"] == self_hex:
+            entry["reacted_by_me"] = True
+    return list(by_emoji.values())
+
+
+def _message_to_dict(row, reactions: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     return {
         "message_id": row["message_id"],
         "sender_hash": row["sender_hash"],
@@ -85,6 +107,7 @@ def _message_to_dict(row) -> dict[str, Any]:
         "timestamp": row["timestamp"],
         "reply_to": row["reply_to"],
         "has_image": bool(row["image_data"]) if "image_data" in row.keys() else False,
+        "reactions": reactions or [],
     }
 
 
@@ -138,8 +161,9 @@ def create_app(backend: Backend) -> FastAPI:
     def _on_message(channel_hash_hex: str, message_id: str):
         msgs = backend.storage.get_messages(channel_hash_hex)
         row = next((m for m in msgs if m["message_id"] == message_id), None)
+        reactions = _reactions_summary(backend.storage, message_id, backend.identity.hash_hex) if row else None
         bus.emit("message", channel_hash=channel_hash_hex,
-                message=_message_to_dict(row) if row else None)
+                message=_message_to_dict(row, reactions) if row else None)
 
     # Pending invites, exactly like MainWindow._pending_invites -- nothing
     # is sent to the network until the user explicitly accepts or declines.
@@ -164,12 +188,20 @@ def create_app(backend: Backend) -> FastAPI:
     def _on_avatar_changed(identity_hash_hex: str):
         bus.emit("avatar_updated", identity_hash=identity_hash_hex)
 
+    def _on_reaction_changed(channel_hash_hex: str, message_id: str):
+        bus.emit("reaction_updated", channel_hash=channel_hash_hex, message_id=message_id)
+
+    def _on_emoji_received(emoji_hash: str):
+        bus.emit("emoji_received", emoji_hash=emoji_hash)
+
     backend.messaging.add_message_callback(_on_message)
     backend.invite_mgr.add_invite_callback(_on_invite)
     backend.invite_mgr.add_channel_joined_callback(_on_channel_joined)
     backend.invite_mgr.add_member_list_callback(_on_member_list_updated)
     backend.presence_mgr.add_presence_callback(_on_presence_changed)
     backend.avatar_mgr.add_avatar_callback(_on_avatar_changed)
+    backend.reaction_mgr.add_reaction_callback(_on_reaction_changed)
+    backend.reaction_mgr.add_emoji_callback(_on_emoji_received)
 
     # --- identity ---
 
@@ -317,7 +349,12 @@ def create_app(backend: Backend) -> FastAPI:
 
     @app.get("/channels/{channel_hash}/messages")
     def list_messages(channel_hash: str):
-        return [_message_to_dict(m) for m in backend.storage.get_messages(channel_hash)]
+        return [
+            _message_to_dict(
+                m, _reactions_summary(backend.storage, m["message_id"], backend.identity.hash_hex)
+            )
+            for m in backend.storage.get_messages(channel_hash)
+        ]
 
     @app.post("/channels/{channel_hash}/messages")
     def send_message(channel_hash: str, req: SendMessageRequest):
@@ -327,6 +364,50 @@ def create_app(backend: Backend) -> FastAPI:
             reply_to=req.reply_to,
         )
         return {"ok": sent}
+
+    # --- reactions and custom emoji ---
+
+    def _reaction_peers(channel_hash: str) -> list[str]:
+        # Same recipient logic _on_send_message uses, minus the SEND_MESSAGE
+        # gate (which doesn't apply to reactions) -- see main_window.py's
+        # _get_reaction_peers.
+        return actions.compute_channel_recipients(
+            backend.storage, backend.subscription_mgr, channel_hash, backend.identity.hash_hex,
+        )
+
+    @app.post("/channels/{channel_hash}/messages/{message_id}/reactions")
+    def add_reaction(channel_hash: str, message_id: str, req: AddReactionRequest):
+        backend.reaction_mgr.add_reaction(
+            channel_hash, message_id, req.emoji_hash, _reaction_peers(channel_hash),
+        )
+        return {"ok": True}
+
+    @app.delete("/channels/{channel_hash}/messages/{message_id}/reactions/{emoji_hash}")
+    def remove_reaction(channel_hash: str, message_id: str, emoji_hash: str):
+        backend.reaction_mgr.remove_reaction(
+            channel_hash, message_id, emoji_hash, _reaction_peers(channel_hash),
+        )
+        return {"ok": True}
+
+    @app.get("/emoji")
+    def list_emoji():
+        return [
+            {
+                "emoji_hash": row["emoji_hash"],
+                "name": row["name"],
+                "image_data_b64": base64.b64encode(bytes(row["image_data"])).decode(),
+            }
+            for row in backend.storage.list_emojis()
+        ]
+
+    @app.post("/emoji/import")
+    def import_emoji(req: ImportEmojiRequest):
+        try:
+            raw = base64.b64decode(req.image_data_b64)
+            emoji_hash = backend.reaction_mgr.import_emoji(req.name, raw)
+        except ValueError as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+        return {"ok": True, "emoji_hash": emoji_hash}
 
     # --- live updates ---
 
