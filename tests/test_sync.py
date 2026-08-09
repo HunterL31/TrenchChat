@@ -543,6 +543,99 @@ class TestTenureSyncFiltering:
         assert wait_for_message(alice.storage, ch_hash, valid_msg_id, timeout=5), \
             "Carol did not serve Bob's pre-kick message in a sync response"
 
+    def test_owner_message_survives_sync_to_a_newly_added_member(self, peer_factory):
+        """
+        Regression test: create_channel() used to never open a tenure record
+        for the channel owner. was_member_at() treats "no tenure data" as
+        "wasn't a member", so once *any* tenure data existed for a channel
+        (as soon as one real member was added), the owner's own messages
+        were silently dropped from every sync response -- regardless of
+        when the requesting member actually joined. A new member would
+        never see anything the owner sent, not even messages sent after
+        they joined, since the same untenured-sender filter applies to all
+        of the owner's history alike.
+
+        Uses a message sent *after* Bob joins -- history from before he
+        joined is a separate, deliberate boundary (see
+        test_pre_join_history_excluded_by_default /
+        test_full_sync_enabled_allows_pre_join_history below), not what
+        this test is checking.
+
+        Goes through the real create_channel() -> publish_member_list()
+        path end to end rather than manually seeding tenure rows (the
+        pattern the other tests in this class use), since manually seeding
+        both sides' tenure is exactly what would paper over this gap.
+        """
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+
+        ch_hash = alice.channel_mgr.create_channel("owner-tenure-ch", "", "invite")
+
+        alice.invite_mgr.publish_member_list(ch_hash, add_members=[bob.identity.hash])
+        assert wait_for_member(alice.storage, ch_hash, bob.identity.hash_hex)
+        # Wait for Bob's own side to actually process the real broadcast
+        # document (not manually seeded) -- his own tenure records, for
+        # both himself and Alice, need to come from the real accept flow,
+        # since that's exactly the path the joined_at fix lives in.
+        assert wait_for(lambda: bob.storage.is_member(ch_hash, bob.identity.hash_hex), timeout=5)
+
+        after_msg_id = _insert_message(alice.storage, ch_hash, alice.identity.hash_hex,
+                                       "sent after Bob joined")
+
+        bob.sync_mgr._send_sync_request(alice.identity.hash_hex, ch_hash, 0.0)
+
+        assert wait_for_message(bob.storage, ch_hash, after_msg_id, timeout=5), \
+            "Bob never received the owner's message via sync -- owner's tenure " \
+            "was likely never opened, so was_member_at() rejected it"
+
+    def test_pre_join_history_excluded_by_default(self, peer_factory):
+        """
+        By default (full_sync off), a new member's sync/backfill is bounded
+        by their own join time -- a message sent before they joined an
+        invite-only channel must not reach them via sync, even though the
+        sender was a legitimate, tenured member the whole time.
+        """
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+
+        ch_hash = alice.channel_mgr.create_channel("bounded-sync-ch", "", "invite")
+        before_msg_id = _insert_message(alice.storage, ch_hash, alice.identity.hash_hex,
+                                        "sent before Bob joined")
+
+        alice.invite_mgr.publish_member_list(ch_hash, add_members=[bob.identity.hash])
+        assert wait_for_member(alice.storage, ch_hash, bob.identity.hash_hex)
+        assert wait_for(lambda: bob.storage.is_member(ch_hash, bob.identity.hash_hex), timeout=5)
+
+        bob.sync_mgr._send_sync_request(alice.identity.hash_hex, ch_hash, 0.0)
+        time.sleep(0.5)
+
+        assert not bob.storage.message_exists(before_msg_id), \
+            "Bob received pre-join history via sync despite full_sync being off by default"
+
+    def test_full_sync_enabled_allows_pre_join_history(self, peer_factory):
+        """
+        An admin who enables full_sync on a channel lets new members backfill
+        its entire history via sync, including messages from before they
+        joined -- the opt-in this whole feature exists to provide.
+        """
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+
+        perms = dict(PRESET_PRIVATE)
+        perms["full_sync"] = True
+        ch_hash = alice.channel_mgr.create_channel("full-sync-ch", "", permissions=perms)
+        before_msg_id = _insert_message(alice.storage, ch_hash, alice.identity.hash_hex,
+                                        "sent before Bob joined")
+
+        alice.invite_mgr.publish_member_list(ch_hash, add_members=[bob.identity.hash])
+        assert wait_for_member(alice.storage, ch_hash, bob.identity.hash_hex)
+        assert wait_for(lambda: bob.storage.is_member(ch_hash, bob.identity.hash_hex), timeout=5)
+
+        bob.sync_mgr._send_sync_request(alice.identity.hash_hex, ch_hash, 0.0)
+
+        assert wait_for_message(bob.storage, ch_hash, before_msg_id, timeout=5), \
+            "Bob did not receive pre-join history via sync despite full_sync being enabled"
+
     def test_no_tenure_data_allows_sync_without_filtering(self, peer_factory):
         """
         When no tenure data exists for a channel (e.g. open-join channel or
@@ -637,6 +730,11 @@ class TestImageSync:
         ch_hash = alice.channel_mgr.create_channel("img-sync", "", "public")
         _seed_channel_on_peer(bob, ch_hash, "img-sync", alice.identity.hash_hex)
 
+        # Timestamped after channel creation, not before -- create_channel()
+        # opens the owner's own tenure at creation time, so a message
+        # "sent" earlier than that would describe an impossible timeline
+        # (Alice sending in a channel before it existed) and gets correctly
+        # rejected as untenured by the sync tenure filter.
         ts = time.time()
         msg_id = alice.storage.get_messages(ch_hash)
         # Insert directly with image data
@@ -645,11 +743,11 @@ class TestImageSync:
             sender_hash=alice.identity.hash_hex,
             sender_name="Alice",
             content="synced image",
-            timestamp=ts - 10,
+            timestamp=ts,
             message_id="sync_img_001",
             reply_to=None,
             last_seen_id=None,
-            received_at=ts - 10,
+            received_at=ts,
             image_data=_FAKE_JPEG,
         )
 

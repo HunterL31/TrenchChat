@@ -45,6 +45,7 @@ ALL_PERMISSIONS = (SEND_MESSAGE, INVITE, KICK, MANAGE_ROLES, MANAGE_CHANNEL)
 
 FLAG_OPEN_JOIN = "open_join"
 FLAG_DISCOVERABLE = "discoverable"
+FLAG_FULL_SYNC = "full_sync"
 
 # ---------------------------------------------------------------------------
 # Default presets
@@ -53,6 +54,7 @@ FLAG_DISCOVERABLE = "discoverable"
 PRESET_PRIVATE: dict[str, Any] = {
     FLAG_OPEN_JOIN: False,
     FLAG_DISCOVERABLE: False,
+    FLAG_FULL_SYNC: False,
     ROLE_ADMIN: [SEND_MESSAGE, INVITE, KICK, MANAGE_ROLES],
     ROLE_MEMBER: [SEND_MESSAGE],
 }
@@ -60,6 +62,7 @@ PRESET_PRIVATE: dict[str, Any] = {
 PRESET_OPEN: dict[str, Any] = {
     FLAG_OPEN_JOIN: True,
     FLAG_DISCOVERABLE: True,
+    FLAG_FULL_SYNC: False,
     ROLE_ADMIN: [SEND_MESSAGE, INVITE, KICK, MANAGE_ROLES],
     ROLE_MEMBER: [SEND_MESSAGE, INVITE],
 }
@@ -100,3 +103,11 @@ def is_open_join(perms: dict) -> bool:
 
 def is_discoverable(perms: dict) -> bool:
     return bool(perms.get(FLAG_DISCOVERABLE, True))
+
+
+def is_full_sync_enabled(perms: dict) -> bool:
+    """Whether members may sync/backfill the channel's entire history via
+    the offline-sync mechanism, rather than only messages sent during their
+    own membership. Off by default -- an admin has to opt in per channel.
+    """
+    return bool(perms.get(FLAG_FULL_SYNC, False))

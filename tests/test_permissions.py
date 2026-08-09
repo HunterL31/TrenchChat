@@ -17,11 +17,11 @@ import pytest
 
 from trenchchat.core.storage import Storage
 from trenchchat.core.permissions import (
-    ALL_PERMISSIONS, FLAG_DISCOVERABLE, FLAG_OPEN_JOIN,
+    ALL_PERMISSIONS, FLAG_DISCOVERABLE, FLAG_FULL_SYNC, FLAG_OPEN_JOIN,
     INVITE, KICK, MANAGE_CHANNEL, MANAGE_ROLES,
     PRESET_OPEN, PRESET_PRIVATE, ROLE_ADMIN, ROLE_MEMBER, ROLE_OWNER,
-    SEND_MESSAGE, has_permission, is_discoverable, is_open_join,
-    permissions_from_json, permissions_to_json, role_rank,
+    SEND_MESSAGE, has_permission, is_discoverable, is_full_sync_enabled,
+    is_open_join, permissions_from_json, permissions_to_json, role_rank,
 )
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -68,6 +68,23 @@ class TestPermissionHelpers:
     def test_is_discoverable(self):
         assert is_discoverable(PRESET_OPEN) is True
         assert is_discoverable(PRESET_PRIVATE) is False
+
+    def test_is_full_sync_enabled_off_by_default(self):
+        assert is_full_sync_enabled(PRESET_OPEN) is False
+        assert is_full_sync_enabled(PRESET_PRIVATE) is False
+
+    def test_is_full_sync_enabled_missing_key_defaults_false(self):
+        """Channels bootstrapped before this flag existed have no full_sync
+        key at all -- must default to the restrictive behavior, not open up
+        full history sync silently."""
+        legacy_perms = {k: v for k, v in PRESET_PRIVATE.items() if k != FLAG_FULL_SYNC}
+        assert FLAG_FULL_SYNC not in legacy_perms
+        assert is_full_sync_enabled(legacy_perms) is False
+
+    def test_is_full_sync_enabled_when_set(self):
+        perms = dict(PRESET_PRIVATE)
+        perms[FLAG_FULL_SYNC] = True
+        assert is_full_sync_enabled(perms) is True
 
     def test_json_roundtrip(self):
         blob = permissions_to_json(PRESET_PRIVATE)

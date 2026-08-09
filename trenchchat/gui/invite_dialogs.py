@@ -15,7 +15,7 @@ from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QFont
 
 from trenchchat.core.permissions import (
-    ALL_PERMISSIONS, FLAG_DISCOVERABLE, FLAG_OPEN_JOIN,
+    ALL_PERMISSIONS, FLAG_DISCOVERABLE, FLAG_FULL_SYNC, FLAG_OPEN_JOIN,
     INVITE, KICK, MANAGE_CHANNEL, MANAGE_ROLES, ROLE_ADMIN, ROLE_MEMBER, ROLE_OWNER,
     SEND_MESSAGE,
 )
@@ -364,6 +364,13 @@ class ChannelPermissionsDialog(QDialog):
         self._discoverable_cb.setChecked(bool(self._perms.get(FLAG_DISCOVERABLE, True)))
         flags_layout.addWidget(self._discoverable_cb)
 
+        self._full_sync_cb = QCheckBox(
+            "Full history sync (new members can request the entire channel "
+            "history, not just messages sent since they joined)"
+        )
+        self._full_sync_cb.setChecked(bool(self._perms.get(FLAG_FULL_SYNC, False)))
+        flags_layout.addWidget(self._full_sync_cb)
+
         layout.addWidget(flags_group)
 
         # --- Per-role permission checkboxes ---
@@ -412,6 +419,7 @@ class ChannelPermissionsDialog(QDialog):
         result = dict(self._perms)
         result[FLAG_OPEN_JOIN] = self._open_join_cb.isChecked()
         result[FLAG_DISCOVERABLE] = self._discoverable_cb.isChecked()
+        result[FLAG_FULL_SYNC] = self._full_sync_cb.isChecked()
         for role, checks in self._role_checks.items():
             result[role] = [perm for perm, cb in checks.items() if cb.isChecked()]
         return result

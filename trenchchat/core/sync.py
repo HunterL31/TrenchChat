@@ -29,7 +29,9 @@ import msgpack
 
 from trenchchat.core.identity import Identity
 from trenchchat.core.messaging import Messaging
-from trenchchat.core.permissions import is_open_join, permissions_from_json
+from trenchchat.core.permissions import (
+    is_full_sync_enabled, is_open_join, permissions_from_json,
+)
 from trenchchat.core.protocol import (
     F_CHANNEL_HASH, F_MSG_TYPE,
     F_SYNC_WINDOW_START, F_SYNC_MESSAGES,
@@ -211,23 +213,43 @@ class SyncManager:
         if not rows:
             return
 
-        # Filter out messages whose sender was not a member at the claimed timestamp.
-        # Only apply this filter when tenure data exists for the channel (skips
-        # open-join channels and channels bootstrapped before this feature).
+        # Filter sync-response rows against tenure. Only applied when tenure
+        # data exists for the channel (skips open-join channels and channels
+        # bootstrapped before this feature). Two independent checks:
+        #   - sender: the claimed author must actually have been a member at
+        #     that timestamp, or the message could be a kicked member's
+        #     replay or an outright forgery.
+        #   - requester (unless full_sync is enabled): the peer asking for
+        #     sync must themselves have been a member at that timestamp, or
+        #     sync becomes a way to backfill history from before they ever
+        #     joined. Off by default; an admin opts a channel into full
+        #     history sync via the full_sync permission flag.
         has_tenure = self._storage.has_any_tenure(channel_hash_hex)
         if has_tenure:
+            perms = permissions_from_json(channel["permissions"]) if channel else {}
+            full_sync = is_full_sync_enabled(perms)
             valid_rows = []
             for r in rows:
-                if self._storage.was_member_at(channel_hash_hex, r["sender_hash"],
-                                               r["timestamp"]):
-                    valid_rows.append(r)
-                else:
+                if not self._storage.was_member_at(channel_hash_hex, r["sender_hash"],
+                                                    r["timestamp"]):
                     RNS.log(
                         f"TrenchChat [sync]: omitting message {r['message_id'][:12]}… "
                         f"from sync response — sender {r['sender_hash'][:12]}… "
                         f"was not a member at ts={r['timestamp']:.0f}",
                         RNS.LOG_WARNING,
                     )
+                    continue
+                if not full_sync and not self._storage.was_member_at(
+                    channel_hash_hex, requester_hex, r["timestamp"]
+                ):
+                    RNS.log(
+                        f"TrenchChat [sync]: omitting message {r['message_id'][:12]}… "
+                        f"from sync response — requester {requester_hex[:12]}… "
+                        f"was not yet a member at ts={r['timestamp']:.0f}",
+                        RNS.LOG_DEBUG,
+                    )
+                    continue
+                valid_rows.append(r)
             rows = valid_rows
 
         if not rows:
@@ -257,6 +279,13 @@ class SyncManager:
             return
 
         has_tenure = self._storage.has_any_tenure(channel_hash_hex)
+        full_sync = False
+        if has_tenure:
+            channel = self._storage.get_channel(channel_hash_hex)
+            full_sync = is_full_sync_enabled(
+                permissions_from_json(channel["permissions"])
+            ) if channel else False
+        my_hex = self._identity.hash_hex
         inserted_any = False
         for m in messages:
             try:
@@ -264,6 +293,10 @@ class SyncManager:
                 msg_ts = float(m.get("timestamp", time.time()))
 
                 # Validate tenure for invite-only channels with tenure data.
+                # Mirrors _handle_sync_request's two checks -- applied again
+                # here on receipt (not just by whoever responded) so a
+                # malicious or buggy responder can't hand us history we
+                # aren't entitled to just by skipping its own filtering.
                 if has_tenure and not self._storage.was_member_at(
                     channel_hash_hex, sender_hash, msg_ts
                 ):
@@ -272,6 +305,16 @@ class SyncManager:
                         f"{str(m.get('message_id', ''))[:12]}… — sender "
                         f"{sender_hash[:12]}… was not a member at ts={msg_ts:.0f}",
                         RNS.LOG_WARNING,
+                    )
+                    continue
+                if has_tenure and not full_sync and not self._storage.was_member_at(
+                    channel_hash_hex, my_hex, msg_ts
+                ):
+                    RNS.log(
+                        f"TrenchChat [sync]: dropping synced message "
+                        f"{str(m.get('message_id', ''))[:12]}… — we were not "
+                        f"yet a member at ts={msg_ts:.0f}",
+                        RNS.LOG_DEBUG,
                     )
                     continue
 

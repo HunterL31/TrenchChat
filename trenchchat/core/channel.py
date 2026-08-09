@@ -92,6 +92,21 @@ class ChannelManager:
             display_name=self._identity.display_name,
             role=ROLE_OWNER,
         )
+        # Without this, the owner has no tenure record at all, and
+        # was_member_at() treats "no tenure data" as "wasn't a member" --
+        # silently dropping the owner's own messages from every sync
+        # response to new members, regardless of when those members
+        # actually joined.
+        #
+        # Gated to non-open-join channels only: public channels never use
+        # the member-list/tenure system at all (membership there is tracked
+        # by SubscriptionManager instead), so giving the owner a tenure row
+        # would make has_any_tenure() true and wrongly engage tenure
+        # filtering -- including the requester-side check -- for peers who
+        # joined via subscription and have no tenure data of their own,
+        # rejecting their sync requests entirely.
+        if not is_open_join(permissions):
+            self._storage.open_tenure(hash_hex, self._identity.hash_hex, time.time())
         self.announce_channel(hash_hex)
         return hash_hex
 
