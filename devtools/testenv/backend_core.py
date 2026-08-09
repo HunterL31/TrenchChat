@@ -26,7 +26,9 @@ from trenchchat.core.messaging import Messaging
 from trenchchat.core.subscription import SubscriptionManager
 from trenchchat.core.invite import InviteManager
 from trenchchat.core.sync import SyncManager
+from trenchchat.core.presence import PresenceManager
 from trenchchat.network.router import Router
+from trenchchat.network.announce import PeerAnnounceHandler
 
 RETICULUM_CONFIG_TEMPLATE = """\
 [reticulum]
@@ -100,6 +102,32 @@ class Backend:
         self.invite_mgr = InviteManager(self.identity, self.storage, self.router)
         self.sync_mgr = SyncManager(self.identity, self.storage, self.router,
                                     self.messaging, self.subscription_mgr, self.invite_mgr)
+        self.presence_mgr = PresenceManager(self.identity.hash_hex, self.config)
+
+        # Mirrors main_window.py's combined _on_peer_appeared handler: one
+        # PeerAnnounceHandler registration drives both the sync manager's
+        # gap-fill request and presence tracking, so a peer's LXMF delivery
+        # announce is the single trigger for both. Without this, SyncManager
+        # .on_peer_appeared() is never called at all in this harness.
+        def _on_peer_appeared(peer_hex: str, iface) -> None:
+            self.sync_mgr.on_peer_appeared(peer_hex)
+            self.presence_mgr.record_seen(peer_hex)
+
+        RNS.Transport.register_announce_handler(
+            PeerAnnounceHandler(_on_peer_appeared)
+        )
+
+        # Also mark a peer as seen on any inbound LXMF message, covering
+        # peers reached via a backchannel link without a prior announce
+        # (same rationale as main_window.py's _on_inbound_message).
+        def _on_inbound_message(message) -> None:
+            if not message.source_hash:
+                return
+            sender_identity = RNS.Identity.recall(message.source_hash)
+            if sender_identity is not None:
+                self.presence_mgr.record_seen(sender_identity.hash.hex())
+
+        self.router.add_delivery_callback(_on_inbound_message)
 
         self.channel_mgr.restore_owned_channels()
 
@@ -133,6 +161,20 @@ class Backend:
                 time.sleep(interval)
 
         t = threading.Thread(target=_loop, daemon=True, name="heartbeat")
+        t.start()
+
+    def start_presence_pruner(self, interval: float = 15.0) -> None:
+        """Periodically prune stale presence entries, mirroring main_window.py's
+        _presence_timer. Runs as a daemon thread so it never blocks process exit."""
+        def _loop():
+            while True:
+                time.sleep(interval)
+                try:
+                    self.presence_mgr.prune()
+                except Exception as e:
+                    RNS.log(f"TesterBackend: presence prune failed: {e}", RNS.LOG_WARNING)
+
+        t = threading.Thread(target=_loop, daemon=True, name="presence-pruner")
         t.start()
 
     @property

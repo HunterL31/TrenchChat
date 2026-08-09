@@ -152,10 +152,14 @@ def create_app(backend: Backend) -> FastAPI:
     def _on_member_list_updated(channel_hash_hex):
         bus.emit("member_list_updated", channel_hash=channel_hash_hex)
 
+    def _on_presence_changed(peer_hash_hex: str, is_online: bool):
+        bus.emit("presence", identity_hash=peer_hash_hex, is_online=is_online)
+
     backend.messaging.add_message_callback(_on_message)
     backend.invite_mgr.add_invite_callback(_on_invite)
     backend.invite_mgr.add_channel_joined_callback(_on_channel_joined)
     backend.invite_mgr.add_member_list_callback(_on_member_list_updated)
+    backend.presence_mgr.add_presence_callback(_on_presence_changed)
 
     # --- identity ---
 
@@ -174,6 +178,13 @@ def create_app(backend: Backend) -> FastAPI:
         # heartbeat's next reannounce cycle.
         backend.router.announce_user()
         return {"ok": True}
+
+    @app.get("/peers/{peer_hash}/presence")
+    def get_peer_presence(peer_hash: str):
+        return {
+            "identity_hash": peer_hash,
+            "is_online": backend.presence_mgr.is_online(peer_hash),
+        }
 
     # --- channels ---
 

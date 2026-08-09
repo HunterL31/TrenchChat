@@ -38,6 +38,7 @@
   }
   .pane-name { font-weight: 700; font-size: 14px; }
   .pane-hash { font-size: 11px; color: var(--dim); font-family: monospace; }
+  .peer-status { font-size: 11px; color: var(--dim); margin-top: 3px; }
   .editable-name { cursor: pointer; border-bottom: 1px dashed transparent; }
   .editable-name:hover { border-bottom-color: var(--dim); }
   .name-edit-input {
@@ -267,6 +268,10 @@ function renderShell() {
           <span id="name-display-${tag}" class="editable-name" onclick="editDisplayName('${tag}')" title="Click to rename">Tester ${tag}</span>
         </div>
         <div class="pane-hash" id="hash-${tag}">connecting...</div>
+        <div class="peer-status">
+          <span class="status-dot" id="peer-dot-${tag}"></span>
+          <span id="peer-status-text-${tag}">Tester ${other(tag)} status unknown</span>
+        </div>
       </div>
       <div class="invite-bar" id="invite-bar-${tag}">
         <span id="invite-text-${tag}"></span>
@@ -323,6 +328,26 @@ async function connectTester(tag) {
   await refreshChannels(tag);
   await refreshInvites(tag);
   connectWs(tag);
+  refreshPeerPresence(tag);
+}
+
+function setPeerStatus(tag, isOnline) {
+  const dot = document.getElementById(`peer-dot-${tag}`);
+  const text = document.getElementById(`peer-status-text-${tag}`);
+  if (!dot || !text) return;
+  dot.classList.toggle('up', isOnline);
+  text.textContent = `Tester ${other(tag)} ${isOnline ? 'online' : 'offline'}`;
+}
+
+async function refreshPeerPresence(tag) {
+  const target = other(tag);
+  if (!state[target].me || !state[tag].me) return;
+  try {
+    const res = await api(tag, `/peers/${state[target].me.hash_hex}/presence`);
+    setPeerStatus(tag, res.is_online);
+  } catch (e) {
+    // transient -- next poll or WS event will catch up
+  }
 }
 
 function connectWs(tag) {
@@ -337,6 +362,10 @@ function connectWs(tag) {
     } else if (msg.type === 'channel_joined' || msg.type === 'member_list_updated') {
       refreshChannels(tag);
       if (msg.channel_hash === state[tag].activeChannel) renderMessages(tag);
+    } else if (msg.type === 'presence') {
+      // This harness only ever has one peer per tester, so any presence
+      // event on tag's socket is about tag's counterpart.
+      setPeerStatus(tag, msg.is_online);
     }
   };
   ws.onclose = () => setTimeout(() => connectWs(tag), 2000);
@@ -484,6 +513,10 @@ async function resetEnvironment() {
 
 renderShell();
 TESTERS.forEach(connectTester);
+// Fallback poll: covers the startup race where a tester's own /me hasn't
+// resolved yet when its counterpart first tries to read presence, and any
+// WS reconnect gap. Live updates still come from the 'presence' WS event.
+setInterval(() => TESTERS.forEach(refreshPeerPresence), 5000);
 </script>
 </body>
 </html>
