@@ -12,9 +12,23 @@ from PyQt6.QtGui import QColor
 
 
 def rgba(hex_color: str, alpha: float) -> str:
-    """Return a Qt-stylesheet-compatible rgba() string for hex_color at the given alpha."""
+    """Return a Qt-stylesheet-compatible rgba() string for hex_color at the given alpha.
+
+    For use inside setStyleSheet(...) QSS strings only — Qt's style sheet engine
+    understands this functional syntax, but the plain QColor(str) constructor used
+    directly in QPainter/QPen code does not (it silently produces an invalid, opaque
+    black color). Use qcolor() below for that case instead.
+    """
     c = QColor(hex_color)
     return f"rgba({c.red()},{c.green()},{c.blue()},{alpha})"
+
+
+def qcolor(hex_color: str, alpha: float = 1.0) -> QColor:
+    """Return a real QColor for hex_color at the given alpha — for QPainter/QPen code,
+    where the CSS rgba(...) strings above (built for QSS) can't be parsed directly."""
+    c = QColor(hex_color)
+    c.setAlphaF(alpha)
+    return c
 
 
 ACCENT = "#9184d9"

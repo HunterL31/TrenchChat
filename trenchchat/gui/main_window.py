@@ -78,13 +78,13 @@ def _make_solid_avatar_pixmap(letter: str, color_hex: str, size: int) -> QPixmap
     return result
 
 
-def _make_channel_icon_pixmap(color_hex: str, size: int = 13) -> QPixmap:
+def _make_channel_icon_pixmap(color: QColor, size: int = 13) -> QPixmap:
     """Return a small tilted-hash "channel" glyph, matching the sidebar icon in the design."""
     result = QPixmap(size, size)
     result.fill(Qt.GlobalColor.transparent)
     painter = QPainter(result)
     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-    pen = QPen(QColor(color_hex))
+    pen = QPen(color)
     pen.setWidthF(size * 0.11)
     pen.setCapStyle(Qt.PenCapStyle.RoundCap)
     painter.setPen(pen)
@@ -524,7 +524,11 @@ class MainWindow(QMainWindow):
 
         # Left: channel list
         left = QWidget()
-        left.setStyleSheet(f"background: {theme.SIDEBAR_BG}; border-right: 1px solid {theme.DIVIDER};")
+        # No border-right here: a CSS border on this widget was found to cause a stray
+        # 1px seam to bleed into unrelated child rows elsewhere in the sidebar (visible
+        # as a spurious vertical line next to the "+" and chevron buttons). The splitter
+        # handle below already draws the boundary between the sidebar and the main pane.
+        left.setStyleSheet(f"background: {theme.SIDEBAR_BG};")
         left_layout = QVBoxLayout(left)
         left_layout.setContentsMargins(0, 0, 0, 0)
         left_layout.setSpacing(0)
@@ -932,8 +936,8 @@ class MainWindow(QMainWindow):
 
     def _update_channel_icons(self) -> None:
         """Recolor each channel row's leading icon: accent when selected, muted otherwise."""
-        muted_icon = QIcon(_make_channel_icon_pixmap(theme.TEXT_MUTED))
-        accent_icon = QIcon(_make_channel_icon_pixmap(theme.ACCENT))
+        muted_icon = QIcon(_make_channel_icon_pixmap(theme.qcolor(theme.TEXT, 0.6)))
+        accent_icon = QIcon(_make_channel_icon_pixmap(QColor(theme.ACCENT)))
         for i in range(self._channel_list_widget.count()):
             item = self._channel_list_widget.item(i)
             is_selected = item.data(Qt.ItemDataRole.UserRole) == self._current_channel
