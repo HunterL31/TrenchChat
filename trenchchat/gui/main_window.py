@@ -18,21 +18,22 @@ import RNS
 
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
-    QListWidget, QListWidgetItem, QSplitter, QToolBar,
-    QLabel, QDialog, QFormLayout, QLineEdit, QComboBox,
-    QDialogButtonBox, QMessageBox, QStackedWidget, QMenu,
+    QListWidget, QListWidgetItem, QSplitter,
+    QLabel, QDialog, QLineEdit, QDialogButtonBox,
+    QMessageBox, QStackedWidget, QMenu,
     QPushButton, QFrame, QTableWidget, QTableWidgetItem, QHeaderView,
-    QAbstractItemView, QSizePolicy, QTabWidget, QCheckBox,
+    QAbstractItemView, QTabWidget, QCheckBox,
 )
-from PyQt6.QtCore import Qt, pyqtSlot, QPoint, pyqtSignal, QTimer, QSettings
-from PyQt6.QtGui import QAction, QColor, QFont
+from PyQt6.QtCore import Qt, pyqtSlot, QPoint, QPointF, QSize, pyqtSignal, QTimer, QSettings
+from PyQt6.QtGui import QColor, QIcon, QPainter, QPainterPath, QPen, QPixmap
 
+from trenchchat.gui import theme
 from trenchchat.config import Config
 from trenchchat.core.identity import Identity
 from trenchchat.core.image import prepare_image, MAX_IMAGE_BYTES
 from trenchchat.core.permissions import (
     INVITE, KICK, MANAGE_CHANNEL, MANAGE_ROLES, SEND_MESSAGE, PRESETS, PRESET_PRIVATE,
-    is_discoverable, is_open_join, permissions_from_json,
+    DEFAULT_PRESET, is_discoverable, is_open_join, permissions_from_json,
 )
 from trenchchat.core.presence import PresenceManager, resolve_display_name
 from trenchchat.core.storage import Storage
@@ -58,29 +59,157 @@ _PRESENCE_PRUNE_INTERVAL_MS = 30_000
 _ANNOUNCE_DEBOUNCE_MS = 2_000
 
 
+def _make_solid_avatar_pixmap(letter: str, color_hex: str, size: int) -> QPixmap:
+    """Return a size×size solid-color circle with a centered letter (top-bar identity avatar)."""
+    result = QPixmap(size, size)
+    result.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(result)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    path = QPainterPath()
+    path.addEllipse(0, 0, size, size)
+    painter.fillPath(path, QColor(color_hex))
+    font = painter.font()
+    font.setPointSize(max(8, size // 2 - 1))
+    font.setBold(True)
+    painter.setFont(font)
+    painter.setPen(QColor(theme.BG))
+    painter.drawText(result.rect(), Qt.AlignmentFlag.AlignCenter, letter)
+    painter.end()
+    return result
+
+
+def _make_channel_icon_pixmap(color: QColor, size: int = 13) -> QPixmap:
+    """Return a small tilted-hash "channel" glyph, matching the sidebar icon in the design."""
+    result = QPixmap(size, size)
+    result.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(result)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    pen = QPen(color)
+    pen.setWidthF(size * 0.11)
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    painter.setPen(pen)
+    s = size / 20.0
+    painter.drawLine(QPointF(7 * s, 4 * s), QPointF(5 * s, 16 * s))
+    painter.drawLine(QPointF(14 * s, 4 * s), QPointF(12 * s, 16 * s))
+    painter.drawLine(QPointF(3.5 * s, 8 * s), QPointF(16 * s, 8 * s))
+    painter.drawLine(QPointF(3 * s, 13 * s), QPointF(15.5 * s, 13 * s))
+    painter.end()
+    return result
+
+
 class NewChannelDialog(QDialog):
+    """Matches the "New channel" card from the main-window design: a name
+    field, an optional description, and a Public / Invite-only segmented
+    visibility toggle in place of the old preset dropdown."""
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("New Channel")
-        layout = QFormLayout(self)
+        self.setFixedWidth(380)
+        self.setStyleSheet(f"""
+            QDialog {{ background: {theme.DIALOG_BG}; }}
+            QLabel {{ color: {theme.TEXT_MUTED}; font-size: 12px; background: transparent; }}
+            QLineEdit {{
+                background: {theme.BG}; color: {theme.TEXT};
+                border: 1px solid {theme.BORDER}; border-radius: 8px;
+                padding: 7px 10px; font-size: 14px;
+            }}
+            QLineEdit:focus {{ border: 1px solid {theme.ACCENT}; }}
+        """)
 
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(22, 22, 22, 22)
+        layout.setSpacing(12)
+
+        title = QLabel("New channel")
+        title.setStyleSheet(f"font-size: 18px; font-weight: 500; color: {theme.TEXT};")
+        layout.addWidget(title)
+
+        layout.addWidget(QLabel("Name"))
         self._name = QLineEdit()
         self._name.setPlaceholderText("general")
-        layout.addRow("Name:", self._name)
+        self._name.textChanged.connect(self._update_create_enabled)
+        layout.addWidget(self._name)
 
+        layout.addWidget(QLabel("Description (optional)"))
         self._desc = QLineEdit()
-        layout.addRow("Description:", self._desc)
+        layout.addWidget(self._desc)
 
-        self._preset = QComboBox()
-        self._preset.addItems(list(PRESETS.keys()))
-        layout.addRow("Preset:", self._preset)
-
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        layout.addWidget(QLabel("Visibility"))
+        self._public_btn = QPushButton("Public")
+        self._private_btn = QPushButton("Invite-only")
+        self._public_btn.setFixedHeight(32)
+        self._private_btn.setFixedHeight(32)
+        self._public_btn.clicked.connect(lambda: self._select_preset("open"))
+        self._private_btn.clicked.connect(lambda: self._select_preset("private"))
+        vis_wrap = QWidget()
+        vis_wrap.setStyleSheet(
+            f"background: transparent; border: 1px solid {theme.BORDER}; border-radius: 8px;"
         )
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        layout.addRow(buttons)
+        vis_layout = QHBoxLayout(vis_wrap)
+        vis_layout.setContentsMargins(0, 0, 0, 0)
+        vis_layout.setSpacing(0)
+        vis_layout.addWidget(self._public_btn)
+        vis_layout.addWidget(self._private_btn)
+        layout.addWidget(vis_wrap)
+
+        self._preset = DEFAULT_PRESET
+        self._apply_preset_styles()
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: transparent; color: {theme.TEXT};
+                border: 1px solid {theme.BORDER_STRONG}; border-radius: 8px;
+                padding: 0 14px; height: 34px; font-size: 13px;
+            }}
+            QPushButton:hover {{ background: {theme.BORDER_SOFT}; }}
+        """)
+        cancel_btn.clicked.connect(self.reject)
+        self._create_btn = QPushButton("Create")
+        self._create_btn.setDefault(True)
+        self._create_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: transparent; color: {theme.ACCENT};
+                border: 1px solid {theme.ACCENT}; border-radius: 8px;
+                padding: 0 14px; height: 34px; font-size: 13px; font-weight: 500;
+            }}
+            QPushButton:hover {{ background: {theme.ACCENT_WASH_HOVER}; }}
+            QPushButton:disabled {{ color: {theme.TEXT_FAINT}; border-color: {theme.BORDER}; }}
+        """)
+        self._create_btn.clicked.connect(self._on_create_clicked)
+        btn_row.addWidget(cancel_btn)
+        btn_row.addWidget(self._create_btn)
+        layout.addLayout(btn_row)
+
+        self._update_create_enabled()
+
+    def _select_preset(self, preset: str) -> None:
+        self._preset = preset
+        self._apply_preset_styles()
+
+    def _apply_preset_styles(self) -> None:
+        for btn, preset in ((self._public_btn, "open"), (self._private_btn, "private")):
+            active = preset == self._preset
+            border = "none" if preset == "open" else f"1px solid {theme.BORDER}"
+            btn.setStyleSheet(f"""
+                QPushButton {{
+                    background: {theme.ACCENT_WASH_SELECTED if active else 'transparent'};
+                    color: {theme.ACCENT if active else theme.TEXT};
+                    border: none; border-left: {border if preset == 'private' else 'none'};
+                    font-size: 13px; padding: 0;
+                }}
+                QPushButton:hover {{ background: {theme.ACCENT_WASH_SELECTED if active else theme.BORDER_SOFT}; }}
+            """)
+
+    def _update_create_enabled(self) -> None:
+        self._create_btn.setEnabled(bool(self._name.text().strip()))
+
+    def _on_create_clicked(self) -> None:
+        if self._name.text().strip():
+            self.accept()
 
     @property
     def channel_name(self) -> str:
@@ -92,7 +221,7 @@ class NewChannelDialog(QDialog):
 
     @property
     def permissions(self) -> dict:
-        return dict(PRESETS.get(self._preset.currentText(), PRESET_PRIVATE))
+        return dict(PRESETS.get(self._preset, PRESET_PRIVATE))
 
 
 class JoinChannelDialog(QDialog):
@@ -107,12 +236,26 @@ class JoinChannelDialog(QDialog):
         self._router = router
         self._selected_hash: str | None = None
 
+        self.setStyleSheet(f"""
+            QDialog {{ background: {theme.DIALOG_BG}; }}
+            QTableWidget {{
+                background: {theme.BG}; color: {theme.TEXT};
+                gridline-color: {theme.BORDER}; border: 1px solid {theme.BORDER};
+                border-radius: 8px;
+            }}
+            QTableWidget::item:selected {{ background: {theme.ACCENT_WASH_SELECTED}; color: {theme.ACCENT}; }}
+            QHeaderView::section {{
+                background: {theme.PANEL_BG}; color: {theme.TEXT_MUTED};
+                border: none; border-bottom: 1px solid {theme.BORDER}; padding: 4px 6px;
+            }}
+        """)
+
         layout = QVBoxLayout(self)
 
         hint = QLabel("Channels announced on the network appear here. "
                       "Click Refresh to request fresh announcements.")
         hint.setWordWrap(True)
-        hint.setStyleSheet("color: #888; font-size: 11px; padding: 4px;")
+        hint.setStyleSheet(f"color: {theme.TEXT_FAINT}; font-size: 11px; padding: 4px;")
         layout.addWidget(hint)
 
         self._table = QTableWidget(0, 3)
@@ -362,96 +505,143 @@ class MainWindow(QMainWindow):
     # --- UI construction ---
 
     def _build_ui(self):
-        toolbar = QToolBar("Main")
-        toolbar.setMovable(False)
-        self.addToolBar(toolbar)
-
-        new_channel_action = QAction("＋ New Channel", self)
-        new_channel_action.triggered.connect(self._on_new_channel)
-        toolbar.addAction(new_channel_action)
-
-        join_channel_action = QAction("⤵ Join Channel", self)
-        join_channel_action.triggered.connect(self._on_join_channel)
-        toolbar.addAction(join_channel_action)
-
-        toolbar.addSeparator()
-
-        self._identity_label = QLabel()
-        self._identity_label.setTextFormat(Qt.TextFormat.RichText)
-        self._update_identity_label()
-        toolbar.addWidget(self._identity_label)
-
-        spacer = QWidget()
-        spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        toolbar.addWidget(spacer)
-
-        settings_action = QAction("⚙ Settings", self)
-        settings_action.triggered.connect(self._on_settings)
-        toolbar.addAction(settings_action)
-
-        # Invite notification bar (hidden until an invite arrives)
-        self._invite_bar = self._build_invite_bar()
-
-        # Central widget wraps the bar + splitter
+        # Central widget wraps the top bar + invite bar + splitter
         central = QWidget()
         central_layout = QVBoxLayout(central)
         central_layout.setContentsMargins(0, 0, 0, 0)
         central_layout.setSpacing(0)
+        central_layout.addWidget(self._build_top_bar())
+
+        # Invite notification bar (hidden until an invite arrives)
+        self._invite_bar = self._build_invite_bar()
         central_layout.addWidget(self._invite_bar)
         self.setCentralWidget(central)
 
         # Main splitter
         splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.setStyleSheet(f"QSplitter::handle {{ background: {theme.DIVIDER}; width: 1px; }}")
         central_layout.addWidget(splitter, 1)
 
         # Left: channel list
         left = QWidget()
+        # No border-right here: a CSS border on this widget was found to cause a stray
+        # 1px seam to bleed into unrelated child rows elsewhere in the sidebar (visible
+        # as a spurious vertical line next to the "+" and chevron buttons). The splitter
+        # handle below already draws the boundary between the sidebar and the main pane.
+        left.setStyleSheet(f"background: {theme.SIDEBAR_BG};")
         left_layout = QVBoxLayout(left)
         left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(0)
 
-        ch_header = QLabel("  Channels")
-        ch_header.setStyleSheet("font-weight: bold; padding: 8px 4px; color: #aaa;")
-        left_layout.addWidget(ch_header)
+        ch_header_row = QWidget()
+        ch_header_layout = QHBoxLayout(ch_header_row)
+        ch_header_layout.setContentsMargins(16, 14, 12, 6)
+        ch_header = QLabel("CHANNELS")
+        ch_header.setStyleSheet(
+            f"font-size: 11px; font-weight: 600; letter-spacing: 1px; color: {theme.TEXT_FAINT};"
+        )
+        ch_header_layout.addWidget(ch_header, 1)
+        ch_add_btn = QPushButton("＋")
+        ch_add_btn.setToolTip("New channel")
+        ch_add_btn.setFixedSize(20, 20)
+        ch_add_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: transparent; color: {theme.TEXT_FAINT}; border: none;
+                font-size: 13px; padding: 0;
+            }}
+            QPushButton:hover {{ color: {theme.TEXT}; }}
+        """)
+        ch_add_btn.clicked.connect(self._on_new_channel)
+        ch_header_layout.addWidget(ch_add_btn)
+        left_layout.addWidget(ch_header_row)
 
         self._channel_list_widget = QListWidget()
-        self._channel_list_widget.setStyleSheet(
-            "QListWidget { border: none; background: #1a1a1a; }"
-            "QListWidget::item { padding: 8px 12px; color: #ccc; }"
-            "QListWidget::item:selected { background: #2a4a7a; color: #fff; }"
-        )
+        self._channel_list_widget.setIconSize(QSize(13, 13))
+        self._channel_list_widget.setSpacing(0)
+        self._channel_list_widget.setStyleSheet(f"""
+            QListWidget {{ border: none; background: {theme.SIDEBAR_BG}; outline: none; }}
+            QListWidget::item {{
+                padding: 7px 10px; margin: 1px 8px; border-radius: 8px;
+                color: {theme.TEXT}; font-size: 13.5px;
+            }}
+            QListWidget::item:selected {{ background: {theme.ACCENT_WASH_SELECTED}; color: {theme.ACCENT}; }}
+            QListWidget::item:hover:!selected {{ background: {theme.BORDER_SOFT}; }}
+        """)
         self._channel_list_widget.currentItemChanged.connect(self._on_channel_selected)
         self._channel_list_widget.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._channel_list_widget.customContextMenuRequested.connect(self._on_channel_context_menu)
         left_layout.addWidget(self._channel_list_widget)
 
+        # Faint fading divider between the channel list and the online panel
+        divider = QFrame()
+        divider.setFixedHeight(1)
+        divider.setStyleSheet(f"""
+            background: qlineargradient(
+                x1:0, y1:0, x2:1, y2:0,
+                stop:0 transparent, stop:0.2 {theme.DIVIDER},
+                stop:0.8 {theme.DIVIDER}, stop:1 transparent
+            );
+            border: none; margin: 0 16px;
+        """)
+        divider_wrap = QWidget()
+        divider_wrap_layout = QVBoxLayout(divider_wrap)
+        divider_wrap_layout.setContentsMargins(16, 12, 16, 0)
+        divider_wrap_layout.addWidget(divider)
+        left_layout.addWidget(divider_wrap)
+
         # Online users panel
         self._online_panel_expanded = True
-        self._online_header = QLabel("  ▾ Online")
+        online_header_row = QWidget()
+        online_header_row.setCursor(Qt.CursorShape.PointingHandCursor)
+        online_header_row.mousePressEvent = self._on_online_header_clicked
+        online_header_layout = QHBoxLayout(online_header_row)
+        online_header_layout.setContentsMargins(16, 10, 12, 6)
+        self._online_header = QLabel("ONLINE — 0")
         self._online_header.setStyleSheet(
-            "font-weight: bold; padding: 6px 4px 4px 4px; color: #aaa;"
+            f"font-size: 11px; font-weight: 600; letter-spacing: 1px; color: {theme.TEXT_FAINT};"
         )
-        self._online_header.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._online_header.mousePressEvent = self._on_online_header_clicked
-        left_layout.addWidget(self._online_header)
+        online_header_layout.addWidget(self._online_header, 1)
+        self._online_chevron = QLabel("▼")
+        self._online_chevron.setStyleSheet(f"color: {theme.TEXT_FAINT}; font-size: 10px;")
+        online_header_layout.addWidget(self._online_chevron)
+        left_layout.addWidget(online_header_row)
 
         self._online_list = QListWidget()
-        self._online_list.setStyleSheet(
-            "QListWidget { border: none; background: #1a1a1a; }"
-            "QListWidget::item { padding: 4px 12px; color: #ccc; font-size: 12px; }"
-            "QListWidget::item:selected { background: transparent; }"
-        )
+        self._online_list.setStyleSheet(f"""
+            QListWidget {{ border: none; background: {theme.SIDEBAR_BG}; outline: none; }}
+            QListWidget::item {{ padding: 0; }}
+            QListWidget::item:selected {{ background: transparent; }}
+        """)
         self._online_list.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
         self._online_list.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._online_list.setMaximumHeight(160)
         left_layout.addWidget(self._online_list)
+        left_layout.addStretch()
 
-        left.setMinimumWidth(180)
-        left.setMaximumWidth(260)
+        left.setMinimumWidth(200)
+        left.setMaximumWidth(280)
         splitter.addWidget(left)
 
         # Right: tab widget — Chat tab and Network Map tab
         self._tabs = QTabWidget()
+        self._tabs.setObjectName("mainTabs")
         self._tabs.setDocumentMode(True)
+        self._tabs.setStyleSheet(f"""
+            QTabWidget#mainTabs::pane {{ border: none; background: {theme.BG}; }}
+            QTabWidget#mainTabs::tab-bar {{ left: 16px; top: 6px; }}
+            QTabBar::tab {{
+                background: transparent; color: {theme.TEXT_MUTED};
+                padding: 7px 14px; font-size: 13px;
+                border: 1px solid {theme.BORDER}; border-right: none;
+            }}
+            QTabBar::tab:first {{ border-top-left-radius: 8px; border-bottom-left-radius: 8px; }}
+            QTabBar::tab:last {{
+                border-right: 1px solid {theme.BORDER};
+                border-top-right-radius: 8px; border-bottom-right-radius: 8px;
+            }}
+            QTabBar::tab:selected {{ color: {theme.ACCENT}; background: {theme.ACCENT_WASH_HOVER}; }}
+            QTabBar::tab:hover:!selected {{ color: {theme.TEXT}; }}
+        """)
         self._tabs.currentChanged.connect(self._on_tab_changed)
 
         # --- Chat tab ---
@@ -463,7 +653,7 @@ class MainWindow(QMainWindow):
         self._stack = QStackedWidget()
         placeholder = QLabel("Select a channel to start chatting")
         placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        placeholder.setStyleSheet("color: #555; font-size: 16px;")
+        placeholder.setStyleSheet(f"color: {theme.TEXT_FAINT}; font-size: 15px;")
         self._stack.addWidget(placeholder)
         chat_layout.addWidget(self._stack, 1)
 
@@ -485,7 +675,7 @@ class MainWindow(QMainWindow):
 
         # Bottom bar: legend + refresh button
         map_bar = QWidget()
-        map_bar.setStyleSheet("background: #111; border-top: 1px solid #333;")
+        map_bar.setStyleSheet(f"background: {theme.PANEL_BG}; border-top: 1px solid {theme.DIVIDER};")
         map_bar_layout = QHBoxLayout(map_bar)
         map_bar_layout.setContentsMargins(8, 4, 8, 4)
 
@@ -498,14 +688,14 @@ class MainWindow(QMainWindow):
             "<span style='color:#e83a3a'>━</span> Poor"
         )
         map_legend.setTextFormat(Qt.TextFormat.RichText)
-        map_legend.setStyleSheet("color: #888; font-size: 11px; background: transparent;")
+        map_legend.setStyleSheet(f"color: {theme.TEXT_FAINT}; font-size: 11px; background: transparent;")
         map_bar_layout.addWidget(map_legend, 1)
 
         self._map_tc_only_check = QCheckBox("TrenchChat Network only")
-        self._map_tc_only_check.setStyleSheet(
-            "QCheckBox { color: #aaa; font-size: 11px; background: transparent; }"
-            "QCheckBox::indicator { width: 13px; height: 13px; }"
-        )
+        self._map_tc_only_check.setStyleSheet(f"""
+            QCheckBox {{ color: {theme.TEXT_MUTED}; font-size: 11px; background: transparent; }}
+            QCheckBox::indicator {{ width: 13px; height: 13px; }}
+        """)
         self._map_tc_only_check.setToolTip(
             "When checked, only nodes that have been seen on the TrenchChat network "
             "(peers from your channels) are shown. Interface and transport nodes are "
@@ -517,11 +707,13 @@ class MainWindow(QMainWindow):
 
         self._map_refresh_btn = QPushButton("↻ Refresh")
         self._map_refresh_btn.setFixedWidth(80)
-        self._map_refresh_btn.setStyleSheet(
-            "QPushButton { background: #2a2a2a; color: #aaa; border: 1px solid #444;"
-            " border-radius: 3px; padding: 2px 6px; font-size: 11px; }"
-            "QPushButton:hover { background: #3a3a3a; }"
-        )
+        self._map_refresh_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: transparent; color: {theme.TEXT_MUTED}; border: 1px solid {theme.BORDER};
+                border-radius: 6px; padding: 2px 6px; font-size: 11px;
+            }}
+            QPushButton:hover {{ background: {theme.BORDER_SOFT}; }}
+        """)
         self._map_refresh_btn.clicked.connect(self._on_map_refresh_clicked)
         map_bar_layout.addWidget(self._map_refresh_btn)
 
@@ -537,36 +729,138 @@ class MainWindow(QMainWindow):
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
 
+    def _icon_btn_qss(self) -> str:
+        """Shared style for the borderless icon buttons in the top bar.
+
+        padding: 0 is required — without it these fixed-size square buttons
+        inherit the global QPushButton rule's `padding: 5px 14px`, which on a
+        32x32 button leaves almost no room for the glyph and clips it down to
+        a sliver.
+        """
+        return f"""
+            QPushButton {{
+                background: transparent; color: {theme.TEXT_MUTED};
+                border: 1px solid transparent; border-radius: 8px; font-size: 14px;
+                padding: 0;
+            }}
+            QPushButton:hover {{ background: {theme.BORDER_SOFT}; color: {theme.TEXT}; }}
+        """
+
+    def _build_top_bar(self) -> QFrame:
+        bar = QFrame()
+        bar.setObjectName("topBar")
+        bar.setStyleSheet(f"""
+            QFrame#topBar {{ background: {theme.BG}; border-bottom: 1px solid {theme.DIVIDER}; }}
+            QFrame#topBar QLabel {{ background: transparent; }}
+        """)
+        layout = QHBoxLayout(bar)
+        layout.setContentsMargins(16, 9, 16, 9)
+        layout.setSpacing(10)
+
+        brand = QLabel(
+            f"📡&nbsp;&nbsp;<span style='font-size:16px;font-weight:500;color:{theme.TEXT}'>"
+            f"TrenchChat</span>"
+        )
+        brand.setTextFormat(Qt.TextFormat.RichText)
+        brand.setStyleSheet(f"color: {theme.ACCENT}; font-size: 16px;")
+        layout.addWidget(brand)
+        layout.addStretch(1)
+
+        search_btn = QPushButton("🔍")
+        search_btn.setToolTip("Browse and join channels")
+        search_btn.setFixedSize(32, 32)
+        search_btn.setStyleSheet(self._icon_btn_qss())
+        search_btn.clicked.connect(self._on_join_channel)
+        layout.addWidget(search_btn)
+
+        new_channel_btn = QPushButton("＋  New channel")
+        new_channel_btn.setFixedHeight(32)
+        new_channel_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: transparent; color: {theme.ACCENT};
+                border: 1px solid {theme.ACCENT}; border-radius: 8px;
+                padding: 0 12px; font-weight: 500; font-size: 13px;
+            }}
+            QPushButton:hover {{ background: {theme.ACCENT_WASH_HOVER}; }}
+        """)
+        new_channel_btn.clicked.connect(self._on_new_channel)
+        layout.addWidget(new_channel_btn)
+
+        identity_row = QWidget()
+        identity_layout = QHBoxLayout(identity_row)
+        identity_layout.setContentsMargins(6, 0, 6, 0)
+        identity_layout.setSpacing(8)
+        self._identity_avatar = QLabel()
+        self._identity_avatar.setFixedSize(26, 26)
+        identity_layout.addWidget(self._identity_avatar)
+        self._identity_hash_label = QLabel()
+        self._identity_hash_label.setStyleSheet(
+            f"font-size: 11px; font-family: {theme.MONO_FONT_FAMILY}; color: {theme.TEXT_FAINT};"
+        )
+        identity_layout.addWidget(self._identity_hash_label)
+        layout.addWidget(identity_row)
+
+        settings_btn = QPushButton("⚙")
+        settings_btn.setToolTip("Settings")
+        settings_btn.setFixedSize(32, 32)
+        settings_btn.setStyleSheet(self._icon_btn_qss())
+        settings_btn.clicked.connect(self._on_settings)
+        layout.addWidget(settings_btn)
+
+        self._update_identity_label()
+        return bar
+
     def _build_invite_bar(self) -> QFrame:
         bar = QFrame()
         bar.setFrameShape(QFrame.Shape.NoFrame)
-        bar.setStyleSheet(
-            "QFrame { background: #2d4a1e; border-bottom: 1px solid #4a7a30; }"
-            "QLabel { color: #b8e08a; font-size: 12px; background: transparent; border: none; }"
-            "QPushButton { padding: 2px 10px; font-size: 11px; }"
-        )
+        bar.setStyleSheet(f"""
+            QFrame {{ background: {theme.INVITE_BG}; border-bottom: 1px solid {theme.INVITE_BORDER}; }}
+            QLabel {{ color: {theme.INVITE_TEXT}; font-size: 13px; background: transparent; border: none; }}
+        """)
         bar.hide()
 
         layout = QHBoxLayout(bar)
-        layout.setContentsMargins(10, 5, 10, 5)
+        layout.setContentsMargins(16, 8, 16, 8)
+        layout.setSpacing(10)
 
         self._invite_bar_label = QLabel()
+        self._invite_bar_label.setTextFormat(Qt.TextFormat.RichText)
         layout.addWidget(self._invite_bar_label, 1)
 
         accept_btn = QPushButton("Accept")
-        accept_btn.setStyleSheet("background: #3a8a20; color: white; border-radius: 3px;")
+        accept_btn.setFixedHeight(26)
+        accept_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: transparent; color: {theme.ACCENT}; border: 1px solid {theme.ACCENT};
+                border-radius: 6px; padding: 0 12px; font-size: 12px; font-weight: 500;
+            }}
+            QPushButton:hover {{ background: {theme.ACCENT_WASH_HOVER}; }}
+        """)
         accept_btn.clicked.connect(self._on_accept_invite)
         layout.addWidget(accept_btn)
 
         decline_btn = QPushButton("Decline")
-        decline_btn.setStyleSheet("background: #5a2020; color: white; border-radius: 3px;")
+        decline_btn.setFixedHeight(26)
+        decline_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: transparent; color: {theme.TEXT}; border: 1px solid {theme.BORDER_STRONG};
+                border-radius: 6px; padding: 0 12px; font-size: 12px;
+            }}
+            QPushButton:hover {{ background: rgba(255,255,255,0.08); }}
+        """)
         decline_btn.clicked.connect(self._on_decline_invite)
         layout.addWidget(decline_btn)
 
         next_btn = QPushButton("▸")
         next_btn.setToolTip("Next invite")
-        next_btn.setFixedWidth(28)
-        next_btn.setStyleSheet("background: #444; color: #ccc; border-radius: 3px;")
+        next_btn.setFixedSize(24, 24)
+        next_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: transparent; color: #a7a1db; border: none;
+                border-radius: 6px; padding: 0;
+            }}
+            QPushButton:hover {{ background: rgba(255,255,255,0.08); }}
+        """)
         next_btn.clicked.connect(self._on_next_invite)
         layout.addWidget(next_btn)
 
@@ -580,45 +874,42 @@ class MainWindow(QMainWindow):
         count = len(self._pending_invites)
         count_str = f" ({count})" if count > 1 else ""
         self._invite_bar_label.setText(
-            f"📨  You've been invited to join  #{channel_name}{count_str}  "
-            f"— from {admin_hex[:16]}…"
+            f"You've been invited to join <strong>#{channel_name}</strong>{count_str} "
+            f"by {admin_hex[:12]}…"
         )
         self._invite_bar.show()
 
     def _apply_dark_theme(self):
-        self.setStyleSheet("""
-            QMainWindow, QWidget {
-                background-color: #1e1e1e;
-                color: #d4d4d4;
-            }
-            QToolBar {
-                background: #252526;
-                border-bottom: 1px solid #333;
-                spacing: 4px;
-                padding: 2px 4px;
-            }
-            QToolBar QToolButton {
-                color: #ccc;
-                padding: 4px 8px;
-                border-radius: 4px;
-            }
-            QToolBar QToolButton:hover { background: #3a3a3a; }
-            QSplitter::handle { background: #333; width: 1px; }
-            QTextEdit, QLineEdit {
-                background: #2d2d2d;
-                color: #d4d4d4;
-                border: 1px solid #444;
-                border-radius: 4px;
-            }
-            QPushButton {
-                background: #0e639c;
-                color: white;
-                border: none;
-                border-radius: 4px;
-                padding: 4px 12px;
-            }
-            QPushButton:hover { background: #1177bb; }
-            QPushButton:disabled { background: #333; color: #666; }
+        self.setStyleSheet(f"""
+            QMainWindow, QWidget {{
+                background-color: {theme.BG};
+                color: {theme.TEXT};
+                font-family: {theme.FONT_FAMILY};
+            }}
+            QSplitter::handle {{ background: {theme.DIVIDER}; width: 1px; }}
+            QTextEdit, QLineEdit {{
+                background: {theme.INPUT_BG};
+                color: {theme.TEXT};
+                border: 1px solid {theme.BORDER};
+                border-radius: 8px;
+                padding: 5px 8px;
+            }}
+            QTextEdit:focus, QLineEdit:focus {{ border: 1px solid {theme.ACCENT}; }}
+            QPushButton {{
+                background: transparent;
+                color: {theme.TEXT};
+                border: 1px solid {theme.BORDER_STRONG};
+                border-radius: 8px;
+                padding: 5px 14px;
+            }}
+            QPushButton:hover {{ background: {theme.BORDER_SOFT}; }}
+            QPushButton:disabled {{ color: {theme.TEXT_FAINT}; border-color: {theme.BORDER}; }}
+            QScrollBar:vertical {{ background: transparent; width: 10px; margin: 0; }}
+            QScrollBar::handle:vertical {{
+                background: {theme.BORDER_STRONG}; border-radius: 5px; min-height: 24px;
+            }}
+            QScrollBar::handle:vertical:hover {{ background: {theme.TEXT_MUTED}; }}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
         """)
 
     # --- channel list ---
@@ -632,15 +923,25 @@ class MainWindow(QMainWindow):
             if not self._storage.is_subscribed(row["hash"]):
                 continue
             perms = permissions_from_json(row["permissions"])
-            lock = " 🔒" if not is_open_join(perms) else ""
-            item = QListWidgetItem(f"# {row['name']}{lock}")
+            lock = "  🔒" if not is_open_join(perms) else ""
+            item = QListWidgetItem(f"{row['name']}{lock}")
             item.setData(Qt.ItemDataRole.UserRole, row["hash"])
             self._channel_list_widget.addItem(item)
         self._channel_list_widget.blockSignals(False)
 
+        self._update_channel_icons()
         # Re-highlight whichever channel is currently open (if still in list).
         if self._current_channel:
             self._highlight_channel_in_list(self._current_channel)
+
+    def _update_channel_icons(self) -> None:
+        """Recolor each channel row's leading icon: accent when selected, muted otherwise."""
+        muted_icon = QIcon(_make_channel_icon_pixmap(theme.qcolor(theme.TEXT, 0.6)))
+        accent_icon = QIcon(_make_channel_icon_pixmap(QColor(theme.ACCENT)))
+        for i in range(self._channel_list_widget.count()):
+            item = self._channel_list_widget.item(i)
+            is_selected = item.data(Qt.ItemDataRole.UserRole) == self._current_channel
+            item.setIcon(accent_icon if is_selected else muted_icon)
 
     def _highlight_channel_in_list(self, channel_hash_hex: str):
         """Select the list row for channel_hash_hex without triggering a switch."""
@@ -682,6 +983,7 @@ class MainWindow(QMainWindow):
 
         self._settings.setValue("last_channel", channel_hash_hex)
         self._current_channel = channel_hash_hex
+        self._update_channel_icons()
 
         if channel_hash_hex not in self._channel_views:
             # Retrieve the scroll restore point saved from a previous session.
@@ -863,11 +1165,15 @@ class MainWindow(QMainWindow):
         is_member = self._storage.is_member(channel_hash, my_hex)
 
         menu = QMenu(self)
-        menu.setStyleSheet(
-            "QMenu { background: #2d2d2d; color: #d4d4d4; border: 1px solid #444; }"
-            "QMenu::item:selected { background: #2a4a7a; }"
-            "QMenu::separator { background: #444; height: 1px; margin: 2px 0; }"
-        )
+        menu.setStyleSheet(f"""
+            QMenu {{
+                background: {theme.DIALOG_BG}; color: {theme.TEXT};
+                border: 1px solid {theme.BORDER}; border-radius: 8px; padding: 4px;
+            }}
+            QMenu::item {{ padding: 6px 14px; border-radius: 6px; }}
+            QMenu::item:selected {{ background: {theme.ACCENT_WASH_SELECTED}; color: {theme.ACCENT}; }}
+            QMenu::separator {{ background: {theme.DIVIDER}; height: 1px; margin: 4px 4px; }}
+        """)
 
         if can_invite:
             invite_action = menu.addAction("Invite member…")
@@ -968,18 +1274,40 @@ class MainWindow(QMainWindow):
     def _on_online_header_clicked(self, _event) -> None:
         """Toggle the online users list visibility."""
         self._online_panel_expanded = not self._online_panel_expanded
-        if self._online_panel_expanded:
-            self._online_list.show()
-            self._online_header.setText("  ▾ Online")
-        else:
-            self._online_list.hide()
-            self._online_header.setText("  ▸ Online")
+        self._online_list.setVisible(self._online_panel_expanded)
+        self._online_chevron.setText("▼" if self._online_panel_expanded else "▶")
+
+    def _make_online_row_widget(self, display_name: str, hash_hex: str,
+                                is_online: bool) -> QWidget:
+        """Build one online-panel row: coloured presence dot + name + trailing hash."""
+        row = QWidget()
+        row.setStyleSheet("background: transparent;")
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(16, 4, 16, 4)
+        layout.setSpacing(8)
+
+        dot = QLabel()
+        dot.setFixedSize(6, 6)
+        dot_color = theme.ONLINE_DOT if is_online else theme.OFFLINE_DOT
+        dot.setStyleSheet(f"background: {dot_color}; border-radius: 3px;")
+        layout.addWidget(dot, 0, Qt.AlignmentFlag.AlignVCenter)
+
+        name = QLabel(display_name)
+        name.setStyleSheet(f"color: {theme.rgba(theme.TEXT, 0.85)}; font-size: 12.5px;")
+        layout.addWidget(name, 1)
+
+        hash_label = QLabel(hash_hex[:8])
+        hash_label.setStyleSheet(
+            f"color: {theme.TEXT_SUBTLE}; font-size: 10.5px; font-family: {theme.MONO_FONT_FAMILY};"
+        )
+        layout.addWidget(hash_label, 0, Qt.AlignmentFlag.AlignRight)
+        return row
 
     def _refresh_online_panel(self) -> None:
         """Repopulate the online users list for the currently selected channel."""
+        self._online_list.clear()
         if self._current_channel is None:
-            self._online_list.clear()
-            self._online_header.setText("  ▾ Online")
+            self._online_header.setText("ONLINE — 0")
             return
 
         entries = self._presence_mgr.get_online_for_channel(
@@ -989,18 +1317,17 @@ class MainWindow(QMainWindow):
         )
 
         online_count = sum(1 for e in entries if e["is_online"])
-        self._online_header.setText(
-            f"  {'▾' if self._online_panel_expanded else '▸'} "
-            f"Online ({online_count})"
-        )
+        self._online_header.setText(f"ONLINE — {online_count}")
 
-        self._online_list.clear()
         for entry in entries:
-            dot = "● " if entry["is_online"] else "○ "
-            color = "#4ec94e" if entry["is_online"] else "#666"
-            item = QListWidgetItem(dot + entry["display_name"])
-            item.setForeground(QColor(color))
+            item = QListWidgetItem()
+            item.setFlags(Qt.ItemFlag.NoItemFlags)
+            row_widget = self._make_online_row_widget(
+                entry["display_name"], entry["identity_hash"], entry["is_online"]
+            )
+            item.setSizeHint(row_widget.sizeHint())
             self._online_list.addItem(item)
+            self._online_list.setItemWidget(item, row_widget)
 
     def _on_presence_changed(self, peer_hex: str, is_online: bool) -> None:
         """Called from RNS background thread — marshal to main thread."""
@@ -1281,12 +1608,12 @@ class MainWindow(QMainWindow):
 
     @pyqtSlot()
     def _update_identity_label(self) -> None:
-        """Refresh the toolbar identity label to reflect the current display name."""
-        self._identity_label.setText(
-            f"  {self._config.display_name}  "
-            f"<span style='color:#555;font-size:10px'>"
-            f"{self._identity.hash_hex[:12]}…</span>"
-        )
+        """Refresh the top-bar avatar/hash to reflect the current identity/display name."""
+        letter = (self._config.display_name[:1] or "?").upper()
+        self._identity_avatar.setPixmap(_make_solid_avatar_pixmap(letter, theme.ACCENT, 26))
+        self._identity_avatar.setToolTip(self._config.display_name)
+        self._identity_hash_label.setText(self._identity.hash_hex[:8])
+        self._identity_hash_label.setToolTip(self._identity.hash_hex)
 
     def _on_settings(self):
         dlg = SettingsDialog(

@@ -26,12 +26,13 @@ from PyQt6.QtGui import QColor, QIcon, QPixmap, QPainter, QPainterPath, QMovie
 
 from trenchchat.core.reaction import ReactionManager
 from trenchchat.core.storage import Storage
+from trenchchat.gui import theme
 
 # Messages received more than this many seconds after their timestamp are "late"
 LATE_THRESHOLD_SECS = 30.0
 
 _MESSAGE_HISTORY_LIMIT = 500
-_AVATAR_SIZE = 40              # avatar circle diameter in pixels
+_AVATAR_SIZE = 38              # avatar circle diameter in pixels
 _ROW_LEFT_PAD = 12             # padding left of avatar
 _ROW_RIGHT_PAD = 36            # padding right edge — wide enough to hold the react button
 _ROW_V_PAD = 4                 # vertical padding for header rows
@@ -150,11 +151,19 @@ def _make_circular_pixmap(pixmap: QPixmap, size: int) -> QPixmap:
     return result
 
 
-def _make_placeholder_pixmap(identity_hex: str, display_name: str, size: int) -> QPixmap:
-    """Return a coloured circle with the first letter of the display name."""
-    digest = hashlib.md5(identity_hex.encode()).digest()
-    hue = int.from_bytes(digest[:2], "big") % 360
-    color = QColor.fromHsv(hue, 150, 190)
+def _make_placeholder_pixmap(identity_hex: str, display_name: str, size: int,
+                             is_own: bool = False) -> QPixmap:
+    """Return a coloured circle with the first letter of the display name.
+
+    Own-message avatars use the accent color (matching the main-window design's
+    avatarBg = isOwn ? accent : perSenderHue rule); other senders get a hash-derived hue.
+    """
+    if is_own:
+        color = QColor(theme.ACCENT)
+    else:
+        digest = hashlib.md5(identity_hex.encode()).digest()
+        hue = int.from_bytes(digest[:2], "big") % 360
+        color = QColor.fromHsv(hue, 150, 190)
 
     result = QPixmap(size, size)
     result.fill(Qt.GlobalColor.transparent)
@@ -174,16 +183,6 @@ def _make_placeholder_pixmap(identity_hex: str, display_name: str, size: int) ->
     painter.drawText(result.rect(), Qt.AlignmentFlag.AlignCenter, letter)
     painter.end()
     return result
-
-
-def _name_color(identity_hex: str, is_own: bool) -> str:
-    """Return a CSS colour string for a sender's display name."""
-    if is_own:
-        return "#7eb8f7"
-    digest = hashlib.md5(identity_hex.encode()).digest()
-    hue = int.from_bytes(digest[:2], "big") % 360
-    c = QColor.fromHsv(hue, 180, 220)
-    return c.name()
 
 
 def _make_qmovie(image_data: bytes) -> QMovie:
@@ -410,6 +409,15 @@ _REACT_BTN_SIZE = 22        # reaction button diameter in px
 _CHIP_EMOJI_SIZE = 18       # emoji thumbnail size inside a reaction chip
 _CHIP_MAX_EMOJIS = 20       # maximum distinct emojis to show per message
 
+_REACT_BTN_QSS = f"""
+    QPushButton {{
+        background: transparent; color: {theme.TEXT_MUTED};
+        border: 1px solid {theme.BORDER_STRONG}; border-radius: 11px; font-size: 11px;
+        padding: 0;
+    }}
+    QPushButton:hover {{ background: {theme.BORDER_SOFT}; color: {theme.TEXT}; }}
+"""
+
 
 class _ReactionChip(QPushButton):
     """A single reaction chip: emoji thumbnail + reactor count.
@@ -446,12 +454,13 @@ class _ReactionChip(QPushButton):
         label = f"{icon_str} {count}" if icon_str else str(count)
         self.setText(label)
 
-        bg = "#3a5080" if user_reacted else "#2a2a2a"
-        border = "#5a80c0" if user_reacted else "#444"
+        bg = theme.ACCENT_WASH_REACTED if user_reacted else "rgba(255,255,255,0.06)"
+        border = theme.ACCENT if user_reacted else theme.BORDER_STRONG
+        hover_bg = theme.ACCENT_WASH_REACTED_HOVER if user_reacted else theme.BORDER_SOFT
         self.setStyleSheet(
-            f"QPushButton {{ background: {bg}; color: #ddd; border: 1px solid {border}; "
+            f"QPushButton {{ background: {bg}; color: {theme.TEXT}; border: 1px solid {border}; "
             f"border-radius: 10px; padding: 1px 6px; font-size: 11px; }}"
-            f"QPushButton:hover {{ background: {'#4a6090' if user_reacted else '#3a3a3a'}; }}"
+            f"QPushButton:hover {{ background: {hover_bg}; }}"
         )
         self.clicked.connect(self._on_click)
 
@@ -550,6 +559,7 @@ class MessageBubble(QWidget):
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
         self._sender_hash = sender_hash
         self._message_id = message_id
+        self._is_own = is_own
 
         row = QHBoxLayout(self)
         row.setContentsMargins(_ROW_LEFT_PAD, _ROW_V_PAD, _ROW_RIGHT_PAD, _ROW_V_PAD)
@@ -566,12 +576,15 @@ class MessageBubble(QWidget):
         col.setSpacing(1)
         col.setContentsMargins(0, 0, 0, 0)
 
-        name_color = _name_color(sender_hash, is_own)
         hash_short = sender_hash[:8]
+        you_badge = (
+            f"&nbsp;<span style='color:{theme.ACCENT};font-size:10px'>you</span>" if is_own else ""
+        )
         header_html = (
-            f"<span style='color:{name_color};font-weight:600'>{sender}</span>"
-            f"&nbsp;<span style='color:#555;font-size:10px'>[{hash_short}]</span>"
-            f"&nbsp;&nbsp;<span style='color:#555;font-size:10px'>{_format_ts(timestamp)}</span>"
+            f"<span style='color:{theme.TEXT};font-weight:600'>{sender}</span>"
+            f"{you_badge}"
+            f"&nbsp;<span style='color:{theme.TEXT_SUBTLE};font-size:10px'>[{hash_short}]</span>"
+            f"&nbsp;&nbsp;<span style='color:{theme.TEXT_SUBTLE};font-size:10px'>{_format_ts(timestamp)}</span>"
         )
         header = QLabel(header_html)
         header.setTextFormat(Qt.TextFormat.RichText)
@@ -590,10 +603,10 @@ class MessageBubble(QWidget):
             if is_rich:
                 body.setTextFormat(Qt.TextFormat.RichText)
                 body.setText(
-                    f'<span style="color:#dcddde;font-size:13px">{body_text}</span>'
+                    f'<span style="color:{theme.MESSAGE_TEXT};font-size:13px">{body_text}</span>'
                 )
             else:
-                body.setStyleSheet("color: #dcddde; font-size: 13px;")
+                body.setStyleSheet(f"color: {theme.MESSAGE_TEXT}; font-size: 13px;")
                 body.setText(body_text)
             col.addWidget(body)
 
@@ -603,7 +616,7 @@ class MessageBubble(QWidget):
 
         if received_at - timestamp > LATE_THRESHOLD_SECS:
             late = QLabel("⟳ received late")
-            late.setStyleSheet("color: #666; font-size: 10px; font-style: italic;")
+            late.setStyleSheet(f"color: {theme.TEXT_FAINT}; font-size: 10px; font-style: italic;")
             col.addWidget(late)
 
         self._reaction_bar = _ReactionBar()
@@ -618,11 +631,7 @@ class MessageBubble(QWidget):
         # Hover react button — shown top-right on enterEvent
         self._react_btn = QPushButton("😊", self)
         self._react_btn.setFixedSize(_REACT_BTN_SIZE, _REACT_BTN_SIZE)
-        self._react_btn.setStyleSheet(
-            "QPushButton { background: #333; color: #aaa; border: 1px solid #555; "
-            "border-radius: 11px; font-size: 11px; }"
-            "QPushButton:hover { background: #444; color: #fff; }"
-        )
+        self._react_btn.setStyleSheet(_REACT_BTN_QSS)
         self._react_btn.setToolTip("Add reaction")
         self._react_btn.hide()
         self._react_btn.clicked.connect(
@@ -654,7 +663,8 @@ class MessageBubble(QWidget):
         if avatar_pixmap and not avatar_pixmap.isNull():
             pix = _make_circular_pixmap(avatar_pixmap, _AVATAR_SIZE)
         else:
-            pix = _make_placeholder_pixmap(sender_hash, display_name, _AVATAR_SIZE)
+            pix = _make_placeholder_pixmap(sender_hash, display_name, _AVATAR_SIZE,
+                                           is_own=self._is_own)
         self._avatar_widget.set_pixmap(pix)
 
     def _react_btn_x(self) -> int:
@@ -733,10 +743,10 @@ class MessageContinuation(QWidget):
             if is_rich:
                 self._body.setTextFormat(Qt.TextFormat.RichText)
                 self._body.setText(
-                    f'<span style="color:#dcddde;font-size:13px">{body_text}</span>'
+                    f'<span style="color:{theme.MESSAGE_TEXT};font-size:13px">{body_text}</span>'
                 )
             else:
-                self._body.setStyleSheet("color: #dcddde; font-size: 13px;")
+                self._body.setStyleSheet(f"color: {theme.MESSAGE_TEXT}; font-size: 13px;")
                 self._body.setText(body_text)
             col.addWidget(self._body)
 
@@ -746,7 +756,7 @@ class MessageContinuation(QWidget):
 
         if received_at - timestamp > LATE_THRESHOLD_SECS:
             late = QLabel("⟳ received late")
-            late.setStyleSheet("color: #666; font-size: 10px; font-style: italic;")
+            late.setStyleSheet(f"color: {theme.TEXT_FAINT}; font-size: 10px; font-style: italic;")
             col.addWidget(late)
 
         self._reaction_bar = _ReactionBar()
@@ -761,11 +771,7 @@ class MessageContinuation(QWidget):
         # Hover react button
         self._react_btn = QPushButton("😊", self)
         self._react_btn.setFixedSize(_REACT_BTN_SIZE, _REACT_BTN_SIZE)
-        self._react_btn.setStyleSheet(
-            "QPushButton { background: #333; color: #aaa; border: 1px solid #555; "
-            "border-radius: 11px; font-size: 11px; }"
-            "QPushButton:hover { background: #444; color: #fff; }"
-        )
+        self._react_btn.setStyleSheet(_REACT_BTN_QSS)
         self._react_btn.setToolTip("Add reaction")
         self._react_btn.hide()
         self._react_btn.clicked.connect(
@@ -793,7 +799,7 @@ class MessageContinuation(QWidget):
 
     def enterEvent(self, event):
         self._ts_label.setStyleSheet(
-            "color: #555; font-size: 10px; padding-right: 6px;"
+            f"color: {theme.TEXT_FAINT}; font-size: 10px; padding-right: 6px;"
         )
         self.setAutoFillBackground(True)
         p = self.palette()
@@ -885,6 +891,12 @@ class ChannelView(QWidget):
                 item.widget().deleteLater()
 
         rows = self._storage.get_messages(self._channel_hash, limit=_MESSAGE_HISTORY_LIMIT)
+        if not rows:
+            empty = QLabel("No messages yet — say something to get things started.")
+            empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            empty.setStyleSheet(f"color: {theme.TEXT_SUBTLE}; font-size: 13px;")
+            self._msg_layout.insertWidget(self._msg_layout.count(), empty)
+            self._msg_layout.addStretch()
         for row in rows:
             self._append_bubble(row, scroll=False)
 
