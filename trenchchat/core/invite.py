@@ -536,14 +536,21 @@ class InviteManager:
                 f"to {invitee_hash_hex[:12]}…", RNS.LOG_NOTICE)
         invitee_hash = bytes.fromhex(invitee_hash_hex)
         token, expiry = self.generate_invite_token(channel_hash_hex, invitee_hash, ttl)
-        self._send_raw(invitee_hash_hex, {
+        fields = {
             F_MSG_TYPE:     MT_INVITE,
             F_CHANNEL_HASH: bytes.fromhex(channel_hash_hex),
             F_INVITE_TOKEN: token,
             F_INVITEE_HASH: invitee_hash,
             F_EXPIRY_TS:    expiry,
             F_ADMIN_HASH:   self._identity.hash,
-        })
+        }
+        # Invite-only channels are never announced, so the invitee has no
+        # local record of this channel yet -- without its name here, the
+        # MT_INVITE handler has nothing to show but the raw hash.
+        channel = self._storage.get_channel(channel_hash_hex)
+        if channel:
+            fields[F_CHANNEL_NAME] = channel["name"]
+        self._send_raw(invitee_hash_hex, fields)
 
     def send_join_request(self, channel_hash_hex: str, token: bytes,
                           expiry: float, admin_hash_hex: str):
@@ -682,8 +689,12 @@ class InviteManager:
                     RNS.LOG_NOTICE)
             if token and expiry and admin_hash:
                 admin_hex = admin_hash.hex() if isinstance(admin_hash, bytes) else str(admin_hash)
-                channel = self._storage.get_channel(channel_hash_hex)
-                channel_name = channel["name"] if channel else channel_hash_hex[:12]
+                channel_name = fields.get(F_CHANNEL_NAME)
+                if isinstance(channel_name, bytes):
+                    channel_name = channel_name.decode("utf-8", errors="replace")
+                if not channel_name:
+                    channel = self._storage.get_channel(channel_hash_hex)
+                    channel_name = channel["name"] if channel else channel_hash_hex[:12]
                 for cb in self._invite_callbacks:
                     try:
                         cb(channel_hash_hex, channel_name, token, expiry, admin_hex)

@@ -162,6 +162,33 @@ class TestInviteFlow:
         assert wait_for(lambda: ch_hash in invites_received, timeout=5), \
             "Bob's invite callback was not fired"
 
+    def test_invite_carries_real_channel_name(self, peer_factory):
+        """
+        The invite callback receives the channel's real name, not a hash
+        fallback -- invite-only channels are never announced, so before this
+        the invitee had no local record of the channel and MT_INVITE alone
+        used to carry no name, leaving the receiving side with nothing but
+        the truncated hash to display.
+        """
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+
+        ch_hash = alice.channel_mgr.create_channel("top-secret-channel", "", "invite")
+        assert bob.storage.get_channel(ch_hash) is None, \
+            "test premise broken: Bob should have no local record of this channel yet"
+
+        received_names = []
+        bob.invite_mgr.add_invite_callback(
+            lambda ch, name, tok, exp, adm: received_names.append(name)
+        )
+
+        alice.invite_mgr.send_invite(ch_hash, bob.identity.hash_hex)
+
+        assert wait_for(lambda: len(received_names) == 1, timeout=5), \
+            "Bob's invite callback was not fired"
+        assert received_names[0] == "top-secret-channel", \
+            f"expected the real channel name, got {received_names[0]!r}"
+
     def test_channel_joined_callback_fires(self, peer_factory):
         """
         The channel_joined callback fires on Bob's side when he auto-joins
