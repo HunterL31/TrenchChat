@@ -39,6 +39,16 @@
   .pane-name { font-weight: 700; font-size: 14px; }
   .pane-hash { font-size: 11px; color: var(--dim); font-family: monospace; }
   .peer-status { font-size: 11px; color: var(--dim); margin-top: 3px; }
+  .avatar-thumb {
+    display: inline-block; width: 22px; height: 22px; border-radius: 50%;
+    background-color: var(--panel); background-size: cover; background-position: center;
+    vertical-align: middle; margin-right: 6px; border: 1px solid var(--border); cursor: pointer;
+  }
+  .avatar-thumb-sm {
+    display: inline-block; width: 16px; height: 16px; border-radius: 50%;
+    background-color: var(--panel); background-size: cover; background-position: center;
+    vertical-align: middle; margin-right: 4px; border: 1px solid var(--border);
+  }
   .editable-name { cursor: pointer; border-bottom: 1px dashed transparent; }
   .editable-name:hover { border-bottom-color: var(--dim); }
   .name-edit-input {
@@ -228,6 +238,8 @@ const state = {
   A: { port: null, me: null, channels: [], activeChannel: null, ws: null, invites: [] },
   B: { port: null, me: null, channels: [], activeChannel: null, ws: null, invites: [] },
 };
+// Per-tag cache of identity_hash -> data URL (or null if confirmed no avatar).
+const avatarCache = { A: {}, B: {} };
 let newChannelForTag = null;
 
 function apiBase(tag) {
@@ -284,7 +296,11 @@ function renderShell() {
       <div class="pane-header">
         <div class="pane-name">
           <span class="status-dot" id="dot-${tag}"></span>
+          <span class="avatar-thumb" id="avatar-${tag}"
+              onclick="document.getElementById('avatar-file-${tag}').click()"
+              title="Click to change your avatar"></span>
           <span id="name-display-${tag}" class="editable-name" onclick="editDisplayName('${tag}')" title="Click to rename">Tester ${tag}</span>
+          <input type="file" accept="image/*" id="avatar-file-${tag}" style="display:none" onchange="uploadAvatar('${tag}')">
         </div>
         <div class="pane-hash" id="hash-${tag}">connecting...</div>
         <div class="peer-status">
@@ -348,6 +364,56 @@ async function connectTester(tag) {
   await refreshInvites(tag);
   connectWs(tag);
   refreshPeerPresence(tag);
+  refreshOwnAvatar(tag);
+}
+
+function avatarDataUrl(b64) {
+  return b64 ? `data:image/jpeg;base64,${b64}` : null;
+}
+
+function applyAvatar(el, dataUrl) {
+  if (!el) return;
+  el.style.backgroundImage = dataUrl ? `url(${dataUrl})` : 'none';
+}
+
+async function refreshOwnAvatar(tag) {
+  const res = await api(tag, '/me/avatar');
+  const url = avatarDataUrl(res.avatar_data_b64);
+  avatarCache[tag][state[tag].me.hash_hex] = url;
+  applyAvatar(document.getElementById(`avatar-${tag}`), url);
+}
+
+async function getPeerAvatarUrl(tag, hash) {
+  if (hash in avatarCache[tag]) return avatarCache[tag][hash];
+  try {
+    const res = await api(tag, `/peers/${hash}/avatar`);
+    const url = avatarDataUrl(res.avatar_data_b64);
+    avatarCache[tag][hash] = url;
+    return url;
+  } catch (e) {
+    return null;
+  }
+}
+
+function uploadAvatar(tag) {
+  const input = document.getElementById(`avatar-file-${tag}`);
+  const file = input.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = async () => {
+    const b64 = reader.result.split(',')[1];
+    try {
+      await api(tag, '/me/avatar', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({image_data_b64: b64}),
+      });
+      await refreshOwnAvatar(tag);
+    } catch (e) {
+      toast(`Tester ${tag}: avatar update failed`);
+    }
+  };
+  reader.readAsDataURL(file);
+  input.value = '';
 }
 
 function setPeerStatus(tag, isOnline) {
@@ -385,6 +451,10 @@ function connectWs(tag) {
       // This harness only ever has one peer per tester, so any presence
       // event on tag's socket is about tag's counterpart.
       setPeerStatus(tag, msg.is_online);
+    } else if (msg.type === 'avatar_updated') {
+      delete avatarCache[tag][msg.identity_hash];
+      if (state[tag].me && msg.identity_hash === state[tag].me.hash_hex) refreshOwnAvatar(tag);
+      if (state[tag].activeChannel) renderMessages(tag);
     }
   };
   ws.onclose = () => setTimeout(() => connectWs(tag), 2000);
@@ -448,12 +518,17 @@ async function renderMessages(tag) {
     return;
   }
   const myHash = state[tag].me.hash_hex;
-  box.innerHTML = msgs.map(m => `
+  const rendered = await Promise.all(msgs.map(async m => {
+    const avatarUrl = await getPeerAvatarUrl(tag, m.sender_hash);
+    const style = avatarUrl ? ` style="background-image:url(${avatarUrl})"` : '';
+    return `
     <div class="msg ${m.sender_hash === myHash ? 'self' : ''}">
+      <span class="avatar-thumb-sm"${style}></span>
       <span class="sender">${escapeHtml(m.sender_name || m.sender_hash.slice(0, 8))}</span>
       <span class="content">${escapeHtml(m.content)}</span>
-    </div>
-  `).join('');
+    </div>`;
+  }));
+  box.innerHTML = rendered.join('');
   box.scrollTop = box.scrollHeight;
 }
 
@@ -546,6 +621,7 @@ async function resetEnvironment() {
   TESTERS.forEach(tag => {
     if (state[tag].ws) state[tag].ws.close();
     state[tag] = { port: null, me: null, channels: [], activeChannel: null, ws: null, invites: [] };
+    avatarCache[tag] = {};
   });
   renderShell();
   try {

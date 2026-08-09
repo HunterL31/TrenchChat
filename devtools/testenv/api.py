@@ -13,6 +13,7 @@ same code path a real client would hit.
 """
 
 import asyncio
+import base64
 import json
 from typing import Any
 
@@ -22,6 +23,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from trenchchat.core import actions
+from trenchchat.core.avatar import compress_avatar
 from trenchchat.core.permissions import (
     PRESET_OPEN, PRESET_PRIVATE, is_open_join, permissions_from_json,
 )
@@ -37,6 +39,10 @@ class CreateChannelRequest(BaseModel):
 
 class SetDisplayNameRequest(BaseModel):
     display_name: str
+
+
+class SetAvatarRequest(BaseModel):
+    image_data_b64: str
 
 
 class SendMessageRequest(BaseModel):
@@ -155,11 +161,15 @@ def create_app(backend: Backend) -> FastAPI:
     def _on_presence_changed(peer_hash_hex: str, is_online: bool):
         bus.emit("presence", identity_hash=peer_hash_hex, is_online=is_online)
 
+    def _on_avatar_changed(identity_hash_hex: str):
+        bus.emit("avatar_updated", identity_hash=identity_hash_hex)
+
     backend.messaging.add_message_callback(_on_message)
     backend.invite_mgr.add_invite_callback(_on_invite)
     backend.invite_mgr.add_channel_joined_callback(_on_channel_joined)
     backend.invite_mgr.add_member_list_callback(_on_member_list_updated)
     backend.presence_mgr.add_presence_callback(_on_presence_changed)
+    backend.avatar_mgr.add_avatar_callback(_on_avatar_changed)
 
     # --- identity ---
 
@@ -192,6 +202,46 @@ def create_app(backend: Backend) -> FastAPI:
         for r in results:
             r["is_online"] = backend.presence_mgr.is_online(r["identity_hash"])
         return results
+
+    @app.get("/me/avatar")
+    def get_own_avatar():
+        data = backend.avatar_mgr.get_own_avatar()
+        if data is None:
+            return {"avatar_data_b64": None}
+        return {"avatar_data_b64": base64.b64encode(data).decode()}
+
+    @app.post("/me/avatar")
+    def set_avatar(req: SetAvatarRequest):
+        # Same call the real Settings dialog makes after cropping; compress_avatar()
+        # does the center-crop + resize + size validation, so the client only
+        # needs to hand over the raw picked file.
+        try:
+            raw = base64.b64decode(req.image_data_b64)
+            jpeg = compress_avatar(raw)
+            backend.avatar_mgr.set_avatar(jpeg, backend.subscription_mgr.get_subscribers)
+        except ValueError as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+        except RuntimeError as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=429)
+        return {"ok": True}
+
+    @app.delete("/me/avatar")
+    def remove_avatar():
+        try:
+            backend.avatar_mgr.remove_avatar(backend.subscription_mgr.get_subscribers)
+        except RuntimeError as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=429)
+        return {"ok": True}
+
+    @app.get("/peers/{peer_hash}/avatar")
+    def get_peer_avatar(peer_hash: str):
+        row = backend.storage.get_peer_avatar(peer_hash)
+        if row is None:
+            return {"avatar_data_b64": None}
+        return {
+            "avatar_data_b64": base64.b64encode(row["avatar_data"]).decode(),
+            "avatar_version": row["avatar_version"],
+        }
 
     # --- channels ---
 

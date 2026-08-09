@@ -28,6 +28,7 @@ from trenchchat.core.invite import InviteManager
 from trenchchat.core.sync import SyncManager
 from trenchchat.core.presence import PresenceManager
 from trenchchat.core.user_directory import UserDirectory
+from trenchchat.core.avatar import AvatarManager
 from trenchchat.network.router import Router
 from trenchchat.network.announce import PeerAnnounceHandler, UserAnnounceHandler
 
@@ -105,6 +106,7 @@ class Backend:
                                     self.messaging, self.subscription_mgr, self.invite_mgr)
         self.presence_mgr = PresenceManager(self.identity.hash_hex, self.config)
         self.user_directory = UserDirectory(self.identity.hash_hex)
+        self.avatar_mgr = AvatarManager(self.identity, self.config, self.storage, self.router)
 
         # Mirrors main.py's _on_user_announced: a trenchchat.user announce is
         # the strongest signal a peer is a TrenchChat client (not just any
@@ -125,6 +127,7 @@ class Backend:
         def _on_peer_appeared(peer_hex: str, iface) -> None:
             self.sync_mgr.on_peer_appeared(peer_hex)
             self.presence_mgr.record_seen(peer_hex)
+            self.avatar_mgr.flush_avatar(peer_hex)
 
         RNS.Transport.register_announce_handler(
             PeerAnnounceHandler(_on_peer_appeared)
