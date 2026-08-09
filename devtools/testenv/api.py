@@ -25,6 +25,7 @@ from pydantic import BaseModel
 
 from trenchchat.core import actions
 from trenchchat.core.image import MAX_IMAGE_BYTES, is_gif, prepare_image
+from trenchchat.core.avatar import compress_avatar
 from trenchchat.core.permissions import (
     ALL_PERMISSIONS, KICK, MANAGE_CHANNEL, MANAGE_ROLES, ROLE_ADMIN, ROLE_MEMBER,
     PRESET_OPEN, PRESET_PRIVATE, is_open_join, permissions_from_json,
@@ -37,6 +38,23 @@ class CreateChannelRequest(BaseModel):
     name: str
     description: str = ""
     access: str = "public"  # "public" | "invite"
+
+
+class SetDisplayNameRequest(BaseModel):
+    display_name: str
+
+
+class SetAvatarRequest(BaseModel):
+    image_data_b64: str
+
+
+class AddReactionRequest(BaseModel):
+    emoji_hash: str
+
+
+class ImportEmojiRequest(BaseModel):
+    name: str
+    image_data_b64: str
 
 
 class SendMessageRequest(BaseModel):
@@ -78,7 +96,20 @@ def _channel_to_dict(row) -> dict[str, Any]:
     }
 
 
-def _message_to_dict(row) -> dict[str, Any]:
+def _reactions_summary(storage, message_id: str, self_hex: str) -> list[dict[str, Any]]:
+    """Group raw reaction rows into one entry per emoji: {emoji_hash, count, reacted_by_me}."""
+    by_emoji: dict[str, dict[str, Any]] = {}
+    for r in storage.get_reactions(message_id):
+        entry = by_emoji.setdefault(
+            r["emoji_hash"], {"emoji_hash": r["emoji_hash"], "count": 0, "reacted_by_me": False}
+        )
+        entry["count"] += 1
+        if r["reactor_hash"] == self_hex:
+            entry["reacted_by_me"] = True
+    return list(by_emoji.values())
+
+
+def _message_to_dict(row, reactions: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     return {
         "message_id": row["message_id"],
         "sender_hash": row["sender_hash"],
@@ -87,6 +118,7 @@ def _message_to_dict(row) -> dict[str, Any]:
         "timestamp": row["timestamp"],
         "reply_to": row["reply_to"],
         "has_image": bool(row["image_data"]) if "image_data" in row.keys() else False,
+        "reactions": reactions or [],
     }
 
 
@@ -140,8 +172,9 @@ def create_app(backend: Backend) -> FastAPI:
     def _on_message(channel_hash_hex: str, message_id: str):
         msgs = backend.storage.get_messages(channel_hash_hex)
         row = next((m for m in msgs if m["message_id"] == message_id), None)
+        reactions = _reactions_summary(backend.storage, message_id, backend.identity.hash_hex) if row else None
         bus.emit("message", channel_hash=channel_hash_hex,
-                message=_message_to_dict(row) if row else None)
+                message=_message_to_dict(row, reactions) if row else None)
 
     # Pending invites, exactly like MainWindow._pending_invites -- nothing
     # is sent to the network until the user explicitly accepts or declines.
@@ -163,11 +196,27 @@ def create_app(backend: Backend) -> FastAPI:
     def _on_channel_discovered(channel_hash_hex, channel_name):
         bus.emit("channel_discovered", channel_hash=channel_hash_hex, channel_name=channel_name)
 
+    def _on_presence_changed(peer_hash_hex: str, is_online: bool):
+        bus.emit("presence", identity_hash=peer_hash_hex, is_online=is_online)
+
+    def _on_avatar_changed(identity_hash_hex: str):
+        bus.emit("avatar_updated", identity_hash=identity_hash_hex)
+
+    def _on_reaction_changed(channel_hash_hex: str, message_id: str):
+        bus.emit("reaction_updated", channel_hash=channel_hash_hex, message_id=message_id)
+
+    def _on_emoji_received(emoji_hash: str):
+        bus.emit("emoji_received", emoji_hash=emoji_hash)
+
     backend.messaging.add_message_callback(_on_message)
     backend.invite_mgr.add_invite_callback(_on_invite)
     backend.invite_mgr.add_channel_joined_callback(_on_channel_joined)
     backend.invite_mgr.add_member_list_callback(_on_member_list_updated)
     backend.channel_mgr.add_channel_discovered_callback(_on_channel_discovered)
+    backend.presence_mgr.add_presence_callback(_on_presence_changed)
+    backend.avatar_mgr.add_avatar_callback(_on_avatar_changed)
+    backend.reaction_mgr.add_reaction_callback(_on_reaction_changed)
+    backend.reaction_mgr.add_emoji_callback(_on_emoji_received)
 
     # --- identity ---
 
@@ -176,6 +225,109 @@ def create_app(backend: Backend) -> FastAPI:
         return {
             "hash_hex": backend.identity.hash_hex,
             "display_name": backend.config.display_name,
+        }
+
+    @app.post("/me/display_name")
+    def set_display_name(req: SetDisplayNameRequest):
+        # Same call the real Settings dialog makes.
+        backend.router.set_display_name(req.display_name)
+        # Propagate promptly rather than waiting for the periodic
+        # heartbeat's next reannounce cycle.
+        backend.router.announce_user()
+        return {"ok": True}
+
+    @app.get("/peers/{peer_hash}/presence")
+    def get_peer_presence(peer_hash: str):
+        return {
+            "identity_hash": peer_hash,
+            "is_online": backend.presence_mgr.is_online(peer_hash),
+        }
+
+    @app.get("/network/map")
+    def get_network_map():
+        # Same free function NetworkMapDialog calls -- no GUI coupling.
+        from trenchchat.gui.network_map import gather_network_data
+        return gather_network_data(backend.rns, backend.identity.hash_hex, backend.storage)
+
+    @app.get("/reticulum/interfaces")
+    def get_interfaces():
+        # Same data source InterfacesWidget.load_interfaces() merges: the
+        # configured [interfaces] section plus live rns.get_interface_stats().
+        # Read-only -- live editing is a separate, bigger scope-add.
+        from trenchchat.gui.interfaces_widget import load_interfaces_config
+
+        cfg_interfaces = load_interfaces_config(backend.rns_config_path)
+        try:
+            stats_result = backend.rns.get_interface_stats()
+            stats_list = stats_result.get("interfaces", []) if stats_result else []
+        except Exception:
+            stats_list = []
+        stats_by_name: dict[str, dict] = {}
+        for iface in stats_list:
+            name = iface.get("name", "")
+            short = iface.get("short_name", name)
+            stats_by_name[name] = iface
+            stats_by_name[short] = iface
+
+        result = []
+        for name, cfg in cfg_interfaces.items():
+            stats = stats_by_name.get(name, {})
+            enabled_str = cfg.get("enabled", cfg.get("interface_enabled", "Yes"))
+            result.append({
+                "name": name,
+                "type": cfg.get("type", "Unknown"),
+                "enabled": enabled_str.lower() in ("yes", "true", "1"),
+                "status": stats.get("status"),
+                "rxb": stats.get("rxb"),
+                "txb": stats.get("txb"),
+            })
+        return result
+
+    @app.get("/directory")
+    def search_directory(q: str = ""):
+        results = backend.user_directory.search(q)
+        for r in results:
+            r["is_online"] = backend.presence_mgr.is_online(r["identity_hash"])
+        return results
+
+    @app.get("/me/avatar")
+    def get_own_avatar():
+        data = backend.avatar_mgr.get_own_avatar()
+        if data is None:
+            return {"avatar_data_b64": None}
+        return {"avatar_data_b64": base64.b64encode(data).decode()}
+
+    @app.post("/me/avatar")
+    def set_avatar(req: SetAvatarRequest):
+        # Same call the real Settings dialog makes after cropping; compress_avatar()
+        # does the center-crop + resize + size validation, so the client only
+        # needs to hand over the raw picked file.
+        try:
+            raw = base64.b64decode(req.image_data_b64)
+            jpeg = compress_avatar(raw)
+            backend.avatar_mgr.set_avatar(jpeg, backend.subscription_mgr.get_subscribers)
+        except ValueError as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+        except RuntimeError as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=429)
+        return {"ok": True}
+
+    @app.delete("/me/avatar")
+    def remove_avatar():
+        try:
+            backend.avatar_mgr.remove_avatar(backend.subscription_mgr.get_subscribers)
+        except RuntimeError as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=429)
+        return {"ok": True}
+
+    @app.get("/peers/{peer_hash}/avatar")
+    def get_peer_avatar(peer_hash: str):
+        row = backend.storage.get_peer_avatar(peer_hash)
+        if row is None:
+            return {"avatar_data_b64": None}
+        return {
+            "avatar_data_b64": base64.b64encode(row["avatar_data"]).decode(),
+            "avatar_version": row["avatar_version"],
         }
 
     # --- channels ---
@@ -310,7 +462,12 @@ def create_app(backend: Backend) -> FastAPI:
 
     @app.get("/channels/{channel_hash}/messages")
     def list_messages(channel_hash: str):
-        return [_message_to_dict(m) for m in backend.storage.get_messages(channel_hash)]
+        return [
+            _message_to_dict(
+                m, _reactions_summary(backend.storage, m["message_id"], backend.identity.hash_hex)
+            )
+            for m in backend.storage.get_messages(channel_hash)
+        ]
 
     @app.get("/channels/{channel_hash}/messages/{message_id}/image")
     def get_message_image(channel_hash: str, message_id: str):
@@ -341,6 +498,50 @@ def create_app(backend: Backend) -> FastAPI:
             reply_to=req.reply_to, image_data=image_data,
         )
         return {"ok": sent}
+
+    # --- reactions and custom emoji ---
+
+    def _reaction_peers(channel_hash: str) -> list[str]:
+        # Same recipient logic _on_send_message uses, minus the SEND_MESSAGE
+        # gate (which doesn't apply to reactions) -- see main_window.py's
+        # _get_reaction_peers.
+        return actions.compute_channel_recipients(
+            backend.storage, backend.subscription_mgr, channel_hash, backend.identity.hash_hex,
+        )
+
+    @app.post("/channels/{channel_hash}/messages/{message_id}/reactions")
+    def add_reaction(channel_hash: str, message_id: str, req: AddReactionRequest):
+        backend.reaction_mgr.add_reaction(
+            channel_hash, message_id, req.emoji_hash, _reaction_peers(channel_hash),
+        )
+        return {"ok": True}
+
+    @app.delete("/channels/{channel_hash}/messages/{message_id}/reactions/{emoji_hash}")
+    def remove_reaction(channel_hash: str, message_id: str, emoji_hash: str):
+        backend.reaction_mgr.remove_reaction(
+            channel_hash, message_id, emoji_hash, _reaction_peers(channel_hash),
+        )
+        return {"ok": True}
+
+    @app.get("/emoji")
+    def list_emoji():
+        return [
+            {
+                "emoji_hash": row["emoji_hash"],
+                "name": row["name"],
+                "image_data_b64": base64.b64encode(bytes(row["image_data"])).decode(),
+            }
+            for row in backend.storage.list_emojis()
+        ]
+
+    @app.post("/emoji/import")
+    def import_emoji(req: ImportEmojiRequest):
+        try:
+            raw = base64.b64decode(req.image_data_b64)
+            emoji_hash = backend.reaction_mgr.import_emoji(req.name, raw)
+        except ValueError as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+        return {"ok": True, "emoji_hash": emoji_hash}
 
     # --- live updates ---
 

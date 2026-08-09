@@ -26,11 +26,16 @@ from trenchchat.core.messaging import Messaging
 from trenchchat.core.subscription import SubscriptionManager
 from trenchchat.core.invite import InviteManager
 from trenchchat.core.sync import SyncManager
+from trenchchat.core.presence import PresenceManager
+from trenchchat.core.user_directory import UserDirectory
+from trenchchat.core.avatar import AvatarManager
+from trenchchat.core.reaction import ReactionManager
 from trenchchat.network.router import Router
+from trenchchat.network.announce import PeerAnnounceHandler, UserAnnounceHandler
 
 RETICULUM_CONFIG_TEMPLATE = """\
 [reticulum]
-enable_transport = False
+enable_transport = {enable_transport}
 share_instance = No
 instance_name = {instance_name}
 
@@ -46,12 +51,19 @@ loglevel = 3
 
 
 def _write_reticulum_config(rns_dir: Path, instance_name: str, role: str,
-                            listen_port: int, peer_host: str, peer_port: int) -> None:
+                            listen_port: int, peer_host: str, peer_port: int,
+                            enable_transport: bool = False) -> None:
     """
     role="server": bind a TCPServerInterface on 127.0.0.1:listen_port.
     role="client": dial a TCPClientInterface at peer_host:peer_port.
     Exactly one interface either way -- a deterministic point-to-point
     link between the two testers, independent of LAN multicast/firewalls.
+
+    enable_transport: set True so this instance will relay traffic between
+    other peers connected to it (e.g. routing between a 3rd party client
+    plugged into its TCPServerInterface and the other tester) -- off by
+    default since a plain 2-tester link never needs to route through
+    either side.
     """
     if role == "server":
         iface_type = "TCPServerInterface"
@@ -64,6 +76,7 @@ def _write_reticulum_config(rns_dir: Path, instance_name: str, role: str,
 
     rns_dir.mkdir(parents=True, exist_ok=True)
     config_text = RETICULUM_CONFIG_TEMPLATE.format(
+        enable_transport="True" if enable_transport else "False",
         instance_name=instance_name,
         iface_type=iface_type,
         iface_body=iface_body,
@@ -76,13 +89,15 @@ class Backend:
 
     def __init__(self, data_dir: Path, display_name: str, role: str,
                 listen_port: int, peer_host: str, peer_port: int,
-                instance_name: str):
+                instance_name: str, enable_transport: bool = False):
         self.data_dir = data_dir
         data_dir.mkdir(parents=True, exist_ok=True)
 
         rns_dir = data_dir / "reticulum"
         _write_reticulum_config(rns_dir, instance_name, role,
-                                listen_port, peer_host, peer_port)
+                                listen_port, peer_host, peer_port,
+                                enable_transport=enable_transport)
+        self.rns_config_path = str(rns_dir / "config")
 
         self.config = Config(data_dir=data_dir)
         self.config.display_name = display_name
@@ -100,6 +115,47 @@ class Backend:
         self.invite_mgr = InviteManager(self.identity, self.storage, self.router)
         self.sync_mgr = SyncManager(self.identity, self.storage, self.router,
                                     self.messaging, self.subscription_mgr, self.invite_mgr)
+        self.presence_mgr = PresenceManager(self.identity.hash_hex, self.config)
+        self.user_directory = UserDirectory(self.identity.hash_hex)
+        self.avatar_mgr = AvatarManager(self.identity, self.config, self.storage, self.router)
+        self.reaction_mgr = ReactionManager(self.identity, self.storage, self.router)
+
+        # Mirrors main.py's _on_user_announced: a trenchchat.user announce is
+        # the strongest signal a peer is a TrenchChat client (not just any
+        # LXMF client), so it feeds both the directory and presence.
+        def _on_user_announced(peer_hex: str, display_name: str, iface) -> None:
+            self.user_directory.record_user(peer_hex, display_name)
+            self.presence_mgr.record_seen(peer_hex)
+
+        RNS.Transport.register_announce_handler(
+            UserAnnounceHandler(_on_user_announced)
+        )
+
+        # Mirrors main_window.py's combined _on_peer_appeared handler: one
+        # PeerAnnounceHandler registration drives both the sync manager's
+        # gap-fill request and presence tracking, so a peer's LXMF delivery
+        # announce is the single trigger for both. Without this, SyncManager
+        # .on_peer_appeared() is never called at all in this harness.
+        def _on_peer_appeared(peer_hex: str, iface) -> None:
+            self.sync_mgr.on_peer_appeared(peer_hex)
+            self.presence_mgr.record_seen(peer_hex)
+            self.avatar_mgr.flush_avatar(peer_hex)
+
+        RNS.Transport.register_announce_handler(
+            PeerAnnounceHandler(_on_peer_appeared)
+        )
+
+        # Also mark a peer as seen on any inbound LXMF message, covering
+        # peers reached via a backchannel link without a prior announce
+        # (same rationale as main_window.py's _on_inbound_message).
+        def _on_inbound_message(message) -> None:
+            if not message.source_hash:
+                return
+            sender_identity = RNS.Identity.recall(message.source_hash)
+            if sender_identity is not None:
+                self.presence_mgr.record_seen(sender_identity.hash.hex())
+
+        self.router.add_delivery_callback(_on_inbound_message)
 
         self.channel_mgr.restore_owned_channels()
 
@@ -133,6 +189,22 @@ class Backend:
                 time.sleep(interval)
 
         t = threading.Thread(target=_loop, daemon=True, name="heartbeat")
+        t.start()
+
+    def start_presence_pruner(self, interval: float = 15.0) -> None:
+        """Periodically prune stale presence and user directory entries,
+        mirroring main_window.py's _on_presence_tick. Runs as a daemon
+        thread so it never blocks process exit."""
+        def _loop():
+            while True:
+                time.sleep(interval)
+                try:
+                    self.presence_mgr.prune()
+                    self.user_directory.prune()
+                except Exception as e:
+                    RNS.log(f"TesterBackend: presence prune failed: {e}", RNS.LOG_WARNING)
+
+        t = threading.Thread(target=_loop, daemon=True, name="presence-pruner")
         t.start()
 
     @property

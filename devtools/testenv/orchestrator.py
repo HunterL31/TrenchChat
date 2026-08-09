@@ -49,12 +49,18 @@ _B_API_PORT = 8802
 _LINK_PORT = 41001
 
 _TESTERS = {
+    # enable_transport=True on A: its TCPServerInterface is the side a 3rd
+    # party client (e.g. the real main.py client, pointed at 127.0.0.1:41001)
+    # would plug into, so A needs to relay for that client's traffic to reach
+    # B to be routable beyond a direct A<->client link.
     "A": dict(tag="A", data_dir=_DATA_DIR / "testerA", display_name="Tester A",
              role="server", listen_port=_LINK_PORT, peer_host="127.0.0.1",
-             peer_port=_LINK_PORT, api_port=_A_API_PORT, instance_name="trenchchat_testenv_a"),
+             peer_port=_LINK_PORT, api_port=_A_API_PORT, instance_name="trenchchat_testenv_a",
+             enable_transport=True),
     "B": dict(tag="B", data_dir=_DATA_DIR / "testerB", display_name="Tester B",
              role="client", listen_port=_LINK_PORT, peer_host="127.0.0.1",
-             peer_port=_LINK_PORT, api_port=_B_API_PORT, instance_name="trenchchat_testenv_b"),
+             peer_port=_LINK_PORT, api_port=_B_API_PORT, instance_name="trenchchat_testenv_b",
+             enable_transport=False),
 }
 
 _processes: dict[str, subprocess.Popen] = {}
@@ -77,7 +83,7 @@ def _launch(tag: str) -> subprocess.Popen:
     args = [
         sys.executable, str(_WORKER), t["tag"], str(t["data_dir"]), t["display_name"],
         t["role"], str(t["listen_port"]), t["peer_host"], str(t["peer_port"]),
-        str(t["api_port"]), t["instance_name"],
+        str(t["api_port"]), t["instance_name"], str(t["enable_transport"]),
     ]
     return subprocess.Popen(args)
 
