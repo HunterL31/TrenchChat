@@ -27,8 +27,9 @@ from trenchchat.core.subscription import SubscriptionManager
 from trenchchat.core.invite import InviteManager
 from trenchchat.core.sync import SyncManager
 from trenchchat.core.presence import PresenceManager
+from trenchchat.core.user_directory import UserDirectory
 from trenchchat.network.router import Router
-from trenchchat.network.announce import PeerAnnounceHandler
+from trenchchat.network.announce import PeerAnnounceHandler, UserAnnounceHandler
 
 RETICULUM_CONFIG_TEMPLATE = """\
 [reticulum]
@@ -103,6 +104,18 @@ class Backend:
         self.sync_mgr = SyncManager(self.identity, self.storage, self.router,
                                     self.messaging, self.subscription_mgr, self.invite_mgr)
         self.presence_mgr = PresenceManager(self.identity.hash_hex, self.config)
+        self.user_directory = UserDirectory(self.identity.hash_hex)
+
+        # Mirrors main.py's _on_user_announced: a trenchchat.user announce is
+        # the strongest signal a peer is a TrenchChat client (not just any
+        # LXMF client), so it feeds both the directory and presence.
+        def _on_user_announced(peer_hex: str, display_name: str, iface) -> None:
+            self.user_directory.record_user(peer_hex, display_name)
+            self.presence_mgr.record_seen(peer_hex)
+
+        RNS.Transport.register_announce_handler(
+            UserAnnounceHandler(_on_user_announced)
+        )
 
         # Mirrors main_window.py's combined _on_peer_appeared handler: one
         # PeerAnnounceHandler registration drives both the sync manager's
@@ -164,13 +177,15 @@ class Backend:
         t.start()
 
     def start_presence_pruner(self, interval: float = 15.0) -> None:
-        """Periodically prune stale presence entries, mirroring main_window.py's
-        _presence_timer. Runs as a daemon thread so it never blocks process exit."""
+        """Periodically prune stale presence and user directory entries,
+        mirroring main_window.py's _on_presence_tick. Runs as a daemon
+        thread so it never blocks process exit."""
         def _loop():
             while True:
                 time.sleep(interval)
                 try:
                     self.presence_mgr.prune()
+                    self.user_directory.prune()
                 except Exception as e:
                     RNS.log(f"TesterBackend: presence prune failed: {e}", RNS.LOG_WARNING)
 

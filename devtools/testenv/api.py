@@ -186,6 +186,13 @@ def create_app(backend: Backend) -> FastAPI:
             "is_online": backend.presence_mgr.is_online(peer_hash),
         }
 
+    @app.get("/directory")
+    def search_directory(q: str = ""):
+        results = backend.user_directory.search(q)
+        for r in results:
+            r["is_online"] = backend.presence_mgr.is_online(r["identity_hash"])
+        return results
+
     # --- channels ---
 
     @app.get("/channels")

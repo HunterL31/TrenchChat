@@ -134,6 +134,13 @@
   }
   .modal-actions .cancel { background: var(--panel); color: var(--text); }
   .modal-actions .confirm { background: var(--accent); color: white; }
+  .directory-results { max-height: 220px; overflow-y: auto; margin-top: 6px; }
+  .directory-item {
+    display: flex; align-items: center; gap: 6px; padding: 7px 6px; border-radius: 4px;
+    cursor: pointer; font-size: 13px;
+  }
+  .directory-item:hover { background: var(--panel); }
+  .dir-hash { color: var(--dim); font-size: 11px; font-family: monospace; margin-left: auto; }
 
   /* --- Mobile: stack the two tester panes instead of squeezing them
      side by side into unusable slivers. --- */
@@ -199,6 +206,18 @@
     <div class="modal-actions">
       <button class="cancel" onclick="closeNewChannelModal()">Cancel</button>
       <button class="confirm" onclick="submitNewChannel()">Create</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-backdrop" id="invite-modal">
+  <div class="modal">
+    <h3>Invite a peer</h3>
+    <label>Search</label>
+    <input id="inv-search" placeholder="name or hash" oninput="searchDirectory()">
+    <div class="directory-results" id="inv-results"></div>
+    <div class="modal-actions">
+      <button class="cancel" onclick="closeInviteModal()">Cancel</button>
     </div>
   </div>
 </div>
@@ -289,7 +308,7 @@ function renderShell() {
           <div class="chat-toolbar">
             <span id="active-channel-${tag}">No channel selected</span>
             <span>
-              <button onclick="inviteOther('${tag}')" title="Invite the other tester to this channel">Invite ${other(tag)}</button>
+              <button onclick="openInviteModal('${tag}')" title="Search the peer directory and invite someone to this channel">Invite...</button>
             </span>
           </div>
           <div class="messages" id="messages-${tag}">
@@ -457,15 +476,45 @@ async function sendMessage(tag) {
   await renderMessages(tag);
 }
 
-async function inviteOther(tag) {
+let inviteForTag = null;
+
+function openInviteModal(tag) {
   if (!state[tag].activeChannel) { toast('Select a channel first'); return; }
-  const target = other(tag);
-  if (!state[target].me) { toast(`Tester ${target} not connected yet`); return; }
+  inviteForTag = tag;
+  document.getElementById('inv-search').value = '';
+  document.getElementById('invite-modal').classList.add('show');
+  searchDirectory();
+}
+function closeInviteModal() {
+  document.getElementById('invite-modal').classList.remove('show');
+  inviteForTag = null;
+}
+async function searchDirectory() {
+  if (!inviteForTag) return;
+  const tag = inviteForTag;
+  const q = document.getElementById('inv-search').value.trim();
+  const results = await api(tag, `/directory?q=${encodeURIComponent(q)}`);
+  const box = document.getElementById('inv-results');
+  if (results.length === 0) {
+    box.innerHTML = '<div class="empty-state">No peers found yet -- wait for an announce</div>';
+    return;
+  }
+  box.innerHTML = results.map(r => `
+    <div class="directory-item" onclick="confirmInvite('${r.identity_hash}')">
+      <span class="status-dot ${r.is_online ? 'up' : ''}"></span>
+      ${escapeHtml(r.display_name)}
+      <span class="dir-hash">${r.identity_hash.slice(0, 10)}…</span>
+    </div>
+  `).join('');
+}
+async function confirmInvite(peerHash) {
+  const tag = inviteForTag;
+  closeInviteModal();
   await api(tag, `/channels/${state[tag].activeChannel}/invite`, {
     method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({peer_hash_hex: state[target].me.hash_hex}),
+    body: JSON.stringify({peer_hash_hex: peerHash}),
   });
-  toast(`Invite sent to Tester ${target}`);
+  toast('Invite sent');
 }
 
 function openNewChannelModal(tag) {
