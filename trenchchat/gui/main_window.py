@@ -24,8 +24,8 @@ from PyQt6.QtWidgets import (
     QPushButton, QFrame, QTableWidget, QTableWidgetItem, QHeaderView,
     QAbstractItemView, QTabWidget, QCheckBox,
 )
-from PyQt6.QtCore import Qt, pyqtSlot, QPoint, pyqtSignal, QTimer, QSettings
-from PyQt6.QtGui import QColor, QPainter, QPainterPath, QPixmap
+from PyQt6.QtCore import Qt, pyqtSlot, QPoint, QPointF, QSize, pyqtSignal, QTimer, QSettings
+from PyQt6.QtGui import QColor, QIcon, QPainter, QPainterPath, QPen, QPixmap
 
 from trenchchat.gui import theme
 from trenchchat.config import Config
@@ -74,6 +74,25 @@ def _make_solid_avatar_pixmap(letter: str, color_hex: str, size: int) -> QPixmap
     painter.setFont(font)
     painter.setPen(QColor(theme.BG))
     painter.drawText(result.rect(), Qt.AlignmentFlag.AlignCenter, letter)
+    painter.end()
+    return result
+
+
+def _make_channel_icon_pixmap(color_hex: str, size: int = 13) -> QPixmap:
+    """Return a small tilted-hash "channel" glyph, matching the sidebar icon in the design."""
+    result = QPixmap(size, size)
+    result.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(result)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    pen = QPen(QColor(color_hex))
+    pen.setWidthF(size * 0.11)
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    painter.setPen(pen)
+    s = size / 20.0
+    painter.drawLine(QPointF(7 * s, 4 * s), QPointF(5 * s, 16 * s))
+    painter.drawLine(QPointF(14 * s, 4 * s), QPointF(12 * s, 16 * s))
+    painter.drawLine(QPointF(3.5 * s, 8 * s), QPointF(16 * s, 8 * s))
+    painter.drawLine(QPointF(3 * s, 13 * s), QPointF(15.5 * s, 13 * s))
     painter.end()
     return result
 
@@ -533,6 +552,8 @@ class MainWindow(QMainWindow):
         left_layout.addWidget(ch_header_row)
 
         self._channel_list_widget = QListWidget()
+        self._channel_list_widget.setIconSize(QSize(13, 13))
+        self._channel_list_widget.setSpacing(0)
         self._channel_list_widget.setStyleSheet(f"""
             QListWidget {{ border: none; background: {theme.SIDEBAR_BG}; outline: none; }}
             QListWidget::item {{
@@ -547,21 +568,44 @@ class MainWindow(QMainWindow):
         self._channel_list_widget.customContextMenuRequested.connect(self._on_channel_context_menu)
         left_layout.addWidget(self._channel_list_widget)
 
+        # Faint fading divider between the channel list and the online panel
+        divider = QFrame()
+        divider.setFixedHeight(1)
+        divider.setStyleSheet(f"""
+            background: qlineargradient(
+                x1:0, y1:0, x2:1, y2:0,
+                stop:0 transparent, stop:0.2 {theme.DIVIDER},
+                stop:0.8 {theme.DIVIDER}, stop:1 transparent
+            );
+            border: none; margin: 0 16px;
+        """)
+        divider_wrap = QWidget()
+        divider_wrap_layout = QVBoxLayout(divider_wrap)
+        divider_wrap_layout.setContentsMargins(16, 12, 16, 0)
+        divider_wrap_layout.addWidget(divider)
+        left_layout.addWidget(divider_wrap)
+
         # Online users panel
         self._online_panel_expanded = True
-        self._online_header = QLabel("  ▾ Online")
+        online_header_row = QWidget()
+        online_header_row.setCursor(Qt.CursorShape.PointingHandCursor)
+        online_header_row.mousePressEvent = self._on_online_header_clicked
+        online_header_layout = QHBoxLayout(online_header_row)
+        online_header_layout.setContentsMargins(16, 10, 12, 6)
+        self._online_header = QLabel("ONLINE — 0")
         self._online_header.setStyleSheet(
             f"font-size: 11px; font-weight: 600; letter-spacing: 1px; color: {theme.TEXT_FAINT};"
-            f" padding: 10px 12px 6px 16px;"
         )
-        self._online_header.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._online_header.mousePressEvent = self._on_online_header_clicked
-        left_layout.addWidget(self._online_header)
+        online_header_layout.addWidget(self._online_header, 1)
+        self._online_chevron = QLabel("▼")
+        self._online_chevron.setStyleSheet(f"color: {theme.TEXT_FAINT}; font-size: 10px;")
+        online_header_layout.addWidget(self._online_chevron)
+        left_layout.addWidget(online_header_row)
 
         self._online_list = QListWidget()
         self._online_list.setStyleSheet(f"""
             QListWidget {{ border: none; background: {theme.SIDEBAR_BG}; outline: none; }}
-            QListWidget::item {{ padding: 4px 16px; color: {theme.TEXT}; font-size: 12.5px; }}
+            QListWidget::item {{ padding: 0; }}
             QListWidget::item:selected {{ background: transparent; }}
         """)
         self._online_list.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
@@ -875,15 +919,25 @@ class MainWindow(QMainWindow):
             if not self._storage.is_subscribed(row["hash"]):
                 continue
             perms = permissions_from_json(row["permissions"])
-            lock = " 🔒" if not is_open_join(perms) else ""
-            item = QListWidgetItem(f"# {row['name']}{lock}")
+            lock = "  🔒" if not is_open_join(perms) else ""
+            item = QListWidgetItem(f"{row['name']}{lock}")
             item.setData(Qt.ItemDataRole.UserRole, row["hash"])
             self._channel_list_widget.addItem(item)
         self._channel_list_widget.blockSignals(False)
 
+        self._update_channel_icons()
         # Re-highlight whichever channel is currently open (if still in list).
         if self._current_channel:
             self._highlight_channel_in_list(self._current_channel)
+
+    def _update_channel_icons(self) -> None:
+        """Recolor each channel row's leading icon: accent when selected, muted otherwise."""
+        muted_icon = QIcon(_make_channel_icon_pixmap(theme.TEXT_MUTED))
+        accent_icon = QIcon(_make_channel_icon_pixmap(theme.ACCENT))
+        for i in range(self._channel_list_widget.count()):
+            item = self._channel_list_widget.item(i)
+            is_selected = item.data(Qt.ItemDataRole.UserRole) == self._current_channel
+            item.setIcon(accent_icon if is_selected else muted_icon)
 
     def _highlight_channel_in_list(self, channel_hash_hex: str):
         """Select the list row for channel_hash_hex without triggering a switch."""
@@ -925,6 +979,7 @@ class MainWindow(QMainWindow):
 
         self._settings.setValue("last_channel", channel_hash_hex)
         self._current_channel = channel_hash_hex
+        self._update_channel_icons()
 
         if channel_hash_hex not in self._channel_views:
             # Retrieve the scroll restore point saved from a previous session.
@@ -1215,18 +1270,40 @@ class MainWindow(QMainWindow):
     def _on_online_header_clicked(self, _event) -> None:
         """Toggle the online users list visibility."""
         self._online_panel_expanded = not self._online_panel_expanded
-        if self._online_panel_expanded:
-            self._online_list.show()
-            self._online_header.setText("  ▾ Online")
-        else:
-            self._online_list.hide()
-            self._online_header.setText("  ▸ Online")
+        self._online_list.setVisible(self._online_panel_expanded)
+        self._online_chevron.setText("▼" if self._online_panel_expanded else "▶")
+
+    def _make_online_row_widget(self, display_name: str, hash_hex: str,
+                                is_online: bool) -> QWidget:
+        """Build one online-panel row: coloured presence dot + name + trailing hash."""
+        row = QWidget()
+        row.setStyleSheet("background: transparent;")
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(16, 4, 16, 4)
+        layout.setSpacing(8)
+
+        dot = QLabel()
+        dot.setFixedSize(6, 6)
+        dot_color = theme.ONLINE_DOT if is_online else theme.OFFLINE_DOT
+        dot.setStyleSheet(f"background: {dot_color}; border-radius: 3px;")
+        layout.addWidget(dot, 0, Qt.AlignmentFlag.AlignVCenter)
+
+        name = QLabel(display_name)
+        name.setStyleSheet(f"color: {theme.rgba(theme.TEXT, 0.85)}; font-size: 12.5px;")
+        layout.addWidget(name, 1)
+
+        hash_label = QLabel(hash_hex[:8])
+        hash_label.setStyleSheet(
+            f"color: {theme.TEXT_SUBTLE}; font-size: 10.5px; font-family: {theme.MONO_FONT_FAMILY};"
+        )
+        layout.addWidget(hash_label, 0, Qt.AlignmentFlag.AlignRight)
+        return row
 
     def _refresh_online_panel(self) -> None:
         """Repopulate the online users list for the currently selected channel."""
+        self._online_list.clear()
         if self._current_channel is None:
-            self._online_list.clear()
-            self._online_header.setText("  ▾ Online")
+            self._online_header.setText("ONLINE — 0")
             return
 
         entries = self._presence_mgr.get_online_for_channel(
@@ -1236,18 +1313,17 @@ class MainWindow(QMainWindow):
         )
 
         online_count = sum(1 for e in entries if e["is_online"])
-        self._online_header.setText(
-            f"  {'▾' if self._online_panel_expanded else '▸'} "
-            f"Online ({online_count})"
-        )
+        self._online_header.setText(f"ONLINE — {online_count}")
 
-        self._online_list.clear()
         for entry in entries:
-            dot = "● " if entry["is_online"] else "○ "
-            color = "#4ec94e" if entry["is_online"] else "#666"
-            item = QListWidgetItem(dot + entry["display_name"])
-            item.setForeground(QColor(color))
+            item = QListWidgetItem()
+            item.setFlags(Qt.ItemFlag.NoItemFlags)
+            row_widget = self._make_online_row_widget(
+                entry["display_name"], entry["identity_hash"], entry["is_online"]
+            )
+            item.setSizeHint(row_widget.sizeHint())
             self._online_list.addItem(item)
+            self._online_list.setItemWidget(item, row_widget)
 
     def _on_presence_changed(self, peer_hex: str, is_online: bool) -> None:
         """Called from RNS background thread — marshal to main thread."""
