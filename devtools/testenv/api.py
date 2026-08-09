@@ -181,6 +181,12 @@ def create_app(backend: Backend) -> FastAPI:
     pending_invites: list[dict[str, Any]] = []
 
     def _on_invite(channel_hash_hex, channel_name, token, expiry, admin_hex):
+        # A re-invite to the same channel refreshes the pending entry (new
+        # token/expiry) instead of stacking a second one alongside it --
+        # mirrors main_window.py's _on_invite_received_main_thread.
+        pending_invites[:] = [
+            i for i in pending_invites if i["channel_hash_hex"] != channel_hash_hex
+        ]
         pending_invites.append({
             "channel_hash_hex": channel_hash_hex, "channel_name": channel_name,
             "token_hex": token.hex(), "expiry": expiry, "admin_hex": admin_hex,
@@ -416,14 +422,16 @@ def create_app(backend: Backend) -> FastAPI:
         # Same entry point main_window.py's _on_view_members uses --
         # update_membership() re-applies the KICK/MANAGE_ROLES gate itself,
         # so an unauthorized request here is silently dropped server-side
-        # even if a caller bypasses the UI gate above.
-        actions.update_membership(
+        # even if a caller bypasses the UI gate above. Its return value
+        # distinguishes that silent drop from an actual change, so this
+        # response doesn't claim success for a request that had no effect.
+        applied = actions.update_membership(
             backend.storage, backend.invite_mgr, channel_hash, backend.identity.hash_hex,
             remove_members=[bytes.fromhex(h) for h in req.remove_members] or None,
             add_admins=[bytes.fromhex(h) for h in req.add_admins] or None,
             remove_admins=[bytes.fromhex(h) for h in req.remove_admins] or None,
         )
-        return {"ok": True}
+        return {"ok": applied}
 
     # --- invites ---
 

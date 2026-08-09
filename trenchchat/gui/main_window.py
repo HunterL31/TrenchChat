@@ -1137,6 +1137,11 @@ class MainWindow(QMainWindow):
     @pyqtSlot(str, str, bytes, float, str)
     def _on_invite_received_main_thread(self, channel_hash_hex: str, channel_name: str,
                                          token: bytes, expiry: float, admin_hash_hex: str):
+        # A re-invite to the same channel refreshes the pending entry (new
+        # token/expiry) instead of stacking a second one alongside it.
+        self._pending_invites = [
+            inv for inv in self._pending_invites if inv[0] != channel_hash_hex
+        ]
         self._pending_invites.append((channel_hash_hex, channel_name, token, expiry, admin_hash_hex))
         self._update_invite_bar()
 

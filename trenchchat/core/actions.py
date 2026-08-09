@@ -107,7 +107,7 @@ def send_message(storage, subscription_mgr, messaging, channel_hash_hex: str,
 def update_membership(storage, invite_mgr, channel_hash_hex: str, actor_hash_hex: str, *,
                       remove_members: list[bytes] | None = None,
                       add_admins: list[bytes] | None = None,
-                      remove_admins: list[bytes] | None = None) -> None:
+                      remove_admins: list[bytes] | None = None) -> bool:
     """
     Outbound guard + publish: filters each requested change down to what
     actor_hash_hex is actually permitted to do (KICK for removals,
@@ -115,6 +115,11 @@ def update_membership(storage, invite_mgr, channel_hash_hex: str, actor_hash_hex
     Core-side enforcement in publish_member_list is still the real
     security boundary; this mirrors the GUI's pre-flight guard so a
     disallowed change never even reaches the wire.
+
+    Returns False if everything requested was filtered out (no permission,
+    or nothing was requested), so callers with no other feedback loop --
+    e.g. an API response -- can tell an unauthorized request apart from one
+    that actually took effect, instead of both looking like success.
     """
     can_kick = storage.has_permission(channel_hash_hex, actor_hash_hex, KICK)
     can_manage_roles = storage.has_permission(channel_hash_hex, actor_hash_hex, MANAGE_ROLES)
@@ -123,13 +128,16 @@ def update_membership(storage, invite_mgr, channel_hash_hex: str, actor_hash_hex
     add_admins = list(add_admins or []) if can_manage_roles else []
     remove_admins = list(remove_admins or []) if can_manage_roles else []
 
-    if remove_members or add_admins or remove_admins:
-        invite_mgr.publish_member_list(
-            channel_hash_hex,
-            remove_members=remove_members or None,
-            add_admins=add_admins or None,
-            remove_admins=remove_admins or None,
-        )
+    if not (remove_members or add_admins or remove_admins):
+        return False
+
+    invite_mgr.publish_member_list(
+        channel_hash_hex,
+        remove_members=remove_members or None,
+        add_admins=add_admins or None,
+        remove_admins=remove_admins or None,
+    )
+    return True
 
 
 def edit_channel_permissions(storage, invite_mgr, channel_hash_hex: str,
