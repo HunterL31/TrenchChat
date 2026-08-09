@@ -35,6 +35,10 @@ class CreateChannelRequest(BaseModel):
     access: str = "public"  # "public" | "invite"
 
 
+class SetDisplayNameRequest(BaseModel):
+    display_name: str
+
+
 class SendMessageRequest(BaseModel):
     content: str
     reply_to: str | None = None
@@ -161,6 +165,15 @@ def create_app(backend: Backend) -> FastAPI:
             "hash_hex": backend.identity.hash_hex,
             "display_name": backend.config.display_name,
         }
+
+    @app.post("/me/display_name")
+    def set_display_name(req: SetDisplayNameRequest):
+        # Same call the real Settings dialog makes.
+        backend.router.set_display_name(req.display_name)
+        # Propagate promptly rather than waiting for the periodic
+        # heartbeat's next reannounce cycle.
+        backend.router.announce_user()
+        return {"ok": True}
 
     # --- channels ---
 

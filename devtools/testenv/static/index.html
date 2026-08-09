@@ -38,6 +38,12 @@
   }
   .pane-name { font-weight: 700; font-size: 14px; }
   .pane-hash { font-size: 11px; color: var(--dim); font-family: monospace; }
+  .editable-name { cursor: pointer; border-bottom: 1px dashed transparent; }
+  .editable-name:hover { border-bottom-color: var(--dim); }
+  .name-edit-input {
+    background: var(--bg); border: 1px solid var(--accent); border-radius: 3px;
+    color: var(--text); font-size: 14px; font-weight: 700; padding: 1px 4px; width: 140px;
+  }
   .invite-bar {
     display: none; align-items: center; justify-content: space-between;
     background: #3a3f2a; border-bottom: 1px solid var(--border);
@@ -220,6 +226,31 @@ function toast(msg) {
   toast._t = setTimeout(() => t.style.display = 'none', 3000);
 }
 
+function editDisplayName(tag) {
+  const span = document.getElementById(`name-display-${tag}`);
+  const current = span.textContent;
+  const input = document.createElement('input');
+  input.className = 'name-edit-input';
+  input.value = current;
+  span.replaceWith(input);
+  input.focus();
+  input.select();
+
+  const save = async () => {
+    const newName = input.value.trim() || current;
+    const result = await api(tag, '/me/display_name', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({display_name: newName}),
+    });
+    state[tag].me.display_name = newName;
+    span.textContent = newName;
+    input.replaceWith(span);
+    if (!result.ok) toast(`Tester ${tag}: rename failed`);
+  };
+  input.addEventListener('keydown', e => { if (e.key === 'Enter') input.blur(); });
+  input.addEventListener('blur', save, {once: true});
+}
+
 async function api(tag, path, opts) {
   const res = await fetch(apiBase(tag) + path, opts);
   if (!res.ok) throw new Error(`${tag} ${path} -> ${res.status}`);
@@ -231,7 +262,10 @@ function renderShell() {
   panes.innerHTML = TESTERS.map(tag => `
     <div class="pane" id="pane-${tag}">
       <div class="pane-header">
-        <div class="pane-name"><span class="status-dot" id="dot-${tag}"></span>Tester ${tag}</div>
+        <div class="pane-name">
+          <span class="status-dot" id="dot-${tag}"></span>
+          <span id="name-display-${tag}" class="editable-name" onclick="editDisplayName('${tag}')" title="Click to rename">Tester ${tag}</span>
+        </div>
         <div class="pane-hash" id="hash-${tag}">connecting...</div>
       </div>
       <div class="invite-bar" id="invite-bar-${tag}">
@@ -284,6 +318,7 @@ async function connectTester(tag) {
   }
   document.getElementById(`dot-${tag}`).classList.add('up');
   document.getElementById(`hash-${tag}`).textContent = state[tag].me.hash_hex.slice(0, 16) + '…';
+  document.getElementById(`name-display-${tag}`).textContent = state[tag].me.display_name;
 
   await refreshChannels(tag);
   await refreshInvites(tag);
