@@ -96,6 +96,42 @@
     padding: 8px 14px; cursor: pointer; font-size: 13px;
   }
   .compose button:hover { background: var(--accent2); }
+  .attach-btn {
+    background: var(--panel2) !important; border: 1px solid var(--border);
+    padding: 8px 10px !important; flex-shrink: 0;
+  }
+  .image-preview {
+    display: none; align-items: center; gap: 8px; padding: 0 10px;
+    background: var(--panel2);
+  }
+  .image-preview.show { display: flex; }
+  .image-preview img { max-height: 60px; border-radius: 4px; margin: 6px 0; }
+  .image-preview .remove-img {
+    background: var(--danger); color: white; border: none; border-radius: 4px;
+    padding: 3px 8px; font-size: 11px; cursor: pointer;
+  }
+  .msg img.attached { max-width: 260px; max-height: 260px; border-radius: 6px; display: block; margin-top: 4px; }
+  .msg .reply-quote {
+    border-left: 2px solid var(--accent); padding: 2px 8px; margin-bottom: 3px;
+    font-size: 11px; color: var(--dim); opacity: 0.85;
+  }
+  .msg .reply-quote b { color: var(--text); }
+  .msg .reply-btn {
+    background: none; border: none; color: var(--dim); font-size: 10px;
+    cursor: pointer; opacity: 0; margin-left: 6px; padding: 0;
+  }
+  .msg:hover .reply-btn { opacity: 1; }
+  .msg .reply-btn:hover { color: var(--accent); text-decoration: underline; }
+  .reply-bar {
+    display: none; align-items: center; justify-content: space-between;
+    padding: 6px 10px; background: var(--panel2); border-left: 2px solid var(--accent);
+    font-size: 11px; color: var(--dim);
+  }
+  .reply-bar.show { display: flex; }
+  .reply-bar b { color: var(--text); }
+  .reply-bar button {
+    background: none; border: none; color: var(--dim); cursor: pointer; font-size: 14px;
+  }
   .status-dot {
     display: inline-block; width: 8px; height: 8px; border-radius: 50%;
     background: var(--dim); margin-right: 6px;
@@ -242,8 +278,8 @@
 <script>
 const TESTERS = ['A', 'B'];
 const state = {
-  A: { port: null, me: null, channels: [], activeChannel: null, ws: null, invites: [] },
-  B: { port: null, me: null, channels: [], activeChannel: null, ws: null, invites: [] },
+  A: { port: null, me: null, channels: [], activeChannel: null, ws: null, invites: [], pendingImage: null, replyTarget: null },
+  B: { port: null, me: null, channels: [], activeChannel: null, ws: null, invites: [], pendingImage: null, replyTarget: null },
 };
 let newChannelForTag = null;
 
@@ -301,7 +337,13 @@ function renderShell() {
           <div class="messages" id="messages-${tag}">
             <div class="empty-state">Select or create a channel to get started.</div>
           </div>
+          <div class="reply-bar" id="reply-bar-${tag}"></div>
+          <div class="image-preview" id="image-preview-${tag}"></div>
           <div class="compose">
+            <input type="file" accept="image/*" id="file-input-${tag}" style="display:none"
+                  onchange="onImageSelected('${tag}', this.files[0])">
+            <button class="attach-btn" onclick="document.getElementById('file-input-${tag}').click()"
+                   title="Attach an image">📎</button>
             <input id="compose-${tag}" placeholder="Message..." onkeydown="if(event.key==='Enter') sendMessage('${tag}')">
             <button onclick="sendMessage('${tag}')">Send</button>
           </div>
@@ -398,6 +440,8 @@ async function refreshChannels(tag) {
 
 async function selectChannel(tag, hash) {
   state[tag].activeChannel = hash;
+  clearReplyTarget(tag);
+  clearPendingImage(tag);
   await refreshChannels(tag);
   const ch = state[tag].channels.find(c => c.hash === hash);
   document.getElementById(`active-channel-${tag}`).textContent = ch ? `#${ch.name}` : hash;
@@ -413,13 +457,67 @@ async function renderMessages(tag) {
     return;
   }
   const myHash = state[tag].me.hash_hex;
-  box.innerHTML = msgs.map(m => `
+  const byId = Object.fromEntries(msgs.map(m => [m.message_id, m]));
+  box.innerHTML = msgs.map(m => {
+    const quoted = m.reply_to && byId[m.reply_to];
+    const quoteHtml = quoted ? `
+      <div class="reply-quote">
+        <b>${escapeHtml(quoted.sender_name || quoted.sender_hash.slice(0, 8))}</b>
+        ${escapeHtml((quoted.content || '(image)').slice(0, 60))}
+      </div>` : '';
+    return `
     <div class="msg ${m.sender_hash === myHash ? 'self' : ''}">
+      ${quoteHtml}
       <span class="sender">${escapeHtml(m.sender_name || m.sender_hash.slice(0, 8))}</span>
       <span class="content">${escapeHtml(m.content)}</span>
+      <button class="reply-btn" onclick='setReplyTarget("${tag}", ${JSON.stringify(m.message_id)}, ${JSON.stringify(m.sender_name || m.sender_hash.slice(0, 8))}, ${JSON.stringify(m.content || "(image)")})'>reply</button>
+      ${m.has_image ? `<img class="attached" src="${apiBase(tag)}/channels/${state[tag].activeChannel}/messages/${m.message_id}/image">` : ''}
     </div>
-  `).join('');
+  `;
+  }).join('');
   box.scrollTop = box.scrollHeight;
+}
+
+function setReplyTarget(tag, messageId, senderName, content) {
+  state[tag].replyTarget = messageId;
+  const bar = document.getElementById(`reply-bar-${tag}`);
+  bar.innerHTML = `
+    <span>Replying to <b>${escapeHtml(senderName)}</b>: ${escapeHtml(content.slice(0, 60))}</span>
+    <button onclick="clearReplyTarget('${tag}')">&times;</button>
+  `;
+  bar.classList.add('show');
+  document.getElementById(`compose-${tag}`).focus();
+}
+
+function clearReplyTarget(tag) {
+  state[tag].replyTarget = null;
+  const bar = document.getElementById(`reply-bar-${tag}`);
+  bar.classList.remove('show');
+  bar.innerHTML = '';
+}
+
+function onImageSelected(tag, file) {
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    // reader.result is "data:image/png;base64,AAAA..." -- keep just the b64 part.
+    state[tag].pendingImage = reader.result.split(',')[1];
+    const preview = document.getElementById(`image-preview-${tag}`);
+    preview.innerHTML = `
+      <img src="${reader.result}">
+      <button class="remove-img" onclick="clearPendingImage('${tag}')">Remove</button>
+    `;
+    preview.classList.add('show');
+  };
+  reader.readAsDataURL(file);
+}
+
+function clearPendingImage(tag) {
+  state[tag].pendingImage = null;
+  document.getElementById(`file-input-${tag}`).value = '';
+  const preview = document.getElementById(`image-preview-${tag}`);
+  preview.classList.remove('show');
+  preview.innerHTML = '';
 }
 
 function escapeHtml(s) {
@@ -431,11 +529,15 @@ function escapeHtml(s) {
 async function sendMessage(tag) {
   const input = document.getElementById(`compose-${tag}`);
   const content = input.value.trim();
-  if (!content || !state[tag].activeChannel) return;
+  const image = state[tag].pendingImage;
+  const replyTo = state[tag].replyTarget;
+  if ((!content && !image) || !state[tag].activeChannel) return;
   input.value = '';
+  clearPendingImage(tag);
+  clearReplyTarget(tag);
   const result = await api(tag, `/channels/${state[tag].activeChannel}/messages`, {
     method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({content}),
+    body: JSON.stringify({content, image_data_b64: image, reply_to: replyTo}),
   });
   if (!result.ok) toast(`Tester ${tag}: message not sent (permission?)`);
   await renderMessages(tag);
@@ -603,7 +705,7 @@ async function resetEnvironment() {
   closePermissionsModal();
   TESTERS.forEach(tag => {
     if (state[tag].ws) state[tag].ws.close();
-    state[tag] = { port: null, me: null, channels: [], activeChannel: null, ws: null, invites: [] };
+    state[tag] = { port: null, me: null, channels: [], activeChannel: null, ws: null, invites: [], pendingImage: null, replyTarget: null };
   });
   renderShell();
   try {
