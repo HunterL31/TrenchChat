@@ -102,7 +102,11 @@ class ChannelManager:
         """Announce a single owned channel.
 
         If attached_interface is given the announce is sent only on that
-        interface; otherwise it is broadcast on all interfaces.
+        interface; otherwise it is broadcast on all interfaces. Channels with
+        discoverable=False (invite-only) are never announced -- broadcasting
+        them would leak their name/description/creator to any peer listening
+        for trenchchat.channel announces, defeating the point of using a
+        signed member-list document instead of mesh-wide discovery for them.
         """
         dest = self._owned_destinations.get(channel_hash_hex)
         if dest is None:
@@ -111,6 +115,8 @@ class ChannelManager:
         if channel is None:
             return
         perms = permissions_from_json(channel["permissions"])
+        if not is_discoverable(perms):
+            return
         access = "public" if is_open_join(perms) else "invite"
         app_data = msgpack.packb({
             "name": channel["name"],
