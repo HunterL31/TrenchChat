@@ -13,16 +13,20 @@ same code path a real client would hit.
 """
 
 import asyncio
+import base64
 import json
 from typing import Any
 
+import RNS
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
 
 from trenchchat.core import actions
+from trenchchat.core.image import MAX_IMAGE_BYTES, is_gif, prepare_image
 from trenchchat.core.permissions import (
+    ALL_PERMISSIONS, KICK, MANAGE_CHANNEL, MANAGE_ROLES, ROLE_ADMIN, ROLE_MEMBER,
     PRESET_OPEN, PRESET_PRIVATE, is_open_join, permissions_from_json,
 )
 
@@ -38,6 +42,12 @@ class CreateChannelRequest(BaseModel):
 class SendMessageRequest(BaseModel):
     content: str
     reply_to: str | None = None
+    image_data_b64: str | None = None
+
+
+class UpdatePermissionsRequest(BaseModel):
+    admin: list[str] = []
+    member: list[str] = []
 
 
 class InviteRequest(BaseModel):
@@ -51,8 +61,10 @@ class JoinRequestRequest(BaseModel):
     admin_hash_hex: str
 
 
-class KickRequest(BaseModel):
-    peer_hash_hex: str
+class UpdateRolesRequest(BaseModel):
+    remove_members: list[str] = []
+    add_admins: list[str] = []
+    remove_admins: list[str] = []
 
 
 def _channel_to_dict(row) -> dict[str, Any]:
@@ -191,11 +203,53 @@ def create_app(backend: Backend) -> FastAPI:
     def list_members(channel_hash: str):
         return [dict(row) for row in backend.storage.get_members(channel_hash)]
 
-    @app.post("/channels/{channel_hash}/kick")
-    def kick_member(channel_hash: str, req: KickRequest):
+    @app.get("/channels/{channel_hash}/my_permissions")
+    def my_permissions(channel_hash: str):
+        # Lets the UI gate kick/promote/demote controls the same way
+        # main_window.py's _on_view_members does -- server-side enforcement
+        # in actions.update_membership is the real boundary regardless.
+        my_hex = backend.identity.hash_hex
+        return {
+            "kick": backend.storage.has_permission(channel_hash, my_hex, KICK),
+            "manage_roles": backend.storage.has_permission(channel_hash, my_hex, MANAGE_ROLES),
+            "manage_channel": backend.storage.has_permission(channel_hash, my_hex, MANAGE_CHANNEL),
+        }
+
+    @app.get("/channels/{channel_hash}/permissions")
+    def get_permissions(channel_hash: str):
+        perms = backend.storage.get_channel_permissions(channel_hash)
+        return {
+            "all_permissions": list(ALL_PERMISSIONS),
+            "admin": perms.get(ROLE_ADMIN, []),
+            "member": perms.get(ROLE_MEMBER, []),
+        }
+
+    @app.post("/channels/{channel_hash}/permissions")
+    def update_permissions(channel_hash: str, req: UpdatePermissionsRequest):
+        # Same entry point main_window.py's _on_edit_permissions uses.
+        # edit_channel_permissions re-checks MANAGE_CHANNEL itself and
+        # no-ops if the caller lacks it, same as the GUI's pre-flight gate.
+        current = backend.storage.get_channel_permissions(channel_hash)
+        new_perms = dict(current)
+        new_perms[ROLE_ADMIN] = req.admin
+        new_perms[ROLE_MEMBER] = req.member
+        ok = actions.edit_channel_permissions(
+            backend.storage, backend.invite_mgr, channel_hash,
+            backend.identity.hash_hex, new_perms,
+        )
+        return {"ok": ok}
+
+    @app.post("/channels/{channel_hash}/roles")
+    def update_roles(channel_hash: str, req: UpdateRolesRequest):
+        # Same entry point main_window.py's _on_view_members uses --
+        # update_membership() re-applies the KICK/MANAGE_ROLES gate itself,
+        # so an unauthorized request here is silently dropped server-side
+        # even if a caller bypasses the UI gate above.
         actions.update_membership(
             backend.storage, backend.invite_mgr, channel_hash, backend.identity.hash_hex,
-            remove_members=[bytes.fromhex(req.peer_hash_hex)],
+            remove_members=[bytes.fromhex(h) for h in req.remove_members] or None,
+            add_admins=[bytes.fromhex(h) for h in req.add_admins] or None,
+            remove_admins=[bytes.fromhex(h) for h in req.remove_admins] or None,
         )
         return {"ok": True}
 
@@ -238,12 +292,33 @@ def create_app(backend: Backend) -> FastAPI:
     def list_messages(channel_hash: str):
         return [_message_to_dict(m) for m in backend.storage.get_messages(channel_hash)]
 
+    @app.get("/channels/{channel_hash}/messages/{message_id}/image")
+    def get_message_image(channel_hash: str, message_id: str):
+        msgs = backend.storage.get_messages(channel_hash)
+        row = next((m for m in msgs if m["message_id"] == message_id), None)
+        if row is None or not row["image_data"]:
+            return JSONResponse({"error": "no image"}, status_code=404)
+        data = bytes(row["image_data"])
+        return Response(content=data, media_type="image/gif" if is_gif(data) else "image/jpeg")
+
     @app.post("/channels/{channel_hash}/messages")
     def send_message(channel_hash: str, req: SendMessageRequest):
+        image_data = None
+        if req.image_data_b64:
+            raw = base64.b64decode(req.image_data_b64)
+            # Same compress-or-fall-back-to-raw pattern main_window.py's
+            # _on_send_message uses.
+            try:
+                image_data, _ = prepare_image(raw)
+            except Exception as exc:
+                RNS.log(f"TrenchChat testenv: image preparation failed: {exc}", RNS.LOG_WARNING)
+                if len(raw) <= MAX_IMAGE_BYTES:
+                    image_data = raw
+
         sent = actions.send_message(
             backend.storage, backend.subscription_mgr, backend.messaging,
             channel_hash, backend.identity.hash_hex, req.content,
-            reply_to=req.reply_to,
+            reply_to=req.reply_to, image_data=image_data,
         )
         return {"ok": sent}
 

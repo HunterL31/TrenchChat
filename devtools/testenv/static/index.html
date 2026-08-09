@@ -127,6 +127,28 @@
   }
   .modal-actions .cancel { background: var(--panel); color: var(--text); }
   .modal-actions .confirm { background: var(--accent); color: white; }
+  .member-row {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 8px 4px; border-bottom: 1px solid var(--border); font-size: 12px; gap: 8px;
+  }
+  .member-row:last-child { border-bottom: none; }
+  .member-hash { font-family: monospace; color: var(--dim); overflow: hidden; text-overflow: ellipsis; }
+  .member-role {
+    font-size: 10px; text-transform: uppercase; padding: 2px 6px; border-radius: 3px;
+    background: var(--panel); color: var(--dim); flex-shrink: 0;
+  }
+  .member-actions { display: flex; gap: 4px; flex-shrink: 0; }
+  .member-actions button {
+    border: none; border-radius: 4px; padding: 4px 8px; font-size: 11px;
+    cursor: pointer; color: white; white-space: nowrap;
+  }
+  .member-actions .kick { background: var(--danger); }
+  .member-actions .promote, .member-actions .demote { background: var(--accent); }
+  .perm-table { width: 100%; font-size: 12px; border-collapse: collapse; }
+  .perm-table th { text-align: left; color: var(--dim); font-weight: 600; padding: 6px 4px; font-size: 11px; }
+  .perm-table th:not(:first-child), .perm-table td:not(:first-child) { text-align: center; width: 60px; }
+  .perm-table td { padding: 6px 4px; border-top: 1px solid var(--border); }
+  .perm-table input[type=checkbox] { width: 15px; height: 15px; cursor: pointer; }
 
   /* --- Mobile: stack the two tester panes instead of squeezing them
      side by side into unusable slivers. --- */
@@ -196,6 +218,27 @@
   </div>
 </div>
 
+<div class="modal-backdrop" id="members-modal">
+  <div class="modal" style="width: min(420px, 90vw);">
+    <h3>Members</h3>
+    <div id="members-list"></div>
+    <div class="modal-actions">
+      <button class="cancel" onclick="closeMembersModal()">Close</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-backdrop" id="permissions-modal">
+  <div class="modal" style="width: min(420px, 90vw);">
+    <h3>Role permissions</h3>
+    <div id="permissions-editor"></div>
+    <div class="modal-actions">
+      <button class="cancel" onclick="closePermissionsModal()">Cancel</button>
+      <button class="confirm" onclick="savePermissions()">Save</button>
+    </div>
+  </div>
+</div>
+
 <script>
 const TESTERS = ['A', 'B'];
 const state = {
@@ -250,6 +293,8 @@ function renderShell() {
           <div class="chat-toolbar">
             <span id="active-channel-${tag}">No channel selected</span>
             <span>
+              <button onclick="openMembersModal('${tag}')" title="View and manage members">Members</button>
+              <button onclick="openPermissionsModal('${tag}')" title="Edit role permissions">Permissions</button>
               <button onclick="inviteOther('${tag}')" title="Invite the other tester to this channel">Invite ${other(tag)}</button>
             </span>
           </div>
@@ -301,7 +346,10 @@ function connectWs(tag) {
       refreshInvites(tag);
     } else if (msg.type === 'channel_joined' || msg.type === 'member_list_updated') {
       refreshChannels(tag);
-      if (msg.channel_hash === state[tag].activeChannel) renderMessages(tag);
+      if (msg.channel_hash === state[tag].activeChannel) {
+        renderMessages(tag);
+        if (membersModalTag === tag) refreshMembersModal();
+      }
     }
   };
   ws.onclose = () => setTimeout(() => connectWs(tag), 2000);
@@ -426,10 +474,133 @@ async function submitNewChannel() {
   await selectChannel(tag, result.hash);
 }
 
+let membersModalTag = null;
+
+async function openMembersModal(tag) {
+  if (!state[tag].activeChannel) { toast('Select a channel first'); return; }
+  membersModalTag = tag;
+  document.getElementById('members-modal').classList.add('show');
+  await refreshMembersModal();
+}
+
+function closeMembersModal() {
+  membersModalTag = null;
+  document.getElementById('members-modal').classList.remove('show');
+}
+
+async function refreshMembersModal() {
+  const tag = membersModalTag;
+  if (!tag || !state[tag].activeChannel) return;
+  const ch = state[tag].activeChannel;
+  const [members, perms] = await Promise.all([
+    api(tag, `/channels/${ch}/members`),
+    api(tag, `/channels/${ch}/my_permissions`),
+  ]);
+  const myHash = state[tag].me.hash_hex;
+  const list = document.getElementById('members-list');
+  list.innerHTML = members.map(m => {
+    const isSelf = m.identity_hash === myHash;
+    const actions = [];
+    if (!isSelf && m.role !== 'owner') {
+      if (perms.kick) {
+        actions.push(`<button class="kick" onclick="kickMember('${m.identity_hash}')">Kick</button>`);
+      }
+      if (perms.manage_roles) {
+        if (m.role === 'admin') {
+          actions.push(`<button class="demote" onclick="demoteMember('${m.identity_hash}')">Demote</button>`);
+        } else {
+          actions.push(`<button class="promote" onclick="promoteMember('${m.identity_hash}')">Promote</button>`);
+        }
+      }
+    }
+    return `
+      <div class="member-row">
+        <span class="member-hash">${m.identity_hash.slice(0, 20)}…${isSelf ? ' (you)' : ''}</span>
+        <span class="member-role">${m.role}</span>
+        <span class="member-actions">${actions.join('')}</span>
+      </div>
+    `;
+  }).join('') || '<div class="empty-state">No members</div>';
+}
+
+async function kickMember(memberHash) {
+  const tag = membersModalTag;
+  await api(tag, `/channels/${state[tag].activeChannel}/roles`, {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({remove_members: [memberHash]}),
+  });
+  await refreshMembersModal();
+}
+
+async function promoteMember(memberHash) {
+  const tag = membersModalTag;
+  await api(tag, `/channels/${state[tag].activeChannel}/roles`, {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({add_admins: [memberHash]}),
+  });
+  await refreshMembersModal();
+}
+
+async function demoteMember(memberHash) {
+  const tag = membersModalTag;
+  await api(tag, `/channels/${state[tag].activeChannel}/roles`, {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({remove_admins: [memberHash]}),
+  });
+  await refreshMembersModal();
+}
+
+let permissionsModalTag = null;
+
+async function openPermissionsModal(tag) {
+  if (!state[tag].activeChannel) { toast('Select a channel first'); return; }
+  permissionsModalTag = tag;
+  const ch = state[tag].activeChannel;
+  const perms = await api(tag, `/channels/${ch}/permissions`);
+  const editor = document.getElementById('permissions-editor');
+  editor.innerHTML = `
+    <table class="perm-table">
+      <tr><th>Permission</th><th>Admin</th><th>Member</th></tr>
+      ${perms.all_permissions.map(p => `
+        <tr>
+          <td>${p}</td>
+          <td><input type="checkbox" data-role="admin" data-perm="${p}" ${perms.admin.includes(p) ? 'checked' : ''}></td>
+          <td><input type="checkbox" data-role="member" data-perm="${p}" ${perms.member.includes(p) ? 'checked' : ''}></td>
+        </tr>
+      `).join('')}
+    </table>
+    <div class="empty-state" style="padding: 8px 0 0;">Owner always has every permission.</div>
+  `;
+  document.getElementById('permissions-modal').classList.add('show');
+}
+
+function closePermissionsModal() {
+  permissionsModalTag = null;
+  document.getElementById('permissions-modal').classList.remove('show');
+}
+
+async function savePermissions() {
+  const tag = permissionsModalTag;
+  if (!tag) return;
+  const boxes = document.querySelectorAll('#permissions-editor input[type=checkbox]');
+  const admin = [], member = [];
+  boxes.forEach(b => {
+    if (b.checked) (b.dataset.role === 'admin' ? admin : member).push(b.dataset.perm);
+  });
+  const result = await api(tag, `/channels/${state[tag].activeChannel}/permissions`, {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({admin, member}),
+  });
+  if (!result.ok) toast(`Tester ${tag}: permission change denied (missing manage_channel?)`);
+  closePermissionsModal();
+}
+
 async function resetEnvironment() {
   const btn = document.getElementById('reset-btn');
   btn.disabled = true;
   btn.textContent = 'Resetting...';
+  closeMembersModal();
+  closePermissionsModal();
   TESTERS.forEach(tag => {
     if (state[tag].ws) state[tag].ws.close();
     state[tag] = { port: null, me: null, channels: [], activeChannel: null, ws: null, invites: [] };
