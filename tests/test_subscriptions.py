@@ -127,6 +127,37 @@ class TestSubscriberListBroadcast:
             timeout=5,
         ), "Carol did not receive the updated subscriber list containing Bob"
 
+    def test_subscriber_list_includes_owner(self, peer_factory):
+        """
+        Regression test: the owner is never itself added to
+        SubscriptionManager._subscribers (that set only tracks peers who sent
+        MT_SUBSCRIBE), but _broadcast_subscriber_list() used to send exactly
+        that set verbatim -- so a subscriber's local get_subscribers() view
+        never included the owner at all.
+
+        This broke actions.compute_channel_recipients() for every non-owner
+        subscriber on a public channel: their reactions (which have no
+        offline-sync/backfill fallback, unlike chat messages) never listed
+        the owner as a recipient and were silently never delivered to them,
+        even though the owner could see the subscriber's chat messages fine
+        (those happened to still arrive via the separate sync mechanism,
+        masking the same underlying gap).
+        """
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+
+        ch_hash = alice.channel_mgr.create_channel("owner-visible", "", "public")
+        bob.storage.upsert_channel(ch_hash, "owner-visible", "", alice.identity.hash_hex,
+                                   "public", time.time())
+
+        bob.subscription_mgr.subscribe(ch_hash, owner_hash_hex=alice.identity.hash_hex)
+        assert wait_for_subscriber(alice, ch_hash, bob.identity.hash_hex, timeout=5)
+
+        assert wait_for(
+            lambda: alice.identity.hash_hex in bob.subscription_mgr.get_subscribers(ch_hash),
+            timeout=5,
+        ), "Bob's subscriber list never included the channel owner"
+
     def test_subscriber_list_rejected_from_non_owner(self, peer_factory):
         """
         A MT_SUBSCRIBER_LIST message from a non-owner is rejected.
