@@ -35,7 +35,7 @@ from trenchchat.network.announce import PeerAnnounceHandler, UserAnnounceHandler
 
 RETICULUM_CONFIG_TEMPLATE = """\
 [reticulum]
-enable_transport = False
+enable_transport = {enable_transport}
 share_instance = No
 instance_name = {instance_name}
 
@@ -51,12 +51,19 @@ loglevel = 3
 
 
 def _write_reticulum_config(rns_dir: Path, instance_name: str, role: str,
-                            listen_port: int, peer_host: str, peer_port: int) -> None:
+                            listen_port: int, peer_host: str, peer_port: int,
+                            enable_transport: bool = False) -> None:
     """
     role="server": bind a TCPServerInterface on 127.0.0.1:listen_port.
     role="client": dial a TCPClientInterface at peer_host:peer_port.
     Exactly one interface either way -- a deterministic point-to-point
     link between the two testers, independent of LAN multicast/firewalls.
+
+    enable_transport: set True so this instance will relay traffic between
+    other peers connected to it (e.g. routing between a 3rd party client
+    plugged into its TCPServerInterface and the other tester) -- off by
+    default since a plain 2-tester link never needs to route through
+    either side.
     """
     if role == "server":
         iface_type = "TCPServerInterface"
@@ -69,6 +76,7 @@ def _write_reticulum_config(rns_dir: Path, instance_name: str, role: str,
 
     rns_dir.mkdir(parents=True, exist_ok=True)
     config_text = RETICULUM_CONFIG_TEMPLATE.format(
+        enable_transport="True" if enable_transport else "False",
         instance_name=instance_name,
         iface_type=iface_type,
         iface_body=iface_body,
@@ -81,13 +89,14 @@ class Backend:
 
     def __init__(self, data_dir: Path, display_name: str, role: str,
                 listen_port: int, peer_host: str, peer_port: int,
-                instance_name: str):
+                instance_name: str, enable_transport: bool = False):
         self.data_dir = data_dir
         data_dir.mkdir(parents=True, exist_ok=True)
 
         rns_dir = data_dir / "reticulum"
         _write_reticulum_config(rns_dir, instance_name, role,
-                                listen_port, peer_host, peer_port)
+                                listen_port, peer_host, peer_port,
+                                enable_transport=enable_transport)
         self.rns_config_path = str(rns_dir / "config")
 
         self.config = Config(data_dir=data_dir)
