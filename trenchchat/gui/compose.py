@@ -13,11 +13,12 @@ from PyQt6.QtCore import Qt, pyqtSignal, QPoint, QSize
 from PyQt6.QtGui import QKeyEvent, QIcon, QPixmap, QTextCursor
 
 from trenchchat.core.storage import Storage
+from trenchchat.gui import theme
 
 
-_ATTACH_BTN_WIDTH = 36
-_SEND_BTN_WIDTH = 70
-_COMPOSE_HEIGHT = 60
+_ATTACH_BTN_WIDTH = 38
+_SEND_BTN_WIDTH = 38
+_COMPOSE_HEIGHT = 38
 _PREVIEW_MAX_PX = 80     # thumbnail max dimension in the preview area
 _AUTOCOMPLETE_MAX = 8    # max emoji results shown in the autocomplete popup
 _AUTOCOMPLETE_ICON_SIZE = 24  # px
@@ -42,12 +43,14 @@ class _EmojiAutocompletePopup(QListWidget):
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-        self.setStyleSheet(
-            "QListWidget { background: #2a2a2a; border: 1px solid #555; color: #ddd; "
-            "font-size: 12px; outline: none; }"
-            "QListWidget::item:selected { background: #3a5080; }"
-            "QListWidget::item:hover { background: #3a3a3a; }"
-        )
+        self.setStyleSheet(f"""
+            QListWidget {{
+                background: {theme.DIALOG_BG}; border: 1px solid {theme.BORDER}; color: {theme.TEXT};
+                font-size: 12px; outline: none;
+            }}
+            QListWidget::item:selected {{ background: {theme.ACCENT_WASH_SELECTED}; color: {theme.ACCENT}; }}
+            QListWidget::item:hover {{ background: {theme.BORDER_SOFT}; }}
+        """)
         self.setIconSize(QSize(_AUTOCOMPLETE_ICON_SIZE, _AUTOCOMPLETE_ICON_SIZE))
         self.itemClicked.connect(self._on_item_clicked)
 
@@ -155,11 +158,11 @@ class ComposeWidget(QWidget):
 
         # --- Preview bar (hidden until an image is attached) ---
         self._preview_bar = QWidget()
-        self._preview_bar.setStyleSheet("background: #2a2a2a;")
+        self._preview_bar.setStyleSheet(f"background: {theme.PANEL_BG};")
         self._preview_bar.hide()
         preview_layout = QHBoxLayout(self._preview_bar)
-        preview_layout.setContentsMargins(8, 4, 8, 4)
-        preview_layout.setSpacing(8)
+        preview_layout.setContentsMargins(16, 8, 16, 8)
+        preview_layout.setSpacing(10)
 
         self._preview_thumb = QLabel()
         self._preview_thumb.setFixedSize(_PREVIEW_MAX_PX, _PREVIEW_MAX_PX)
@@ -167,18 +170,21 @@ class ComposeWidget(QWidget):
         preview_layout.addWidget(self._preview_thumb)
 
         self._preview_label = QLabel()
-        self._preview_label.setStyleSheet("color: #aaa; font-size: 11px;")
+        self._preview_label.setStyleSheet(f"color: {theme.TEXT_MUTED}; font-size: 11.5px;")
         self._preview_label.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
         )
         preview_layout.addWidget(self._preview_label)
 
         remove_btn = QPushButton("✕")
-        remove_btn.setFixedSize(24, 24)
-        remove_btn.setStyleSheet(
-            "QPushButton { background: #444; color: #ccc; border: none; border-radius: 4px; }"
-            "QPushButton:hover { background: #c0392b; color: #fff; }"
-        )
+        remove_btn.setFixedSize(22, 22)
+        remove_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: {theme.INPUT_BG}; color: {theme.TEXT}; border: none; border-radius: 6px;
+                padding: 0;
+            }}
+            QPushButton:hover {{ background: {theme.DANGER_BG}; color: #fff; }}
+        """)
         remove_btn.clicked.connect(self._clear_image)
         preview_layout.addWidget(remove_btn)
 
@@ -187,18 +193,20 @@ class ComposeWidget(QWidget):
         # --- Compose row ---
         row = QWidget()
         row_layout = QHBoxLayout(row)
-        row_layout.setContentsMargins(8, 4, 8, 8)
-        row_layout.setSpacing(6)
+        row_layout.setContentsMargins(16, 10, 16, 10)
+        row_layout.setSpacing(8)
 
-        self._attach_btn = QPushButton("+")
+        self._attach_btn = QPushButton("📎")
         self._attach_btn.setFixedWidth(_ATTACH_BTN_WIDTH)
         self._attach_btn.setFixedHeight(_COMPOSE_HEIGHT)
-        self._attach_btn.setStyleSheet(
-            "QPushButton { background: #2a2a2a; color: #aaa; font-size: 20px; "
-            "border: 1px solid #444; border-radius: 4px; }"
-            "QPushButton:hover { background: #3a3a3a; color: #fff; }"
-            "QPushButton:disabled { color: #555; }"
-        )
+        self._attach_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: {theme.INPUT_BG}; color: {theme.TEXT_MUTED}; font-size: 15px;
+                border: 1px solid {theme.BORDER}; border-radius: 8px; padding: 0;
+            }}
+            QPushButton:hover {{ background: {theme.BORDER_SOFT}; color: {theme.TEXT}; }}
+            QPushButton:disabled {{ color: {theme.TEXT_FAINT}; }}
+        """)
         self._attach_btn.clicked.connect(self._on_attach)
         row_layout.addWidget(self._attach_btn)
 
@@ -210,9 +218,17 @@ class ComposeWidget(QWidget):
         self._editor.focusOutEvent = self._on_editor_focus_out
         row_layout.addWidget(self._editor)
 
-        self._send_btn = QPushButton("Send")
+        self._send_btn = QPushButton("➤")
         self._send_btn.setFixedWidth(_SEND_BTN_WIDTH)
         self._send_btn.setFixedHeight(_COMPOSE_HEIGHT)
+        self._send_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: transparent; color: {theme.ACCENT}; font-size: 15px;
+                border: 1px solid {theme.ACCENT}; border-radius: 8px; padding: 0;
+            }}
+            QPushButton:hover {{ background: {theme.ACCENT_WASH_HOVER}; }}
+            QPushButton:disabled {{ color: {theme.TEXT_FAINT}; border-color: {theme.BORDER}; }}
+        """)
         self._send_btn.clicked.connect(self._on_send)
         row_layout.addWidget(self._send_btn)
 
