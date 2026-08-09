@@ -160,10 +160,14 @@ def create_app(backend: Backend) -> FastAPI:
     def _on_member_list_updated(channel_hash_hex):
         bus.emit("member_list_updated", channel_hash=channel_hash_hex)
 
+    def _on_channel_discovered(channel_hash_hex, channel_name):
+        bus.emit("channel_discovered", channel_hash=channel_hash_hex, channel_name=channel_name)
+
     backend.messaging.add_message_callback(_on_message)
     backend.invite_mgr.add_invite_callback(_on_invite)
     backend.invite_mgr.add_channel_joined_callback(_on_channel_joined)
     backend.invite_mgr.add_member_list_callback(_on_member_list_updated)
+    backend.channel_mgr.add_channel_discovered_callback(_on_channel_discovered)
 
     # --- identity ---
 
@@ -178,7 +182,23 @@ def create_app(backend: Backend) -> FastAPI:
 
     @app.get("/channels")
     def list_channels():
-        return [_channel_to_dict(c) for c in backend.storage.get_all_channels()]
+        # Channels this tester has actually joined -- both join paths
+        # (join_public_channel for open-join, the invite/accept flow for
+        # invite-only) call storage.subscribe(), and create_channel()
+        # subscribes the owner too, so is_subscribed is a reliable "am I
+        # part of this channel" signal across every channel type.
+        return [_channel_to_dict(c) for c in backend.storage.get_all_channels()
+               if backend.storage.is_subscribed(c["hash"])]
+
+    @app.get("/channels/discovered")
+    def list_discovered_channels():
+        # Channels heard via a real-time announce (see
+        # ChannelAnnounceHandler / channel_mgr._on_channel_discovered) but
+        # never joined. Only ever open-join channels in practice --
+        # invite-only channels aren't broadcast (is_discoverable is False
+        # for PRESET_PRIVATE), so they never reach local storage this way.
+        return [_channel_to_dict(c) for c in backend.storage.get_all_channels()
+               if not backend.storage.is_subscribed(c["hash"])]
 
     @app.post("/channels")
     def create_channel(req: CreateChannelRequest):

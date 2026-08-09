@@ -70,6 +70,19 @@
     cursor: pointer; font-size: 12px;
   }
   .new-channel-btn:hover { border-color: var(--accent); }
+  .discovered-header {
+    font-size: 10px; text-transform: uppercase; color: var(--dim);
+    margin: 14px 0 6px 4px; letter-spacing: 0.03em;
+  }
+  .discovered-item {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 6px 8px; border-radius: 4px; font-size: 12px; color: var(--dim);
+    margin-bottom: 2px;
+  }
+  .discovered-item button {
+    background: var(--ok); color: white; border: none; border-radius: 4px;
+    padding: 3px 9px; font-size: 11px; cursor: pointer; flex-shrink: 0;
+  }
   .chat-area { flex: 1; display: flex; flex-direction: column; min-width: 0; }
   .chat-toolbar {
     padding: 8px 12px; border-bottom: 1px solid var(--border); font-size: 12px;
@@ -324,6 +337,8 @@ function renderShell() {
         <div class="channel-list">
           <div id="channels-${tag}"></div>
           <button class="new-channel-btn" onclick="openNewChannelModal('${tag}')">+ New channel</button>
+          <div class="discovered-header">Discovered (not joined)</div>
+          <div id="discovered-${tag}"></div>
         </div>
         <div class="chat-area">
           <div class="chat-toolbar">
@@ -373,6 +388,7 @@ async function connectTester(tag) {
   document.getElementById(`hash-${tag}`).textContent = state[tag].me.hash_hex.slice(0, 16) + '…';
 
   await refreshChannels(tag);
+  await refreshDiscovered(tag);
   await refreshInvites(tag);
   connectWs(tag);
 }
@@ -392,6 +408,9 @@ function connectWs(tag) {
         renderMessages(tag);
         if (membersModalTag === tag) refreshMembersModal();
       }
+    } else if (msg.type === 'channel_discovered') {
+      toast(`Tester ${tag}: discovered #${msg.channel_name}`);
+      refreshDiscovered(tag);
     }
   };
   ws.onclose = () => setTimeout(() => connectWs(tag), 2000);
@@ -436,6 +455,29 @@ async function refreshChannels(tag) {
       <span class="badge">${c.open_join ? 'public' : 'invite-only'}</span>
     </div>
   `).join('');
+}
+
+async function refreshDiscovered(tag) {
+  const discovered = await api(tag, '/channels/discovered');
+  const box = document.getElementById(`discovered-${tag}`);
+  if (discovered.length === 0) {
+    box.innerHTML = '<div class="empty-state" style="padding:4px 0;">None yet</div>';
+    return;
+  }
+  box.innerHTML = discovered.map(c => `
+    <div class="discovered-item">
+      <span>#${c.name}</span>
+      <button onclick="joinDiscoveredChannel('${tag}', '${c.hash}')">Join</button>
+    </div>
+  `).join('');
+}
+
+async function joinDiscoveredChannel(tag, hash) {
+  const result = await api(tag, `/channels/${hash}/join`, {method: 'POST'});
+  if (!result.ok) { toast(`Tester ${tag}: join failed`); return; }
+  await refreshChannels(tag);
+  await refreshDiscovered(tag);
+  await selectChannel(tag, hash);
 }
 
 async function selectChannel(tag, hash) {
