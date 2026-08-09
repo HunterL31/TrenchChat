@@ -11,6 +11,12 @@ Profile pictures are:
 Send rate limiting:  no more than one avatar change per SEND_RATE_LIMIT_SECS.
 Receive rate limiting: at most one inbound avatar update accepted per peer per
                        RECEIVE_RATE_LIMIT_SECS, regardless of version numbers.
+                       Kept equal to SEND_RATE_LIMIT_SECS -- a receive window
+                       longer than the send throttle would silently drop a
+                       legitimately-throttled sender's follow-up change (e.g.
+                       "set" immediately followed 60s later by a "remove"),
+                       not just an actually-abusive one sending faster than
+                       its own throttle allows.
 """
 
 import io
@@ -35,7 +41,7 @@ AVATAR_JPEG_QUALITY = 80
 MAX_AVATAR_BYTES = 16384
 
 SEND_RATE_LIMIT_SECS = 60
-RECEIVE_RATE_LIMIT_SECS = 300
+RECEIVE_RATE_LIMIT_SECS = SEND_RATE_LIMIT_SECS
 
 
 def compress_avatar(image_bytes: bytes) -> bytes:
@@ -171,21 +177,29 @@ class AvatarManager:
     # --- deferred delivery ---
 
     def flush_avatar(self, peer_hex: str) -> None:
-        """Send our current avatar to a peer that just came online, if needed.
+        """Send our current avatar state to a peer that just came online, if needed.
 
-        Skips delivery if the peer has already received the current version.
+        Skips delivery if the peer has already received the current version, or
+        if we have never set an avatar at all (version 0 -- nothing to ever
+        communicate). Otherwise flushes -- including a removal (empty payload)
+        when we currently have no avatar but have set one before. This matters
+        because set_avatar()/remove_avatar() both call clear_avatar_deliveries()
+        on every change, so "peer's last-delivered version" can't be used to
+        tell a genuinely-new peer apart from one whose delivery record was just
+        wiped: a peer who only ever learns about us via announce (no shared
+        channel to have received the direct push) would otherwise be stuck
+        showing a stale cached avatar forever after we remove it.
         Called from the peer-appeared callback in main_window.py.
         """
-        own_avatar = self._config.avatar_bytes
-        if own_avatar is None:
-            return
-
         current_version = self._config.avatar_version
+        if current_version == 0:
+            return
         delivered_version = self._storage.get_avatar_delivery_version(peer_hex)
         if delivered_version == current_version:
             return
 
-        self._send_avatar_to(peer_hex, own_avatar, current_version)
+        own_avatar = self._config.avatar_bytes
+        self._send_avatar_to(peer_hex, own_avatar or b"", current_version)
         RNS.log(
             f"TrenchChat [avatar]: flushed avatar (v{current_version}) to {peer_hex[:12]}…",
             RNS.LOG_DEBUG,
