@@ -6,6 +6,7 @@ import RNS
 import msgpack
 
 from trenchchat import APP_NAME, APP_ASPECT_CHANNEL, APP_ASPECT_USER
+from trenchchat.core.protocol import unpack_wire
 
 # Path table index for the receiving interface (from RNS.Transport constants).
 _IDX_PT_RVCD_IF = 5
@@ -13,7 +14,7 @@ _IDX_PT_RVCD_IF = 5
 
 def _parse_channel_app_data(app_data: bytes) -> dict:
     try:
-        return msgpack.unpackb(app_data, raw=False)
+        return unpack_wire(app_data)
     except Exception as e:
         RNS.log(f"TrenchChat: failed to parse channel app_data: {e}", RNS.LOG_DEBUG)
         return {}
@@ -138,7 +139,7 @@ class UserAnnounceHandler:
         display_name = ""
         if app_data:
             try:
-                parsed = msgpack.unpackb(app_data, raw=False)
+                parsed = unpack_wire(app_data)
                 if isinstance(parsed, dict):
                     name = parsed.get("name", "")
                     if isinstance(name, bytes):

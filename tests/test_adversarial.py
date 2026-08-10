@@ -45,8 +45,12 @@ import time
 
 import msgpack
 import pytest
+import LXMF
+import RNS
 
+from tests.conftest import forge
 from tests.helpers import wait_for, wait_for_member
+from trenchchat.network.router import QUARANTINE_MAX_PER_SENDER
 from trenchchat.core import actions
 from trenchchat.core.invite import _sign, _signed_payload
 from trenchchat.core.permissions import (
@@ -54,10 +58,12 @@ from trenchchat.core.permissions import (
     PRESET_PRIVATE, ROLE_ADMIN, ROLE_MEMBER, ROLE_OWNER, SEND_MESSAGE,
 )
 from trenchchat.core.protocol import (
-    F_ADMIN_HASH, F_CHANNEL_HASH, F_EXPIRY_TS, F_INVITE_TOKEN,
-    F_INVITEE_HASH, F_MEMBER_LIST_DOC, F_MSG_TYPE,
-    MT_JOIN_REQUEST, MT_MEMBER_LIST_UPDATE,
+    F_ADMIN_HASH, F_CHANNEL_HASH, F_DISPLAY_NAME, F_EXPIRY_TS, F_INVITE_TOKEN,
+    F_INVITEE_HASH, F_MEMBER_LIST_DOC, F_MESSAGE_ID, F_MSG_TYPE, F_TIMESTAMP,
+    F_EMOJI_HASH, F_IMAGE_DATA, F_REACTION_MSG_ID, F_REACTION_REMOVE,
+    MT_JOIN_REQUEST, MT_MEMBER_LIST_UPDATE, MT_REACTION,
 )
+from trenchchat.core.image import MAX_IMAGE_BYTES
 
 
 # ---------------------------------------------------------------------------
@@ -1015,7 +1021,11 @@ class TestAdversarialTenure:
         assert kick_published_at > valid_ts, \
             "Test setup error: kick_published_at must be after valid_ts"
 
-        # Sync delivers the pre-kick message — must be accepted
+        # Sync delivers the pre-kick message — must be accepted.
+        # Responses are only applied in answer to a request we issued, so
+        # solicit one first; an unsolicited response is covered separately by
+        # TestAdversarialSyncInjection.
+        alice.sync_mgr._record_pending_request(ch_hash, bob.identity.hash_hex)
         alice.sync_mgr._handle_sync_response(
             {0x08: __import__("msgpack").packb([{
                 "sender_hash":  bob.identity.hash_hex,
@@ -1027,6 +1037,7 @@ class TestAdversarialTenure:
                 "last_seen_id": None,
             }], use_bin_type=True)},
             ch_hash,
+            bob.identity.hash_hex,
         )
 
         assert alice.storage.message_exists(valid_msg_id), \
@@ -1076,3 +1087,507 @@ class TestAdversarialTenure:
         ]
         assert not pending_for_channel, \
             "Pending outbound messages were not cleared after Bob was kicked"
+
+
+# ---------------------------------------------------------------------------
+# INBOUND MESSAGE AUTHENTICATION (LXMF signature enforcement)
+# ---------------------------------------------------------------------------
+
+class TestAdversarialUnauthenticatedDelivery:
+    """
+    LXMF records a failed signature check on the message and delivers it
+    anyway; source_hash is attacker-chosen wire data.  Router._authenticate is
+    the only thing standing between a spoofed source_hash and every
+    sender-identity check in the core managers, so the gate is exercised here
+    at the router's real entry point.
+    """
+
+    def _chat_lxm(self, sender, recipient, ch_hash, content, msg_id):
+        dest = RNS.Destination(
+            recipient.identity.rns_identity, RNS.Destination.OUT,
+            RNS.Destination.SINGLE, "lxmf", "delivery",
+        )
+        lxm = LXMF.LXMessage(dest, sender.router.delivery_destination, content,
+                             desired_method=LXMF.LXMessage.DIRECT)
+        lxm.fields = {
+            F_CHANNEL_HASH: bytes.fromhex(ch_hash),
+            F_DISPLAY_NAME: "Alice",
+            F_TIMESTAMP:    time.time(),
+            F_MESSAGE_ID:   msg_id,
+        }
+        return lxm
+
+    def test_forged_chat_message_is_dropped(self, peer_factory):
+        """
+        A peer sets source_hash to Alice's delivery hash so that
+        RNS.Identity.recall() resolves to Alice's real identity, making
+        sender_hex look authentic to every downstream check.  LXMF flags the
+        signature as invalid; the router must drop the message.
+        """
+        alice, bob, ch_hash = _setup_channel_with_member(
+            peer_factory, member_perms=[SEND_MESSAGE]
+        )
+        lxm = self._chat_lxm(alice, bob, ch_hash, "spoofed", "forged-msg-1")
+
+        bob.router._on_message_received(forge(lxm))
+        time.sleep(0.3)
+
+        ids = [m["message_id"] for m in bob.storage.get_messages(ch_hash)]
+        assert "forged-msg-1" not in ids, \
+            "Bob stored a message whose LXMF signature did not validate"
+
+    def test_authentic_chat_message_is_delivered(self, peer_factory):
+        """
+        Positive control for the test above: the identical message with a
+        valid signature must be stored.  Without this, a router that dropped
+        everything would pass the forgery test.
+        """
+        alice, bob, ch_hash = _setup_channel_with_member(
+            peer_factory, member_perms=[SEND_MESSAGE]
+        )
+        lxm = self._chat_lxm(alice, bob, ch_hash, "genuine", "authentic-msg-1")
+        lxm.signature_validated = True
+
+        bob.router._on_message_received(lxm)
+        time.sleep(0.3)
+
+        ids = [m["message_id"] for m in bob.storage.get_messages(ch_hash)]
+        assert "authentic-msg-1" in ids, \
+            "A correctly signed message was not delivered"
+
+    def test_forged_member_list_update_never_reaches_invite_manager(self, peer_factory):
+        """
+        The member list document carries its own Ed25519 signatures, but the
+        router must not hand an unauthenticated message to the invite manager
+        at all -- defence in depth, and the same gate protects the message
+        types that have no inner signature.
+        """
+        alice, bob, ch_hash = _setup_channel_with_member(
+            peer_factory, member_perms=[SEND_MESSAGE]
+        )
+        # Let the legitimate member list doc from setup land first, otherwise
+        # its callback is what we would end up observing.
+        time.sleep(0.5)
+        seen: list = []
+        bob.invite_mgr.add_member_list_callback(lambda ch: seen.append(ch))
+
+        dest = RNS.Destination(
+            bob.identity.rns_identity, RNS.Destination.OUT,
+            RNS.Destination.SINGLE, "lxmf", "delivery",
+        )
+        lxm = LXMF.LXMessage(dest, alice.router.delivery_destination, "",
+                             desired_method=LXMF.LXMessage.DIRECT)
+        lxm.fields = {
+            F_MSG_TYPE:        MT_MEMBER_LIST_UPDATE,
+            F_CHANNEL_HASH:    bytes.fromhex(ch_hash),
+            F_MEMBER_LIST_DOC: msgpack.packb({"version": 99}, use_bin_type=True),
+        }
+
+        bob.router._on_message_received(forge(lxm))
+        time.sleep(0.3)
+
+        assert not seen, "An unauthenticated member list update was processed"
+
+    def test_unknown_source_is_quarantined_not_dispatched(self, peer_factory):
+        """
+        A message whose sender identity is not yet known is not a forgery --
+        we simply cannot check it yet.  It must be withheld from the delivery
+        callbacks rather than trusted, and held for later re-validation.
+        """
+        alice, bob, ch_hash = _setup_channel_with_member(
+            peer_factory, member_perms=[SEND_MESSAGE]
+        )
+        lxm = self._chat_lxm(alice, bob, ch_hash, "unknown source", "unknown-src-1")
+        lxm.signature_validated = False
+        lxm.unverified_reason = LXMF.LXMessage.SOURCE_UNKNOWN
+        lxm.packed = b"\x00" * 32  # non-empty so it is held rather than discarded
+
+        bob.router._on_message_received(lxm)
+        time.sleep(0.3)
+
+        ids = [m["message_id"] for m in bob.storage.get_messages(ch_hash)]
+        assert "unknown-src-1" not in ids, \
+            "A message with an unverifiable source was delivered"
+        held = sum(len(v) for v in bob.router._quarantine.values())
+        assert held == 1, f"Expected the message to be quarantined, found {held}"
+
+    def test_quarantine_release_rejects_still_invalid_signature(self, peer_factory):
+        """
+        Arrival of the sender's identity is not itself evidence the message was
+        genuine.  On release the signature must be re-checked against the newly
+        known identity, and a message that still fails must be discarded.
+        """
+        alice, bob, ch_hash = _setup_channel_with_member(
+            peer_factory, member_perms=[SEND_MESSAGE]
+        )
+        lxm = self._chat_lxm(alice, bob, ch_hash, "still bad", "release-bad-1")
+        lxm.signature_validated = False
+        lxm.unverified_reason = LXMF.LXMessage.SOURCE_UNKNOWN
+        lxm.packed = b"\x01" * 64  # garbage: re-unpack fails or does not validate
+
+        bob.router._on_message_received(lxm)
+        assert sum(len(v) for v in bob.router._quarantine.values()) == 1
+
+        bob.router.release_quarantined(alice.identity.hash_hex)
+        time.sleep(0.3)
+
+        ids = [m["message_id"] for m in bob.storage.get_messages(ch_hash)]
+        assert "release-bad-1" not in ids, \
+            "A quarantined message was delivered without re-validating its signature"
+
+    def test_quarantine_is_bounded_per_sender(self, peer_factory):
+        """
+        The quarantine must not become its own memory-exhaustion vector: a
+        peer that never announces can otherwise pin unbounded messages.
+        """
+        alice, bob, ch_hash = _setup_channel_with_member(
+            peer_factory, member_perms=[SEND_MESSAGE]
+        )
+        for i in range(QUARANTINE_MAX_PER_SENDER * 3):
+            lxm = self._chat_lxm(alice, bob, ch_hash, f"flood {i}", f"flood-{i}")
+            lxm.signature_validated = False
+            lxm.unverified_reason = LXMF.LXMessage.SOURCE_UNKNOWN
+            lxm.packed = b"\x02" * 32
+            bob.router._on_message_received(lxm)
+
+        held = sum(len(v) for v in bob.router._quarantine.values())
+        assert held <= QUARANTINE_MAX_PER_SENDER, \
+            f"Quarantine grew to {held}, above the per-sender cap"
+
+
+# ---------------------------------------------------------------------------
+# SYNC INJECTION — unsolicited history and unauthorised hints
+# ---------------------------------------------------------------------------
+
+class TestAdversarialSyncInjection:
+    """
+    A sync response writes messages into the channel transcript with the
+    sender attribution taken from its own payload.  Nothing in the payload is
+    signed, so accepting one that answers no request lets any peer forge
+    history from any author.
+    """
+
+    def _payload(self, sender_hex, content, ts, msg_id):
+        return {0x08: msgpack.packb([{
+            "sender_hash":  sender_hex,
+            "sender_name":  "Alice",
+            "content":      content,
+            "timestamp":    ts,
+            "message_id":   msg_id,
+            "reply_to":     None,
+            "last_seen_id": None,
+        }], use_bin_type=True)}
+
+    def test_unsolicited_sync_response_is_rejected(self, peer_factory):
+        """Carol pushes history for a channel nobody asked her for."""
+        alice, bob, ch_hash = _setup_channel_with_member(
+            peer_factory, member_perms=[SEND_MESSAGE]
+        )
+        carol = peer_factory("carol")
+        ts = time.time() - 60
+
+        bob.sync_mgr._handle_sync_response(
+            self._payload(alice.identity.hash_hex, "injected", ts, "injected-1"),
+            ch_hash,
+            carol.identity.hash_hex,
+        )
+
+        assert not bob.storage.message_exists("injected-1"), \
+            "An unsolicited sync response injected a message into the transcript"
+
+    def test_sync_response_cannot_be_replayed(self, peer_factory):
+        """
+        One request must authorise exactly one response, otherwise a single
+        legitimate request becomes a standing licence to inject.
+        """
+        alice, bob, ch_hash = _setup_channel_with_member(
+            peer_factory, member_perms=[SEND_MESSAGE]
+        )
+        ts = time.time() - 60
+
+        bob.sync_mgr._record_pending_request(ch_hash, alice.identity.hash_hex)
+        bob.sync_mgr._handle_sync_response(
+            self._payload(alice.identity.hash_hex, "first", ts, "replay-1"),
+            ch_hash, alice.identity.hash_hex,
+        )
+        bob.sync_mgr._handle_sync_response(
+            self._payload(alice.identity.hash_hex, "second", ts, "replay-2"),
+            ch_hash, alice.identity.hash_hex,
+        )
+
+        assert bob.storage.message_exists("replay-1"), \
+            "The solicited response was rejected"
+        assert not bob.storage.message_exists("replay-2"), \
+            "A second response was accepted against a single consumed request"
+
+    def test_missed_delivery_hint_from_non_member_is_rejected(self, peer_factory):
+        """
+        Hints steer which messages we later serve and are written straight to
+        storage, so an outsider must not be able to seed them.
+        """
+        alice, bob, ch_hash = _setup_channel_with_member(
+            peer_factory, member_perms=[SEND_MESSAGE]
+        )
+        carol = peer_factory("carol")
+
+        bob.sync_mgr._handle_missed_delivery(
+            {0x06: alice.identity.hash_hex, 0x07: "hint-msg-1"},
+            ch_hash,
+            carol.identity.hash_hex,
+        )
+
+        hinted = bob.storage.get_missed_message_ids(ch_hash, alice.identity.hash_hex)
+        assert "hint-msg-1" not in hinted, \
+            "A non-member seeded a missed-delivery hint"
+
+
+# ---------------------------------------------------------------------------
+# REACTIONS — membership and SEND_MESSAGE
+# ---------------------------------------------------------------------------
+
+class TestAdversarialReactions:
+    """
+    A reaction is a write into the channel attributed to the sender, so it
+    needs the same authorisation a message does.  Previously the only check
+    was is_subscribed, which says nothing about the *sender*.
+    """
+
+    def _react(self, peer, target, ch_hash, msg_id, emoji_hash, remove=False):
+        dest = RNS.Destination(
+            target.identity.rns_identity, RNS.Destination.OUT,
+            RNS.Destination.SINGLE, "lxmf", "delivery",
+        )
+        lxm = LXMF.LXMessage(dest, peer.router.delivery_destination, "",
+                             desired_method=LXMF.LXMessage.DIRECT)
+        lxm.fields = {
+            F_MSG_TYPE:         MT_REACTION,
+            F_CHANNEL_HASH:     bytes.fromhex(ch_hash),
+            F_REACTION_MSG_ID:  msg_id,
+            F_EMOJI_HASH:       bytes.fromhex(emoji_hash),
+            F_REACTION_REMOVE:  remove,
+        }
+        lxm.signature_validated = True
+        target.router._on_message_received(lxm)
+        time.sleep(0.2)
+
+    def test_non_member_reaction_is_rejected(self, peer_factory):
+        alice, bob, ch_hash = _setup_channel_with_member(
+            peer_factory, member_perms=[SEND_MESSAGE]
+        )
+        carol = peer_factory("carol")
+        emoji_hash = "ab" * 32
+
+        self._react(carol, bob, ch_hash, "target-msg", emoji_hash)
+
+        rows = bob.storage.get_reactions("target-msg")
+        assert not any(r["reactor_hash"] == carol.identity.hash_hex for r in rows), \
+            "A non-member's reaction was stored on an invite-only channel"
+
+    def test_member_without_send_message_cannot_react(self, peer_factory):
+        """Bob is a member but his send_message was revoked; Alice must
+        refuse his reaction just as she refuses his messages."""
+        alice, bob, ch_hash = _setup_channel_with_member(
+            peer_factory, member_perms=[]  # member, but send_message revoked
+        )
+        emoji_hash = "cd" * 32
+
+        self._react(bob, alice, ch_hash, "target-msg-2", emoji_hash)
+
+        rows = alice.storage.get_reactions("target-msg-2")
+        assert not any(r["reactor_hash"] == bob.identity.hash_hex for r in rows), \
+            "A member without send_message had their reaction stored"
+
+
+# ---------------------------------------------------------------------------
+# RESOURCE / PAYLOAD LIMITS
+# ---------------------------------------------------------------------------
+
+class TestAdversarialPayloadLimits:
+    def test_oversized_inbound_image_is_dropped(self, peer_factory):
+        """
+        Attachment bytes are stored and later handed to Qt's image decoders.
+        Avatars and emoji are both capped on receipt; message images were not.
+        """
+        alice, bob, ch_hash = _setup_channel_with_member(
+            peer_factory, member_perms=[SEND_MESSAGE]
+        )
+        dest = RNS.Destination(
+            bob.identity.rns_identity, RNS.Destination.OUT,
+            RNS.Destination.SINGLE, "lxmf", "delivery",
+        )
+        lxm = LXMF.LXMessage(dest, alice.router.delivery_destination, "huge",
+                             desired_method=LXMF.LXMessage.DIRECT)
+        lxm.fields = {
+            F_CHANNEL_HASH: bytes.fromhex(ch_hash),
+            F_DISPLAY_NAME: "Alice",
+            F_TIMESTAMP:    time.time(),
+            F_MESSAGE_ID:   "oversized-img-1",
+            F_IMAGE_DATA:   b"\x00" * (MAX_IMAGE_BYTES + 1),
+        }
+        lxm.signature_validated = True
+
+        bob.router._on_message_received(lxm)
+        time.sleep(0.3)
+
+        rows = [m for m in bob.storage.get_messages(ch_hash)
+                if m["message_id"] == "oversized-img-1"]
+        assert rows, "The message itself should still be delivered"
+        assert not rows[0]["image_data"], \
+            "An over-cap image attachment was stored"
+
+
+# ---------------------------------------------------------------------------
+# ADMIN ADVERSARY — a trusted signer exceeding their own permissions
+# ---------------------------------------------------------------------------
+
+def _setup_channel_with_admin(peer_factory, *, admin_perms=None):
+    """Alice (owner) and Bob (ADMIN) on a shared invite-only channel.
+
+    Every other adversary in this file is a plain member, which is why the
+    admin boundary went unchecked: a valid signature proves who wrote a
+    document, not that they were allowed to write it.
+    """
+    alice = peer_factory("alice")
+    bob = peer_factory("bob")
+
+    perms = dict(PRESET_PRIVATE)
+    if admin_perms is not None:
+        perms[ROLE_ADMIN] = list(admin_perms)
+
+    ch_hash = alice.channel_mgr.create_channel("admin-ch", "", permissions=perms)
+    alice.invite_mgr.publish_member_list(
+        ch_hash, add_members=[bob.identity.hash], add_admins=[bob.identity.hash]
+    )
+    assert wait_for_member(alice.storage, ch_hash, bob.identity.hash_hex)
+    return alice, bob, ch_hash
+
+
+class TestAdversarialAdminSigner:
+    def _doc(self, ch_hash, version, members, admins, owners, signer,
+             permissions=b""):
+        published_at = time.time()
+        payload = _signed_payload(
+            bytes.fromhex(ch_hash), version, published_at,
+            members, admins, owners, permissions,
+        )
+        return {
+            "channel_hash": bytes.fromhex(ch_hash),
+            "version":      version,
+            "published_at": published_at,
+            "members":      members,
+            "admins":       admins,
+            "owners":       owners,
+            "permissions":  permissions,
+            "signatures":   {signer.identity.hash: _sign(
+                signer.identity.rns_identity, payload)},
+        }
+
+    def test_admin_cannot_promote_self_to_owner(self, peer_factory):
+        alice, bob, ch_hash = _setup_channel_with_admin(peer_factory)
+        v = alice.storage.get_member_list_version(ch_hash)["version"]
+
+        doc = self._doc(
+            ch_hash, v + 1,
+            members=[alice.identity.hash, bob.identity.hash],
+            admins=[alice.identity.hash, bob.identity.hash],
+            owners=[alice.identity.hash, bob.identity.hash],  # Bob adds himself
+            signer=bob,
+        )
+        assert not alice.invite_mgr._accept_document(doc, ch_hash), \
+            "An admin promoted themselves to owner"
+        assert alice.storage.get_role(ch_hash, bob.identity.hash_hex) != ROLE_OWNER
+
+    def test_admin_cannot_demote_the_owner(self, peer_factory):
+        alice, bob, ch_hash = _setup_channel_with_admin(peer_factory)
+        v = alice.storage.get_member_list_version(ch_hash)["version"]
+
+        doc = self._doc(
+            ch_hash, v + 1,
+            members=[alice.identity.hash, bob.identity.hash],
+            admins=[bob.identity.hash],
+            owners=[bob.identity.hash],  # Alice removed as owner
+            signer=bob,
+        )
+        assert not alice.invite_mgr._accept_document(doc, ch_hash), \
+            "An admin demoted the channel owner"
+        assert alice.storage.get_role(ch_hash, alice.identity.hash_hex) == ROLE_OWNER
+
+    def test_admin_without_manage_channel_cannot_rewrite_permissions(self, peer_factory):
+        """
+        PRESET_PRIVATE does not grant admins MANAGE_CHANNEL, yet the receiver
+        applied any permissions blob carried by a doc from any trusted signer.
+        """
+        alice, bob, ch_hash = _setup_channel_with_admin(
+            peer_factory, admin_perms=[SEND_MESSAGE, KICK, MANAGE_ROLES]
+        )
+        v = alice.storage.get_member_list_version(ch_hash)["version"]
+        before = alice.storage.get_channel_permissions(ch_hash)
+
+        evil = dict(PRESET_PRIVATE)
+        evil[ROLE_MEMBER] = list(ALL_PERMISSIONS)
+        doc = self._doc(
+            ch_hash, v + 1,
+            members=[alice.identity.hash, bob.identity.hash],
+            admins=[alice.identity.hash, bob.identity.hash],
+            owners=[alice.identity.hash],
+            signer=bob,
+            permissions=msgpack.packb(evil, use_bin_type=True),
+        )
+        assert not alice.invite_mgr._accept_document(doc, ch_hash), \
+            "An admin without manage_channel rewrote the permission set"
+        assert alice.storage.get_channel_permissions(ch_hash) == before
+
+    def test_admin_without_kick_cannot_remove_members(self, peer_factory):
+        alice, bob, ch_hash = _setup_channel_with_admin(
+            peer_factory, admin_perms=[SEND_MESSAGE]  # no KICK
+        )
+        carol = peer_factory("carol")
+        alice.invite_mgr.publish_member_list(ch_hash, add_members=[carol.identity.hash])
+        assert wait_for_member(alice.storage, ch_hash, carol.identity.hash_hex)
+        v = alice.storage.get_member_list_version(ch_hash)["version"]
+
+        doc = self._doc(
+            ch_hash, v + 1,
+            members=[alice.identity.hash, bob.identity.hash],  # Carol dropped
+            admins=[alice.identity.hash, bob.identity.hash],
+            owners=[alice.identity.hash],
+            signer=bob,
+        )
+        assert not alice.invite_mgr._accept_document(doc, ch_hash), \
+            "An admin without kick removed a member"
+        assert alice.storage.is_member(ch_hash, carol.identity.hash_hex)
+
+    def test_document_cannot_strip_all_authority(self, peer_factory):
+        """
+        A doc with no admins and no owners leaves trusted_signers empty, after
+        which no further update can ever validate -- the channel is bricked.
+        """
+        alice, bob, ch_hash = _setup_channel_with_admin(
+            peer_factory, admin_perms=list(ALL_PERMISSIONS)
+        )
+        v = alice.storage.get_member_list_version(ch_hash)["version"]
+
+        doc = self._doc(
+            ch_hash, v + 1,
+            members=[alice.identity.hash, bob.identity.hash],
+            admins=[], owners=[],
+            signer=bob,
+        )
+        assert not alice.invite_mgr._accept_document(doc, ch_hash), \
+            "A document stripped every admin and owner from the channel"
+
+    def test_owner_can_still_manage_owners(self, peer_factory):
+        """Positive control: the gates above must not block the owner."""
+        alice, bob, ch_hash = _setup_channel_with_admin(peer_factory)
+        v = alice.storage.get_member_list_version(ch_hash)["version"]
+
+        doc = self._doc(
+            ch_hash, v + 1,
+            members=[alice.identity.hash, bob.identity.hash],
+            admins=[alice.identity.hash, bob.identity.hash],
+            owners=[alice.identity.hash, bob.identity.hash],
+            signer=alice,
+        )
+        assert alice.invite_mgr._accept_document(doc, ch_hash), \
+            "The owner was blocked from changing the owner list"
+

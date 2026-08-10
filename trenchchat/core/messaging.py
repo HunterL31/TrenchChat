@@ -27,6 +27,7 @@ from trenchchat.core.protocol import (
     F_REPLY_TO, F_LAST_SEEN_ID, F_SYNC_WINDOW_START, F_SYNC_MESSAGES,
     F_MISSED_FOR, F_MISSED_MSG_ID, F_MSG_TYPE, F_IMAGE_DATA,
 )
+from trenchchat.core.image import MAX_IMAGE_BYTES
 from trenchchat.core.storage import Storage
 from trenchchat.network.router import Router
 
@@ -316,6 +317,17 @@ class Messaging:
         if isinstance(image_data, str):
             image_data = image_data.encode()
         if not image_data:
+            image_data = None
+        elif len(image_data) > MAX_IMAGE_BYTES:
+            # Avatars and custom emoji are both capped on receipt; message
+            # attachments were not, leaving the only bound on attacker-supplied
+            # bytes -- which are stored and later handed to Qt's image decoders
+            # -- as a protocol convention rather than anything checked here.
+            RNS.log(
+                f"TrenchChat: dropping oversized image ({len(image_data)} bytes, "
+                f"max {MAX_IMAGE_BYTES}) from {sender_hex[:12]}…",
+                RNS.LOG_WARNING,
+            )
             image_data = None
 
         if not msg_id:

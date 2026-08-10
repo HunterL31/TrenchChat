@@ -277,6 +277,23 @@ class AvatarManager:
                 return
             self._last_received[sender_hex] = now
 
+        # The version is documented as a monotonic counter but was never
+        # compared against what we already hold, so an older update -- or a
+        # replayed one -- silently overwrote a newer avatar.
+        existing = self._storage.get_peer_avatar(sender_hex)
+        if existing is not None:
+            try:
+                if int(avatar_version) < int(existing["avatar_version"]):
+                    RNS.log(
+                        f"TrenchChat [avatar]: ignoring stale avatar v{avatar_version} "
+                        f"from {sender_hex[:12]}… (holding "
+                        f"v{existing['avatar_version']})",
+                        RNS.LOG_DEBUG,
+                    )
+                    return
+            except (TypeError, ValueError):
+                return
+
         if avatar_data:
             self._storage.upsert_peer_avatar(sender_hex, avatar_data, avatar_version)
             RNS.log(

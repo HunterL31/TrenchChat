@@ -369,7 +369,8 @@ class Storage:
         plain_conn = _sqlcipher.connect(str(db_path))
         try:
             plain_conn.execute(
-                f"ATTACH DATABASE '{enc_path}' AS encrypted KEY \"x'{hex_key}'\""
+                f"ATTACH DATABASE ? AS encrypted KEY \"x'{hex_key}'\"",
+                (enc_path,),
             )
             plain_conn.execute("SELECT sqlcipher_export('encrypted')")
             plain_conn.execute("DETACH DATABASE encrypted")
@@ -395,7 +396,8 @@ class Storage:
         try:
             enc_conn.execute(f"PRAGMA key = \"x'{hex_key}'\"")
             enc_conn.execute(
-                f"ATTACH DATABASE '{plain_path}' AS plaintext KEY ''"
+                "ATTACH DATABASE ? AS plaintext KEY ''",
+                (plain_path,),
             )
             enc_conn.execute("SELECT sqlcipher_export('plaintext')")
             enc_conn.execute("DETACH DATABASE plaintext")

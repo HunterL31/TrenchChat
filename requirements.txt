@@ -1,11 +1,28 @@
-rns>=1.4.2
-lxmf>=1.1.1
-PyQt6
-msgpack
-configobj
-sqlcipher3
-Pillow
+# Runtime dependencies.
+#
+# Pinned to exact versions: release artefacts are built with
+# `pip install -r requirements.txt` (.github/workflows/release.yml), so an
+# unpinned floating resolution means two builds of the same commit can ship
+# different code, and an upstream release lands in a signed installer without
+# review. Pillow in particular parses untrusted image bytes and has a long
+# history of decoder CVEs, and cryptography backs the PIN/at-rest encryption.
+#
+# These pins satisfy the rns>=1.4.2 / lxmf>=1.1.1 minimums required for the
+# ratchet and stamp support those releases introduced.
+#
+# Bump deliberately, and re-run the full test suite when you do.
+rns==1.4.2
+lxmf==1.1.1
+PyQt6==6.10.2
+msgpack==1.1.2
+configobj==5.0.9
+sqlcipher3==0.6.2
+Pillow==12.1.1
+# Required by core/lockbox.py (Fernet). Previously only declared in
+# pyproject.toml and satisfied transitively via rns -- the PIN feature must
+# not depend on another package continuing to pull this in.
+cryptography==46.0.5
 
 # Development / testing
-pytest>=7.0
-pyinstaller>=6.0
+pytest>=7.0,<9
+pyinstaller>=6.0,<7

@@ -39,10 +39,32 @@ from trenchchat.network.router import Router
 # In-process message transport
 # ---------------------------------------------------------------------------
 
+def forge(lxm: LXMF.LXMessage) -> LXMF.LXMessage:
+    """Mark a message as having failed LXMF signature validation.
+
+    Locally constructed LXMessages never go through pack/unpack, so the
+    transport marks them signature-valid to model a correctly signed delivery.
+    Adversarial tests wrap the message in this helper to model the opposite: a
+    peer that set ``source_hash`` to someone else's delivery hash, which LXMF
+    flags as SIGNATURE_INVALID but still delivers.
+    """
+    lxm._tc_forged = True
+    lxm.signature_validated = False
+    lxm.unverified_reason = LXMF.LXMessage.SIGNATURE_INVALID
+    return lxm
+
+
 class TestTransport:
     """
-    Routes LXMF messages between in-process peers by directly invoking
-    delivery callbacks, bypassing the Reticulum network layer.
+    Routes LXMF messages between in-process peers by handing them to the
+    recipient's Router._on_message_received, bypassing only the Reticulum
+    network layer -- not the router's own inbound authentication.
+
+    Because these messages are built in-process rather than unpacked from
+    wire bytes, LXMF's signature fields are never populated, so the transport
+    stamps ``signature_validated = True`` to model an authentic signed
+    delivery.  Tests that need an unauthenticated message call forge() on it
+    first; see tests/test_adversarial.py.
 
     Usage:
         transport = TestTransport()
@@ -71,16 +93,22 @@ class TestTransport:
                 if hasattr(lxm, "_failed_callback") and lxm._failed_callback:
                     lxm._failed_callback(lxm)
                 return
+            # Model LXMF's signature verdict: authentic unless the test forged it.
+            if getattr(lxm, "_tc_forged", False):
+                lxm.signature_validated = False
+                lxm.unverified_reason = LXMF.LXMessage.SIGNATURE_INVALID
+            else:
+                lxm.signature_validated = True
+                lxm.unverified_reason = None
+
             # Deliver asynchronously (matches real LXMF behaviour)
             def _deliver():
                 time.sleep(0.05)
-                for cb in recipient_router._delivery_callbacks:
-                    try:
-                        cb(lxm)
-                    except Exception as e:
-                        import RNS as _RNS
-                        _RNS.log(f"TestTransport: delivery callback error: {e}",
-                                 _RNS.LOG_ERROR)
+                try:
+                    recipient_router._on_message_received(lxm)
+                except Exception as e:
+                    import RNS as _RNS
+                    _RNS.log(f"TestTransport: delivery error: {e}", _RNS.LOG_ERROR)
             threading.Thread(target=_deliver, daemon=True).start()
         return send
 
@@ -122,8 +150,28 @@ def rns_instance(tmp_path_factory):
     """
     Initialize a single RNS.Reticulum for the entire test session.
     Uses a temp config dir so it doesn't touch ~/.reticulum.
+
+    The config declares no interfaces.  Reticulum's default config enables
+    AutoInterface, whose multicast discovery is not used by these tests at all
+    (TestTransport delivers between peers in-process) but does intermittently
+    fault the interpreter on Windows -- "No multicast echoes received" followed
+    by an access violation -- which crashes the run before pytest can report.
+    Declaring an empty interface set removes that source of nondeterminism
+    without changing what any test exercises.
     """
     rns_dir = tmp_path_factory.mktemp("rns_config")
+    (rns_dir / "config").write_text(
+        "[reticulum]\n"
+        "  enable_transport = False\n"
+        "  share_instance = False\n"
+        "  panic_on_interface_error = False\n"
+        "\n"
+        "[logging]\n"
+        "  loglevel = 3\n"
+        "\n"
+        "[interfaces]\n",
+        encoding="utf-8",
+    )
     rns = RNS.Reticulum(configdir=str(rns_dir), loglevel=RNS.LOG_WARNING)
     yield rns
 
@@ -184,6 +232,31 @@ def peer_factory(rns_instance, tmp_path):
             invite_mgr=invite_mgr,
             sync_mgr=sync_mgr,
         )
+        # Every peer stands up an LXMRouter with its own destinations, links
+        # and callbacks.  Left running, these accumulate across the whole
+        # session -- several hundred by the end of a full run -- and the
+        # interpreter eventually faults on Windows partway through. Tearing
+        # each one down with the peer keeps a full-suite run stable.
+        def _stop_router(r=router, ch=channel_mgr):
+            r.lxmf_router.exit_handler()
+            # exit_handler tears down LXMF's own delivery destinations but not
+            # the ones this app registers directly with RNS.Transport, which
+            # otherwise stay in the global destination table for the life of
+            # the session.
+            for dest in (getattr(r, "_user_dest", None),
+                         getattr(r, "_delivery_dest", None)):
+                if dest is not None:
+                    try:
+                        RNS.Transport.deregister_destination(dest)
+                    except Exception:
+                        pass
+            for dest in list(getattr(ch, "_owned_destinations", {}).values()):
+                try:
+                    RNS.Transport.deregister_destination(dest)
+                except Exception:
+                    pass
+
+        peer._teardown_callbacks.append(_stop_router)
         peer._teardown_callbacks.append(storage.close)
         created_peers.append(peer)
 

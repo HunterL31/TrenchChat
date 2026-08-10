@@ -15,6 +15,8 @@ import threading
 import RNS
 import msgpack
 
+from trenchchat.core.protocol import unpack_wire
+
 PRESENCE_TIMEOUT_SECS = 180
 
 
@@ -47,7 +49,7 @@ def resolve_display_name(identity_hex: str, self_hex: str, storage, config=None)
         )
         raw = RNS.Identity.recall_app_data(delivery_hash)
         if raw:
-            parsed = msgpack.unpackb(raw, raw=False)
+            parsed = unpack_wire(raw)
             if isinstance(parsed, list) and len(parsed) >= 1:
                 name = parsed[0]
             elif isinstance(parsed, dict):

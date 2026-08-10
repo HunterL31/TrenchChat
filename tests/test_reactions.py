@@ -29,6 +29,7 @@ from trenchchat.core.protocol import (
     F_REACTION_MSG_ID, F_REACTION_REMOVE,
     MT_REACTION, MT_EMOJI_REQUEST, MT_EMOJI_RESPONSE,
 )
+from trenchchat.core.permissions import PRESET_PRIVATE, ROLE_MEMBER
 from trenchchat.core.reaction import ReactionManager, compute_emoji_hash, MAX_EMOJI_BYTES
 from trenchchat.core.storage import Storage
 
@@ -326,13 +327,21 @@ class TestInboundReaction:
         for cb in router._delivery_callbacks:
             cb(lxm)
 
-    def _setup_channel(self, storage, channel_hex: str) -> None:
-        """Insert a dummy channel row and subscribe to it."""
+    def _setup_channel(self, storage, channel_hex: str,
+                       member_hex: str = "bb" * 16) -> None:
+        """Insert a channel row, subscribe, and admit member_hex.
+
+        Inbound reactions are authorised the same way inbound messages are, so
+        the sender has to be a real member holding send_message for the
+        legitimate-traffic cases below.  Rejection of an unauthorised reactor
+        is covered in tests/test_adversarial.py.
+        """
         storage.upsert_channel(
             hash=channel_hex, name="test", description="",
-            creator_hash="aa" * 16, permissions="{}", created_at=0.0,
+            creator_hash="aa" * 16, permissions=PRESET_PRIVATE, created_at=0.0,
         )
         storage.subscribe(channel_hex)
+        storage.upsert_member(channel_hex, member_hex, "Member", role=ROLE_MEMBER)
 
     def test_inbound_reaction_stored(self, reaction_mgr):
         mgr, storage, identity, router = reaction_mgr
@@ -516,6 +525,16 @@ class TestEmojiRequestResponse:
         img = _make_png()
         emoji_hash = compute_emoji_hash(img)
         storage.insert_emoji(emoji_hash, "test", img, time.time())
+
+        # Emoji requests are only served to peers we share a channel with,
+        # so the library cannot be enumerated by an arbitrary node.
+        channel_hex = "dd" * 16
+        storage.upsert_channel(
+            hash=channel_hex, name="test", description="",
+            creator_hash="aa" * 16, permissions=PRESET_PRIVATE, created_at=0.0,
+        )
+        storage.subscribe(channel_hex)
+        storage.upsert_member(channel_hex, requester_hex, "Requester", role=ROLE_MEMBER)
 
         # The identity mock must return a proper hex string from .hash.hex()
         requester_identity_mock = MagicMock()

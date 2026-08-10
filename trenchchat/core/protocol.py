@@ -72,3 +72,44 @@ MT_AVATAR_UPDATE    = "avatar_update"
 MT_REACTION         = "reaction"        # notify channel: reactor added/removed emoji on a message
 MT_EMOJI_REQUEST    = "emoji_request"   # ask a peer for emoji image data by hash
 MT_EMOJI_RESPONSE   = "emoji_response"  # respond with the emoji image bytes
+
+
+# --- bounded unpacking of wire payloads ---
+
+import msgpack  # noqa: E402  (kept below the constants; still no local imports)
+
+# Caps applied when unpacking anything that came off the network.
+#
+# msgpack >= 1.0 derives its per-type limits from len(packed), so a short
+# payload already cannot declare a huge array -- but that is a library default
+# the code was relying on implicitly rather than a bound this protocol states.
+# Declaring them keeps the guarantee explicit and independent of the default.
+# unpackb() has no max_buffer_size parameter (it is an Unpacker-only option),
+# so the overall payload size is bounded here instead.
+MAX_WIRE_PAYLOAD  = 4 * 1024 * 1024
+MAX_WIRE_ARRAY    = 4096
+MAX_WIRE_MAP      = 4096
+MAX_WIRE_STR      = 1 * 1024 * 1024
+MAX_WIRE_BIN      = 2 * 1024 * 1024
+
+
+def unpack_wire(payload: bytes, *, raw: bool = False):
+    """msgpack.unpackb with explicit limits, for data received from a peer.
+
+    Use this for every payload that originated off the network; the plain
+    msgpack.unpackb call is fine for blobs we wrote ourselves.
+    Raises ValueError if the payload itself is over the size cap.
+    """
+    if len(payload) > MAX_WIRE_PAYLOAD:
+        raise ValueError(
+            f"wire payload is {len(payload)} bytes, over the "
+            f"{MAX_WIRE_PAYLOAD} limit"
+        )
+    return msgpack.unpackb(
+        payload,
+        raw=raw,
+        max_array_len=MAX_WIRE_ARRAY,
+        max_map_len=MAX_WIRE_MAP,
+        max_str_len=MAX_WIRE_STR,
+        max_bin_len=MAX_WIRE_BIN,
+    )

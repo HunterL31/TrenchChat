@@ -26,6 +26,7 @@ from trenchchat.core.identity import Identity
 from trenchchat.core.protocol import (
     F_CHANNEL_HASH, F_MSG_TYPE, F_SUBSCRIBER_LIST,
     MT_SUBSCRIBE, MT_UNSUBSCRIBE, MT_SUBSCRIBER_LIST,
+    unpack_wire,
 )
 from trenchchat.core.storage import Storage
 from trenchchat.network.router import Router
@@ -148,7 +149,7 @@ class SubscriptionManager:
             packed = fields.get(F_SUBSCRIBER_LIST)
             if packed:
                 try:
-                    hashes = msgpack.unpackb(packed, raw=False)
+                    hashes = unpack_wire(packed)
                     if channel_hash_hex not in self._subscribers:
                         self._subscribers[channel_hash_hex] = set()
                     self._subscribers[channel_hash_hex] = set(hashes)
