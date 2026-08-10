@@ -60,14 +60,24 @@ class TestPublicChannelFullLifecycle:
         ch_hash = alice.channel_mgr.create_channel("town-square", "Public square", "public")
 
         # Bob and Carol learn about the channel (discovery is exercised
-        # separately in test_channels.py) and subscribe for real.
+        # separately in test_channels.py) and subscribe for real, one at a
+        # time. Alice's subscriber_list broadcast is a separate, independently
+        # delayed message from her MT_SUBSCRIBE acknowledgment, and the
+        # inbound handler replaces the local cache wholesale rather than
+        # merging -- so if Bob and Carol subscribed back-to-back, Bob's own
+        # (smaller, older) broadcast could arrive after Carol's (larger,
+        # newer) one and silently drop her from his cache. Waiting for each
+        # peer's own round trip to land before the next one subscribes
+        # keeps the two broadcasts from racing each other.
         for peer in (bob, carol):
             peer.storage.upsert_channel(ch_hash, "town-square", "Public square",
                                         alice.identity.hash_hex, "public", time.time())
             peer.subscription_mgr.subscribe(ch_hash, owner_hash_hex=alice.identity.hash_hex)
-
-        assert wait_for_subscriber(alice, ch_hash, bob.identity.hash_hex, timeout=5)
-        assert wait_for_subscriber(alice, ch_hash, carol.identity.hash_hex, timeout=5)
+            assert wait_for_subscriber(alice, ch_hash, peer.identity.hash_hex, timeout=5)
+            assert wait_for(
+                lambda p=peer: p.identity.hash_hex in p.subscription_mgr.get_subscribers(ch_hash),
+                timeout=5,
+            ), f"{peer.name} never received their own subscriber_list confirmation"
 
         recipients = get_subscriber_hashes(alice, ch_hash)
         assert set(recipients) == {alice.identity.hash_hex, bob.identity.hash_hex,
