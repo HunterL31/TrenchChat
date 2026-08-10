@@ -309,3 +309,35 @@ class TestMemberListVersioning:
 
         assert wait_for_member(bob.storage, ch_hash, carol.identity.hash_hex, timeout=5), \
             "Bob did not receive the member list update containing Carol"
+
+
+class TestDocumentFormatCompatibility:
+    """The v4 roster field must not change what a standalone channel puts on
+    the wire — that is the regression guarantee for every existing channel."""
+
+    def test_standalone_payload_is_byte_identical_without_roster(self):
+        from trenchchat.core.invite import _signed_payload
+        args = (b"\x01" * 16, 3, 123.0, [b"\x02" * 16], [b"\x03" * 16])
+        kwargs = dict(owners=[b"\x04" * 16], permissions_blob=b"perms",
+                      joined_at={b"\x02" * 16: 1.0})
+        assert _signed_payload(*args, **kwargs) == \
+            _signed_payload(*args, **kwargs, channels_blob=None)
+
+    def test_roster_changes_the_payload(self):
+        from trenchchat.core.invite import _signed_payload
+        args = (b"\x01" * 16, 3, 123.0, [b"\x02" * 16], [b"\x03" * 16])
+        kwargs = dict(owners=[b"\x04" * 16], permissions_blob=b"perms",
+                      joined_at={b"\x02" * 16: 1.0})
+        assert _signed_payload(*args, **kwargs) != \
+            _signed_payload(*args, **kwargs, channels_blob=b"\x90")
+
+    def test_standalone_document_has_no_channels_key(self, peer_factory):
+        from trenchchat.core.permissions import PRESET_PRIVATE
+        from trenchchat.core import actions
+        alice = peer_factory("alice")
+        ch = actions.create_channel(
+            alice.channel_mgr, alice.invite_mgr, "solo", "", dict(PRESET_PRIVATE))
+        import msgpack as _mp
+        stored = alice.storage.get_member_list_version(ch)
+        doc = _mp.unpackb(stored["document_blob"], raw=True)
+        assert b"channels" not in doc

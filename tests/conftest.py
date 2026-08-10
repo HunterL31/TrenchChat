@@ -31,6 +31,7 @@ from trenchchat.core.channel import ChannelManager
 from trenchchat.core.messaging import Messaging
 from trenchchat.core.subscription import SubscriptionManager
 from trenchchat.core.invite import InviteManager
+from trenchchat.core.server import ServerManager
 from trenchchat.core.sync import SyncManager
 from trenchchat.network.router import Router
 
@@ -122,6 +123,7 @@ class TestPeer:
     storage: Storage
     router: Router
     channel_mgr: ChannelManager
+    server_mgr: ServerManager
     messaging: Messaging
     subscription_mgr: SubscriptionManager
     invite_mgr: InviteManager
@@ -211,6 +213,7 @@ def peer_factory(rns_instance, tmp_path):
         router = Router(config, identity, storagepath=messagestore_path)
 
         channel_mgr = ChannelManager(identity, storage)
+        server_mgr = ServerManager(identity, storage)
         messaging = Messaging(identity, storage, router)
         subscription_mgr = SubscriptionManager(identity, storage, router)
         invite_mgr = InviteManager(identity, storage, router)
@@ -218,6 +221,7 @@ def peer_factory(rns_instance, tmp_path):
                                subscription_mgr, invite_mgr)
 
         channel_mgr.restore_owned_channels()
+        server_mgr.restore_owned_servers()
 
         peer = TestPeer(
             name=name,
@@ -227,6 +231,7 @@ def peer_factory(rns_instance, tmp_path):
             storage=storage,
             router=router,
             channel_mgr=channel_mgr,
+            server_mgr=server_mgr,
             messaging=messaging,
             subscription_mgr=subscription_mgr,
             invite_mgr=invite_mgr,
