@@ -13,6 +13,11 @@ from pathlib import Path
 import pytest
 
 from trenchchat.core.fileutils import OWNER_RW_MODE
+from trenchchat.core.permissions import (
+    CREATE_CHANNEL, INVITE, PRESET_PRIVATE, PRESET_SERVER, ROLE_ADMIN,
+    ROLE_MEMBER, ROLE_OWNER, SEND_MESSAGE,
+    is_discoverable, is_open_join, permissions_from_json,
+)
 from trenchchat.core.storage import Storage
 from trenchchat.core.lockbox import sqlcipher_hex_key
 
@@ -753,3 +758,261 @@ class TestMessageImageData:
         cols = [c["name"] for c in s._conn.execute("PRAGMA table_info(messages)").fetchall()]
         assert "image_data" in cols
         s.close()
+
+
+# ---------------------------------------------------------------------------
+# Servers and scope resolution
+# ---------------------------------------------------------------------------
+
+SERVER_H = "aa" * 16
+CHAN_IN_SERVER = "bb" * 16
+STANDALONE = "cc" * 16
+ALICE = "11" * 16
+BOB = "22" * 16
+
+
+def _make_server_with_channel(db):
+    """A server owning one channel, plus one unrelated standalone channel."""
+    db.upsert_server(SERVER_H, "My Server", "desc", ALICE,
+                     PRESET_SERVER, time.time())
+    db.upsert_channel(CHAN_IN_SERVER, "general", "", ALICE,
+                      PRESET_SERVER, time.time(), server_hash=SERVER_H)
+    db.upsert_channel(STANDALONE, "solo", "", BOB, PRESET_PRIVATE, time.time())
+
+
+class TestServersCRUD:
+    def test_upsert_and_get_server(self, db):
+        db.upsert_server(SERVER_H, "My Server", "desc", ALICE,
+                         PRESET_SERVER, 123.0)
+        row = db.get_server(SERVER_H)
+        assert row["name"] == "My Server"
+        assert row["creator_hash"] == ALICE
+        assert row["created_at"] == 123.0
+
+    def test_get_server_missing(self, db):
+        assert db.get_server(SERVER_H) is None
+
+    def test_is_server(self, db):
+        db.upsert_server(SERVER_H, "S", "", ALICE, PRESET_SERVER, 1.0)
+        db.upsert_channel(STANDALONE, "c", "", ALICE, PRESET_PRIVATE, 1.0)
+        assert db.is_server(SERVER_H) is True
+        assert db.is_server(STANDALONE) is False
+
+    def test_get_all_servers_excludes_channels(self, db):
+        _make_server_with_channel(db)
+        hashes = [r["hash"] for r in db.get_all_servers()]
+        assert hashes == [SERVER_H]
+
+    def test_get_all_channels_excludes_servers(self, db):
+        """get_all_channels feeds the sidebar and restore_owned_channels —
+        a server must never appear in it."""
+        _make_server_with_channel(db)
+        hashes = {r["hash"] for r in db.get_all_channels()}
+        assert hashes == {CHAN_IN_SERVER, STANDALONE}
+
+    def test_get_server_channels(self, db):
+        _make_server_with_channel(db)
+        assert [r["hash"] for r in db.get_server_channels(SERVER_H)] == [CHAN_IN_SERVER]
+
+    def test_get_standalone_channels(self, db):
+        _make_server_with_channel(db)
+        assert [r["hash"] for r in db.get_standalone_channels()] == [STANDALONE]
+
+    def test_get_scope_creator_hash_prefers_server(self, db):
+        _make_server_with_channel(db)
+        assert db.get_scope_creator_hash(SERVER_H) == ALICE
+        assert db.get_scope_creator_hash(STANDALONE) == BOB
+        assert db.get_scope_creator_hash("de" * 16) is None
+
+
+class TestScopeResolution:
+    def test_scope_of_server_channel_is_the_server(self, db):
+        _make_server_with_channel(db)
+        assert db.scope_for(CHAN_IN_SERVER) == SERVER_H
+
+    def test_scope_of_standalone_channel_is_itself(self, db):
+        _make_server_with_channel(db)
+        assert db.scope_for(STANDALONE) == STANDALONE
+
+    def test_scope_of_unknown_hash_is_itself(self, db):
+        assert db.scope_for("ee" * 16) == "ee" * 16
+
+    def test_role_resolves_to_server(self, db):
+        _make_server_with_channel(db)
+        db.upsert_member(SERVER_H, BOB, "Bob", ROLE_ADMIN)
+        assert db.get_role(CHAN_IN_SERVER, BOB) == ROLE_ADMIN
+        assert db.is_member(CHAN_IN_SERVER, BOB) is True
+        assert db.is_admin(CHAN_IN_SERVER, BOB) is True
+
+    def test_members_resolve_to_server(self, db):
+        _make_server_with_channel(db)
+        db.upsert_member(SERVER_H, ALICE, "Alice", ROLE_OWNER)
+        db.upsert_member(SERVER_H, BOB, "Bob", ROLE_MEMBER)
+        assert {r["identity_hash"] for r in db.get_members(CHAN_IN_SERVER)} == {ALICE, BOB}
+
+    def test_display_name_resolves_to_server(self, db):
+        _make_server_with_channel(db)
+        db.upsert_member(SERVER_H, BOB, "Bobby", ROLE_MEMBER)
+        assert db.get_member_display_name(CHAN_IN_SERVER, BOB) == "Bobby"
+
+    def test_standalone_membership_is_unaffected(self, db):
+        _make_server_with_channel(db)
+        db.upsert_member(SERVER_H, BOB, "Bob", ROLE_ADMIN)
+        # Bob is a server admin but has nothing to do with the standalone channel.
+        assert db.get_role(STANDALONE, BOB) is None
+        assert db.is_member(STANDALONE, BOB) is False
+
+    def test_has_permission_resolves_to_server_role(self, db):
+        _make_server_with_channel(db)
+        db.upsert_member(SERVER_H, BOB, "Bob", ROLE_ADMIN)
+        assert db.has_permission(CHAN_IN_SERVER, BOB, CREATE_CHANNEL) is True
+        assert db.has_permission(CHAN_IN_SERVER, BOB, SEND_MESSAGE) is True
+
+    def test_member_permission_denied_create_channel(self, db):
+        _make_server_with_channel(db)
+        db.upsert_member(SERVER_H, BOB, "Bob", ROLE_MEMBER)
+        assert db.has_permission(CHAN_IN_SERVER, BOB, CREATE_CHANNEL) is False
+
+    def test_tenure_resolves_to_server(self, db):
+        _make_server_with_channel(db)
+        db.open_tenure(SERVER_H, BOB, 100.0)
+        assert db.has_any_tenure(CHAN_IN_SERVER) is True
+        assert db.was_member_at(CHAN_IN_SERVER, BOB, 150.0) is True
+        assert db.was_member_at(CHAN_IN_SERVER, BOB, 50.0) is False
+        assert db.get_open_tenure_joined_at(CHAN_IN_SERVER, BOB) == 100.0
+
+    def test_has_any_tenure_false_for_unrelated_standalone(self, db):
+        _make_server_with_channel(db)
+        db.open_tenure(SERVER_H, BOB, 100.0)
+        assert db.has_any_tenure(STANDALONE) is False
+
+    def test_member_list_version_resolves_to_server(self, db):
+        _make_server_with_channel(db)
+        db.upsert_member_list_version(SERVER_H, 3, 10.0, b"blob")
+        row = db.get_member_list_version(CHAN_IN_SERVER)
+        assert row is not None and row["version"] == 3
+
+    def test_writes_do_not_resolve(self, db):
+        """A membership write keyed by a channel hash must NOT land at server
+        scope — that would be a privilege-escalation primitive."""
+        _make_server_with_channel(db)
+        db.upsert_member(CHAN_IN_SERVER, BOB, "Bob", ROLE_OWNER)
+        # It landed on the channel's own row, which no resolving read reaches.
+        assert db.get_role(CHAN_IN_SERVER, BOB) is None
+        rows = db._conn.execute(
+            "SELECT role FROM members WHERE channel_hash = ? AND identity_hash = ?",
+            (CHAN_IN_SERVER, BOB),
+        ).fetchall()
+        assert rows and rows[0]["role"] == ROLE_OWNER
+
+    def test_scope_cache_invalidated_on_upsert(self, db):
+        db.upsert_server(SERVER_H, "S", "", ALICE, PRESET_SERVER, 1.0)
+        db.upsert_channel(CHAN_IN_SERVER, "c", "", ALICE, PRESET_SERVER, 1.0,
+                          server_hash=SERVER_H)
+        assert db.scope_for(CHAN_IN_SERVER) == SERVER_H
+        assert CHAN_IN_SERVER in db._scope_cache
+
+        db.upsert_channel(CHAN_IN_SERVER, "renamed", "", ALICE, PRESET_SERVER, 1.0,
+                          server_hash=SERVER_H)
+        assert CHAN_IN_SERVER not in db._scope_cache
+        assert db.scope_for(CHAN_IN_SERVER) == SERVER_H
+
+
+class TestServerHashIsWriteOnce:
+    def test_upsert_cannot_reparent_existing_channel(self, db):
+        """Defence against roster adoption: a signed server roster naming an
+        existing standalone channel must not capture it."""
+        db.upsert_channel(STANDALONE, "solo", "", BOB, PRESET_PRIVATE, 1.0)
+        db.upsert_server(SERVER_H, "Evil", "", ALICE, PRESET_SERVER, 1.0)
+        db.upsert_channel(STANDALONE, "solo", "", BOB, PRESET_PRIVATE, 1.0,
+                          server_hash=SERVER_H)
+        assert db.get_channel(STANDALONE)["server_hash"] is None
+        assert db.scope_for(STANDALONE) == STANDALONE
+
+    def test_server_hash_set_on_insert(self, db):
+        db.upsert_server(SERVER_H, "S", "", ALICE, PRESET_SERVER, 1.0)
+        db.upsert_channel(CHAN_IN_SERVER, "general", "", ALICE,
+                          PRESET_SERVER, 1.0, server_hash=SERVER_H)
+        assert db.get_channel(CHAN_IN_SERVER)["server_hash"] == SERVER_H
+
+
+class TestPermissionMirror:
+    def test_set_server_permissions_mirrors_into_children(self, db):
+        _make_server_with_channel(db)
+        other = "dd" * 16
+        db.upsert_channel(other, "random", "", ALICE, PRESET_SERVER, 1.0,
+                          server_hash=SERVER_H)
+        new_perms = dict(PRESET_SERVER)
+        new_perms[ROLE_MEMBER] = [SEND_MESSAGE, INVITE]
+        db.set_server_permissions(SERVER_H, new_perms)
+
+        assert db.get_server_permissions(SERVER_H)[ROLE_MEMBER] == [SEND_MESSAGE, INVITE]
+        for ch in (CHAN_IN_SERVER, other):
+            mirrored = permissions_from_json(db.get_channel(ch)["permissions"])
+            assert mirrored[ROLE_MEMBER] == [SEND_MESSAGE, INVITE]
+
+    def test_mirror_does_not_touch_standalone_channels(self, db):
+        _make_server_with_channel(db)
+        before = db.get_channel(STANDALONE)["permissions"]
+        db.set_server_permissions(SERVER_H, dict(PRESET_SERVER))
+        assert db.get_channel(STANDALONE)["permissions"] == before
+
+    def test_mirrored_flags_keep_server_channels_invite_only(self, db):
+        """open_join False must ride in the mirror, or server channels would be
+        routed down the subscriber path and would get announced."""
+        _make_server_with_channel(db)
+        db.set_server_permissions(SERVER_H, dict(PRESET_SERVER))
+        perms = permissions_from_json(db.get_channel(CHAN_IN_SERVER)["permissions"])
+        assert is_open_join(perms) is False
+        assert is_discoverable(perms) is False
+
+    def test_get_channel_permissions_does_not_resolve(self, db):
+        """Permissions are mirrored down, never resolved up — resolving here
+        would be bypassed by the ~18 direct row['permissions'] readers."""
+        db.upsert_server(SERVER_H, "S", "", ALICE, PRESET_SERVER, 1.0)
+        db.upsert_channel(CHAN_IN_SERVER, "general", "", ALICE,
+                          PRESET_PRIVATE, 1.0, server_hash=SERVER_H)
+        # The channel row keeps its own blob; get_channel_permissions reads it.
+        assert db.get_channel_permissions(CHAN_IN_SERVER) == PRESET_PRIVATE
+
+
+class TestServerSchemaMigration:
+    def test_migration_adds_server_hash_column(self, tmp_path):
+        """_migrate_servers() adds channels.server_hash to a legacy database."""
+        import sqlite3
+        db_path = tmp_path / "legacy.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("""
+            CREATE TABLE channels (
+                hash TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                creator_hash TEXT NOT NULL,
+                permissions TEXT NOT NULL DEFAULT '{}',
+                created_at REAL NOT NULL,
+                last_seen REAL NOT NULL
+            )
+        """)
+        conn.execute(
+            "INSERT INTO channels VALUES (?, 'old', '', ?, '{}', 1.0, 1.0)",
+            (STANDALONE, BOB),
+        )
+        conn.commit()
+        conn.close()
+
+        s = Storage(db_path=db_path)
+        cols = [c["name"] for c in s._conn.execute("PRAGMA table_info(channels)").fetchall()]
+        assert "server_hash" in cols
+        # Pre-existing rows backfill to NULL, i.e. standalone.
+        assert s.get_channel(STANDALONE)["server_hash"] is None
+        assert s.scope_for(STANDALONE) == STANDALONE
+        s.close()
+
+    def test_migration_is_idempotent(self, tmp_path):
+        db_path = tmp_path / "twice.db"
+        s = Storage(db_path=db_path)
+        s.upsert_server(SERVER_H, "S", "", ALICE, PRESET_SERVER, 1.0)
+        s.close()
+        s2 = Storage(db_path=db_path)
+        assert s2.get_server(SERVER_H)["name"] == "S"
+        s2.close()

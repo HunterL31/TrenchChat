@@ -14,6 +14,7 @@ import msgpack
 
 from trenchchat import APP_NAME, APP_ASPECT_CHANNEL
 from trenchchat.core.identity import Identity
+from trenchchat.core.naming import sanitise_name
 from trenchchat.core.permissions import (
     PRESET_OPEN, PRESET_PRIVATE, PRESETS, ROLE_OWNER,
     is_discoverable, is_open_join, permissions_from_json,
@@ -21,11 +22,7 @@ from trenchchat.core.permissions import (
 from trenchchat.core.storage import Storage
 from trenchchat.network.announce import ChannelAnnounceHandler
 
-
-def _sanitise_name(name: str) -> str:
-    """Lower-case, alphanumeric + hyphens only, max 32 chars."""
-    sanitised = "".join(c if c.isalnum() or c == "-" else "-" for c in name.lower())
-    return sanitised[:32].strip("-")
+_sanitise_name = sanitise_name
 
 
 class ChannelManager:

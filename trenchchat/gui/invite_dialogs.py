@@ -16,7 +16,8 @@ from PyQt6.QtGui import QFont
 
 from trenchchat.core.permissions import (
     ALL_PERMISSIONS, FLAG_DISCOVERABLE, FLAG_OPEN_JOIN,
-    FULL_SYNC, INVITE, KICK, MANAGE_CHANNEL, MANAGE_ROLES, ROLE_ADMIN, ROLE_MEMBER, ROLE_OWNER,
+    CREATE_CHANNEL, FULL_SYNC, INVITE, KICK, MANAGE_CHANNEL, MANAGE_ROLES,
+    ROLE_ADMIN, ROLE_MEMBER, ROLE_OWNER,
     SEND_MESSAGE,
 )
 from trenchchat.core.storage import Storage
@@ -28,6 +29,7 @@ _PERMISSION_LABELS: dict[str, str] = {
     KICK:           "Remove members",
     MANAGE_ROLES:   "Manage roles",
     MANAGE_CHANNEL: "Manage channel settings",
+    CREATE_CHANNEL: "Create channels in this server",
     FULL_SYNC:      "Full history sync (backfill messages sent before joining)",
 }
 
