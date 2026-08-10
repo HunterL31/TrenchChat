@@ -470,22 +470,35 @@ class TestSyncOnChannelJoin:
             timeout=5,
         ), "Bob's SyncManager never sent a sync request to Alice after joining"
 
-    def test_new_member_receives_history_from_before_they_joined(self, peer_factory):
+    def test_new_member_receives_history_from_before_they_joined_when_full_sync_enabled(
+        self, peer_factory
+    ):
         """
-        End-to-end: joining an invite-only channel backfills the channel's
-        existing history, not just future messages.
+        End-to-end: joining an invite-only channel with full_sync enabled
+        backfills the channel's existing history via the join-triggered
+        sync request, not just future messages.
 
-        This depends on the member-list document carrying each member's
-        real (signed) original join time (invite.py's joined_at field) --
-        without it, a new joiner's local tenure view only starts at the
-        moment they personally observed each member, and an existing
+        full_sync is off by default (see TestTenureSyncFiltering's
+        test_pre_join_history_excluded_by_default) -- a plain invite-only
+        channel restricts a new member's sync to messages sent since they
+        joined. This test covers the opt-in case, exercising it through the
+        *real* end-to-end pipeline: invite -> join request -> auto-join ->
+        SyncManager's channel_joined-triggered sync request -- not a
+        manually-invoked sync call.
+
+        This also depends on the member-list document carrying each
+        member's real (signed) original join time (invite.py's joined_at
+        field) -- without it, a new joiner's local tenure view only starts
+        at the moment they personally observed each member, and an existing
         member's genuinely older messages get filtered by the *receiver's*
         own tenure check even once the sync request itself is working.
         """
         alice = peer_factory("alice")
         bob = peer_factory("bob")
 
-        ch_hash = alice.channel_mgr.create_channel("history-on-join", "", "invite")
+        perms = dict(PRESET_PRIVATE)
+        perms["full_sync"] = True
+        ch_hash = alice.channel_mgr.create_channel("history-on-join", "", permissions=perms)
         alice.invite_mgr.publish_member_list(ch_hash)
 
         alice.messaging.send_message(
@@ -506,6 +519,41 @@ class TestSyncOnChannelJoin:
 
         assert wait_for_message(bob.storage, ch_hash, pre_join_id, timeout=5), \
             "Bob did not receive the message Alice sent before he joined"
+
+    def test_new_member_does_not_receive_pre_join_history_by_default(self, peer_factory):
+        """
+        Mirror of the full_sync-enabled case above, but for the default
+        (full_sync off) channel -- confirms the join-triggered auto-sync
+        (SyncManager._on_channel_joined) and the tenure filter interact
+        correctly through the real end-to-end invite/join pipeline, not
+        just when sync is triggered manually.
+        """
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+
+        ch_hash = alice.channel_mgr.create_channel("history-on-join-default", "", "invite")
+        alice.invite_mgr.publish_member_list(ch_hash)
+
+        alice.messaging.send_message(
+            channel_hash_hex=ch_hash,
+            content="sent before Bob was even invited",
+            subscriber_hashes=[alice.identity.hash_hex],
+        )
+        pre_join_id = alice.storage.get_messages(ch_hash)[0]["message_id"]
+
+        def on_invite(channel_hash_hex, channel_name, token, expiry, admin_hex):
+            bob.invite_mgr.send_join_request(channel_hash_hex, token, expiry, admin_hex)
+
+        bob.invite_mgr.add_invite_callback(on_invite)
+        alice.invite_mgr.send_invite(ch_hash, bob.identity.hash_hex)
+
+        assert wait_for_member(alice.storage, ch_hash, bob.identity.hash_hex, timeout=5), \
+            "Bob never joined"
+        assert wait_for(lambda: bob.storage.is_member(ch_hash, bob.identity.hash_hex), timeout=5)
+
+        time.sleep(1.0)  # let the join-triggered sync request round-trip
+        assert not bob.storage.message_exists(pre_join_id), \
+            "Bob received pre-join history via the auto-triggered sync despite full_sync being off"
 
     def test_forged_tenure_claim_from_untrusted_signer_still_rejected(self, peer_factory):
         """
