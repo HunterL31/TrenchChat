@@ -138,7 +138,8 @@ Full detail in `.claude/rules/code-standards.md`. Highlights not obvious from sk
 - Logging is always `RNS.log(...)`, never `print`/stdlib `logging`, prefixed `"TrenchChat:"` (or
   `"TrenchChat [subsystem]:"`).
 - 100-column line limit.
-- Comments are kept to a minimum — see `.claude/rules/comment-style.md`.
+- Comments are kept to a minimum — only to explain genuinely confusing code, never to justify
+  design decisions.
 
 ## Working in this repo
 
