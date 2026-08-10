@@ -203,7 +203,27 @@ Defined in `trenchchat/core/messaging.py`:
 
 ---
 
+## Sync on Channel Join
+
+**File**: `trenchchat/core/sync.py` — `SyncManager._on_channel_joined`
+
+Auto-joining a channel via an accepted invite fires an additional sync trigger, wired to `InviteManager`'s `channel_joined` callback. Without this, a channel joined mid-session — as opposed to one already subscribed at the moment `request_sync_all()` runs, 3s after startup — would never sync at all until the next app restart or peer-reconnect announce. A fresh join has no `last_sync_at` yet, so it requests the full `SYNC_WINDOW_SECS` window, same as an unsynced channel's fallback in `request_sync_all()`.
+
+---
+
 ## Access Control
 
-- **Public channels**: sync requests are honored for any peer who is subscribed (`storage.is_subscribed()`).
-- **Invite-only channels**: sync requests are only honored if the requester's identity hash is present in the local `members` table (`storage.is_member()`). This preserves the existing invite-only access model — a non-member cannot use the sync protocol to read channel history.
+- **Public channels**: sync requests are honored for any peer who is subscribed (`storage.is_subscribed()`). No tenure tracking applies — membership there is a simple subscribe/unsubscribe flag, not a timestamped interval.
+- **Invite-only channels**: access control is timestamp-based, not just membership-based, via the `membership_tenure` table (`channel_hash, identity_hash, joined_at, left_at`) and `storage.was_member_at(channel_hash, identity_hash, timestamp)`. Two independent checks apply to each candidate message in a sync response:
+  1. **Sender tenure**: was the message's claimed author actually a member of the channel *at the message's timestamp*? Rejects messages from someone who has since been kicked, or whose claimed authorship predates them ever joining.
+  2. **Requester tenure**: was the peer *asking* for sync actually a member at that timestamp? Off by default — see `full_sync` below — this is what stops a newly-invited member from using the sync protocol to backfill history from before they joined, the same way an invite-only channel's `members` table stops them from reading a live channel dump.
+
+  Both checks are applied on both sides of a sync exchange: the responder filters before sending (`_handle_sync_request`), and the requester filters again on what it receives (`_handle_sync_response`) — defense in depth against a single compromised or bugged peer skipping the check on its side.
+
+  If a channel has zero rows in `membership_tenure` (an open-join channel, or one bootstrapped before tenure tracking existed), tenure checks are skipped entirely (`storage.has_any_tenure()`) rather than incorrectly rejecting everything.
+
+### The `full_sync` channel flag
+
+By default, a new member of an invite-only channel can only sync/backfill messages sent since they actually joined — the requester-tenure check above is active. An admin can flip a channel to `full_sync: true` (`ChannelPermissionsDialog`, or `is_full_sync_enabled()` in `trenchchat/core/permissions.py`) to let members request the channel's *entire* history instead, disabling the requester-side check while the sender-side check still applies.
+
+Each member's true original join time — not just the timestamp of whichever member-list document version they first happened to receive — is carried in the signed member-list document itself (the `joined_at` field, covered by the same signature as the rest of the document; see `invite.py`'s `_build_document`/`_validate_document`). Without this, the first document version a peer processes would make everyone in it, including the channel owner, look like they joined "now," hiding all of their prior history regardless of how long the channel had actually existed.

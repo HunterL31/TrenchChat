@@ -118,8 +118,9 @@ knowing before you go looking for a bug in your own changes:
   member-list update immediately followed by a chat message) can arrive
   out of order. `messaging.py` drops a chat message if the receiver
   isn't yet marked subscribed/member locally.
-- **Invite notifications show a hash fragment, not the channel name**,
-  for a never-before-seen invite-only channel. `send_invite()` never
-  includes `F_CHANNEL_NAME` in its LXMF fields (the constant exists in
-  `protocol.py`, it's just not populated here), so the receiver falls
-  back to `channel_hash_hex[:12]`.
+- **Real network round trips are slow compared to the pytest suite.**
+  `tests/` uses a `TestTransport` shim that delivers LXMF messages
+  in-process; this environment goes over real RNS Links. A chain like
+  invite → join request → member-list update → sync request → sync
+  response is four separate hops, not one -- give it several seconds
+  before concluding something didn't work.
