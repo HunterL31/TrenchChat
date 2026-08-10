@@ -1,4 +1,5 @@
 import json
+import re
 import sqlite3
 import shutil
 import threading
@@ -18,6 +19,8 @@ from trenchchat.core.permissions import (
 )
 
 DB_PATH = DATA_DIR / "storage.db"
+
+_KNOWN_TABLE_RE = re.compile(r"^[a-z_][a-z0-9_]*$")
 
 
 def _connect_plain(path: str) -> sqlite3.Connection:
@@ -169,6 +172,17 @@ CREATE TABLE IF NOT EXISTS accepted_invites (
     expiry       REAL NOT NULL,
     recorded_at  REAL NOT NULL
 );
+
+-- Member list documents for channels we cannot anchor trust for, held until
+-- the user confirms. Nothing here has been applied.
+CREATE TABLE IF NOT EXISTS pending_member_docs (
+    channel_hash  TEXT PRIMARY KEY,
+    channel_name  TEXT NOT NULL DEFAULT '',
+    admin_hash    TEXT NOT NULL,
+    doc_blob      BLOB NOT NULL,
+    meta_blob     BLOB NOT NULL,
+    received_at   REAL NOT NULL
+);
 """
 
 
@@ -227,6 +241,10 @@ class Storage:
     # ------------------------------------------------------------------
 
     def _has_column(self, table: str, column: str) -> bool:
+        # PRAGMA cannot take a bound parameter, so the name is whitelisted
+        # against the schema rather than interpolated blind.
+        if not _KNOWN_TABLE_RE.match(table):
+            raise ValueError(f"refusing PRAGMA on unrecognised table name {table!r}")
         cols = self._conn.execute(f"PRAGMA table_info({table})").fetchall()
         return any(c["name"] == column for c in cols)
 
@@ -901,6 +919,42 @@ class Storage:
         with self._tx():
             self._conn.execute(
                 "DELETE FROM accepted_invites WHERE channel_hash = ?",
+                (channel_hash,),
+            )
+
+    # --- pending (unconfirmed) member list documents ---
+
+    def record_pending_member_doc(self, channel_hash: str, channel_name: str,
+                                  admin_hash: str, doc_blob: bytes,
+                                  meta_blob: bytes) -> None:
+        with self._tx():
+            self._conn.execute("""
+                INSERT OR REPLACE INTO pending_member_docs
+                    (channel_hash, channel_name, admin_hash, doc_blob,
+                     meta_blob, received_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (channel_hash, channel_name, admin_hash, doc_blob, meta_blob,
+                  time.time()))
+
+    def get_pending_member_doc(self, channel_hash: str) -> dict | None:
+        row = self._fetchone("""
+            SELECT channel_hash, channel_name, admin_hash, doc_blob, meta_blob,
+                   received_at
+            FROM pending_member_docs WHERE channel_hash = ?
+        """, (channel_hash,))
+        return dict(row) if row else None
+
+    def get_pending_member_docs(self) -> list[dict]:
+        rows = self._fetchall("""
+            SELECT channel_hash, channel_name, admin_hash, received_at
+            FROM pending_member_docs ORDER BY received_at
+        """)
+        return [dict(r) for r in rows]
+
+    def clear_pending_member_doc(self, channel_hash: str) -> None:
+        with self._tx():
+            self._conn.execute(
+                "DELETE FROM pending_member_docs WHERE channel_hash = ?",
                 (channel_hash,),
             )
 

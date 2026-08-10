@@ -177,28 +177,29 @@ rather than relied on transitively via `rns`.
 
 ---
 
+## Also fixed: member list bootstrap trust
+
+`_validate_document` anchors a document to, in order: a stored member list, the
+channel's `creator_hash`, or an invite this user actively accepted (recorded in
+`accepted_invites` when the join request is sent). If none of those exist the
+document is **rejected** — there is no longer any fallback to its own signers.
+
+That fallback could not simply be deleted, because an admin adding a member
+unilaterally produces a document the recipient has no other way to anchor, and
+that is a supported flow. Such a document is now *held* rather than applied:
+nothing is written, the channel is not created and not subscribed to, and the
+user is prompted through the existing invite bar (`admin… added you to #channel
+— join?`). Confirming records the anchor and applies the document; declining
+discards it. A held document that does not name the recipient is dropped
+outright.
+
+This closes the last path to unsolicited channel membership.
+
+---
+
 ## Still open
 
-### 1. Member list bootstrap trust (narrowed, not closed)
-
-`_validate_document` anchors the first document for a channel to, in order: a
-stored member list, the channel's `creator_hash`, or an invite this user
-actively accepted (recorded in `accepted_invites` when the join request is
-sent). If none of those exist it falls back to the document's own signers — the
-self-granted authority the function's own docstring warns about.
-
-That branch is now narrowed to documents that **name us as a member**, so it
-cannot be used to inject channels the user has nothing to do with, and it logs a
-warning. It cannot simply be removed: an admin adding a member unilaterally
-produces a document the recipient has no other way to anchor, and that is a
-supported flow.
-
-**Recommended:** surface such a document as a *pending invite* the user
-confirms, rather than auto-creating and auto-subscribing to the channel. That is
-a UI change, which is why it is not done here. It is the last remaining path to
-unsolicited channel membership.
-
-### 2. Encryption at rest is off by default, and the PIN is weak
+### 1. Encryption at rest is off by default, and the PIN is weak
 
 Without a PIN the private key and the entire message database are stored in
 plaintext. That is disclosed in the Settings UI, but it is the default.
@@ -221,7 +222,7 @@ migration for existing databases, so it belongs in its own change.
 Related: enabling a PIN leaves the pre-existing plaintext database recoverable
 from free disk sectors, since the old file is unlinked rather than overwritten.
 
-### 3. Display-name spoofing (largely addressed)
+### 2. Display-name spoofing (largely addressed)
 
 `F_DISPLAY_NAME` is self-asserted and never verified. The earlier version of
 this document recommended showing a short hash badge alongside every display
@@ -235,22 +236,14 @@ display name arrives under a different hash.
 
 ---
 
-### 4. Minor residue
+### 3. Minor residue
 
 None of these are exploitable on their own; recorded so they are not
 rediscovered as findings.
 
-- `storage.py` builds `PRAGMA table_info({table})` with an f-string. Every
-  caller passes a hardcoded table name, so there is nothing injectable today,
-  but the helper takes an arbitrary string.
 - 14 `except Exception:` blocks across `core/` and `network/` swallow failures
   silently. Fail-closed where it matters, but a systematic verification failure
   is indistinguishable from a single malformed message.
-- `.gitignore` has no pattern for `.trenchchat/`, `*.db`, `identity` or
-  `lock.*`. The data directory lives under `$HOME`, so this only bites a
-  developer who points `Config(data_dir=...)` at the repo.
-- `main.py` parses `-v/--verbose` but never reads `args.verbose`; only
-  `--rns-debug` has any effect.
 - macOS builds are unsigned (`trenchchat.spec` sets `codesign_identity=None`) —
   a distribution-trust matter rather than an application one.
 

@@ -580,10 +580,16 @@ class MainWindow(QMainWindow):
         channel_hash, channel_name, token, expiry, admin_hex = self._pending_invites[0]
         count = len(self._pending_invites)
         count_str = f" ({count})" if count > 1 else ""
-        self._invite_bar_label.setText(
-            f"📨  You've been invited to join  #{channel_name}{count_str}  "
-            f"— from {admin_hex[:16]}…"
-        )
+        if token is None:
+            self._invite_bar_label.setText(
+                f"📨  {admin_hex[:16]}… added you to  #{channel_name}{count_str}  "
+                f"— join?"
+            )
+        else:
+            self._invite_bar_label.setText(
+                f"📨  You've been invited to join  #{channel_name}{count_str}  "
+                f"— from {admin_hex[:16]}…"
+            )
         self._invite_bar.show()
 
     def _apply_dark_theme(self):
@@ -1151,6 +1157,25 @@ class MainWindow(QMainWindow):
         if not self._pending_invites:
             return
         channel_hash, channel_name, token, expiry, admin_hex = self._pending_invites.pop(0)
+
+        # token is None when an admin added us directly: the member list
+        # document is already held, so confirming applies it rather than
+        # sending a join request.
+        if token is None:
+            if self._invite_mgr.accept_pending_membership(channel_hash):
+                QMessageBox.information(
+                    self, "Channel joined",
+                    f"You've joined #{channel_name}."
+                )
+            else:
+                QMessageBox.warning(
+                    self, "Could not join",
+                    f"The membership record for #{channel_name} could not be "
+                    "verified, so nothing was applied."
+                )
+            self._update_invite_bar()
+            return
+
         self._invite_mgr.send_join_request(channel_hash, token, expiry, admin_hex)
         QMessageBox.information(
             self, "Join request sent",
@@ -1162,7 +1187,9 @@ class MainWindow(QMainWindow):
     @pyqtSlot()
     def _on_decline_invite(self):
         if self._pending_invites:
-            self._pending_invites.pop(0)
+            channel_hash, _name, token, _expiry, _admin = self._pending_invites.pop(0)
+            if token is None:
+                self._invite_mgr.decline_pending_membership(channel_hash)
         self._update_invite_bar()
 
     @pyqtSlot()

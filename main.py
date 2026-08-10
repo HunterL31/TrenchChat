@@ -61,6 +61,8 @@ def main():
     # so backbone/transport chatter doesn't drown TrenchChat's own messages.
     if args.rns_debug:
         rns_loglevel = RNS.LOG_DEBUG
+    elif args.verbose:
+        rns_loglevel = RNS.LOG_INFO
     else:
         rns_loglevel = RNS.LOG_NOTICE
 

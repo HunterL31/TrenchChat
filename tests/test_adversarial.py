@@ -1738,6 +1738,72 @@ class TestAdversarialUnsolicitedChannelInjection:
         assert not alice.storage.is_subscribed(ch_hash), \
             "Victim was auto-subscribed to an attacker-defined channel"
 
+    def test_doc_naming_us_is_held_not_applied(self, peer_factory):
+        """
+        A document that *does* name us is the unilateral-add case. It is held
+        for confirmation, not applied: nothing is joined until the user says so.
+        """
+        alice = peer_factory("alice")
+        mallory = peer_factory("mallory")
+        ch_hash = "cd" * 16
+
+        published_at = time.time()
+        members = [mallory.identity.hash, alice.identity.hash]
+        payload = _signed_payload(
+            bytes.fromhex(ch_hash), 1, published_at, members,
+            [mallory.identity.hash], [mallory.identity.hash], b"",
+        )
+        doc = {
+            "channel_hash": bytes.fromhex(ch_hash),
+            "version":      1,
+            "published_at": published_at,
+            "members":      members,
+            "admins":       [mallory.identity.hash],
+            "owners":       [mallory.identity.hash],
+            "permissions":  b"",
+            "signatures":   {mallory.identity.hash: _sign(
+                mallory.identity.rns_identity, payload)},
+        }
+
+        alice.invite_mgr._hold_for_confirmation(doc, ch_hash, {})
+
+        assert not alice.storage.is_subscribed(ch_hash), \
+            "A held document auto-subscribed the victim"
+        assert alice.storage.get_channel(ch_hash) is None
+        assert not alice.storage.is_member(ch_hash, alice.identity.hash_hex)
+        pending = [p["channel_hash"] for p
+                   in alice.invite_mgr.list_pending_memberships()]
+        assert ch_hash in pending, "The document was not held for confirmation"
+
+    def test_declining_a_held_doc_applies_nothing(self, peer_factory):
+        alice = peer_factory("alice")
+        mallory = peer_factory("mallory")
+        ch_hash = "ce" * 16
+        published_at = time.time()
+        members = [mallory.identity.hash, alice.identity.hash]
+        payload = _signed_payload(
+            bytes.fromhex(ch_hash), 1, published_at, members,
+            [mallory.identity.hash], [mallory.identity.hash], b"",
+        )
+        doc = {
+            "channel_hash": bytes.fromhex(ch_hash),
+            "version":      1,
+            "published_at": published_at,
+            "members":      members,
+            "admins":       [mallory.identity.hash],
+            "owners":       [mallory.identity.hash],
+            "permissions":  b"",
+            "signatures":   {mallory.identity.hash: _sign(
+                mallory.identity.rns_identity, payload)},
+        }
+        alice.invite_mgr._hold_for_confirmation(doc, ch_hash, {})
+
+        alice.invite_mgr.decline_pending_membership(ch_hash)
+
+        assert not alice.invite_mgr.list_pending_memberships()
+        assert not alice.storage.is_subscribed(ch_hash)
+        assert alice.storage.get_channel(ch_hash) is None
+
     def test_accepted_invite_anchors_the_first_document(self, peer_factory):
         """
         Positive control: once the user acts on an invite, the document that
