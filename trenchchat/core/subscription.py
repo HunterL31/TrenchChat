@@ -72,9 +72,20 @@ class SubscriptionManager:
             self._subscribers[channel_hash_hex].discard(identity_hex)
 
     def _broadcast_subscriber_list(self, channel_hash_hex: str):
-        """Send the current subscriber list to all subscribers."""
+        """Send the current subscriber list to all subscribers.
+
+        The owner is never itself in self._subscribers (that set only tracks
+        peers who sent MT_SUBSCRIBE), but is still a legitimate recipient of
+        anything a subscriber broadcasts to the channel. Include it in the
+        payload -- not doing so left every non-owner subscriber's local
+        compute_channel_recipients() blind to the owner, so anything with no
+        sync/backfill fallback (reactions, in particular -- chat messages
+        happened to still arrive via the separate offline-sync mechanism)
+        silently never reached the owner at all.
+        """
         subs = self.get_subscribers(channel_hash_hex)
-        packed = msgpack.packb(list(subs), use_bin_type=True)
+        recipients = set(subs) | {self._identity.hash_hex}
+        packed = msgpack.packb(list(recipients), use_bin_type=True)
         for dest_hex in subs:
             if dest_hex == self._identity.hash_hex:
                 continue

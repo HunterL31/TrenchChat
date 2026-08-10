@@ -244,6 +244,17 @@ class TestReceiveRateLimit:
         row = avatar_mgr._storage.get_peer_avatar(sender)
         assert bytes(row["avatar_data"]) == jpeg
 
+    def test_receive_limit_no_stricter_than_send_limit(self):
+        """
+        Regression test: RECEIVE_RATE_LIMIT_SECS was 300 while
+        SEND_RATE_LIMIT_SECS was 60, so a sender doing exactly what its own
+        throttle allows (e.g. set, then remove 60s later) had the second
+        change silently dropped by every receiver for up to 5 minutes -- a
+        legitimate, correctly-throttled update looked identical to an
+        abusive one from the receiver's side.
+        """
+        assert RECEIVE_RATE_LIMIT_SECS <= SEND_RATE_LIMIT_SECS
+
     def test_second_avatar_after_rate_limit_accepted(self, avatar_mgr):
         jpeg = compress_avatar(_make_test_jpeg())
         sender = "cc" * 16
@@ -353,6 +364,35 @@ class TestDeliveryTracking:
         avatar_mgr._send_avatar_to = lambda h, d, v: sent.append(h)
         avatar_mgr.flush_avatar("33" * 16)
         assert sent == []
+
+    def test_flush_avatar_sends_removal_after_real_removal_flow(self, avatar_mgr, config):
+        """
+        Regression test: flush_avatar() used to bail out unconditionally when
+        own_avatar was None, so a peer who only learns about us via announce
+        (never received remove_avatar()'s own direct push, e.g. because we
+        shared no channel with them at the time) would never find out we
+        removed our avatar -- stuck with the stale cached copy forever.
+
+        Goes through the real remove_avatar() path deliberately: it calls
+        clear_avatar_deliveries(), wiping delivery records for every peer, so
+        a fix that only checked "does this peer have a stale delivered
+        version" would never fire here -- delivered_version looks identical
+        to a peer who was never told anything. The guard has to be based on
+        whether an avatar was ever set (version 0 vs not), not on delivery
+        history, which this flow always clears.
+        """
+        config.avatar_bytes = _make_test_jpeg()
+        config.avatar_version = 1
+        peer_hex = "55" * 16
+        avatar_mgr._storage.upsert_avatar_delivery(peer_hex, 1)  # had the old avatar
+
+        avatar_mgr.remove_avatar(subscriber_lookup=lambda ch: set())  # no shared channels
+
+        sent = []
+        avatar_mgr._send_avatar_to = lambda h, d, v: sent.append((h, d, v))
+        avatar_mgr.flush_avatar(peer_hex)
+        assert len(sent) == 1 and sent[0][0] == peer_hex and sent[0][1] == b"", \
+            "removal was not flushed to a peer after remove_avatar() cleared delivery tracking"
 
     def test_avatar_callback_fires_on_inbound(self, avatar_mgr):
         jpeg = compress_avatar(_make_test_jpeg())

@@ -67,6 +67,42 @@ the API/UI layer on top:
 | `static/index.html` | Two-pane vanilla JS/HTML UI |
 | `smoke_test.py` | Headless proof that two real processes can invite/join/message over a real TCP link |
 
+## Adding a new feature
+
+This environment is meant to double as a prototyping ground: build a
+feature here first, verify it against a real two-peer network, then port
+it to `trenchchat/gui/main_window.py` with minimal changes -- not a
+redesign. That only works if every feature follows the same shape:
+
+1. **Business logic goes in `trenchchat/core/actions.py`**, not in the
+   GUI and not in `api.py`. If a feature needs more than one manager call
+   (a permission check before a mutation, a computed recipient list, a
+   create-then-follow-up-call sequence), it's a plain function in
+   `actions.py` taking already-constructed managers as arguments. See
+   `send_message`, `create_channel`, `update_membership` for the
+   established shape.
+2. **`main_window.py`'s `_on_*` handlers call that function.** They keep
+   the Qt-specific bits (dialogs, message boxes, widget refreshes) and
+   delegate everything else to `actions.py`.
+3. **`api.py`'s endpoints call the same function.** Not a parallel
+   reimplementation -- literally the same import, same call. This is
+   what makes a bug caught here a real bug, and a feature proven here a
+   feature ready to port.
+4. **New core managers get instantiated in `backend_core.py`'s
+   `Backend.__init__`**, mirroring `main.py`'s wiring order exactly
+   (identity → storage → router → managers). If `main.py` constructs it
+   with `ManagerX(identity, storage, router)`, `Backend` should too.
+5. **The frontend (`static/index.html`) is disposable.** It doesn't need
+   to match the real GUI's visual design -- it needs to exercise the
+   real code paths convincingly enough to prove a feature works before
+   it's worth the GUI polish investment in `main_window.py`.
+
+When a feature is missing something the real client has (a manager never
+instantiated, an endpoint never written), that's not a design decision --
+it just hasn't been ported yet. Check `trenchchat/core/` for the
+equivalent manager/action before writing new logic; there's usually
+already a correct implementation to call.
+
 ## Known real-app quirks this environment will make you run into
 
 Not harness bugs -- genuine behavior of the production code, worth
