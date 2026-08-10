@@ -5,6 +5,8 @@ from pathlib import Path
 
 import RNS
 
+from trenchchat.core.fileutils import atomic_write_bytes
+
 DATA_DIR = Path.home() / ".trenchchat"
 CONFIG_PATH = DATA_DIR / "config.json"
 
@@ -54,8 +56,10 @@ class Config:
         return {}
 
     def save(self):
-        with open(self._config_path, "w") as f:
-            json.dump(self._data, f, indent=2)
+        atomic_write_bytes(
+            self._config_path,
+            json.dumps(self._data, indent=2).encode("utf-8"),
+        )
 
     # --- display name ---
 
@@ -131,7 +135,11 @@ class Config:
 
     @channel_filter_mode.setter
     def channel_filter_mode(self, value: str):
-        assert value in ("allowlist", "all")
+        # Not an assert: stripped under `python -O`.
+        if value not in ("allowlist", "all"):
+            raise ValueError(
+                f"channel_filter_mode must be 'allowlist' or 'all', got {value!r}"
+            )
         self._data["propagation_node"]["channel_filter"]["mode"] = value
         self.save()
 

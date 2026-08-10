@@ -9,6 +9,8 @@ imported by any layer without circular dependencies.
 import json
 from typing import Any
 
+import RNS
+
 # ---------------------------------------------------------------------------
 # Roles
 # ---------------------------------------------------------------------------
@@ -81,8 +83,48 @@ def permissions_to_json(perms: dict) -> str:
     return json.dumps(perms, sort_keys=True)
 
 
+def is_valid_permissions(perms: object) -> bool:
+    """True if *perms* has the shape this module expects."""
+    if not isinstance(perms, dict):
+        return False
+    for flag in (FLAG_OPEN_JOIN, FLAG_DISCOVERABLE):
+        if flag in perms and not isinstance(perms[flag], bool):
+            return False
+    for role in (ROLE_OWNER, ROLE_ADMIN, ROLE_MEMBER):
+        if role not in perms:
+            continue
+        granted = perms[role]
+        if not isinstance(granted, list):
+            return False
+        if not all(isinstance(p, str) for p in granted):
+            return False
+    return True
+
+
 def permissions_from_json(blob: str) -> dict:
-    return json.loads(blob)
+    """Parse a stored permissions blob, falling back to the private preset.
+
+    Must not raise: every read path calls this, including one on the GUI
+    thread outside any try/except. The fallback is the most restrictive
+    preset, so a bad blob fails closed.
+    """
+    try:
+        perms = json.loads(blob)
+    except (TypeError, ValueError):
+        RNS.log(
+            "TrenchChat [permissions]: malformed permissions blob — "
+            "falling back to the private preset",
+            RNS.LOG_WARNING,
+        )
+        return dict(PRESET_PRIVATE)
+    if not is_valid_permissions(perms):
+        RNS.log(
+            "TrenchChat [permissions]: permissions blob failed validation — "
+            "falling back to the private preset",
+            RNS.LOG_WARNING,
+        )
+        return dict(PRESET_PRIVATE)
+    return perms
 
 
 def has_permission(perms: dict, role: str, permission: str) -> bool:

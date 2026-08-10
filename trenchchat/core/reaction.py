@@ -201,11 +201,7 @@ class ReactionManager:
             return True
 
     def _may_react(self, channel_hash_hex: str, sender_hex: str) -> bool:
-        """Mirror the inbound authorisation Messaging applies to chat messages.
-
-        Open-join channels accept anyone by design; otherwise the sender must
-        be a member and hold SEND_MESSAGE.  An unknown channel fails closed.
-        """
+        """Mirror the inbound authorisation Messaging applies to chat messages."""
         if not sender_hex:
             return False
         channel = self._storage.get_channel(channel_hash_hex)
@@ -236,12 +232,6 @@ class ReactionManager:
         if not self._storage.is_subscribed(channel_hash_hex):
             return
 
-        # A reaction is a write into the channel keyed by the sender's
-        # identity, so it needs the same authorisation a message does.
-        # Without this a non-member -- or a member whose send_message was
-        # revoked -- can attach reactions to any message on any channel whose
-        # hash they know, and the remove path lets them delete other people's
-        # reactions.
         if not self._may_react(channel_hash_hex, sender_hex):
             RNS.log(
                 f"TrenchChat [reaction]: dropping reaction on "
@@ -290,11 +280,7 @@ class ReactionManager:
         if not requester_hex:
             return
 
-        # One small request produces up to MAX_EMOJI_BYTES in reply, so an
-        # unthrottled responder is a bandwidth amplifier -- and answering
-        # every hash on demand lets an arbitrary peer enumerate the local
-        # emoji library.  Serve only peers we share a channel with, at a
-        # bounded rate.
+        # One small request produces up to MAX_EMOJI_BYTES in reply.
         if not self._shares_any_channel(requester_hex):
             RNS.log(
                 f"TrenchChat [reaction]: ignoring emoji request from "

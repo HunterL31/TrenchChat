@@ -277,9 +277,6 @@ class AvatarManager:
                 return
             self._last_received[sender_hex] = now
 
-        # The version is documented as a monotonic counter but was never
-        # compared against what we already hold, so an older update -- or a
-        # replayed one -- silently overwrote a newer avatar.
         existing = self._storage.get_peer_avatar(sender_hex)
         if existing is not None:
             try:

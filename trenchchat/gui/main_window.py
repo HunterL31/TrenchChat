@@ -774,11 +774,8 @@ class MainWindow(QMainWindow):
             try:
                 image_data, _ = prepare_image(bytes(raw_image))
             except Exception as exc:
-                # Do not fall back to the original bytes.  The re-encode is
-                # the only sanitisation this pipeline performs, and the inputs
-                # that make it fail -- malformed or decompression-bomb images
-                # -- are precisely the ones that must not be forwarded to
-                # every subscriber's image decoder.
+                # The re-encode is the only sanitisation here, so a rejected
+                # image must not be forwarded instead.
                 RNS.log(f"TrenchChat: image rejected, not sent: {exc}", RNS.LOG_WARNING)
                 image_data = None
 

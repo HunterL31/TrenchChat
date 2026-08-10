@@ -26,6 +26,7 @@ Invite token = Ed25519 signature over:
     + expiry_timestamp (8 bytes, big-endian double)
 """
 
+import hashlib
 import struct
 import threading
 import time
@@ -37,7 +38,7 @@ from trenchchat.core.identity import Identity
 from trenchchat.core.permissions import (
     INVITE, KICK, MANAGE_CHANNEL, MANAGE_ROLES,
     ROLE_ADMIN, ROLE_MEMBER, ROLE_OWNER,
-    permissions_from_json, permissions_to_json,
+    is_valid_permissions, permissions_from_json, permissions_to_json,
 )
 from trenchchat.core.protocol import (
     F_CHANNEL_HASH, F_MSG_TYPE,
@@ -114,12 +115,8 @@ class InviteManager:
         self._invite_callbacks: list = []
         self._channel_callbacks: list = []
         self._member_list_callbacks: list = []
-        # Serialises the read-compare-write in _accept_document.  LXMF delivers
-        # on background threads, so two member-list documents for the same
-        # channel can be processed concurrently; without this both pass the
-        # version check against the same stale value and the loser's roster and
-        # permissions overwrite the winner's -- a silent rollback to an older
-        # signed document.
+        # Serialises the read-compare-write in _accept_document; LXMF
+        # delivers on background threads.
         self._accept_lock = threading.Lock()
         router.add_delivery_callback(self._on_lxmf_message)
 
@@ -222,13 +219,41 @@ class InviteManager:
             )
         else:
             channel = self._storage.get_channel(channel_hash_hex)
+            trusted_signers = set()
             if channel and channel["creator_hash"]:
                 try:
                     trusted_signers = {bytes.fromhex(channel["creator_hash"])}
                 except ValueError:
-                    trusted_signers = set(admins_in_doc) | set(owners_in_doc)
-            else:
-                # No local record at all — bootstrap: trust the doc's own signers.
+                    trusted_signers = set()
+            if not trusted_signers:
+                # Next anchor: an invite this user actively accepted, which
+                # names the admin we sent the join request to.
+                admin_hex = self._storage.get_accepted_invite_admin(channel_hash_hex)
+                if admin_hex:
+                    try:
+                        trusted_signers = {bytes.fromhex(admin_hex)}
+                    except ValueError:
+                        trusted_signers = set()
+
+            if not trusted_signers:
+                # Last resort: the document's own signers, narrowed to
+                # documents that name us. Retained because an admin adding a
+                # member unilaterally produces a document the recipient has no
+                # other way to anchor. See docs/security-improvements.md.
+                if self._identity.hash not in doc.get("members", []):
+                    RNS.log(
+                        f"TrenchChat [invite]: no trust anchor for member list "
+                        f"doc on unknown channel {channel_hash_hex[:12]}… and "
+                        f"it does not name us — rejected",
+                        RNS.LOG_WARNING,
+                    )
+                    return None
+                RNS.log(
+                    f"TrenchChat [invite]: accepting first member list doc for "
+                    f"{channel_hash_hex[:12]}… on its own authority — no stored "
+                    f"channel record or accepted invite to anchor it",
+                    RNS.LOG_WARNING,
+                )
                 trusted_signers = set(admins_in_doc) | set(owners_in_doc)
 
         is_v2 = "owners" in doc
@@ -264,18 +289,11 @@ class InviteManager:
                           signer: bytes) -> bool:
         """Check the signer is permitted to make the changes this doc contains.
 
-        A valid signature proves *who* wrote the document, not that they were
-        allowed to write it.  Without this, being any trusted signer -- i.e.
-        any admin -- was enough to remove members, change roles, rewrite the
-        permission set for every role, or flip open_join, regardless of which
-        permissions that admin actually held.  Those gates existed only in
-        publish_member_list on the sending side, which a modified client
-        simply does not run.
-
-        Every comparison is against *stored* state, never the incoming
-        document's own claims.  Returns True when there is no stored state to
-        diff against (first document for a channel), where the signer-trust
-        rules in _validate_document are the only available control.
+        A valid signature proves who wrote the document, not that they were
+        allowed to write it.  Every comparison is against stored state, never
+        the document's own claims.  Returns True when there is no stored state
+        to diff against, where _validate_document's signer-trust rules are the
+        only available control.
         """
         existing = self._storage.get_member_list_version(channel_hash_hex)
         if not existing:
@@ -302,8 +320,7 @@ class InviteManager:
             )
             return False
 
-        # Removing members requires KICK.  Additions are governed by the
-        # invite/join-request path, not here.
+        # Additions are governed by the invite/join-request path, not here.
         if old_members - new_members:
             if not self._storage.has_permission(channel_hash_hex, signer_hex, KICK):
                 return _deny("removing members", KICK)
@@ -314,10 +331,8 @@ class InviteManager:
                                                 MANAGE_ROLES):
                 return _deny("changing admins", MANAGE_ROLES)
 
-        # The owner set is the root of authority for the channel: only an
-        # existing owner may alter it.  MANAGE_ROLES is deliberately not
-        # sufficient, otherwise any admin could promote themselves to owner
-        # and demote the real one.
+        # Only an existing owner may alter the owner set; MANAGE_ROLES is
+        # not sufficient.
         if old_owners != new_owners:
             if signer not in old_owners:
                 RNS.log(
@@ -327,9 +342,8 @@ class InviteManager:
                 )
                 return False
 
-        # A document may never leave the channel with no authority at all;
-        # trusted_signers would become empty and no future update could ever
-        # be validated, permanently bricking the channel.
+        # An empty authority set makes trusted_signers empty, after which no
+        # future update can validate.
         if not new_admins and not new_owners:
             RNS.log(
                 f"TrenchChat [invite]: rejecting member list doc that would "
@@ -338,9 +352,8 @@ class InviteManager:
             )
             return False
 
-        # Changing the embedded permission set requires MANAGE_CHANNEL.
-        # An empty blob asserts nothing -- _accept_document only applies a
-        # non-empty one -- so it is a no-op here, not a change to authorise.
+        # An empty blob asserts nothing; _accept_document only applies a
+        # non-empty one.
         old_perms = old_doc.get(b"permissions", b"") or b""
         new_perms = doc.get("permissions", b"") or b""
         if new_perms and new_perms != old_perms:
@@ -419,24 +432,21 @@ class InviteManager:
                     if new_min >= old_min:
                         return False
 
-        # Persist
-        blob = msgpack.packb(doc, use_bin_type=True)
-        self._storage.upsert_member_list_version(
-            channel_hash_hex, new_v, new_ts, blob
-        )
-
-        # Capture the old member set for tenure diffing before we replace it
-        old_member_hashes: set[str] = {
-            row["identity_hash"]
-            for row in self._storage.get_members(channel_hash_hex)
-        }
-
-        # Rebuild members table with role-based membership
+        # Build the roster before committing anything: a malformed entry here
+        # must not leave the version advanced and the members table stale.
         owners_set = set(doc.get("owners", []))
         admins_set = set(doc.get("admins", []))
         member_rows: list[tuple[str, str, str]] = []
         new_member_hashes: set[str] = set()
         for m in doc["members"]:
+            if not isinstance(m, bytes):
+                RNS.log(
+                    f"TrenchChat [invite]: member list doc for "
+                    f"{channel_hash_hex[:12]}… contains a non-bytes member "
+                    f"entry — rejected",
+                    RNS.LOG_WARNING,
+                )
+                return False
             m_hex = m.hex()
             new_member_hashes.add(m_hex)
             if m in owners_set:
@@ -446,6 +456,18 @@ class InviteManager:
             else:
                 role = ROLE_MEMBER
             member_rows.append((m_hex, "", role))
+
+        # Capture the old member set for tenure diffing before we replace it
+        old_member_hashes: set[str] = {
+            row["identity_hash"]
+            for row in self._storage.get_members(channel_hash_hex)
+        }
+
+        # Persist
+        blob = msgpack.packb(doc, use_bin_type=True)
+        self._storage.upsert_member_list_version(
+            channel_hash_hex, new_v, new_ts, blob
+        )
         self._storage.replace_members(channel_hash_hex, member_rows)
 
         # Update tenure log: close intervals for removed members, open for
@@ -472,15 +494,31 @@ class InviteManager:
             joined_at_map=joined_at_map,
         )
 
-        # Apply permissions from the document if present
+        # v2 only: the v1 signed payload does not cover the permissions
+        # field, so a v1 doc's blob is unauthenticated.
         perms_blob = doc.get("permissions", b"")
-        if perms_blob:
+        if perms_blob and "owners" not in doc:
+            RNS.log(
+                f"TrenchChat [invite]: ignoring permissions on a v1 member "
+                f"list doc for {channel_hash_hex[:12]}… — not covered by the "
+                f"signature",
+                RNS.LOG_WARNING,
+            )
+        elif perms_blob:
             try:
-                perms = msgpack.unpackb(perms_blob, raw=False)
-                if isinstance(perms, dict):
+                perms = unpack_wire(perms_blob)
+            except Exception as e:
+                RNS.log(f"TrenchChat [invite]: permissions blob unpack error: {e}",
+                        RNS.LOG_WARNING)
+            else:
+                if is_valid_permissions(perms):
                     self._storage.set_channel_permissions(channel_hash_hex, perms)
-            except Exception:
-                pass
+                else:
+                    RNS.log(
+                        f"TrenchChat [invite]: rejecting malformed permissions "
+                        f"for {channel_hash_hex[:12]}…",
+                        RNS.LOG_WARNING,
+                    )
 
         return True
 
@@ -557,6 +595,12 @@ class InviteManager:
         for m in (remove_members or []):
             if m in members:
                 members.remove(m)
+            # trusted_signers is derived from admins/owners, so a kick has
+            # to revoke signing authority too.
+            if m in admins:
+                admins.remove(m)
+            if m in owners:
+                owners.remove(m)
         for a in (add_admins or []):
             if a not in admins:
                 admins.append(a)
@@ -588,6 +632,12 @@ class InviteManager:
         for m in members:
             existing_joined = self._storage.get_open_tenure_joined_at(channel_hash_hex, m.hex())
             joined_at[m] = existing_joined if existing_joined is not None else published_at
+
+        # Block any token still outstanding for a removed member.
+        for m in (remove_members or []):
+            self._storage.revoke_invite_tokens_for(
+                channel_hash_hex, m.hex(), published_at + DEFAULT_TOKEN_TTL
+            )
 
         doc = self._build_document(channel_hash_hex, members, admins,
                                    version, published_at,
@@ -718,6 +768,11 @@ class InviteManager:
         """Send a join request to an admin using a received invite token."""
         RNS.log(f"TrenchChat: sending join request for channel {channel_hash_hex[:12]}… "
                 f"to admin {admin_hash_hex[:12]}…", RNS.LOG_NOTICE)
+        # Anchors the first member list document we receive for this channel
+        # to this admin; see _validate_document.
+        self._storage.record_accepted_invite(
+            channel_hash_hex, admin_hash_hex, expiry
+        )
         self._send_raw(admin_hash_hex, {
             F_MSG_TYPE:     MT_JOIN_REQUEST,
             F_CHANNEL_HASH: bytes.fromhex(channel_hash_hex),
@@ -772,7 +827,10 @@ class InviteManager:
         if msg_type == MT_JOIN_REQUEST:
             RNS.log(f"TrenchChat [invite]: join request received for channel {channel_hash_hex[:12]}…",
                     RNS.LOG_NOTICE)
-            self._handle_join_request(fields, channel_hash_hex)
+            sender_identity = (RNS.Identity.recall(message.source_hash)
+                               if message.source_hash else None)
+            sender_hex = sender_identity.hash.hex() if sender_identity else ""
+            self._handle_join_request(fields, channel_hash_hex, sender_hex)
 
         elif msg_type == MT_MEMBER_LIST_UPDATE:
             blob = fields.get(F_MEMBER_LIST_DOC)
@@ -865,7 +923,8 @@ class InviteManager:
                 RNS.log("TrenchChat [invite]: invite message missing required fields, dropping",
                         RNS.LOG_WARNING)
 
-    def _handle_join_request(self, fields: dict, channel_hash_hex: str):
+    def _handle_join_request(self, fields: dict, channel_hash_hex: str,
+                             sender_hex: str = ""):
         token        = fields.get(F_INVITE_TOKEN)
         invitee_hash = fields.get(F_INVITEE_HASH)
         expiry       = fields.get(F_EXPIRY_TS)
@@ -873,14 +932,48 @@ class InviteManager:
 
         if not all([token, invitee_hash, expiry, admin_hash]):
             return
+        if not isinstance(invitee_hash, bytes):
+            return
 
         if not self._storage.has_permission(channel_hash_hex, self._identity.hash_hex, INVITE):
+            return
+
+        # The request must come from the identity the token was issued to.
+        if sender_hex and sender_hex != invitee_hash.hex():
+            RNS.log(
+                f"TrenchChat [invite]: join request for "
+                f"{invitee_hash.hex()[:12]}… submitted by "
+                f"{sender_hex[:12]}… — rejected",
+                RNS.LOG_WARNING,
+            )
             return
 
         if not self._verify_invite_token(token, invitee_hash, channel_hash_hex,
                                          expiry, admin_hash):
             RNS.log("TrenchChat: invalid or expired invite token rejected",
                     RNS.LOG_WARNING)
+            return
+
+        invitee_hex = invitee_hash.hex()
+
+        if self._storage.are_invite_tokens_revoked_for(channel_hash_hex, invitee_hex):
+            RNS.log(
+                f"TrenchChat [invite]: refusing revoked invite token for "
+                f"{invitee_hex[:12]}… on {channel_hash_hex[:12]}…",
+                RNS.LOG_WARNING,
+            )
+            return
+
+        # The insert is the atomic claim; a replay cannot also win it.
+        token_hash = hashlib.sha256(token).hexdigest()
+        if not self._storage.spend_invite_token(
+            channel_hash_hex, token_hash, invitee_hex, float(expiry)
+        ):
+            RNS.log(
+                f"TrenchChat [invite]: invite token already redeemed for "
+                f"{invitee_hex[:12]}… — replay rejected",
+                RNS.LOG_WARNING,
+            )
             return
 
         self.publish_member_list(channel_hash_hex,

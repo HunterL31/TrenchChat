@@ -55,9 +55,11 @@ from trenchchat.core import actions
 from trenchchat.core.invite import _sign, _signed_payload
 from trenchchat.core.permissions import (
     ALL_PERMISSIONS, FULL_SYNC, INVITE, KICK, MANAGE_CHANNEL, MANAGE_ROLES,
-    PRESET_PRIVATE, ROLE_ADMIN, ROLE_MEMBER, ROLE_OWNER, SEND_MESSAGE,
+    PRESET_OPEN, PRESET_PRIVATE, ROLE_ADMIN, ROLE_MEMBER, ROLE_OWNER, SEND_MESSAGE,
 )
+from trenchchat.core.subscription import _subscriber_payload
 from trenchchat.core.protocol import (
+    F_SUBSCRIBER_LIST, F_SUBSCRIBER_SIG, F_SUBSCRIBER_VERSION, MT_SUBSCRIBER_LIST,
     F_ADMIN_HASH, F_CHANNEL_HASH, F_DISPLAY_NAME, F_EXPIRY_TS, F_INVITE_TOKEN,
     F_INVITEE_HASH, F_MEMBER_LIST_DOC, F_MESSAGE_ID, F_MSG_TYPE, F_TIMESTAMP,
     F_EMOJI_HASH, F_IMAGE_DATA, F_REACTION_MSG_ID, F_REACTION_REMOVE,
@@ -1590,4 +1592,248 @@ class TestAdversarialAdminSigner:
         )
         assert alice.invite_mgr._accept_document(doc, ch_hash), \
             "The owner was blocked from changing the owner list"
+
+
+# ---------------------------------------------------------------------------
+# INVITE TOKEN REUSE AND REVOCATION
+# ---------------------------------------------------------------------------
+
+class TestAdversarialTokenReuse:
+    """
+    The token is an unforgeable Ed25519 signature bound to invitee, channel
+    and expiry — but it is a bearer credential, so unforgeable is not the same
+    as un-replayable.
+    """
+
+    def _join(self, admin, joiner, ch_hash, token, expiry, sender_hex=None):
+        admin.invite_mgr._handle_join_request(
+            {
+                F_INVITE_TOKEN: token,
+                F_INVITEE_HASH: joiner.identity.hash,
+                F_EXPIRY_TS:    expiry,
+                F_ADMIN_HASH:   admin.identity.hash,
+            },
+            ch_hash,
+            joiner.identity.hash_hex if sender_hex is None else sender_hex,
+        )
+        time.sleep(0.2)
+
+    def test_token_is_single_use(self, peer_factory):
+        alice, bob, ch_hash = _setup_channel_with_member(
+            peer_factory, member_perms=[SEND_MESSAGE]
+        )
+        carol = peer_factory("carol")
+        token, expiry = alice.invite_mgr.generate_invite_token(
+            ch_hash, carol.identity.hash
+        )
+
+        self._join(alice, carol, ch_hash, token, expiry)
+        assert alice.storage.is_member(ch_hash, carol.identity.hash_hex)
+
+        # Kick her, then replay the very same token.
+        alice.invite_mgr.publish_member_list(
+            ch_hash, remove_members=[carol.identity.hash]
+        )
+        assert not alice.storage.is_member(ch_hash, carol.identity.hash_hex)
+
+        self._join(alice, carol, ch_hash, token, expiry)
+        assert not alice.storage.is_member(ch_hash, carol.identity.hash_hex), \
+            "A kicked member re-joined by replaying their original invite token"
+
+    def test_token_cannot_be_submitted_by_a_third_party(self, peer_factory):
+        """
+        The invitee was taken from the message body and never compared to the
+        LXMF sender, so holding someone else's token was enough to force them
+        into a channel without their participation.
+        """
+        alice, bob, ch_hash = _setup_channel_with_member(
+            peer_factory, member_perms=[SEND_MESSAGE]
+        )
+        carol = peer_factory("carol")
+        dave = peer_factory("dave")
+        token, expiry = alice.invite_mgr.generate_invite_token(
+            ch_hash, carol.identity.hash
+        )
+
+        # Dave submits Carol's token, claiming to be delivering it.
+        self._join(alice, carol, ch_hash, token, expiry,
+                   sender_hex=dave.identity.hash_hex)
+
+        assert not alice.storage.is_member(ch_hash, carol.identity.hash_hex), \
+            "A third party redeemed someone else's invite token"
+
+    def test_kicked_admin_loses_signing_authority(self, peer_factory):
+        """
+        remove_members stripped only `members`, leaving the kicked admin in
+        `admins` — and trusted_signers is derived from exactly that list, so
+        they could sign themselves straight back in.
+        """
+        alice, bob, ch_hash = _setup_channel_with_admin(peer_factory)
+        assert alice.storage.get_role(ch_hash, bob.identity.hash_hex) == ROLE_ADMIN
+
+        alice.invite_mgr.publish_member_list(
+            ch_hash, remove_members=[bob.identity.hash]
+        )
+        assert not alice.storage.is_member(ch_hash, bob.identity.hash_hex)
+
+        # Bob signs a doc re-adding himself.
+        v = alice.storage.get_member_list_version(ch_hash)["version"]
+        published_at = time.time()
+        members = [alice.identity.hash, bob.identity.hash]
+        admins = [alice.identity.hash, bob.identity.hash]
+        owners = [alice.identity.hash]
+        payload = _signed_payload(
+            bytes.fromhex(ch_hash), v + 1, published_at, members, admins,
+            owners, b"",
+        )
+        doc = {
+            "channel_hash": bytes.fromhex(ch_hash),
+            "version":      v + 1,
+            "published_at": published_at,
+            "members":      members,
+            "admins":       admins,
+            "owners":       owners,
+            "permissions":  b"",
+            "signatures":   {bob.identity.hash: _sign(
+                bob.identity.rns_identity, payload)},
+        }
+
+        assert not alice.invite_mgr._accept_document(doc, ch_hash), \
+            "A kicked admin retained signing authority and re-added themselves"
+        assert not alice.storage.is_member(ch_hash, bob.identity.hash_hex)
+
+
+class TestAdversarialUnsolicitedChannelInjection:
+    def test_doc_for_unknown_channel_not_naming_us_is_rejected(self, peer_factory):
+        """
+        A document for a channel hash the victim has never seen, signed by its
+        own self-declared owner. Accepting it records the attacker as the sole
+        trusted signer and auto-subscribes the victim.
+        """
+        alice = peer_factory("alice")
+        mallory = peer_factory("mallory")
+        ch_hash = "ab" * 16
+
+        published_at = time.time()
+        members = [mallory.identity.hash]
+        payload = _signed_payload(
+            bytes.fromhex(ch_hash), 1, published_at, members,
+            [mallory.identity.hash], [mallory.identity.hash], b"",
+        )
+        doc = {
+            "channel_hash": bytes.fromhex(ch_hash),
+            "version":      1,
+            "published_at": published_at,
+            "members":      members,
+            "admins":       [mallory.identity.hash],
+            "owners":       [mallory.identity.hash],
+            "permissions":  b"",
+            "signatures":   {mallory.identity.hash: _sign(
+                mallory.identity.rns_identity, payload)},
+        }
+
+        assert not alice.invite_mgr._accept_document(doc, ch_hash), \
+            "An unsolicited member list doc for an unknown channel was accepted"
+        assert alice.storage.get_channel(ch_hash) is None
+        assert not alice.storage.is_subscribed(ch_hash), \
+            "Victim was auto-subscribed to an attacker-defined channel"
+
+    def test_accepted_invite_anchors_the_first_document(self, peer_factory):
+        """
+        Positive control: once the user acts on an invite, the document that
+        comes back from that admin is anchored to them and accepted.
+        """
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+        ch_hash = alice.channel_mgr.create_channel("anchored-ch", "", "invite")
+
+        token, expiry = alice.invite_mgr.generate_invite_token(
+            ch_hash, bob.identity.hash
+        )
+        bob.invite_mgr.send_join_request(
+            ch_hash, token, expiry, alice.identity.hash_hex
+        )
+
+        assert wait_for(
+            lambda: bob.storage.is_member(ch_hash, bob.identity.hash_hex),
+            timeout=5,
+        ), "Bob did not join via the real invite flow"
+
+
+class TestAdversarialSubscriberList:
+    """
+    The subscriber set drives who outbound channel messages are delivered to,
+    so forging or replaying it redirects or severs a peer's traffic.
+    """
+
+    def _setup(self, peer_factory):
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+        ch_hash = alice.channel_mgr.create_channel("open-ch", "", "public")
+        bob.storage.upsert_channel(ch_hash, "open-ch", "", alice.identity.hash_hex,
+                                   PRESET_OPEN, time.time())
+        bob.storage.subscribe(ch_hash)
+        return alice, bob, ch_hash
+
+    def _send(self, sender, target, ch_hash, packed, version, sig):
+        fields = {
+            F_MSG_TYPE:           MT_SUBSCRIBER_LIST,
+            F_CHANNEL_HASH:       bytes.fromhex(ch_hash),
+            F_SUBSCRIBER_LIST:    packed,
+            F_SUBSCRIBER_VERSION: version,
+            F_SUBSCRIBER_SIG:     sig,
+        }
+        target.subscription_mgr._handle_subscriber_list(
+            fields, ch_hash, sender.identity.hash_hex
+        )
+
+    def test_unsigned_subscriber_list_is_rejected(self, peer_factory):
+        alice, bob, ch_hash = self._setup(peer_factory)
+        packed = msgpack.packb(["cc" * 16], use_bin_type=True)
+
+        bob.subscription_mgr._handle_subscriber_list(
+            {
+                F_MSG_TYPE:        MT_SUBSCRIBER_LIST,
+                F_CHANNEL_HASH:    bytes.fromhex(ch_hash),
+                F_SUBSCRIBER_LIST: packed,
+            },
+            ch_hash,
+            alice.identity.hash_hex,
+        )
+
+        assert "cc" * 16 not in bob.subscription_mgr.get_subscribers(ch_hash), \
+            "An unsigned subscriber list was applied"
+
+    def test_forged_signature_is_rejected(self, peer_factory):
+        alice, bob, ch_hash = self._setup(peer_factory)
+        mallory = peer_factory("mallory")
+        packed = msgpack.packb([mallory.identity.hash_hex], use_bin_type=True)
+        payload = _subscriber_payload(ch_hash, 1, packed)
+        # Signed by Mallory, but claiming to come from the owner.
+        sig = _sign(mallory.identity.rns_identity, payload)
+
+        self._send(alice, bob, ch_hash, packed, 1, sig)
+
+        assert mallory.identity.hash_hex not in \
+            bob.subscription_mgr.get_subscribers(ch_hash), \
+            "A subscriber list with a forged owner signature was applied"
+
+    def test_replayed_older_version_is_rejected(self, peer_factory):
+        alice, bob, ch_hash = self._setup(peer_factory)
+
+        def signed(members, version):
+            packed = msgpack.packb(members, use_bin_type=True)
+            sig = _sign(alice.identity.rns_identity,
+                        _subscriber_payload(ch_hash, version, packed))
+            return packed, version, sig
+
+        current = ["aa" * 16, "bb" * 16]
+        self._send(alice, bob, ch_hash, *signed(current, 5))
+        assert set(bob.subscription_mgr.get_subscribers(ch_hash)) == set(current)
+
+        # A genuine older list, replayed to resurrect a removed subscriber.
+        self._send(alice, bob, ch_hash, *signed(["aa" * 16, "dd" * 16], 3))
+
+        assert "dd" * 16 not in bob.subscription_mgr.get_subscribers(ch_hash), \
+            "An older signed subscriber list was replayed successfully"
 

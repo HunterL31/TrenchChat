@@ -2,21 +2,10 @@
 Manages the LXMFRouter lifecycle, propagation node enable/disable,
 and wires the propagation filter into the inbound delivery callback.
 
-Inbound authentication
-----------------------
-LXMF signs every message with the sender's Ed25519 key, but a failed
-signature is *not* fatal inside LXMF: ``LXMessage.unpack_from_bytes`` only
-records the outcome on ``signature_validated`` / ``unverified_reason``, and
-``LXMRouter`` invokes the delivery callback regardless.  ``source_hash`` is
-attacker-chosen wire data, so any handler that derives a sender identity from
-it is trusting an unauthenticated value unless the signature flag is checked
-first.  This module is the single choke point where that check happens: no
-message reaches a delivery callback unless its signature validated.
-
-Messages whose source identity is not yet known (``SOURCE_UNKNOWN``) are not
-forgeries -- we simply have not received the sender's announce yet -- so they
-are held in a bounded quarantine while a path request is issued, and
-re-validated from their original packed bytes once the identity resolves.
+This module is the single choke point for inbound authentication: no message
+reaches a delivery callback unless its LXMF signature validated.  Messages
+whose source identity is not yet known are held in a bounded quarantine and
+re-validated from their packed bytes once the identity resolves.
 """
 
 import time
@@ -29,6 +18,7 @@ import msgpack
 from pathlib import Path
 from trenchchat import APP_NAME, APP_ASPECT_USER
 from trenchchat.config import Config, DATA_DIR
+from trenchchat.core.protocol import F_MSG_TYPE
 from trenchchat.network.prop_filter import PropagationFilter
 
 _MESSAGE_STORE_PATH = str(DATA_DIR / "messagestore")
@@ -40,14 +30,14 @@ QUARANTINE_TTL_SECS = 300
 QUARANTINE_MAX_PER_SENDER = 8
 QUARANTINE_MAX_TOTAL = 128
 
+# Per-sender ceiling on inbound control messages.
+CONTROL_RATE_WINDOW_SECS = 60.0
+CONTROL_RATE_BURST = 60
+CONTROL_RATE_MAX_SENDERS = 512
+
 
 def delivery_hash_for_identity(identity_hash: bytes) -> bytes:
-    """Return the LXMF delivery destination hash for an identity hash.
-
-    The identity hash and the delivery destination hash are different values;
-    inbound ``source_hash`` is the latter.  Callers holding an identity hash
-    must convert before comparing against anything derived from the wire.
-    """
+    """Return the LXMF delivery destination hash for an identity hash."""
     return RNS.Destination.hash(identity_hash, "lxmf", "delivery")
 
 
@@ -65,6 +55,9 @@ class Router:
         # source_hash hex -> list of (received_at, LXMessage) awaiting identity
         self._quarantine: dict[str, list] = {}
         self._quarantine_lock = threading.Lock()
+        # source_hash hex -> recent control-message timestamps
+        self._control_rate: dict[str, list] = {}
+        self._control_rate_lock = threading.Lock()
 
         self._router = LXMF.LXMRouter(
             storagepath=storagepath or _MESSAGE_STORE_PATH,
@@ -107,15 +100,57 @@ class Router:
 
     def _on_message_received(self, message: LXMF.LXMessage):
         """Called by LXMFRouter for every inbound message."""
-        # When acting as a propagation node, filter before storing.
-        if self._config.propagation_enabled:
-            if not self._filter.allows(message):
-                return
+        # The filter governs what we store and forward for others; it must
+        # not gate messages addressed to us.
+        if (self._config.propagation_enabled
+                and not self._addressed_to_us(message)
+                and not self._filter.allows(message)):
+            return
 
         if not self._authenticate(message):
             return
 
+        if not self._allow_control_message(message):
+            return
+
         self._dispatch(message)
+
+    def _allow_control_message(self, message: LXMF.LXMessage) -> bool:
+        """Throttle control messages per sender.
+
+        Chat messages are exempt; a limit there would drop conversation.
+        """
+        fields = getattr(message, "fields", None) or {}
+        if F_MSG_TYPE not in fields:
+            return True
+        if not message.source_hash:
+            return True
+
+        sender = message.source_hash.hex()
+        now = time.time()
+        with self._control_rate_lock:
+            times = self._control_rate.setdefault(sender, [])
+            times[:] = [t for t in times if now - t < CONTROL_RATE_WINDOW_SECS]
+            if len(times) >= CONTROL_RATE_BURST:
+                RNS.log(
+                    f"TrenchChat: rate-limited control messages from "
+                    f"{sender[:16]}…",
+                    RNS.LOG_WARNING,
+                )
+                return False
+            times.append(now)
+            if len(self._control_rate) > CONTROL_RATE_MAX_SENDERS:
+                for stale, stamps in list(self._control_rate.items()):
+                    if not stamps or now - stamps[-1] > CONTROL_RATE_WINDOW_SECS:
+                        del self._control_rate[stale]
+        return True
+
+    def _addressed_to_us(self, message: LXMF.LXMessage) -> bool:
+        """True if this message was delivered to our own LXMF destination."""
+        try:
+            return message.destination_hash == self._delivery_dest.hash
+        except AttributeError:
+            return False
 
     def _dispatch(self, message: LXMF.LXMessage):
         for cb in self._delivery_callbacks:
@@ -127,12 +162,7 @@ class Router:
     # --- inbound authentication ---
 
     def _authenticate(self, message: LXMF.LXMessage) -> bool:
-        """Return True only if the message's LXMF signature validated.
-
-        A message whose signature is present but wrong is a forgery attempt and
-        is dropped outright.  A message whose source identity is simply not
-        known yet is held for re-validation rather than discarded.
-        """
+        """Return True only if the message's LXMF signature validated."""
         if getattr(message, "signature_validated", False):
             return True
 
@@ -153,11 +183,8 @@ class Router:
     def _quarantine_message(self, message: LXMF.LXMessage):
         """Hold a message whose sender identity is not yet known.
 
-        Without the sender's identity LXMF cannot check the signature, so the
-        message is neither trusted nor discarded.  A path request is issued;
-        release happens from ``release_quarantined`` when the announce lands.
-        Messages with no packed representation cannot be re-validated later and
-        are dropped immediately.
+        Messages with no packed representation cannot be re-validated later,
+        so they are dropped rather than held.
         """
         if not message.source_hash or not getattr(message, "packed", None):
             RNS.log(
@@ -209,10 +236,8 @@ class Router:
     def release_quarantined(self, identity_hash_hex: str):
         """Re-validate and dispatch messages held for a now-known identity.
 
-        Called when a peer announce resolves an identity we were waiting on.
-        Each held message is re-unpacked from its original bytes so LXMF
-        re-runs the signature check against the newly recalled identity --
-        arrival of a path is not itself evidence the message was genuine.
+        Each message is re-unpacked from its original bytes so LXMF re-runs
+        the signature check against the newly recalled identity.
         """
         try:
             source_hash = delivery_hash_for_identity(bytes.fromhex(identity_hash_hex))

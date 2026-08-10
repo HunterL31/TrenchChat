@@ -21,17 +21,12 @@ MAX_IMAGE_BYTES = 921600    # 900 KB  -- limit for compressed still images (belo
 MAX_GIF_BYTES   = 921600    # 900 KB  -- limit for GIFs (below LXMF's 1 MB ceiling)
 IMAGE_JPEG_QUALITY = 85
 
-# Hard ceiling on the pixel count PIL will decode.  Pillow's stock default
-# (~178 Mpx, warn at 1x and raise only at 2x) allows a small compressed file
-# to expand into gigabytes of raster before any of the byte-size checks below
-# get a chance to run, since those all measure the *output* of compression.
+# Pillow's default (~178 Mpx) lets a small file expand into gigabytes of
+# raster before the byte-size checks below, which measure compressed output.
 MAX_IMAGE_PIXELS = 40_000_000
 Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
 
-# Upper bound on frames extracted from an animated GIF.  Each frame is
-# materialised as a full RGBA raster and retained, then copied again during
-# rescaling, so an unbounded frame count is a memory-exhaustion vector
-# independent of the pixel cap above.
+# Each frame is retained as a full RGBA raster and copied again on rescale.
 MAX_GIF_FRAMES = 300
 
 # Scale factors tried in order when a GIF is too large.

@@ -319,10 +319,6 @@ class Messaging:
         if not image_data:
             image_data = None
         elif len(image_data) > MAX_IMAGE_BYTES:
-            # Avatars and custom emoji are both capped on receipt; message
-            # attachments were not, leaving the only bound on attacker-supplied
-            # bytes -- which are stored and later handed to Qt's image decoders
-            # -- as a protocol convention rather than anything checked here.
             RNS.log(
                 f"TrenchChat: dropping oversized image ({len(image_data)} bytes, "
                 f"max {MAX_IMAGE_BYTES}) from {sender_hex[:12]}…",

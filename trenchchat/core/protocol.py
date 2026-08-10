@@ -57,6 +57,8 @@ F_CHANNEL_PERMISSIONS = 0x27 # str   — JSON permissions dict (replaces F_CHANN
 
 # --- Subscription fields ---
 F_SUBSCRIBER_LIST   = 0x30   # bytes — msgpack list of hex identity hashes
+F_SUBSCRIBER_VERSION = 0x31  # int   — monotonic counter per channel
+F_SUBSCRIBER_SIG    = 0x32   # bytes — owner Ed25519 signature over the list
 
 # --- Message type strings ---
 MT_SUBSCRIBE        = "subscribe"
@@ -78,14 +80,10 @@ MT_EMOJI_RESPONSE   = "emoji_response"  # respond with the emoji image bytes
 
 import msgpack  # noqa: E402  (kept below the constants; still no local imports)
 
-# Caps applied when unpacking anything that came off the network.
-#
-# msgpack >= 1.0 derives its per-type limits from len(packed), so a short
-# payload already cannot declare a huge array -- but that is a library default
-# the code was relying on implicitly rather than a bound this protocol states.
-# Declaring them keeps the guarantee explicit and independent of the default.
-# unpackb() has no max_buffer_size parameter (it is an Unpacker-only option),
-# so the overall payload size is bounded here instead.
+# Caps applied when unpacking anything that came off the network. msgpack
+# >= 1.0 derives per-type limits from len(packed); these state them explicitly
+# rather than relying on that default. unpackb() has no max_buffer_size, so
+# the payload size is bounded separately.
 MAX_WIRE_PAYLOAD  = 4 * 1024 * 1024
 MAX_WIRE_ARRAY    = 4096
 MAX_WIRE_MAP      = 4096

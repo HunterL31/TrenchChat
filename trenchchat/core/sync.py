@@ -137,8 +137,8 @@ class SyncManager:
         if peer_hex == self._identity.hash_hex:
             return
 
-        # The announce that woke us carries this peer's identity, so any of
-        # their messages we quarantined for want of it can now be verified.
+        # The announce carries this peer's identity, so anything of theirs we
+        # quarantined can now be verified.
         self._router.release_quarantined(peer_hex)
 
         self._messaging.flush_pending(peer_hex)
@@ -210,10 +210,8 @@ class SyncManager:
     def _peer_may_participate(self, channel_hash_hex: str, peer_hex: str) -> bool:
         """Return True if peer_hex is entitled to take part in this channel's sync.
 
-        Membership is required on invite-only channels.  On open-join channels
-        anyone may participate by design, but the channel must still be one we
-        actually know: an unknown channel row is treated as closed rather than
-        open, so a missing record can never widen access.
+        An unknown channel is treated as closed, so a missing record can never
+        widen access.
         """
         if not peer_hex:
             return False
@@ -226,10 +224,6 @@ class SyncManager:
 
     def _handle_missed_delivery(self, fields: dict, channel_hash_hex: str,
                                 sender_hex: str):
-        # Hints are written straight to the missed_deliveries table and steer
-        # which messages we later serve, so an unauthorised sender could both
-        # grow that table without bound and suppress a peer's history sync by
-        # filling it with message ids that do not exist.
         if not self._peer_may_participate(channel_hash_hex, sender_hex):
             return
         missed_for = fields.get(F_MISSED_FOR, "")
@@ -246,9 +240,7 @@ class SyncManager:
         if not self._storage.is_subscribed(channel_hash_hex):
             return
 
-        # Fails closed on an unknown channel: previously a subscriptions row
-        # without a matching channels row skipped the membership check
-        # entirely and served private history to any requester.
+        # Fails closed on an unknown channel.
         if not self._peer_may_participate(channel_hash_hex, requester_hex):
             return
         channel = self._storage.get_channel(channel_hash_hex)
@@ -333,16 +325,9 @@ class SyncManager:
         if not self._storage.is_subscribed(channel_hash_hex):
             return
 
-        # A sync response injects messages straight into the channel
-        # transcript with sender attribution taken from the payload, so an
-        # unsolicited one is an arbitrary-history-injection primitive.
-        #
-        # The gate is that we asked *this* peer for *this* channel, not that
-        # they are a member: by design any reachable peer may serve history
-        # (that is what makes store-and-forward work), and our local roster
-        # need not list them.  Correlation is the stronger check anyway --
-        # it denies every peer we did not solicit -- and each message in the
-        # payload is still tenure-validated individually below.
+        # The gate is that we asked this peer for this channel, not that they
+        # are a member: by design any reachable peer may serve history and our
+        # local roster need not list them.
         if not self._claim_pending_request(channel_hash_hex, responder_hex):
             RNS.log(
                 f"TrenchChat [sync]: dropping unsolicited sync response for "
@@ -407,8 +392,6 @@ class SyncManager:
                 if not image_data:
                     image_data = None
                 elif len(image_data) > MAX_IMAGE_BYTES:
-                    # Same cap the direct-delivery path applies; synced
-                    # history is no more trusted than a live message.
                     image_data = None
 
                 inserted = self._storage.insert_message(
@@ -499,12 +482,9 @@ class SyncManager:
     def _peer_key_forms(self, peer_hex: str) -> list[str]:
         """Return every hex form an inbound message may identify this peer by.
 
-        Inbound handlers resolve the sender via RNS.Identity.recall(), which
-        yields the identity hash, but fall back to the raw source_hash -- the
-        LXMF *delivery destination* hash -- when the identity is not known
-        locally.  These are different values for the same peer, so a request
-        recorded under one form would not be matched by a response carrying
-        the other.
+        Handlers resolve the sender via RNS.Identity.recall() but fall back to
+        the raw source_hash, which is the delivery destination hash; these are
+        different values for the same peer.
         """
         forms = [peer_hex]
         try:
@@ -524,11 +504,7 @@ class SyncManager:
     def _claim_pending_request(self, channel_hash_hex: str, responder_hex: str) -> bool:
         """Consume the outstanding request this response claims to answer.
 
-        Returns False when we never asked this peer for this channel, or when
-        the request is older than the response window -- both cases mean the
-        response was not solicited and must not be applied.  Consuming the
-        entry also makes a single request answerable only once, so one
-        legitimate request cannot be used to justify a stream of injections.
+        Consuming the entry makes a single request answerable only once.
         """
         now = time.time()
         with self._pending_requests_lock:

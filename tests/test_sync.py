@@ -626,11 +626,17 @@ def _setup_invite_channel(peer_factory):
     perms = dict(PRESET_PRIVATE)
     perms[ROLE_MEMBER] = [SEND_MESSAGE]
     ch_hash = alice.channel_mgr.create_channel("tenure-ch", "", permissions=perms)
-    alice.invite_mgr.publish_member_list(ch_hash, add_members=[bob.identity.hash])
-    assert wait_for_member(alice.storage, ch_hash, bob.identity.hash_hex)
+    # Mirror the channel on Bob *before* publishing. The member list document
+    # is delivered asynchronously, and a peer only accepts one for a channel it
+    # can anchor trust for -- a stored channel record naming the creator, or an
+    # invite it accepted. Seeding the record first is what the real invite flow
+    # achieves, and it also removes a race between the document arriving and
+    # the test's own mirroring.
     bob.storage.upsert_channel(ch_hash, "tenure-ch", "", alice.identity.hash_hex,
                                perms, time.time())
     bob.storage.subscribe(ch_hash)
+    alice.invite_mgr.publish_member_list(ch_hash, add_members=[bob.identity.hash])
+    assert wait_for_member(alice.storage, ch_hash, bob.identity.hash_hex)
     bob.storage.upsert_member(ch_hash, bob.identity.hash_hex, "Bob", role=ROLE_MEMBER)
     bob.storage.upsert_member(ch_hash, alice.identity.hash_hex, "Alice", role=ROLE_OWNER)
     bob.storage.set_channel_permissions(ch_hash, perms)
