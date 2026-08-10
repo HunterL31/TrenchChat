@@ -30,7 +30,7 @@ import msgpack
 from trenchchat.core.identity import Identity
 from trenchchat.core.messaging import Messaging
 from trenchchat.core.permissions import (
-    is_full_sync_enabled, is_open_join, permissions_from_json,
+    FULL_SYNC, has_permission, is_open_join, permissions_from_json,
 )
 from trenchchat.core.protocol import (
     F_CHANNEL_HASH, F_MSG_TYPE,
@@ -236,15 +236,18 @@ class SyncManager:
         #   - sender: the claimed author must actually have been a member at
         #     that timestamp, or the message could be a kicked member's
         #     replay or an outright forgery.
-        #   - requester (unless full_sync is enabled): the peer asking for
-        #     sync must themselves have been a member at that timestamp, or
-        #     sync becomes a way to backfill history from before they ever
-        #     joined. Off by default; an admin opts a channel into full
-        #     history sync via the full_sync permission flag.
+        #   - requester (unless they hold the full_sync permission): the peer
+        #     asking for sync must themselves have been a member at that
+        #     timestamp, or sync becomes a way to backfill history from
+        #     before they ever joined. full_sync is a per-role permission
+        #     (like send_message/invite/...), off by default -- an admin
+        #     grants it to whichever role(s) should be able to backfill full
+        #     history, e.g. admin but not member.
         has_tenure = self._storage.has_any_tenure(channel_hash_hex)
         if has_tenure:
             perms = permissions_from_json(channel["permissions"]) if channel else {}
-            full_sync = is_full_sync_enabled(perms)
+            requester_role = self._storage.get_role(channel_hash_hex, requester_hex)
+            full_sync = has_permission(perms, requester_role, FULL_SYNC)
             valid_rows = []
             for r in rows:
                 if not self._storage.was_member_at(channel_hash_hex, r["sender_hash"],
@@ -296,13 +299,14 @@ class SyncManager:
             return
 
         has_tenure = self._storage.has_any_tenure(channel_hash_hex)
+        my_hex = self._identity.hash_hex
         full_sync = False
         if has_tenure:
             channel = self._storage.get_channel(channel_hash_hex)
-            full_sync = is_full_sync_enabled(
-                permissions_from_json(channel["permissions"])
-            ) if channel else False
-        my_hex = self._identity.hash_hex
+            if channel:
+                perms = permissions_from_json(channel["permissions"])
+                my_role = self._storage.get_role(channel_hash_hex, my_hex)
+                full_sync = has_permission(perms, my_role, FULL_SYNC)
         inserted_any = False
         for m in messages:
             try:

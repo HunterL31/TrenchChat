@@ -15,8 +15,8 @@ from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QFont
 
 from trenchchat.core.permissions import (
-    ALL_PERMISSIONS, FLAG_DISCOVERABLE, FLAG_FULL_SYNC, FLAG_OPEN_JOIN,
-    INVITE, KICK, MANAGE_CHANNEL, MANAGE_ROLES, ROLE_ADMIN, ROLE_MEMBER, ROLE_OWNER,
+    ALL_PERMISSIONS, FLAG_DISCOVERABLE, FLAG_OPEN_JOIN,
+    FULL_SYNC, INVITE, KICK, MANAGE_CHANNEL, MANAGE_ROLES, ROLE_ADMIN, ROLE_MEMBER, ROLE_OWNER,
     SEND_MESSAGE,
 )
 from trenchchat.core.storage import Storage
@@ -28,6 +28,7 @@ _PERMISSION_LABELS: dict[str, str] = {
     KICK:           "Remove members",
     MANAGE_ROLES:   "Manage roles",
     MANAGE_CHANNEL: "Manage channel settings",
+    FULL_SYNC:      "Full history sync (backfill messages sent before joining)",
 }
 
 
@@ -384,13 +385,6 @@ class ChannelPermissionsDialog(QDialog):
         self._open_join_cb.toggled.connect(lambda _checked: _sync_discoverable_enabled())
         _sync_discoverable_enabled()
 
-        self._full_sync_cb = QCheckBox(
-            "Full history sync (new members can request the entire channel "
-            "history, not just messages sent since they joined)"
-        )
-        self._full_sync_cb.setChecked(bool(self._perms.get(FLAG_FULL_SYNC, False)))
-        flags_layout.addWidget(self._full_sync_cb)
-
         layout.addWidget(flags_group)
 
         # --- Per-role permission checkboxes ---
@@ -443,7 +437,6 @@ class ChannelPermissionsDialog(QDialog):
         # saved channel's permissions blob can't be misread as "meant to be
         # discoverable" -- the checkbox itself is disabled in this state.
         result[FLAG_DISCOVERABLE] = self._discoverable_cb.isChecked() and open_join
-        result[FLAG_FULL_SYNC] = self._full_sync_cb.isChecked()
         for role, checks in self._role_checks.items():
             result[role] = [perm for perm, cb in checks.items() if cb.isChecked()]
         return result

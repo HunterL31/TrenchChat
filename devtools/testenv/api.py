@@ -27,9 +27,9 @@ from trenchchat.core import actions
 from trenchchat.core.image import MAX_IMAGE_BYTES, is_gif, prepare_image
 from trenchchat.core.avatar import compress_avatar
 from trenchchat.core.permissions import (
-    ALL_PERMISSIONS, FLAG_FULL_SYNC, KICK, MANAGE_CHANNEL, MANAGE_ROLES,
+    ALL_PERMISSIONS, KICK, MANAGE_CHANNEL, MANAGE_ROLES,
     ROLE_ADMIN, ROLE_MEMBER, PRESET_OPEN, PRESET_PRIVATE,
-    is_full_sync_enabled, is_open_join, permissions_from_json,
+    is_open_join, permissions_from_json,
 )
 
 from backend_core import Backend
@@ -67,7 +67,6 @@ class SendMessageRequest(BaseModel):
 class UpdatePermissionsRequest(BaseModel):
     admin: list[str] = []
     member: list[str] = []
-    full_sync: bool = False
 
 
 class InviteRequest(BaseModel):
@@ -403,7 +402,6 @@ def create_app(backend: Backend) -> FastAPI:
             "all_permissions": list(ALL_PERMISSIONS),
             "admin": perms.get(ROLE_ADMIN, []),
             "member": perms.get(ROLE_MEMBER, []),
-            "full_sync": is_full_sync_enabled(perms),
         }
 
     @app.post("/channels/{channel_hash}/permissions")
@@ -415,7 +413,6 @@ def create_app(backend: Backend) -> FastAPI:
         new_perms = dict(current)
         new_perms[ROLE_ADMIN] = req.admin
         new_perms[ROLE_MEMBER] = req.member
-        new_perms[FLAG_FULL_SYNC] = req.full_sync
         ok = actions.edit_channel_permissions(
             backend.storage, backend.invite_mgr, channel_hash,
             backend.identity.hash_hex, new_perms,

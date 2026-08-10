@@ -17,10 +17,10 @@ import pytest
 
 from trenchchat.core.storage import Storage
 from trenchchat.core.permissions import (
-    ALL_PERMISSIONS, FLAG_DISCOVERABLE, FLAG_FULL_SYNC, FLAG_OPEN_JOIN,
-    INVITE, KICK, MANAGE_CHANNEL, MANAGE_ROLES,
+    ALL_PERMISSIONS, FLAG_DISCOVERABLE, FLAG_OPEN_JOIN,
+    FULL_SYNC, INVITE, KICK, MANAGE_CHANNEL, MANAGE_ROLES,
     PRESET_OPEN, PRESET_PRIVATE, ROLE_ADMIN, ROLE_MEMBER, ROLE_OWNER,
-    SEND_MESSAGE, has_permission, is_discoverable, is_full_sync_enabled,
+    SEND_MESSAGE, has_permission, is_discoverable,
     is_open_join, permissions_from_json, permissions_to_json, role_rank,
 )
 
@@ -69,22 +69,33 @@ class TestPermissionHelpers:
         assert is_discoverable(PRESET_OPEN) is True
         assert is_discoverable(PRESET_PRIVATE) is False
 
-    def test_is_full_sync_enabled_off_by_default(self):
-        assert is_full_sync_enabled(PRESET_OPEN) is False
-        assert is_full_sync_enabled(PRESET_PRIVATE) is False
+    def test_full_sync_off_by_default_for_every_role(self):
+        """full_sync is a per-role permission, same shape as send_message/
+        invite/etc -- off for both roles under the default presets, exactly
+        like every other permission not explicitly granted."""
+        for perms in (PRESET_OPEN, PRESET_PRIVATE):
+            assert not has_permission(perms, ROLE_ADMIN, FULL_SYNC)
+            assert not has_permission(perms, ROLE_MEMBER, FULL_SYNC)
 
-    def test_is_full_sync_enabled_missing_key_defaults_false(self):
-        """Channels bootstrapped before this flag existed have no full_sync
-        key at all -- must default to the restrictive behavior, not open up
-        full history sync silently."""
-        legacy_perms = {k: v for k, v in PRESET_PRIVATE.items() if k != FLAG_FULL_SYNC}
-        assert FLAG_FULL_SYNC not in legacy_perms
-        assert is_full_sync_enabled(legacy_perms) is False
+    def test_full_sync_missing_from_role_list_defaults_false(self):
+        """A channel bootstrapped before this permission existed has no
+        full_sync entry in its role lists at all -- must default to the
+        restrictive behavior, not open up full history sync silently."""
+        legacy_perms = dict(PRESET_PRIVATE)
+        assert FULL_SYNC not in legacy_perms.get(ROLE_ADMIN, [])
+        assert not has_permission(legacy_perms, ROLE_ADMIN, FULL_SYNC)
 
-    def test_is_full_sync_enabled_when_set(self):
+    def test_full_sync_can_be_granted_to_admin_but_not_member(self):
+        """The exact scenario this permission exists for: an admin can be
+        trusted with full history backfill while ordinary members remain
+        bounded to their own join time."""
         perms = dict(PRESET_PRIVATE)
-        perms[FLAG_FULL_SYNC] = True
-        assert is_full_sync_enabled(perms) is True
+        perms[ROLE_ADMIN] = [SEND_MESSAGE, INVITE, KICK, MANAGE_ROLES, FULL_SYNC]
+        assert has_permission(perms, ROLE_ADMIN, FULL_SYNC)
+        assert not has_permission(perms, ROLE_MEMBER, FULL_SYNC)
+
+    def test_owner_always_has_full_sync(self):
+        assert has_permission(PRESET_PRIVATE, ROLE_OWNER, FULL_SYNC)
 
     def test_json_roundtrip(self):
         blob = permissions_to_json(PRESET_PRIVATE)
@@ -339,3 +350,14 @@ class TestChannelPermissionsDialog:
         send_cb.setChecked(False)
         perms = dlg.permissions
         assert SEND_MESSAGE not in perms[ROLE_ADMIN]
+
+    def test_full_sync_can_be_granted_to_admin_only(self, qt_app):
+        """full_sync has its own per-role checkbox like any other permission
+        -- checking it for admin without touching member's checkbox grants
+        it to admin alone."""
+        from trenchchat.gui.invite_dialogs import ChannelPermissionsDialog
+        dlg = ChannelPermissionsDialog("test", dict(PRESET_PRIVATE))
+        dlg._role_checks[ROLE_ADMIN][FULL_SYNC].setChecked(True)
+        perms = dlg.permissions
+        assert FULL_SYNC in perms[ROLE_ADMIN]
+        assert FULL_SYNC not in perms[ROLE_MEMBER]

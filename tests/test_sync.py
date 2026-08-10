@@ -481,8 +481,9 @@ class TestSyncOnChannelJoin:
         full_sync is off by default (see TestTenureSyncFiltering's
         test_pre_join_history_excluded_by_default) -- a plain invite-only
         channel restricts a new member's sync to messages sent since they
-        joined. This test covers the opt-in case, exercising it through the
-        *real* end-to-end pipeline: invite -> join request -> auto-join ->
+        joined. This test covers the case where the member role has been
+        granted the full_sync permission, exercising it through the *real*
+        end-to-end pipeline: invite -> join request -> auto-join ->
         SyncManager's channel_joined-triggered sync request -- not a
         manually-invoked sync call.
 
@@ -497,7 +498,7 @@ class TestSyncOnChannelJoin:
         bob = peer_factory("bob")
 
         perms = dict(PRESET_PRIVATE)
-        perms["full_sync"] = True
+        perms[ROLE_MEMBER] = [SEND_MESSAGE, FULL_SYNC]
         ch_hash = alice.channel_mgr.create_channel("history-on-join", "", permissions=perms)
         alice.invite_mgr.publish_member_list(ch_hash)
 
@@ -601,7 +602,9 @@ class TestSyncOnChannelJoin:
 # Membership tenure — sync filtering
 # ---------------------------------------------------------------------------
 
-from trenchchat.core.permissions import PRESET_PRIVATE, ROLE_MEMBER, ROLE_OWNER, SEND_MESSAGE
+from trenchchat.core.permissions import (
+    FULL_SYNC, PRESET_PRIVATE, ROLE_ADMIN, ROLE_MEMBER, ROLE_OWNER, SEND_MESSAGE,
+)
 
 
 def _setup_invite_channel(peer_factory):
@@ -794,15 +797,16 @@ class TestTenureSyncFiltering:
 
     def test_full_sync_enabled_allows_pre_join_history(self, peer_factory):
         """
-        An admin who enables full_sync on a channel lets new members backfill
-        its entire history via sync, including messages from before they
-        joined -- the opt-in this whole feature exists to provide.
+        An admin who grants the member role full_sync lets new members
+        backfill the channel's entire history via sync, including messages
+        from before they joined -- the opt-in this permission exists to
+        provide.
         """
         alice = peer_factory("alice")
         bob = peer_factory("bob")
 
         perms = dict(PRESET_PRIVATE)
-        perms["full_sync"] = True
+        perms[ROLE_MEMBER] = [SEND_MESSAGE, FULL_SYNC]
         ch_hash = alice.channel_mgr.create_channel("full-sync-ch", "", permissions=perms)
         before_msg_id = _insert_message(alice.storage, ch_hash, alice.identity.hash_hex,
                                         "sent before Bob joined")
@@ -815,6 +819,42 @@ class TestTenureSyncFiltering:
 
         assert wait_for_message(bob.storage, ch_hash, before_msg_id, timeout=5), \
             "Bob did not receive pre-join history via sync despite full_sync being enabled"
+
+    def test_full_sync_granted_to_admin_but_not_member(self, peer_factory):
+        """
+        The scenario full_sync being a per-role permission (rather than a
+        channel-wide flag) exists for: an admin can be trusted to backfill
+        the entire channel history while ordinary members stay bounded to
+        their own join time, on the very same channel.
+        """
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")     # plain member -- no full_sync
+        carol = peer_factory("carol")  # admin -- granted full_sync
+
+        perms = dict(PRESET_PRIVATE)
+        perms[ROLE_ADMIN] = [SEND_MESSAGE, FULL_SYNC]
+        ch_hash = alice.channel_mgr.create_channel("admin-only-full-sync-ch", "",
+                                                    permissions=perms)
+        before_msg_id = _insert_message(alice.storage, ch_hash, alice.identity.hash_hex,
+                                        "sent before Bob and Carol joined")
+
+        alice.invite_mgr.publish_member_list(
+            ch_hash, add_members=[bob.identity.hash, carol.identity.hash],
+            add_admins=[carol.identity.hash],
+        )
+        assert wait_for_member(alice.storage, ch_hash, bob.identity.hash_hex)
+        assert wait_for_member(alice.storage, ch_hash, carol.identity.hash_hex)
+        assert wait_for(lambda: bob.storage.is_member(ch_hash, bob.identity.hash_hex), timeout=5)
+        assert wait_for(lambda: carol.storage.is_member(ch_hash, carol.identity.hash_hex), timeout=5)
+
+        bob.sync_mgr._send_sync_request(alice.identity.hash_hex, ch_hash, 0.0)
+        carol.sync_mgr._send_sync_request(alice.identity.hash_hex, ch_hash, 0.0)
+        time.sleep(0.5)
+
+        assert not bob.storage.message_exists(before_msg_id), \
+            "Bob (plain member, no full_sync) received pre-join history"
+        assert wait_for_message(carol.storage, ch_hash, before_msg_id, timeout=5), \
+            "Carol (admin, granted full_sync) did not receive pre-join history"
 
     def test_no_tenure_data_allows_sync_without_filtering(self, peer_factory):
         """

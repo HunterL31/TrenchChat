@@ -49,7 +49,7 @@ import pytest
 from tests.helpers import wait_for, wait_for_member
 from trenchchat.core.invite import _sign, _signed_payload
 from trenchchat.core.permissions import (
-    ALL_PERMISSIONS, INVITE, KICK, MANAGE_CHANNEL, MANAGE_ROLES,
+    ALL_PERMISSIONS, FULL_SYNC, INVITE, KICK, MANAGE_CHANNEL, MANAGE_ROLES,
     PRESET_PRIVATE, ROLE_ADMIN, ROLE_MEMBER, ROLE_OWNER, SEND_MESSAGE,
 )
 from trenchchat.core.protocol import (
@@ -422,44 +422,50 @@ class TestAdversarialManageChannel:
             timeout=5,
         ), "Bob did not receive Alice's permission update"
 
-    def test_member_without_manage_channel_cannot_enable_full_sync(self, peer_factory):
+    def test_member_without_manage_channel_cannot_grant_self_full_sync(self, peer_factory):
         """
-        The full_sync flag (whether new members can backfill history from
-        before they joined) travels inside the same signed permissions
-        document as every other channel flag, so it's protected by the same
-        signature check -- Bob can't flip it on for himself by broadcasting
-        his own doc.
+        full_sync is a per-role permission like any other (send_message,
+        invite, ...), travelling inside the same signed permissions
+        document -- Bob can't grant it to his own role by broadcasting his
+        own doc, same as he can't grant himself KICK or MANAGE_ROLES.
         """
         alice, bob, ch_hash = _setup_channel_with_member(
             peer_factory, member_perms=[SEND_MESSAGE]  # no MANAGE_CHANNEL
         )
-        assert not alice.storage.get_channel_permissions(ch_hash).get("full_sync", False)
+        assert not alice.storage.has_permission(ch_hash, bob.identity.hash_hex, FULL_SYNC)
 
         evil_perms = dict(PRESET_PRIVATE)
-        evil_perms["full_sync"] = True
+        evil_perms[ROLE_MEMBER] = [SEND_MESSAGE, FULL_SYNC]
         bob.storage.set_channel_permissions(ch_hash, evil_perms)
         bob.invite_mgr.broadcast_permissions(ch_hash)
 
         time.sleep(0.3)
-        assert not alice.storage.get_channel_permissions(ch_hash).get("full_sync", False), \
-            "Bob enabled full_sync without MANAGE_CHANNEL"
+        assert not alice.storage.has_permission(ch_hash, bob.identity.hash_hex, FULL_SYNC), \
+            "Bob granted himself full_sync without MANAGE_CHANNEL"
 
-    def test_owner_can_enable_full_sync(self, peer_factory):
-        """Sanity check: the owner's broadcast_permissions can enable full_sync,
-        and it propagates to existing members."""
+    def test_owner_can_grant_full_sync_to_one_role_but_not_another(self, peer_factory):
+        """Sanity check: the owner's broadcast_permissions can grant full_sync
+        to one role while withholding it from another, and it propagates to
+        existing members -- the scenario this permission exists for (e.g.
+        admin gets it, member doesn't)."""
         alice, bob, ch_hash = _setup_channel_with_member(
             peer_factory, member_perms=[SEND_MESSAGE]
         )
 
         new_perms = dict(PRESET_PRIVATE)
-        new_perms["full_sync"] = True
+        new_perms[ROLE_ADMIN] = [SEND_MESSAGE, FULL_SYNC]
+        new_perms[ROLE_MEMBER] = [SEND_MESSAGE]
         alice.storage.set_channel_permissions(ch_hash, new_perms)
         alice.invite_mgr.broadcast_permissions(ch_hash)
 
         assert wait_for(
-            lambda: bob.storage.get_channel_permissions(ch_hash).get("full_sync") is True,
+            lambda: bob.storage.get_channel_permissions(ch_hash).get(ROLE_ADMIN) == [
+                SEND_MESSAGE, FULL_SYNC
+            ],
             timeout=5,
         ), "Bob did not receive Alice's full_sync change"
+        assert not bob.storage.has_permission(ch_hash, bob.identity.hash_hex, FULL_SYNC), \
+            "Bob (plain member) ended up with full_sync from a change that only granted it to admin"
 
 
 # ---------------------------------------------------------------------------

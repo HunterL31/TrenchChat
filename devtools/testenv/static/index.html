@@ -1052,11 +1052,6 @@ async function openPermissionsModal(tag) {
       `).join('')}
     </table>
     <div class="empty-state" style="padding: 8px 0 0;">Owner always has every permission.</div>
-    <label style="display:flex; align-items:center; gap:6px; margin-top:10px; font-size:12px;">
-      <input type="checkbox" id="perm-full-sync" ${perms.full_sync ? 'checked' : ''}>
-      Full history sync (new members can request the entire channel history,
-      not just messages sent since they joined)
-    </label>
   `;
   document.getElementById('permissions-modal').classList.add('show');
 }
@@ -1074,10 +1069,9 @@ async function savePermissions() {
   boxes.forEach(b => {
     if (b.checked) (b.dataset.role === 'admin' ? admin : member).push(b.dataset.perm);
   });
-  const fullSync = document.getElementById('perm-full-sync').checked;
   const result = await api(tag, `/channels/${state[tag].activeChannel}/permissions`, {
     method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({admin, member, full_sync: fullSync}),
+    body: JSON.stringify({admin, member}),
   });
   if (!result.ok) toast(`Tester ${tag}: permission change denied (missing manage_channel?)`);
   closePermissionsModal();
