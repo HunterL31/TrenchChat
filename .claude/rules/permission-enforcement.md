@@ -1,6 +1,7 @@
 ---
 description: Three-layer permission enforcement pattern for TrenchChat
-alwaysApply: true
+globs: "trenchchat/core/**/*.py,trenchchat/gui/**/*.py,tests/test_adversarial.py"
+alwaysApply: false
 ---
 
 # Permission Enforcement

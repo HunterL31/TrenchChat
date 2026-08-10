@@ -1,6 +1,7 @@
 ---
 description: Treat existing tests as the authoritative specification — never modify them just to make them pass
-alwaysApply: true
+globs: "tests/**/*.py"
+alwaysApply: false
 ---
 
 # Tests Are the Specification

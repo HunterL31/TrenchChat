@@ -1,6 +1,7 @@
 ---
 description: Python code standards for the TrenchChat repository
-alwaysApply: true
+globs: "**/*.py"
+alwaysApply: false
 ---
 
 # Code Standards
@@ -94,15 +95,55 @@ for cb in self._messaging._message_callbacks:
 self._messaging.notify_message_received(channel_hash_hex, msg_id)
 ```
 
-## Docstrings
+## Docstrings, comments, and other non-code prose
 
-Every module, public class, and public method must have a docstring.
-Use plain prose — not reStructuredText or Google-style parameter blocks.
-One-liners are fine for simple methods; multi-line for anything non-obvious.
+Any prose that lives in the repo but isn't code — docstrings, comments, PR
+descriptions, commit messages — follows one standard above all else: clean,
+concise, simple wording. Say the thing in as few plain words as possible. No
+filler, no hedging, no jargon where a plain word works.
+
+### Docstrings
+
+Every module, public class, and public method must have a docstring. Use
+plain prose — not reStructuredText or Google-style parameter blocks.
+One-liners are fine for simple methods; multi-line only when the behavior is
+genuinely non-obvious, and even then, as short as it can be while staying
+clear.
 
 ```python
 def flush_pending(self, dest_hex: str) -> None:
     """Attempt to deliver all queued messages for a peer whose path is now known."""
+```
+
+### Comments
+
+Keep comments to a minimum. Only write one when it explains genuinely confusing
+code — a non-obvious constraint, a subtle invariant, a workaround for a specific
+bug, or behavior that would surprise a reader. Well-named identifiers and clear
+code should speak for themselves. When a comment is warranted, keep it as short
+and plain as a good docstring — the same standard applies.
+
+Do not use comments to justify design decisions, explain what the code does, or
+narrate the current task/fix. That belongs in the PR description or commit
+message — written with the same clean, concise, simple standard — not in the
+source; comments in the source rot as the codebase evolves.
+
+```python
+# ❌ justifies a design decision
+# Using a dict here instead of a class for simplicity
+config = {"timeout": 30, "retries": 3}
+
+# ❌ explains what the code does (already obvious from the code)
+# Loop through all channels and check membership
+for channel in channels:
+    if user in channel.members:
+        ...
+
+# ✅ explains genuinely confusing code — a non-obvious constraint
+# LXMF may deliver this as bytes depending on msgpack encoding; must coerce.
+value = fields.get(F_DISPLAY_NAME, "")
+if isinstance(value, bytes):
+    value = value.decode(errors="replace")
 ```
 
 ## No dead code
