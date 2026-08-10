@@ -9,7 +9,7 @@ import json
 
 import pytest
 
-from trenchchat.core.permissions import is_open_join, permissions_from_json
+from trenchchat.core.permissions import FLAG_DISCOVERABLE, PRESET_PRIVATE, is_open_join, permissions_from_json
 from tests.helpers import (
     announce_and_wait,
     wait_for_channel,
@@ -105,12 +105,13 @@ class TestChannelDiscovery:
         The ChannelAnnounceHandler's _on_channel_discovered callback correctly
         stores a discovered channel in the database and fires the discovered callback.
 
-        Note: In-process RNS announce filtering uses an exact destination hash match.
-        The ChannelAnnounceHandler aspect_filter "trenchchat.channel" matches
-        destinations with exactly that aspect path. Since channel destinations have
-        an additional name component (trenchchat.channel.<name>), cross-peer announce
-        discovery requires peers on separate Reticulum instances. We test the
-        handler logic directly here.
+        This calls the handler directly rather than going through a real announce:
+        the test fixtures' AutoInterface relies on UDP multicast, which is not
+        reliable on every machine (this is also why TestTransport exists for LXMF
+        message delivery), so announce-dependent tests target dest.announce()
+        directly instead of asserting on cross-peer delivery -- see
+        test_invite_only_channel_never_announced / test_public_channel_is_announced
+        below.
         """
         alice = peer_factory("alice")
         bob = peer_factory("bob")
@@ -212,3 +213,69 @@ class TestChannelDiscovery:
         ch = bob.storage.get_channel(ch_hash)
         assert ch is not None
         assert not is_open_join(permissions_from_json(ch["permissions"]))
+
+    def test_invite_only_channel_never_announced(self, peer_factory):
+        """
+        Invite-only channels must never be broadcast on the mesh -- they rely on
+        the signed member-list document instead, precisely so their existence,
+        name, and description aren't visible to peers who were never invited.
+        announce_channel() must skip the actual dest.announce() call for them.
+
+        Regression test for a real bug: announce_channel() previously called
+        dest.announce() unconditionally for every owned channel, leaking
+        invite-only channel metadata to any peer listening for
+        trenchchat.channel announces.
+        """
+        alice = peer_factory("alice")
+        ch_hash = alice.channel_mgr.create_channel("secret-room", "", "invite")
+
+        dest = alice.channel_mgr._owned_destinations[ch_hash]
+        calls = []
+        dest.announce = lambda *a, **kw: calls.append((a, kw))
+
+        alice.channel_mgr.announce_channel(ch_hash)
+
+        assert calls == [], "invite-only channel's destination.announce() was called"
+
+    def test_invite_only_channel_never_announced_even_if_marked_discoverable(self, peer_factory):
+        """
+        discoverable and open_join are independent flags -- the real GUI's
+        ChannelPermissionsDialog lets an admin check "Discoverable" while
+        leaving "Open join" off. announce_channel() must still refuse to
+        announce, or an invite-only channel's name/description/creator gets
+        broadcast to every peer on the mesh, none of whom were ever invited.
+
+        Regression test for a real bug: announce_channel() only checked
+        is_discoverable(), trusting it wasn't set independently of
+        open_join. It was -- confirmed live via the devtools two-tester
+        environment, where a channel with open_join=False, discoverable=True
+        showed up in a never-invited tester's Discovered panel.
+        """
+        alice = peer_factory("alice")
+
+        leaked_perms = dict(PRESET_PRIVATE)
+        leaked_perms[FLAG_DISCOVERABLE] = True
+        ch_hash = alice.channel_mgr.create_channel("secret-room", "", permissions=leaked_perms)
+
+        dest = alice.channel_mgr._owned_destinations[ch_hash]
+        calls = []
+        dest.announce = lambda *a, **kw: calls.append((a, kw))
+
+        alice.channel_mgr.announce_channel(ch_hash)
+
+        assert calls == [], \
+            "invite-only channel was announced despite open_join=False, just because discoverable=True"
+
+    def test_public_channel_is_announced(self, peer_factory):
+        """Public channels are the intended case for dest.announce() -- the guard
+        added for invite-only channels must not also swallow this one."""
+        alice = peer_factory("alice")
+        ch_hash = alice.channel_mgr.create_channel("open-room", "", "public")
+
+        dest = alice.channel_mgr._owned_destinations[ch_hash]
+        calls = []
+        dest.announce = lambda *a, **kw: calls.append((a, kw))
+
+        alice.channel_mgr.announce_channel(ch_hash)
+
+        assert len(calls) == 1, "public channel's destination.announce() was not called"

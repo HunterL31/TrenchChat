@@ -33,3 +33,7 @@ Thumbs.db
 
 # Reticulum / LXMF storage
 *.rnodeconfig
+
+# devtools/testenv: generated per-run tester identities/storage
+devtools/testenv/data/
+devtools/testenv/smoke_data/

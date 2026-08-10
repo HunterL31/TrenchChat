@@ -76,6 +76,7 @@ class ChannelManager:
         )
         hash_hex = dest.hash.hex()
 
+        created_at = time.time()
         self._owned_destinations[hash_hex] = dest
         self._storage.upsert_channel(
             hash=hash_hex,
@@ -83,7 +84,7 @@ class ChannelManager:
             description=description,
             creator_hash=self._identity.hash_hex,
             permissions=permissions,
-            created_at=time.time(),
+            created_at=created_at,
         )
         self._storage.subscribe(hash_hex)
         self._storage.upsert_member(
@@ -92,6 +93,23 @@ class ChannelManager:
             display_name=self._identity.display_name,
             role=ROLE_OWNER,
         )
+        # Without this, the owner has no tenure record at all, and
+        # was_member_at() treats "no tenure data" as "wasn't a member" --
+        # silently dropping the owner's own messages from every sync
+        # response to new members, regardless of when those members
+        # actually joined. Uses created_at rather than a fresh time.time()
+        # call so the tenure interval starts at the exact moment the channel
+        # itself was created, not some microseconds-later timestamp.
+        #
+        # Gated to non-open-join channels only: public channels never use
+        # the member-list/tenure system at all (membership there is tracked
+        # by SubscriptionManager instead), so giving the owner a tenure row
+        # would make has_any_tenure() true and wrongly engage tenure
+        # filtering -- including the requester-side check -- for peers who
+        # joined via subscription and have no tenure data of their own,
+        # rejecting their sync requests entirely.
+        if not is_open_join(permissions):
+            self._storage.open_tenure(hash_hex, self._identity.hash_hex, created_at)
         self.announce_channel(hash_hex)
         return hash_hex
 
@@ -102,7 +120,17 @@ class ChannelManager:
         """Announce a single owned channel.
 
         If attached_interface is given the announce is sent only on that
-        interface; otherwise it is broadcast on all interfaces.
+        interface; otherwise it is broadcast on all interfaces. Invite-only
+        channels are never announced regardless of the discoverable flag --
+        broadcasting them would leak their name/description/creator to any
+        peer listening for trenchchat.channel announces, defeating the point
+        of using a signed member-list document instead of mesh-wide
+        discovery for them. discoverable and open_join are stored as
+        independent flags (ChannelPermissionsDialog exposes both), so
+        open_join must be checked here too rather than trusting discoverable
+        alone -- otherwise toggling "Discoverable" on in the permissions
+        dialog broadcasts an invite-only channel's existence to the whole
+        mesh even though open_join stays off.
         """
         dest = self._owned_destinations.get(channel_hash_hex)
         if dest is None:
@@ -111,6 +139,8 @@ class ChannelManager:
         if channel is None:
             return
         perms = permissions_from_json(channel["permissions"])
+        if not is_discoverable(perms) or not is_open_join(perms):
+            return
         access = "public" if is_open_join(perms) else "invite"
         app_data = msgpack.packb({
             "name": channel["name"],

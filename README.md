@@ -53,6 +53,31 @@ python main.py
 
 Pass `-v` / `--verbose` to enable detailed Reticulum and TrenchChat debug logging.
 
+## Development
+
+`devtools/testenv/` runs two fully independent, real TrenchChat backends
+("Tester A" and "Tester B") as separate processes over a real Reticulum
+link, driven from a two-pane web UI — no second physical machine or manual
+key exchange needed to test multi-peer behavior (invites, channel
+discovery, sync, permissions) end-to-end. Every action it takes calls the
+same `trenchchat.core.actions` entry points the real GUI does, so a bug
+caught there is a bug in the real client. See
+[devtools/testenv/README.md](devtools/testenv/README.md).
+
+```bash
+.venv/Scripts/python devtools/testenv/orchestrator.py   # Windows
+.venv/bin/python devtools/testenv/orchestrator.py        # Linux/macOS
+```
+
+Then visit `http://localhost:8800/`.
+
+Run the test suite after any change to `trenchchat/`:
+
+```bash
+.venv/Scripts/python -m pytest tests/ -v   # Windows
+.venv/bin/python -m pytest tests/ -v       # Linux/macOS
+```
+
 ## How It Works
 
 TrenchChat assigns every user a stable cryptographic identity derived from an Ed25519/X25519 keypair stored locally at `~/.trenchchat/identity`. Channels are addressed by a hash derived from the creator's identity and the channel name. Messages are unicast LXMF packets sent directly to each subscriber — there is no broadcast or multicast layer.
@@ -105,9 +130,12 @@ trenchchat/
     compose.py              Message compose widget
     invite_dialogs.py       Invite and member management dialogs
     settings.py             Settings dialog
+devtools/
+  testenv/                  Two-process local dev/test environment (see its README)
 docs/
   offline-sync.md           Offline sync design and implementation detail
   security-improvements.md  Application-layer security hardening notes
+tests/                      pytest suite; run after any change to trenchchat/
 ```
 
 ## Data Storage

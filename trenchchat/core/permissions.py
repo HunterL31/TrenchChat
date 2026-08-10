@@ -36,8 +36,9 @@ INVITE = "invite"
 KICK = "kick"
 MANAGE_ROLES = "manage_roles"
 MANAGE_CHANNEL = "manage_channel"
+FULL_SYNC = "full_sync"
 
-ALL_PERMISSIONS = (SEND_MESSAGE, INVITE, KICK, MANAGE_ROLES, MANAGE_CHANNEL)
+ALL_PERMISSIONS = (SEND_MESSAGE, INVITE, KICK, MANAGE_ROLES, MANAGE_CHANNEL, FULL_SYNC)
 
 # ---------------------------------------------------------------------------
 # Channel-level flags

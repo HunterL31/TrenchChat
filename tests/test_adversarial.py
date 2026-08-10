@@ -47,9 +47,10 @@ import msgpack
 import pytest
 
 from tests.helpers import wait_for, wait_for_member
+from trenchchat.core import actions
 from trenchchat.core.invite import _sign, _signed_payload
 from trenchchat.core.permissions import (
-    ALL_PERMISSIONS, INVITE, KICK, MANAGE_CHANNEL, MANAGE_ROLES,
+    ALL_PERMISSIONS, FULL_SYNC, INVITE, KICK, MANAGE_CHANNEL, MANAGE_ROLES,
     PRESET_PRIVATE, ROLE_ADMIN, ROLE_MEMBER, ROLE_OWNER, SEND_MESSAGE,
 )
 from trenchchat.core.protocol import (
@@ -421,6 +422,76 @@ class TestAdversarialManageChannel:
             lambda: bob.storage.has_permission(ch_hash, bob.identity.hash_hex, INVITE),
             timeout=5,
         ), "Bob did not receive Alice's permission update"
+
+    def test_member_without_manage_channel_cannot_grant_self_full_sync(self, peer_factory):
+        """
+        full_sync is a per-role permission like any other (send_message,
+        invite, ...), travelling inside the same signed permissions
+        document -- Bob can't grant it to his own role by broadcasting his
+        own doc, same as he can't grant himself KICK or MANAGE_ROLES.
+        """
+        alice, bob, ch_hash = _setup_channel_with_member(
+            peer_factory, member_perms=[SEND_MESSAGE]  # no MANAGE_CHANNEL
+        )
+        assert not alice.storage.has_permission(ch_hash, bob.identity.hash_hex, FULL_SYNC)
+
+        evil_perms = dict(PRESET_PRIVATE)
+        evil_perms[ROLE_MEMBER] = [SEND_MESSAGE, FULL_SYNC]
+        bob.storage.set_channel_permissions(ch_hash, evil_perms)
+        bob.invite_mgr.broadcast_permissions(ch_hash)
+
+        time.sleep(0.3)
+        assert not alice.storage.has_permission(ch_hash, bob.identity.hash_hex, FULL_SYNC), \
+            "Bob granted himself full_sync without MANAGE_CHANNEL"
+
+    def test_owner_can_grant_full_sync_to_one_role_but_not_another(self, peer_factory):
+        """Sanity check: the owner's broadcast_permissions can grant full_sync
+        to one role while withholding it from another, and it propagates to
+        existing members -- the scenario this permission exists for (e.g.
+        admin gets it, member doesn't)."""
+        alice, bob, ch_hash = _setup_channel_with_member(
+            peer_factory, member_perms=[SEND_MESSAGE]
+        )
+
+        new_perms = dict(PRESET_PRIVATE)
+        new_perms[ROLE_ADMIN] = [SEND_MESSAGE, FULL_SYNC]
+        new_perms[ROLE_MEMBER] = [SEND_MESSAGE]
+        alice.storage.set_channel_permissions(ch_hash, new_perms)
+        alice.invite_mgr.broadcast_permissions(ch_hash)
+
+        assert wait_for(
+            lambda: bob.storage.get_channel_permissions(ch_hash).get(ROLE_ADMIN) == [
+                SEND_MESSAGE, FULL_SYNC
+            ],
+            timeout=5,
+        ), "Bob did not receive Alice's full_sync change"
+        assert not bob.storage.has_permission(ch_hash, bob.identity.hash_hex, FULL_SYNC), \
+            "Bob (plain member) ended up with full_sync from a change that only granted it to admin"
+
+    def test_actions_edit_channel_permissions_rejects_unauthorized_local_caller(self, peer_factory):
+        """
+        Direct-call coverage for actions.edit_channel_permissions -- the
+        shared entry point both main_window.py's _on_edit_permissions and
+        devtools/testenv/api.py's update_permissions call. Its own
+        MANAGE_CHANNEL check (not the signed-document path the other
+        MANAGE_CHANNEL tests in this class cover) is what stands between a
+        modified/compromised local client and rewriting the local
+        permissions store directly, bypassing the GUI entirely.
+        """
+        alice, bob, ch_hash = _setup_channel_with_member(
+            peer_factory, member_perms=[SEND_MESSAGE]  # no MANAGE_CHANNEL
+        )
+        before = bob.storage.get_channel_permissions(ch_hash)
+
+        evil_perms = dict(PRESET_PRIVATE)
+        evil_perms[ROLE_MEMBER] = list(ALL_PERMISSIONS)
+        applied = actions.edit_channel_permissions(
+            bob.storage, bob.invite_mgr, ch_hash, bob.identity.hash_hex, evil_perms,
+        )
+
+        assert applied is False
+        assert bob.storage.get_channel_permissions(ch_hash) == before, \
+            "Bob's local permissions store was rewritten by a direct call without MANAGE_CHANNEL"
 
 
 # ---------------------------------------------------------------------------
@@ -798,6 +869,66 @@ class TestAdversarialTenure:
         assert not alice.storage.was_member_at(
             ch_hash, bob.identity.hash_hex, kick_published_at
         )
+
+    def test_forged_joined_at_claim_from_untrusted_signer_rejected(self, peer_factory):
+        """
+        Bob crafts a raw MT_MEMBER_LIST_UPDATE doc claiming he joined the
+        channel long before he actually did (backdated joined_at for
+        himself), signed with his own key rather than an admin/owner's.
+
+        This is the exact scenario update_tenure()'s joined_at_map exists to
+        protect against: a member trying to unlock history from before they
+        were actually added by asserting an earlier join date. The forged
+        claim never even reaches update_tenure(), because _validate_document
+        rejects the whole document first -- Bob isn't a trusted signer, so
+        neither his backdated joined_at nor anything else in his crafted doc
+        is trusted, regardless of what it claims.
+        """
+        alice, bob, ch_hash = _setup_channel_with_member(
+            peer_factory, member_perms=[SEND_MESSAGE]
+        )
+        real_bob_joined_at = alice.storage.get_open_tenure_joined_at(
+            ch_hash, bob.identity.hash_hex
+        )
+        assert real_bob_joined_at is not None
+
+        existing = alice.storage.get_member_list_version(ch_hash)
+        version = existing["version"] + 1
+        published_at = time.time()
+        members = [alice.identity.hash, bob.identity.hash]
+        admins = [alice.identity.hash]
+        owners = [alice.identity.hash]
+        forged_joined_at = {
+            alice.identity.hash: real_bob_joined_at - 10_000,
+            bob.identity.hash:   real_bob_joined_at - 10_000,
+        }
+        payload = _signed_payload(
+            bytes.fromhex(ch_hash), version, published_at,
+            members, admins, owners, b"", forged_joined_at,
+        )
+        sig = _sign(bob.identity.rns_identity, payload)
+        doc = {
+            "channel_hash": bytes.fromhex(ch_hash),
+            "version":      version,
+            "published_at": published_at,
+            "members":      members,
+            "admins":       admins,
+            "owners":       owners,
+            "permissions":  b"",
+            "joined_at":    forged_joined_at,
+            "signatures":   {bob.identity.hash: sig},
+        }
+
+        accepted = alice.invite_mgr._accept_document(doc, ch_hash)
+        assert not accepted, "Alice accepted a member list signed by a non-admin"
+
+        # Bob's tenure must be untouched by the forged claim.
+        assert alice.storage.get_open_tenure_joined_at(
+            ch_hash, bob.identity.hash_hex
+        ) == real_bob_joined_at, "Bob's forged backdated joined_at was applied"
+        assert not alice.storage.was_member_at(
+            ch_hash, bob.identity.hash_hex, real_bob_joined_at - 5_000
+        ), "Bob's forged claim unlocked history from before he actually joined"
 
     def test_synced_message_from_kicked_member_in_gap_is_rejected(self, peer_factory):
         """

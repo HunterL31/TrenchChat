@@ -14,6 +14,7 @@ import pytest
 
 from tests.helpers import (
     wait_for,
+    wait_for_member,
     wait_for_message,
 )
 from trenchchat.core.messaging import _compute_message_id
@@ -416,12 +417,206 @@ class TestStartupSync:
             "Bob did not receive message via request_sync_all"
 
 
+class TestSyncOnChannelJoin:
+    def test_join_triggers_sync_request_to_channel_peers(self, peer_factory):
+        """
+        Regression test for: SyncManager never requested sync when a
+        channel_joined event fired. request_sync_all() only runs once, 3s
+        after app startup, over channels already subscribed at that
+        moment -- a channel joined later in the session was never covered,
+        so a new member never even asked anyone for history.
+
+        This only verifies the *request* goes out on join (the fix in
+        SyncManager). It does not assert the requester ends up with the
+        channel's pre-join history -- that also requires every message's
+        sender to have a locally-known membership_tenure interval covering
+        its timestamp, which for a brand-new joiner is only true for
+        activity within their own local view. Making a joiner trust an
+        existing member's *claimed* earlier history is a separate,
+        security-relevant design question (see the linked bug report) --
+        the signed member-list document carries no per-member join
+        timestamp, so there's no verified source for how far back to
+        trust someone without weakening the tenure/replay protections.
+        """
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+
+        ch_hash = alice.channel_mgr.create_channel("history-on-join", "", "invite")
+        alice.invite_mgr.publish_member_list(ch_hash)
+
+        # Spy on Bob's SyncManager -- his join is what should trigger an
+        # outbound sync request to Alice.
+        sync_requests_seen = []
+        orig_send_sync_request = bob.sync_mgr._send_sync_request
+
+        def spy(dest_hex, channel_hash_hex, since_ts):
+            sync_requests_seen.append((dest_hex, channel_hash_hex))
+            return orig_send_sync_request(dest_hex, channel_hash_hex, since_ts)
+
+        bob.sync_mgr._send_sync_request = spy
+
+        def on_invite(channel_hash_hex, channel_name, token, expiry, admin_hex):
+            bob.invite_mgr.send_join_request(channel_hash_hex, token, expiry, admin_hex)
+
+        bob.invite_mgr.add_invite_callback(on_invite)
+        alice.invite_mgr.send_invite(ch_hash, bob.identity.hash_hex)
+
+        assert wait_for_member(alice.storage, ch_hash, bob.identity.hash_hex, timeout=5), \
+            "Bob never joined"
+
+        assert wait_for(
+            lambda: any(dest == alice.identity.hash_hex and ch == ch_hash
+                       for dest, ch in sync_requests_seen),
+            timeout=5,
+        ), "Bob's SyncManager never sent a sync request to Alice after joining"
+
+    def test_new_member_receives_history_from_before_they_joined_when_full_sync_enabled(
+        self, peer_factory
+    ):
+        """
+        End-to-end: joining an invite-only channel with full_sync enabled
+        backfills the channel's existing history via the join-triggered
+        sync request, not just future messages.
+
+        full_sync is off by default (see TestTenureSyncFiltering's
+        test_pre_join_history_excluded_by_default) -- a plain invite-only
+        channel restricts a new member's sync to messages sent since they
+        joined. This test covers the case where the member role has been
+        granted the full_sync permission, exercising it through the *real*
+        end-to-end pipeline: invite -> join request -> auto-join ->
+        SyncManager's channel_joined-triggered sync request -- not a
+        manually-invoked sync call.
+
+        This also depends on the member-list document carrying each
+        member's real (signed) original join time (invite.py's joined_at
+        field) -- without it, a new joiner's local tenure view only starts
+        at the moment they personally observed each member, and an existing
+        member's genuinely older messages get filtered by the *receiver's*
+        own tenure check even once the sync request itself is working.
+        """
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+
+        perms = dict(PRESET_PRIVATE)
+        perms[ROLE_MEMBER] = [SEND_MESSAGE, FULL_SYNC]
+        ch_hash = alice.channel_mgr.create_channel("history-on-join", "", permissions=perms)
+        alice.invite_mgr.publish_member_list(ch_hash)
+
+        alice.messaging.send_message(
+            channel_hash_hex=ch_hash,
+            content="sent before Bob was even invited",
+            subscriber_hashes=[alice.identity.hash_hex],
+        )
+        pre_join_id = alice.storage.get_messages(ch_hash)[0]["message_id"]
+        # send_message has no timestamp override, so guarantee a real clock
+        # tick has passed before Bob joins -- see
+        # test_pre_join_history_excluded_by_default for why an implicit
+        # ordering assumption alone isn't safe here (Windows' time.time()
+        # resolution can return the same value across calls a few ms apart).
+        time.sleep(0.02)
+
+        def on_invite(channel_hash_hex, channel_name, token, expiry, admin_hex):
+            bob.invite_mgr.send_join_request(channel_hash_hex, token, expiry, admin_hex)
+
+        bob.invite_mgr.add_invite_callback(on_invite)
+        alice.invite_mgr.send_invite(ch_hash, bob.identity.hash_hex)
+
+        assert wait_for_member(alice.storage, ch_hash, bob.identity.hash_hex, timeout=5), \
+            "Bob never joined"
+
+        assert wait_for_message(bob.storage, ch_hash, pre_join_id, timeout=5), \
+            "Bob did not receive the message Alice sent before he joined"
+
+    def test_new_member_does_not_receive_pre_join_history_by_default(self, peer_factory):
+        """
+        Mirror of the full_sync-enabled case above, but for the default
+        (full_sync off) channel -- confirms the join-triggered auto-sync
+        (SyncManager._on_channel_joined) and the tenure filter interact
+        correctly through the real end-to-end invite/join pipeline, not
+        just when sync is triggered manually.
+        """
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+
+        ch_hash = alice.channel_mgr.create_channel("history-on-join-default", "", "invite")
+        alice.invite_mgr.publish_member_list(ch_hash)
+
+        alice.messaging.send_message(
+            channel_hash_hex=ch_hash,
+            content="sent before Bob was even invited",
+            subscriber_hashes=[alice.identity.hash_hex],
+        )
+        pre_join_id = alice.storage.get_messages(ch_hash)[0]["message_id"]
+        # send_message has no timestamp override, so guarantee a real clock
+        # tick has passed before Bob joins -- see
+        # test_pre_join_history_excluded_by_default for why an implicit
+        # ordering assumption alone isn't safe here (Windows' time.time()
+        # resolution can return the same value across calls a few ms apart).
+        time.sleep(0.02)
+
+        def on_invite(channel_hash_hex, channel_name, token, expiry, admin_hex):
+            bob.invite_mgr.send_join_request(channel_hash_hex, token, expiry, admin_hex)
+
+        bob.invite_mgr.add_invite_callback(on_invite)
+        alice.invite_mgr.send_invite(ch_hash, bob.identity.hash_hex)
+
+        assert wait_for_member(alice.storage, ch_hash, bob.identity.hash_hex, timeout=5), \
+            "Bob never joined"
+        assert wait_for(lambda: bob.storage.is_member(ch_hash, bob.identity.hash_hex), timeout=5)
+
+        time.sleep(1.0)  # let the join-triggered sync request round-trip
+        assert not bob.storage.message_exists(pre_join_id), \
+            "Bob received pre-join history via the auto-triggered sync despite full_sync being off"
+
+    def test_forged_tenure_claim_from_untrusted_signer_still_rejected(self, peer_factory):
+        """
+        Security regression test: joined_at only extends trust as far as
+        the signer was already trusted to vouch for -- it must not let an
+        untrusted party inject messages attributed to someone who was
+        never actually a legitimately-signed member.
+
+        Bob crafts a member-list doc claiming Carol has been a member
+        since the dawn of time (and signs it himself, since he's not an
+        admin and has no legitimate signature to offer). Alice must
+        reject the whole document, same as she would without any
+        joined_at claim at all -- _validate_document's signer-trust check
+        runs before joined_at is ever consulted.
+        """
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+        carol = peer_factory("carol")
+
+        ch_hash = alice.channel_mgr.create_channel("no-forged-tenure", "", "invite")
+        alice.invite_mgr.publish_member_list(ch_hash, add_members=[bob.identity.hash])
+        assert wait_for_member(alice.storage, ch_hash, bob.identity.hash_hex, timeout=5)
+
+        bob.storage.upsert_channel(ch_hash, "no-forged-tenure", "", alice.identity.hash_hex,
+                                   "invite", time.time())
+        bob.storage.subscribe(ch_hash)
+
+        forged_doc = bob.invite_mgr._build_document(
+            ch_hash,
+            members=[alice.identity.hash, bob.identity.hash, carol.identity.hash],
+            admins=[alice.identity.hash],
+            version=99,
+            published_at=time.time(),
+            owners=[alice.identity.hash],
+            joined_at={carol.identity.hash: 0.0},  # claims Carol joined at the Unix epoch
+        )
+        accepted = alice.invite_mgr._accept_document(forged_doc, ch_hash)
+
+        assert not accepted, "Alice accepted a member list doc signed by a non-admin"
+        assert not alice.storage.is_member(ch_hash, carol.identity.hash_hex), \
+            "Carol was added to Alice's member list via a forged, unsigned-by-a-trusted-party doc"
+
+
 # ---------------------------------------------------------------------------
 # Membership tenure — sync filtering
 # ---------------------------------------------------------------------------
 
-from trenchchat.core.permissions import PRESET_PRIVATE, ROLE_MEMBER, ROLE_OWNER, SEND_MESSAGE
-from tests.helpers import wait_for_member
+from trenchchat.core.permissions import (
+    FULL_SYNC, PRESET_PRIVATE, ROLE_ADMIN, ROLE_MEMBER, ROLE_OWNER, SEND_MESSAGE,
+)
 
 
 def _setup_invite_channel(peer_factory):
@@ -543,6 +738,155 @@ class TestTenureSyncFiltering:
         assert wait_for_message(alice.storage, ch_hash, valid_msg_id, timeout=5), \
             "Carol did not serve Bob's pre-kick message in a sync response"
 
+    def test_owner_message_survives_sync_to_a_newly_added_member(self, peer_factory):
+        """
+        Regression test: create_channel() used to never open a tenure record
+        for the channel owner. was_member_at() treats "no tenure data" as
+        "wasn't a member", so once *any* tenure data existed for a channel
+        (as soon as one real member was added), the owner's own messages
+        were silently dropped from every sync response -- regardless of
+        when the requesting member actually joined. A new member would
+        never see anything the owner sent, not even messages sent after
+        they joined, since the same untenured-sender filter applies to all
+        of the owner's history alike.
+
+        Uses a message sent *after* Bob joins -- history from before he
+        joined is a separate, deliberate boundary (see
+        test_pre_join_history_excluded_by_default /
+        test_full_sync_enabled_allows_pre_join_history below), not what
+        this test is checking.
+
+        Goes through the real create_channel() -> publish_member_list()
+        path end to end rather than manually seeding tenure rows (the
+        pattern the other tests in this class use), since manually seeding
+        both sides' tenure is exactly what would paper over this gap.
+        """
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+
+        ch_hash = alice.channel_mgr.create_channel("owner-tenure-ch", "", "invite")
+
+        alice.invite_mgr.publish_member_list(ch_hash, add_members=[bob.identity.hash])
+        assert wait_for_member(alice.storage, ch_hash, bob.identity.hash_hex)
+        # Wait for Bob's own side to actually process the real broadcast
+        # document (not manually seeded) -- his own tenure records, for
+        # both himself and Alice, need to come from the real accept flow,
+        # since that's exactly the path the joined_at fix lives in.
+        assert wait_for(lambda: bob.storage.is_member(ch_hash, bob.identity.hash_hex), timeout=5)
+
+        after_msg_id = _insert_message(alice.storage, ch_hash, alice.identity.hash_hex,
+                                       "sent after Bob joined")
+
+        bob.sync_mgr._send_sync_request(alice.identity.hash_hex, ch_hash, 0.0)
+
+        assert wait_for_message(bob.storage, ch_hash, after_msg_id, timeout=5), \
+            "Bob never received the owner's message via sync -- owner's tenure " \
+            "was likely never opened, so was_member_at() rejected it"
+
+    def test_pre_join_history_excluded_by_default(self, peer_factory):
+        """
+        By default (full_sync off), a new member's sync/backfill is bounded
+        by their own join time -- a message sent before they joined an
+        invite-only channel must not reach them via sync, even though the
+        sender was a legitimate, tenured member the whole time.
+        """
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+
+        ch_hash = alice.channel_mgr.create_channel("bounded-sync-ch", "", "invite")
+        # A real sleep between each ordering boundary, not just call order --
+        # time.time() on Windows can return the identical value across calls
+        # a few ms apart, and was_member_at()'s joined_at <= timestamp check
+        # then treats "joined in the same clock tick" as "was already a
+        # member," admitting a message that was, in program order, inserted
+        # before the join. A fixed backdate offset isn't safe either: too
+        # large and it can predate the channel's own creation (failing the
+        # *sender* tenure check instead), so an actual elapsed tick on both
+        # sides of the message is what actually removes the ambiguity.
+        time.sleep(0.02)
+        before_msg_id = _insert_message(alice.storage, ch_hash, alice.identity.hash_hex,
+                                        "sent before Bob joined")
+        time.sleep(0.02)
+
+        alice.invite_mgr.publish_member_list(ch_hash, add_members=[bob.identity.hash])
+        assert wait_for_member(alice.storage, ch_hash, bob.identity.hash_hex)
+        assert wait_for(lambda: bob.storage.is_member(ch_hash, bob.identity.hash_hex), timeout=5)
+
+        bob.sync_mgr._send_sync_request(alice.identity.hash_hex, ch_hash, 0.0)
+        time.sleep(0.5)
+
+        assert not bob.storage.message_exists(before_msg_id), \
+            "Bob received pre-join history via sync despite full_sync being off by default"
+
+    def test_full_sync_enabled_allows_pre_join_history(self, peer_factory):
+        """
+        An admin who grants the member role full_sync lets new members
+        backfill the channel's entire history via sync, including messages
+        from before they joined -- the opt-in this permission exists to
+        provide.
+        """
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+
+        perms = dict(PRESET_PRIVATE)
+        perms[ROLE_MEMBER] = [SEND_MESSAGE, FULL_SYNC]
+        ch_hash = alice.channel_mgr.create_channel("full-sync-ch", "", permissions=perms)
+        # See test_pre_join_history_excluded_by_default for why these sleeps
+        # are needed instead of relying on call ordering alone.
+        time.sleep(0.02)
+        before_msg_id = _insert_message(alice.storage, ch_hash, alice.identity.hash_hex,
+                                        "sent before Bob joined")
+        time.sleep(0.02)
+
+        alice.invite_mgr.publish_member_list(ch_hash, add_members=[bob.identity.hash])
+        assert wait_for_member(alice.storage, ch_hash, bob.identity.hash_hex)
+        assert wait_for(lambda: bob.storage.is_member(ch_hash, bob.identity.hash_hex), timeout=5)
+
+        bob.sync_mgr._send_sync_request(alice.identity.hash_hex, ch_hash, 0.0)
+
+        assert wait_for_message(bob.storage, ch_hash, before_msg_id, timeout=5), \
+            "Bob did not receive pre-join history via sync despite full_sync being enabled"
+
+    def test_full_sync_granted_to_admin_but_not_member(self, peer_factory):
+        """
+        The scenario full_sync being a per-role permission (rather than a
+        channel-wide flag) exists for: an admin can be trusted to backfill
+        the entire channel history while ordinary members stay bounded to
+        their own join time, on the very same channel.
+        """
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")     # plain member -- no full_sync
+        carol = peer_factory("carol")  # admin -- granted full_sync
+
+        perms = dict(PRESET_PRIVATE)
+        perms[ROLE_ADMIN] = [SEND_MESSAGE, FULL_SYNC]
+        ch_hash = alice.channel_mgr.create_channel("admin-only-full-sync-ch", "",
+                                                    permissions=perms)
+        # See test_pre_join_history_excluded_by_default for why these sleeps
+        # are needed instead of relying on call ordering alone.
+        time.sleep(0.02)
+        before_msg_id = _insert_message(alice.storage, ch_hash, alice.identity.hash_hex,
+                                        "sent before Bob and Carol joined")
+        time.sleep(0.02)
+
+        alice.invite_mgr.publish_member_list(
+            ch_hash, add_members=[bob.identity.hash, carol.identity.hash],
+            add_admins=[carol.identity.hash],
+        )
+        assert wait_for_member(alice.storage, ch_hash, bob.identity.hash_hex)
+        assert wait_for_member(alice.storage, ch_hash, carol.identity.hash_hex)
+        assert wait_for(lambda: bob.storage.is_member(ch_hash, bob.identity.hash_hex), timeout=5)
+        assert wait_for(lambda: carol.storage.is_member(ch_hash, carol.identity.hash_hex), timeout=5)
+
+        bob.sync_mgr._send_sync_request(alice.identity.hash_hex, ch_hash, 0.0)
+        carol.sync_mgr._send_sync_request(alice.identity.hash_hex, ch_hash, 0.0)
+        time.sleep(0.5)
+
+        assert not bob.storage.message_exists(before_msg_id), \
+            "Bob (plain member, no full_sync) received pre-join history"
+        assert wait_for_message(carol.storage, ch_hash, before_msg_id, timeout=5), \
+            "Carol (admin, granted full_sync) did not receive pre-join history"
+
     def test_no_tenure_data_allows_sync_without_filtering(self, peer_factory):
         """
         When no tenure data exists for a channel (e.g. open-join channel or
@@ -637,6 +981,11 @@ class TestImageSync:
         ch_hash = alice.channel_mgr.create_channel("img-sync", "", "public")
         _seed_channel_on_peer(bob, ch_hash, "img-sync", alice.identity.hash_hex)
 
+        # Timestamped after channel creation, not before -- create_channel()
+        # opens the owner's own tenure at creation time, so a message
+        # "sent" earlier than that would describe an impossible timeline
+        # (Alice sending in a channel before it existed) and gets correctly
+        # rejected as untenured by the sync tenure filter.
         ts = time.time()
         msg_id = alice.storage.get_messages(ch_hash)
         # Insert directly with image data
@@ -645,11 +994,11 @@ class TestImageSync:
             sender_hash=alice.identity.hash_hex,
             sender_name="Alice",
             content="synced image",
-            timestamp=ts - 10,
+            timestamp=ts,
             message_id="sync_img_001",
             reply_to=None,
             last_seen_id=None,
-            received_at=ts - 10,
+            received_at=ts,
             image_data=_FAKE_JPEG,
         )
 

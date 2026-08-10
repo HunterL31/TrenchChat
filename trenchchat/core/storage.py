@@ -696,16 +696,28 @@ class Storage:
             """, (left_at, channel_hash, identity_hash, channel_hash, identity_hash))
 
     def update_tenure(self, channel_hash: str, old_members: set[str],
-                      new_members: set[str], published_at: float):
+                      new_members: set[str], published_at: float,
+                      joined_at_map: dict[str, float] | None = None):
         """Diff old vs new member sets and update tenure records accordingly.
 
         Members in old_members but not new_members get their open interval
         closed at published_at.  Members in new_members but not old_members
-        get a new open interval starting at published_at.  Members in both
-        sets are unchanged.
+        get a new open interval starting at published_at, unless
+        *joined_at_map* gives a specific identity_hash -> joined_at for them
+        (their true historical join time, carried in the signed member-list
+        document) -- this matters most the first time a peer processes any
+        version of a channel's document: without it, everyone already in
+        the member list looks like they joined "now" (the publish time of
+        this particular version) from the new recipient's perspective,
+        including the channel owner -- silently hiding all of the owner's
+        history from before this document version, regardless of how long
+        the channel had actually existed. Values are clamped to
+        [0, published_at] so a claimed join time can't be forged into the
+        future or before Unix epoch.  Members in both sets are unchanged.
         """
         removed = old_members - new_members
         added = new_members - old_members
+        joined_at_map = joined_at_map or {}
         with self._tx():
             for ih in removed:
                 self._conn.execute("""
@@ -718,11 +730,18 @@ class Storage:
                       )
                 """, (published_at, channel_hash, ih, channel_hash, ih))
             for ih in added:
+                # Clamp: never in the future relative to this document's own
+                # publish time, never negative. The signer is already
+                # trusted (checked before this is ever called) to attest to
+                # membership at all; this just bounds how far a claimed
+                # join time can stray from something sane.
+                joined_at = joined_at_map.get(ih, published_at)
+                joined_at = min(max(joined_at, 0.0), published_at)
                 self._conn.execute("""
                     INSERT OR IGNORE INTO membership_tenure
                         (channel_hash, identity_hash, joined_at, left_at)
                     VALUES (?, ?, ?, NULL)
-                """, (channel_hash, ih, published_at))
+                """, (channel_hash, ih, joined_at))
 
     def was_member_at(self, channel_hash: str, identity_hash: str,
                       timestamp: float) -> bool:
@@ -739,6 +758,21 @@ class Storage:
             LIMIT 1
         """, (channel_hash, identity_hash, timestamp, timestamp))
         return row is not None
+
+    def get_open_tenure_joined_at(self, channel_hash: str, identity_hash: str) -> float | None:
+        """Return the joined_at of the current open tenure interval, if any.
+
+        Used when publishing a member-list document: carries each existing
+        member's true historical join time in the signed joined_at map,
+        rather than letting it default to this publish's timestamp for
+        everyone (see update_tenure's joined_at_map for why that matters).
+        """
+        row = self._fetchone("""
+            SELECT joined_at FROM membership_tenure
+            WHERE channel_hash = ? AND identity_hash = ? AND left_at IS NULL
+            ORDER BY joined_at DESC LIMIT 1
+        """, (channel_hash, identity_hash))
+        return row["joined_at"] if row else None
 
     def has_any_tenure(self, channel_hash: str) -> bool:
         """Return True if the membership_tenure table has any rows for this channel.

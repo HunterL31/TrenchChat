@@ -1,0 +1,8 @@
+# Dependencies for the local two-tester test environment (devtools/testenv/).
+# Dev-only -- not part of the shipped app; install into the same .venv as
+# the main requirements.txt before running orchestrator.py or smoke_test.py.
+
+fastapi>=0.141
+uvicorn[standard]>=0.52
+httpx>=0.28
+websockets>=16.1

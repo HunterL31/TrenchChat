@@ -1,0 +1,1162 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TrenchChat test environment</title>
+<style>
+  :root {
+    --bg: #1e1f22; --panel: #2b2d31; --panel2: #313338; --border: #3f4147;
+    --text: #dbdee1; --dim: #949ba4; --accent: #5865f2; --accent2: #4752c4;
+    --danger: #da373c; --ok: #23a55a;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; font-family: -apple-system, Segoe UI, Roboto, sans-serif;
+    background: var(--bg); color: var(--text); height: 100vh; display: flex;
+    flex-direction: column;
+  }
+  header {
+    display: flex; align-items: center; justify-content: space-between; gap: 10px;
+    padding: 10px 16px; background: var(--panel2); border-bottom: 1px solid var(--border);
+  }
+  header h1 { font-size: 15px; margin: 0; font-weight: 600; color: var(--dim); min-width: 0; }
+  #reset-btn {
+    background: var(--danger); color: white; border: none; border-radius: 4px;
+    padding: 7px 14px; cursor: pointer; font-size: 13px; font-weight: 600; flex-shrink: 0;
+  }
+  #reset-btn:hover { background: #c62d31; }
+  #reset-btn:disabled { opacity: 0.5; cursor: default; }
+  main { flex: 1; display: flex; overflow: hidden; }
+  .pane {
+    flex: 1; display: flex; flex-direction: column; min-width: 0;
+    border-right: 1px solid var(--border);
+  }
+  .pane:last-child { border-right: none; }
+  .pane-header {
+    padding: 10px 14px; background: var(--panel2); border-bottom: 1px solid var(--border);
+  }
+  .pane-name { font-weight: 700; font-size: 14px; }
+  .pane-hash { font-size: 11px; color: var(--dim); font-family: monospace; }
+  .peer-status { font-size: 11px; color: var(--dim); margin-top: 3px; }
+  .avatar-thumb {
+    display: inline-block; width: 22px; height: 22px; border-radius: 50%;
+    background-color: var(--panel); background-size: cover; background-position: center;
+    vertical-align: middle; margin-right: 6px; border: 1px solid var(--border); cursor: pointer;
+  }
+  .avatar-thumb-sm {
+    display: inline-block; width: 16px; height: 16px; border-radius: 50%;
+    background-color: var(--panel); background-size: cover; background-position: center;
+    vertical-align: middle; margin-right: 4px; border: 1px solid var(--border);
+  }
+  .editable-name { cursor: pointer; border-bottom: 1px dashed transparent; }
+  .editable-name:hover { border-bottom-color: var(--dim); }
+  .name-edit-input {
+    background: var(--bg); border: 1px solid var(--accent); border-radius: 3px;
+    color: var(--text); font-size: 14px; font-weight: 700; padding: 1px 4px; width: 140px;
+  }
+  .invite-bar {
+    display: none; align-items: center; justify-content: space-between;
+    background: #3a3f2a; border-bottom: 1px solid var(--border);
+    padding: 8px 14px; font-size: 12px;
+  }
+  .invite-bar.show { display: flex; }
+  .invite-bar button {
+    border: none; border-radius: 4px; padding: 4px 10px; font-size: 11px;
+    cursor: pointer; margin-left: 6px; color: white;
+  }
+  .invite-bar .accept { background: var(--ok); }
+  .invite-bar .decline { background: var(--danger); }
+  .pane-body { flex: 1; display: flex; overflow: hidden; }
+  .channel-list {
+    width: 200px; background: var(--panel); border-right: 1px solid var(--border);
+    overflow-y: auto; padding: 8px; flex-shrink: 0;
+  }
+  .channel-item {
+    padding: 7px 8px; border-radius: 4px; cursor: pointer; font-size: 13px;
+    color: var(--dim); margin-bottom: 2px;
+  }
+  .channel-item:hover { background: var(--panel2); }
+  .channel-item.active { background: var(--accent); color: white; }
+  .channel-item .badge {
+    font-size: 10px; opacity: 0.7; display: block;
+  }
+  .new-channel-btn {
+    width: 100%; margin-top: 6px; padding: 6px; background: var(--panel2);
+    color: var(--text); border: 1px dashed var(--border); border-radius: 4px;
+    cursor: pointer; font-size: 12px;
+  }
+  .new-channel-btn:hover { border-color: var(--accent); }
+  .discovered-header {
+    font-size: 10px; text-transform: uppercase; color: var(--dim);
+    margin: 14px 0 6px 4px; letter-spacing: 0.03em;
+  }
+  .discovered-item {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 6px 8px; border-radius: 4px; font-size: 12px; color: var(--dim);
+    margin-bottom: 2px;
+  }
+  .discovered-item button {
+    background: var(--ok); color: white; border: none; border-radius: 4px;
+    padding: 3px 9px; font-size: 11px; cursor: pointer; flex-shrink: 0;
+  }
+  .chat-area { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  .chat-toolbar {
+    padding: 8px 12px; border-bottom: 1px solid var(--border); font-size: 12px;
+    color: var(--dim); display: flex; justify-content: space-between; align-items: center;
+  }
+  .chat-toolbar button {
+    background: var(--panel2); color: var(--text); border: 1px solid var(--border);
+    border-radius: 4px; padding: 4px 10px; font-size: 11px; cursor: pointer; margin-left: 6px;
+  }
+  .chat-toolbar button:hover { border-color: var(--accent); }
+  .messages { flex: 1; overflow-y: auto; padding: 10px 14px; font-size: 13px; }
+  .msg { margin-bottom: 8px; }
+  .msg .sender { font-weight: 700; margin-right: 6px; }
+  .msg .content { color: var(--text); }
+  .msg .self .sender { color: #ffa057; }
+  .msg-row { display: flex; align-items: flex-start; gap: 2px; }
+  .msg-body { flex: 1; min-width: 0; }
+  .react-btn {
+    background: none; border: none; color: var(--dim); cursor: pointer; font-size: 12px;
+    padding: 0 4px; opacity: 0; visibility: hidden;
+  }
+  .msg:hover .react-btn { opacity: 1; visibility: visible; }
+  .reactions { margin-top: 2px; display: flex; flex-wrap: wrap; gap: 4px; }
+  .reaction-chip {
+    display: inline-flex; align-items: center; gap: 4px; background: var(--panel2);
+    border: 1px solid var(--border); border-radius: 10px; padding: 1px 7px 1px 4px;
+    cursor: pointer; font-size: 11px;
+  }
+  .reaction-chip.mine { border-color: var(--accent); background: #333a6b; }
+  .reaction-chip img { width: 14px; height: 14px; object-fit: contain; }
+  .emoji-picker {
+    position: absolute; background: var(--panel2); border: 1px solid var(--border);
+    border-radius: 6px; padding: 8px; z-index: 30; display: flex; flex-wrap: wrap;
+    gap: 6px; width: 180px;
+  }
+  .emoji-picker img { width: 24px; height: 24px; object-fit: contain; cursor: pointer; }
+  .emoji-picker .empty-state { padding: 4px; width: 100%; }
+  .emoji-picker .import-row { width: 100%; border-top: 1px solid var(--border); margin-top: 6px; padding-top: 6px; }
+  .emoji-picker .import-row label {
+    font-size: 11px; color: var(--dim); cursor: pointer; text-decoration: underline;
+  }
+  .empty-state { color: var(--dim); font-size: 12px; padding: 20px; text-align: center; }
+  .compose { display: flex; padding: 10px; border-top: 1px solid var(--border); gap: 8px; }
+  .compose input {
+    flex: 1; background: var(--panel2); border: 1px solid var(--border); border-radius: 4px;
+    color: var(--text); padding: 8px 10px; font-size: 13px;
+  }
+  .compose button {
+    background: var(--accent); color: white; border: none; border-radius: 4px;
+    padding: 8px 14px; cursor: pointer; font-size: 13px;
+  }
+  .compose button:hover { background: var(--accent2); }
+  .attach-btn {
+    background: var(--panel2) !important; border: 1px solid var(--border);
+    padding: 8px 10px !important; flex-shrink: 0;
+  }
+  .image-preview {
+    display: none; align-items: center; gap: 8px; padding: 0 10px;
+    background: var(--panel2);
+  }
+  .image-preview.show { display: flex; }
+  .image-preview img { max-height: 60px; border-radius: 4px; margin: 6px 0; }
+  .image-preview .remove-img {
+    background: var(--danger); color: white; border: none; border-radius: 4px;
+    padding: 3px 8px; font-size: 11px; cursor: pointer;
+  }
+  .msg img.attached { max-width: 260px; max-height: 260px; border-radius: 6px; display: block; margin-top: 4px; }
+  .msg .reply-quote {
+    border-left: 2px solid var(--accent); padding: 2px 8px; margin-bottom: 3px;
+    font-size: 11px; color: var(--dim); opacity: 0.85;
+  }
+  .msg .reply-quote b { color: var(--text); }
+  .msg .reply-btn {
+    background: none; border: none; color: var(--dim); font-size: 10px;
+    cursor: pointer; opacity: 0; margin-left: 6px; padding: 0;
+  }
+  .msg:hover .reply-btn { opacity: 1; }
+  .msg .reply-btn:hover { color: var(--accent); text-decoration: underline; }
+  .reply-bar {
+    display: none; align-items: center; justify-content: space-between;
+    padding: 6px 10px; background: var(--panel2); border-left: 2px solid var(--accent);
+    font-size: 11px; color: var(--dim);
+  }
+  .reply-bar.show { display: flex; }
+  .reply-bar b { color: var(--text); }
+  .reply-bar button {
+    background: none; border: none; color: var(--dim); cursor: pointer; font-size: 14px;
+  }
+  .status-dot {
+    display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+    background: var(--dim); margin-right: 6px;
+  }
+  .status-dot.up { background: var(--ok); }
+  #toast {
+    position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%);
+    background: var(--panel2); border: 1px solid var(--border); border-radius: 6px;
+    padding: 10px 18px; font-size: 13px; display: none; z-index: 10;
+  }
+  .modal-backdrop {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.5); display: none;
+    align-items: center; justify-content: center; z-index: 20;
+  }
+  .modal-backdrop.show { display: flex; }
+  .modal {
+    background: var(--panel2); border: 1px solid var(--border); border-radius: 8px;
+    padding: 18px; width: min(320px, 90vw);
+  }
+  .modal h3 { margin: 0 0 12px 0; font-size: 14px; }
+  .modal label { display: block; font-size: 12px; color: var(--dim); margin: 10px 0 4px; }
+  .modal input, .modal select {
+    width: 100%; background: var(--bg); border: 1px solid var(--border); border-radius: 4px;
+    color: var(--text); padding: 7px 9px; font-size: 13px;
+  }
+  .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+  .modal-actions button {
+    padding: 7px 14px; border-radius: 4px; border: none; cursor: pointer; font-size: 12px;
+  }
+  .modal-actions .cancel { background: var(--panel); color: var(--text); }
+  .modal-actions .confirm { background: var(--accent); color: white; }
+  .member-row {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 8px 4px; border-bottom: 1px solid var(--border); font-size: 12px; gap: 8px;
+  }
+  .member-row:last-child { border-bottom: none; }
+  .member-hash { font-family: monospace; color: var(--dim); overflow: hidden; text-overflow: ellipsis; }
+  .member-role {
+    font-size: 10px; text-transform: uppercase; padding: 2px 6px; border-radius: 3px;
+    background: var(--panel); color: var(--dim); flex-shrink: 0;
+  }
+  .member-actions { display: flex; gap: 4px; flex-shrink: 0; }
+  .member-actions button {
+    border: none; border-radius: 4px; padding: 4px 8px; font-size: 11px;
+    cursor: pointer; color: white; white-space: nowrap;
+  }
+  .member-actions .kick { background: var(--danger); }
+  .member-actions .promote, .member-actions .demote { background: var(--accent); }
+  .perm-table { width: 100%; font-size: 12px; border-collapse: collapse; }
+  .perm-table th { text-align: left; color: var(--dim); font-weight: 600; padding: 6px 4px; font-size: 11px; }
+  .perm-table th:not(:first-child), .perm-table td:not(:first-child) { text-align: center; width: 60px; }
+  .perm-table td { padding: 6px 4px; border-top: 1px solid var(--border); }
+  .perm-table input[type=checkbox] { width: 15px; height: 15px; cursor: pointer; }
+  .directory-results { max-height: 220px; overflow-y: auto; margin-top: 6px; }
+  .directory-item {
+    display: flex; align-items: center; gap: 6px; padding: 7px 6px; border-radius: 4px;
+    cursor: pointer; font-size: 13px;
+  }
+  .directory-item:hover { background: var(--panel); }
+  .dir-hash { color: var(--dim); font-size: 11px; font-family: monospace; margin-left: auto; }
+
+  /* --- Mobile: stack the two tester panes instead of squeezing them
+     side by side into unusable slivers. --- */
+  @media (max-width: 860px) {
+    header {
+      flex-wrap: wrap;
+    }
+    header h1 { font-size: 13px; }
+    #hint { display: none; }
+    main {
+      flex-direction: column;
+      overflow-y: auto;
+      overflow-x: hidden;
+    }
+    .pane {
+      border-right: none;
+      border-bottom: 2px solid var(--border);
+      flex: none;
+      height: 48vh;
+      min-height: 320px;
+    }
+    .pane:last-child { border-bottom: none; }
+    .channel-list {
+      width: 120px;
+    }
+    .chat-toolbar {
+      flex-wrap: wrap;
+      row-gap: 4px;
+    }
+  }
+
+  /* --- Very narrow phones: channel list gets tight, drop it further
+     and shrink the compose button so the input stays usable. --- */
+  @media (max-width: 420px) {
+    .channel-list { width: 96px; padding: 6px; }
+    .channel-item { font-size: 12px; padding: 6px; }
+    .compose button { padding: 8px 10px; }
+    .pane-hash { font-size: 10px; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>TrenchChat test environment &mdash; <span id="hint">two isolated testers, real backend, no manual key exchange</span></h1>
+  <button id="reset-btn" onclick="resetEnvironment()">Reset environment</button>
+</header>
+
+<main id="panes"></main>
+
+<div id="toast"></div>
+
+<div class="modal-backdrop" id="new-channel-modal">
+  <div class="modal">
+    <h3>New channel</h3>
+    <label>Name</label>
+    <input id="nc-name" placeholder="general">
+    <label>Access</label>
+    <select id="nc-access">
+      <option value="public">Public (open join)</option>
+      <option value="invite">Invite-only</option>
+    </select>
+    <div class="modal-actions">
+      <button class="cancel" onclick="closeNewChannelModal()">Cancel</button>
+      <button class="confirm" onclick="submitNewChannel()">Create</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-backdrop" id="members-modal">
+  <div class="modal" style="width: min(420px, 90vw);">
+    <h3>Members</h3>
+    <div id="members-list"></div>
+    <div class="modal-actions">
+      <button class="cancel" onclick="closeMembersModal()">Close</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-backdrop" id="permissions-modal">
+  <div class="modal" style="width: min(420px, 90vw);">
+    <h3>Role permissions</h3>
+    <div id="permissions-editor"></div>
+    <div class="modal-actions">
+      <button class="cancel" onclick="closePermissionsModal()">Cancel</button>
+      <button class="confirm" onclick="savePermissions()">Save</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-backdrop" id="network-modal">
+  <div class="modal" style="width:min(560px, 92vw)">
+    <h3>Network &mdash; <span id="net-title"></span></h3>
+    <div id="net-content" style="max-height:60vh; overflow-y:auto; font-size:12px;"></div>
+    <div class="modal-actions">
+      <button class="cancel" onclick="refreshNetworkModal()">Refresh</button>
+      <button class="confirm" onclick="closeNetworkModal()">Close</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-backdrop" id="invite-modal">
+  <div class="modal">
+    <h3>Invite a peer</h3>
+    <label>Search</label>
+    <input id="inv-search" placeholder="name or hash" oninput="searchDirectory()">
+    <div class="directory-results" id="inv-results"></div>
+    <div class="modal-actions">
+      <button class="cancel" onclick="closeInviteModal()">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const TESTERS = ['A', 'B'];
+const state = {
+  A: { port: null, me: null, channels: [], activeChannel: null, ws: null, invites: [], pendingImage: null, replyTarget: null },
+  B: { port: null, me: null, channels: [], activeChannel: null, ws: null, invites: [], pendingImage: null, replyTarget: null },
+};
+// Per-tag cache of identity_hash -> data URL (or null if confirmed no avatar).
+const avatarCache = { A: {}, B: {} };
+let newChannelForTag = null;
+
+function apiBase(tag) {
+  return `http://${location.hostname}:${state[tag].port}`;
+}
+function wsBase(tag) {
+  return `ws://${location.hostname}:${state[tag].port}`;
+}
+function other(tag) { return tag === 'A' ? 'B' : 'A'; }
+
+function toast(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.style.display = 'block';
+  clearTimeout(toast._t);
+  toast._t = setTimeout(() => t.style.display = 'none', 3000);
+}
+
+function editDisplayName(tag) {
+  const span = document.getElementById(`name-display-${tag}`);
+  const current = span.textContent;
+  const input = document.createElement('input');
+  input.className = 'name-edit-input';
+  input.value = current;
+  span.replaceWith(input);
+  input.focus();
+  input.select();
+
+  const save = async () => {
+    const newName = input.value.trim() || current;
+    const result = await api(tag, '/me/display_name', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({display_name: newName}),
+    });
+    state[tag].me.display_name = newName;
+    span.textContent = newName;
+    input.replaceWith(span);
+    if (!result.ok) toast(`Tester ${tag}: rename failed`);
+  };
+  input.addEventListener('keydown', e => { if (e.key === 'Enter') input.blur(); });
+  input.addEventListener('blur', save, {once: true});
+}
+
+async function api(tag, path, opts) {
+  const res = await fetch(apiBase(tag) + path, opts);
+  if (!res.ok) throw new Error(`${tag} ${path} -> ${res.status}`);
+  return res.json();
+}
+
+function renderShell() {
+  const panes = document.getElementById('panes');
+  panes.innerHTML = TESTERS.map(tag => `
+    <div class="pane" id="pane-${tag}">
+      <div class="pane-header">
+        <div class="pane-name">
+          <span class="status-dot" id="dot-${tag}"></span>
+          <span class="avatar-thumb" id="avatar-${tag}"
+              onclick="document.getElementById('avatar-file-${tag}').click()"
+              title="Click to change your avatar"></span>
+          <span id="name-display-${tag}" class="editable-name" onclick="editDisplayName('${tag}')" title="Click to rename">Tester ${tag}</span>
+          <input type="file" accept="image/*" id="avatar-file-${tag}" style="display:none" onchange="uploadAvatar('${tag}')">
+        </div>
+        <div class="pane-hash" id="hash-${tag}">connecting...</div>
+        <div class="peer-status">
+          <span class="status-dot" id="peer-dot-${tag}"></span>
+          <span id="peer-status-text-${tag}">Tester ${other(tag)} status unknown</span>
+        </div>
+      </div>
+      <div class="invite-bar" id="invite-bar-${tag}">
+        <span id="invite-text-${tag}"></span>
+        <span>
+          <button class="accept" onclick="respondInvite('${tag}', true)">Accept</button>
+          <button class="decline" onclick="respondInvite('${tag}', false)">Decline</button>
+        </span>
+      </div>
+      <div class="pane-body">
+        <div class="channel-list">
+          <div id="channels-${tag}"></div>
+          <button class="new-channel-btn" onclick="openNewChannelModal('${tag}')">+ New channel</button>
+          <div class="discovered-header">Discovered (not joined)</div>
+          <div id="discovered-${tag}"></div>
+        </div>
+        <div class="chat-area">
+          <div class="chat-toolbar">
+            <span id="active-channel-${tag}">No channel selected</span>
+            <span>
+              <button onclick="openMembersModal('${tag}')" title="View and manage members">Members</button>
+              <button onclick="openPermissionsModal('${tag}')" title="Edit role permissions">Permissions</button>
+              <button onclick="openInviteModal('${tag}')" title="Search the peer directory and invite someone to this channel">Invite...</button>
+              <button onclick="openNetworkModal('${tag}')" title="View network topology and configured interfaces">Network</button>
+            </span>
+          </div>
+          <div class="messages" id="messages-${tag}">
+            <div class="empty-state">Select or create a channel to get started.</div>
+          </div>
+          <div class="reply-bar" id="reply-bar-${tag}"></div>
+          <div class="image-preview" id="image-preview-${tag}"></div>
+          <div class="compose">
+            <input type="file" accept="image/*" id="file-input-${tag}" style="display:none"
+                  onchange="onImageSelected('${tag}', this.files[0])">
+            <button class="attach-btn" onclick="document.getElementById('file-input-${tag}').click()"
+                   title="Attach an image">📎</button>
+            <input id="compose-${tag}" placeholder="Message..." onkeydown="if(event.key==='Enter') sendMessage('${tag}')">
+            <button onclick="sendMessage('${tag}')">Send</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  `).join('');
+}
+
+async function connectTester(tag) {
+  const cfg = await (await fetch('/config')).json();
+  state[tag].port = tag === 'A' ? cfg.a_api_port : cfg.b_api_port;
+
+  for (let i = 0; i < 20; i++) {
+    try {
+      state[tag].me = await api(tag, '/me');
+      break;
+    } catch (e) {
+      await new Promise(r => setTimeout(r, 500));
+    }
+  }
+  if (!state[tag].me) {
+    document.getElementById(`hash-${tag}`).textContent = 'failed to connect';
+    return;
+  }
+  document.getElementById(`dot-${tag}`).classList.add('up');
+  document.getElementById(`hash-${tag}`).textContent = state[tag].me.hash_hex.slice(0, 16) + '…';
+  document.getElementById(`name-display-${tag}`).textContent = state[tag].me.display_name;
+
+  await refreshChannels(tag);
+  await refreshDiscovered(tag);
+  await refreshInvites(tag);
+  connectWs(tag);
+  refreshPeerPresence(tag);
+  refreshOwnAvatar(tag);
+  refreshEmojiLibrary(tag);
+}
+
+function avatarDataUrl(b64) {
+  return b64 ? `data:image/jpeg;base64,${b64}` : null;
+}
+
+function applyAvatar(el, dataUrl) {
+  if (!el) return;
+  el.style.backgroundImage = dataUrl ? `url(${dataUrl})` : 'none';
+}
+
+async function refreshOwnAvatar(tag) {
+  const res = await api(tag, '/me/avatar');
+  const url = avatarDataUrl(res.avatar_data_b64);
+  avatarCache[tag][state[tag].me.hash_hex] = url;
+  applyAvatar(document.getElementById(`avatar-${tag}`), url);
+}
+
+async function getPeerAvatarUrl(tag, hash) {
+  if (hash in avatarCache[tag]) return avatarCache[tag][hash];
+  try {
+    const res = await api(tag, `/peers/${hash}/avatar`);
+    const url = avatarDataUrl(res.avatar_data_b64);
+    avatarCache[tag][hash] = url;
+    return url;
+  } catch (e) {
+    return null;
+  }
+}
+
+function uploadAvatar(tag) {
+  const input = document.getElementById(`avatar-file-${tag}`);
+  const file = input.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = async () => {
+    const b64 = reader.result.split(',')[1];
+    try {
+      await api(tag, '/me/avatar', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({image_data_b64: b64}),
+      });
+      await refreshOwnAvatar(tag);
+    } catch (e) {
+      toast(`Tester ${tag}: avatar update failed`);
+    }
+  };
+  reader.readAsDataURL(file);
+  input.value = '';
+}
+
+function setPeerStatus(tag, isOnline) {
+  const dot = document.getElementById(`peer-dot-${tag}`);
+  const text = document.getElementById(`peer-status-text-${tag}`);
+  if (!dot || !text) return;
+  dot.classList.toggle('up', isOnline);
+  text.textContent = `Tester ${other(tag)} ${isOnline ? 'online' : 'offline'}`;
+}
+
+async function refreshPeerPresence(tag) {
+  const target = other(tag);
+  if (!state[target].me || !state[tag].me) return;
+  try {
+    const res = await api(tag, `/peers/${state[target].me.hash_hex}/presence`);
+    setPeerStatus(tag, res.is_online);
+  } catch (e) {
+    // transient -- next poll or WS event will catch up
+  }
+}
+
+function connectWs(tag) {
+  const ws = new WebSocket(wsBase(tag) + '/ws');
+  ws.onmessage = (evt) => {
+    const msg = JSON.parse(evt.data);
+    if (msg.type === 'message' && msg.channel_hash === state[tag].activeChannel) {
+      renderMessages(tag);
+    } else if (msg.type === 'invite_received') {
+      toast(`Tester ${tag}: invite received for #${msg.channel_name}`);
+      refreshInvites(tag);
+    } else if (msg.type === 'channel_joined' || msg.type === 'member_list_updated') {
+      refreshChannels(tag);
+      if (msg.channel_hash === state[tag].activeChannel) {
+        renderMessages(tag);
+        if (membersModalTag === tag) refreshMembersModal();
+      }
+    } else if (msg.type === 'channel_discovered') {
+      toast(`Tester ${tag}: discovered #${msg.channel_name}`);
+      refreshDiscovered(tag);
+    } else if (msg.type === 'presence') {
+      // This harness only ever has one peer per tester, so any presence
+      // event on tag's socket is about tag's counterpart.
+      setPeerStatus(tag, msg.is_online);
+    } else if (msg.type === 'avatar_updated') {
+      delete avatarCache[tag][msg.identity_hash];
+      if (state[tag].me && msg.identity_hash === state[tag].me.hash_hex) refreshOwnAvatar(tag);
+      if (state[tag].activeChannel) renderMessages(tag);
+    } else if (msg.type === 'reaction_updated') {
+      if (msg.channel_hash === state[tag].activeChannel) renderMessages(tag);
+    } else if (msg.type === 'emoji_received') {
+      refreshEmojiLibrary(tag).then(() => {
+        if (state[tag].activeChannel) renderMessages(tag);
+      });
+    }
+  };
+  ws.onclose = () => setTimeout(() => connectWs(tag), 2000);
+  state[tag].ws = ws;
+}
+
+async function refreshInvites(tag) {
+  state[tag].invites = await api(tag, '/invites');
+  const bar = document.getElementById(`invite-bar-${tag}`);
+  const text = document.getElementById(`invite-text-${tag}`);
+  if (state[tag].invites.length === 0) {
+    bar.classList.remove('show');
+    return;
+  }
+  const inv = state[tag].invites[0];
+  const more = state[tag].invites.length > 1 ? ` (+${state[tag].invites.length - 1} more)` : '';
+  text.textContent = `Invited to #${inv.channel_name}${more}`;
+  bar.classList.add('show');
+  bar.dataset.channelHash = inv.channel_hash_hex;
+}
+
+async function respondInvite(tag, accept) {
+  const bar = document.getElementById(`invite-bar-${tag}`);
+  const channelHash = bar.dataset.channelHash;
+  if (!channelHash) return;
+  await api(tag, `/invites/${channelHash}/${accept ? 'accept' : 'decline'}`, {method: 'POST'});
+  await refreshInvites(tag);
+  if (accept) toast(`Tester ${tag}: join request sent, waiting for admin approval`);
+}
+
+async function refreshChannels(tag) {
+  state[tag].channels = await api(tag, '/channels');
+  const list = document.getElementById(`channels-${tag}`);
+  if (state[tag].channels.length === 0) {
+    list.innerHTML = '<div class="empty-state">No channels yet</div>';
+    return;
+  }
+  list.innerHTML = state[tag].channels.map(c => `
+    <div class="channel-item ${c.hash === state[tag].activeChannel ? 'active' : ''}"
+        onclick="selectChannel('${tag}', '${c.hash}')">
+      #${c.name}
+      <span class="badge">${c.open_join ? 'public' : 'invite-only'}</span>
+    </div>
+  `).join('');
+}
+
+async function refreshDiscovered(tag) {
+  const discovered = await api(tag, '/channels/discovered');
+  const box = document.getElementById(`discovered-${tag}`);
+  if (discovered.length === 0) {
+    box.innerHTML = '<div class="empty-state" style="padding:4px 0;">None yet</div>';
+    return;
+  }
+  box.innerHTML = discovered.map(c => `
+    <div class="discovered-item">
+      <span>#${c.name}</span>
+      <button onclick="joinDiscoveredChannel('${tag}', '${c.hash}')">Join</button>
+    </div>
+  `).join('');
+}
+
+async function joinDiscoveredChannel(tag, hash) {
+  const result = await api(tag, `/channels/${hash}/join`, {method: 'POST'});
+  if (!result.ok) { toast(`Tester ${tag}: join failed`); return; }
+  await refreshChannels(tag);
+  await refreshDiscovered(tag);
+  await selectChannel(tag, hash);
+}
+
+async function selectChannel(tag, hash) {
+  state[tag].activeChannel = hash;
+  clearReplyTarget(tag);
+  clearPendingImage(tag);
+  await refreshChannels(tag);
+  const ch = state[tag].channels.find(c => c.hash === hash);
+  document.getElementById(`active-channel-${tag}`).textContent = ch ? `#${ch.name}` : hash;
+  await renderMessages(tag);
+}
+
+async function renderMessages(tag) {
+  if (!state[tag].activeChannel) return;
+  const msgs = await api(tag, `/channels/${state[tag].activeChannel}/messages`);
+  const box = document.getElementById(`messages-${tag}`);
+  if (msgs.length === 0) {
+    box.innerHTML = '<div class="empty-state">No messages yet</div>';
+    return;
+  }
+  const myHash = state[tag].me.hash_hex;
+  const byId = Object.fromEntries(msgs.map(m => [m.message_id, m]));
+  const rendered = await Promise.all(msgs.map(async m => {
+    const avatarUrl = await getPeerAvatarUrl(tag, m.sender_hash);
+    const style = avatarUrl ? ` style="background-image:url(${avatarUrl})"` : '';
+    const chips = (m.reactions || []).map(r => reactionChipHtml(tag, m.message_id, r)).join('');
+    const quoted = m.reply_to && byId[m.reply_to];
+    const quoteHtml = quoted ? `
+      <div class="reply-quote">
+        <b>${escapeHtml(quoted.sender_name || quoted.sender_hash.slice(0, 8))}</b>
+        ${escapeHtml((quoted.content || '(image)').slice(0, 60))}
+      </div>` : '';
+    return `
+    <div class="msg ${m.sender_hash === myHash ? 'self' : ''}">
+      <div class="msg-row">
+        <span class="avatar-thumb-sm"${style}></span>
+        <div class="msg-body">
+          ${quoteHtml}
+          <span class="sender">${escapeHtml(m.sender_name || m.sender_hash.slice(0, 8))}</span>
+          <span class="content">${escapeHtml(m.content)}</span>
+          <button class="reply-btn" onclick='setReplyTarget("${tag}", ${JSON.stringify(m.message_id)}, ${JSON.stringify(m.sender_name || m.sender_hash.slice(0, 8))}, ${JSON.stringify(m.content || "(image)")})'>reply</button>
+          <button class="react-btn" onclick="toggleEmojiPicker(event, '${tag}', '${m.message_id}')">+react</button>
+          ${m.has_image ? `<img class="attached" src="${apiBase(tag)}/channels/${state[tag].activeChannel}/messages/${m.message_id}/image">` : ''}
+          <div class="reactions">${chips}</div>
+        </div>
+      </div>
+    </div>`;
+  }));
+  box.innerHTML = rendered.join('');
+  box.scrollTop = box.scrollHeight;
+}
+
+function setReplyTarget(tag, messageId, senderName, content) {
+  state[tag].replyTarget = messageId;
+  const bar = document.getElementById(`reply-bar-${tag}`);
+  bar.innerHTML = `
+    <span>Replying to <b>${escapeHtml(senderName)}</b>: ${escapeHtml(content.slice(0, 60))}</span>
+    <button onclick="clearReplyTarget('${tag}')">&times;</button>
+  `;
+  bar.classList.add('show');
+  document.getElementById(`compose-${tag}`).focus();
+}
+
+function clearReplyTarget(tag) {
+  state[tag].replyTarget = null;
+  const bar = document.getElementById(`reply-bar-${tag}`);
+  bar.classList.remove('show');
+  bar.innerHTML = '';
+}
+
+function onImageSelected(tag, file) {
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    // reader.result is "data:image/png;base64,AAAA..." -- keep just the b64 part.
+    state[tag].pendingImage = reader.result.split(',')[1];
+    const preview = document.getElementById(`image-preview-${tag}`);
+    preview.innerHTML = `
+      <img src="${reader.result}">
+      <button class="remove-img" onclick="clearPendingImage('${tag}')">Remove</button>
+    `;
+    preview.classList.add('show');
+  };
+  reader.readAsDataURL(file);
+}
+
+function clearPendingImage(tag) {
+  state[tag].pendingImage = null;
+  document.getElementById(`file-input-${tag}`).value = '';
+  const preview = document.getElementById(`image-preview-${tag}`);
+  preview.classList.remove('show');
+  preview.innerHTML = '';
+}
+
+function sniffImageMime(b64) {
+  const bytes = atob(b64.slice(0, 12));
+  if (bytes.startsWith('\x89PNG')) return 'image/png';
+  if (bytes.startsWith('\xff\xd8')) return 'image/jpeg';
+  if (bytes.startsWith('GIF8')) return 'image/gif';
+  return 'image/png';
+}
+
+function reactionChipHtml(tag, messageId, r) {
+  const entry = (emojiLibrary[tag] || []).find(e => e.emoji_hash === r.emoji_hash);
+  const img = entry
+    ? `<img src="data:${sniffImageMime(entry.image_data_b64)};base64,${entry.image_data_b64}">`
+    : '';
+  return `<span class="reaction-chip ${r.reacted_by_me ? 'mine' : ''}"
+      onclick="toggleReaction('${tag}', '${messageId}', '${r.emoji_hash}', ${r.reacted_by_me})">
+      ${img}<span>${r.count}</span>
+    </span>`;
+}
+
+const emojiLibrary = { A: [], B: [] };
+
+async function refreshEmojiLibrary(tag) {
+  emojiLibrary[tag] = await api(tag, '/emoji');
+}
+
+let openPicker = null;
+
+function closeEmojiPicker() {
+  if (openPicker) { openPicker.el.remove(); openPicker = null; }
+}
+document.addEventListener('click', (e) => {
+  if (openPicker && !openPicker.el.contains(e.target)) closeEmojiPicker();
+});
+
+async function toggleEmojiPicker(evt, tag, messageId) {
+  evt.stopPropagation();
+  if (openPicker && openPicker.messageId === messageId) { closeEmojiPicker(); return; }
+  closeEmojiPicker();
+  await refreshEmojiLibrary(tag);
+  const picker = document.createElement('div');
+  picker.className = 'emoji-picker';
+  const rect = evt.target.getBoundingClientRect();
+  picker.style.left = `${rect.left + window.scrollX}px`;
+  picker.style.top = `${rect.bottom + window.scrollY + 4}px`;
+  const items = emojiLibrary[tag];
+  const itemsHtml = items.length === 0
+    ? '<div class="empty-state">No emoji yet</div>'
+    : items.map(e => `<img src="data:${sniffImageMime(e.image_data_b64)};base64,${e.image_data_b64}"
+        title="${escapeHtml(e.name)}" onclick="pickEmoji('${tag}', '${messageId}', '${e.emoji_hash}')">`).join('');
+  picker.innerHTML = itemsHtml + `<div class="import-row">
+      <label>Import emoji...<input type="file" accept="image/*" style="display:none"
+          onchange="importEmoji(event, '${tag}', '${messageId}')"></label>
+    </div>`;
+  document.body.appendChild(picker);
+  openPicker = { el: picker, tag, messageId };
+}
+
+function pickEmoji(tag, messageId, emojiHash) {
+  closeEmojiPicker();
+  toggleReaction(tag, messageId, emojiHash, false);
+}
+
+function importEmoji(evt, tag, messageId) {
+  const file = evt.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = async () => {
+    const b64 = reader.result.split(',')[1];
+    try {
+      const res = await api(tag, '/emoji/import', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({name: file.name.replace(/\.[^.]+$/, ''), image_data_b64: b64}),
+      });
+      closeEmojiPicker();
+      await refreshEmojiLibrary(tag);
+      await toggleReaction(tag, messageId, res.emoji_hash, false);
+    } catch (e) {
+      toast(`Tester ${tag}: emoji import failed`);
+    }
+  };
+  reader.readAsDataURL(file);
+}
+
+async function toggleReaction(tag, messageId, emojiHash, alreadyMine) {
+  try {
+    if (alreadyMine) {
+      await api(tag, `/channels/${state[tag].activeChannel}/messages/${messageId}/reactions/${emojiHash}`,
+          {method: 'DELETE'});
+    } else {
+      await api(tag, `/channels/${state[tag].activeChannel}/messages/${messageId}/reactions`, {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({emoji_hash: emojiHash}),
+      });
+    }
+  } catch (e) {
+    toast(`Tester ${tag}: reaction failed`);
+  }
+  await renderMessages(tag);
+}
+
+function escapeHtml(s) {
+  const d = document.createElement('div');
+  d.textContent = s || '';
+  return d.innerHTML;
+}
+
+async function sendMessage(tag) {
+  const input = document.getElementById(`compose-${tag}`);
+  const content = input.value.trim();
+  const image = state[tag].pendingImage;
+  const replyTo = state[tag].replyTarget;
+  if ((!content && !image) || !state[tag].activeChannel) return;
+  input.value = '';
+  clearPendingImage(tag);
+  clearReplyTarget(tag);
+  const result = await api(tag, `/channels/${state[tag].activeChannel}/messages`, {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({content, image_data_b64: image, reply_to: replyTo}),
+  });
+  if (!result.ok) toast(`Tester ${tag}: message not sent (permission?)`);
+  await renderMessages(tag);
+}
+
+let inviteForTag = null;
+
+function openInviteModal(tag) {
+  if (!state[tag].activeChannel) { toast('Select a channel first'); return; }
+  inviteForTag = tag;
+  document.getElementById('inv-search').value = '';
+  document.getElementById('invite-modal').classList.add('show');
+  searchDirectory();
+}
+function closeInviteModal() {
+  document.getElementById('invite-modal').classList.remove('show');
+  inviteForTag = null;
+}
+async function searchDirectory() {
+  if (!inviteForTag) return;
+  const tag = inviteForTag;
+  const q = document.getElementById('inv-search').value.trim();
+  const results = await api(tag, `/directory?q=${encodeURIComponent(q)}`);
+  const box = document.getElementById('inv-results');
+  if (results.length === 0) {
+    box.innerHTML = '<div class="empty-state">No peers found yet -- wait for an announce</div>';
+    return;
+  }
+  box.innerHTML = results.map(r => `
+    <div class="directory-item" onclick="confirmInvite('${r.identity_hash}')">
+      <span class="status-dot ${r.is_online ? 'up' : ''}"></span>
+      ${escapeHtml(r.display_name)}
+      <span class="dir-hash">${r.identity_hash.slice(0, 10)}…</span>
+    </div>
+  `).join('');
+}
+async function confirmInvite(peerHash) {
+  const tag = inviteForTag;
+  closeInviteModal();
+  await api(tag, `/channels/${state[tag].activeChannel}/invite`, {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({peer_hash_hex: peerHash}),
+  });
+  toast('Invite sent');
+}
+
+function openNewChannelModal(tag) {
+  newChannelForTag = tag;
+  document.getElementById('nc-name').value = '';
+  document.getElementById('new-channel-modal').classList.add('show');
+}
+function closeNewChannelModal() {
+  document.getElementById('new-channel-modal').classList.remove('show');
+}
+async function submitNewChannel() {
+  const name = document.getElementById('nc-name').value.trim();
+  const access = document.getElementById('nc-access').value;
+  if (!name || !newChannelForTag) return;
+  const tag = newChannelForTag;
+  closeNewChannelModal();
+  const result = await api(tag, '/channels', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({name, access}),
+  });
+  await refreshChannels(tag);
+  await selectChannel(tag, result.hash);
+}
+
+let membersModalTag = null;
+
+async function openMembersModal(tag) {
+  if (!state[tag].activeChannel) { toast('Select a channel first'); return; }
+  membersModalTag = tag;
+  document.getElementById('members-modal').classList.add('show');
+  await refreshMembersModal();
+}
+
+function closeMembersModal() {
+  membersModalTag = null;
+  document.getElementById('members-modal').classList.remove('show');
+}
+
+async function refreshMembersModal() {
+  const tag = membersModalTag;
+  if (!tag || !state[tag].activeChannel) return;
+  const ch = state[tag].activeChannel;
+  const [members, perms] = await Promise.all([
+    api(tag, `/channels/${ch}/members`),
+    api(tag, `/channels/${ch}/my_permissions`),
+  ]);
+  const myHash = state[tag].me.hash_hex;
+  const list = document.getElementById('members-list');
+  list.innerHTML = members.map(m => {
+    const isSelf = m.identity_hash === myHash;
+    const actions = [];
+    if (!isSelf && m.role !== 'owner') {
+      if (perms.kick) {
+        actions.push(`<button class="kick" onclick="kickMember('${m.identity_hash}')">Kick</button>`);
+      }
+      if (perms.manage_roles) {
+        if (m.role === 'admin') {
+          actions.push(`<button class="demote" onclick="demoteMember('${m.identity_hash}')">Demote</button>`);
+        } else {
+          actions.push(`<button class="promote" onclick="promoteMember('${m.identity_hash}')">Promote</button>`);
+        }
+      }
+    }
+    return `
+      <div class="member-row">
+        <span class="member-hash">${m.identity_hash.slice(0, 20)}…${isSelf ? ' (you)' : ''}</span>
+        <span class="member-role">${m.role}</span>
+        <span class="member-actions">${actions.join('')}</span>
+      </div>
+    `;
+  }).join('') || '<div class="empty-state">No members</div>';
+}
+
+async function kickMember(memberHash) {
+  const tag = membersModalTag;
+  await api(tag, `/channels/${state[tag].activeChannel}/roles`, {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({remove_members: [memberHash]}),
+  });
+  await refreshMembersModal();
+}
+
+async function promoteMember(memberHash) {
+  const tag = membersModalTag;
+  await api(tag, `/channels/${state[tag].activeChannel}/roles`, {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({add_admins: [memberHash]}),
+  });
+  await refreshMembersModal();
+}
+
+async function demoteMember(memberHash) {
+  const tag = membersModalTag;
+  await api(tag, `/channels/${state[tag].activeChannel}/roles`, {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({remove_admins: [memberHash]}),
+  });
+  await refreshMembersModal();
+}
+
+let permissionsModalTag = null;
+
+async function openPermissionsModal(tag) {
+  if (!state[tag].activeChannel) { toast('Select a channel first'); return; }
+  permissionsModalTag = tag;
+  const ch = state[tag].activeChannel;
+  const perms = await api(tag, `/channels/${ch}/permissions`);
+  const editor = document.getElementById('permissions-editor');
+  editor.innerHTML = `
+    <table class="perm-table">
+      <tr><th>Permission</th><th>Admin</th><th>Member</th></tr>
+      ${perms.all_permissions.map(p => `
+        <tr>
+          <td>${p}</td>
+          <td><input type="checkbox" data-role="admin" data-perm="${p}" ${perms.admin.includes(p) ? 'checked' : ''}></td>
+          <td><input type="checkbox" data-role="member" data-perm="${p}" ${perms.member.includes(p) ? 'checked' : ''}></td>
+        </tr>
+      `).join('')}
+    </table>
+    <div class="empty-state" style="padding: 8px 0 0;">Owner always has every permission.</div>
+  `;
+  document.getElementById('permissions-modal').classList.add('show');
+}
+
+function closePermissionsModal() {
+  permissionsModalTag = null;
+  document.getElementById('permissions-modal').classList.remove('show');
+}
+
+async function savePermissions() {
+  const tag = permissionsModalTag;
+  if (!tag) return;
+  const boxes = document.querySelectorAll('#permissions-editor input[type=checkbox][data-role]');
+  const admin = [], member = [];
+  boxes.forEach(b => {
+    if (b.checked) (b.dataset.role === 'admin' ? admin : member).push(b.dataset.perm);
+  });
+  const result = await api(tag, `/channels/${state[tag].activeChannel}/permissions`, {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({admin, member}),
+  });
+  if (!result.ok) toast(`Tester ${tag}: permission change denied (missing manage_channel?)`);
+  closePermissionsModal();
+}
+
+let networkForTag = null;
+
+async function openNetworkModal(tag) {
+  networkForTag = tag;
+  document.getElementById('net-title').textContent = `Tester ${tag}`;
+  document.getElementById('network-modal').classList.add('show');
+  await refreshNetworkModal();
+}
+function closeNetworkModal() {
+  document.getElementById('network-modal').classList.remove('show');
+  networkForTag = null;
+}
+async function refreshNetworkModal() {
+  if (!networkForTag) return;
+  const tag = networkForTag;
+  const [map, ifaces] = await Promise.all([
+    api(tag, '/network/map'),
+    api(tag, '/reticulum/interfaces'),
+  ]);
+  const ifaceRows = ifaces.map(i => `
+    <tr>
+      <td>${escapeHtml(i.name)}</td><td>${escapeHtml(i.type)}</td>
+      <td>${i.enabled ? 'yes' : 'no'}</td>
+      <td>${i.status === null ? '—' : (i.status ? 'online' : 'offline')}</td>
+      <td>${i.rxb ?? '—'}</td><td>${i.txb ?? '—'}</td>
+    </tr>`).join('');
+  const nodeRows = map.nodes.map(n => `
+    <tr><td>${escapeHtml(n.label || n.id.slice(0, 10))}</td><td>${n.kind}</td><td>${n.hops}</td></tr>
+  `).join('');
+  document.getElementById('net-content').innerHTML = `
+    <div><b>Stats:</b> ${map.stats.node_count} nodes, ${map.stats.path_count} paths,
+      ${map.stats.interface_count} interfaces</div>
+    <h4 style="margin:10px 0 4px;">Interfaces</h4>
+    <table style="width:100%; border-collapse:collapse;">
+      <tr style="color:var(--dim); text-align:left;">
+        <th>Name</th><th>Type</th><th>Enabled</th><th>Status</th><th>Rx</th><th>Tx</th>
+      </tr>
+      ${ifaceRows || '<tr><td colspan="6">none configured</td></tr>'}
+    </table>
+    <h4 style="margin:10px 0 4px;">Nodes</h4>
+    <table style="width:100%; border-collapse:collapse;">
+      <tr style="color:var(--dim); text-align:left;"><th>Label</th><th>Kind</th><th>Hops</th></tr>
+      ${nodeRows || '<tr><td colspan="3">none</td></tr>'}
+    </table>
+  `;
+}
+
+async function resetEnvironment() {
+  const btn = document.getElementById('reset-btn');
+  btn.disabled = true;
+  btn.textContent = 'Resetting...';
+  closeMembersModal();
+  closePermissionsModal();
+  TESTERS.forEach(tag => {
+    if (state[tag].ws) state[tag].ws.close();
+    state[tag] = { port: null, me: null, channels: [], activeChannel: null, ws: null, invites: [], pendingImage: null, replyTarget: null };
+    avatarCache[tag] = {};
+    emojiLibrary[tag] = [];
+  });
+  closeEmojiPicker();
+  closeNetworkModal();
+  renderShell();
+  try {
+    const res = await fetch('/reset', {method: 'POST'});
+    const body = await res.json();
+    if (!body.ok) toast('Reset had trouble bringing both testers back up');
+  } catch (e) {
+    toast('Reset request failed: ' + e);
+  }
+  await Promise.all(TESTERS.map(connectTester));
+  btn.disabled = false;
+  btn.textContent = 'Reset environment';
+}
+
+renderShell();
+TESTERS.forEach(connectTester);
+// Fallback poll: covers the startup race where a tester's own /me hasn't
+// resolved yet when its counterpart first tries to read presence, and any
+// WS reconnect gap. Live updates still come from the 'presence' WS event.
+setInterval(() => TESTERS.forEach(refreshPeerPresence), 5000);
+</script>
+</body>
+</html>
