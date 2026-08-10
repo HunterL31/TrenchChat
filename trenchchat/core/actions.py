@@ -33,10 +33,18 @@ def create_channel(channel_mgr, invite_mgr, name: str, description: str,
 
 
 def join_public_channel(storage, subscription_mgr, channel_hash_hex: str) -> bool:
-    """Subscribe to a known public channel. Returns False if the channel
-    isn't in local storage yet (e.g. never discovered)."""
+    """Subscribe to a known open-join channel. Returns False if the channel
+    isn't in local storage yet (e.g. never discovered), or if it's
+    invite-only -- membership there is granted only via a signed member-list
+    document from an admin/owner, never a bare local subscribe. This is a
+    second layer behind announce_channel()'s discoverability guard: if an
+    invite-only channel's row ever ends up in local storage some other way
+    (a stale row from before a permissions change, a future discovery path),
+    this still can't be used to self-admit into it."""
     channel = storage.get_channel(channel_hash_hex)
     if channel is None:
+        return False
+    if not is_open_join(permissions_from_json(channel["permissions"])):
         return False
     subscription_mgr.subscribe(channel_hash_hex, channel["creator_hash"])
     return True

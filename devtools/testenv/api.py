@@ -355,8 +355,9 @@ def create_app(backend: Backend) -> FastAPI:
         # Channels heard via a real-time announce (see
         # ChannelAnnounceHandler / channel_mgr._on_channel_discovered) but
         # never joined. Only ever open-join channels in practice --
-        # invite-only channels aren't broadcast (is_discoverable is False
-        # for PRESET_PRIVATE), so they never reach local storage this way.
+        # announce_channel() refuses to announce anything invite-only
+        # regardless of the discoverable flag, so they never reach local
+        # storage this way.
         return [_channel_to_dict(c) for c in backend.storage.get_all_channels()
                if not backend.storage.is_subscribed(c["hash"])]
 

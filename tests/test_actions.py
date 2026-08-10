@@ -9,7 +9,9 @@ import time
 
 from tests.helpers import wait_for_member
 from trenchchat.core import actions
-from trenchchat.core.permissions import PRESET_PRIVATE, ROLE_MEMBER, ROLE_OWNER
+from trenchchat.core.permissions import (
+    FLAG_DISCOVERABLE, FLAG_OPEN_JOIN, PRESET_OPEN, PRESET_PRIVATE, ROLE_MEMBER, ROLE_OWNER,
+)
 
 
 def _setup_channel_with_member(peer_factory, *, member_perms=None):
@@ -80,3 +82,53 @@ class TestUpdateMembership:
         )
 
         assert applied is False
+
+
+class TestJoinPublicChannel:
+    def test_open_join_channel_can_be_joined(self, peer_factory):
+        """Sanity check: subscribing to a genuinely open-join channel works."""
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+
+        ch_hash = alice.channel_mgr.create_channel("public-room", "", permissions=PRESET_OPEN)
+        bob.storage.upsert_channel(ch_hash, "public-room", "", alice.identity.hash_hex,
+                                   PRESET_OPEN, time.time())
+
+        joined = actions.join_public_channel(bob.storage, bob.subscription_mgr, ch_hash)
+
+        assert joined is True
+        assert bob.storage.is_subscribed(ch_hash)
+
+    def test_invite_only_channel_cannot_be_self_joined(self, peer_factory):
+        """
+        A locally-known invite-only channel must never be joinable via a bare
+        subscribe, even if a row for it somehow exists in local storage --
+        membership there is only ever granted through a signed member-list
+        document from an admin/owner.
+
+        Regression test for a real bug: ChannelPermissionsDialog lets
+        discoverable and open_join be toggled independently, so an
+        invite-only channel could be marked discoverable, get announced
+        (see the announce_channel fix for that half), and a peer who merely
+        *heard* about it that way -- never invited -- could then call this
+        and self-admit. join_public_channel must refuse regardless of how
+        the row got into local storage.
+        """
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+
+        # Simulates Bob having discovered an invite-only channel's metadata
+        # (e.g. via a leaked announce) without ever being invited.
+        leaked_perms = dict(PRESET_PRIVATE)
+        leaked_perms[FLAG_DISCOVERABLE] = True
+        assert leaked_perms[FLAG_OPEN_JOIN] is False
+
+        ch_hash = alice.channel_mgr.create_channel("secret-room", "", permissions=leaked_perms)
+        bob.storage.upsert_channel(ch_hash, "secret-room", "", alice.identity.hash_hex,
+                                   leaked_perms, time.time())
+
+        joined = actions.join_public_channel(bob.storage, bob.subscription_mgr, ch_hash)
+
+        assert joined is False
+        assert not bob.storage.is_subscribed(ch_hash), \
+            "Bob self-joined an invite-only channel via a bare subscribe"

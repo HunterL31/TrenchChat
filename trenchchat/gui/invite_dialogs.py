@@ -364,6 +364,26 @@ class ChannelPermissionsDialog(QDialog):
         self._discoverable_cb.setChecked(bool(self._perms.get(FLAG_DISCOVERABLE, True)))
         flags_layout.addWidget(self._discoverable_cb)
 
+        # Invite-only channels are never announced on the mesh regardless of
+        # this checkbox (see ChannelManager.announce_channel) -- an invite is
+        # the only way in, so broadcasting the channel's existence would just
+        # leak its name/description to everyone while still refusing them
+        # entry. Disabling this here keeps the UI from claiming a toggle
+        # does something it can't.
+        def _sync_discoverable_enabled():
+            open_join = self._open_join_cb.isChecked()
+            self._discoverable_cb.setEnabled(open_join)
+            if not open_join:
+                self._discoverable_cb.setToolTip(
+                    "Invite-only channels are never broadcast on the mesh, "
+                    "so this has no effect while Open join is off."
+                )
+            else:
+                self._discoverable_cb.setToolTip("")
+
+        self._open_join_cb.toggled.connect(lambda _checked: _sync_discoverable_enabled())
+        _sync_discoverable_enabled()
+
         self._full_sync_cb = QCheckBox(
             "Full history sync (new members can request the entire channel "
             "history, not just messages sent since they joined)"
@@ -417,8 +437,12 @@ class ChannelPermissionsDialog(QDialog):
     def permissions(self) -> dict:
         """Return the updated permissions dict reflecting the current checkbox state."""
         result = dict(self._perms)
-        result[FLAG_OPEN_JOIN] = self._open_join_cb.isChecked()
-        result[FLAG_DISCOVERABLE] = self._discoverable_cb.isChecked()
+        open_join = self._open_join_cb.isChecked()
+        result[FLAG_OPEN_JOIN] = open_join
+        # Stored as False (not just left inert) when open_join is off, so a
+        # saved channel's permissions blob can't be misread as "meant to be
+        # discoverable" -- the checkbox itself is disabled in this state.
+        result[FLAG_DISCOVERABLE] = self._discoverable_cb.isChecked() and open_join
         result[FLAG_FULL_SYNC] = self._full_sync_cb.isChecked()
         for role, checks in self._role_checks.items():
             result[role] = [perm for perm, cb in checks.items() if cb.isChecked()]
