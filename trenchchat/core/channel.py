@@ -76,6 +76,7 @@ class ChannelManager:
         )
         hash_hex = dest.hash.hex()
 
+        created_at = time.time()
         self._owned_destinations[hash_hex] = dest
         self._storage.upsert_channel(
             hash=hash_hex,
@@ -83,7 +84,7 @@ class ChannelManager:
             description=description,
             creator_hash=self._identity.hash_hex,
             permissions=permissions,
-            created_at=time.time(),
+            created_at=created_at,
         )
         self._storage.subscribe(hash_hex)
         self._storage.upsert_member(
@@ -96,7 +97,9 @@ class ChannelManager:
         # was_member_at() treats "no tenure data" as "wasn't a member" --
         # silently dropping the owner's own messages from every sync
         # response to new members, regardless of when those members
-        # actually joined.
+        # actually joined. Uses created_at rather than a fresh time.time()
+        # call so the tenure interval starts at the exact moment the channel
+        # itself was created, not some microseconds-later timestamp.
         #
         # Gated to non-open-join channels only: public channels never use
         # the member-list/tenure system at all (membership there is tracked
@@ -106,7 +109,7 @@ class ChannelManager:
         # joined via subscription and have no tenure data of their own,
         # rejecting their sync requests entirely.
         if not is_open_join(permissions):
-            self._storage.open_tenure(hash_hex, self._identity.hash_hex, time.time())
+            self._storage.open_tenure(hash_hex, self._identity.hash_hex, created_at)
         self.announce_channel(hash_hex)
         return hash_hex
 

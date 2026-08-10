@@ -150,6 +150,8 @@ class InviteManager:
                         joined_at: dict[bytes, float] | None = None) -> dict:
         if owners is None:
             owners = []
+        if joined_at is None:
+            joined_at = {}
         permissions_blob = (msgpack.packb(permissions, use_bin_type=True)
                             if permissions else b"")
         payload = _signed_payload(
@@ -165,6 +167,7 @@ class InviteManager:
             "admins":       admins,
             "owners":       owners,
             "permissions":  permissions_blob,
+            "joined_at":    joined_at,
             "signatures":   {self._identity.hash: sig},
         }
         if joined_at is not None:
@@ -320,10 +323,16 @@ class InviteManager:
 
         # Update tenure log: close intervals for removed members, open for
         # added ones. Prefer each member's true historical joined_at, signed
-        # into the document itself, over new_ts (this document version's
-        # publish time) -- otherwise the first version of the document a
-        # peer ever processes makes everyone in it, including the owner,
-        # look like they joined "now", hiding all of their prior history.
+        # into the document itself (so not spoofable by an untrusted party --
+        # the signer must already be a trusted admin/owner per the check
+        # above), over new_ts (this document version's publish time) --
+        # otherwise the first version of the document a peer ever processes
+        # makes everyone in it, including the owner, look like they joined
+        # "now", hiding all of their prior history. Falls back to new_ts for
+        # documents from before this field existed. float() coercion with a
+        # skip-on-failure guards against a malformed (not necessarily
+        # malicious -- the signature check already rules that out) timestamp
+        # value in an older or hand-crafted document.
         joined_at_map: dict[str, float] = {}
         for m, ts in (doc.get("joined_at") or {}).items():
             m_hex = m.hex() if isinstance(m, bytes) else str(m)
@@ -435,7 +444,12 @@ class InviteManager:
         # Carry each member's true join time, not just this publish's
         # timestamp -- preserves everyone's real history (including our
         # own, e.g. the channel's actual creation time) for whichever peer
-        # processes this document first.
+        # processes this document first. Continuing members keep the
+        # joined_at already on file (our own local tenure log is
+        # authoritative for that); a member appearing for the first time is
+        # genuinely joining right now. Uses "is not None" rather than "or"
+        # so a legitimately-stored joined_at of exactly 0.0 isn't mistaken
+        # for "no data on file" and overwritten with published_at.
         joined_at: dict[bytes, float] = {}
         for m in members:
             existing_joined = self._storage.get_open_tenure_joined_at(channel_hash_hex, m.hex())

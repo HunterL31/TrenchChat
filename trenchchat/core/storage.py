@@ -717,6 +717,7 @@ class Storage:
         """
         removed = old_members - new_members
         added = new_members - old_members
+        joined_at_map = joined_at_map or {}
         with self._tx():
             for ih in removed:
                 self._conn.execute("""
@@ -729,9 +730,13 @@ class Storage:
                       )
                 """, (published_at, channel_hash, ih, channel_hash, ih))
             for ih in added:
-                joined_at = published_at
-                if joined_at_map and ih in joined_at_map:
-                    joined_at = min(max(joined_at_map[ih], 0.0), published_at)
+                # Clamp: never in the future relative to this document's own
+                # publish time, never negative. The signer is already
+                # trusted (checked before this is ever called) to attest to
+                # membership at all; this just bounds how far a claimed
+                # join time can stray from something sane.
+                joined_at = joined_at_map.get(ih, published_at)
+                joined_at = min(max(joined_at, 0.0), published_at)
                 self._conn.execute("""
                     INSERT OR IGNORE INTO membership_tenure
                         (channel_hash, identity_hash, joined_at, left_at)

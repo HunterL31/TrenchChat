@@ -62,6 +62,7 @@ class SyncManager:
         messaging.set_missed_delivery_callback(self._on_missed_delivery_event)
         router.add_delivery_callback(self._on_lxmf_message)
         invite_mgr.add_member_list_callback(self._on_member_list_updated)
+        invite_mgr.add_channel_joined_callback(self._on_channel_joined)
 
         # Purge stale hints from previous sessions on startup
         self._storage.purge_old_missed_deliveries(time.time() - SYNC_WINDOW_SECS)
@@ -76,9 +77,25 @@ class SyncManager:
         for sub in self._storage.get_subscriptions():
             channel_hash_hex = sub["channel_hash"]
             since_ts = sub["last_sync_at"] or (time.time() - SYNC_WINDOW_SECS)
-            peers = self._get_channel_peers(channel_hash_hex)
-            for peer_hex in peers:
-                self._send_sync_request(peer_hex, channel_hash_hex, since_ts)
+            self._request_sync_for_channel(channel_hash_hex, since_ts)
+
+    def _on_channel_joined(self, channel_hash_hex: str, channel_name: str):
+        """
+        Fired when we auto-join a channel via an accepted invite. Without
+        this, a new member never sees any message sent before they joined:
+        request_sync_all() only runs once, 3s after app startup, over
+        whatever channels are already subscribed at that moment -- a
+        channel joined later in the session is never covered by anything.
+
+        A fresh join has no last_sync_at yet, so pull the full sync window
+        (same fallback request_sync_all() uses for an unsynced channel).
+        """
+        self._request_sync_for_channel(channel_hash_hex, time.time() - SYNC_WINDOW_SECS)
+
+    def _request_sync_for_channel(self, channel_hash_hex: str, since_ts: float):
+        peers = self._get_channel_peers(channel_hash_hex)
+        for peer_hex in peers:
+            self._send_sync_request(peer_hex, channel_hash_hex, since_ts)
 
     def _on_member_list_updated(self, channel_hash_hex: str):
         """Clear pending outbound messages for this channel if we were removed.
