@@ -221,14 +221,38 @@ migration for existing databases, so it belongs in its own change.
 Related: enabling a PIN leaves the pre-existing plaintext database recoverable
 from free disk sectors, since the old file is unlinked rather than overwritten.
 
-### 3. Display-name spoofing
+### 3. Display-name spoofing (largely addressed)
 
-`F_DISPLAY_NAME` is self-asserted and shown unverified. The sender's identity
-hash *is* now authenticated, so this is a UI-presentation problem rather than a
-protocol one.
+`F_DISPLAY_NAME` is self-asserted and never verified. The earlier version of
+this document recommended showing a short hash badge alongside every display
+name; that is **already implemented** — `gui/channel_view.py` renders every
+message header as `Alice [a3f1c2d4]`. Combined with signature enforcement, the
+identity hash shown is now authenticated rather than merely claimed.
 
-**Recommended:** show a short hash badge alongside every display name. A local
-contact book with verified names is a stronger follow-up.
+What remains is optional hardening rather than a gap: a local contact book that
+lets a user pin a verified name to an identity hash and warns when a familiar
+display name arrives under a different hash.
+
+---
+
+### 4. Minor residue
+
+None of these are exploitable on their own; recorded so they are not
+rediscovered as findings.
+
+- `storage.py` builds `PRAGMA table_info({table})` with an f-string. Every
+  caller passes a hardcoded table name, so there is nothing injectable today,
+  but the helper takes an arbitrary string.
+- 14 `except Exception:` blocks across `core/` and `network/` swallow failures
+  silently. Fail-closed where it matters, but a systematic verification failure
+  is indistinguishable from a single malformed message.
+- `.gitignore` has no pattern for `.trenchchat/`, `*.db`, `identity` or
+  `lock.*`. The data directory lives under `$HOME`, so this only bites a
+  developer who points `Config(data_dir=...)` at the repo.
+- `main.py` parses `-v/--verbose` but never reads `args.verbose`; only
+  `--rns-debug` has any effect.
+- macOS builds are unsigned (`trenchchat.spec` sets `codesign_identity=None`) —
+  a distribution-trust matter rather than an application one.
 
 ---
 
