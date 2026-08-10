@@ -1,6 +1,7 @@
 ---
 description: Python code standards for the TrenchChat repository
-alwaysApply: true
+globs: "**/*.py"
+alwaysApply: false
 ---
 
 # Code Standards

@@ -1,6 +1,7 @@
 ---
 description: Ensure new functionality is covered by tests
-alwaysApply: true
+globs: "trenchchat/**/*.py"
+alwaysApply: false
 ---
 
 # Test Coverage for New Functionality

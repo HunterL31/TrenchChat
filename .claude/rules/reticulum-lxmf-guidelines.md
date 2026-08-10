@@ -1,6 +1,7 @@
 ---
 description: Correct usage of the Reticulum (RNS) and LXMF APIs in TrenchChat
-alwaysApply: true
+globs: "trenchchat/core/**/*.py,trenchchat/network/**/*.py"
+alwaysApply: false
 ---
 
 # Reticulum / LXMF Guidelines

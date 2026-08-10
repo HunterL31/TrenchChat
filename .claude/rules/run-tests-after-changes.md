@@ -1,6 +1,7 @@
 ---
 description: Run the full test suite before considering any feature or fix complete
-alwaysApply: true
+globs: "trenchchat/**/*.py"
+alwaysApply: false
 ---
 
 # Run Tests After Every Change
