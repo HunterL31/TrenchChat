@@ -260,3 +260,39 @@ they were testing signature validation rather than the permission.
 `TestAdversarialAdminSigner` now covers a trusted signer exceeding their own
 permissions, and each new control has a positive control alongside it so a
 handler that rejected everything could not pass.
+
+---
+
+## Server rosters are capability claims
+
+A server's member-list document carries a *roster* — a signed list of the
+channels in that server. On accept each entry becomes a local channel row
+parented under the server, and membership, roles and permissions all resolve up
+to that server. Every roster entry is therefore a capability claim.
+
+A malicious roster naming a channel the receiver is already in would hand the
+server's members that channel's membership and history. Four independent
+defences apply:
+
+1. `channels.server_hash` is write-once — absent from `upsert_channel`'s
+   `ON CONFLICT` clause, so no upsert can re-parent an existing channel.
+2. Any roster hash already known locally under a different `server_hash` is
+   refused outright.
+3. Each entry must be hash-bound: `channel_hash_for(creator, name)` has to
+   equal the claimed hash. `RNS.Destination.hash()` accepts a raw identity
+   hash, so this is computable offline, and preimage resistance means an
+   attacker cannot produce a `(creator, name)` pair for a hash they did not
+   mint. The same binding is applied to the server itself before
+   `upsert_server`, blocking impersonation via the unsigned name/creator fields.
+4. Adding a channel to a roster requires `CREATE_CHANNEL`, checked in
+   `_signer_may_apply` against the signer's role in the *previously stored*
+   document.
+
+The anchor check runs strictly before the server row is created, so an
+unanchored document cannot mint the very anchor it would be checked against.
+
+Two things this used to say are now handled by the member-list bootstrap work
+above: the trust tier that fell back to a document's own signers is gone, and
+the durable `accepted_invites` anchor replaced an in-memory map that did not
+survive a restart.
+

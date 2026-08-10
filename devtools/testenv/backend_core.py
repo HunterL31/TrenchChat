@@ -22,6 +22,7 @@ from trenchchat.config import Config
 from trenchchat.core.identity import Identity
 from trenchchat.core.storage import Storage
 from trenchchat.core.channel import ChannelManager
+from trenchchat.core.server import ServerManager
 from trenchchat.core.messaging import Messaging
 from trenchchat.core.subscription import SubscriptionManager
 from trenchchat.core.invite import InviteManager
@@ -110,6 +111,7 @@ class Backend:
                              storagepath=str(data_dir / "messagestore"))
 
         self.channel_mgr = ChannelManager(self.identity, self.storage)
+        self.server_mgr = ServerManager(self.identity, self.storage)
         self.messaging = Messaging(self.identity, self.storage, self.router)
         self.subscription_mgr = SubscriptionManager(self.identity, self.storage, self.router)
         self.invite_mgr = InviteManager(self.identity, self.storage, self.router)
@@ -158,6 +160,7 @@ class Backend:
         self.router.add_delivery_callback(_on_inbound_message)
 
         self.channel_mgr.restore_owned_channels()
+        self.server_mgr.restore_owned_servers()
 
     def accept_invite(self, channel_hash_hex: str, token: bytes, expiry: float,
                       admin_hex: str) -> None:
