@@ -1054,7 +1054,7 @@ async function submitNewChannel() {
 let membersModalTag = null;
 
 async function openMembersModal(tag) {
-  if (!state[tag].activeChannel) { toast('Select a channel first'); return; }
+  if (!scopeFor(tag)) { toast('Select a channel or server first'); return; }
   membersModalTag = tag;
   document.getElementById('members-modal').classList.add('show');
   await refreshMembersModal();
@@ -1067,11 +1067,11 @@ function closeMembersModal() {
 
 async function refreshMembersModal() {
   const tag = membersModalTag;
-  if (!tag || !state[tag].activeChannel) return;
-  const ch = state[tag].activeChannel;
+  const scope = tag ? scopeFor(tag) : null;
+  if (!scope) return;
   const [members, perms] = await Promise.all([
-    api(tag, `/channels/${ch}/members`),
-    api(tag, `/channels/${ch}/my_permissions`),
+    api(tag, `/${scope.kind}/${scope.hash}/members`),
+    api(tag, `/${scope.kind}/${scope.hash}/my_permissions`),
   ]);
   const myHash = state[tag].me.hash_hex;
   const list = document.getElementById('members-list');
@@ -1100,42 +1100,57 @@ async function refreshMembersModal() {
   }).join('') || '<div class="empty-state">No members</div>';
 }
 
-async function kickMember(memberHash) {
+async function updateRoles(body) {
   const tag = membersModalTag;
-  await api(tag, `/channels/${state[tag].activeChannel}/roles`, {
+  const scope = tag ? scopeFor(tag) : null;
+  if (!scope) return;
+  await api(tag, `/${scope.kind}/${scope.hash}/roles`, {
     method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({remove_members: [memberHash]}),
+    body: JSON.stringify(body),
   });
   await refreshMembersModal();
 }
 
-async function promoteMember(memberHash) {
-  const tag = membersModalTag;
-  await api(tag, `/channels/${state[tag].activeChannel}/roles`, {
-    method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({add_admins: [memberHash]}),
-  });
-  await refreshMembersModal();
-}
-
-async function demoteMember(memberHash) {
-  const tag = membersModalTag;
-  await api(tag, `/channels/${state[tag].activeChannel}/roles`, {
-    method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({remove_admins: [memberHash]}),
-  });
-  await refreshMembersModal();
-}
+const kickMember    = h => updateRoles({remove_members: [h]});
+const promoteMember = h => updateRoles({add_admins: [h]});
+const demoteMember  = h => updateRoles({remove_admins: [h]});
 
 let permissionsModalTag = null;
 
+// Membership, roles and permissions live on the server for any channel inside
+// one, so those all address the server scope. Returns null when nothing is
+// selected.
+function scopeFor(tag) {
+  const s = state[tag];
+  const ch = s.activeChannel;
+  if (ch) {
+    const row = (s.servers.flatMap(srv => s.serverChannels[srv.hash] || [])
+                 .concat(s.channels)).find(c => c.hash === ch);
+    if (row && row.server_hash) {
+      const srv = s.servers.find(x => x.hash === row.server_hash);
+      return {kind: 'servers', hash: row.server_hash, name: srv ? srv.name : 'server'};
+    }
+    return {kind: 'channels', hash: ch, name: row ? `#${row.name}` : 'channel'};
+  }
+  if (s.activeServer) {
+    const srv = s.servers.find(x => x.hash === s.activeServer);
+    return {kind: 'servers', hash: s.activeServer, name: srv ? srv.name : 'server'};
+  }
+  return null;
+}
+
 async function openPermissionsModal(tag) {
-  if (!state[tag].activeChannel) { toast('Select a channel first'); return; }
+  const scope = scopeFor(tag);
+  if (!scope) { toast('Select a channel or server first'); return; }
   permissionsModalTag = tag;
-  const ch = state[tag].activeChannel;
-  const perms = await api(tag, `/channels/${ch}/permissions`);
+  const perms = await api(tag, `/${scope.kind}/${scope.hash}/permissions`);
+  const isServer = scope.kind === 'servers';
   const editor = document.getElementById('permissions-editor');
   editor.innerHTML = `
+    <div class="empty-state" style="padding: 0 0 8px;">
+      Editing <strong>${scope.name}</strong>${isServer
+        ? ' — applies to every channel in this server' : ''}
+    </div>
     <table class="perm-table">
       <tr><th>Permission</th><th>Admin</th><th>Member</th></tr>
       ${perms.all_permissions.map(p => `
@@ -1159,17 +1174,24 @@ function closePermissionsModal() {
 async function savePermissions() {
   const tag = permissionsModalTag;
   if (!tag) return;
+  const scope = scopeFor(tag);
+  if (!scope) { closePermissionsModal(); return; }
   const boxes = document.querySelectorAll('#permissions-editor input[type=checkbox][data-role]');
   const admin = [], member = [];
   boxes.forEach(b => {
     if (b.checked) (b.dataset.role === 'admin' ? admin : member).push(b.dataset.perm);
   });
-  const result = await api(tag, `/channels/${state[tag].activeChannel}/permissions`, {
+  const result = await api(tag, `/${scope.kind}/${scope.hash}/permissions`, {
     method: 'POST', headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({admin, member}),
   });
-  if (!result.ok) toast(`Tester ${tag}: permission change denied (missing manage_channel?)`);
+  if (result.error) {
+    toast(`Tester ${tag}: ${result.error}`);
+  } else if (!result.ok) {
+    toast(`Tester ${tag}: permission change denied (missing manage_channel?)`);
+  }
   closePermissionsModal();
+  await refreshChannels(tag);
 }
 
 let networkForTag = null;
