@@ -508,6 +508,12 @@ class TestSyncOnChannelJoin:
             subscriber_hashes=[alice.identity.hash_hex],
         )
         pre_join_id = alice.storage.get_messages(ch_hash)[0]["message_id"]
+        # send_message has no timestamp override, so guarantee a real clock
+        # tick has passed before Bob joins -- see
+        # test_pre_join_history_excluded_by_default for why an implicit
+        # ordering assumption alone isn't safe here (Windows' time.time()
+        # resolution can return the same value across calls a few ms apart).
+        time.sleep(0.02)
 
         def on_invite(channel_hash_hex, channel_name, token, expiry, admin_hex):
             bob.invite_mgr.send_join_request(channel_hash_hex, token, expiry, admin_hex)
@@ -541,6 +547,12 @@ class TestSyncOnChannelJoin:
             subscriber_hashes=[alice.identity.hash_hex],
         )
         pre_join_id = alice.storage.get_messages(ch_hash)[0]["message_id"]
+        # send_message has no timestamp override, so guarantee a real clock
+        # tick has passed before Bob joins -- see
+        # test_pre_join_history_excluded_by_default for why an implicit
+        # ordering assumption alone isn't safe here (Windows' time.time()
+        # resolution can return the same value across calls a few ms apart).
+        time.sleep(0.02)
 
         def on_invite(channel_hash_hex, channel_name, token, expiry, admin_hex):
             bob.invite_mgr.send_join_request(channel_hash_hex, token, expiry, admin_hex)
@@ -782,8 +794,19 @@ class TestTenureSyncFiltering:
         bob = peer_factory("bob")
 
         ch_hash = alice.channel_mgr.create_channel("bounded-sync-ch", "", "invite")
+        # A real sleep between each ordering boundary, not just call order --
+        # time.time() on Windows can return the identical value across calls
+        # a few ms apart, and was_member_at()'s joined_at <= timestamp check
+        # then treats "joined in the same clock tick" as "was already a
+        # member," admitting a message that was, in program order, inserted
+        # before the join. A fixed backdate offset isn't safe either: too
+        # large and it can predate the channel's own creation (failing the
+        # *sender* tenure check instead), so an actual elapsed tick on both
+        # sides of the message is what actually removes the ambiguity.
+        time.sleep(0.02)
         before_msg_id = _insert_message(alice.storage, ch_hash, alice.identity.hash_hex,
                                         "sent before Bob joined")
+        time.sleep(0.02)
 
         alice.invite_mgr.publish_member_list(ch_hash, add_members=[bob.identity.hash])
         assert wait_for_member(alice.storage, ch_hash, bob.identity.hash_hex)
@@ -808,8 +831,12 @@ class TestTenureSyncFiltering:
         perms = dict(PRESET_PRIVATE)
         perms[ROLE_MEMBER] = [SEND_MESSAGE, FULL_SYNC]
         ch_hash = alice.channel_mgr.create_channel("full-sync-ch", "", permissions=perms)
+        # See test_pre_join_history_excluded_by_default for why these sleeps
+        # are needed instead of relying on call ordering alone.
+        time.sleep(0.02)
         before_msg_id = _insert_message(alice.storage, ch_hash, alice.identity.hash_hex,
                                         "sent before Bob joined")
+        time.sleep(0.02)
 
         alice.invite_mgr.publish_member_list(ch_hash, add_members=[bob.identity.hash])
         assert wait_for_member(alice.storage, ch_hash, bob.identity.hash_hex)
@@ -835,8 +862,12 @@ class TestTenureSyncFiltering:
         perms[ROLE_ADMIN] = [SEND_MESSAGE, FULL_SYNC]
         ch_hash = alice.channel_mgr.create_channel("admin-only-full-sync-ch", "",
                                                     permissions=perms)
+        # See test_pre_join_history_excluded_by_default for why these sleeps
+        # are needed instead of relying on call ordering alone.
+        time.sleep(0.02)
         before_msg_id = _insert_message(alice.storage, ch_hash, alice.identity.hash_hex,
                                         "sent before Bob and Carol joined")
+        time.sleep(0.02)
 
         alice.invite_mgr.publish_member_list(
             ch_hash, add_members=[bob.identity.hash, carol.identity.hash],

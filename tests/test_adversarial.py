@@ -47,6 +47,7 @@ import msgpack
 import pytest
 
 from tests.helpers import wait_for, wait_for_member
+from trenchchat.core import actions
 from trenchchat.core.invite import _sign, _signed_payload
 from trenchchat.core.permissions import (
     ALL_PERMISSIONS, FULL_SYNC, INVITE, KICK, MANAGE_CHANNEL, MANAGE_ROLES,
@@ -466,6 +467,31 @@ class TestAdversarialManageChannel:
         ), "Bob did not receive Alice's full_sync change"
         assert not bob.storage.has_permission(ch_hash, bob.identity.hash_hex, FULL_SYNC), \
             "Bob (plain member) ended up with full_sync from a change that only granted it to admin"
+
+    def test_actions_edit_channel_permissions_rejects_unauthorized_local_caller(self, peer_factory):
+        """
+        Direct-call coverage for actions.edit_channel_permissions -- the
+        shared entry point both main_window.py's _on_edit_permissions and
+        devtools/testenv/api.py's update_permissions call. Its own
+        MANAGE_CHANNEL check (not the signed-document path the other
+        MANAGE_CHANNEL tests in this class cover) is what stands between a
+        modified/compromised local client and rewriting the local
+        permissions store directly, bypassing the GUI entirely.
+        """
+        alice, bob, ch_hash = _setup_channel_with_member(
+            peer_factory, member_perms=[SEND_MESSAGE]  # no MANAGE_CHANNEL
+        )
+        before = bob.storage.get_channel_permissions(ch_hash)
+
+        evil_perms = dict(PRESET_PRIVATE)
+        evil_perms[ROLE_MEMBER] = list(ALL_PERMISSIONS)
+        applied = actions.edit_channel_permissions(
+            bob.storage, bob.invite_mgr, ch_hash, bob.identity.hash_hex, evil_perms,
+        )
+
+        assert applied is False
+        assert bob.storage.get_channel_permissions(ch_hash) == before, \
+            "Bob's local permissions store was rewritten by a direct call without MANAGE_CHANNEL"
 
 
 # ---------------------------------------------------------------------------
