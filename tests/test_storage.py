@@ -1016,3 +1016,33 @@ class TestServerSchemaMigration:
         s2 = Storage(db_path=db_path)
         assert s2.get_server(SERVER_H)["name"] == "S"
         s2.close()
+
+
+class TestServerScopePermissions:
+    """has_permission() must work when handed a *server* hash, not just a
+    channel one. A server has no channels row, so without a fallback every
+    admin and member is denied everything — and an owner still looks fine
+    because has_permission short-circuits on that role, which is exactly what
+    made this hard to notice."""
+
+    def test_admin_holds_server_permissions_by_hash(self, db):
+        db.upsert_server(SERVER_H, "HQ", "", ALICE, PRESET_SERVER, 1.0)
+        db.upsert_member(SERVER_H, BOB, "Bob", ROLE_ADMIN)
+        assert db.get_channel_permissions(SERVER_H) == PRESET_SERVER
+        assert db.has_permission(SERVER_H, BOB, CREATE_CHANNEL) is True
+        assert db.has_permission(SERVER_H, BOB, SEND_MESSAGE) is True
+
+    def test_member_is_still_denied_admin_only_permissions(self, db):
+        db.upsert_server(SERVER_H, "HQ", "", ALICE, PRESET_SERVER, 1.0)
+        db.upsert_member(SERVER_H, BOB, "Bob", ROLE_MEMBER)
+        assert db.has_permission(SERVER_H, BOB, SEND_MESSAGE) is True
+        assert db.has_permission(SERVER_H, BOB, CREATE_CHANNEL) is False
+
+    def test_channel_row_still_wins_for_a_channel_hash(self, db):
+        """The fallback must not shadow a real channel's own mirrored row."""
+        _make_server_with_channel(db)
+        assert db.get_channel_permissions(CHAN_IN_SERVER) == PRESET_SERVER
+        assert db.get_channel_permissions(STANDALONE) == PRESET_PRIVATE
+
+    def test_unknown_hash_is_still_empty(self, db):
+        assert db.get_channel_permissions("ee" * 16) == {}

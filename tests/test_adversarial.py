@@ -2007,6 +2007,9 @@ class TestAdversarialCreateChannel:
             timeout=5,
         )
 
+        # An empty permissions blob asserts nothing, so the roster addition is
+        # the only unauthorized change in the document and the CREATE_CHANNEL
+        # gate is what has to catch it.
         existing = alice.storage.get_member_list_version(s)
         forged = _server_doc(
             bob.identity.rns_identity, s, existing["version"] + 1,
@@ -2014,11 +2017,34 @@ class TestAdversarialCreateChannel:
             admins=[alice.identity.hash, bob.identity.hash],
             owners=[alice.identity.hash],
             roster_rows=[_roster_row(bob.identity.hash, "smuggled")],
-            permissions_blob=msgpack.packb(perms, use_bin_type=True),
         )
-        assert alice.invite_mgr._accept_document(forged, s) is True
+        assert alice.invite_mgr._accept_document(forged, s) is False, \
+            "a document adding a channel without CREATE_CHANNEL was accepted"
         assert alice.storage.get_server_channels(s) == [], \
             "an admin without CREATE_CHANNEL smuggled a channel into the roster"
+
+    def test_admin_with_create_channel_may_add_to_the_roster(self, peer_factory):
+        """Control case: the gate must not reject a legitimate addition."""
+        alice, bob, s = _server_with_member(peer_factory)
+        actions.update_membership(
+            alice.storage, alice.invite_mgr, s, alice.identity.hash_hex,
+            add_admins=[bob.identity.hash],
+        )
+        assert wait_for(
+            lambda: alice.storage.get_role(s, bob.identity.hash_hex) == ROLE_ADMIN,
+            timeout=5,
+        )
+        existing = alice.storage.get_member_list_version(s)
+        entry = _roster_row(bob.identity.hash, "legit")
+        doc = _server_doc(
+            bob.identity.rns_identity, s, existing["version"] + 1,
+            members=[alice.identity.hash, bob.identity.hash],
+            admins=[alice.identity.hash, bob.identity.hash],
+            owners=[alice.identity.hash],
+            roster_rows=[entry],
+        )
+        assert alice.invite_mgr._accept_document(doc, s) is True
+        assert alice.storage.get_channel(entry["hash"]) is not None
 
 
 class TestAdversarialRoster:

@@ -1006,11 +1006,25 @@ class Storage:
     # --- channel permissions ---
 
     def get_channel_permissions(self, channel_hash: str) -> dict:
-        """Return the parsed permissions dict for a channel."""
+        """Return the parsed permissions dict for a channel.
+
+        A channel inside a server reads its own row, which carries a mirrored
+        copy -- this deliberately does not resolve upward, because ~18 call
+        sites read channels.permissions straight off the Row and would bypass
+        any resolution here.
+
+        When the hash names a *server* rather than a channel there is no
+        channels row to read, so fall back to the servers table. Without that,
+        has_permission(server_hash, ...) sees an empty dict and denies every
+        permission to admins and members alike -- an owner only appears to work
+        because has_permission short-circuits on that role.
+        """
         row = self._fetchone(
             "SELECT permissions FROM channels WHERE hash = ?", (channel_hash,)
         )
-        if not row or not row["permissions"]:
+        if row is None:
+            return self.get_server_permissions(channel_hash)
+        if not row["permissions"]:
             return {}
         return permissions_from_json(row["permissions"])
 
