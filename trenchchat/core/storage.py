@@ -220,18 +220,21 @@ class Storage:
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._conn.executescript(SCHEMA)
         self._conn.commit()
-        self._migrate_permissions()
-        self._secure_db_files()
         # Serialise all connection use across threads.  SQLite's Python
         # binding shares a single connection object; concurrent execute/commit/
         # rollback calls from different threads corrupt cursor state even with
         # check_same_thread=False.  An RLock (reentrant) is used so that a
-        # single thread can re-enter (e.g. _tx → insert → _tx).
+        # single thread can re-enter (e.g. _tx → insert → _tx).  Must exist
+        # before _migrate_permissions(), whose tenure repair pass calls
+        # _scope(), which uses _fetchone().
         self._lock = threading.RLock()
         # channel_hash -> owning scope hash.  Safe to cache because
         # channels.server_hash is write-once (never in upsert_channel's
-        # ON CONFLICT clause); invalidated per-key by upsert_channel.
+        # ON CONFLICT clause); invalidated per-key by upsert_channel.  Must
+        # also exist before _migrate_permissions() for the same reason.
         self._scope_cache: dict[str, str] = {}
+        self._migrate_permissions()
+        self._secure_db_files()
 
     # ------------------------------------------------------------------
     # File permission hardening
@@ -993,6 +996,41 @@ class Storage:
                         (channel_hash, identity_hash, joined_at, left_at)
                     VALUES (?, ?, ?, NULL)
                 """, (channel_hash, ih, joined_at))
+
+    def get_departed_within(self, channel_hash: str, since_ts: float) -> list[sqlite3.Row]:
+        """Return closed tenure intervals (identity_hash, joined_at, left_at)
+        that ended at or after *since_ts*.
+
+        Used when publishing a member-list document: a brand-new joiner has
+        no prior local state, so update_tenure's added/removed diff (which
+        only fires relative to what a peer already knew) can never teach
+        them about anyone who left before they joined. Carrying recent
+        departures in the signed document closes that gap. Bounded to the
+        sync window so the document doesn't grow with a channel's full
+        historical churn.
+        """
+        channel_hash = self._scope(channel_hash)
+        return self._fetchall("""
+            SELECT identity_hash, joined_at, left_at FROM membership_tenure
+            WHERE channel_hash = ? AND left_at IS NOT NULL AND left_at >= ?
+            ORDER BY identity_hash, joined_at
+        """, (channel_hash, since_ts))
+
+    def record_departed_tenure(self, channel_hash: str, identity_hash: str,
+                               joined_at: float, left_at: float) -> None:
+        """Record a closed tenure interval learned from a signed member-list
+        document's departed-member entry.
+
+        INSERT OR IGNORE only adds intervals not already on file -- never
+        overwrites existing local tenure data.
+        """
+        channel_hash = self._scope(channel_hash)
+        with self._tx():
+            self._conn.execute("""
+                INSERT OR IGNORE INTO membership_tenure
+                    (channel_hash, identity_hash, joined_at, left_at)
+                VALUES (?, ?, ?, ?)
+            """, (channel_hash, identity_hash, joined_at, left_at))
 
     def was_member_at(self, channel_hash: str, identity_hash: str,
                       timestamp: float) -> bool:

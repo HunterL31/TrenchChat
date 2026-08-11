@@ -1947,7 +1947,8 @@ def _server_doc(signer, server_hash: str, version: int, members, admins, owners,
     channels_blob = encode_roster(roster_rows)
     payload = _signed_payload(
         bytes.fromhex(server_hash), version, published_at,
-        members, admins, owners, permissions_blob, joined_at, channels_blob,
+        members, admins, owners=owners, permissions_blob=permissions_blob,
+        joined_at=joined_at, channels_blob=channels_blob,
     )
     return {
         "channel_hash": bytes.fromhex(server_hash),

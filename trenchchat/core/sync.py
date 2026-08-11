@@ -20,6 +20,13 @@ Flow when A fails to deliver to B:
 When B later sends MT_SYNC_REQUEST:
   - Peer checks missed_deliveries hints for B → sends exact missing messages
   - If no hints, falls back to timestamp sweep (get_messages_after)
+
+A request reaching further back than SYNC_WINDOW_SECS ("deep" backfill) is
+still answered -- there's no hard wall -- but rate-limited per (channel,
+peer): DEEP_SYNC_COOLDOWN_SECS between deep sweeps this responder will serve
+a given peer, so a flood of requests can't repeatedly force a full
+timestamp sweep. A request within the recent window is unaffected and
+always answered immediately.
 """
 
 import threading
@@ -39,14 +46,11 @@ from trenchchat.core.protocol import (
     F_SYNC_WINDOW_START, F_SYNC_MESSAGES,
     F_MISSED_FOR, F_MISSED_MSG_ID,
     MT_MISSED_DELIVERY, MT_SYNC_REQUEST, MT_SYNC_RESPONSE,
+    SYNC_WINDOW_SECS,
     unpack_wire,
 )
 from trenchchat.core.storage import Storage
 from trenchchat.network.router import Router
-
-# Sync window: how far back to look for missing messages
-SYNC_WINDOW_DAYS    = 7
-SYNC_WINDOW_SECS    = SYNC_WINDOW_DAYS * 86400
 
 # Maximum messages returned in a single sync response (LXMF size budget)
 MAX_RESPONSE_MESSAGES = 50
@@ -55,6 +59,18 @@ MAX_RESPONSE_MESSAGES = 50
 # outside this window is treated as unsolicited.  Generous enough to cover a
 # slow multi-hop mesh round trip without leaving the window open indefinitely.
 SYNC_RESPONSE_WINDOW_SECS = 300
+
+# How often a single peer may trigger a deep (pre-SYNC_WINDOW_SECS) backfill
+# sweep on a given channel from this responder. A soft mitigation against a
+# flood of costly full timestamp sweeps, not a hard security boundary --
+# tenure and full_sync already gate what a peer is authorised to see; this
+# only paces how fast they can pull it.
+DEEP_SYNC_COOLDOWN_SECS = 10 * 60
+
+# How long an idle (channel, peer) cooldown entry is kept before being
+# pruned, so the cooldown map doesn't grow unbounded over a long session
+# with many distinct peers.
+DEEP_SYNC_COOLDOWN_PRUNE_SECS = 24 * 3600
 
 
 class SyncManager:
@@ -71,6 +87,12 @@ class SyncManager:
         # response is only applied if it answers one of these.
         self._pending_requests: dict[tuple[str, str], float] = {}
         self._pending_requests_lock = threading.Lock()
+
+        # (channel_hash_hex, peer_hex) -> time we last served that peer a
+        # deep backfill sweep for that channel.  In-memory only; a restart
+        # resets it, which is acceptable for a soft rate limit.
+        self._deep_sync_last_served: dict[tuple[str, str], float] = {}
+        self._deep_sync_lock = threading.Lock()
 
         messaging.set_missed_delivery_callback(self._on_missed_delivery_event)
         router.add_delivery_callback(self._on_lxmf_message)
@@ -89,8 +111,7 @@ class SyncManager:
         """
         for sub in self._storage.get_subscriptions():
             channel_hash_hex = sub["channel_hash"]
-            since_ts = sub["last_sync_at"] or (time.time() - SYNC_WINDOW_SECS)
-            self._request_sync_for_channel(channel_hash_hex, since_ts)
+            self._request_sync_for_channel(channel_hash_hex, sub["last_sync_at"])
 
     def _on_channel_joined(self, channel_hash_hex: str, channel_name: str):
         """
@@ -100,10 +121,11 @@ class SyncManager:
         whatever channels are already subscribed at that moment -- a
         channel joined later in the session is never covered by anything.
 
-        A fresh join has no last_sync_at yet, so pull the full sync window
-        (same fallback request_sync_all() uses for an unsynced channel).
+        A fresh join has no last_sync_at yet, so ask for everything (0.0) --
+        the responder decides how far back it's actually willing to look;
+        see _handle_sync_request's deep-sync cooldown.
         """
-        self._request_sync_for_channel(channel_hash_hex, time.time() - SYNC_WINDOW_SECS)
+        self._request_sync_for_channel(channel_hash_hex, 0.0)
 
     def _request_sync_for_channel(self, channel_hash_hex: str, since_ts: float):
         peers = self._get_channel_peers(channel_hash_hex)
@@ -148,8 +170,7 @@ class SyncManager:
             channel_hash_hex = sub["channel_hash"]
             if peer_hex not in self._get_channel_peers(channel_hash_hex):
                 continue
-            since_ts = sub["last_sync_at"] or (time.time() - SYNC_WINDOW_SECS)
-            self._send_sync_request(peer_hex, channel_hash_hex, since_ts)
+            self._send_sync_request(peer_hex, channel_hash_hex, sub["last_sync_at"])
 
     # --- missed-delivery hint broadcast ---
 
@@ -250,14 +271,26 @@ class SyncManager:
             window_start = float(window_start_raw)
         except (TypeError, ValueError):
             window_start = time.time() - SYNC_WINDOW_SECS
-        # Never look back further than the configured sync window
-        window_start = max(window_start, time.time() - SYNC_WINDOW_SECS)
+        window_start = max(window_start, 0.0)
 
         # Prefer hint-targeted lookup; fall back to timestamp sweep
         missed_ids = self._storage.get_missed_message_ids(channel_hash_hex, requester_hex)
         if missed_ids:
             rows = self._get_messages_by_ids(channel_hash_hex, missed_ids)
         else:
+            # A request reaching further back than the recent window is a
+            # "deep" backfill; rate-limited so a flood of requests can't
+            # repeatedly force a full timestamp sweep. A recent request is
+            # unaffected and always answered immediately.
+            if window_start < time.time() - SYNC_WINDOW_SECS and not \
+                    self._deep_sync_allowed(channel_hash_hex, requester_hex):
+                RNS.log(
+                    f"TrenchChat [sync]: deep sync request from "
+                    f"{requester_hex[:12]}… for {channel_hash_hex[:12]}… "
+                    f"throttled — cooldown active",
+                    RNS.LOG_DEBUG,
+                )
+                return
             rows = self._storage.get_messages_after(
                 channel_hash_hex, window_start, MAX_RESPONSE_MESSAGES
             )
@@ -525,6 +558,27 @@ class SyncManager:
                 if self._pending_requests.pop((channel_hash_hex, form), None) is not None:
                     claimed = True
             return claimed
+
+    def _deep_sync_allowed(self, channel_hash_hex: str, requester_hex: str) -> bool:
+        """Rate-limit deep (pre-SYNC_WINDOW_SECS) backfill sweeps per (channel, peer).
+
+        Records this attempt and returns True the first time a given peer
+        asks for a deep sweep on a channel, then False for any further
+        attempt within DEEP_SYNC_COOLDOWN_SECS. Only guards the timestamp-
+        sweep fallback -- hint-targeted responses are already small and
+        exact, not a bulk-sweep concern.
+        """
+        now = time.time()
+        key = (channel_hash_hex, requester_hex)
+        with self._deep_sync_lock:
+            for stale_key, ts in list(self._deep_sync_last_served.items()):
+                if now - ts > DEEP_SYNC_COOLDOWN_PRUNE_SECS:
+                    del self._deep_sync_last_served[stale_key]
+            last = self._deep_sync_last_served.get(key)
+            if last is not None and now - last < DEEP_SYNC_COOLDOWN_SECS:
+                return False
+            self._deep_sync_last_served[key] = now
+            return True
 
     def _send_raw(self, dest_hex: str, fields: dict):
         try:

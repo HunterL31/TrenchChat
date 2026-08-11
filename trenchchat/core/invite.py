@@ -49,6 +49,7 @@ from trenchchat.core.protocol import (
     F_CHANNEL_CREATOR, F_CHANNEL_ACCESS, F_CHANNEL_CREATED_AT,
     F_CHANNEL_PERMISSIONS, F_SCOPE_KIND,
     MT_JOIN_REQUEST, MT_MEMBER_LIST_UPDATE, MT_INVITE,
+    SYNC_WINDOW_SECS,
     unpack_wire,
 )
 from trenchchat.core.storage import Storage
@@ -80,6 +81,7 @@ def _signed_payload(channel_hash: bytes, version: int, published_at: float,
                     owners: list[bytes] | None = None,
                     permissions_blob: bytes = b"",
                     joined_at: dict[bytes, float] | None = None,
+                    departed: dict[bytes, tuple[float, float]] | None = None,
                     channels_blob: bytes | None = None) -> bytes:
     """Build the payload that gets signed.
 
@@ -89,8 +91,19 @@ def _signed_payload(channel_hash: bytes, version: int, published_at: float,
     historical join time is bound into the signature too, so a recipient
     can trust it came from the signing admin and wasn't added or altered
     by whoever relayed the document.
+    If *departed* is also provided (v5, requires v3), each entry binds a
+    former member's (joined_at, left_at) interval into the signature, so a
+    brand-new joiner -- who has no prior local state to diff a removal
+    against -- can still validate messages sent by someone who left before
+    they joined.
     If *channels_blob* is also provided (v4, requires v3) the document scopes
     a server and the blob is its channel roster.
+
+    *departed* and *channels_blob* are independent siblings once *joined_at*
+    is present -- a legacy v4 server document (channels_blob, no departed,
+    from a peer that predates this field) must still reproduce its original
+    signed bytes, so channels_blob's inclusion must not be nested inside
+    departed's presence check.
 
     The nesting means None is "absent", so a standalone channel's payload is
     byte-identical to what the pre-server code produced.
@@ -101,6 +114,10 @@ def _signed_payload(channel_hash: bytes, version: int, published_at: float,
         items.extend([sorted(owners), permissions_blob])
         if joined_at is not None:
             items.append(sorted(joined_at.items()))
+            if departed is not None:
+                items.append(sorted(
+                    (m, jt, lt) for m, (jt, lt) in departed.items()
+                ))
             if channels_blob is not None:
                 items.append(channels_blob)
     return msgpack.packb(items, use_bin_type=True)
@@ -205,16 +222,20 @@ class InviteManager:
                         owners: list[bytes] | None = None,
                         permissions: dict | None = None,
                         joined_at: dict[bytes, float] | None = None,
+                        departed: dict[bytes, tuple[float, float]] | None = None,
                         channels_blob: bytes | None = None) -> dict:
         if owners is None:
             owners = []
         if joined_at is None:
             joined_at = {}
+        if departed is None:
+            departed = {}
         permissions_blob = (msgpack.packb(permissions, use_bin_type=True)
                             if permissions else b"")
         payload = _signed_payload(
             bytes.fromhex(channel_hash_hex), version, published_at,
-            members, admins, owners, permissions_blob, joined_at, channels_blob,
+            members, admins, owners=owners, permissions_blob=permissions_blob,
+            joined_at=joined_at, departed=departed, channels_blob=channels_blob,
         )
         sig = _sign(self._identity.rns_identity, payload)
         doc = {
@@ -226,6 +247,7 @@ class InviteManager:
             "owners":       owners,
             "permissions":  permissions_blob,
             "joined_at":    joined_at,
+            "departed":     departed,
             "signatures":   {self._identity.hash: sig},
         }
         if channels_blob is not None:
@@ -435,13 +457,15 @@ class InviteManager:
 
         is_v2 = "owners" in doc
         joined_at_in_doc = doc.get("joined_at") if "joined_at" in doc else None
+        departed_in_doc = doc.get("departed") if "departed" in doc else None
         channels_in_doc = doc.get("channels") if "channels" in doc else None
         if is_v2:
             payload = _signed_payload(
                 doc["channel_hash"], doc["version"], doc["published_at"],
                 doc["members"], admins_in_doc,
-                owners_in_doc, doc.get("permissions", b""),
-                joined_at_in_doc, channels_in_doc,
+                owners=owners_in_doc, permissions_blob=doc.get("permissions", b""),
+                joined_at=joined_at_in_doc, departed=departed_in_doc,
+                channels_blob=channels_in_doc,
             )
         else:
             payload = _signed_payload(
@@ -692,6 +716,22 @@ class InviteManager:
             channel_hash_hex, old_member_hashes, new_member_hashes, new_ts,
             joined_at_map=joined_at_map,
         )
+
+        # Departed-member tenure, signed into the document the same way
+        # joined_at is: lets a brand-new joiner validate messages sent by
+        # someone who left before they joined, which update_tenure's
+        # added/removed diff can never teach them (it only fires relative to
+        # what a peer already knew). INSERT OR IGNORE means this can only
+        # ever add intervals not already on file, never override them.
+        for m, interval in (doc.get("departed") or {}).items():
+            m_hex = m.hex() if isinstance(m, bytes) else str(m)
+            try:
+                joined_at_val, left_at_val = float(interval[0]), float(interval[1])
+            except (TypeError, ValueError, IndexError):
+                continue
+            self._storage.record_departed_tenure(
+                channel_hash_hex, m_hex, joined_at_val, left_at_val
+            )
 
         # v2 only: the v1 signed payload does not cover the permissions
         # field, so a v1 doc's blob is unauthenticated.
@@ -993,6 +1033,17 @@ class InviteManager:
             existing_joined = self._storage.get_open_tenure_joined_at(channel_hash_hex, m.hex())
             joined_at[m] = existing_joined if existing_joined is not None else published_at
 
+        # Recently departed members, so a brand-new joiner -- who has no
+        # prior local state for update_tenure's added/removed diff to act
+        # on -- can still validate messages sent by someone who left before
+        # they joined. See Storage.get_departed_within.
+        departed: dict[bytes, tuple[float, float]] = {
+            bytes.fromhex(row["identity_hash"]): (row["joined_at"], row["left_at"])
+            for row in self._storage.get_departed_within(
+                channel_hash_hex, published_at - SYNC_WINDOW_SECS
+            )
+        }
+
         # Block any token still outstanding for a removed member.
         for m in (remove_members or []):
             self._storage.revoke_invite_tokens_for(
@@ -1004,7 +1055,7 @@ class InviteManager:
         doc = self._build_document(channel_hash_hex, members, admins,
                                    version, published_at,
                                    owners=owners, permissions=perms,
-                                   joined_at=joined_at,
+                                   joined_at=joined_at, departed=departed,
                                    channels_blob=channels_blob)
         self._accept_document(doc, channel_hash_hex)
         self._broadcast_member_list(channel_hash_hex, doc)
@@ -1095,11 +1146,17 @@ class InviteManager:
         for m in members:
             existing_joined = self._storage.get_open_tenure_joined_at(channel_hash_hex, m.hex())
             joined_at[m] = existing_joined if existing_joined is not None else published_at
+        departed: dict[bytes, tuple[float, float]] = {
+            bytes.fromhex(row["identity_hash"]): (row["joined_at"], row["left_at"])
+            for row in self._storage.get_departed_within(
+                channel_hash_hex, published_at - SYNC_WINDOW_SECS
+            )
+        }
 
         doc = self._build_document(channel_hash_hex, members, admins,
                                    version, published_at,
                                    owners=owners, permissions=perms,
-                                   joined_at=joined_at,
+                                   joined_at=joined_at, departed=departed,
                                    channels_blob=(self._roster_blob(channel_hash_hex)
                                                   if is_server else None))
 
@@ -1269,6 +1326,10 @@ class InviteManager:
                         doc_clean["permissions"] = doc[b"permissions"]
                     if b"joined_at" in doc:
                         doc_clean["joined_at"] = dict(doc[b"joined_at"])
+                    if b"departed" in doc:
+                        doc_clean["departed"] = {
+                            k: tuple(v) for k, v in doc[b"departed"].items()
+                        }
                     if b"channels" in doc:
                         doc_clean["channels"] = doc[b"channels"]
 

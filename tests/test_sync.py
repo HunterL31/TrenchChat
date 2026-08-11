@@ -273,6 +273,90 @@ class TestSyncRequestResponse:
 
 
 # ---------------------------------------------------------------------------
+# Deep (pre-SYNC_WINDOW_SECS) sync rate limiting
+# ---------------------------------------------------------------------------
+
+class TestDeepSyncRateLimit:
+    def test_deep_sync_beyond_window_is_served(self, peer_factory):
+        """
+        A sync request reaching further back than SYNC_WINDOW_SECS is still
+        answered -- there's no hard wall anymore, just a rate limit that a
+        single first-time request never trips.
+        """
+        from trenchchat.core.sync import SYNC_WINDOW_SECS
+
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+
+        ch_hash = alice.channel_mgr.create_channel("deep-sync-ch", "", "public")
+        _seed_channel_on_peer(bob, ch_hash, "deep-sync-ch", alice.identity.hash_hex)
+
+        old_ts = time.time() - SYNC_WINDOW_SECS - 3600
+        msg_id = _insert_message(alice.storage, ch_hash, alice.identity.hash_hex,
+                                 "Ancient message", old_ts)
+
+        bob.sync_mgr._send_sync_request(alice.identity.hash_hex, ch_hash, old_ts - 10)
+
+        assert wait_for_message(bob.storage, ch_hash, msg_id, timeout=5), \
+            "A first deep sync request was not served"
+
+    def test_deep_sync_throttled_on_repeat_request(self, peer_factory):
+        """
+        A second deep-backfill request from the same peer within the
+        cooldown is silently dropped, so a flood of requests can't force
+        repeated full timestamp sweeps.
+        """
+        from trenchchat.core.sync import SYNC_WINDOW_SECS
+
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+
+        ch_hash = alice.channel_mgr.create_channel("deep-sync-throttle-ch", "", "public")
+        _seed_channel_on_peer(bob, ch_hash, "deep-sync-throttle-ch", alice.identity.hash_hex)
+
+        old_ts = time.time() - SYNC_WINDOW_SECS - 3600
+        first_id = _insert_message(alice.storage, ch_hash, alice.identity.hash_hex,
+                                   "First ancient message", old_ts)
+
+        bob.sync_mgr._send_sync_request(alice.identity.hash_hex, ch_hash, old_ts - 10)
+        assert wait_for_message(bob.storage, ch_hash, first_id, timeout=5)
+
+        second_id = _insert_message(alice.storage, ch_hash, alice.identity.hash_hex,
+                                    "Second ancient message", old_ts + 1)
+
+        bob.sync_mgr._send_sync_request(alice.identity.hash_hex, ch_hash, old_ts - 10)
+        time.sleep(0.5)
+
+        assert not bob.storage.message_exists(second_id), \
+            "A repeated deep sync request within the cooldown was served anyway"
+
+    def test_recent_request_is_never_throttled(self, peer_factory):
+        """
+        The deep-sync cooldown only guards requests reaching further back
+        than SYNC_WINDOW_SECS -- repeated in-window requests are always
+        answered immediately, matching pre-existing behaviour.
+        """
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+
+        ch_hash = alice.channel_mgr.create_channel("recent-sync-ch", "", "public")
+        _seed_channel_on_peer(bob, ch_hash, "recent-sync-ch", alice.identity.hash_hex)
+
+        window_start = time.time()
+        first_id = _insert_message(alice.storage, ch_hash, alice.identity.hash_hex,
+                                   "Recent message one", window_start + 1)
+        bob.sync_mgr._send_sync_request(alice.identity.hash_hex, ch_hash, window_start)
+        assert wait_for_message(bob.storage, ch_hash, first_id, timeout=5)
+
+        second_id = _insert_message(alice.storage, ch_hash, alice.identity.hash_hex,
+                                    "Recent message two", window_start + 2)
+        bob.sync_mgr._send_sync_request(alice.identity.hash_hex, ch_hash, window_start)
+
+        assert wait_for_message(bob.storage, ch_hash, second_id, timeout=5), \
+            "A second in-window request was incorrectly throttled"
+
+
+# ---------------------------------------------------------------------------
 # Flush pending
 # ---------------------------------------------------------------------------
 
@@ -958,6 +1042,102 @@ class TestTenureSyncFiltering:
             "Bob (plain member, no full_sync) received pre-join history"
         assert wait_for_message(carol.storage, ch_hash, before_msg_id, timeout=5), \
             "Carol (admin, granted full_sync) did not receive pre-join history"
+
+    def test_new_member_receives_departed_members_pre_kick_history(self, peer_factory):
+        """
+        Regression test for a real gap: a brand-new joiner has no prior
+        local state, so update_tenure's added/removed diff -- which only
+        fires relative to what a peer already knew -- could never teach
+        them about anyone who left before they joined. Every message from
+        a departed member was silently and permanently unsyncable to any
+        future joiner, regardless of full_sync. The departed-member entries
+        a signed member-list document now carries close that gap.
+
+        full_sync is granted to the member role so this isolates the fix:
+        without it, Carol would be blocked by the *requester*-tenure
+        boundary regardless (she joined after Bob left), which is a
+        separate, correct restriction already covered by
+        test_pre_join_history_excluded_by_default.
+        """
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+        carol = peer_factory("carol")
+
+        perms = dict(PRESET_PRIVATE)
+        perms[ROLE_MEMBER] = [SEND_MESSAGE, FULL_SYNC]
+        ch_hash = alice.channel_mgr.create_channel("departed-ch", "", permissions=perms)
+
+        alice.invite_mgr.publish_member_list(ch_hash, add_members=[bob.identity.hash])
+        assert wait_for_member(alice.storage, ch_hash, bob.identity.hash_hex)
+        _confirm_membership(bob, ch_hash)
+        assert wait_for(lambda: bob.storage.is_member(ch_hash, bob.identity.hash_hex), timeout=5)
+
+        pre_kick_msg_id = _insert_message(alice.storage, ch_hash, bob.identity.hash_hex,
+                                          "Bob's message before he left")
+        time.sleep(0.02)
+
+        alice.invite_mgr.publish_member_list(ch_hash, remove_members=[bob.identity.hash])
+        assert wait_for(
+            lambda: not alice.storage.is_member(ch_hash, bob.identity.hash_hex), timeout=5
+        )
+        time.sleep(0.02)
+
+        alice.invite_mgr.publish_member_list(ch_hash, add_members=[carol.identity.hash])
+        assert wait_for_member(alice.storage, ch_hash, carol.identity.hash_hex)
+        _confirm_membership(carol, ch_hash)
+        assert wait_for(lambda: carol.storage.is_member(ch_hash, carol.identity.hash_hex), timeout=5)
+
+        carol.sync_mgr._send_sync_request(alice.identity.hash_hex, ch_hash, 0.0)
+
+        assert wait_for_message(carol.storage, ch_hash, pre_kick_msg_id, timeout=5), \
+            "Carol did not receive Bob's pre-kick message -- she has no way to " \
+            "validate his tenure without the departed-member entries the signed " \
+            "document is now supposed to carry"
+
+    def test_departed_member_tenure_does_not_cover_post_kick_message(self, peer_factory):
+        """
+        Security boundary: departed-member tenure only covers the actual
+        interval -- a message purportedly from Bob timestamped after his
+        kick must still be rejected by a brand-new joiner, the same as it
+        already is for a peer that witnessed the kick directly
+        (test_sync_response_rejects_gap_message).
+        """
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+        carol = peer_factory("carol")
+
+        perms = dict(PRESET_PRIVATE)
+        perms[ROLE_MEMBER] = [SEND_MESSAGE, FULL_SYNC]
+        ch_hash = alice.channel_mgr.create_channel("departed-gap-ch", "", permissions=perms)
+
+        alice.invite_mgr.publish_member_list(ch_hash, add_members=[bob.identity.hash])
+        assert wait_for_member(alice.storage, ch_hash, bob.identity.hash_hex)
+        _confirm_membership(bob, ch_hash)
+        assert wait_for(lambda: bob.storage.is_member(ch_hash, bob.identity.hash_hex), timeout=5)
+
+        time.sleep(0.02)
+        alice.invite_mgr.publish_member_list(ch_hash, remove_members=[bob.identity.hash])
+        assert wait_for(
+            lambda: not alice.storage.is_member(ch_hash, bob.identity.hash_hex), timeout=5
+        )
+        time.sleep(0.02)
+
+        # A message purportedly from Bob, timestamped after his kick
+        gap_msg_id = _insert_message(alice.storage, ch_hash, bob.identity.hash_hex,
+                                     "Gap message after kick")
+        time.sleep(0.02)
+
+        alice.invite_mgr.publish_member_list(ch_hash, add_members=[carol.identity.hash])
+        assert wait_for_member(alice.storage, ch_hash, carol.identity.hash_hex)
+        _confirm_membership(carol, ch_hash)
+        assert wait_for(lambda: carol.storage.is_member(ch_hash, carol.identity.hash_hex), timeout=5)
+
+        carol.sync_mgr._send_sync_request(alice.identity.hash_hex, ch_hash, 0.0)
+        time.sleep(0.5)
+
+        assert not carol.storage.message_exists(gap_msg_id), \
+            "Carol accepted a message from Bob timestamped after his departed-tenure " \
+            "interval closed -- departed-member trust must not extend past left_at"
 
     def test_no_tenure_data_allows_sync_without_filtering(self, peer_factory):
         """

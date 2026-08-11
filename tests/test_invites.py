@@ -341,3 +341,45 @@ class TestDocumentFormatCompatibility:
         stored = alice.storage.get_member_list_version(ch)
         doc = _mp.unpackb(stored["document_blob"], raw=True)
         assert b"channels" not in doc
+
+
+class TestDepartedTenureFormatCompatibility:
+    """departed and channels_blob are independent siblings once joined_at is
+    present -- a legacy v4 server document (channels_blob, no departed field,
+    from a peer that predates this feature) must still reproduce its
+    original signed bytes so it stays validatable by patched code."""
+
+    def test_legacy_server_payload_unaffected_by_absent_departed(self):
+        from trenchchat.core.invite import _signed_payload
+        args = (b"\x01" * 16, 3, 123.0, [b"\x02" * 16], [b"\x03" * 16])
+        kwargs = dict(owners=[b"\x04" * 16], permissions_blob=b"perms",
+                      joined_at={b"\x02" * 16: 1.0}, channels_blob=b"\x90")
+        assert _signed_payload(*args, **kwargs) == \
+            _signed_payload(*args, **kwargs, departed=None)
+
+    def test_departed_changes_the_payload(self):
+        from trenchchat.core.invite import _signed_payload
+        args = (b"\x01" * 16, 3, 123.0, [b"\x02" * 16], [b"\x03" * 16])
+        kwargs = dict(owners=[b"\x04" * 16], permissions_blob=b"perms",
+                      joined_at={b"\x02" * 16: 1.0})
+        assert _signed_payload(*args, **kwargs, departed=None) != \
+            _signed_payload(*args, **kwargs, departed={b"\x05" * 16: (1.0, 2.0)})
+
+    def test_departed_and_channels_blob_coexist(self):
+        """A new-format server document (both departed and channels_blob
+        present) is distinct from either alone -- neither field's presence
+        silently drops the other from the signed payload."""
+        from trenchchat.core.invite import _signed_payload
+        args = (b"\x01" * 16, 3, 123.0, [b"\x02" * 16], [b"\x03" * 16])
+        kwargs = dict(owners=[b"\x04" * 16], permissions_blob=b"perms",
+                      joined_at={b"\x02" * 16: 1.0})
+        departed = {b"\x05" * 16: (1.0, 2.0)}
+        channels_blob = b"\x90"
+        both = _signed_payload(*args, **kwargs, departed=departed,
+                               channels_blob=channels_blob)
+        departed_only = _signed_payload(*args, **kwargs, departed=departed,
+                                        channels_blob=None)
+        channels_only = _signed_payload(*args, **kwargs, departed=None,
+                                        channels_blob=channels_blob)
+        assert both != departed_only
+        assert both != channels_only

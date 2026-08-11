@@ -79,6 +79,14 @@ MT_EMOJI_REQUEST    = "emoji_request"   # ask a peer for emoji image data by has
 MT_EMOJI_RESPONSE   = "emoji_response"  # respond with the emoji image bytes
 
 
+# --- sync window ---
+# How far back sync requests, missed-delivery hints, and a published member
+# list's departed-member tenure entries look. Shared so invite.py and sync.py
+# stay bounded by the same horizon.
+SYNC_WINDOW_DAYS = 7
+SYNC_WINDOW_SECS = SYNC_WINDOW_DAYS * 86400
+
+
 # --- bounded unpacking of wire payloads ---
 
 import msgpack  # noqa: E402  (kept below the constants; still no local imports)
