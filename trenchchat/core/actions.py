@@ -14,7 +14,7 @@ free of any GUI framework dependency.
 """
 
 from trenchchat.core.permissions import (
-    KICK, MANAGE_CHANNEL, MANAGE_ROLES, SEND_MESSAGE,
+    CREATE_CHANNEL, KICK, MANAGE_CHANNEL, MANAGE_ROLES, SEND_MESSAGE,
     is_open_join, permissions_from_json,
 )
 
@@ -164,4 +164,81 @@ def leave_channel(storage, subscription_mgr, channel_hash_hex: str) -> bool:
     if channel is None:
         return False
     subscription_mgr.unsubscribe(channel_hash_hex, channel["creator_hash"])
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Servers
+#
+# A server is a collection of channels sharing one membership and one role
+# assignment. Most existing actions above need no server-specific variant:
+# has_permission(), get_members() and the tenure lookups all resolve a channel
+# to its owning server inside Storage, so compute_channel_recipients(),
+# send_message() and update_membership() are already correct when handed a
+# server channel or a server hash.
+# ---------------------------------------------------------------------------
+
+
+def create_server(server_mgr, invite_mgr, name: str, description: str = "",
+                  permissions: dict | None = None) -> str:
+    """Create a server and publish its initial member list document.
+
+    Mirrors create_channel(): without that first signed document there is no
+    root for _validate_document's trusted-signer chain to build on.
+    """
+    server_hash = server_mgr.create_server(
+        name=name, description=description, permissions=permissions,
+    )
+    invite_mgr.publish_member_list(server_hash)
+    return server_hash
+
+
+def create_channel_in_server(storage, channel_mgr, invite_mgr,
+                             server_hash_hex: str, actor_hash_hex: str,
+                             name: str, description: str = "") -> str | None:
+    """Create a channel inside a server.
+
+    Returns None if the server is unknown or the actor lacks CREATE_CHANNEL
+    (a silent no-op, matching compute_send_recipients). The channel inherits
+    the server's permissions and membership; re-publishing the server's
+    document is what carries the new channel to every member.
+    """
+    if storage.get_server(server_hash_hex) is None:
+        return None
+    if not storage.has_permission(server_hash_hex, actor_hash_hex, CREATE_CHANNEL):
+        return None
+    channel_hash = channel_mgr.create_channel(
+        name=name, description=description,
+        permissions=storage.get_server_permissions(server_hash_hex),
+        server_hash=server_hash_hex,
+    )
+    invite_mgr.publish_member_list(server_hash_hex)
+    return channel_hash
+
+
+def edit_server_permissions(storage, invite_mgr, server_hash_hex: str,
+                            actor_hash_hex: str, new_perms: dict) -> bool:
+    """Server analogue of edit_channel_permissions.
+
+    set_server_permissions mirrors the new dict into every child channel row
+    in one transaction, so the direct channels.permissions readers across core
+    stay correct.
+    """
+    if not storage.has_permission(server_hash_hex, actor_hash_hex, MANAGE_CHANNEL):
+        return False
+    storage.set_server_permissions(server_hash_hex, new_perms)
+    invite_mgr.broadcast_permissions(server_hash_hex)
+    return True
+
+
+def leave_server(storage, subscription_mgr, server_hash_hex: str) -> bool:
+    """Unsubscribe from every channel in a server.
+
+    Local only, like leave_channel: membership rows are left for the next
+    accepted document to replace.
+    """
+    if storage.get_server(server_hash_hex) is None:
+        return False
+    for row in storage.get_server_channels(server_hash_hex):
+        subscription_mgr.unsubscribe(row["hash"], row["creator_hash"])
     return True

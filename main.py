@@ -30,6 +30,7 @@ from trenchchat.core.identity import Identity
 from trenchchat.core.reaction import ReactionManager
 from trenchchat.core.storage import Storage
 from trenchchat.core.channel import ChannelManager
+from trenchchat.core.server import ServerManager
 from trenchchat.core.messaging import Messaging
 from trenchchat.core.presence import PresenceManager
 from trenchchat.core.subscription import SubscriptionManager
@@ -98,6 +99,7 @@ def main():
 
     # --- core managers ---
     channel_mgr = ChannelManager(identity, storage)
+    server_mgr = ServerManager(identity, storage)
     messaging = Messaging(identity, storage, router)
     subscription_mgr = SubscriptionManager(identity, storage, router)
     invite_mgr = InviteManager(identity, storage, router)
@@ -114,8 +116,9 @@ def main():
 
     RNS.Transport.register_announce_handler(UserAnnounceHandler(_on_user_announced))
 
-    # Restore RNS destinations for channels we own
+    # Restore RNS destinations for channels and servers we own
     channel_mgr.restore_owned_channels()
+    server_mgr.restore_owned_servers()
 
     # Announce our delivery destination, trenchchat.user, and all owned channels
     router.announce()
@@ -185,6 +188,7 @@ def main():
         rns=rns,
         router=router,
         channel_mgr=channel_mgr,
+        server_mgr=server_mgr,
         messaging=messaging,
         subscription_mgr=subscription_mgr,
         invite_mgr=invite_mgr,

@@ -13,7 +13,7 @@ from trenchchat.config import DATA_DIR
 from trenchchat.core.fileutils import secure_file
 from trenchchat.core.lockbox import sqlcipher_hex_key
 from trenchchat.core.permissions import (
-    PRESET_OPEN, PRESET_PRIVATE, ROLE_ADMIN, ROLE_MEMBER, ROLE_OWNER,
+    PRESET_OPEN, PRESET_PRIVATE, PRESET_SERVER, ROLE_ADMIN, ROLE_MEMBER, ROLE_OWNER,
     has_permission as _check_permission,
     permissions_from_json, permissions_to_json,
 )
@@ -45,6 +45,16 @@ def _connect_encrypted(path: str, raw_key: bytes) -> sqlite3.Connection:
     return conn
 
 SCHEMA = """
+CREATE TABLE IF NOT EXISTS servers (
+    hash         TEXT PRIMARY KEY,
+    name         TEXT NOT NULL,
+    description  TEXT NOT NULL DEFAULT '',
+    creator_hash TEXT NOT NULL,
+    permissions  TEXT NOT NULL DEFAULT '{}',
+    created_at   REAL NOT NULL,
+    last_seen    REAL NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS channels (
     hash        TEXT PRIMARY KEY,
     name        TEXT NOT NULL,
@@ -52,7 +62,8 @@ CREATE TABLE IF NOT EXISTS channels (
     creator_hash TEXT NOT NULL,
     permissions TEXT NOT NULL DEFAULT '{}',
     created_at  REAL NOT NULL,
-    last_seen   REAL NOT NULL
+    last_seen   REAL NOT NULL,
+    server_hash TEXT
 );
 
 CREATE TABLE IF NOT EXISTS messages (
@@ -217,6 +228,10 @@ class Storage:
         # check_same_thread=False.  An RLock (reentrant) is used so that a
         # single thread can re-enter (e.g. _tx → insert → _tx).
         self._lock = threading.RLock()
+        # channel_hash -> owning scope hash.  Safe to cache because
+        # channels.server_hash is write-once (never in upsert_channel's
+        # ON CONFLICT clause); invalidated per-key by upsert_channel.
+        self._scope_cache: dict[str, str] = {}
 
     # ------------------------------------------------------------------
     # File permission hardening
@@ -299,6 +314,25 @@ class Storage:
         self._migrate_tenure()
         self._migrate_image_data()
         self._migrate_reactions()
+        self._migrate_servers()
+
+    def _migrate_servers(self):
+        """Add channels.server_hash for existing databases.
+
+        The servers table itself is covered by SCHEMA's CREATE TABLE IF NOT
+        EXISTS.  Existing channel rows get server_hash NULL, which _scope()
+        reads as "standalone" -- so every pre-server channel keeps behaving
+        exactly as it did.
+        """
+        if not self._has_column("channels", "server_hash"):
+            self._conn.execute("ALTER TABLE channels ADD COLUMN server_hash TEXT")
+        # Indexed here rather than in SCHEMA: on a legacy database the channels
+        # table already exists, so CREATE TABLE IF NOT EXISTS is a no-op and an
+        # index over server_hash would run before the ALTER TABLE above.
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_channels_server ON channels(server_hash)"
+        )
+        self._conn.commit()
 
     def _migrate_tenure(self):
         """Create membership_tenure table and backfill current members if the table is new."""
@@ -466,11 +500,119 @@ class Storage:
 
         RNS.log("TrenchChat [storage]: database re-keyed with new PIN", RNS.LOG_NOTICE)
 
+    # --- scope resolution ---
+
+    def _scope(self, channel_hash: str) -> str:
+        """Resolve a channel hash to the hash that owns its membership.
+
+        A channel inside a server shares one members table, one permissions
+        document and one tenure log with that server, all keyed by the server
+        hash.  A standalone channel is its own scope.  Unknown hashes resolve
+        to themselves, so every pre-server call site behaves identically.
+        """
+        cached = self._scope_cache.get(channel_hash)
+        if cached is not None:
+            return cached
+        row = self._fetchone(
+            "SELECT server_hash FROM channels WHERE hash = ?", (channel_hash,)
+        )
+        scope = row["server_hash"] if row and row["server_hash"] else channel_hash
+        self._scope_cache[channel_hash] = scope
+        return scope
+
+    def scope_for(self, channel_hash: str) -> str:
+        """Public form of _scope, for callers that normalise once up front."""
+        return self._scope(channel_hash)
+
+    # --- servers ---
+
+    def upsert_server(self, hash: str, name: str, description: str,
+                      creator_hash: str, permissions: str | dict = "",
+                      created_at: float = 0.0):
+        """Create or update a server."""
+        if isinstance(permissions, dict):
+            permissions = permissions_to_json(permissions)
+        elif not permissions:
+            permissions = permissions_to_json(PRESET_SERVER)
+        with self._tx():
+            self._conn.execute("""
+                INSERT INTO servers (hash, name, description, creator_hash, permissions,
+                                     created_at, last_seen)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(hash) DO UPDATE SET
+                    name=excluded.name,
+                    description=excluded.description,
+                    permissions=excluded.permissions,
+                    last_seen=excluded.last_seen
+            """, (hash, name, description, creator_hash, permissions, created_at,
+                  time.time()))
+
+    def get_server(self, hash: str) -> sqlite3.Row | None:
+        return self._fetchone("SELECT * FROM servers WHERE hash = ?", (hash,))
+
+    def get_all_servers(self) -> list[sqlite3.Row]:
+        return self._fetchall("SELECT * FROM servers ORDER BY name")
+
+    def is_server(self, hash: str) -> bool:
+        return self._fetchone(
+            "SELECT 1 FROM servers WHERE hash = ?", (hash,)
+        ) is not None
+
+    def get_server_channels(self, server_hash: str) -> list[sqlite3.Row]:
+        return self._fetchall(
+            "SELECT * FROM channels WHERE server_hash = ? ORDER BY created_at",
+            (server_hash,),
+        )
+
+    def get_standalone_channels(self) -> list[sqlite3.Row]:
+        return self._fetchall(
+            "SELECT * FROM channels WHERE server_hash IS NULL ORDER BY name"
+        )
+
+    def get_scope_creator_hash(self, scope_hash: str) -> str | None:
+        """The creator of a scope, whether it is a server or a channel.
+
+        Used by the member-list document's trusted-signer fallback: without
+        checking servers first, every server document would skip the creator
+        tier and fall through to the weakest bootstrap tier.
+        """
+        row = self._fetchone("SELECT creator_hash FROM servers WHERE hash = ?",
+                             (scope_hash,))
+        if row is None:
+            row = self._fetchone("SELECT creator_hash FROM channels WHERE hash = ?",
+                                 (scope_hash,))
+        return row["creator_hash"] if row else None
+
+    def get_server_permissions(self, server_hash: str) -> dict:
+        row = self._fetchone("SELECT permissions FROM servers WHERE hash = ?",
+                             (server_hash,))
+        if row is None or not row["permissions"]:
+            return {}
+        return permissions_from_json(row["permissions"])
+
+    def set_server_permissions(self, server_hash: str, permissions: dict) -> None:
+        """Write server permissions and mirror them into every child channel.
+
+        Child channels keep a copy in channels.permissions because ~18 call
+        sites across core read that column straight off the sqlite Row rather
+        than going through get_channel_permissions() -- including the FULL_SYNC
+        check at sync.py:248, whose other half (get_role) *does* resolve to the
+        server.  The two halves agree only because of this mirror.  Both
+        statements share one transaction so it can never be half-applied.
+        """
+        blob = permissions_to_json(permissions)
+        with self._tx():
+            self._conn.execute("UPDATE servers SET permissions = ? WHERE hash = ?",
+                               (blob, server_hash))
+            self._conn.execute("UPDATE channels SET permissions = ? WHERE server_hash = ?",
+                               (blob, server_hash))
+
     # --- channels ---
 
     def upsert_channel(self, hash: str, name: str, description: str,
                        creator_hash: str, permissions: str | dict = "",
-                       created_at: float = 0.0, *, access_mode: str = ""):
+                       created_at: float = 0.0, *, access_mode: str = "",
+                       server_hash: str | None = None):
         """Create or update a channel.
 
         *permissions* can be a JSON string, a dict (will be serialised), or
@@ -487,15 +629,23 @@ class Storage:
         elif not permissions:
             permissions = permissions_to_json(PRESET_PRIVATE)
         with self._tx():
+            # server_hash is deliberately absent from the DO UPDATE clause: a
+            # channel's parent server is fixed at creation.  Letting an upsert
+            # re-parent an existing channel would allow a signed server roster
+            # to adopt a standalone channel a peer is already in, handing that
+            # server's members the channel's membership, permissions and history.
             self._conn.execute("""
-                INSERT INTO channels (hash, name, description, creator_hash, permissions, created_at, last_seen)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO channels (hash, name, description, creator_hash, permissions,
+                                      created_at, last_seen, server_hash)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(hash) DO UPDATE SET
                     name=excluded.name,
                     description=excluded.description,
                     permissions=excluded.permissions,
                     last_seen=excluded.last_seen
-            """, (hash, name, description, creator_hash, permissions, created_at, time.time()))
+            """, (hash, name, description, creator_hash, permissions, created_at,
+                  time.time(), server_hash))
+            self._scope_cache.pop(hash, None)
 
     def get_channel(self, hash: str) -> sqlite3.Row | None:
         return self._fetchone("SELECT * FROM channels WHERE hash = ?", (hash,))
@@ -591,6 +741,14 @@ class Storage:
             )
 
     # --- members ---
+    #
+    # Membership *writes* never resolve to the server scope: callers address the
+    # scope explicitly (InviteManager passes the server hash it validated the
+    # document against).  A write keyed by a channel hash that silently landed at
+    # server scope would be a privilege-escalation primitive -- create_channel()
+    # upserts its creator as ROLE_OWNER, which under a resolving write would let
+    # anyone holding CREATE_CHANNEL make themselves owner of the whole server.
+    # Unresolved, such a write lands on a row no resolving read will ever see.
 
     def upsert_member(self, channel_hash: str, identity_hash: str,
                       display_name: str, role: str | bool = ROLE_MEMBER,
@@ -622,6 +780,7 @@ class Storage:
             )
 
     def get_members(self, channel_hash: str) -> list[sqlite3.Row]:
+        channel_hash = self._scope(channel_hash)
         return self._fetchall(
             "SELECT * FROM members WHERE channel_hash = ? ORDER BY added_at",
             (channel_hash,)
@@ -630,6 +789,7 @@ class Storage:
     def get_member_display_name(self, channel_hash: str,
                                 identity_hash: str) -> str | None:
         """Return the stored display name for a member, or None if not found."""
+        channel_hash = self._scope(channel_hash)
         row = self._fetchone(
             "SELECT display_name FROM members WHERE channel_hash = ? AND identity_hash = ?",
             (channel_hash, identity_hash),
@@ -661,6 +821,7 @@ class Storage:
         return row["display_name"] if row else None
 
     def is_member(self, channel_hash: str, identity_hash: str) -> bool:
+        channel_hash = self._scope(channel_hash)
         return self._fetchone(
             "SELECT 1 FROM members WHERE channel_hash = ? AND identity_hash = ?",
             (channel_hash, identity_hash)
@@ -668,6 +829,7 @@ class Storage:
 
     def is_admin(self, channel_hash: str, identity_hash: str) -> bool:
         """Backward-compatible check: True if the member is an admin or owner."""
+        channel_hash = self._scope(channel_hash)
         row = self._fetchone(
             "SELECT role FROM members WHERE channel_hash = ? AND identity_hash = ?",
             (channel_hash, identity_hash)
@@ -675,7 +837,12 @@ class Storage:
         return bool(row and row["role"] in (ROLE_ADMIN, ROLE_OWNER))
 
     def get_role(self, channel_hash: str, identity_hash: str) -> str | None:
-        """Return the member's role, or None if not a member."""
+        """Return the member's role, or None if not a member.
+
+        Resolves to the server scope for a channel inside a server: one role
+        applies across every channel in it.
+        """
+        channel_hash = self._scope(channel_hash)
         row = self._fetchone(
             "SELECT role FROM members WHERE channel_hash = ? AND identity_hash = ?",
             (channel_hash, identity_hash)
@@ -793,6 +960,7 @@ class Storage:
         joined_at <= timestamp < left_at  (or left_at IS NULL for open intervals).
         Returns False if no tenure data exists for the identity (unknown history).
         """
+        channel_hash = self._scope(channel_hash)
         row = self._fetchone("""
             SELECT 1 FROM membership_tenure
             WHERE channel_hash = ? AND identity_hash = ?
@@ -809,6 +977,7 @@ class Storage:
         rather than letting it default to this publish's timestamp for
         everyone (see update_tenure's joined_at_map for why that matters).
         """
+        channel_hash = self._scope(channel_hash)
         row = self._fetchone("""
             SELECT joined_at FROM membership_tenure
             WHERE channel_hash = ? AND identity_hash = ? AND left_at IS NULL
@@ -822,7 +991,12 @@ class Storage:
         Used to decide whether to apply tenure checks — if no tenure data exists
         (e.g. an open-join channel or a channel bootstrapped before this feature),
         tenure checks are skipped rather than incorrectly rejecting all messages.
+
+        Resolving to the server scope is load-bearing: a channel inside a server
+        has no tenure rows under its own hash, so without this the sync tenure
+        filter at sync.py:246 would silently disengage for every server channel.
         """
+        channel_hash = self._scope(channel_hash)
         row = self._fetchone(
             "SELECT 1 FROM membership_tenure WHERE channel_hash = ? LIMIT 1",
             (channel_hash,)
@@ -832,11 +1006,25 @@ class Storage:
     # --- channel permissions ---
 
     def get_channel_permissions(self, channel_hash: str) -> dict:
-        """Return the parsed permissions dict for a channel."""
+        """Return the parsed permissions dict for a channel.
+
+        A channel inside a server reads its own row, which carries a mirrored
+        copy -- this deliberately does not resolve upward, because ~18 call
+        sites read channels.permissions straight off the Row and would bypass
+        any resolution here.
+
+        When the hash names a *server* rather than a channel there is no
+        channels row to read, so fall back to the servers table. Without that,
+        has_permission(server_hash, ...) sees an empty dict and denies every
+        permission to admins and members alike -- an owner only appears to work
+        because has_permission short-circuits on that role.
+        """
         row = self._fetchone(
             "SELECT permissions FROM channels WHERE hash = ?", (channel_hash,)
         )
-        if not row or not row["permissions"]:
+        if row is None:
+            return self.get_server_permissions(channel_hash)
+        if not row["permissions"]:
             return {}
         return permissions_from_json(row["permissions"])
 
@@ -859,6 +1047,7 @@ class Storage:
     # --- member list versions ---
 
     def get_member_list_version(self, channel_hash: str) -> sqlite3.Row | None:
+        channel_hash = self._scope(channel_hash)
         return self._fetchone(
             "SELECT * FROM member_list_versions WHERE channel_hash = ?",
             (channel_hash,)

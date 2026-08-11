@@ -13,6 +13,8 @@ LXMF fields layout:
     0x09  missed_for        str         — identity hex of peer who missed a message (missed_delivery)
     0x0A  missed_msg_id     str         — message_id that was not delivered (missed_delivery)
     0x0D  image_data        bytes|None  — JPEG image attachment payload (max 320 KB)
+    0x28  scope_kind        str         — "server" when a control message targets a
+                                          server scope; absent means a single channel
 """
 
 import hashlib

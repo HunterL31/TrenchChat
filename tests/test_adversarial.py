@@ -1903,3 +1903,246 @@ class TestAdversarialSubscriberList:
         assert "dd" * 16 not in bob.subscription_mgr.get_subscribers(ch_hash), \
             "An older signed subscriber list was replayed successfully"
 
+
+# ---------------------------------------------------------------------------
+# SERVERS
+#
+# A server roster is a signed list of channel hashes that the receiver turns
+# into local channel rows re-parented under that server. Every entry is a
+# capability claim, so each one is checked three independent ways.
+# ---------------------------------------------------------------------------
+
+from trenchchat.core.invite import encode_roster
+from trenchchat.core.naming import channel_hash_for, server_hash_for
+from trenchchat.core.permissions import CREATE_CHANNEL, PRESET_SERVER
+from trenchchat.core.protocol import (
+    F_CHANNEL_CREATOR, F_CHANNEL_NAME, F_SCOPE_KIND,
+)
+
+
+def _server_with_member(peer_factory, member_perms=None):
+    """Alice owns a server; Bob is a member of it."""
+    alice = peer_factory("alice")
+    bob = peer_factory("bob")
+    perms = dict(PRESET_SERVER)
+    if member_perms is not None:
+        perms[ROLE_MEMBER] = list(member_perms)
+    s = actions.create_server(alice.server_mgr, alice.invite_mgr, "S", "", perms)
+
+    def on_invite(scope_hex, name, token, expiry, admin_hex):
+        bob.invite_mgr.send_join_request(scope_hex, token, expiry, admin_hex)
+
+    bob.invite_mgr.add_invite_callback(on_invite)
+    alice.invite_mgr.send_invite(s, bob.identity.hash_hex)
+    assert wait_for_member(alice.storage, s, bob.identity.hash_hex, timeout=5)
+    assert wait_for(lambda: bob.storage.get_server(s) is not None, timeout=5)
+    return alice, bob, s
+
+
+def _server_doc(signer, server_hash: str, version: int, members, admins, owners,
+                roster_rows, permissions_blob=b""):
+    """A server member-list doc with a roster, signed by *signer*."""
+    published_at = time.time()
+    joined_at = {m: published_at for m in members}
+    channels_blob = encode_roster(roster_rows)
+    payload = _signed_payload(
+        bytes.fromhex(server_hash), version, published_at,
+        members, admins, owners, permissions_blob, joined_at, channels_blob,
+    )
+    return {
+        "channel_hash": bytes.fromhex(server_hash),
+        "version":      version,
+        "published_at": published_at,
+        "members":      members,
+        "admins":       admins,
+        "owners":       owners,
+        "permissions":  permissions_blob,
+        "joined_at":    joined_at,
+        "channels":     channels_blob,
+        "signatures":   {signer.hash: _sign(signer, payload)},
+    }
+
+
+def _roster_row(creator_hash: bytes, name: str, ch_hash: str | None = None):
+    return {
+        "hash": ch_hash or channel_hash_for(creator_hash, name),
+        "name": name,
+        "description": "",
+        "creator_hash": creator_hash.hex(),
+        "created_at": time.time(),
+    }
+
+
+class TestAdversarialCreateChannel:
+    def test_member_without_create_channel_cannot_create(self, peer_factory):
+        """Outbound guard: a plain member calling the action directly."""
+        alice, bob, s = _server_with_member(peer_factory)
+        assert actions.create_channel_in_server(
+            bob.storage, bob.channel_mgr, bob.invite_mgr,
+            s, bob.identity.hash_hex, "sneaky",
+        ) is None
+        assert bob.storage.get_server_channels(s) == []
+
+    def test_admin_without_create_channel_cannot_smuggle_roster_entry(self, peer_factory):
+        """Core receiver enforcement: Bob is a *trusted signer* (admin) but the
+        server's permissions deny admins CREATE_CHANNEL. His crafted document's
+        member changes may apply; the roster addition must not."""
+        perms = dict(PRESET_SERVER)
+        perms[ROLE_ADMIN] = [SEND_MESSAGE, INVITE]          # no CREATE_CHANNEL
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+        s = actions.create_server(alice.server_mgr, alice.invite_mgr, "S", "", perms)
+
+        def on_invite(scope_hex, name, token, expiry, admin_hex):
+            bob.invite_mgr.send_join_request(scope_hex, token, expiry, admin_hex)
+        bob.invite_mgr.add_invite_callback(on_invite)
+        alice.invite_mgr.send_invite(s, bob.identity.hash_hex)
+        assert wait_for_member(alice.storage, s, bob.identity.hash_hex, timeout=5)
+        actions.update_membership(
+            alice.storage, alice.invite_mgr, s, alice.identity.hash_hex,
+            add_admins=[bob.identity.hash],
+        )
+        assert wait_for(
+            lambda: alice.storage.get_role(s, bob.identity.hash_hex) == ROLE_ADMIN,
+            timeout=5,
+        )
+
+        # An empty permissions blob asserts nothing, so the roster addition is
+        # the only unauthorized change in the document and the CREATE_CHANNEL
+        # gate is what has to catch it.
+        existing = alice.storage.get_member_list_version(s)
+        forged = _server_doc(
+            bob.identity.rns_identity, s, existing["version"] + 1,
+            members=[alice.identity.hash, bob.identity.hash],
+            admins=[alice.identity.hash, bob.identity.hash],
+            owners=[alice.identity.hash],
+            roster_rows=[_roster_row(bob.identity.hash, "smuggled")],
+        )
+        assert alice.invite_mgr._accept_document(forged, s) is False, \
+            "a document adding a channel without CREATE_CHANNEL was accepted"
+        assert alice.storage.get_server_channels(s) == [], \
+            "an admin without CREATE_CHANNEL smuggled a channel into the roster"
+
+    def test_admin_with_create_channel_may_add_to_the_roster(self, peer_factory):
+        """Control case: the gate must not reject a legitimate addition."""
+        alice, bob, s = _server_with_member(peer_factory)
+        actions.update_membership(
+            alice.storage, alice.invite_mgr, s, alice.identity.hash_hex,
+            add_admins=[bob.identity.hash],
+        )
+        assert wait_for(
+            lambda: alice.storage.get_role(s, bob.identity.hash_hex) == ROLE_ADMIN,
+            timeout=5,
+        )
+        existing = alice.storage.get_member_list_version(s)
+        entry = _roster_row(bob.identity.hash, "legit")
+        doc = _server_doc(
+            bob.identity.rns_identity, s, existing["version"] + 1,
+            members=[alice.identity.hash, bob.identity.hash],
+            admins=[alice.identity.hash, bob.identity.hash],
+            owners=[alice.identity.hash],
+            roster_rows=[entry],
+        )
+        assert alice.invite_mgr._accept_document(doc, s) is True
+        assert alice.storage.get_channel(entry["hash"]) is not None
+
+
+class TestAdversarialRoster:
+    def test_roster_cannot_adopt_an_existing_standalone_channel(self, peer_factory):
+        """The headline attack: Mallory's roster names a private channel Bob is
+        already in, trying to re-parent it and inherit its membership."""
+        alice, bob, s = _server_with_member(peer_factory)
+
+        secrets = actions.create_channel(
+            bob.channel_mgr, bob.invite_mgr, "secrets", "", dict(PRESET_PRIVATE))
+        assert bob.storage.get_channel(secrets)["server_hash"] is None
+
+        existing = bob.storage.get_member_list_version(s)
+        forged = _server_doc(
+            alice.identity.rns_identity, s, existing["version"] + 1,
+            members=[alice.identity.hash, bob.identity.hash],
+            admins=[alice.identity.hash],
+            owners=[alice.identity.hash],
+            roster_rows=[_roster_row(bob.identity.hash, "secrets", ch_hash=secrets)],
+            permissions_blob=msgpack.packb(dict(PRESET_SERVER), use_bin_type=True),
+        )
+        bob.invite_mgr._accept_document(forged, s)
+
+        assert bob.storage.get_channel(secrets)["server_hash"] is None, \
+            "an existing standalone channel was captured by a server roster"
+        assert bob.storage.scope_for(secrets) == secrets
+        assert bob.storage.is_member(secrets, alice.identity.hash_hex) is False, \
+            "the attacker gained membership of the adopted channel"
+
+    def test_roster_entry_not_bound_to_creator_is_dropped(self, peer_factory):
+        """An entry whose hash isn't derivable from its claimed creator+name."""
+        alice, bob, s = _server_with_member(peer_factory)
+        existing = bob.storage.get_member_list_version(s)
+        forged = _server_doc(
+            alice.identity.rns_identity, s, existing["version"] + 1,
+            members=[alice.identity.hash, bob.identity.hash],
+            admins=[alice.identity.hash],
+            owners=[alice.identity.hash],
+            roster_rows=[_roster_row(alice.identity.hash, "fake", ch_hash="ab" * 16)],
+            permissions_blob=msgpack.packb(dict(PRESET_SERVER), use_bin_type=True),
+        )
+        bob.invite_mgr._accept_document(forged, s)
+        assert bob.storage.get_channel("ab" * 16) is None, \
+            "a roster entry with a fabricated hash was materialised"
+
+    def test_legitimate_roster_entry_is_accepted(self, peer_factory):
+        """Control case — the defences must not reject honest rosters."""
+        alice, bob, s = _server_with_member(peer_factory)
+        existing = bob.storage.get_member_list_version(s)
+        good = _roster_row(alice.identity.hash, "general")
+        doc = _server_doc(
+            alice.identity.rns_identity, s, existing["version"] + 1,
+            members=[alice.identity.hash, bob.identity.hash],
+            admins=[alice.identity.hash],
+            owners=[alice.identity.hash],
+            roster_rows=[good],
+            permissions_blob=msgpack.packb(dict(PRESET_SERVER), use_bin_type=True),
+        )
+        assert bob.invite_mgr._accept_document(doc, s) is True
+        assert bob.storage.get_channel(good["hash"]) is not None
+        assert bob.storage.get_channel(good["hash"])["server_hash"] == s
+
+
+class TestAdversarialServerBinding:
+    def test_server_not_bound_to_claimed_creator_is_not_materialised(self, peer_factory):
+        """Unsigned name/creator metadata must hash back to the scope itself."""
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+        fake_scope = "cd" * 16
+        bob.invite_mgr._materialise_server({
+            F_SCOPE_KIND:      "server",
+            F_CHANNEL_NAME:    "Totally Alice's Server",
+            F_CHANNEL_CREATOR: alice.identity.hash_hex,
+        }, fake_scope)
+        assert bob.storage.get_server(fake_scope) is None, \
+            "a server impersonating another identity was materialised"
+
+    def test_correctly_bound_server_is_materialised(self, peer_factory):
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+        real = server_hash_for(alice.identity.hash, "Alice Server")
+        bob.invite_mgr._materialise_server({
+            F_SCOPE_KIND:      "server",
+            F_CHANNEL_NAME:    "Alice Server",
+            F_CHANNEL_CREATOR: alice.identity.hash_hex,
+        }, real)
+        assert bob.storage.get_server(real) is not None
+
+    def test_server_doc_for_another_server_is_rejected(self, peer_factory):
+        alice, bob, s = _server_with_member(peer_factory)
+        other = server_hash_for(alice.identity.hash, "Other")
+        existing = bob.storage.get_member_list_version(s)
+        doc = _server_doc(
+            alice.identity.rns_identity, other, existing["version"] + 1,
+            members=[alice.identity.hash, bob.identity.hash],
+            admins=[alice.identity.hash],
+            owners=[alice.identity.hash],
+            roster_rows=[],
+        )
+        assert bob.invite_mgr._accept_document(doc, s) is False, \
+            "a document for server A was accepted as an update for server B"

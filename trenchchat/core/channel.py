@@ -14,6 +14,7 @@ import msgpack
 
 from trenchchat import APP_NAME, APP_ASPECT_CHANNEL
 from trenchchat.core.identity import Identity
+from trenchchat.core.naming import sanitise_name
 from trenchchat.core.permissions import (
     PRESET_OPEN, PRESET_PRIVATE, PRESETS, ROLE_OWNER,
     is_discoverable, is_open_join, permissions_from_json,
@@ -21,11 +22,7 @@ from trenchchat.core.permissions import (
 from trenchchat.core.storage import Storage
 from trenchchat.network.announce import ChannelAnnounceHandler
 
-
-def _sanitise_name(name: str) -> str:
-    """Lower-case, alphanumeric + hyphens only, max 32 chars."""
-    sanitised = "".join(c if c.isalnum() or c == "-" else "-" for c in name.lower())
-    return sanitised[:32].strip("-")
+_sanitise_name = sanitise_name
 
 
 class ChannelManager:
@@ -50,12 +47,17 @@ class ChannelManager:
 
     def create_channel(self, name: str, description: str = "",
                        access_mode: str = "public",
-                       permissions: dict | None = None) -> str:
+                       permissions: dict | None = None,
+                       server_hash: str | None = None) -> str:
         """Create a new channel owned by the local identity.
 
         *permissions* is the full permissions dict.  For backward compat,
         *access_mode* (``"public"`` / ``"invite"``) is also accepted and
         converted to the matching preset.
+
+        When *server_hash* is set the channel belongs to a server, which owns
+        its membership, roles and tenure: no owner member row and no tenure
+        interval are written here, and the channel is never announced.
 
         Returns the channel hash hex string.
         """
@@ -85,8 +87,11 @@ class ChannelManager:
             creator_hash=self._identity.hash_hex,
             permissions=permissions,
             created_at=created_at,
+            server_hash=server_hash,
         )
         self._storage.subscribe(hash_hex)
+        if server_hash is not None:
+            return hash_hex
         self._storage.upsert_member(
             channel_hash=hash_hex,
             identity_hash=self._identity.hash_hex,
@@ -214,6 +219,11 @@ class ChannelManager:
                     aspect,
                 )
                 self._owned_destinations[row["hash"]] = dest
+                # A channel inside a server has no member rows of its own --
+                # the server owns them, and writing one here would be invisible
+                # to every resolving read anyway.
+                if row["server_hash"]:
+                    continue
                 self._storage.upsert_member(
                     channel_hash=row["hash"],
                     identity_hash=self._identity.hash_hex,

@@ -1037,3 +1037,46 @@ class TestImageSync:
         bob_msgs = bob.storage.get_messages(ch_hash)
         synced = next(m for m in bob_msgs if m["message_id"] == "sync_img_001")
         assert bytes(synced["image_data"]) == _FAKE_JPEG
+
+
+class TestServerScopedTenure:
+    """Tenure lives at server scope. has_any_tenure() resolving there is
+    load-bearing: if it didn't, sync.py would see no tenure rows under a
+    server channel's own hash and silently disable filtering for it."""
+
+    def test_tenure_filter_is_engaged_for_a_server_channel(self, peer_factory):
+        from trenchchat.core import actions
+        alice = peer_factory("alice")
+        s = actions.create_server(alice.server_mgr, alice.invite_mgr, "S")
+        ch = actions.create_channel_in_server(
+            alice.storage, alice.channel_mgr, alice.invite_mgr,
+            s, alice.identity.hash_hex, "general")
+        assert alice.storage.has_any_tenure(ch) is True, \
+            "tenure filtering would fail open for every channel in this server"
+
+    def test_member_gets_no_history_from_before_they_joined_the_server(self, peer_factory):
+        from trenchchat.core import actions
+        from trenchchat.core.permissions import PRESET_SERVER
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+        s = actions.create_server(alice.server_mgr, alice.invite_mgr, "S")
+        ch = actions.create_channel_in_server(
+            alice.storage, alice.channel_mgr, alice.invite_mgr,
+            s, alice.identity.hash_hex, "general")
+
+        actions.send_message(alice.storage, alice.subscription_mgr, alice.messaging,
+                             ch, alice.identity.hash_hex, "before bob joined")
+        time.sleep(0.2)
+
+        def on_invite(scope_hex, name, token, expiry, admin_hex):
+            bob.invite_mgr.send_join_request(scope_hex, token, expiry, admin_hex)
+        bob.invite_mgr.add_invite_callback(on_invite)
+        alice.invite_mgr.send_invite(s, bob.identity.hash_hex)
+        assert wait_for_member(alice.storage, s, bob.identity.hash_hex, timeout=5)
+        assert wait_for(lambda: bob.storage.get_channel(ch) is not None, timeout=5)
+
+        bob.sync_mgr._request_sync_for_channel(ch, 0.0)
+        time.sleep(1.0)
+        contents = [m["content"] for m in bob.storage.get_messages(ch)]
+        assert "before bob joined" not in contents, \
+            "pre-join history leaked to a member without full_sync"

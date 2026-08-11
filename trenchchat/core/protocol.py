@@ -54,6 +54,9 @@ F_CHANNEL_CREATOR   = 0x24   # str   — creator identity hash hex
 F_CHANNEL_ACCESS    = 0x25   # str   — (legacy) access mode ("public" | "invite")
 F_CHANNEL_CREATED_AT = 0x26  # float — Unix timestamp of channel creation
 F_CHANNEL_PERMISSIONS = 0x27 # str   — JSON permissions dict (replaces F_CHANNEL_ACCESS)
+F_SCOPE_KIND        = 0x28   # str   — "server" when this control message targets a
+                             #         server scope; absent/"channel" means a single
+                             #         channel. The scope hash rides in F_CHANNEL_HASH.
 
 # --- Subscription fields ---
 F_SUBSCRIBER_LIST   = 0x30   # bytes — msgpack list of hex identity hashes

@@ -27,7 +27,7 @@ from trenchchat.core import actions
 from trenchchat.core.image import MAX_IMAGE_BYTES, is_gif, prepare_image
 from trenchchat.core.avatar import compress_avatar
 from trenchchat.core.permissions import (
-    ALL_PERMISSIONS, KICK, MANAGE_CHANNEL, MANAGE_ROLES,
+    ALL_PERMISSIONS, CREATE_CHANNEL, INVITE, KICK, MANAGE_CHANNEL, MANAGE_ROLES,
     ROLE_ADMIN, ROLE_MEMBER, PRESET_OPEN, PRESET_PRIVATE,
     is_open_join, permissions_from_json,
 )
@@ -39,6 +39,16 @@ class CreateChannelRequest(BaseModel):
     name: str
     description: str = ""
     access: str = "public"  # "public" | "invite"
+
+
+class CreateServerRequest(BaseModel):
+    name: str
+    description: str = ""
+
+
+class CreateServerChannelRequest(BaseModel):
+    name: str
+    description: str = ""
 
 
 class SetDisplayNameRequest(BaseModel):
@@ -87,12 +97,24 @@ class UpdateRolesRequest(BaseModel):
 
 
 def _channel_to_dict(row) -> dict[str, Any]:
+    keys = row.keys()
     return {
         "hash": row["hash"],
         "name": row["name"],
         "description": row["description"],
         "creator_hash": row["creator_hash"],
         "open_join": is_open_join(permissions_from_json(row["permissions"])),
+        "created_at": row["created_at"],
+        "server_hash": row["server_hash"] if "server_hash" in keys else None,
+    }
+
+
+def _server_to_dict(row) -> dict[str, Any]:
+    return {
+        "hash": row["hash"],
+        "name": row["name"],
+        "description": row["description"],
+        "creator_hash": row["creator_hash"],
         "created_at": row["created_at"],
     }
 
@@ -191,6 +213,7 @@ def create_app(backend: Backend) -> FastAPI:
         pending_invites.append({
             "channel_hash_hex": channel_hash_hex, "channel_name": channel_name,
             "token_hex": token.hex(), "expiry": expiry, "admin_hex": admin_hex,
+            "scope_kind": backend.invite_mgr.invite_scope_kind(channel_hash_hex),
         })
         bus.emit("invite_received", channel_hash=channel_hash_hex, channel_name=channel_name)
 
@@ -337,6 +360,98 @@ def create_app(backend: Backend) -> FastAPI:
             "avatar_version": row["avatar_version"],
         }
 
+    # --- servers ---
+
+    @app.get("/servers")
+    def list_servers():
+        return [_server_to_dict(s) for s in backend.server_mgr.list_servers()]
+
+    @app.post("/servers")
+    def create_server(req: CreateServerRequest):
+        return {"hash": actions.create_server(
+            backend.server_mgr, backend.invite_mgr,
+            name=req.name, description=req.description,
+        )}
+
+    @app.get("/servers/{server_hash}/channels")
+    def list_server_channels(server_hash: str):
+        return [_channel_to_dict(c)
+                for c in backend.storage.get_server_channels(server_hash)]
+
+    @app.post("/servers/{server_hash}/channels")
+    def create_server_channel(server_hash: str, req: CreateServerChannelRequest):
+        # Outbound guard: returns None when the caller lacks CREATE_CHANNEL.
+        # The core layer re-checks on both the publishing and receiving side.
+        ch_hash = actions.create_channel_in_server(
+            backend.storage, backend.channel_mgr, backend.invite_mgr,
+            server_hash, backend.identity.hash_hex,
+            name=req.name, description=req.description,
+        )
+        if ch_hash is None:
+            return JSONResponse(
+                status_code=403,
+                content={"error": f"missing {CREATE_CHANNEL} on this server"},
+            )
+        return {"hash": ch_hash}
+
+    @app.get("/servers/{server_hash}/members")
+    def list_server_members(server_hash: str):
+        return [dict(row) for row in backend.storage.get_members(server_hash)]
+
+    @app.get("/servers/{server_hash}/my_permissions")
+    def my_server_permissions(server_hash: str):
+        my_hex = backend.identity.hash_hex
+        has = backend.storage.has_permission
+        return {
+            "kick": has(server_hash, my_hex, KICK),
+            "manage_roles": has(server_hash, my_hex, MANAGE_ROLES),
+            "manage_channel": has(server_hash, my_hex, MANAGE_CHANNEL),
+            "create_channel": has(server_hash, my_hex, CREATE_CHANNEL),
+            "invite": has(server_hash, my_hex, INVITE),
+        }
+
+    @app.get("/servers/{server_hash}/permissions")
+    def get_server_permissions(server_hash: str):
+        perms = backend.storage.get_server_permissions(server_hash)
+        return {
+            "all_permissions": list(ALL_PERMISSIONS),
+            "admin": perms.get(ROLE_ADMIN, []),
+            "member": perms.get(ROLE_MEMBER, []),
+        }
+
+    @app.post("/servers/{server_hash}/permissions")
+    def update_server_permissions(server_hash: str, req: UpdatePermissionsRequest):
+        current = backend.storage.get_server_permissions(server_hash)
+        new_perms = dict(current)
+        new_perms[ROLE_ADMIN] = req.admin
+        new_perms[ROLE_MEMBER] = req.member
+        return {"ok": actions.edit_server_permissions(
+            backend.storage, backend.invite_mgr, server_hash,
+            backend.identity.hash_hex, new_perms,
+        )}
+
+    @app.post("/servers/{server_hash}/roles")
+    def update_server_roles(server_hash: str, req: UpdateRolesRequest):
+        # update_membership needs no server-specific variant: has_permission
+        # resolves a scope hash the same way for a server as for a channel.
+        return {"ok": actions.update_membership(
+            backend.storage, backend.invite_mgr, server_hash,
+            backend.identity.hash_hex,
+            remove_members=[bytes.fromhex(h) for h in req.remove_members] or None,
+            add_admins=[bytes.fromhex(h) for h in req.add_admins] or None,
+            remove_admins=[bytes.fromhex(h) for h in req.remove_admins] or None,
+        )}
+
+    @app.post("/servers/{server_hash}/invite")
+    def invite_to_server(server_hash: str, req: InviteRequest):
+        backend.invite_mgr.send_invite(server_hash, req.peer_hash_hex)
+        return {"ok": True}
+
+    @app.post("/servers/{server_hash}/leave")
+    def leave_server(server_hash: str):
+        return {"ok": actions.leave_server(
+            backend.storage, backend.subscription_mgr, server_hash)}
+
     # --- channels ---
 
     @app.get("/channels")
@@ -346,7 +461,8 @@ def create_app(backend: Backend) -> FastAPI:
         # invite-only) call storage.subscribe(), and create_channel()
         # subscribes the owner too, so is_subscribed is a reliable "am I
         # part of this channel" signal across every channel type.
-        return [_channel_to_dict(c) for c in backend.storage.get_all_channels()
+        # Channels inside a server are reached through /servers/{h}/channels.
+        return [_channel_to_dict(c) for c in backend.storage.get_standalone_channels()
                if backend.storage.is_subscribed(c["hash"])]
 
     @app.get("/channels/discovered")
@@ -357,7 +473,7 @@ def create_app(backend: Backend) -> FastAPI:
         # announce_channel() refuses to announce anything invite-only
         # regardless of the discoverable flag, so they never reach local
         # storage this way.
-        return [_channel_to_dict(c) for c in backend.storage.get_all_channels()
+        return [_channel_to_dict(c) for c in backend.storage.get_standalone_channels()
                if not backend.storage.is_subscribed(c["hash"])]
 
     @app.post("/channels")
@@ -409,6 +525,14 @@ def create_app(backend: Backend) -> FastAPI:
         # Same entry point main_window.py's _on_edit_permissions uses.
         # edit_channel_permissions re-checks MANAGE_CHANNEL itself and
         # no-ops if the caller lacks it, same as the GUI's pre-flight gate.
+        row = backend.storage.get_channel(channel_hash)
+        if row is not None and row["server_hash"]:
+            # A per-channel override would be silently clobbered by the
+            # mirror on the server's next accepted document.
+            return JSONResponse(
+                status_code=409,
+                content={"error": "permissions are managed at the server level"},
+            )
         current = backend.storage.get_channel_permissions(channel_hash)
         new_perms = dict(current)
         new_perms[ROLE_ADMIN] = req.admin

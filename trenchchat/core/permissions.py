@@ -38,9 +38,11 @@ INVITE = "invite"
 KICK = "kick"
 MANAGE_ROLES = "manage_roles"
 MANAGE_CHANNEL = "manage_channel"
+CREATE_CHANNEL = "create_channel"
 FULL_SYNC = "full_sync"
 
-ALL_PERMISSIONS = (SEND_MESSAGE, INVITE, KICK, MANAGE_ROLES, MANAGE_CHANNEL, FULL_SYNC)
+ALL_PERMISSIONS = (SEND_MESSAGE, INVITE, KICK, MANAGE_ROLES, MANAGE_CHANNEL,
+                   CREATE_CHANNEL, FULL_SYNC)
 
 # ---------------------------------------------------------------------------
 # Channel-level flags
@@ -67,9 +69,17 @@ PRESET_OPEN: dict[str, Any] = {
     ROLE_MEMBER: [SEND_MESSAGE, INVITE],
 }
 
+PRESET_SERVER: dict[str, Any] = {
+    FLAG_OPEN_JOIN: False,
+    FLAG_DISCOVERABLE: False,
+    ROLE_ADMIN: [SEND_MESSAGE, INVITE, KICK, MANAGE_ROLES, CREATE_CHANNEL],
+    ROLE_MEMBER: [SEND_MESSAGE],
+}
+
 PRESETS = {
     "private": PRESET_PRIVATE,
     "open": PRESET_OPEN,
+    "server": PRESET_SERVER,
 }
 
 DEFAULT_PRESET = "private"

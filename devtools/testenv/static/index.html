@@ -81,6 +81,24 @@
   .channel-item .badge {
     font-size: 10px; opacity: 0.7; display: block;
   }
+  .server-item {
+    padding: 6px 8px; border-radius: 4px; cursor: pointer; font-size: 12px;
+    color: var(--text); font-weight: 600; text-transform: uppercase;
+    letter-spacing: 0.04em; display: flex; justify-content: space-between;
+    align-items: center; margin-top: 6px;
+  }
+  .server-item:hover { background: var(--panel2); }
+  .srv-add {
+    font-size: 15px; line-height: 1; padding: 0 4px; opacity: 0.6;
+  }
+  .srv-add:hover { opacity: 1; }
+  .srv-caret {
+    display: inline-block; width: 10px; font-size: 9px; opacity: 0.7;
+  }
+  .srv-count {
+    font-size: 10px; background: var(--panel2); border: 1px solid var(--border);
+    border-radius: 8px; padding: 0 6px; margin-right: 4px; opacity: 0.8;
+  }
   .new-channel-btn {
     width: 100%; margin-top: 6px; padding: 6px; background: var(--panel2);
     color: var(--text); border: 1px dashed var(--border); border-radius: 4px;
@@ -300,16 +318,30 @@
 
 <div id="toast"></div>
 
+<div class="modal-backdrop" id="new-server-modal">
+  <div class="modal">
+    <h3>New server</h3>
+    <label>Name</label>
+    <input id="ns-name" placeholder="my-server">
+    <div class="modal-actions">
+      <button class="cancel" onclick="closeNewServerModal()">Cancel</button>
+      <button class="confirm" onclick="submitNewServer()">Create</button>
+    </div>
+  </div>
+</div>
+
 <div class="modal-backdrop" id="new-channel-modal">
   <div class="modal">
-    <h3>New channel</h3>
+    <h3 id="nc-title">New channel</h3>
     <label>Name</label>
     <input id="nc-name" placeholder="general">
+    <div id="nc-access-row">
     <label>Access</label>
     <select id="nc-access">
       <option value="public">Public (open join)</option>
       <option value="invite">Invite-only</option>
     </select>
+    </div>
     <div class="modal-actions">
       <button class="cancel" onclick="closeNewChannelModal()">Cancel</button>
       <button class="confirm" onclick="submitNewChannel()">Create</button>
@@ -364,8 +396,8 @@
 <script>
 const TESTERS = ['A', 'B'];
 const state = {
-  A: { port: null, me: null, channels: [], activeChannel: null, ws: null, invites: [], pendingImage: null, replyTarget: null },
-  B: { port: null, me: null, channels: [], activeChannel: null, ws: null, invites: [], pendingImage: null, replyTarget: null },
+  A: { port: null, me: null, channels: [], activeChannel: null, activeServer: null, servers: [], serverChannels: {}, serverPerms: {}, collapsedServers: new Set(), ws: null, invites: [], pendingImage: null, replyTarget: null },
+  B: { port: null, me: null, channels: [], activeChannel: null, activeServer: null, servers: [], serverChannels: {}, serverPerms: {}, collapsedServers: new Set(), ws: null, invites: [], pendingImage: null, replyTarget: null },
 };
 // Per-tag cache of identity_hash -> data URL (or null if confirmed no avatar).
 const avatarCache = { A: {}, B: {} };
@@ -448,6 +480,7 @@ function renderShell() {
         <div class="channel-list">
           <div id="channels-${tag}"></div>
           <button class="new-channel-btn" onclick="openNewChannelModal('${tag}')">+ New channel</button>
+          <button class="new-channel-btn" onclick="openNewServerModal('${tag}')">+ New server</button>
           <div class="discovered-header">Discovered (not joined)</div>
           <div id="discovered-${tag}"></div>
         </div>
@@ -500,6 +533,7 @@ async function connectTester(tag) {
   document.getElementById(`hash-${tag}`).textContent = state[tag].me.hash_hex.slice(0, 16) + '…';
   document.getElementById(`name-display-${tag}`).textContent = state[tag].me.display_name;
 
+  loadCollapsed(tag);
   await refreshChannels(tag);
   await refreshDiscovered(tag);
   await refreshInvites(tag);
@@ -625,7 +659,10 @@ async function refreshInvites(tag) {
   }
   const inv = state[tag].invites[0];
   const more = state[tag].invites.length > 1 ? ` (+${state[tag].invites.length - 1} more)` : '';
-  text.textContent = `Invited to #${inv.channel_name}${more}`;
+  const label = inv.scope_kind === 'server'
+    ? `server ${inv.channel_name} (all its channels)`
+    : `#${inv.channel_name}`;
+  text.textContent = `Invited to ${label}${more}`;
   bar.classList.add('show');
   bar.dataset.channelHash = inv.channel_hash_hex;
 }
@@ -639,20 +676,82 @@ async function respondInvite(tag, accept) {
   if (accept) toast(`Tester ${tag}: join request sent, waiting for admin approval`);
 }
 
+function channelItemHtml(tag, c, indented) {
+  const active = c.hash === state[tag].activeChannel ? 'active' : '';
+  const style = indented ? ' style="margin-left:10px;"' : '';
+  const badge = indented ? '' :
+    `<span class="badge">${c.open_join ? 'public' : 'invite-only'}</span>`;
+  return `<div class="channel-item ${active}"${style}
+      onclick="selectChannel('${tag}', '${c.hash}')">#${c.name}${badge}</div>`;
+}
+
 async function refreshChannels(tag) {
-  state[tag].channels = await api(tag, '/channels');
-  const list = document.getElementById(`channels-${tag}`);
-  if (state[tag].channels.length === 0) {
-    list.innerHTML = '<div class="empty-state">No channels yet</div>';
-    return;
+  const s = state[tag];
+  s.servers = await api(tag, '/servers');
+  s.channels = await api(tag, '/channels');
+
+  // A server's channels and our permissions on it, fetched per server so the
+  // "+" affordance below reflects the real CREATE_CHANNEL grant.
+  await Promise.all(s.servers.map(async srv => {
+    s.serverChannels[srv.hash] = await api(tag, `/servers/${srv.hash}/channels`);
+    s.serverPerms[srv.hash] = await api(tag, `/servers/${srv.hash}/my_permissions`);
+  }));
+
+  const parts = [];
+  for (const srv of s.servers) {
+    const perms = s.serverPerms[srv.hash] || {};
+    const collapsed = s.collapsedServers.has(srv.hash);
+    const children = s.serverChannels[srv.hash] || [];
+    const plus = perms.create_channel
+      ? `<span class="srv-add" title="New channel in this server"
+             onclick="event.stopPropagation(); openNewChannelModal('${tag}', '${srv.hash}')">+</span>`
+      : '';
+    // Collapsing hides the channels but must not hide unread activity, so the
+    // count of what's tucked away rides on the header.
+    const badge = collapsed && children.length
+      ? `<span class="srv-count">${children.length}</span>` : '';
+    parts.push(`<div class="server-item" onclick="selectServer('${tag}', '${srv.hash}')">
+        <span><span class="srv-caret">${collapsed ? '▸' : '▾'}</span> ${srv.name}</span>
+        <span>${badge}${plus}</span></div>`);
+    if (collapsed) continue;
+    parts.push(children.length
+      ? children.map(c => channelItemHtml(tag, c, true)).join('')
+      : '<div class="empty-state" style="padding:2px 0 2px 14px;">No channels</div>');
   }
-  list.innerHTML = state[tag].channels.map(c => `
-    <div class="channel-item ${c.hash === state[tag].activeChannel ? 'active' : ''}"
-        onclick="selectChannel('${tag}', '${c.hash}')">
-      #${c.name}
-      <span class="badge">${c.open_join ? 'public' : 'invite-only'}</span>
-    </div>
-  `).join('');
+  if (s.channels.length) {
+    if (s.servers.length) parts.push('<div class="discovered-header">Channels</div>');
+    parts.push(s.channels.map(c => channelItemHtml(tag, c, false)).join(''));
+  }
+  const list = document.getElementById(`channels-${tag}`);
+  list.innerHTML = parts.length ? parts.join('')
+    : '<div class="empty-state">No channels yet</div>';
+}
+
+function selectServer(tag, serverHash) {
+  // Clicking the header both selects the server (so the toolbar acts on it)
+  // and toggles its channels.
+  const s = state[tag];
+  s.activeServer = serverHash;
+  if (s.collapsedServers.has(serverHash)) s.collapsedServers.delete(serverHash);
+  else s.collapsedServers.add(serverHash);
+  persistCollapsed(tag);
+  refreshChannels(tag);
+}
+
+const COLLAPSED_KEY = 'trenchchat.collapsedServers';
+
+function persistCollapsed(tag) {
+  try {
+    localStorage.setItem(`${COLLAPSED_KEY}.${tag}`,
+                         JSON.stringify([...state[tag].collapsedServers]));
+  } catch (e) { /* private mode: collapse just won't survive a reload */ }
+}
+
+function loadCollapsed(tag) {
+  try {
+    const raw = localStorage.getItem(`${COLLAPSED_KEY}.${tag}`);
+    if (raw) state[tag].collapsedServers = new Set(JSON.parse(raw));
+  } catch (e) { /* ignore */ }
 }
 
 async function refreshDiscovered(tag) {
@@ -934,10 +1033,39 @@ async function confirmInvite(peerHash) {
   toast('Invite sent');
 }
 
-function openNewChannelModal(tag) {
+let newChannelForServer = null;
+
+function openNewChannelModal(tag, serverHash) {
   newChannelForTag = tag;
+  newChannelForServer = serverHash || null;
   document.getElementById('nc-name').value = '';
+  // Access is inherited from the server, so the picker is irrelevant there.
+  document.getElementById('nc-access-row').style.display =
+    newChannelForServer ? 'none' : '';
+  document.getElementById('nc-title').textContent = newChannelForServer
+    ? 'New channel in server' : 'New channel';
   document.getElementById('new-channel-modal').classList.add('show');
+}
+
+let newServerForTag = null;
+function openNewServerModal(tag) {
+  newServerForTag = tag;
+  document.getElementById('ns-name').value = '';
+  document.getElementById('new-server-modal').classList.add('show');
+}
+function closeNewServerModal() {
+  document.getElementById('new-server-modal').classList.remove('show');
+}
+async function submitNewServer() {
+  const name = document.getElementById('ns-name').value.trim();
+  if (!name || !newServerForTag) return;
+  const tag = newServerForTag;
+  closeNewServerModal();
+  await api(tag, '/servers', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({name}),
+  });
+  await refreshChannels(tag);
 }
 function closeNewChannelModal() {
   document.getElementById('new-channel-modal').classList.remove('show');
@@ -947,11 +1075,15 @@ async function submitNewChannel() {
   const access = document.getElementById('nc-access').value;
   if (!name || !newChannelForTag) return;
   const tag = newChannelForTag;
+  const server = newChannelForServer;
   closeNewChannelModal();
-  const result = await api(tag, '/channels', {
+  const path = server ? `/servers/${server}/channels` : '/channels';
+  const body = server ? {name} : {name, access};
+  const result = await api(tag, path, {
     method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({name, access}),
+    body: JSON.stringify(body),
   });
+  if (result && result.error) { toast(result.error); return; }
   await refreshChannels(tag);
   await selectChannel(tag, result.hash);
 }
@@ -959,7 +1091,7 @@ async function submitNewChannel() {
 let membersModalTag = null;
 
 async function openMembersModal(tag) {
-  if (!state[tag].activeChannel) { toast('Select a channel first'); return; }
+  if (!scopeFor(tag)) { toast('Select a channel or server first'); return; }
   membersModalTag = tag;
   document.getElementById('members-modal').classList.add('show');
   await refreshMembersModal();
@@ -972,11 +1104,11 @@ function closeMembersModal() {
 
 async function refreshMembersModal() {
   const tag = membersModalTag;
-  if (!tag || !state[tag].activeChannel) return;
-  const ch = state[tag].activeChannel;
+  const scope = tag ? scopeFor(tag) : null;
+  if (!scope) return;
   const [members, perms] = await Promise.all([
-    api(tag, `/channels/${ch}/members`),
-    api(tag, `/channels/${ch}/my_permissions`),
+    api(tag, `/${scope.kind}/${scope.hash}/members`),
+    api(tag, `/${scope.kind}/${scope.hash}/my_permissions`),
   ]);
   const myHash = state[tag].me.hash_hex;
   const list = document.getElementById('members-list');
@@ -1005,42 +1137,57 @@ async function refreshMembersModal() {
   }).join('') || '<div class="empty-state">No members</div>';
 }
 
-async function kickMember(memberHash) {
+async function updateRoles(body) {
   const tag = membersModalTag;
-  await api(tag, `/channels/${state[tag].activeChannel}/roles`, {
+  const scope = tag ? scopeFor(tag) : null;
+  if (!scope) return;
+  await api(tag, `/${scope.kind}/${scope.hash}/roles`, {
     method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({remove_members: [memberHash]}),
+    body: JSON.stringify(body),
   });
   await refreshMembersModal();
 }
 
-async function promoteMember(memberHash) {
-  const tag = membersModalTag;
-  await api(tag, `/channels/${state[tag].activeChannel}/roles`, {
-    method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({add_admins: [memberHash]}),
-  });
-  await refreshMembersModal();
-}
-
-async function demoteMember(memberHash) {
-  const tag = membersModalTag;
-  await api(tag, `/channels/${state[tag].activeChannel}/roles`, {
-    method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({remove_admins: [memberHash]}),
-  });
-  await refreshMembersModal();
-}
+const kickMember    = h => updateRoles({remove_members: [h]});
+const promoteMember = h => updateRoles({add_admins: [h]});
+const demoteMember  = h => updateRoles({remove_admins: [h]});
 
 let permissionsModalTag = null;
 
+// Membership, roles and permissions live on the server for any channel inside
+// one, so those all address the server scope. Returns null when nothing is
+// selected.
+function scopeFor(tag) {
+  const s = state[tag];
+  const ch = s.activeChannel;
+  if (ch) {
+    const row = (s.servers.flatMap(srv => s.serverChannels[srv.hash] || [])
+                 .concat(s.channels)).find(c => c.hash === ch);
+    if (row && row.server_hash) {
+      const srv = s.servers.find(x => x.hash === row.server_hash);
+      return {kind: 'servers', hash: row.server_hash, name: srv ? srv.name : 'server'};
+    }
+    return {kind: 'channels', hash: ch, name: row ? `#${row.name}` : 'channel'};
+  }
+  if (s.activeServer) {
+    const srv = s.servers.find(x => x.hash === s.activeServer);
+    return {kind: 'servers', hash: s.activeServer, name: srv ? srv.name : 'server'};
+  }
+  return null;
+}
+
 async function openPermissionsModal(tag) {
-  if (!state[tag].activeChannel) { toast('Select a channel first'); return; }
+  const scope = scopeFor(tag);
+  if (!scope) { toast('Select a channel or server first'); return; }
   permissionsModalTag = tag;
-  const ch = state[tag].activeChannel;
-  const perms = await api(tag, `/channels/${ch}/permissions`);
+  const perms = await api(tag, `/${scope.kind}/${scope.hash}/permissions`);
+  const isServer = scope.kind === 'servers';
   const editor = document.getElementById('permissions-editor');
   editor.innerHTML = `
+    <div class="empty-state" style="padding: 0 0 8px;">
+      Editing <strong>${scope.name}</strong>${isServer
+        ? ' — applies to every channel in this server' : ''}
+    </div>
     <table class="perm-table">
       <tr><th>Permission</th><th>Admin</th><th>Member</th></tr>
       ${perms.all_permissions.map(p => `
@@ -1064,17 +1211,24 @@ function closePermissionsModal() {
 async function savePermissions() {
   const tag = permissionsModalTag;
   if (!tag) return;
+  const scope = scopeFor(tag);
+  if (!scope) { closePermissionsModal(); return; }
   const boxes = document.querySelectorAll('#permissions-editor input[type=checkbox][data-role]');
   const admin = [], member = [];
   boxes.forEach(b => {
     if (b.checked) (b.dataset.role === 'admin' ? admin : member).push(b.dataset.perm);
   });
-  const result = await api(tag, `/channels/${state[tag].activeChannel}/permissions`, {
+  const result = await api(tag, `/${scope.kind}/${scope.hash}/permissions`, {
     method: 'POST', headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({admin, member}),
   });
-  if (!result.ok) toast(`Tester ${tag}: permission change denied (missing manage_channel?)`);
+  if (result.error) {
+    toast(`Tester ${tag}: ${result.error}`);
+  } else if (!result.ok) {
+    toast(`Tester ${tag}: permission change denied (missing manage_channel?)`);
+  }
   closePermissionsModal();
+  await refreshChannels(tag);
 }
 
 let networkForTag = null;
@@ -1132,7 +1286,7 @@ async function resetEnvironment() {
   closePermissionsModal();
   TESTERS.forEach(tag => {
     if (state[tag].ws) state[tag].ws.close();
-    state[tag] = { port: null, me: null, channels: [], activeChannel: null, ws: null, invites: [], pendingImage: null, replyTarget: null };
+    state[tag] = { port: null, me: null, channels: [], activeChannel: null, activeServer: null, servers: [], serverChannels: {}, serverPerms: {}, collapsedServers: new Set(), ws: null, invites: [], pendingImage: null, replyTarget: null };
     avatarCache[tag] = {};
     emojiLibrary[tag] = [];
   });

@@ -49,15 +49,27 @@ def tester_a(base: Path):
         backend.close()
         return
 
-    ch_hash = backend.channel_mgr.create_channel(
-        "smoke-test", "cross-process smoke test", "invite"
+    # A server with two channels: one invite must admit B to both, and the
+    # message below goes to the *second* channel to prove it.
+    from trenchchat.core import actions
+    server_hash = actions.create_server(
+        backend.server_mgr, backend.invite_mgr, "smoke-server",
+        "cross-process smoke test",
     )
-    backend.invite_mgr.send_invite(ch_hash, b_hash)
+    first = actions.create_channel_in_server(
+        backend.storage, backend.channel_mgr, backend.invite_mgr,
+        server_hash, backend.identity.hash_hex, "general",
+    )
+    ch_hash = actions.create_channel_in_server(
+        backend.storage, backend.channel_mgr, backend.invite_mgr,
+        server_hash, backend.identity.hash_hex, "second",
+    )
+    backend.invite_mgr.send_invite(server_hash, b_hash)
 
     deadline = time.time() + 30
     joined = False
     while time.time() < deadline:
-        if backend.storage.is_member(ch_hash, b_hash):
+        if backend.storage.is_member(server_hash, b_hash):
             joined = True
             break
         time.sleep(0.2)
@@ -77,7 +89,9 @@ def tester_a(base: Path):
             channel_hash_hex=ch_hash, content=sent_content, subscriber_hashes=recipients
         )
 
-    result = {"joined": joined, "channel_hash": ch_hash, "sent_content": sent_content}
+    result = {"joined": joined, "channel_hash": ch_hash,
+              "server_hash": server_hash, "first_channel": first,
+              "sent_content": sent_content}
     (data_dir / "result.json").write_text(json.dumps(result))
     time.sleep(3)  # let delivery threads finish before the process exits
     backend.close()
@@ -115,6 +129,13 @@ def tester_b(base: Path):
     deadline = time.time() + 45
     while time.time() < deadline and received["content"] is None:
         time.sleep(0.2)
+
+    # One invite should have admitted B to every channel in the server.
+    servers = [dict(s) for s in backend.storage.get_all_servers()]
+    received["server_count"] = len(servers)
+    received["channel_count"] = sum(
+        len(backend.storage.get_server_channels(s["hash"])) for s in servers
+    )
 
     (data_dir / "result.json").write_text(json.dumps(received))
     backend.close()
@@ -161,6 +182,9 @@ def main() -> int:
         a_result and b_result
         and a_result.get("joined")
         and b_result.get("content") == a_result.get("sent_content")
+        # One invite, both channels: B must hold the server and its full roster.
+        and b_result.get("server_count") == 1
+        and b_result.get("channel_count") == 2
     )
     print("SMOKE TEST:", "PASS" if ok else "FAIL")
     return 0 if ok else 1
