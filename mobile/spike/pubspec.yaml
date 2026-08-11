@@ -1,0 +1,24 @@
+name: trenchchat_spike
+description: >
+  Throwaway spike proving trenchchat/core/identity.py and storage.py run
+  on-device via serious_python. Not a real app, not published.
+publish_to: "none"
+version: 0.0.1
+
+environment:
+  sdk: ">=3.4.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  serious_python: ^0.9.0
+  path_provider: ^2.1.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+
+flutter:
+  uses-material-design: true
+  assets:
+    - python/app/
