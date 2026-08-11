@@ -598,6 +598,55 @@ class TestMembershipTenure:
         assert db.was_member_at(CHAN, ID_A, t0 + 1)
         db.close()
 
+    def test_repair_tenure_widens_interval_to_earlier_stored_message(self, db):
+        """A joined_at backfilled too late (e.g. from a stale
+        members.added_at) is widened to cover a message already on file
+        that predates it."""
+        db.upsert_channel(CHAN, "Test", "", "creator", "invite", time.time())
+        t0 = 1_000_000.0
+        bad_joined_at = t0 + 500.0
+        db.open_tenure(CHAN, ID_A, bad_joined_at)
+        db.insert_message(
+            channel_hash=CHAN, sender_hash=ID_A, sender_name="A",
+            content="hi", timestamp=t0, message_id="repair-m1",
+            reply_to=None, last_seen_id=None, received_at=t0,
+        )
+        assert not db.was_member_at(CHAN, ID_A, t0)
+
+        db._repair_tenure_from_message_history()
+
+        assert db.was_member_at(CHAN, ID_A, t0)
+
+    def test_repair_tenure_does_not_widen_when_message_is_within_interval(self, db):
+        db.upsert_channel(CHAN, "Test", "", "creator", "invite", time.time())
+        t0 = 1_000_000.0
+        db.open_tenure(CHAN, ID_A, t0)
+        db.insert_message(
+            channel_hash=CHAN, sender_hash=ID_A, sender_name="A",
+            content="hi", timestamp=t0 + 10, message_id="repair-m2",
+            reply_to=None, last_seen_id=None, received_at=t0 + 10,
+        )
+
+        db._repair_tenure_from_message_history()
+
+        row = db._conn.execute(
+            "SELECT joined_at FROM membership_tenure WHERE channel_hash=? AND identity_hash=?",
+            (CHAN, ID_A)
+        ).fetchone()
+        assert row["joined_at"] == t0
+
+    def test_repair_tenure_skips_identity_with_no_tenure_record(self, db):
+        db.upsert_channel(CHAN, "Test", "", "creator", "invite", time.time())
+        db.insert_message(
+            channel_hash=CHAN, sender_hash=ID_B, sender_name="B",
+            content="hi", timestamp=1_000_000.0, message_id="repair-m3",
+            reply_to=None, last_seen_id=None, received_at=1_000_000.0,
+        )
+
+        db._repair_tenure_from_message_history()
+
+        assert not db.was_member_at(CHAN, ID_B, 1_000_000.0)
+
 
 # ---------------------------------------------------------------------------
 # Peer avatars
