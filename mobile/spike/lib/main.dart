@@ -46,7 +46,7 @@ class _SpikeScreenState extends State<SpikeScreen> {
       await spikeDir.create(recursive: true);
 
       await SeriousPython.run(
-        'app/main.py',
+        appFileName: 'app/main.py',
         sync: true,
         environmentVariables: {'TRENCHCHAT_SPIKE_DIR': spikeDir.path},
       );
