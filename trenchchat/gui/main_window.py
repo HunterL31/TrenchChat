@@ -277,6 +277,12 @@ class MainWindow(QMainWindow):
         self._channel_views: dict[str, ChannelView] = {}
         self._current_channel: str | None = None
         self._settings = QSettings("TrenchChat", "TrenchChat")
+        # Server hashes whose channels are hidden in the sidebar. QSettings
+        # round-trips a single-element list as a bare string, hence the coerce.
+        stored = self._settings.value("collapsed_servers", []) or []
+        if isinstance(stored, str):
+            stored = [stored]
+        self._collapsed_servers: set[str] = set(stored)
 
         self.setWindowTitle("TrenchChat")
         self.setMinimumSize(800, 600)
@@ -468,6 +474,7 @@ class MainWindow(QMainWindow):
             "QListWidget::item:selected { background: #2a4a7a; color: #fff; }"
         )
         self._channel_list_widget.currentItemChanged.connect(self._on_channel_selected)
+        self._channel_list_widget.itemClicked.connect(self._on_channel_list_clicked)
         self._channel_list_widget.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._channel_list_widget.customContextMenuRequested.connect(self._on_channel_context_menu)
         left_layout.addWidget(self._channel_list_widget)
@@ -690,9 +697,13 @@ class MainWindow(QMainWindow):
         item.setData(Qt.ItemDataRole.UserRole, row["hash"])
         self._channel_list_widget.addItem(item)
 
-    def _add_server_header(self, server):
-        """A non-selectable header row carrying its server hash for the menu."""
-        item = QListWidgetItem(server["name"].upper())
+    def _add_server_header(self, server, child_count: int):
+        """A clickable but non-selectable header row that collapses its channels."""
+        collapsed = server["hash"] in self._collapsed_servers
+        caret = "▸" if collapsed else "▾"
+        # Collapsing hides the channels but must not hide that they exist.
+        suffix = f"  ({child_count})" if collapsed and child_count else ""
+        item = QListWidgetItem(f"{caret} {server['name'].upper()}{suffix}")
         font = item.font()
         font.setBold(True)
         item.setFont(font)
@@ -700,8 +711,23 @@ class MainWindow(QMainWindow):
         # _restore_channel_selection match on it, so headers stay invisible
         # to channel selection.
         item.setData(SERVER_HASH_ROLE, server["hash"])
-        item.setFlags(Qt.ItemFlag.NoItemFlags)
+        # Enabled so itemClicked fires, but not selectable, so clicking a
+        # header never moves the current-channel selection.
+        item.setFlags(Qt.ItemFlag.ItemIsEnabled)
         self._channel_list_widget.addItem(item)
+
+    @pyqtSlot(QListWidgetItem)
+    def _on_channel_list_clicked(self, item: QListWidgetItem):
+        server_hash = item.data(SERVER_HASH_ROLE)
+        if not server_hash:
+            return
+        if server_hash in self._collapsed_servers:
+            self._collapsed_servers.discard(server_hash)
+        else:
+            self._collapsed_servers.add(server_hash)
+        self._settings.setValue("collapsed_servers",
+                                sorted(self._collapsed_servers))
+        self._refresh_channel_list()
 
     def _refresh_channel_list(self):
         # Suppress selection-change signals while rebuilding the list so we
@@ -711,10 +737,13 @@ class MainWindow(QMainWindow):
 
         if self._server_mgr is not None:
             for server in self._server_mgr.list_servers():
-                self._add_server_header(server)
-                for row in self._storage.get_server_channels(server["hash"]):
-                    if self._storage.is_subscribed(row["hash"]):
-                        self._add_channel_item(row, indented=True)
+                children = [r for r in self._storage.get_server_channels(server["hash"])
+                            if self._storage.is_subscribed(r["hash"])]
+                self._add_server_header(server, len(children))
+                if server["hash"] in self._collapsed_servers:
+                    continue
+                for row in children:
+                    self._add_channel_item(row, indented=True)
 
         for row in self._storage.get_standalone_channels():
             if self._storage.is_subscribed(row["hash"]):

@@ -92,6 +92,13 @@
     font-size: 15px; line-height: 1; padding: 0 4px; opacity: 0.6;
   }
   .srv-add:hover { opacity: 1; }
+  .srv-caret {
+    display: inline-block; width: 10px; font-size: 9px; opacity: 0.7;
+  }
+  .srv-count {
+    font-size: 10px; background: var(--panel2); border: 1px solid var(--border);
+    border-radius: 8px; padding: 0 6px; margin-right: 4px; opacity: 0.8;
+  }
   .new-channel-btn {
     width: 100%; margin-top: 6px; padding: 6px; background: var(--panel2);
     color: var(--text); border: 1px dashed var(--border); border-radius: 4px;
@@ -389,8 +396,8 @@
 <script>
 const TESTERS = ['A', 'B'];
 const state = {
-  A: { port: null, me: null, channels: [], activeChannel: null, activeServer: null, servers: [], serverChannels: {}, serverPerms: {}, ws: null, invites: [], pendingImage: null, replyTarget: null },
-  B: { port: null, me: null, channels: [], activeChannel: null, activeServer: null, servers: [], serverChannels: {}, serverPerms: {}, ws: null, invites: [], pendingImage: null, replyTarget: null },
+  A: { port: null, me: null, channels: [], activeChannel: null, activeServer: null, servers: [], serverChannels: {}, serverPerms: {}, collapsedServers: new Set(), ws: null, invites: [], pendingImage: null, replyTarget: null },
+  B: { port: null, me: null, channels: [], activeChannel: null, activeServer: null, servers: [], serverChannels: {}, serverPerms: {}, collapsedServers: new Set(), ws: null, invites: [], pendingImage: null, replyTarget: null },
 };
 // Per-tag cache of identity_hash -> data URL (or null if confirmed no avatar).
 const avatarCache = { A: {}, B: {} };
@@ -526,6 +533,7 @@ async function connectTester(tag) {
   document.getElementById(`hash-${tag}`).textContent = state[tag].me.hash_hex.slice(0, 16) + '…';
   document.getElementById(`name-display-${tag}`).textContent = state[tag].me.display_name;
 
+  loadCollapsed(tag);
   await refreshChannels(tag);
   await refreshDiscovered(tag);
   await refreshInvites(tag);
@@ -692,13 +700,20 @@ async function refreshChannels(tag) {
   const parts = [];
   for (const srv of s.servers) {
     const perms = s.serverPerms[srv.hash] || {};
+    const collapsed = s.collapsedServers.has(srv.hash);
+    const children = s.serverChannels[srv.hash] || [];
     const plus = perms.create_channel
       ? `<span class="srv-add" title="New channel in this server"
              onclick="event.stopPropagation(); openNewChannelModal('${tag}', '${srv.hash}')">+</span>`
       : '';
+    // Collapsing hides the channels but must not hide unread activity, so the
+    // count of what's tucked away rides on the header.
+    const badge = collapsed && children.length
+      ? `<span class="srv-count">${children.length}</span>` : '';
     parts.push(`<div class="server-item" onclick="selectServer('${tag}', '${srv.hash}')">
-        <span>▸ ${srv.name}</span>${plus}</div>`);
-    const children = s.serverChannels[srv.hash] || [];
+        <span><span class="srv-caret">${collapsed ? '▸' : '▾'}</span> ${srv.name}</span>
+        <span>${badge}${plus}</span></div>`);
+    if (collapsed) continue;
     parts.push(children.length
       ? children.map(c => channelItemHtml(tag, c, true)).join('')
       : '<div class="empty-state" style="padding:2px 0 2px 14px;">No channels</div>');
@@ -713,8 +728,30 @@ async function refreshChannels(tag) {
 }
 
 function selectServer(tag, serverHash) {
-  state[tag].activeServer = serverHash;
+  // Clicking the header both selects the server (so the toolbar acts on it)
+  // and toggles its channels.
+  const s = state[tag];
+  s.activeServer = serverHash;
+  if (s.collapsedServers.has(serverHash)) s.collapsedServers.delete(serverHash);
+  else s.collapsedServers.add(serverHash);
+  persistCollapsed(tag);
   refreshChannels(tag);
+}
+
+const COLLAPSED_KEY = 'trenchchat.collapsedServers';
+
+function persistCollapsed(tag) {
+  try {
+    localStorage.setItem(`${COLLAPSED_KEY}.${tag}`,
+                         JSON.stringify([...state[tag].collapsedServers]));
+  } catch (e) { /* private mode: collapse just won't survive a reload */ }
+}
+
+function loadCollapsed(tag) {
+  try {
+    const raw = localStorage.getItem(`${COLLAPSED_KEY}.${tag}`);
+    if (raw) state[tag].collapsedServers = new Set(JSON.parse(raw));
+  } catch (e) { /* ignore */ }
 }
 
 async function refreshDiscovered(tag) {
@@ -1249,7 +1286,7 @@ async function resetEnvironment() {
   closePermissionsModal();
   TESTERS.forEach(tag => {
     if (state[tag].ws) state[tag].ws.close();
-    state[tag] = { port: null, me: null, channels: [], activeChannel: null, activeServer: null, servers: [], serverChannels: {}, serverPerms: {}, ws: null, invites: [], pendingImage: null, replyTarget: null };
+    state[tag] = { port: null, me: null, channels: [], activeChannel: null, activeServer: null, servers: [], serverChannels: {}, serverPerms: {}, collapsedServers: new Set(), ws: null, invites: [], pendingImage: null, replyTarget: null };
     avatarCache[tag] = {};
     emojiLibrary[tag] = [];
   });

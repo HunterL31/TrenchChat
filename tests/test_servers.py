@@ -322,3 +322,73 @@ class TestGuiPermissionScope:
         mirrored = permissions_from_json(alice.storage.get_channel(ch)["permissions"])
         assert mirrored[ROLE_MEMBER] == [SEND_MESSAGE, "kick"]
         assert is_open_join(mirrored) is False
+
+
+class TestServerCollapse:
+    """Collapsing a server hides its channels without disturbing anything else."""
+
+    def _window_stub(self, storage, server_mgr, collapsed=()):
+        from trenchchat.gui.main_window import MainWindow
+
+        class _Stub:
+            pass
+
+        w = _Stub()
+        w._storage = storage
+        w._server_mgr = server_mgr
+        w._collapsed_servers = set(collapsed)
+        w._rows = []
+        # Exercise the real grouping logic against a list-widget stand-in.
+        w._add_channel_item = lambda row, indented=False: w._rows.append(
+            ("channel", row["hash"], indented))
+        w._add_server_header = lambda server, n: w._rows.append(
+            ("server", server["hash"], n))
+        w._current_channel = None
+        w._highlight_channel_in_list = lambda h: None
+
+        class _LW:
+            def blockSignals(self, _): pass
+            def clear(self): w._rows.clear()
+        w._channel_list_widget = _LW()
+        w._refresh_channel_list = MainWindow._refresh_channel_list.__get__(w)
+        return w
+
+    def _server_with_channels(self, peer, names):
+        s = actions.create_server(peer.server_mgr, peer.invite_mgr, "HQ")
+        for n in names:
+            actions.create_channel_in_server(
+                peer.storage, peer.channel_mgr, peer.invite_mgr,
+                s, peer.identity.hash_hex, n)
+        return s
+
+    def test_expanded_lists_every_channel(self, peer_factory):
+        alice = peer_factory("alice")
+        s = self._server_with_channels(alice, ("general", "random"))
+        w = self._window_stub(alice.storage, alice.server_mgr)
+        w._refresh_channel_list()
+        assert w._rows[0] == ("server", s, 2)
+        assert [r for r in w._rows if r[0] == "channel"] != []
+
+    def test_collapsed_hides_children_but_keeps_the_header(self, peer_factory):
+        alice = peer_factory("alice")
+        s = self._server_with_channels(alice, ("general", "random"))
+        w = self._window_stub(alice.storage, alice.server_mgr, collapsed={s})
+        w._refresh_channel_list()
+        assert w._rows == [("server", s, 2)], \
+            "collapsing must hide the channels and keep the header, with a count"
+
+    def test_collapsing_one_server_does_not_hide_standalone_channels(self, peer_factory):
+        alice = peer_factory("alice")
+        s = self._server_with_channels(alice, ("general",))
+        solo = actions.create_channel(
+            alice.channel_mgr, alice.invite_mgr, "solo", "", dict(PRESET_PRIVATE))
+        w = self._window_stub(alice.storage, alice.server_mgr, collapsed={s})
+        w._refresh_channel_list()
+        assert ("channel", solo, False) in w._rows
+
+    def test_header_count_reflects_subscribed_channels(self, peer_factory):
+        alice = peer_factory("alice")
+        s = self._server_with_channels(alice, ("a", "b", "c"))
+        w = self._window_stub(alice.storage, alice.server_mgr, collapsed={s})
+        w._refresh_channel_list()
+        assert w._rows[0][2] == 3
