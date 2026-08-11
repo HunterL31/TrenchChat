@@ -174,6 +174,51 @@ class TestSyncRequestResponse:
             assert wait_for_message(bob.storage, ch_hash, mid, timeout=5), \
                 f"Bob did not receive message {mid[:12]}… via timestamp fallback"
 
+    def test_capped_batch_watermark_resumes_from_last_message(self, peer_factory):
+        """
+        A sync response capped at MAX_RESPONSE_MESSAGES must advance the sync
+        watermark to the last message actually received, not wall-clock time
+        -- otherwise everything past the cap is permanently skipped by the
+        next sync request.
+        """
+        from trenchchat.core.sync import MAX_RESPONSE_MESSAGES
+
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+        carol = peer_factory("carol")
+
+        ch_hash = alice.channel_mgr.create_channel("capped-sync", "", "public")
+        _seed_channel_on_peer(carol, ch_hash, "capped-sync", alice.identity.hash_hex)
+        _seed_channel_on_peer(bob, ch_hash, "capped-sync", alice.identity.hash_hex)
+
+        window_start = time.time()
+        total = MAX_RESPONSE_MESSAGES + 10
+        msg_ids = []
+        for i in range(total):
+            ts = window_start + i + 1
+            mid = _insert_message(carol.storage, ch_hash, alice.identity.hash_hex,
+                                   f"Message {i}", ts)
+            msg_ids.append(mid)
+
+        bob.sync_mgr._send_sync_request(carol.identity.hash_hex, ch_hash, window_start)
+
+        assert wait_for_message(
+            bob.storage, ch_hash, msg_ids[MAX_RESPONSE_MESSAGES - 1], timeout=5
+        ), "Bob did not receive the capped first batch"
+
+        last_sync_at = bob.storage.get_subscriptions()[0]["last_sync_at"]
+        expected_ts = window_start + MAX_RESPONSE_MESSAGES
+        assert abs(last_sync_at - expected_ts) < 1, (
+            "last_sync_at did not advance to the last delivered message's "
+            f"timestamp: expected ~= {expected_ts}, got {last_sync_at}"
+        )
+
+        bob.sync_mgr._send_sync_request(carol.identity.hash_hex, ch_hash, last_sync_at)
+
+        for mid in msg_ids[MAX_RESPONSE_MESSAGES:]:
+            assert wait_for_message(bob.storage, ch_hash, mid, timeout=5), \
+                f"Bob never received message {mid[:12]}… stranded past the cap"
+
     def test_sync_response_is_idempotent(self, peer_factory):
         """
         Receiving the same sync response twice does not create duplicate messages.

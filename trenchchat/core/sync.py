@@ -355,10 +355,12 @@ class SyncManager:
                 my_role = self._storage.get_role(channel_hash_hex, my_hex)
                 full_sync = has_permission(perms, my_role, FULL_SYNC)
         inserted_any = False
+        newest_ts = 0.0
         for m in messages:
             try:
                 sender_hash = m.get("sender_hash", "")
                 msg_ts = float(m.get("timestamp", time.time()))
+                newest_ts = max(newest_ts, msg_ts)
 
                 # Validate tenure for invite-only channels with tenure data.
                 # Mirrors _handle_sync_request's two checks -- applied again
@@ -418,7 +420,14 @@ class SyncManager:
         if inserted_any:
             # Clear hints now that we have the messages
             self._storage.clear_missed_deliveries(channel_hash_hex, self._identity.hash_hex)
-            self._storage.update_last_sync(channel_hash_hex)
+
+        if newest_ts > 0.0:
+            # Advance to the newest message actually present in this batch,
+            # not wall-clock time -- a response capped at
+            # MAX_RESPONSE_MESSAGES otherwise strands everything past the
+            # cap forever, since the next request would start from "now"
+            # instead of resuming right after this batch.
+            self._storage.update_last_sync(channel_hash_hex, newest_ts)
 
     # --- helpers ---
 

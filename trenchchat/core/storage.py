@@ -733,11 +733,12 @@ class Storage:
     def get_subscriptions(self) -> list[sqlite3.Row]:
         return self._fetchall("SELECT * FROM subscriptions")
 
-    def update_last_sync(self, channel_hash: str):
+    def update_last_sync(self, channel_hash: str, ts: float | None = None):
+        """Advance last_sync_at to *ts*, or wall-clock time if not given."""
         with self._tx():
             self._conn.execute(
                 "UPDATE subscriptions SET last_sync_at = ? WHERE channel_hash = ?",
-                (time.time(), channel_hash)
+                (ts if ts is not None else time.time(), channel_hash)
             )
 
     # --- members ---
