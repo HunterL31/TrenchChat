@@ -17,6 +17,8 @@ Subscriber list sync:
   - The list is an LXMF message with fields[0x30] = "subscriber_list".
 """
 
+import re
+import threading
 import time
 import RNS
 import LXMF
@@ -25,10 +27,37 @@ import msgpack
 from trenchchat.core.identity import Identity
 from trenchchat.core.protocol import (
     F_CHANNEL_HASH, F_MSG_TYPE, F_SUBSCRIBER_LIST,
+    F_SUBSCRIBER_SIG, F_SUBSCRIBER_VERSION,
     MT_SUBSCRIBE, MT_UNSUBSCRIBE, MT_SUBSCRIBER_LIST,
+    unpack_wire,
 )
 from trenchchat.core.storage import Storage
 from trenchchat.network.router import Router
+
+_IDENTITY_HEX_RE = re.compile(r"^[0-9a-f]{32}$")
+
+
+def _is_identity_hex(value: object) -> bool:
+    return isinstance(value, str) and bool(_IDENTITY_HEX_RE.match(value))
+
+
+def _subscriber_payload(channel_hash_hex: str, version: int,
+                        packed_list: bytes) -> bytes:
+    return msgpack.packb(
+        [bytes.fromhex(channel_hash_hex), version, packed_list],
+        use_bin_type=True,
+    )
+
+
+def _sign(identity: RNS.Identity, data: bytes) -> bytes:
+    return identity.sign(data)
+
+
+def _verify(identity: RNS.Identity, data: bytes, signature: bytes) -> bool:
+    try:
+        return identity.validate(signature, data)
+    except Exception:
+        return False
 
 
 class SubscriptionManager:
@@ -39,6 +68,10 @@ class SubscriptionManager:
 
         # In-memory subscriber lists: channel_hash_hex -> set of identity_hash_hex
         self._subscribers: dict[str, set[str]] = {}
+        # Monotonic per-channel counter; owners bump it, receivers reject
+        # anything not newer than what they hold.
+        self._subscriber_versions: dict[str, int] = {}
+        self._version_lock = threading.Lock()
 
         router.add_delivery_callback(self._on_lxmf_message)
 
@@ -94,15 +127,30 @@ class SubscriptionManager:
         """
         subs = self.get_subscribers(channel_hash_hex)
         recipients = set(subs) | {self._identity.hash_hex}
-        packed = msgpack.packb(list(recipients), use_bin_type=True)
+        packed = msgpack.packb(sorted(recipients), use_bin_type=True)
+
+        version = self._next_subscriber_version(channel_hash_hex)
+        signature = _sign(
+            self._identity.rns_identity,
+            _subscriber_payload(channel_hash_hex, version, packed),
+        )
+
         for dest_hex in subs:
             if dest_hex == self._identity.hash_hex:
                 continue
             self._send_raw(dest_hex, {
-                F_MSG_TYPE:        MT_SUBSCRIBER_LIST,
-                F_CHANNEL_HASH:    bytes.fromhex(channel_hash_hex),
-                F_SUBSCRIBER_LIST: packed,
+                F_MSG_TYPE:           MT_SUBSCRIBER_LIST,
+                F_CHANNEL_HASH:       bytes.fromhex(channel_hash_hex),
+                F_SUBSCRIBER_LIST:    packed,
+                F_SUBSCRIBER_VERSION: version,
+                F_SUBSCRIBER_SIG:     signature,
             })
+
+    def _next_subscriber_version(self, channel_hash_hex: str) -> int:
+        with self._version_lock:
+            version = self._subscriber_versions.get(channel_hash_hex, 0) + 1
+            self._subscriber_versions[channel_hash_hex] = version
+            return version
 
     # --- inbound handler ---
 
@@ -137,24 +185,76 @@ class SubscriptionManager:
                 self._remove_subscriber(channel_hash_hex, sender_hex)
 
         elif msg_type == MT_SUBSCRIBER_LIST:
-            channel = self._storage.get_channel(channel_hash_hex)
-            if not channel or channel["creator_hash"] != sender_hex:
-                RNS.log(
-                    f"TrenchChat: rejected subscriber_list for {channel_hash_hex} "
-                    f"from non-owner {sender_hex}",
-                    RNS.LOG_WARNING,
-                )
-                return
-            packed = fields.get(F_SUBSCRIBER_LIST)
-            if packed:
-                try:
-                    hashes = msgpack.unpackb(packed, raw=False)
-                    if channel_hash_hex not in self._subscribers:
-                        self._subscribers[channel_hash_hex] = set()
-                    self._subscribers[channel_hash_hex] = set(hashes)
-                except Exception as e:
-                    RNS.log(f"TrenchChat: failed to parse subscriber list: {e}",
-                            RNS.LOG_WARNING)
+            self._handle_subscriber_list(fields, channel_hash_hex, sender_hex)
+
+    def _handle_subscriber_list(self, fields: dict, channel_hash_hex: str,
+                                sender_hex: str):
+        channel = self._storage.get_channel(channel_hash_hex)
+        if not channel or channel["creator_hash"] != sender_hex:
+            RNS.log(
+                f"TrenchChat: rejected subscriber_list for {channel_hash_hex} "
+                f"from non-owner {sender_hex}",
+                RNS.LOG_WARNING,
+            )
+            return
+
+        packed = fields.get(F_SUBSCRIBER_LIST)
+        if not packed:
+            return
+
+        version = fields.get(F_SUBSCRIBER_VERSION)
+        signature = fields.get(F_SUBSCRIBER_SIG)
+        if not isinstance(version, int) or not isinstance(signature, bytes):
+            RNS.log(
+                f"TrenchChat: rejected unsigned subscriber_list for "
+                f"{channel_hash_hex[:12]}…",
+                RNS.LOG_WARNING,
+            )
+            return
+
+        last_seen = self._subscriber_versions.get(channel_hash_hex, 0)
+        if version <= last_seen:
+            RNS.log(
+                f"TrenchChat: rejected replayed subscriber_list v{version} for "
+                f"{channel_hash_hex[:12]}… (holding v{last_seen})",
+                RNS.LOG_WARNING,
+            )
+            return
+
+        owner_identity = self._recall_owner_identity(sender_hex)
+        if owner_identity is None:
+            return
+        payload = _subscriber_payload(channel_hash_hex, version, packed)
+        if not _verify(owner_identity, payload, signature):
+            RNS.log(
+                f"TrenchChat: rejected subscriber_list for "
+                f"{channel_hash_hex[:12]}… — bad owner signature",
+                RNS.LOG_WARNING,
+            )
+            return
+
+        try:
+            hashes = unpack_wire(packed)
+        except Exception as e:
+            RNS.log(f"TrenchChat: failed to parse subscriber list: {e}",
+                    RNS.LOG_WARNING)
+            return
+
+        valid = {h for h in hashes if _is_identity_hex(h)}
+        with self._version_lock:
+            self._subscriber_versions[channel_hash_hex] = version
+        self._subscribers[channel_hash_hex] = valid
+
+    def _recall_owner_identity(self, owner_hex: str):
+        if owner_hex == self._identity.hash_hex:
+            return self._identity.rns_identity
+        try:
+            delivery_hash = RNS.Destination.hash(
+                bytes.fromhex(owner_hex), "lxmf", "delivery"
+            )
+        except ValueError:
+            return None
+        return RNS.Identity.recall(delivery_hash)
 
     # --- helpers ---
 

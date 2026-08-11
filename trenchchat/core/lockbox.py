@@ -36,7 +36,7 @@ from cryptography.fernet import Fernet, InvalidToken
 import RNS
 
 from trenchchat.config import DATA_DIR
-from trenchchat.core.fileutils import secure_file
+from trenchchat.core.fileutils import atomic_write_bytes, secure_file
 
 # Files managed by this module.
 _SALT_PATH = DATA_DIR / "lock.salt"
@@ -118,12 +118,10 @@ def create_lock(pin: str) -> bytes:
     salt = os.urandom(16)
     raw_key = derive_key(pin, salt)
 
-    _SALT_PATH.write_bytes(salt)
-    secure_file(_SALT_PATH)
+    atomic_write_bytes(_SALT_PATH, salt)
 
     token = _make_fernet(raw_key).encrypt(_VERIFY_SENTINEL)
-    _VERIFY_PATH.write_bytes(token)
-    secure_file(_VERIFY_PATH)
+    atomic_write_bytes(_VERIFY_PATH, token)
 
     RNS.log("TrenchChat [lockbox]: PIN lock created", RNS.LOG_NOTICE)
     return raw_key

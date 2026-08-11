@@ -24,6 +24,9 @@ import RNS
 import LXMF
 
 from trenchchat.core.identity import Identity
+from trenchchat.core.permissions import (
+    SEND_MESSAGE, is_open_join, permissions_from_json,
+)
 from trenchchat.core.protocol import (
     F_MSG_TYPE, F_CHANNEL_HASH,
     F_EMOJI_HASH, F_EMOJI_DATA, F_EMOJI_NAME,
@@ -34,6 +37,11 @@ from trenchchat.core.storage import Storage
 from trenchchat.network.router import Router
 
 MAX_EMOJI_BYTES = 65536   # 64 KB hard cap per emoji image
+
+# Inbound emoji-request throttle.  Each request can pull up to MAX_EMOJI_BYTES
+# back out, so this bounds the amplification a single peer can drive.
+EMOJI_REQUEST_WINDOW_SECS = 60.0
+EMOJI_REQUEST_BURST = 12
 
 
 def compute_emoji_hash(image_data: bytes) -> str:
@@ -61,6 +69,10 @@ class ReactionManager:
         # emoji_hash hex strings we have already sent a request for, to avoid
         # spamming the same peer for the same asset.
         self._pending_emoji_requests: set[str] = set()
+
+        # requester identity hex -> recent request timestamps, for throttling
+        # inbound emoji requests (see _allow_emoji_request).
+        self._emoji_request_times: dict[str, list[float]] = {}
 
         router.add_delivery_callback(self._on_lxmf_message)
 
@@ -164,6 +176,43 @@ class ReactionManager:
         elif msg_type == MT_EMOJI_RESPONSE:
             self._handle_emoji_response(message, fields)
 
+    def _shares_any_channel(self, peer_hex: str) -> bool:
+        """True if peer_hex is a member of, or subscriber to, any channel we hold."""
+        for sub in self._storage.get_subscriptions():
+            ch = sub["channel_hash"]
+            channel = self._storage.get_channel(ch)
+            if channel is None:
+                continue
+            if is_open_join(permissions_from_json(channel["permissions"])):
+                return True
+            if self._storage.is_member(ch, peer_hex):
+                return True
+        return False
+
+    def _allow_emoji_request(self, requester_hex: str) -> bool:
+        """Token-bucket style throttle: EMOJI_REQUEST_BURST per window per peer."""
+        now = time.time()
+        with self._lock:
+            times = self._emoji_request_times.setdefault(requester_hex, [])
+            times[:] = [t for t in times if now - t < EMOJI_REQUEST_WINDOW_SECS]
+            if len(times) >= EMOJI_REQUEST_BURST:
+                return False
+            times.append(now)
+            return True
+
+    def _may_react(self, channel_hash_hex: str, sender_hex: str) -> bool:
+        """Mirror the inbound authorisation Messaging applies to chat messages."""
+        if not sender_hex:
+            return False
+        channel = self._storage.get_channel(channel_hash_hex)
+        if channel is None:
+            return False
+        if is_open_join(permissions_from_json(channel["permissions"])):
+            return True
+        if not self._storage.is_member(channel_hash_hex, sender_hex):
+            return False
+        return self._storage.has_permission(channel_hash_hex, sender_hex, SEND_MESSAGE)
+
     def _handle_reaction(self, message: LXMF.LXMessage, fields: dict) -> None:
         """Process an incoming MT_REACTION from a peer."""
         sender_hex = self._resolve_sender_hex(message)
@@ -181,6 +230,15 @@ class ReactionManager:
         )
 
         if not self._storage.is_subscribed(channel_hash_hex):
+            return
+
+        if not self._may_react(channel_hash_hex, sender_hex):
+            RNS.log(
+                f"TrenchChat [reaction]: dropping reaction on "
+                f"{channel_hash_hex[:12]}… from unauthorised sender "
+                f"{sender_hex[:12]}…",
+                RNS.LOG_WARNING,
+            )
             return
 
         msg_id = fields.get(F_REACTION_MSG_ID, "")
@@ -220,6 +278,22 @@ class ReactionManager:
         """
         requester_hex = self._resolve_sender_hex(message)
         if not requester_hex:
+            return
+
+        # One small request produces up to MAX_EMOJI_BYTES in reply.
+        if not self._shares_any_channel(requester_hex):
+            RNS.log(
+                f"TrenchChat [reaction]: ignoring emoji request from "
+                f"{requester_hex[:12]}… — no shared channel",
+                RNS.LOG_DEBUG,
+            )
+            return
+        if not self._allow_emoji_request(requester_hex):
+            RNS.log(
+                f"TrenchChat [reaction]: rate-limited emoji request from "
+                f"{requester_hex[:12]}…",
+                RNS.LOG_WARNING,
+            )
             return
 
         emoji_hash_raw = fields.get(F_EMOJI_HASH, b"")

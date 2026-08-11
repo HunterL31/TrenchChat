@@ -37,3 +37,13 @@ Thumbs.db
 # devtools/testenv: generated per-run tester identities/storage
 devtools/testenv/data/
 devtools/testenv/smoke_data/
+
+# Never commit identity keys or message stores, in case a data dir is ever
+# pointed at the repo.
+.trenchchat/
+identity
+lock.salt
+lock.verify
+*.db
+*.db-wal
+*.db-shm

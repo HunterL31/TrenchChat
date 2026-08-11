@@ -1,171 +1,262 @@
-# TrenchChat — Security Improvement Areas
+# TrenchChat — Application-Layer Security
 
-This document describes three application-level security gaps identified during
-a review of TrenchChat's use of the Reticulum stack and LXMF. None of these are
-cryptographic vulnerabilities — Reticulum and LXMF handle all encryption,
-signing, and key exchange correctly. These are hardening items at the
-application layer.
+This document records the application-layer security posture of TrenchChat: what
+has been hardened, and what is still open. None of it concerns Reticulum or
+LXMF cryptography — X25519 + AES-256 for transport, Ed25519 for signing — which
+is not in question. Every item here is about how the application *uses* that
+crypto.
 
----
-
-## 1. Unsigned subscriber list updates (public channels)
-
-### Issue
-
-When a `subscriber_list` control message arrives (`subscription.py`,
-`MT_SUBSCRIBER_LIST`), TrenchChat unpacks the msgpack payload and replaces the
-local subscriber set without verifying that the message came from the channel
-owner.
-
-Any node that knows a channel hash can craft a forged subscriber list and send
-it to a participant. The recipient would then use that list to determine who
-receives future messages, meaning an attacker could:
-
-- **Add themselves** to the list so they receive messages they shouldn't.
-- **Remove legitimate subscribers** so they stop receiving messages (denial of
-  service).
-- **Replace the list entirely** to redirect all traffic.
-
-LXMF already signs every message with the sender's Ed25519 key, so the sender
-identity *is* authenticated at the transport layer. TrenchChat simply doesn't
-check it.
-
-### Options
-
-**A. Verify sender is channel owner (recommended — minimal change)**
-
-Before accepting a `subscriber_list` message, look up the channel in storage
-and compare `message.source_hash` (resolved to an identity hash) against
-`channel["creator_hash"]`. Reject the update if they don't match.
-
-Pros: Simple, no protocol changes, uses data already available.
-Cons: Relies on `creator_hash` being correct in local storage (which it is,
-because it was set during channel creation or verified announce receipt).
-
-**B. Sign the subscriber list document (mirrors invite member list)**
-
-Adopt the same signed-document pattern used by the invite subsystem: the owner
-signs the subscriber list with their Ed25519 key, and receivers validate the
-signature before accepting.
-
-Pros: Strongest guarantee; works even if the message is relayed through a
-propagation node.
-Cons: More protocol complexity, requires versioning and conflict resolution
-(already solved in `invite.py` and could be reused).
-
-**C. Move to a pull model**
-
-Instead of the owner pushing subscriber lists, subscribers request the list
-directly from the owner over a Reticulum link. The link itself authenticates
-the owner.
-
-Pros: No extra signing needed; link-level auth is sufficient.
-Cons: Requires both parties to be online simultaneously; doesn't work well with
-store-and-forward propagation.
+It supersedes the earlier version of this file, which described three gaps
+(unsigned subscriber lists, display-name spoofing, no rate limiting) and
+proposed fixes. One of those proposals rested on a false premise; see
+"Correction" below.
 
 ---
 
-## 2. Display name spoofing
+## The root problem: LXMF signatures were never checked
 
-### Issue
+**Status: fixed.**
 
-The `F_DISPLAY_NAME` field (0x02) in every LXMF message is set by the sender
-and displayed in the UI without verification. Any node can claim any display
-name. While the sender's Reticulum identity hash is cryptographically verified
-by LXMF's signature, users see the display name prominently and may not notice
-(or understand) the identity hash.
+LXMF signs every message, and TrenchChat read the sender from
+`message.source_hash` — but never checked whether that signature actually
+validated. Both halves of the problem are in the library's behaviour:
 
-An attacker could impersonate another user by setting the same display name,
-enabling social engineering attacks within a channel.
+- `LXMessage.unpack_from_bytes` records a failed signature check on the message
+  (`signature_validated = False`, `unverified_reason = SIGNATURE_INVALID`) and
+  returns it normally. A bad signature is not an error.
+- `LXMRouter` then calls the delivery callback **unconditionally**. The only
+  pre-dispatch use of `signature_validated` in that path gates ticket handling,
+  not delivery.
 
-### Options
+`source_hash` is attacker-chosen wire data. Setting it to a victim's LXMF
+delivery hash — publicly derivable from the identity hash shown in the UI —
+makes `RNS.Identity.recall()` return that victim's *real* identity, so
+`sender_hex` becomes their identity hash. The signature check fails, and
+previously nothing looked.
 
-**A. Always show a truncated identity hash alongside the display name
-(recommended — UI-only change)**
+This defeated essentially every other control in the codebase, because they all
+compare against a value derived from `source_hash`.
 
-Append a short hash badge (e.g. `Alice [a3f1c2d4]`) to every message in the
-channel view. Users learn to associate names with hashes and can spot
-impersonation.
+**Fix** (`network/router.py`): `_on_message_received` authenticates before
+dispatching to any callback. Invalid signatures are dropped. `SOURCE_UNKNOWN` —
+the sender's identity is not known yet, which is not evidence of forgery — is
+held in a bounded quarantine, a path request is issued, and the message is
+**re-unpacked from its original bytes** when the identity resolves so LXMF
+re-runs the real check. Arrival of a path is not itself evidence of anything.
 
-Pros: Zero protocol changes, easy to implement, educational for users.
-Cons: Slightly noisier UI; users may still ignore the hash.
-
-**B. Local contact book with verified names**
-
-Let users assign trusted display names to identity hashes they've verified
-out-of-band. Show a "verified" indicator when the sender's hash matches a
-contact entry, and a warning when a display name matches a contact but the hash
-doesn't.
-
-Pros: Clear visual distinction between verified and unverified names.
-Cons: Requires users to manually verify and add contacts; new UI surface.
-
-**C. Channel-level name registry maintained by the owner**
-
-The channel owner publishes an authoritative mapping of identity hash →
-display name as part of the member list document (which is already signed).
-Receivers use this mapping instead of the self-asserted name.
-
-Pros: Names are authenticated by the owner's signature.
-Cons: Only works for invite channels where the owner knows members; adds
-protocol complexity; owner becomes a naming authority.
+`tests/conftest.py`'s `TestTransport` now delivers through
+`Router._on_message_received` rather than around it, so this gate is exercised
+by the whole suite rather than bypassed by it.
 
 ---
 
-## 3. No rate limiting on control messages
+## Correction to the previous version of this document
 
-### Issue
+The earlier text recommended, for unsigned subscriber lists, comparing
+`source_hash` against `channel['creator_hash']`, reasoning that "LXMF already
+signs every message, so the sender identity *is* authenticated at the transport
+layer. TrenchChat simply doesn't check it."
 
-TrenchChat processes every inbound LXMF control message (subscribe,
-unsubscribe, join request, member list update, subscriber list) without any
-rate limiting. A malicious node could flood a target with control messages,
-causing:
+Two problems: that check was **already implemented**, and the premise was wrong.
+LXMF authenticates the sender only if you read `signature_validated`, which
+nothing did.
 
-- Excessive CPU usage from signature verification and msgpack parsing.
-- Excessive disk I/O from SQLite writes (member list replacements, subscriber
-  list updates).
-- Network amplification: a single `subscribe` triggers a `subscriber_list`
-  broadcast to all subscribers.
+---
 
-### Options
+## Fixed
 
-**A. Per-sender rate limiting with a token bucket (recommended)**
+### Inbound authentication and rate limiting
+- Signature enforcement with quarantine and re-validation (above).
+- Per-sender throttle on all inbound **control** messages (`router.py`). Chat
+  messages are exempt; a limit there would drop legitimate conversation. Avatars
+  and emoji requests have their own throttles. This does not help against Sybil
+  attacks.
 
-Track the last N control messages received from each sender identity hash.
-Drop messages that exceed a threshold (e.g. 10 control messages per minute per
-sender). This can be implemented as a simple in-memory dict in the router's
-delivery callback.
+### Subscriber lists are now signed and versioned
+`MT_SUBSCRIBER_LIST` carries an owner Ed25519 signature over
+`(channel_hash, version, packed_list)` and a monotonic per-channel version.
+Receivers reject unsigned lists, bad signatures, and any version not newer than
+what they hold, and discard entries that are not well-formed identity hex. The
+subscriber set drives message delivery, so forging it redirected a peer's
+outbound traffic and replaying an old one resurrected removed subscribers.
 
-Pros: Simple, effective against single-source floods, no protocol changes.
-Cons: Doesn't help against Sybil attacks (attacker using many identities);
-requires tuning the threshold.
+### Sync
+- **Unsolicited history injection**: a `MT_SYNC_RESPONSE` writes messages into
+  the transcript with the author taken from its own unsigned payload. The
+  handler did not receive the sender at all. Responses now only apply in answer
+  to a request we issued, consumed on use. Correlation rather than membership is
+  the gate deliberately: any reachable peer may serve history by design, and our
+  local roster need not list them.
+- **Sync requests failing open** when the channel row was missing.
+- **Missed-delivery hints** accepted from non-members.
 
-**B. Proof-of-work on control messages**
+### Reactions and emoji
+Reactions bypassed membership and `SEND_MESSAGE` entirely — the only check was
+`is_subscribed`, which says nothing about the sender, and the `remove` path let
+an outsider delete other people's reactions. Emoji requests had no authorization
+and no rate limit, allowing library enumeration and amplification.
 
-Require control messages to include a small proof-of-work (e.g. a nonce such
-that `SHA-256(message_id + nonce)` has N leading zero bits). Receivers reject
-messages without valid PoW.
+### Authorization on member list documents
+A valid signature proves *who* wrote a document, not that they were allowed to.
+The permission gates lived only in `publish_member_list` on the sending side,
+which a modified client does not run. `_signer_may_apply` now diffs against
+**stored** state and checks the specific signer:
 
-Pros: Raises the cost of flooding for all attackers, including Sybils.
-Cons: Protocol change; increases latency on legitimate control messages;
-PoW difficulty is hard to calibrate across heterogeneous hardware (desktop vs.
-embedded LoRa node).
+- `MANAGE_CHANNEL` previously had no core enforcement anywhere, and
+  `broadcast_permissions` had no check on either side, so any admin could
+  rewrite every role's permissions network-wide — including flipping
+  `open_join`, which disables the `send_message` gate and the sync membership
+  check for every recipient.
+- Owner-list mutations were ungated: an admin could add themselves as owner and
+  demote the real one. Only an existing owner may change the owner set.
+- Member removal requires `KICK`; admin changes require `MANAGE_ROLES`.
+- A document that would leave the channel with no admins and no owners is
+  rejected; accepting one empties `trusted_signers` and no further update can
+  ever validate.
+- The `permissions` blob is applied only from v2 documents. The v1 signed
+  payload does not cover that field, so a v1 blob is unauthenticated even though
+  its signature verifies. Permission sets are shape-validated before storage.
 
-**C. Only accept control messages from known identities**
+### Invite tokens
+Tokens are Ed25519 signatures bound to invitee, channel and expiry — unforgeable,
+but bearer credentials. Now:
+- **Single use**, via a `spent_invite_tokens` table; the insert is the atomic
+  claim, so a replay cannot also win it.
+- **Revoked on kick**, so a removed member cannot re-join by resending their
+  original request.
+- **Bound to the sender**: the join request must come from the identity the
+  token names. Previously a third party holding someone's token could force
+  that person into a channel.
+- `remove_members` now also strips `admins`/`owners`. `trusted_signers` is
+  derived from those lists, so a kicked admin previously kept the authority to
+  sign themselves back in.
 
-For owned channels, only process subscribe/unsubscribe from identities that
-have been seen in a valid announce. For invite channels, only process join
-requests with a valid invite token (already implemented). Drop everything else.
+### Correctness and robustness
+- `_accept_document`'s version check and apply are serialised. LXMF delivers on
+  background threads, so two documents could both pass the version check against
+  the same stale value and the loser's roster would overwrite the winner's — a
+  silent rollback to an older signed document.
+- The roster is built before the version is committed. A malformed member entry
+  previously raised after the version had advanced, leaving the members table
+  stale and permanently wedging the channel.
+- `permissions_from_json` no longer raises; it falls back to the most
+  restrictive preset. It is called on the GUI thread outside any try/except.
+- `load_private_key`'s return value is checked — it returns `False` rather than
+  raising, so a corrupt identity file previously surfaced as something unrelated.
 
-Pros: Very effective for invite channels; leverages existing mechanisms.
-Cons: Public channels are open by design, so completely unknown senders need
-to be able to subscribe; this limits applicability.
+### Payload limits
+- Inbound `F_IMAGE_DATA` is capped on both the direct and sync paths; avatars
+  (16 KB) and emoji (64 KB) were capped, message attachments were not, and those
+  bytes are handed to Qt's C++ image decoders.
+- `Image.MAX_IMAGE_PIXELS` set; GIF frame extraction bounded.
+- Image sanitisation no longer fails open — when PIL rejects an image the
+  original bytes are not forwarded. The re-encode is the only sanitisation in
+  the pipeline and it was bypassed precisely on the inputs it exists to catch.
+- `avatar_version` is compared before overwrite.
+- Wire payloads unpack through `protocol.unpack_wire` with explicit limits.
 
-**D. Decouple broadcast from subscribe (mitigate amplification)**
+### Local files
+- `secure_file()` now restricts the ACL on Windows via `icacls`. It previously
+  OR-ed in `S_IWRITE`, which *clears* the read-only attribute and restricts
+  nothing, so the identity file was protected only by the profile ACL.
+- Sensitive files are written atomically at 0600 from creation
+  (`atomic_write_bytes`), closing both the truncate-on-failure risk to the only
+  copy of the private key and the umask window. Applied to the identity, lock
+  files and config.
+- `ATTACH DATABASE` no longer interpolates a filesystem path into SQL.
+- The propagation channel filter no longer drops the node's *own* inbound
+  messages; enabling propagation-node mode with the default allowlist silently
+  stopped the operator receiving their own mail, invites included.
+- `channel_filter_mode` validates with a raise rather than an `assert`, which
+  is stripped under `python -O`.
 
-Instead of immediately broadcasting the full subscriber list every time a new
-subscriber joins, batch updates on a timer (e.g. once per minute) or only send
-the delta. This limits the amplification factor of a subscribe flood.
+### Supply chain
+Dependencies pinned in `requirements.txt`; release artefacts were previously
+built against whatever PyPI served that day. `cryptography` is declared there
+rather than relied on transitively via `rns`.
 
-Pros: Reduces network amplification without rejecting legitimate subscribes.
-Cons: Slightly delays subscriber list convergence.
+---
+
+## Also fixed: member list bootstrap trust
+
+`_validate_document` anchors a document to, in order: a stored member list, the
+channel's `creator_hash`, or an invite this user actively accepted (recorded in
+`accepted_invites` when the join request is sent). If none of those exist the
+document is **rejected** — there is no longer any fallback to its own signers.
+
+That fallback could not simply be deleted, because an admin adding a member
+unilaterally produces a document the recipient has no other way to anchor, and
+that is a supported flow. Such a document is now *held* rather than applied:
+nothing is written, the channel is not created and not subscribed to, and the
+user is prompted through the existing invite bar (`admin… added you to #channel
+— join?`). Confirming records the anchor and applies the document; declining
+discards it. A held document that does not name the recipient is dropped
+outright.
+
+This closes the last path to unsolicited channel membership.
+
+---
+
+## Still open
+
+### 1. Encryption at rest is off by default, and the PIN is weak
+
+Without a PIN the private key and the entire message database are stored in
+plaintext. That is disclosed in the Settings UI, but it is the default.
+
+When a PIN is set the KDF is PBKDF2-HMAC-SHA256 at 600k iterations with a
+16-byte random salt — but the PIN is constrained to **4–8 numeric digits**
+(`gui/pin_dialog.py`), a keyspace of 10⁴–10⁸. No iteration count rescues ~13
+bits of entropy; a 4-digit PIN falls in about a second on one GPU.
+`lock.verify` compounds this: a Fernet token over a hardcoded sentinel sitting
+next to the salt, i.e. an offline verification oracle. Lockout exists only in
+the GUI dialog, resets after each cooldown, and `lockbox.unlock()` is
+unthrottled.
+
+**Recommended:** allow a real passphrase (keep a PIN option but require
+meaningful length), move to a memory-hard KDF — `cryptography` already ships
+`Scrypt` — remove the oracle, and enforce lockout in `lockbox.unlock()` with a
+persistent, escalating counter. Needs a versioned KDF marker and a re-key
+migration for existing databases, so it belongs in its own change.
+
+Related: enabling a PIN leaves the pre-existing plaintext database recoverable
+from free disk sectors, since the old file is unlinked rather than overwritten.
+
+### 2. Display-name spoofing (largely addressed)
+
+`F_DISPLAY_NAME` is self-asserted and never verified. The earlier version of
+this document recommended showing a short hash badge alongside every display
+name; that is **already implemented** — `gui/channel_view.py` renders every
+message header as `Alice [a3f1c2d4]`. Combined with signature enforcement, the
+identity hash shown is now authenticated rather than merely claimed.
+
+What remains is optional hardening rather than a gap: a local contact book that
+lets a user pin a verified name to an identity hash and warns when a familiar
+display name arrives under a different hash.
+
+---
+
+### 3. Minor residue
+
+None of these are exploitable on their own; recorded so they are not
+rediscovered as findings.
+
+- 14 `except Exception:` blocks across `core/` and `network/` swallow failures
+  silently. Fail-closed where it matters, but a systematic verification failure
+  is indistinguishable from a single malformed message.
+- macOS builds are unsigned (`trenchchat.spec` sets `codesign_identity=None`) —
+  a distribution-trust matter rather than an application one.
+
+---
+
+## Test architecture note
+
+Adversarial coverage lives in `tests/test_adversarial.py`. Until recently every
+adversary in that file was a plain member, which is why the admin-level
+authorization gaps went unnoticed: the tests that appeared to cover
+`MANAGE_CHANNEL` passed only because the attacker was not a trusted signer, so
+they were testing signature validation rather than the permission.
+
+`TestAdversarialAdminSigner` now covers a trusted signer exceeding their own
+permissions, and each new control has a positive control alongside it so a
+handler that rejected everything could not pass.

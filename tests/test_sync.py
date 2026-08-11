@@ -619,6 +619,22 @@ from trenchchat.core.permissions import (
 )
 
 
+def _confirm_membership(peer, ch_hash, timeout: float = 5.0):
+    """Confirm a membership an admin created for us without an invite.
+
+    A member list document for a channel the recipient cannot anchor trust for
+    is held rather than applied; the user confirms it. Tests that add a member
+    directly with publish_member_list go through this instead of joining
+    automatically.
+    """
+    assert wait_for(
+        lambda: peer.storage.get_pending_member_doc(ch_hash) is not None,
+        timeout=timeout,
+    ), "no pending membership arrived to confirm"
+    assert peer.invite_mgr.accept_pending_membership(ch_hash), \
+        "pending membership was rejected on confirmation"
+
+
 def _setup_invite_channel(peer_factory):
     """Create alice (owner) and bob (member) on a shared invite-only channel."""
     alice = peer_factory("alice")
@@ -626,11 +642,17 @@ def _setup_invite_channel(peer_factory):
     perms = dict(PRESET_PRIVATE)
     perms[ROLE_MEMBER] = [SEND_MESSAGE]
     ch_hash = alice.channel_mgr.create_channel("tenure-ch", "", permissions=perms)
-    alice.invite_mgr.publish_member_list(ch_hash, add_members=[bob.identity.hash])
-    assert wait_for_member(alice.storage, ch_hash, bob.identity.hash_hex)
+    # Mirror the channel on Bob *before* publishing. The member list document
+    # is delivered asynchronously, and a peer only accepts one for a channel it
+    # can anchor trust for -- a stored channel record naming the creator, or an
+    # invite it accepted. Seeding the record first is what the real invite flow
+    # achieves, and it also removes a race between the document arriving and
+    # the test's own mirroring.
     bob.storage.upsert_channel(ch_hash, "tenure-ch", "", alice.identity.hash_hex,
                                perms, time.time())
     bob.storage.subscribe(ch_hash)
+    alice.invite_mgr.publish_member_list(ch_hash, add_members=[bob.identity.hash])
+    assert wait_for_member(alice.storage, ch_hash, bob.identity.hash_hex)
     bob.storage.upsert_member(ch_hash, bob.identity.hash_hex, "Bob", role=ROLE_MEMBER)
     bob.storage.upsert_member(ch_hash, alice.identity.hash_hex, "Alice", role=ROLE_OWNER)
     bob.storage.set_channel_permissions(ch_hash, perms)
@@ -772,6 +794,7 @@ class TestTenureSyncFiltering:
         # document (not manually seeded) -- his own tenure records, for
         # both himself and Alice, need to come from the real accept flow,
         # since that's exactly the path the joined_at fix lives in.
+        _confirm_membership(bob, ch_hash)
         assert wait_for(lambda: bob.storage.is_member(ch_hash, bob.identity.hash_hex), timeout=5)
 
         after_msg_id = _insert_message(alice.storage, ch_hash, alice.identity.hash_hex,
@@ -810,6 +833,7 @@ class TestTenureSyncFiltering:
 
         alice.invite_mgr.publish_member_list(ch_hash, add_members=[bob.identity.hash])
         assert wait_for_member(alice.storage, ch_hash, bob.identity.hash_hex)
+        _confirm_membership(bob, ch_hash)
         assert wait_for(lambda: bob.storage.is_member(ch_hash, bob.identity.hash_hex), timeout=5)
 
         bob.sync_mgr._send_sync_request(alice.identity.hash_hex, ch_hash, 0.0)
@@ -840,6 +864,7 @@ class TestTenureSyncFiltering:
 
         alice.invite_mgr.publish_member_list(ch_hash, add_members=[bob.identity.hash])
         assert wait_for_member(alice.storage, ch_hash, bob.identity.hash_hex)
+        _confirm_membership(bob, ch_hash)
         assert wait_for(lambda: bob.storage.is_member(ch_hash, bob.identity.hash_hex), timeout=5)
 
         bob.sync_mgr._send_sync_request(alice.identity.hash_hex, ch_hash, 0.0)
@@ -875,7 +900,9 @@ class TestTenureSyncFiltering:
         )
         assert wait_for_member(alice.storage, ch_hash, bob.identity.hash_hex)
         assert wait_for_member(alice.storage, ch_hash, carol.identity.hash_hex)
+        _confirm_membership(bob, ch_hash)
         assert wait_for(lambda: bob.storage.is_member(ch_hash, bob.identity.hash_hex), timeout=5)
+        _confirm_membership(carol, ch_hash)
         assert wait_for(lambda: carol.storage.is_member(ch_hash, carol.identity.hash_hex), timeout=5)
 
         bob.sync_mgr._send_sync_request(alice.identity.hash_hex, ch_hash, 0.0)

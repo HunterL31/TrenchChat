@@ -22,12 +22,14 @@ When B later sends MT_SYNC_REQUEST:
   - If no hints, falls back to timestamp sweep (get_messages_after)
 """
 
+import threading
 import time
 import RNS
 import LXMF
 import msgpack
 
 from trenchchat.core.identity import Identity
+from trenchchat.core.image import MAX_IMAGE_BYTES
 from trenchchat.core.messaging import Messaging
 from trenchchat.core.permissions import (
     FULL_SYNC, has_permission, is_open_join, permissions_from_json,
@@ -37,6 +39,7 @@ from trenchchat.core.protocol import (
     F_SYNC_WINDOW_START, F_SYNC_MESSAGES,
     F_MISSED_FOR, F_MISSED_MSG_ID,
     MT_MISSED_DELIVERY, MT_SYNC_REQUEST, MT_SYNC_RESPONSE,
+    unpack_wire,
 )
 from trenchchat.core.storage import Storage
 from trenchchat.network.router import Router
@@ -48,6 +51,11 @@ SYNC_WINDOW_SECS    = SYNC_WINDOW_DAYS * 86400
 # Maximum messages returned in a single sync response (LXMF size budget)
 MAX_RESPONSE_MESSAGES = 50
 
+# How long an issued sync request stays answerable.  A response arriving
+# outside this window is treated as unsolicited.  Generous enough to cover a
+# slow multi-hop mesh round trip without leaving the window open indefinitely.
+SYNC_RESPONSE_WINDOW_SECS = 300
+
 
 class SyncManager:
     def __init__(self, identity: Identity, storage: Storage, router: Router,
@@ -58,6 +66,11 @@ class SyncManager:
         self._messaging = messaging
         self._subscription_mgr = subscription_mgr
         self._invite_mgr = invite_mgr
+
+        # (channel_hash_hex, peer_hex) -> time the request was issued.  A sync
+        # response is only applied if it answers one of these.
+        self._pending_requests: dict[tuple[str, str], float] = {}
+        self._pending_requests_lock = threading.Lock()
 
         messaging.set_missed_delivery_callback(self._on_missed_delivery_event)
         router.add_delivery_callback(self._on_lxmf_message)
@@ -124,6 +137,10 @@ class SyncManager:
         if peer_hex == self._identity.hash_hex:
             return
 
+        # The announce carries this peer's identity, so anything of theirs we
+        # quarantined can now be verified.
+        self._router.release_quarantined(peer_hex)
+
         self._messaging.flush_pending(peer_hex)
 
         # Send sync requests for every channel we share with this peer
@@ -182,15 +199,33 @@ class SyncManager:
                       else (message.source_hash.hex() if message.source_hash else ""))
 
         if msg_type == MT_MISSED_DELIVERY:
-            self._handle_missed_delivery(fields, channel_hash_hex)
+            self._handle_missed_delivery(fields, channel_hash_hex, sender_hex)
         elif msg_type == MT_SYNC_REQUEST:
             self._handle_sync_request(fields, channel_hash_hex, sender_hex)
         elif msg_type == MT_SYNC_RESPONSE:
-            self._handle_sync_response(fields, channel_hash_hex)
+            self._handle_sync_response(fields, channel_hash_hex, sender_hex)
 
     # --- handlers ---
 
-    def _handle_missed_delivery(self, fields: dict, channel_hash_hex: str):
+    def _peer_may_participate(self, channel_hash_hex: str, peer_hex: str) -> bool:
+        """Return True if peer_hex is entitled to take part in this channel's sync.
+
+        An unknown channel is treated as closed, so a missing record can never
+        widen access.
+        """
+        if not peer_hex:
+            return False
+        channel = self._storage.get_channel(channel_hash_hex)
+        if channel is None:
+            return False
+        if is_open_join(permissions_from_json(channel["permissions"])):
+            return True
+        return self._storage.is_member(channel_hash_hex, peer_hex)
+
+    def _handle_missed_delivery(self, fields: dict, channel_hash_hex: str,
+                                sender_hex: str):
+        if not self._peer_may_participate(channel_hash_hex, sender_hex):
+            return
         missed_for = fields.get(F_MISSED_FOR, "")
         missed_msg_id = fields.get(F_MISSED_MSG_ID, "")
         if isinstance(missed_for, bytes):
@@ -205,10 +240,10 @@ class SyncManager:
         if not self._storage.is_subscribed(channel_hash_hex):
             return
 
+        # Fails closed on an unknown channel.
+        if not self._peer_may_participate(channel_hash_hex, requester_hex):
+            return
         channel = self._storage.get_channel(channel_hash_hex)
-        if channel and not is_open_join(permissions_from_json(channel["permissions"])):
-            if not self._storage.is_member(channel_hash_hex, requester_hex):
-                return
 
         window_start_raw = fields.get(F_SYNC_WINDOW_START, 0.0)
         try:
@@ -285,15 +320,27 @@ class SyncManager:
             F_SYNC_MESSAGES: packed,
         })
 
-    def _handle_sync_response(self, fields: dict, channel_hash_hex: str):
+    def _handle_sync_response(self, fields: dict, channel_hash_hex: str,
+                              responder_hex: str = ""):
         if not self._storage.is_subscribed(channel_hash_hex):
+            return
+
+        # The gate is that we asked this peer for this channel, not that they
+        # are a member: by design any reachable peer may serve history and our
+        # local roster need not list them.
+        if not self._claim_pending_request(channel_hash_hex, responder_hex):
+            RNS.log(
+                f"TrenchChat [sync]: dropping unsolicited sync response for "
+                f"{channel_hash_hex[:12]}… from {responder_hex[:12]}…",
+                RNS.LOG_WARNING,
+            )
             return
 
         packed = fields.get(F_SYNC_MESSAGES)
         if not packed:
             return
         try:
-            messages = msgpack.unpackb(packed, raw=False)
+            messages = unpack_wire(packed)
         except Exception as e:
             RNS.log(f"TrenchChat: sync_response unpack error: {e}", RNS.LOG_WARNING)
             return
@@ -343,6 +390,8 @@ class SyncManager:
                 if isinstance(image_data, str):
                     image_data = image_data.encode()
                 if not image_data:
+                    image_data = None
+                elif len(image_data) > MAX_IMAGE_BYTES:
                     image_data = None
 
                 inserted = self._storage.insert_message(
@@ -421,11 +470,52 @@ class SyncManager:
         return d
 
     def _send_sync_request(self, dest_hex: str, channel_hash_hex: str, since_ts: float):
+        self._record_pending_request(channel_hash_hex, dest_hex)
         self._send_raw(dest_hex, {
             F_MSG_TYPE:          MT_SYNC_REQUEST,
             F_CHANNEL_HASH:      bytes.fromhex(channel_hash_hex),
             F_SYNC_WINDOW_START: since_ts,
         })
+
+    # --- outstanding sync request tracking ---
+
+    def _peer_key_forms(self, peer_hex: str) -> list[str]:
+        """Return every hex form an inbound message may identify this peer by.
+
+        Handlers resolve the sender via RNS.Identity.recall() but fall back to
+        the raw source_hash, which is the delivery destination hash; these are
+        different values for the same peer.
+        """
+        forms = [peer_hex]
+        try:
+            delivery = RNS.Destination.hash(bytes.fromhex(peer_hex), "lxmf", "delivery")
+            forms.append(delivery.hex())
+        except (ValueError, TypeError):
+            pass
+        return forms
+
+    def _record_pending_request(self, channel_hash_hex: str, dest_hex: str):
+        """Remember that we asked dest_hex for history on this channel."""
+        now = time.time()
+        with self._pending_requests_lock:
+            for form in self._peer_key_forms(dest_hex):
+                self._pending_requests[(channel_hash_hex, form)] = now
+
+    def _claim_pending_request(self, channel_hash_hex: str, responder_hex: str) -> bool:
+        """Consume the outstanding request this response claims to answer.
+
+        Consuming the entry makes a single request answerable only once.
+        """
+        now = time.time()
+        with self._pending_requests_lock:
+            for stale_key, ts in list(self._pending_requests.items()):
+                if now - ts > SYNC_RESPONSE_WINDOW_SECS:
+                    del self._pending_requests[stale_key]
+            claimed = False
+            for form in self._peer_key_forms(responder_hex):
+                if self._pending_requests.pop((channel_hash_hex, form), None) is not None:
+                    claimed = True
+            return claimed
 
     def _send_raw(self, dest_hex: str, fields: dict):
         try:

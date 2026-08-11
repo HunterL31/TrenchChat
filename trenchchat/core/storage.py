@@ -1,4 +1,5 @@
 import json
+import re
 import sqlite3
 import shutil
 import threading
@@ -18,6 +19,8 @@ from trenchchat.core.permissions import (
 )
 
 DB_PATH = DATA_DIR / "storage.db"
+
+_KNOWN_TABLE_RE = re.compile(r"^[a-z_][a-z0-9_]*$")
 
 
 def _connect_plain(path: str) -> sqlite3.Connection:
@@ -147,6 +150,39 @@ CREATE TABLE IF NOT EXISTS reactions (
 
 CREATE INDEX IF NOT EXISTS idx_reactions_message
     ON reactions(message_id);
+
+-- Invite tokens already redeemed, or revoked by a kick.
+CREATE TABLE IF NOT EXISTS spent_invite_tokens (
+    channel_hash  TEXT NOT NULL,
+    token_hash    TEXT NOT NULL,
+    invitee_hash  TEXT NOT NULL,
+    expiry        REAL NOT NULL,
+    recorded_at   REAL NOT NULL,
+    PRIMARY KEY (channel_hash, token_hash)
+);
+
+CREATE INDEX IF NOT EXISTS idx_spent_tokens_invitee
+    ON spent_invite_tokens(channel_hash, invitee_hash);
+
+-- Invites this node accepted, recorded when the join request is sent.
+-- Anchors trust for the first member list document received for a channel.
+CREATE TABLE IF NOT EXISTS accepted_invites (
+    channel_hash TEXT PRIMARY KEY,
+    admin_hash   TEXT NOT NULL,
+    expiry       REAL NOT NULL,
+    recorded_at  REAL NOT NULL
+);
+
+-- Member list documents for channels we cannot anchor trust for, held until
+-- the user confirms. Nothing here has been applied.
+CREATE TABLE IF NOT EXISTS pending_member_docs (
+    channel_hash  TEXT PRIMARY KEY,
+    channel_name  TEXT NOT NULL DEFAULT '',
+    admin_hash    TEXT NOT NULL,
+    doc_blob      BLOB NOT NULL,
+    meta_blob     BLOB NOT NULL,
+    received_at   REAL NOT NULL
+);
 """
 
 
@@ -205,6 +241,10 @@ class Storage:
     # ------------------------------------------------------------------
 
     def _has_column(self, table: str, column: str) -> bool:
+        # PRAGMA cannot take a bound parameter, so the name is whitelisted
+        # against the schema rather than interpolated blind.
+        if not _KNOWN_TABLE_RE.match(table):
+            raise ValueError(f"refusing PRAGMA on unrecognised table name {table!r}")
         cols = self._conn.execute(f"PRAGMA table_info({table})").fetchall()
         return any(c["name"] == column for c in cols)
 
@@ -369,7 +409,8 @@ class Storage:
         plain_conn = _sqlcipher.connect(str(db_path))
         try:
             plain_conn.execute(
-                f"ATTACH DATABASE '{enc_path}' AS encrypted KEY \"x'{hex_key}'\""
+                f"ATTACH DATABASE ? AS encrypted KEY \"x'{hex_key}'\"",
+                (enc_path,),
             )
             plain_conn.execute("SELECT sqlcipher_export('encrypted')")
             plain_conn.execute("DETACH DATABASE encrypted")
@@ -395,7 +436,8 @@ class Storage:
         try:
             enc_conn.execute(f"PRAGMA key = \"x'{hex_key}'\"")
             enc_conn.execute(
-                f"ATTACH DATABASE '{plain_path}' AS plaintext KEY ''"
+                "ATTACH DATABASE ? AS plaintext KEY ''",
+                (plain_path,),
             )
             enc_conn.execute("SELECT sqlcipher_export('plaintext')")
             enc_conn.execute("DETACH DATABASE plaintext")
@@ -849,6 +891,128 @@ class Storage:
         """, (channel_hash, since_ts, limit))
 
     # --- missed_deliveries ---
+
+    # --- accepted invites (bootstrap trust anchor) ---
+
+    def record_accepted_invite(self, channel_hash: str, admin_hash: str,
+                               expiry: float) -> None:
+        with self._tx():
+            self._conn.execute("""
+                INSERT OR REPLACE INTO accepted_invites
+                    (channel_hash, admin_hash, expiry, recorded_at)
+                VALUES (?, ?, ?, ?)
+            """, (channel_hash, admin_hash, expiry, time.time()))
+
+    def get_accepted_invite_admin(self, channel_hash: str) -> str | None:
+        """Return the admin hash of an unexpired accepted invite, if any."""
+        row = self._fetchone("""
+            SELECT admin_hash, expiry FROM accepted_invites
+            WHERE channel_hash = ?
+        """, (channel_hash,))
+        if row is None:
+            return None
+        if time.time() >= row["expiry"]:
+            return None
+        return row["admin_hash"]
+
+    def clear_accepted_invite(self, channel_hash: str) -> None:
+        with self._tx():
+            self._conn.execute(
+                "DELETE FROM accepted_invites WHERE channel_hash = ?",
+                (channel_hash,),
+            )
+
+    # --- pending (unconfirmed) member list documents ---
+
+    def record_pending_member_doc(self, channel_hash: str, channel_name: str,
+                                  admin_hash: str, doc_blob: bytes,
+                                  meta_blob: bytes) -> None:
+        with self._tx():
+            self._conn.execute("""
+                INSERT OR REPLACE INTO pending_member_docs
+                    (channel_hash, channel_name, admin_hash, doc_blob,
+                     meta_blob, received_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (channel_hash, channel_name, admin_hash, doc_blob, meta_blob,
+                  time.time()))
+
+    def get_pending_member_doc(self, channel_hash: str) -> dict | None:
+        row = self._fetchone("""
+            SELECT channel_hash, channel_name, admin_hash, doc_blob, meta_blob,
+                   received_at
+            FROM pending_member_docs WHERE channel_hash = ?
+        """, (channel_hash,))
+        return dict(row) if row else None
+
+    def get_pending_member_docs(self) -> list[dict]:
+        rows = self._fetchall("""
+            SELECT channel_hash, channel_name, admin_hash, received_at
+            FROM pending_member_docs ORDER BY received_at
+        """)
+        return [dict(r) for r in rows]
+
+    def clear_pending_member_doc(self, channel_hash: str) -> None:
+        with self._tx():
+            self._conn.execute(
+                "DELETE FROM pending_member_docs WHERE channel_hash = ?",
+                (channel_hash,),
+            )
+
+    # --- spent / revoked invite tokens ---
+
+    def spend_invite_token(self, channel_hash: str, token_hash: str,
+                           invitee_hash: str, expiry: float) -> bool:
+        """Record a token as redeemed.  Returns False if it was already spent.
+
+        The insert is the atomic test-and-set; the second of two concurrent
+        claims violates the primary key.
+        """
+        with self._tx():
+            cur = self._conn.execute("""
+                INSERT OR IGNORE INTO spent_invite_tokens
+                    (channel_hash, token_hash, invitee_hash, expiry, recorded_at)
+                VALUES (?, ?, ?, ?, ?)
+            """, (channel_hash, token_hash, invitee_hash, expiry, time.time()))
+            return cur.rowcount > 0
+
+    def is_invite_token_spent(self, channel_hash: str, token_hash: str) -> bool:
+        row = self._fetchone("""
+            SELECT 1 FROM spent_invite_tokens
+            WHERE channel_hash = ? AND token_hash = ?
+        """, (channel_hash, token_hash))
+        return row is not None
+
+    def revoke_invite_tokens_for(self, channel_hash: str, invitee_hash: str,
+                                 expiry: float) -> None:
+        """Block any outstanding token for this invitee on this channel.
+
+        A removed member's token stays signature-valid for the rest of its
+        TTL. Records a sentinel row keyed on the invitee.
+        """
+        with self._tx():
+            self._conn.execute("""
+                INSERT OR REPLACE INTO spent_invite_tokens
+                    (channel_hash, token_hash, invitee_hash, expiry, recorded_at)
+                VALUES (?, ?, ?, ?, ?)
+            """, (channel_hash, f"revoked:{invitee_hash}", invitee_hash,
+                  expiry, time.time()))
+
+    def are_invite_tokens_revoked_for(self, channel_hash: str,
+                                      invitee_hash: str) -> bool:
+        row = self._fetchone("""
+            SELECT expiry FROM spent_invite_tokens
+            WHERE channel_hash = ? AND token_hash = ?
+        """, (channel_hash, f"revoked:{invitee_hash}"))
+        if row is None:
+            return False
+        return time.time() < row["expiry"]
+
+    def purge_expired_invite_tokens(self, now: float | None = None) -> None:
+        with self._tx():
+            self._conn.execute(
+                "DELETE FROM spent_invite_tokens WHERE expiry < ?",
+                (now if now is not None else time.time(),),
+            )
 
     def record_missed_delivery(self, channel_hash: str,
                                 recipient_hash: str, message_id: str):

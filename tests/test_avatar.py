@@ -286,6 +286,43 @@ class TestReceiveRateLimit:
             avatar_mgr._on_lxmf_message(lxm)
         assert avatar_mgr._storage.get_peer_avatar(sender) is None
 
+    def test_older_avatar_version_cannot_overwrite_newer(self, avatar_mgr):
+        """
+        avatar_version is documented as a monotonic counter but was never
+        compared against what is already stored, so an older -- or replayed --
+        update silently replaced a newer avatar.
+        """
+        jpeg = compress_avatar(_make_test_jpeg())
+        sender = "ef" * 16
+        mock_identity = MagicMock()
+        mock_identity.hash = bytes.fromhex(sender)
+
+        lxm1 = _make_lxm(
+            {F_MSG_TYPE: MT_AVATAR_UPDATE, F_AVATAR_DATA: jpeg, F_AVATAR_VERSION: 7}
+        )
+        lxm1.source_hash = bytes.fromhex(sender)
+        with patch("trenchchat.core.avatar.RNS.Identity.recall", return_value=mock_identity):
+            avatar_mgr._on_lxmf_message(lxm1)
+        assert avatar_mgr._storage.get_peer_avatar(sender)["avatar_version"] == 7
+
+        with avatar_mgr._lock:
+            avatar_mgr._last_received[sender] = (
+                time.time() - RECEIVE_RATE_LIMIT_SECS - 1
+            )
+
+        # A rollback to an earlier version, and a removal at that version,
+        # must both be ignored.
+        lxm2 = _make_lxm(
+            {F_MSG_TYPE: MT_AVATAR_UPDATE, F_AVATAR_DATA: b"", F_AVATAR_VERSION: 3}
+        )
+        lxm2.source_hash = bytes.fromhex(sender)
+        with patch("trenchchat.core.avatar.RNS.Identity.recall", return_value=mock_identity):
+            avatar_mgr._on_lxmf_message(lxm2)
+
+        row = avatar_mgr._storage.get_peer_avatar(sender)
+        assert row is not None and row["avatar_version"] == 7, \
+            "An older avatar version overwrote a newer one"
+
     def test_remove_avatar_clears_peer_cache(self, avatar_mgr):
         """An MT_AVATAR_UPDATE with empty avatar_data removes the stored avatar."""
         jpeg = compress_avatar(_make_test_jpeg())

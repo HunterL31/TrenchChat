@@ -20,7 +20,7 @@ import msgpack
 
 from trenchchat import APP_NAME
 from trenchchat.config import Config, DATA_DIR
-from trenchchat.core.fileutils import secure_file
+from trenchchat.core.fileutils import atomic_write_bytes, secure_file
 from trenchchat.core.lockbox import encrypt_bytes, decrypt_bytes
 
 # The aspect used to derive TrenchChat's stable delivery destination.
@@ -41,7 +41,14 @@ def _load_identity(path, encryption_key: bytes | None) -> RNS.Identity:
     if encryption_key is not None:
         raw = decrypt_bytes(raw, encryption_key)
     identity = RNS.Identity()
-    identity.load_private_key(raw)
+    # load_private_key returns False on failure rather than raising, so an
+    # unchecked call hands a half-initialised Identity to RNS.Destination and
+    # the real fault surfaces later as something unrelated. Fail here instead.
+    if not identity.load_private_key(raw):
+        raise ValueError(
+            f"identity file at {path} could not be loaded — it may be corrupt, "
+            f"or encrypted with a different key"
+        )
     return identity
 
 
@@ -50,8 +57,9 @@ def _save_identity(identity: RNS.Identity, path, encryption_key: bytes | None) -
     raw = identity.get_private_key()
     if encryption_key is not None:
         raw = encrypt_bytes(raw, encryption_key)
-    path.write_bytes(raw)
-    secure_file(path)
+    # Atomic and 0o600 from creation: this is the node's only copy of its
+    # private key, so a truncating write that fails part way is unrecoverable.
+    atomic_write_bytes(path, raw)
 
 
 class Identity:

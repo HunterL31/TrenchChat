@@ -6,15 +6,20 @@ build-backend = "setuptools.backends._legacy:_Backend"
 name = "TrenchChat"
 version = "0.1.0"
 requires-python = ">=3.10"
+# Lower bounds pinned to the versions this release is built and tested
+# against; requirements.txt pins exact versions for reproducible builds.
+# msgpack's lower bound matters for security: before 1.0, unpackb() derived
+# no limits from the payload length, so a small payload could declare a huge
+# array and exhaust memory. The inbound handlers rely on the >=1.0 behaviour.
 dependencies = [
     "rns>=1.4.2",
     "lxmf>=1.1.1",
-    "PyQt6",
-    "msgpack",
-    "configobj",
-    "sqlcipher3",
-    "cryptography",
-    "Pillow",
+    "PyQt6>=6.10",
+    "msgpack>=1.0",
+    "configobj>=5.0",
+    "sqlcipher3>=0.6",
+    "cryptography>=42.0",
+    "Pillow>=10.0",
 ]
 
 [project.gui-scripts]
