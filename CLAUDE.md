@@ -143,6 +143,8 @@ Full detail in `.claude/rules/code-standards.md`. Highlights not obvious from sk
 
 ## Working in this repo
 
+- New core functionality is prototyped in `devtools/testenv/` against a real two-peer network first,
+  then ported to the GUI once it works — see `.claude/rules/feature-development-workflow.md`.
 - Run the full test suite after any change to `trenchchat/` and don't consider the task done until it
   passes — see `.claude/rules/run-tests-after-changes.md`.
 - New functionality needs a test in the matching `tests/test_*.py` file (bug fixes need a regression
