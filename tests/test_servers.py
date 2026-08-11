@@ -247,3 +247,78 @@ class TestStandaloneChannelsUnaffected:
 
         assert alice.storage.is_member(solo, bob.identity.hash_hex) is False
         assert alice.storage.get_role(solo, bob.identity.hash_hex) is None
+
+
+# ---------------------------------------------------------------------------
+# Qt GUI port
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(scope="module")
+def qt_app():
+    """Module-scoped QApplication for headless GUI tests."""
+    from PyQt6.QtWidgets import QApplication
+    app = QApplication.instance() or QApplication([])
+    yield app
+
+
+class TestNewServerDialog:
+    def test_exposes_name_and_description(self, qt_app):
+        from trenchchat.gui.main_window import NewServerDialog
+        dlg = NewServerDialog()
+        dlg._name.setText("  Trench HQ  ")
+        dlg._desc.setText(" the place ")
+        assert dlg.server_name == "Trench HQ"
+        assert dlg.description == "the place"
+
+    def test_no_preset_picker_for_a_channel_in_a_server(self, qt_app):
+        """Server channels inherit the server's permissions, so offering a
+        preset would imply an override that doesn't exist."""
+        from trenchchat.gui.main_window import NewChannelDialog
+        assert NewChannelDialog(in_server=True)._preset is None
+        assert NewChannelDialog(in_server=False)._preset is not None
+
+
+class _FakeWindow:
+    """Minimal stand-in so _scope_for can be exercised without building a
+    MainWindow (which needs the full manager graph and a running Reticulum)."""
+
+    def __init__(self, storage):
+        self._storage = storage
+
+
+class TestGuiPermissionScope:
+    """Regression: editing permissions from a channel inside a server must write
+    the *server*, not the channel. Writing the channel row leaves the server
+    unchanged and is silently clobbered by the next accepted document."""
+
+    def test_scope_resolves_server_channel_to_its_server(self, peer_factory):
+        alice = peer_factory("alice")
+        s = actions.create_server(alice.server_mgr, alice.invite_mgr, "HQ")
+        ch = actions.create_channel_in_server(
+            alice.storage, alice.channel_mgr, alice.invite_mgr,
+            s, alice.identity.hash_hex, "general")
+        solo = actions.create_channel(
+            alice.channel_mgr, alice.invite_mgr, "solo", "", dict(PRESET_PRIVATE))
+
+        from trenchchat.gui.main_window import MainWindow
+        scope_for = MainWindow._scope_for.__get__(_FakeWindow(alice.storage))
+        assert scope_for(ch) == ("server", s, "HQ")
+        assert scope_for(solo)[:2] == ("channel", solo)
+
+    def test_editing_from_a_server_channel_writes_the_server(self, peer_factory):
+        alice = peer_factory("alice")
+        s = actions.create_server(alice.server_mgr, alice.invite_mgr, "HQ")
+        ch = actions.create_channel_in_server(
+            alice.storage, alice.channel_mgr, alice.invite_mgr,
+            s, alice.identity.hash_hex, "general")
+
+        new_perms = dict(PRESET_SERVER)
+        new_perms[ROLE_MEMBER] = [SEND_MESSAGE, "kick"]
+        assert actions.edit_server_permissions(
+            alice.storage, alice.invite_mgr, s, alice.identity.hash_hex, new_perms,
+        ) is True
+
+        assert alice.storage.get_server_permissions(s)[ROLE_MEMBER] == [SEND_MESSAGE, "kick"]
+        mirrored = permissions_from_json(alice.storage.get_channel(ch)["permissions"])
+        assert mirrored[ROLE_MEMBER] == [SEND_MESSAGE, "kick"]
+        assert is_open_join(mirrored) is False

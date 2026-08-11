@@ -32,7 +32,7 @@ from trenchchat.core import actions
 from trenchchat.core.identity import Identity
 from trenchchat.core.image import prepare_image, MAX_IMAGE_BYTES
 from trenchchat.core.permissions import (
-    INVITE, MANAGE_CHANNEL, SEND_MESSAGE, PRESETS, PRESET_PRIVATE,
+    CREATE_CHANNEL, INVITE, MANAGE_CHANNEL, SEND_MESSAGE, PRESETS, PRESET_PRIVATE,
     is_discoverable, is_open_join, permissions_from_json,
 )
 from trenchchat.core.presence import PresenceManager, resolve_display_name
@@ -58,11 +58,15 @@ _STARTUP_SYNC_DELAY_MS = 3_000
 _PRESENCE_PRUNE_INTERVAL_MS = 30_000
 _ANNOUNCE_DEBOUNCE_MS = 2_000
 
+# Server header rows carry their hash here rather than under UserRole, which is
+# reserved for channel hashes so header rows can never be selected as channels.
+SERVER_HASH_ROLE = Qt.ItemDataRole.UserRole + 1
+
 
 class NewChannelDialog(QDialog):
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, in_server: bool = False):
         super().__init__(parent)
-        self.setWindowTitle("New Channel")
+        self.setWindowTitle("New Channel in Server" if in_server else "New Channel")
         layout = QFormLayout(self)
 
         self._name = QLineEdit()
@@ -72,9 +76,13 @@ class NewChannelDialog(QDialog):
         self._desc = QLineEdit()
         layout.addRow("Description:", self._desc)
 
-        self._preset = QComboBox()
-        self._preset.addItems(list(PRESETS.keys()))
-        layout.addRow("Preset:", self._preset)
+        # A channel in a server inherits the server's permissions, so offering
+        # a preset here would imply an override that does not exist.
+        self._preset = None
+        if not in_server:
+            self._preset = QComboBox()
+            self._preset.addItems(list(PRESETS.keys()))
+            layout.addRow("Preset:", self._preset)
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
@@ -93,7 +101,40 @@ class NewChannelDialog(QDialog):
 
     @property
     def permissions(self) -> dict:
+        if self._preset is None:
+            return dict(PRESET_PRIVATE)
         return dict(PRESETS.get(self._preset.currentText(), PRESET_PRIVATE))
+
+
+class NewServerDialog(QDialog):
+    """Servers are always invite-only, so there is no access choice to make."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("New Server")
+        layout = QFormLayout(self)
+
+        self._name = QLineEdit()
+        self._name.setPlaceholderText("my-server")
+        layout.addRow("Name:", self._name)
+
+        self._desc = QLineEdit()
+        layout.addRow("Description:", self._desc)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addRow(buttons)
+
+    @property
+    def server_name(self) -> str:
+        return self._name.text().strip()
+
+    @property
+    def description(self) -> str:
+        return self._desc.text().strip()
 
 
 class JoinChannelDialog(QDialog):
@@ -212,7 +253,8 @@ class MainWindow(QMainWindow):
                  rns: "RNS.Reticulum", router: Router, channel_mgr: ChannelManager,
                  messaging: Messaging, subscription_mgr: SubscriptionManager,
                  invite_mgr: InviteManager, presence_mgr: PresenceManager,
-                 user_directory: UserDirectory, avatar_mgr=None, reaction_mgr=None):
+                 user_directory: UserDirectory, avatar_mgr=None, reaction_mgr=None,
+                 server_mgr=None):
         super().__init__()
         self._config = config
         self._identity = identity
@@ -220,6 +262,7 @@ class MainWindow(QMainWindow):
         self._rns = rns
         self._router = router
         self._channel_mgr = channel_mgr
+        self._server_mgr = server_mgr
         self._messaging = messaging
         self._subscription_mgr = subscription_mgr
         self._invite_mgr = invite_mgr
@@ -370,6 +413,10 @@ class MainWindow(QMainWindow):
         new_channel_action = QAction("＋ New Channel", self)
         new_channel_action.triggered.connect(self._on_new_channel)
         toolbar.addAction(new_channel_action)
+
+        new_server_action = QAction("＋ New Server", self)
+        new_server_action.triggered.connect(self._on_new_server)
+        toolbar.addAction(new_server_action)
 
         join_channel_action = QAction("⤵ Join Channel", self)
         join_channel_action.triggered.connect(self._on_join_channel)
@@ -580,14 +627,19 @@ class MainWindow(QMainWindow):
         channel_hash, channel_name, token, expiry, admin_hex = self._pending_invites[0]
         count = len(self._pending_invites)
         count_str = f" ({count})" if count > 1 else ""
+        if self._invite_mgr.invite_scope_kind(channel_hash) == "server":
+            target = f"the server {channel_name} and all its channels"
+        else:
+            target = f"#{channel_name}"
         if token is None:
+            # A member list doc held for confirmation, not a token invite.
             self._invite_bar_label.setText(
-                f"📨  {admin_hex[:16]}… added you to  #{channel_name}{count_str}  "
+                f"📨  {admin_hex[:16]}… added you to  {target}{count_str}  "
                 f"— join?"
             )
         else:
             self._invite_bar_label.setText(
-                f"📨  You've been invited to join  #{channel_name}{count_str}  "
+                f"📨  You've been invited to join  {target}{count_str}  "
                 f"— from {admin_hex[:16]}…"
             )
         self._invite_bar.show()
@@ -630,19 +682,43 @@ class MainWindow(QMainWindow):
 
     # --- channel list ---
 
+    def _add_channel_item(self, row, indented: bool = False):
+        perms = permissions_from_json(row["permissions"])
+        lock = " 🔒" if not is_open_join(perms) else ""
+        prefix = "    # " if indented else "# "
+        item = QListWidgetItem(f"{prefix}{row['name']}{lock}")
+        item.setData(Qt.ItemDataRole.UserRole, row["hash"])
+        self._channel_list_widget.addItem(item)
+
+    def _add_server_header(self, server):
+        """A non-selectable header row carrying its server hash for the menu."""
+        item = QListWidgetItem(server["name"].upper())
+        font = item.font()
+        font.setBold(True)
+        item.setFont(font)
+        # No UserRole hash: _highlight_channel_in_list and
+        # _restore_channel_selection match on it, so headers stay invisible
+        # to channel selection.
+        item.setData(SERVER_HASH_ROLE, server["hash"])
+        item.setFlags(Qt.ItemFlag.NoItemFlags)
+        self._channel_list_widget.addItem(item)
+
     def _refresh_channel_list(self):
         # Suppress selection-change signals while rebuilding the list so we
         # don't trigger a spurious channel switch on clear().
         self._channel_list_widget.blockSignals(True)
         self._channel_list_widget.clear()
-        for row in self._storage.get_all_channels():
-            if not self._storage.is_subscribed(row["hash"]):
-                continue
-            perms = permissions_from_json(row["permissions"])
-            lock = " 🔒" if not is_open_join(perms) else ""
-            item = QListWidgetItem(f"# {row['name']}{lock}")
-            item.setData(Qt.ItemDataRole.UserRole, row["hash"])
-            self._channel_list_widget.addItem(item)
+
+        if self._server_mgr is not None:
+            for server in self._server_mgr.list_servers():
+                self._add_server_header(server)
+                for row in self._storage.get_server_channels(server["hash"]):
+                    if self._storage.is_subscribed(row["hash"]):
+                        self._add_channel_item(row, indented=True)
+
+        for row in self._storage.get_standalone_channels():
+            if self._storage.is_subscribed(row["hash"]):
+                self._add_channel_item(row)
         self._channel_list_widget.blockSignals(False)
 
         # Re-highlight whichever channel is currently open (if still in list).
@@ -768,6 +844,60 @@ class MainWindow(QMainWindow):
         self._refresh_channel_list()
         self._switch_to_channel(hash_hex)
 
+    def _on_new_server(self):
+        dlg = NewServerDialog(self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        if not dlg.server_name:
+            QMessageBox.warning(self, "TrenchChat", "Server name cannot be empty.")
+            return
+        actions.create_server(
+            self._server_mgr, self._invite_mgr,
+            name=dlg.server_name, description=dlg.description,
+        )
+        self._refresh_channel_list()
+
+    def _on_new_channel_in_server(self, server_hash: str):
+        dlg = NewChannelDialog(self, in_server=True)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        if not dlg.channel_name:
+            QMessageBox.warning(self, "TrenchChat", "Channel name cannot be empty.")
+            return
+        hash_hex = actions.create_channel_in_server(
+            self._storage, self._channel_mgr, self._invite_mgr,
+            server_hash, self._identity.hash_hex,
+            name=dlg.channel_name, description=dlg.description,
+        )
+        if hash_hex is None:
+            QMessageBox.warning(
+                self, "TrenchChat",
+                "You don't have permission to create channels in this server.",
+            )
+            return
+        self._refresh_channel_list()
+        self._switch_to_channel(hash_hex)
+
+    def _on_leave_server(self, server_hash: str):
+        server = self._storage.get_server(server_hash)
+        name = server["name"] if server else server_hash[:12]
+        confirm = QMessageBox.question(
+            self, "Leave server",
+            f"Leave {name}? You'll leave every channel in it. "
+            "Your local message history will be kept.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+        for row in self._storage.get_server_channels(server_hash):
+            view = self._channel_views.pop(row["hash"], None)
+            if view is not None:
+                view.setParent(None)
+            if self._current_channel == row["hash"]:
+                self._current_channel = None
+        actions.leave_server(self._storage, self._subscription_mgr, server_hash)
+        self._refresh_channel_list()
+
     # --- send ---
 
     @pyqtSlot(str, object)
@@ -838,15 +968,6 @@ class MainWindow(QMainWindow):
         item = self._channel_list_widget.itemAt(pos)
         if item is None:
             return
-        channel_hash = item.data(Qt.ItemDataRole.UserRole)
-        channel = self._storage.get_channel(channel_hash)
-        if channel is None:
-            return
-
-        my_hex = self._identity.hash_hex
-        can_invite = self._storage.has_permission(channel_hash, my_hex, INVITE)
-        can_manage_channel = self._storage.has_permission(channel_hash, my_hex, MANAGE_CHANNEL)
-        is_member = self._storage.is_member(channel_hash, my_hex)
 
         menu = QMenu(self)
         menu.setStyleSheet(
@@ -855,20 +976,41 @@ class MainWindow(QMainWindow):
             "QMenu::separator { background: #444; height: 1px; margin: 2px 0; }"
         )
 
+        server_hash = item.data(SERVER_HASH_ROLE)
+        if server_hash:
+            self._build_server_menu(menu, server_hash)
+            menu.exec(self._channel_list_widget.mapToGlobal(pos))
+            return
+
+        channel_hash = item.data(Qt.ItemDataRole.UserRole)
+        channel = self._storage.get_channel(channel_hash)
+        if channel is None:
+            return
+
+        my_hex = self._identity.hash_hex
+        kind, scope_hash, _scope_name = self._scope_for(channel_hash)
+        can_invite = self._storage.has_permission(scope_hash, my_hex, INVITE)
+        can_manage_channel = self._storage.has_permission(scope_hash, my_hex, MANAGE_CHANNEL)
+        is_member = self._storage.is_member(scope_hash, my_hex)
+        in_server = kind == "server"
+
         if can_invite:
-            invite_action = menu.addAction("Invite member…")
+            label = "Invite to server…" if in_server else "Invite member…"
+            invite_action = menu.addAction(label)
             invite_action.triggered.connect(
                 lambda: self._on_invite_member(channel_hash, channel["name"])
             )
 
         if is_member:
-            members_action = menu.addAction("View members…")
+            label = "View server members…" if in_server else "View members…"
+            members_action = menu.addAction(label)
             members_action.triggered.connect(
                 lambda: self._on_view_members(channel_hash, channel["name"])
             )
 
         if can_manage_channel:
-            perms_action = menu.addAction("Edit permissions…")
+            label = "Edit server permissions…" if in_server else "Edit permissions…"
+            perms_action = menu.addAction(label)
             perms_action.triggered.connect(
                 lambda: self._on_edit_permissions(channel_hash, channel["name"])
             )
@@ -876,53 +1018,139 @@ class MainWindow(QMainWindow):
         if menu.actions():
             menu.addSeparator()
 
-        leave_action = menu.addAction("Leave channel")
-        leave_action.triggered.connect(lambda: self._on_leave_channel(channel_hash))
+        if in_server:
+            # Membership is server-wide, so there is no such thing as leaving a
+            # single channel of a server.
+            leave_action = menu.addAction("Leave server")
+            leave_action.triggered.connect(lambda: self._on_leave_server(scope_hash))
+        else:
+            leave_action = menu.addAction("Leave channel")
+            leave_action.triggered.connect(lambda: self._on_leave_channel(channel_hash))
 
         menu.exec(self._channel_list_widget.mapToGlobal(pos))
 
+    def _build_server_menu(self, menu: QMenu, server_hash: str):
+        my_hex = self._identity.hash_hex
+        server = self._storage.get_server(server_hash)
+        if server is None:
+            return
+        name = server["name"]
+
+        if self._storage.has_permission(server_hash, my_hex, CREATE_CHANNEL):
+            action = menu.addAction("New channel in server…")
+            action.triggered.connect(lambda: self._on_new_channel_in_server(server_hash))
+        if self._storage.has_permission(server_hash, my_hex, INVITE):
+            action = menu.addAction("Invite to server…")
+            action.triggered.connect(lambda: self._on_invite_to_server(server_hash, name))
+        if self._storage.is_member(server_hash, my_hex):
+            action = menu.addAction("View server members…")
+            action.triggered.connect(lambda: self._on_view_server_members(server_hash, name))
+        if self._storage.has_permission(server_hash, my_hex, MANAGE_CHANNEL):
+            action = menu.addAction("Edit server permissions…")
+            action.triggered.connect(lambda: self._on_edit_server_permissions(server_hash, name))
+
+        if menu.actions():
+            menu.addSeparator()
+        leave = menu.addAction("Leave server")
+        leave.triggered.connect(lambda: self._on_leave_server(server_hash))
+
     def _on_invite_member(self, channel_hash: str, channel_name: str):
-        dlg = InviteDialog(channel_name, self._user_directory, self._storage, self)
+        # An invite to a server admits the peer to every channel in it, so the
+        # invite is addressed to the server rather than the channel clicked.
+        kind, scope_hash, scope_name = self._scope_for(channel_hash)
+        self._invite_to_scope(kind, scope_hash, scope_name)
+
+    def _on_invite_to_server(self, server_hash: str, server_name: str):
+        self._invite_to_scope("server", server_hash, server_name)
+
+    def _invite_to_scope(self, kind: str, scope_hash: str, scope_name: str):
+        dlg = InviteDialog(scope_name, self._user_directory, self._storage, self)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
         invitee_hex = dlg.invitee_hash
         if invitee_hex:
-            self._invite_mgr.send_invite(channel_hash, invitee_hex)
+            self._invite_mgr.send_invite(scope_hash, invitee_hex)
+            extra = (" They will join every channel in this server."
+                     if kind == "server" else "")
             QMessageBox.information(
                 self, "Invite sent",
                 f"Invite sent to {invitee_hex[:16]}…\n"
-                "They will be added once they accept."
+                f"They will be added once they accept.{extra}"
             )
 
     def _on_view_members(self, channel_hash: str, channel_name: str):
+        # Membership belongs to the server for a channel inside one. Storage
+        # resolves this anyway, but addressing the scope explicitly is what
+        # keeps the permissions path above and this one from drifting apart.
+        _kind, scope_hash, scope_name = self._scope_for(channel_hash)
+        self._view_members_for_scope(scope_hash, scope_name)
+
+    def _on_view_server_members(self, server_hash: str, server_name: str):
+        self._view_members_for_scope(server_hash, server_name)
+
+    def _view_members_for_scope(self, scope_hash: str, scope_name: str):
         dlg = MembersDialog(
-            channel_hash, channel_name, self._storage,
+            scope_hash, scope_name, self._storage,
             self._identity.hash_hex,
-            self._storage.is_admin(channel_hash, self._identity.hash_hex),
+            self._storage.is_admin(scope_hash, self._identity.hash_hex),
             self,
         )
         dlg.exec()
         actions.update_membership(
-            self._storage, self._invite_mgr, channel_hash, self._identity.hash_hex,
+            self._storage, self._invite_mgr, scope_hash, self._identity.hash_hex,
             remove_members=dlg.members_to_remove,
             add_admins=dlg.admins_to_add,
             remove_admins=dlg.admins_to_remove,
         )
 
+    def _scope_for(self, channel_hash: str) -> tuple[str, str, str]:
+        """The scope that owns a channel's membership and permissions.
+
+        Returns (kind, hash, display_name) where kind is "server" or "channel".
+        Permissions for a channel inside a server live on the server, so editing
+        them through the channel would write a row the next accepted document
+        overwrites.
+        """
+        row = self._storage.get_channel(channel_hash)
+        if row is not None and row["server_hash"]:
+            server = self._storage.get_server(row["server_hash"])
+            name = server["name"] if server else row["server_hash"][:12]
+            return ("server", row["server_hash"], name)
+        name = row["name"] if row is not None else channel_hash[:12]
+        return ("channel", channel_hash, name)
+
     def _on_edit_permissions(self, channel_hash: str, channel_name: str):
-        if not self._storage.has_permission(channel_hash, self._identity.hash_hex, MANAGE_CHANNEL):
+        kind, scope_hash, scope_name = self._scope_for(channel_hash)
+        self._edit_permissions_for_scope(kind, scope_hash, scope_name, channel_hash)
+
+    def _on_edit_server_permissions(self, server_hash: str, server_name: str):
+        self._edit_permissions_for_scope("server", server_hash, server_name, None)
+
+    def _edit_permissions_for_scope(self, kind: str, scope_hash: str,
+                                    scope_name: str, channel_hash: str | None):
+        if not self._storage.has_permission(scope_hash, self._identity.hash_hex,
+                                            MANAGE_CHANNEL):
             return
-        current_perms = self._storage.get_channel_permissions(channel_hash)
-        dlg = ChannelPermissionsDialog(channel_name, current_perms, self)
+        if kind == "server":
+            current_perms = self._storage.get_server_permissions(scope_hash)
+        else:
+            current_perms = self._storage.get_channel_permissions(scope_hash)
+        dlg = ChannelPermissionsDialog(scope_name, current_perms, self,
+                                       scope_kind=kind)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
-        new_perms = dlg.permissions
-        actions.edit_channel_permissions(
-            self._storage, self._invite_mgr, channel_hash,
-            self._identity.hash_hex, new_perms,
-        )
+        if kind == "server":
+            actions.edit_server_permissions(
+                self._storage, self._invite_mgr, scope_hash,
+                self._identity.hash_hex, dlg.permissions,
+            )
+        else:
+            actions.edit_channel_permissions(
+                self._storage, self._invite_mgr, scope_hash,
+                self._identity.hash_hex, dlg.permissions,
+            )
         self._refresh_channel_list()
-        if self._current_channel == channel_hash:
+        if channel_hash and self._current_channel == channel_hash:
             self._switch_to_channel(channel_hash)
 
     def _on_leave_channel(self, channel_hash: str):
@@ -1176,10 +1404,12 @@ class MainWindow(QMainWindow):
             self._update_invite_bar()
             return
 
+        is_server = self._invite_mgr.invite_scope_kind(channel_hash) == "server"
         self._invite_mgr.send_join_request(channel_hash, token, expiry, admin_hex)
+        target = f"the server {channel_name}" if is_server else f"#{channel_name}"
         QMessageBox.information(
             self, "Join request sent",
-            f"Your request to join #{channel_name} has been sent.\n"
+            f"Your request to join {target} has been sent.\n"
             "You'll be added once an admin approves it."
         )
         self._update_invite_bar()

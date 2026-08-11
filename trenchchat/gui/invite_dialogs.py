@@ -346,17 +346,32 @@ class ChannelPermissionsDialog(QDialog):
     and persist it through the appropriate core manager.
     """
 
-    def __init__(self, channel_name: str, current_permissions: dict, parent=None):
+    def __init__(self, channel_name: str, current_permissions: dict, parent=None,
+                 scope_kind: str = "channel"):
         super().__init__(parent)
-        self.setWindowTitle(f"Channel permissions — #{channel_name}")
+        is_server = scope_kind == "server"
+        noun = "Server" if is_server else "Channel"
+        prefix = "" if is_server else "#"
+        self.setWindowTitle(f"{noun} permissions — {prefix}{channel_name}")
         self.setMinimumWidth(460)
 
         self._perms = dict(current_permissions)
 
         layout = QVBoxLayout(self)
 
-        # --- Channel flags ---
-        flags_group = QGroupBox("Channel flags")
+        # The window title is easy to miss, and a server-wide change reached
+        # from one of its channels must not be a surprise -- say it in-body.
+        heading = QLabel(
+            f"<b>{prefix}{channel_name}</b>" + (
+                "<br><span style='color:#c8a45c;'>Applies to every channel "
+                "in this server.</span>" if is_server else ""
+            )
+        )
+        heading.setWordWrap(True)
+        layout.addWidget(heading)
+
+        # --- flags ---
+        flags_group = QGroupBox(f"{noun} flags")
         flags_layout = QVBoxLayout(flags_group)
 
         self._open_join_cb = QCheckBox("Open join (anyone can join without an invite)")
