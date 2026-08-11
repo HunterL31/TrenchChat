@@ -579,6 +579,45 @@ class TestMembershipTenure:
         db.open_tenure(CHAN, ID_A, 1_000_000.0)
         assert not db.was_member_at(CHAN, ID_B, 1_000_000.0)
 
+    def test_get_departed_within_returns_recent_closed_interval(self, db):
+        t0 = 1_000_000.0
+        left = t0 + 500.0
+        db.open_tenure(CHAN, ID_A, t0)
+        db.close_tenure(CHAN, ID_A, left)
+        rows = db.get_departed_within(CHAN, left - 1)
+        assert len(rows) == 1
+        assert rows[0]["identity_hash"] == ID_A
+        assert rows[0]["joined_at"] == t0
+        assert rows[0]["left_at"] == left
+
+    def test_get_departed_within_excludes_interval_closed_before_cutoff(self, db):
+        t0 = 1_000_000.0
+        left = t0 + 500.0
+        db.open_tenure(CHAN, ID_A, t0)
+        db.close_tenure(CHAN, ID_A, left)
+        assert db.get_departed_within(CHAN, left + 1) == []
+
+    def test_get_departed_within_excludes_open_intervals(self, db):
+        db.open_tenure(CHAN, ID_A, 1_000_000.0)
+        assert db.get_departed_within(CHAN, 0.0) == []
+
+    def test_record_departed_tenure_adds_interval(self, db):
+        db.record_departed_tenure(CHAN, ID_A, 1_000_000.0, 1_000_500.0)
+        assert db.was_member_at(CHAN, ID_A, 1_000_200.0)
+        assert not db.was_member_at(CHAN, ID_A, 1_000_600.0)
+
+    def test_record_departed_tenure_does_not_overwrite_existing(self, db):
+        db.open_tenure(CHAN, ID_A, 1_000_000.0)
+        db.close_tenure(CHAN, ID_A, 1_000_500.0)
+        # A conflicting claim for the same (channel, identity, joined_at) is ignored
+        db.record_departed_tenure(CHAN, ID_A, 1_000_000.0, 1_000_999.0)
+        row = db._conn.execute(
+            "SELECT left_at FROM membership_tenure "
+            "WHERE channel_hash=? AND identity_hash=? AND joined_at=?",
+            (CHAN, ID_A, 1_000_000.0)
+        ).fetchone()
+        assert row["left_at"] == 1_000_500.0
+
     def test_backfill_from_members_table(self, tmp_path):
         """Existing members are backfilled into tenure on first open."""
         db = Storage(db_path=tmp_path / "bf.db")
@@ -597,6 +636,77 @@ class TestMembershipTenure:
         db._migrate_tenure()
         assert db.was_member_at(CHAN, ID_A, t0 + 1)
         db.close()
+
+    def test_repair_tenure_widens_interval_to_earlier_stored_message(self, db):
+        """A joined_at backfilled too late (e.g. from a stale
+        members.added_at) is widened to cover a message already on file
+        that predates it."""
+        db.upsert_channel(CHAN, "Test", "", "creator", "invite", time.time())
+        t0 = 1_000_000.0
+        bad_joined_at = t0 + 500.0
+        db.open_tenure(CHAN, ID_A, bad_joined_at)
+        db.insert_message(
+            channel_hash=CHAN, sender_hash=ID_A, sender_name="A",
+            content="hi", timestamp=t0, message_id="repair-m1",
+            reply_to=None, last_seen_id=None, received_at=t0,
+        )
+        assert not db.was_member_at(CHAN, ID_A, t0)
+
+        db._repair_tenure_from_message_history()
+
+        assert db.was_member_at(CHAN, ID_A, t0)
+
+    def test_repair_tenure_does_not_widen_when_message_is_within_interval(self, db):
+        db.upsert_channel(CHAN, "Test", "", "creator", "invite", time.time())
+        t0 = 1_000_000.0
+        db.open_tenure(CHAN, ID_A, t0)
+        db.insert_message(
+            channel_hash=CHAN, sender_hash=ID_A, sender_name="A",
+            content="hi", timestamp=t0 + 10, message_id="repair-m2",
+            reply_to=None, last_seen_id=None, received_at=t0 + 10,
+        )
+
+        db._repair_tenure_from_message_history()
+
+        row = db._conn.execute(
+            "SELECT joined_at FROM membership_tenure WHERE channel_hash=? AND identity_hash=?",
+            (CHAN, ID_A)
+        ).fetchone()
+        assert row["joined_at"] == t0
+
+    def test_repair_tenure_skips_identity_with_no_tenure_record(self, db):
+        db.upsert_channel(CHAN, "Test", "", "creator", "invite", time.time())
+        db.insert_message(
+            channel_hash=CHAN, sender_hash=ID_B, sender_name="B",
+            content="hi", timestamp=1_000_000.0, message_id="repair-m3",
+            reply_to=None, last_seen_id=None, received_at=1_000_000.0,
+        )
+
+        db._repair_tenure_from_message_history()
+
+        assert not db.was_member_at(CHAN, ID_B, 1_000_000.0)
+
+    def test_repair_tenure_runs_safely_from_init_on_existing_db(self, tmp_path):
+        """Reproduces a real startup crash: the repair pass runs inside
+        __init__ via _migrate_permissions, before self._lock and
+        self._scope_cache existed at one point -- only visible on a database
+        that already has message rows, since the repair query is a no-op on
+        an empty messages table."""
+        db_path = tmp_path / "existing.db"
+        db1 = Storage(db_path=db_path)
+        db1.upsert_channel(CHAN, "Test", "", "creator", "invite", time.time())
+        t0 = 1_000_000.0
+        db1.open_tenure(CHAN, ID_A, t0 + 500.0)
+        db1.insert_message(
+            channel_hash=CHAN, sender_hash=ID_A, sender_name="A",
+            content="hi", timestamp=t0, message_id="reopen-m1",
+            reply_to=None, last_seen_id=None, received_at=t0,
+        )
+        db1.close()
+
+        db2 = Storage(db_path=db_path)  # must not raise on construction
+        assert db2.was_member_at(CHAN, ID_A, t0)
+        db2.close()
 
 
 # ---------------------------------------------------------------------------

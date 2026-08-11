@@ -220,18 +220,21 @@ class Storage:
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._conn.executescript(SCHEMA)
         self._conn.commit()
-        self._migrate_permissions()
-        self._secure_db_files()
         # Serialise all connection use across threads.  SQLite's Python
         # binding shares a single connection object; concurrent execute/commit/
         # rollback calls from different threads corrupt cursor state even with
         # check_same_thread=False.  An RLock (reentrant) is used so that a
-        # single thread can re-enter (e.g. _tx → insert → _tx).
+        # single thread can re-enter (e.g. _tx → insert → _tx).  Must exist
+        # before _migrate_permissions(), whose tenure repair pass calls
+        # _scope(), which uses _fetchone().
         self._lock = threading.RLock()
         # channel_hash -> owning scope hash.  Safe to cache because
         # channels.server_hash is write-once (never in upsert_channel's
-        # ON CONFLICT clause); invalidated per-key by upsert_channel.
+        # ON CONFLICT clause); invalidated per-key by upsert_channel.  Must
+        # also exist before _migrate_permissions() for the same reason.
         self._scope_cache: dict[str, str] = {}
+        self._migrate_permissions()
+        self._secure_db_files()
 
     # ------------------------------------------------------------------
     # File permission hardening
@@ -315,6 +318,9 @@ class Storage:
         self._migrate_image_data()
         self._migrate_reactions()
         self._migrate_servers()
+        # _scope() reads channels.server_hash, so this must run after
+        # _migrate_servers() has ensured that column exists.
+        self._repair_tenure_from_message_history()
 
     def _migrate_servers(self):
         """Add channels.server_hash for existing databases.
@@ -352,6 +358,44 @@ class Storage:
                     VALUES (?, ?, ?, NULL)
                 """, [(r["channel_hash"], r["identity_hash"], r["added_at"]) for r in rows])
                 self._conn.commit()
+
+    def _repair_tenure_from_message_history(self):
+        """Widen each member's earliest tenure interval to cover any locally
+        stored message from them that predates it.
+
+        _migrate_tenure's one-time backfill uses members.added_at, which is
+        reset to "now" on every member-list republish (replace_members
+        wipes and reinserts the whole table) -- so a member who joined long
+        before their channel's local upgrade to tenure tracking can end up
+        with a joined_at far later than their true join time, silently
+        failing sync for all of their older messages. A message already
+        stored locally was authenticated as genuinely from that identity at
+        the LXMF transport layer, so it's safe evidence they were already a
+        member by then. This only ever widens an interval already on file --
+        it can never grant membership to an identity with no tenure record.
+        """
+        rows = self._conn.execute("""
+            SELECT channel_hash, sender_hash, MIN(timestamp) AS earliest_ts
+            FROM messages
+            GROUP BY channel_hash, sender_hash
+        """).fetchall()
+        changed = False
+        for row in rows:
+            scope = self._scope(row["channel_hash"])
+            tenure_row = self._conn.execute("""
+                SELECT joined_at FROM membership_tenure
+                WHERE channel_hash = ? AND identity_hash = ?
+                ORDER BY joined_at ASC LIMIT 1
+            """, (scope, row["sender_hash"])).fetchone()
+            if tenure_row is None or row["earliest_ts"] >= tenure_row["joined_at"]:
+                continue
+            self._conn.execute("""
+                UPDATE membership_tenure SET joined_at = ?
+                WHERE channel_hash = ? AND identity_hash = ? AND joined_at = ?
+            """, (row["earliest_ts"], scope, row["sender_hash"], tenure_row["joined_at"]))
+            changed = True
+        if changed:
+            self._conn.commit()
 
     def _migrate_image_data(self):
         """Add image_data BLOB column to messages table for existing databases."""
@@ -733,11 +777,12 @@ class Storage:
     def get_subscriptions(self) -> list[sqlite3.Row]:
         return self._fetchall("SELECT * FROM subscriptions")
 
-    def update_last_sync(self, channel_hash: str):
+    def update_last_sync(self, channel_hash: str, ts: float | None = None):
+        """Advance last_sync_at to *ts*, or wall-clock time if not given."""
         with self._tx():
             self._conn.execute(
                 "UPDATE subscriptions SET last_sync_at = ? WHERE channel_hash = ?",
-                (time.time(), channel_hash)
+                (ts if ts is not None else time.time(), channel_hash)
             )
 
     # --- members ---
@@ -951,6 +996,41 @@ class Storage:
                         (channel_hash, identity_hash, joined_at, left_at)
                     VALUES (?, ?, ?, NULL)
                 """, (channel_hash, ih, joined_at))
+
+    def get_departed_within(self, channel_hash: str, since_ts: float) -> list[sqlite3.Row]:
+        """Return closed tenure intervals (identity_hash, joined_at, left_at)
+        that ended at or after *since_ts*.
+
+        Used when publishing a member-list document: a brand-new joiner has
+        no prior local state, so update_tenure's added/removed diff (which
+        only fires relative to what a peer already knew) can never teach
+        them about anyone who left before they joined. Carrying recent
+        departures in the signed document closes that gap. Bounded to the
+        sync window so the document doesn't grow with a channel's full
+        historical churn.
+        """
+        channel_hash = self._scope(channel_hash)
+        return self._fetchall("""
+            SELECT identity_hash, joined_at, left_at FROM membership_tenure
+            WHERE channel_hash = ? AND left_at IS NOT NULL AND left_at >= ?
+            ORDER BY identity_hash, joined_at
+        """, (channel_hash, since_ts))
+
+    def record_departed_tenure(self, channel_hash: str, identity_hash: str,
+                               joined_at: float, left_at: float) -> None:
+        """Record a closed tenure interval learned from a signed member-list
+        document's departed-member entry.
+
+        INSERT OR IGNORE only adds intervals not already on file -- never
+        overwrites existing local tenure data.
+        """
+        channel_hash = self._scope(channel_hash)
+        with self._tx():
+            self._conn.execute("""
+                INSERT OR IGNORE INTO membership_tenure
+                    (channel_hash, identity_hash, joined_at, left_at)
+                VALUES (?, ?, ?, ?)
+            """, (channel_hash, identity_hash, joined_at, left_at))
 
     def was_member_at(self, channel_hash: str, identity_hash: str,
                       timestamp: float) -> bool:
