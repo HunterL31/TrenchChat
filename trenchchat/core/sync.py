@@ -65,7 +65,7 @@ SYNC_RESPONSE_WINDOW_SECS = 300
 # flood of costly full timestamp sweeps, not a hard security boundary --
 # tenure and full_sync already gate what a peer is authorised to see; this
 # only paces how fast they can pull it.
-DEEP_SYNC_COOLDOWN_SECS = 10 * 60
+DEEP_SYNC_COOLDOWN_SECS = 60
 
 # How long an idle (channel, peer) cooldown entry is kept before being
 # pruned, so the cooldown map doesn't grow unbounded over a long session
