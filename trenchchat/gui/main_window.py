@@ -1123,6 +1123,8 @@ class MainWindow(QMainWindow):
             self._identity.hash_hex,
             self._storage.is_admin(scope_hash, self._identity.hash_hex),
             self,
+            config=self._config,
+            user_directory=self._user_directory,
         )
         dlg.exec()
         actions.update_membership(
