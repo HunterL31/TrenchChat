@@ -1,6 +1,6 @@
 """
 Settings dialog: identity, propagation node configuration, channel filter,
-and security (PIN lock).
+and security (passphrase lock).
 """
 
 import io
@@ -488,24 +488,25 @@ class SettingsDialog(QDialog):
     # --- security tab ---
 
     def _build_security_tab(self) -> QWidget:
-        """Build the Security tab with PIN lock controls."""
+        """Build the Security tab with passphrase lock controls."""
         widget = QWidget()
         layout = QVBoxLayout(widget)
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(12)
 
-        group = QGroupBox("PIN Lock")
+        group = QGroupBox("Passphrase Lock")
         grp_layout = QVBoxLayout(group)
         grp_layout.setSpacing(8)
 
         if lockbox.is_locked():
             status_text = (
-                "Your identity and message database are protected by a PIN."
+                "Your identity and message database are protected by a "
+                "passphrase."
             )
         else:
             status_text = (
-                "No PIN is set. Your identity file and message database are "
-                "stored unencrypted."
+                "No passphrase is set. Your identity file and message database "
+                "are stored unencrypted."
             )
         self._pin_status_label = QLabel(status_text)
         self._pin_status_label.setWordWrap(True)
@@ -514,15 +515,15 @@ class SettingsDialog(QDialog):
         btn_row = QHBoxLayout()
 
         if lockbox.is_locked():
-            change_btn = QPushButton("Change PIN…")
+            change_btn = QPushButton("Change passphrase…")
             change_btn.clicked.connect(self._on_change_pin)
             btn_row.addWidget(change_btn)
 
-            remove_btn = QPushButton("Remove PIN…")
+            remove_btn = QPushButton("Remove passphrase…")
             remove_btn.clicked.connect(self._on_remove_pin)
             btn_row.addWidget(remove_btn)
         else:
-            set_btn = QPushButton("Set PIN…")
+            set_btn = QPushButton("Set passphrase…")
             set_btn.clicked.connect(self._on_set_pin)
             btn_row.addWidget(set_btn)
 
@@ -530,9 +531,11 @@ class SettingsDialog(QDialog):
         grp_layout.addLayout(btn_row)
 
         warning = QLabel(
-            "<i>Note: changing or removing the PIN re-encrypts or decrypts "
-            "your data files immediately. TrenchChat must be restarted for "
-            "the new lock state to take effect on startup.</i>"
+            "<i>Note: changing or removing the passphrase re-encrypts or "
+            "decrypts your data files immediately. TrenchChat must be "
+            "restarted for the new lock state to take effect on startup. "
+            "Anyone who copies your data files can guess passphrases offline, "
+            "so length is what protects them.</i>"
         )
         warning.setWordWrap(True)
         warning.setStyleSheet("color: #888; font-size: 11px;")
@@ -543,7 +546,7 @@ class SettingsDialog(QDialog):
         return widget
 
     def _reopen_storage(self, encryption_key: bytes | None) -> None:
-        """Re-initialise the storage connection after a PIN change.
+        """Re-initialise the storage connection after a passphrase change.
 
         The path is preserved from the current (closed) instance.
         """
@@ -551,7 +554,7 @@ class SettingsDialog(QDialog):
         self._storage.__init__(db_path=db_path, encryption_key=encryption_key)
 
     def _on_set_pin(self):
-        """Set a new PIN, encrypting identity and database."""
+        """Set a new passphrase, encrypting identity and database."""
         dlg = SetPinDialog(self)
         if dlg.exec() != SetPinDialog.DialogCode.Accepted or dlg.pin is None:
             return
@@ -565,21 +568,22 @@ class SettingsDialog(QDialog):
             self._storage.encrypt_database(new_key)
             self._reopen_storage(new_key)
         except Exception as exc:
-            RNS.log(f"TrenchChat: failed to set PIN: {exc}", RNS.LOG_ERROR)
-            QMessageBox.critical(self, "Error", f"Failed to set PIN:\n{exc}")
+            RNS.log(f"TrenchChat: failed to set passphrase: {exc}", RNS.LOG_ERROR)
+            QMessageBox.critical(self, "Error", f"Failed to set passphrase:\n{exc}")
             return
 
         self._pin_status_label.setText(
-            "Your identity and message database are protected by a PIN."
+            "Your identity and message database are protected by a passphrase."
         )
         QMessageBox.information(
-            self, "PIN Set",
-            "PIN lock enabled. You will need your PIN the next time you start TrenchChat."
+            self, "Passphrase Set",
+            "Passphrase lock enabled. You will need it the next time you "
+            "start TrenchChat."
         )
-        RNS.log("TrenchChat: PIN lock enabled via settings", RNS.LOG_NOTICE)
+        RNS.log("TrenchChat: passphrase lock enabled via settings", RNS.LOG_NOTICE)
 
     def _on_change_pin(self):
-        """Change the existing PIN, re-keying the database."""
+        """Change the existing passphrase, re-keying the database."""
         dlg = ChangePinDialog(self)
         if dlg.exec() != ChangePinDialog.DialogCode.Accepted:
             return
@@ -589,7 +593,7 @@ class SettingsDialog(QDialog):
             return
 
         try:
-            # Remove old lock metadata and create fresh salt + verify for new PIN.
+            # Remove old lock metadata and create a fresh salt + verify token.
             lockbox.remove_lock()
             new_key = lockbox.create_lock(dlg.new_pin)
 
@@ -601,17 +605,18 @@ class SettingsDialog(QDialog):
             self._storage.rekey_database(dlg.current_raw_key, new_key)
             self._reopen_storage(new_key)
         except Exception as exc:
-            RNS.log(f"TrenchChat: failed to change PIN: {exc}", RNS.LOG_ERROR)
-            QMessageBox.critical(self, "Error", f"Failed to change PIN:\n{exc}")
+            RNS.log(f"TrenchChat: failed to change passphrase: {exc}", RNS.LOG_ERROR)
+            QMessageBox.critical(self, "Error", f"Failed to change passphrase:\n{exc}")
             return
 
-        QMessageBox.information(self, "PIN Changed", "Your PIN has been updated.")
-        RNS.log("TrenchChat: PIN changed via settings", RNS.LOG_NOTICE)
+        QMessageBox.information(self, "Passphrase Changed",
+                                "Your passphrase has been updated.")
+        RNS.log("TrenchChat: passphrase changed via settings", RNS.LOG_NOTICE)
 
     def _on_remove_pin(self):
-        """Remove the PIN, decrypting identity and database."""
+        """Remove the passphrase, decrypting identity and database."""
         dlg = ChangePinDialog(self)
-        dlg.setWindowTitle("Remove PIN")
+        dlg.setWindowTitle("Remove passphrase")
         if dlg.exec() != ChangePinDialog.DialogCode.Accepted:
             return
         self._remove_pin_with_key(dlg.current_raw_key)
@@ -627,19 +632,19 @@ class SettingsDialog(QDialog):
             lockbox.remove_lock()
             self._reopen_storage(None)
         except Exception as exc:
-            RNS.log(f"TrenchChat: failed to remove PIN: {exc}", RNS.LOG_ERROR)
-            QMessageBox.critical(self, "Error", f"Failed to remove PIN:\n{exc}")
+            RNS.log(f"TrenchChat: failed to remove passphrase: {exc}", RNS.LOG_ERROR)
+            QMessageBox.critical(self, "Error", f"Failed to remove passphrase:\n{exc}")
             return
 
         self._pin_status_label.setText(
-            "No PIN is set. Your identity file and message database are "
-            "stored unencrypted."
+            "No passphrase is set. Your identity file and message database "
+            "are stored unencrypted."
         )
         QMessageBox.information(
-            self, "PIN Removed",
-            "PIN lock removed. Your data is no longer encrypted at rest."
+            self, "Passphrase Removed",
+            "Passphrase lock removed. Your data is no longer encrypted at rest."
         )
-        RNS.log("TrenchChat: PIN lock removed via settings", RNS.LOG_NOTICE)
+        RNS.log("TrenchChat: passphrase lock removed via settings", RNS.LOG_NOTICE)
 
     # --- accept ---
 

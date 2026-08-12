@@ -1,11 +1,12 @@
 """
 Tests for trenchchat.core.lockbox.
 
-Covers PIN derivation, symmetric encryption/decryption, salt/verify file
-management, and wrong-PIN detection.  All tests use tmp_path to avoid
-touching the real ~/.trenchchat directory.
+Covers passphrase derivation, symmetric encryption/decryption, salt/verify
+file management, and wrong-passphrase detection.  All tests use tmp_path to
+avoid touching the real ~/.trenchchat directory.
 """
 
+import hashlib
 import os
 from pathlib import Path
 from unittest.mock import patch
@@ -13,6 +14,7 @@ from unittest.mock import patch
 import pytest
 
 from trenchchat.core.lockbox import (
+    PBKDF2_ITERATIONS,
     WrongPinError,
     create_lock,
     decrypt_bytes,
@@ -66,6 +68,27 @@ class TestDeriveKey:
         key1 = derive_key("1234", os.urandom(16))
         key2 = derive_key("1234", os.urandom(16))
         assert key1 != key2
+
+    def test_nfkc_normalises_the_passphrase(self):
+        """Two Unicode spellings of the same passphrase must derive one key,
+        or a user who types it a different way is locked out."""
+        salt = os.urandom(16)
+        composed = "café battery staple"      # e + combining acute
+        precomposed = "café battery staple"    # é
+        assert composed != precomposed
+        assert derive_key(composed, salt) == derive_key(precomposed, salt)
+
+    def test_legacy_numeric_pin_derives_unchanged(self):
+        """Locks created before passphrases were allowed hold a short numeric
+        PIN. Normalisation must not change what those derive to, or every
+        existing user is locked out of their own data."""
+        salt = bytes(range(16))
+        expected = hashlib.pbkdf2_hmac("sha256", b"1234", salt, PBKDF2_ITERATIONS)
+        assert derive_key("1234", salt) == expected
+
+    def test_long_passphrase_is_accepted(self):
+        salt = os.urandom(16)
+        assert len(derive_key("correct horse battery staple!", salt)) == 32
 
 
 # ---------------------------------------------------------------------------
