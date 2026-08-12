@@ -9,6 +9,7 @@ import json
 
 import pytest
 
+from trenchchat.core import actions
 from trenchchat.core.permissions import FLAG_DISCOVERABLE, PRESET_PRIVATE, is_open_join, permissions_from_json
 from tests.helpers import (
     announce_and_wait,
@@ -279,3 +280,70 @@ class TestChannelDiscovery:
         alice.channel_mgr.announce_channel(ch_hash)
 
         assert len(calls) == 1, "public channel's destination.announce() was not called"
+
+
+class TestOwnerLeavesChannel:
+    """
+    Ownership and membership are tracked separately: _owned_destinations and
+    restore_owned_channels() key off creator_hash alone. Leaving a channel you
+    created must still stop it being advertised, or it stays discoverable and
+    joinable forever with nobody reading it.
+    """
+
+    def test_owner_leaving_stops_announce(self, peer_factory):
+        alice = peer_factory("alice")
+        ch_hash = alice.channel_mgr.create_channel("open-room", "", "public")
+
+        dest = alice.channel_mgr._owned_destinations[ch_hash]
+        calls = []
+        dest.announce = lambda *a, **kw: calls.append((a, kw))
+
+        alice.channel_mgr.announce_all_owned()
+        assert len(calls) == 1, "public channel was not announced before leaving"
+
+        actions.leave_channel(alice.storage, alice.subscription_mgr,
+                              alice.channel_mgr, ch_hash)
+
+        calls.clear()
+        alice.channel_mgr.announce_all_owned()
+        assert calls == [], "channel was still announced after the owner left"
+
+    def test_leave_releases_owned_destination(self, peer_factory):
+        alice = peer_factory("alice")
+        ch_hash = alice.channel_mgr.create_channel("open-room", "", "public")
+        assert alice.channel_mgr.is_owner(ch_hash)
+
+        actions.leave_channel(alice.storage, alice.subscription_mgr,
+                              alice.channel_mgr, ch_hash)
+
+        assert ch_hash not in alice.channel_mgr._owned_destinations
+        assert alice.channel_mgr.get_owned_destination(ch_hash) is None
+
+    def test_announce_channel_skips_unsubscribed_owned_channel(self, peer_factory):
+        """The gate lives in announce_channel(), so it holds even for a caller
+        that still has the destination -- not just via leave_channel()."""
+        alice = peer_factory("alice")
+        ch_hash = alice.channel_mgr.create_channel("open-room", "", "public")
+
+        dest = alice.channel_mgr._owned_destinations[ch_hash]
+        calls = []
+        dest.announce = lambda *a, **kw: calls.append((a, kw))
+
+        alice.storage.unsubscribe(ch_hash)
+        alice.channel_mgr.announce_channel(ch_hash)
+
+        assert calls == [], "unsubscribed owned channel was announced"
+
+    def test_restore_skips_unsubscribed_owned_channels(self, peer_factory):
+        """restore_owned_channels() re-adds every channel whose creator_hash is
+        ours, so without a subscription check a left channel comes back on the
+        next launch and starts announcing again."""
+        alice = peer_factory("alice")
+        ch_hash = alice.channel_mgr.create_channel("open-room", "", "public")
+
+        actions.leave_channel(alice.storage, alice.subscription_mgr,
+                              alice.channel_mgr, ch_hash)
+        alice.channel_mgr.restore_owned_channels()
+
+        assert ch_hash not in alice.channel_mgr._owned_destinations, \
+            "left channel was resurrected by restore_owned_channels()"

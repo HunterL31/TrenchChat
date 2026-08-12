@@ -158,12 +158,14 @@ def edit_channel_permissions(storage, invite_mgr, channel_hash_hex: str,
     return True
 
 
-def leave_channel(storage, subscription_mgr, channel_hash_hex: str) -> bool:
+def leave_channel(storage, subscription_mgr, channel_mgr,
+                  channel_hash_hex: str) -> bool:
     """Returns False if the channel isn't in local storage."""
     channel = storage.get_channel(channel_hash_hex)
     if channel is None:
         return False
     subscription_mgr.unsubscribe(channel_hash_hex, channel["creator_hash"])
+    channel_mgr.release_owned_channel(channel_hash_hex)
     return True
 
 
