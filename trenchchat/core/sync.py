@@ -317,31 +317,46 @@ class SyncManager:
             window_start = time.time() - SYNC_WINDOW_SECS
         window_start = max(window_start, 0.0)
 
-        # Prefer hint-targeted lookup; fall back to timestamp sweep
+        # Hints name exact messages this peer missed, including ones older than
+        # their window.  They supplement the timestamp sweep rather than
+        # replacing it: a hint naming a message we don't hold resolves to
+        # nothing, and letting that stand as the whole answer would starve the
+        # requester of everything else we have until the hint ages out.
         missed_ids = self._storage.get_missed_message_ids(channel_hash_hex, requester_hex)
-        if missed_ids:
-            rows = self._filter_rows_by_tenure(
-                channel, channel_hash_hex, requester_hex,
-                self._get_messages_by_ids(channel_hash_hex, missed_ids),
+        hinted_rows = self._filter_rows_by_tenure(
+            channel, channel_hash_hex, requester_hex,
+            self._get_messages_by_ids(channel_hash_hex, missed_ids),
+        ) if missed_ids else []
+
+        # A request reaching further back than the recent window is a
+        # "deep" backfill; rate-limited so a flood of requests can't
+        # repeatedly force a full timestamp sweep. A recent request is
+        # unaffected and always answered immediately.
+        if window_start < time.time() - SYNC_WINDOW_SECS and not \
+                self._deep_sync_allowed(channel_hash_hex, requester_hex):
+            RNS.log(
+                f"TrenchChat [sync]: deep sync request from "
+                f"{requester_hex[:12]}… for {channel_hash_hex[:12]}… "
+                f"throttled — cooldown active",
+                RNS.LOG_DEBUG,
             )
-            truncated = False
-        else:
-            # A request reaching further back than the recent window is a
-            # "deep" backfill; rate-limited so a flood of requests can't
-            # repeatedly force a full timestamp sweep. A recent request is
-            # unaffected and always answered immediately.
-            if window_start < time.time() - SYNC_WINDOW_SECS and not \
-                    self._deep_sync_allowed(channel_hash_hex, requester_hex):
-                RNS.log(
-                    f"TrenchChat [sync]: deep sync request from "
-                    f"{requester_hex[:12]}… for {channel_hash_hex[:12]}… "
-                    f"throttled — cooldown active",
-                    RNS.LOG_DEBUG,
-                )
-                return
-            rows, truncated = self._collect_permitted_rows(
-                channel, channel_hash_hex, requester_hex, window_start
-            )
+            return
+
+        swept_rows, truncated = self._collect_permitted_rows(
+            channel, channel_hash_hex, requester_hex, window_start
+        )
+
+        # A hinted message newer than the sweep reached has to wait for the
+        # sweep to reach it. The requester advances its watermark to the newest
+        # message in the response, so sending one out of band would strand
+        # every message between it and where the sweep actually got to.
+        frontier = swept_rows[-1]["timestamp"] if swept_rows else window_start
+        rows = self._merge_rows(
+            [r for r in hinted_rows if r["timestamp"] <= frontier], swept_rows
+        )
+        if len(rows) > MAX_RESPONSE_MESSAGES:
+            rows = rows[:MAX_RESPONSE_MESSAGES]
+            truncated = True
 
         packed = msgpack.packb(
             [self._row_to_dict(r) for r in rows],
@@ -353,6 +368,14 @@ class SyncManager:
             F_SYNC_MESSAGES:  packed,
             F_SYNC_TRUNCATED: truncated,
         })
+
+    def _merge_rows(self, *row_sets: list) -> list:
+        """Combine row lists, dropping duplicate ids and ordering oldest first."""
+        by_id: dict = {}
+        for rows in row_sets:
+            for row in rows:
+                by_id.setdefault(row["message_id"], row)
+        return sorted(by_id.values(), key=lambda r: r["timestamp"])
 
     def _collect_permitted_rows(self, channel, channel_hash_hex: str,
                                 requester_hex: str, window_start: float) -> tuple[list, bool]:
@@ -566,7 +589,10 @@ class SyncManager:
         # message we didn't get: the responder sweeps past what it withholds
         # (see _collect_permitted_rows), so a watermark that ran ahead of the
         # transcript could only mean history lost for good.
-        if newest_ts > 0.0:
+        # Never backwards, either: a hint can serve a message older than
+        # everything we already hold, and rewinding the watermark over it would
+        # re-request history we have on every future sync.
+        if newest_ts > self._storage.get_last_sync(channel_hash_hex):
             self._storage.update_last_sync(channel_hash_hex, newest_ts)
 
         truncated = bool(fields.get(F_SYNC_TRUNCATED, False))
@@ -605,13 +631,9 @@ class SyncManager:
     def _get_messages_by_ids(self, channel_hash_hex: str,
                               message_ids: list[str]) -> list:
         """Fetch message rows matching the given message_id list."""
-        rows = self._storage.get_messages_after(
-            channel_hash_hex,
-            time.time() - SYNC_WINDOW_SECS,
-            limit=len(message_ids) + MAX_RESPONSE_MESSAGES,
+        return self._storage.get_messages_by_ids(
+            channel_hash_hex, message_ids[:MAX_RESPONSE_MESSAGES]
         )
-        id_set = set(message_ids)
-        return [r for r in rows if r["message_id"] in id_set][:MAX_RESPONSE_MESSAGES]
 
     @staticmethod
     def _row_to_dict(row) -> dict:

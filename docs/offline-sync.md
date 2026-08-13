@@ -147,9 +147,16 @@ Fields:
 
 Any online peer that is subscribed (or is a member of an invite-only channel) responds. The responder's logic:
 
-1. **Check hints first**: `storage.get_missed_message_ids(channel_hash, B_hash)` — if non-empty, fetch exactly those messages (targeted; avoids a full sweep).
-2. **Timestamp fallback**: if no hints exist, `storage.get_messages_after(channel_hash, window_start, limit=50)` — returns the 50 oldest messages since `window_start`.
-3. **Send** as `MT_SYNC_RESPONSE` with the full message records packed via msgpack.
+1. **Resolve hints**: `storage.get_missed_message_ids(channel_hash, B_hash)`, then look those ids up directly (`storage.get_messages_by_ids`). These name exact messages B missed, including ones older than B's window.
+2. **Sweep**: `_collect_permitted_rows(...)` from `window_start`, capped at 50.
+3. **Merge and send** as `MT_SYNC_RESPONSE`, deduplicated by message id and ordered oldest first.
+
+Hints **supplement** the sweep rather than replacing it. Letting a hint short-circuit the sweep breaks two ways, both of which strand B silently while the empty response reports the channel as synced:
+
+- Hints are broadcast to every reachable subscriber, so most holders of a hint never have the message it names. That lookup resolves to nothing, and if it stood as the whole answer B would get nothing from that peer until the hint aged out.
+- A responder that answers only the hinted message never serves the newer history B also lacks, and the hint is never cleared on the responder side — so it would keep answering with the same one message on every future request.
+
+A hinted message **newer than where the sweep reached** is held back for the sweep to reach in order. B advances its watermark to the newest message in a response, so serving one out of band would strand everything between it and the sweep frontier.
 
 Every authorised request is answered, **including with an empty message list**. Silence is ambiguous — "nothing for you", "never received it", and "not allowed" all look identical — so a requester could never tell that it is actually up to date. Requests the responder refuses (unauthorised peer, or a throttled deep sweep) stay silent, so neither leaks a signal.
 
@@ -157,7 +164,7 @@ The 50-message chunk limit keeps responses within LXMF message size constraints.
 
 The sweep fills a batch with rows the requester may actually see, **scanning past withheld ones** (`_collect_permitted_rows`, bounded by `MAX_SWEEP_SCAN`). Tenure filtering can otherwise empty a batch while the responder still holds newer history the requester is entitled to, stranding them at that timestamp.
 
-The requester's watermark only ever advances over messages it actually accepted — never past ones the responder withheld or it rejected itself. A permission decision is not permanent: a role or `full_sync` grant still propagating would otherwise leave history withheld for good, since the watermark would already be past it. The cost is that the responder re-scans that withheld run on each request, which is bounded and indexed.
+The requester's watermark only ever advances over messages it actually accepted — never past ones the responder withheld or it rejected itself, and never backwards, since a hint can serve a message older than everything already held. A permission decision is not permanent: a role or `full_sync` grant still propagating would otherwise leave history withheld for good, since the watermark would already be past it. The cost is that the responder re-scans that withheld run on each request, which is bounded and indexed.
 
 On receiving `MT_SYNC_RESPONSE`, B inserts each message with `Storage.insert_message()`, which is idempotent — the `UNIQUE(message_id)` constraint silently discards duplicates. New messages fire the normal GUI message callbacks so the chat view updates live.
 

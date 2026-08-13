@@ -1167,6 +1167,18 @@ class Storage:
             LIMIT ?
         """, (channel_hash, since_ts, limit))
 
+    def get_messages_by_ids(self, channel_hash: str,
+                            message_ids: list[str]) -> list[sqlite3.Row]:
+        """Fetch a channel's messages matching the given ids, oldest first."""
+        if not message_ids:
+            return []
+        placeholders = ",".join("?" * len(message_ids))
+        return self._fetchall(f"""
+            SELECT * FROM messages
+            WHERE channel_hash = ? AND message_id IN ({placeholders})
+            ORDER BY timestamp ASC, received_at ASC
+        """, (channel_hash, *message_ids))
+
     # --- missed_deliveries ---
 
     # --- accepted invites (bootstrap trust anchor) ---
