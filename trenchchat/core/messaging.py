@@ -17,8 +17,6 @@ LXMF fields layout:
                                           server scope; absent means a single channel
     0x50  sync_truncated    bool        — responder capped this batch and holds more
                                           history (sync_response)
-    0x51  sync_next_start   float       — timestamp to resume the next request from
-                                          (sync_response)
 """
 
 import hashlib

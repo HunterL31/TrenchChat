@@ -35,7 +35,7 @@ F_CHANNEL_HASH = 0x01
 | `0x11–0x1F` | Invite | `F_INVITE_TOKEN=0x11`, `F_INVITEE_HASH=0x12`, `F_EXPIRY_TS=0x13`, `F_ADMIN_HASH=0x14` |
 | `0x20–0x2F` | Member list | `F_MEMBER_LIST_DOC=0x21`, `F_CHANNEL_NAME=0x22`, `F_CHANNEL_DESC=0x23`, `F_CHANNEL_CREATOR=0x24`, `F_CHANNEL_ACCESS=0x25`, `F_CHANNEL_CREATED_AT=0x26`, `F_CHANNEL_PERMISSIONS=0x27`, `F_SCOPE_KIND=0x28` |
 | `0x30–0x3F` | Subscription | `F_SUBSCRIBER_LIST=0x30` |
-| `0x50–0x5F` | Sync status | `F_SYNC_TRUNCATED=0x50`, `F_SYNC_NEXT_START=0x51` |
+| `0x50–0x5F` | Sync status | `F_SYNC_TRUNCATED=0x50` |
 
 When adding a new field:
 1. Pick the next unused key in the appropriate range.

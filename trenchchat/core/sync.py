@@ -38,6 +38,11 @@ A response that hits MAX_RESPONSE_MESSAGES carries F_SYNC_TRUNCATED, and the
 requester immediately asks the same peer for the next batch from its newly
 advanced watermark.  Without that, everything past the cap waits for an
 unrelated announce to trigger the next request.
+
+A watermark only ever advances over messages actually accepted.  Rows the
+responder withholds are skipped by the responder's own sweep instead, so a
+grant that was still propagating when the request landed can be picked up
+later rather than being lost behind a watermark that ran past it.
 """
 
 import threading
@@ -54,7 +59,7 @@ from trenchchat.core.permissions import (
 )
 from trenchchat.core.protocol import (
     F_CHANNEL_HASH, F_MSG_TYPE,
-    F_SYNC_WINDOW_START, F_SYNC_MESSAGES, F_SYNC_TRUNCATED, F_SYNC_NEXT_START,
+    F_SYNC_WINDOW_START, F_SYNC_MESSAGES, F_SYNC_TRUNCATED,
     F_MISSED_FOR, F_MISSED_MSG_ID,
     MT_MISSED_DELIVERY, MT_SYNC_REQUEST, MT_SYNC_RESPONSE,
     SYNC_WINDOW_SECS,
@@ -83,6 +88,11 @@ DEEP_SYNC_COOLDOWN_SECS = 60
 # pruned, so the cooldown map doesn't grow unbounded over a long session
 # with many distinct peers.
 DEEP_SYNC_COOLDOWN_PRUNE_SECS = 24 * 3600
+
+# How many message rows one sweep will scan before giving up, however many of
+# them the requester turns out to be entitled to. Bounds the work a request can
+# cost when a long run of history is withheld from the requester.
+MAX_SWEEP_SCAN = MAX_RESPONSE_MESSAGES * 20
 
 # How many times a truncated response may chain another request to the same
 # peer on the same channel. Bounds the work a peer can induce by setting
@@ -310,7 +320,11 @@ class SyncManager:
         # Prefer hint-targeted lookup; fall back to timestamp sweep
         missed_ids = self._storage.get_missed_message_ids(channel_hash_hex, requester_hex)
         if missed_ids:
-            rows = self._get_messages_by_ids(channel_hash_hex, missed_ids)
+            rows = self._filter_rows_by_tenure(
+                channel, channel_hash_hex, requester_hex,
+                self._get_messages_by_ids(channel_hash_hex, missed_ids),
+            )
+            truncated = False
         else:
             # A request reaching further back than the recent window is a
             # "deep" backfill; rate-limited so a flood of requests can't
@@ -325,29 +339,67 @@ class SyncManager:
                     RNS.LOG_DEBUG,
                 )
                 return
-            rows = self._storage.get_messages_after(
-                channel_hash_hex, window_start, MAX_RESPONSE_MESSAGES
+            rows, truncated = self._collect_permitted_rows(
+                channel, channel_hash_hex, requester_hex, window_start
             )
-
-        # Both read from the unfiltered query: tenure filtering below can empty
-        # the batch while we still hold newer history the requester is entitled
-        # to, and an empty batch with no resume point would strand them there.
-        truncated = len(rows) == MAX_RESPONSE_MESSAGES
-        next_start = max((r["timestamp"] for r in rows), default=0.0)
-
-        rows = self._filter_rows_by_tenure(channel, channel_hash_hex, requester_hex, rows)
 
         packed = msgpack.packb(
             [self._row_to_dict(r) for r in rows],
             use_bin_type=True,
         )
         self._send_raw(requester_hex, {
-            F_MSG_TYPE:        MT_SYNC_RESPONSE,
-            F_CHANNEL_HASH:    bytes.fromhex(channel_hash_hex),
-            F_SYNC_MESSAGES:   packed,
-            F_SYNC_TRUNCATED:  truncated,
-            F_SYNC_NEXT_START: next_start,
+            F_MSG_TYPE:       MT_SYNC_RESPONSE,
+            F_CHANNEL_HASH:   bytes.fromhex(channel_hash_hex),
+            F_SYNC_MESSAGES:  packed,
+            F_SYNC_TRUNCATED: truncated,
         })
+
+    def _collect_permitted_rows(self, channel, channel_hash_hex: str,
+                                requester_hex: str, window_start: float) -> tuple[list, bool]:
+        """Sweep forward from window_start for rows this requester may see.
+
+        Scanning past withheld rows here, instead of returning a batch that
+        tenure filtering emptied, is what keeps a requester from stalling
+        behind history they will never be shown.  The alternative -- telling
+        them to resume past what we withheld -- would bake a permission
+        decision into their watermark permanently, so history withheld while
+        a role or grant was still propagating could never be recovered.
+
+        Returns the rows to send and whether more remain beyond them.
+        """
+        permitted: list = []
+        cursor = window_start
+        scanned = 0
+        truncated = False
+
+        while True:
+            page = self._storage.get_messages_after(
+                channel_hash_hex, cursor, MAX_RESPONSE_MESSAGES
+            )
+            if not page:
+                break
+            cursor = page[-1]["timestamp"]
+            scanned += len(page)
+            permitted.extend(self._filter_rows_by_tenure(
+                channel, channel_hash_hex, requester_hex, page
+            ))
+
+            if len(permitted) >= MAX_RESPONSE_MESSAGES:
+                permitted = permitted[:MAX_RESPONSE_MESSAGES]
+                truncated = True
+                break
+            if len(page) < MAX_RESPONSE_MESSAGES:
+                break
+            if scanned >= MAX_SWEEP_SCAN:
+                truncated = True
+                RNS.log(
+                    f"TrenchChat [sync]: sweep for {requester_hex[:12]}… on "
+                    f"{channel_hash_hex[:12]}… stopped after {scanned} rows",
+                    RNS.LOG_DEBUG,
+                )
+                break
+
+        return permitted, truncated
 
     def _filter_rows_by_tenure(self, channel, channel_hash_hex: str,
                                requester_hex: str, rows: list) -> list:
@@ -442,7 +494,6 @@ class SyncManager:
             try:
                 sender_hash = m.get("sender_hash", "")
                 msg_ts = float(m.get("timestamp", time.time()))
-                newest_ts = max(newest_ts, msg_ts)
 
                 # Validate tenure for invite-only channels with tenure data.
                 # Mirrors _handle_sync_request's two checks -- applied again
@@ -469,6 +520,10 @@ class SyncManager:
                         RNS.LOG_DEBUG,
                     )
                     continue
+
+                # Only messages that passed validation move the watermark: a
+                # message we refused is not one we have.
+                newest_ts = max(newest_ts, msg_ts)
 
                 image_data = m.get("image_data")
                 if isinstance(image_data, str):
@@ -504,15 +559,15 @@ class SyncManager:
             self._storage.clear_missed_deliveries(channel_hash_hex, self._identity.hash_hex)
             self._status.clear_gap(channel_hash_hex)
 
-        # Advance to the newest message actually present in this batch, not
-        # wall-clock time -- a response capped at MAX_RESPONSE_MESSAGES
-        # otherwise strands everything past the cap forever, since the next
-        # request would start from "now" instead of resuming right after this
-        # batch.  The responder's own resume point covers the case where its
-        # tenure filtering emptied the batch we can see.
-        resume_ts = max(newest_ts, self._coerce_float(fields.get(F_SYNC_NEXT_START)))
-        if resume_ts > 0.0:
-            self._storage.update_last_sync(channel_hash_hex, resume_ts)
+        # Advance to the newest message we actually accepted, not wall-clock
+        # time -- a response capped at MAX_RESPONSE_MESSAGES otherwise strands
+        # everything past the cap forever, since the next request would start
+        # from "now" instead of resuming right after this batch.  Never past a
+        # message we didn't get: the responder sweeps past what it withholds
+        # (see _collect_permitted_rows), so a watermark that ran ahead of the
+        # transcript could only mean history lost for good.
+        if newest_ts > 0.0:
+            self._storage.update_last_sync(channel_hash_hex, newest_ts)
 
         truncated = bool(fields.get(F_SYNC_TRUNCATED, False))
         self._status.response_received(
@@ -520,10 +575,10 @@ class SyncManager:
             received=len(messages), inserted=inserted_count, truncated=truncated,
         )
 
-        # Only chain a follow-up when the resume point actually moved past what
-        # we asked for; a responder that repeats itself can't induce a loop.
-        if truncated and resume_ts > requested_since:
-            self._continue_sync(channel_hash_hex, peer_hex, resume_ts)
+        # Only chain a follow-up when the watermark actually moved past what we
+        # asked for; a responder that repeats itself can't induce a loop.
+        if truncated and newest_ts > requested_since:
+            self._continue_sync(channel_hash_hex, peer_hex, newest_ts)
 
     # --- helpers ---
 
@@ -573,14 +628,6 @@ class SyncManager:
         if image_data:
             d["image_data"] = bytes(image_data)
         return d
-
-    @staticmethod
-    def _coerce_float(value) -> float:
-        """Read a float off the wire, treating anything unusable as 0.0."""
-        try:
-            return max(float(value), 0.0)
-        except (TypeError, ValueError):
-            return 0.0
 
     def _send_sync_request(self, dest_hex: str, channel_hash_hex: str, since_ts: float,
                            continuation: bool = False) -> bool:

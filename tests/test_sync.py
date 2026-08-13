@@ -260,8 +260,8 @@ class TestSyncRequestResponse:
         forever: the chain is capped per (channel, peer).
         """
         from trenchchat.core.protocol import (
-            F_CHANNEL_HASH, F_MSG_TYPE, F_SYNC_MESSAGES, F_SYNC_NEXT_START,
-            F_SYNC_TRUNCATED, MT_SYNC_RESPONSE,
+            F_CHANNEL_HASH, F_MSG_TYPE, F_SYNC_MESSAGES, F_SYNC_TRUNCATED,
+            MT_SYNC_RESPONSE,
         )
         from trenchchat.core.sync import MAX_SYNC_CONTINUATIONS
 
@@ -284,19 +284,26 @@ class TestSyncRequestResponse:
 
         bob.sync_mgr._send_raw = counting_send_raw
 
-        # Every response claims more history and advances the resume point, so
+        # Every response carries a newer message and claims more behind it, so
         # only the budget can stop the chain.
-        resume = time.time()
-        bob.sync_mgr._send_sync_request(carol.identity.hash_hex, ch_hash, resume)
-        for _ in range(MAX_SYNC_CONTINUATIONS + 5):
-            resume += 10
+        ts = time.time()
+        bob.sync_mgr._send_sync_request(carol.identity.hash_hex, ch_hash, ts)
+        for i in range(MAX_SYNC_CONTINUATIONS + 5):
+            ts += 10
             bob.sync_mgr._handle_sync_response(
                 {
-                    F_MSG_TYPE:        MT_SYNC_RESPONSE,
-                    F_CHANNEL_HASH:    bytes.fromhex(ch_hash),
-                    F_SYNC_MESSAGES:   msgpack.packb([], use_bin_type=True),
-                    F_SYNC_TRUNCATED:  True,
-                    F_SYNC_NEXT_START: resume,
+                    F_MSG_TYPE:       MT_SYNC_RESPONSE,
+                    F_CHANNEL_HASH:   bytes.fromhex(ch_hash),
+                    F_SYNC_MESSAGES:  msgpack.packb([{
+                        "sender_hash":  alice.identity.hash_hex,
+                        "sender_name":  "Alice",
+                        "content":      f"chain {i}",
+                        "timestamp":    ts,
+                        "message_id":   f"chain-{i}",
+                        "reply_to":     None,
+                        "last_seen_id": None,
+                    }], use_bin_type=True),
+                    F_SYNC_TRUNCATED: True,
                 },
                 ch_hash,
                 carol.identity.hash_hex,
@@ -1151,6 +1158,88 @@ class TestTenureSyncFiltering:
 
         assert wait_for_message(bob.storage, ch_hash, before_msg_id, timeout=5), \
             "Bob did not receive pre-join history via sync despite full_sync being enabled"
+
+    def test_withheld_history_does_not_advance_the_watermark(self, peer_factory,
+                                                             monkeypatch):
+        """
+        Withholding is a permission decision, and permissions change. If a
+        watermark moved past history that was withheld, granting full_sync
+        later could never recover it -- the requester would ask only for
+        messages newer than history it never received, and report itself up
+        to date.
+        """
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+
+        ch_hash = alice.channel_mgr.create_channel("withheld-watermark", "", "invite")
+        # See test_pre_join_history_excluded_by_default for why these sleeps
+        # are needed instead of relying on call ordering alone.
+        time.sleep(0.02)
+        before_msg_id = _insert_message(alice.storage, ch_hash, alice.identity.hash_hex,
+                                        "sent before Bob joined")
+        time.sleep(0.02)
+
+        alice.invite_mgr.publish_member_list(ch_hash, add_members=[bob.identity.hash])
+        assert wait_for_member(alice.storage, ch_hash, bob.identity.hash_hex)
+        _confirm_membership(bob, ch_hash)
+        assert wait_for(lambda: bob.storage.is_member(ch_hash, bob.identity.hash_hex), timeout=5)
+
+        bob.sync_mgr._send_sync_request(alice.identity.hash_hex, ch_hash, 0.0)
+        time.sleep(0.5)
+
+        assert not bob.storage.message_exists(before_msg_id), \
+            "test setup: pre-join history should be withheld with full_sync off"
+        assert bob.storage.get_last_sync(ch_hash) == 0.0, \
+            "the watermark advanced past history Bob was never sent"
+
+        # Grant full_sync; the backfill Bob was previously refused must now
+        # reach him, which is only possible if his watermark stayed put.
+        perms = dict(alice.storage.get_channel_permissions(ch_hash))
+        perms[ROLE_MEMBER] = list(perms.get(ROLE_MEMBER, [])) + [FULL_SYNC]
+        alice.storage.set_channel_permissions(ch_hash, perms)
+        bob.storage.set_channel_permissions(ch_hash, perms)
+
+        # Recovery still reaches back to 0, so it is a deep request like the
+        # first one; in the real app the cooldown just paces it by a minute.
+        monkeypatch.setattr("trenchchat.core.sync.DEEP_SYNC_COOLDOWN_SECS", 0)
+        bob.sync_mgr._send_sync_request(alice.identity.hash_hex, ch_hash,
+                                        bob.storage.get_last_sync(ch_hash))
+
+        assert wait_for_message(bob.storage, ch_hash, before_msg_id, timeout=5), \
+            "history withheld before the grant never arrived after it"
+
+    def test_sweep_scans_past_withheld_history(self, peer_factory):
+        """
+        A new member behind a full batch of history they may not see must
+        still reach the messages they may: the responder sweeps past what it
+        withholds instead of answering with an empty batch.
+        """
+        from trenchchat.core.sync import MAX_RESPONSE_MESSAGES
+
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+
+        ch_hash = alice.channel_mgr.create_channel("sweep-past", "", "invite")
+        time.sleep(0.02)
+        for i in range(MAX_RESPONSE_MESSAGES + 5):
+            _insert_message(alice.storage, ch_hash, alice.identity.hash_hex,
+                            f"before Bob joined {i}")
+        time.sleep(0.02)
+
+        alice.invite_mgr.publish_member_list(ch_hash, add_members=[bob.identity.hash])
+        assert wait_for_member(alice.storage, ch_hash, bob.identity.hash_hex)
+        _confirm_membership(bob, ch_hash)
+        assert wait_for(lambda: bob.storage.is_member(ch_hash, bob.identity.hash_hex), timeout=5)
+
+        time.sleep(0.02)
+        after_msg_id = _insert_message(alice.storage, ch_hash, alice.identity.hash_hex,
+                                       "sent after Bob joined")
+
+        bob.sync_mgr._send_sync_request(alice.identity.hash_hex, ch_hash, 0.0)
+
+        assert wait_for_message(bob.storage, ch_hash, after_msg_id, timeout=5), \
+            "Bob never reached the message he was entitled to behind a batch " \
+            "of withheld pre-join history"
 
     def test_full_sync_granted_to_admin_but_not_member(self, peer_factory):
         """
