@@ -151,9 +151,31 @@ Any online peer that is subscribed (or is a member of an invite-only channel) re
 2. **Timestamp fallback**: if no hints exist, `storage.get_messages_after(channel_hash, window_start, limit=50)` — returns the 50 oldest messages since `window_start`.
 3. **Send** as `MT_SYNC_RESPONSE` with the full message records packed via msgpack.
 
-The 50-message chunk limit keeps responses within LXMF message size constraints. Subsequent sync cycles fill any remaining gaps.
+Every authorised request is answered, **including with an empty message list**. Silence is ambiguous — "nothing for you", "never received it", and "not allowed" all look identical — so a requester could never tell that it is actually up to date. Requests the responder refuses (unauthorised peer, or a throttled deep sweep) stay silent, so neither leaks a signal.
+
+The 50-message chunk limit keeps responses within LXMF message size constraints. A response that hits the cap carries `F_SYNC_TRUNCATED`, and the requester immediately asks the same peer for the next batch. Without that, everything past the cap waits for an unrelated announce to drive the next request. The chain is bounded by `MAX_SYNC_CONTINUATIONS` per (channel, peer) and only continues while the resume point actually advances, so a peer that flags every batch truncated can't induce unbounded requests.
+
+`F_SYNC_NEXT_START` carries the timestamp to resume from, read from the responder's **unfiltered** query. Tenure filtering (see Access Control) can empty a batch while the responder still holds newer history the requester is entitled to; without a resume point the requester would be stranded at that timestamp forever.
 
 On receiving `MT_SYNC_RESPONSE`, B inserts each message with `Storage.insert_message()`, which is idempotent — the `UNIQUE(message_id)` constraint silently discards duplicates. New messages fire the normal GUI message callbacks so the chat view updates live.
+
+---
+
+## Sync Status
+
+**File**: `trenchchat/core/sync_status.py` — `SyncStatusTracker`, owned by `SyncManager` and exposed as `sync_mgr.status`
+
+Sync is otherwise invisible: a freshly joined channel shows an empty pane while a backfill is already in flight, and the messages then appear looking exactly like live traffic. The tracker records what was asked of whom and what came back, so a frontend can show it. It has no network side effects — it only observes calls `SyncManager` already makes.
+
+| State | Meaning |
+|-------|---------|
+| `SYNCING` | at least one request outstanding |
+| `SYNCED` | a peer answered and reported nothing further |
+| `INCOMPLETE` | a known gap: a truncated batch, or a hint naming us |
+| `WAITING` | no reachable peer to sync from |
+| `UNKNOWN` | never attempted |
+
+`SYNCED` requires a peer to have actually answered — a silent peer never counts as up to date, which is what the empty response above exists to make possible.
 
 ---
 
@@ -192,7 +214,7 @@ Requests never look back further than `now - SYNC_WINDOW_SECS`, preventing unbou
 
 ## New LXMF Field Constants
 
-Defined in `trenchchat/core/messaging.py`:
+Defined in `trenchchat/core/protocol.py`:
 
 | Field | Key | Type | Used in |
 |-------|-----|------|---------|
@@ -200,6 +222,8 @@ Defined in `trenchchat/core/messaging.py`:
 | `F_SYNC_MESSAGES` | `0x08` | `bytes` (msgpack) | `sync_response` |
 | `F_MISSED_FOR` | `0x09` | `str` | `missed_delivery` |
 | `F_MISSED_MSG_ID` | `0x0A` | `str` | `missed_delivery` |
+| `F_SYNC_TRUNCATED` | `0x50` | `bool` | `sync_response` |
+| `F_SYNC_NEXT_START` | `0x51` | `float` | `sync_response` |
 
 ---
 

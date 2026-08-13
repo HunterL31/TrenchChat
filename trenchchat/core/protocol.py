@@ -12,6 +12,7 @@ Field key registry
 0x20–0x2F  Member-list fields
 0x30–0x3F  Subscription fields
 0x40–0x4F  Reaction fields
+0x50–0x5F  Sync status fields
 """
 
 # --- Common / messaging fields ---
@@ -62,6 +63,12 @@ F_SCOPE_KIND        = 0x28   # str   — "server" when this control message targ
 F_SUBSCRIBER_LIST   = 0x30   # bytes — msgpack list of hex identity hashes
 F_SUBSCRIBER_VERSION = 0x31  # int   — monotonic counter per channel
 F_SUBSCRIBER_SIG    = 0x32   # bytes — owner Ed25519 signature over the list
+
+# --- Sync status fields ---
+F_SYNC_TRUNCATED    = 0x50   # bool  — responder capped this batch; it holds more history
+F_SYNC_NEXT_START   = 0x51   # float — timestamp the requester should resume from, read
+                             #         from the responder's unfiltered query so a batch
+                             #         emptied by tenure filtering still advances
 
 # --- Message type strings ---
 MT_SUBSCRIBE        = "subscribe"

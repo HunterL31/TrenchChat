@@ -128,6 +128,12 @@
     border-radius: 4px; padding: 4px 10px; font-size: 11px; cursor: pointer; margin-left: 6px;
   }
   .chat-toolbar button:hover { border-color: var(--accent); }
+  .sync-status { font-size: 11px; margin-left: 8px; }
+  .sync-status.syncing { color: #e8c33a; }
+  .sync-status.synced { color: #3ddc3d; }
+  .sync-status.incomplete { color: #e8963a; }
+  .sync-status.waiting { color: var(--dim); }
+  .sync-status.unknown { color: var(--dim); }
   .messages { flex: 1; overflow-y: auto; padding: 10px 14px; font-size: 13px; }
   .msg { margin-bottom: 8px; }
   .msg .sender { font-weight: 700; margin-right: 6px; }
@@ -486,7 +492,10 @@ function renderShell() {
         </div>
         <div class="chat-area">
           <div class="chat-toolbar">
-            <span id="active-channel-${tag}">No channel selected</span>
+            <span>
+              <span id="active-channel-${tag}">No channel selected</span>
+              <span class="sync-status" id="sync-status-${tag}"></span>
+            </span>
             <span>
               <button onclick="openMembersModal('${tag}')" title="View and manage members">Members</button>
               <button onclick="openPermissionsModal('${tag}')" title="Edit role permissions">Permissions</button>
@@ -639,6 +648,8 @@ function connectWs(tag) {
       if (state[tag].activeChannel) renderMessages(tag);
     } else if (msg.type === 'reaction_updated') {
       if (msg.channel_hash === state[tag].activeChannel) renderMessages(tag);
+    } else if (msg.type === 'sync_status') {
+      if (msg.channel_hash === state[tag].activeChannel) refreshSyncStatus(tag);
     } else if (msg.type === 'emoji_received') {
       refreshEmojiLibrary(tag).then(() => {
         if (state[tag].activeChannel) renderMessages(tag);
@@ -785,6 +796,39 @@ async function selectChannel(tag, hash) {
   const ch = state[tag].channels.find(c => c.hash === hash);
   document.getElementById(`active-channel-${tag}`).textContent = ch ? `#${ch.name}` : hash;
   await renderMessages(tag);
+  await refreshSyncStatus(tag);
+}
+
+function syncStatusLabel(status) {
+  const answered = status.peers.filter(p => p.state === 'answered');
+  const pending = status.peers.filter(p => p.state === 'pending');
+  const names = ps => ps.map(p => p.display_name || p.identity_hash.slice(0, 8)).join(', ');
+  switch (status.state) {
+    case 'syncing':
+      return `⟳ syncing with ${names(pending)}`;
+    case 'synced':
+      return status.received_count
+        ? `✓ up to date — ${status.received_count} synced from ${names(answered)}`
+        : '✓ up to date';
+    case 'incomplete':
+      return '⚠ history still missing';
+    case 'waiting':
+      return '⋯ no peer reachable';
+    default:
+      return '';
+  }
+}
+
+async function refreshSyncStatus(tag) {
+  const el = document.getElementById(`sync-status-${tag}`);
+  if (!el) return;
+  if (!state[tag].activeChannel) {
+    el.textContent = '';
+    return;
+  }
+  const status = await api(tag, `/channels/${state[tag].activeChannel}/sync_status`);
+  el.className = `sync-status ${status.state}`;
+  el.textContent = syncStatusLabel(status);
 }
 
 async function renderMessages(tag) {

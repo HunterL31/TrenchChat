@@ -1322,6 +1322,105 @@ class TestAdversarialSyncInjection:
         assert not bob.storage.message_exists("replay-2"), \
             "A second response was accepted against a single consumed request"
 
+    def test_unsolicited_empty_response_cannot_claim_we_are_synced(self, peer_factory):
+        """
+        The empty sync response is what lets a channel report itself up to
+        date.  A peer we never asked must not be able to assert that for us --
+        it would hide a real gap behind a green status.
+        """
+        from trenchchat.core.sync_status import SyncState
+
+        alice, bob, ch_hash = _setup_channel_with_member(
+            peer_factory, member_perms=[SEND_MESSAGE]
+        )
+        carol = peer_factory("carol")
+
+        bob.sync_mgr._handle_sync_response(
+            {0x08: msgpack.packb([], use_bin_type=True)},
+            ch_hash,
+            carol.identity.hash_hex,
+        )
+
+        assert bob.sync_mgr.status.get_state(ch_hash) != SyncState.SYNCED, \
+            "An unsolicited empty response marked the channel as fully synced"
+
+    def test_endless_truncation_cannot_drive_unbounded_requests(self, peer_factory):
+        """
+        A responder that flags every batch truncated is asking us to keep
+        requesting.  The chain has to stop on its own, or one peer can make us
+        transmit indefinitely.
+        """
+        from trenchchat.core.sync import MAX_SYNC_CONTINUATIONS
+
+        alice, bob, ch_hash = _setup_channel_with_member(
+            peer_factory, member_perms=[SEND_MESSAGE]
+        )
+
+        requests = 0
+        original = bob.sync_mgr._send_raw
+
+        def counting_send_raw(dest_hex, fields):
+            nonlocal requests
+            if fields.get(0x10) == "sync_request":
+                requests += 1
+            return original(dest_hex, fields)
+
+        bob.sync_mgr._send_raw = counting_send_raw
+
+        resume = time.time()
+        bob.sync_mgr._send_sync_request(alice.identity.hash_hex, ch_hash, resume)
+        for _ in range(MAX_SYNC_CONTINUATIONS * 3):
+            resume += 10
+            bob.sync_mgr._handle_sync_response(
+                {
+                    0x08: msgpack.packb([], use_bin_type=True),
+                    0x50: True,
+                    0x51: resume,
+                },
+                ch_hash,
+                alice.identity.hash_hex,
+            )
+
+        assert requests <= MAX_SYNC_CONTINUATIONS + 1, (
+            f"a peer flagging every batch truncated drove {requests} requests, "
+            f"past the {MAX_SYNC_CONTINUATIONS} continuation budget"
+        )
+
+    def test_repeated_resume_point_does_not_chain(self, peer_factory):
+        """
+        A truncated response that doesn't actually move the resume point has
+        nothing more to give; continuing would just loop on the same batch.
+        """
+        alice, bob, ch_hash = _setup_channel_with_member(
+            peer_factory, member_perms=[SEND_MESSAGE]
+        )
+
+        requests = 0
+        original = bob.sync_mgr._send_raw
+
+        def counting_send_raw(dest_hex, fields):
+            nonlocal requests
+            if fields.get(0x10) == "sync_request":
+                requests += 1
+            return original(dest_hex, fields)
+
+        bob.sync_mgr._send_raw = counting_send_raw
+
+        window_start = time.time()
+        bob.sync_mgr._send_sync_request(alice.identity.hash_hex, ch_hash, window_start)
+        bob.sync_mgr._handle_sync_response(
+            {
+                0x08: msgpack.packb([], use_bin_type=True),
+                0x50: True,
+                0x51: window_start,
+            },
+            ch_hash,
+            alice.identity.hash_hex,
+        )
+
+        assert requests == 1, \
+            "a response that repeated its own resume point still chained a request"
+
     def test_missed_delivery_hint_from_non_member_is_rejected(self, peer_factory):
         """
         Hints steer which messages we later serve and are written straight to

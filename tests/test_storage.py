@@ -207,6 +207,18 @@ class TestSubscriptions:
         after = db.get_subscriptions()[0]["last_sync_at"]
         assert after > before
 
+    def test_get_last_sync(self, db):
+        self._seed_channel(db)
+        db.subscribe("ch01")
+        assert db.get_last_sync("ch01") == 0.0
+
+        watermark = time.time()
+        db.update_last_sync("ch01", watermark)
+        assert db.get_last_sync("ch01") == pytest.approx(watermark)
+
+    def test_get_last_sync_for_unsubscribed_channel(self, db):
+        assert db.get_last_sync("nope") == 0.0
+
 
 # ---------------------------------------------------------------------------
 # Members

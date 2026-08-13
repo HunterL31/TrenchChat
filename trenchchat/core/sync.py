@@ -27,6 +27,17 @@ peer): DEEP_SYNC_COOLDOWN_SECS between deep sweeps this responder will serve
 a given peer, so a flood of requests can't repeatedly force a full
 timestamp sweep. A request within the recent window is unaffected and
 always answered immediately.
+
+Every authorised request is answered, including with an empty message list.
+Silence would otherwise be ambiguous -- "nothing for you", "never received",
+and "not allowed" would look identical -- and SyncStatusTracker could never
+honestly report a channel as up to date.  Requests we refuse (unauthorised,
+or throttled) stay silent so neither leaks a signal.
+
+A response that hits MAX_RESPONSE_MESSAGES carries F_SYNC_TRUNCATED, and the
+requester immediately asks the same peer for the next batch from its newly
+advanced watermark.  Without that, everything past the cap waits for an
+unrelated announce to trigger the next request.
 """
 
 import threading
@@ -43,13 +54,14 @@ from trenchchat.core.permissions import (
 )
 from trenchchat.core.protocol import (
     F_CHANNEL_HASH, F_MSG_TYPE,
-    F_SYNC_WINDOW_START, F_SYNC_MESSAGES,
+    F_SYNC_WINDOW_START, F_SYNC_MESSAGES, F_SYNC_TRUNCATED, F_SYNC_NEXT_START,
     F_MISSED_FOR, F_MISSED_MSG_ID,
     MT_MISSED_DELIVERY, MT_SYNC_REQUEST, MT_SYNC_RESPONSE,
     SYNC_WINDOW_SECS,
     unpack_wire,
 )
 from trenchchat.core.storage import Storage
+from trenchchat.core.sync_status import SyncStatusTracker
 from trenchchat.network.router import Router
 
 # Maximum messages returned in a single sync response (LXMF size budget)
@@ -71,6 +83,12 @@ DEEP_SYNC_COOLDOWN_SECS = 60
 # pruned, so the cooldown map doesn't grow unbounded over a long session
 # with many distinct peers.
 DEEP_SYNC_COOLDOWN_PRUNE_SECS = 24 * 3600
+
+# How many times a truncated response may chain another request to the same
+# peer on the same channel. Bounds the work a peer can induce by setting
+# F_SYNC_TRUNCATED on every response; MAX_RESPONSE_MESSAGES per batch makes
+# this enough to backfill a substantial history in one reconnect.
+MAX_SYNC_CONTINUATIONS = 20
 
 
 class SyncManager:
@@ -94,6 +112,12 @@ class SyncManager:
         self._deep_sync_last_served: dict[tuple[str, str], float] = {}
         self._deep_sync_lock = threading.Lock()
 
+        # (channel_hash_hex, peer_hex) -> continuation requests chained so far
+        self._continuations: dict[tuple[str, str], int] = {}
+        self._continuations_lock = threading.Lock()
+
+        self._status = SyncStatusTracker(storage)
+
         messaging.set_missed_delivery_callback(self._on_missed_delivery_event)
         router.add_delivery_callback(self._on_lxmf_message)
         invite_mgr.add_member_list_callback(self._on_member_list_updated)
@@ -103,6 +127,11 @@ class SyncManager:
         self._storage.purge_old_missed_deliveries(time.time() - SYNC_WINDOW_SECS)
 
     # --- public API ---
+
+    @property
+    def status(self) -> SyncStatusTracker:
+        """Per-channel sync progress, for frontends that display it."""
+        return self._status
 
     def request_sync_all(self):
         """
@@ -129,6 +158,9 @@ class SyncManager:
 
     def _request_sync_for_channel(self, channel_hash_hex: str, since_ts: float):
         peers = self._get_channel_peers(channel_hash_hex)
+        if not peers:
+            self._status.note_no_peers(channel_hash_hex)
+            return
         for peer_hex in peers:
             self._send_sync_request(peer_hex, channel_hash_hex, since_ts)
 
@@ -255,6 +287,8 @@ class SyncManager:
             missed_msg_id = missed_msg_id.decode(errors="replace")
         if missed_for and missed_msg_id:
             self._storage.record_missed_delivery(channel_hash_hex, missed_for, missed_msg_id)
+            if missed_for == self._identity.hash_hex:
+                self._status.note_gap(channel_hash_hex)
 
     def _handle_sync_request(self, fields: dict, channel_hash_hex: str,
                               requester_hex: str):
@@ -295,63 +329,73 @@ class SyncManager:
                 channel_hash_hex, window_start, MAX_RESPONSE_MESSAGES
             )
 
-        if not rows:
-            return
+        # Both read from the unfiltered query: tenure filtering below can empty
+        # the batch while we still hold newer history the requester is entitled
+        # to, and an empty batch with no resume point would strand them there.
+        truncated = len(rows) == MAX_RESPONSE_MESSAGES
+        next_start = max((r["timestamp"] for r in rows), default=0.0)
 
-        # Filter sync-response rows against tenure. Only applied when tenure
-        # data exists for the channel (skips open-join channels and channels
-        # bootstrapped before this feature). Two independent checks:
-        #   - sender: the claimed author must actually have been a member at
-        #     that timestamp, or the message could be a kicked member's
-        #     replay or an outright forgery.
-        #   - requester (unless they hold the full_sync permission): the peer
-        #     asking for sync must themselves have been a member at that
-        #     timestamp, or sync becomes a way to backfill history from
-        #     before they ever joined. full_sync is a per-role permission
-        #     (like send_message/invite/...), off by default -- an admin
-        #     grants it to whichever role(s) should be able to backfill full
-        #     history, e.g. admin but not member.
-        has_tenure = self._storage.has_any_tenure(channel_hash_hex)
-        if has_tenure:
-            perms = permissions_from_json(channel["permissions"]) if channel else {}
-            requester_role = self._storage.get_role(channel_hash_hex, requester_hex)
-            full_sync = has_permission(perms, requester_role, FULL_SYNC)
-            valid_rows = []
-            for r in rows:
-                if not self._storage.was_member_at(channel_hash_hex, r["sender_hash"],
-                                                    r["timestamp"]):
-                    RNS.log(
-                        f"TrenchChat [sync]: omitting message {r['message_id'][:12]}… "
-                        f"from sync response — sender {r['sender_hash'][:12]}… "
-                        f"was not a member at ts={r['timestamp']:.0f}",
-                        RNS.LOG_WARNING,
-                    )
-                    continue
-                if not full_sync and not self._storage.was_member_at(
-                    channel_hash_hex, requester_hex, r["timestamp"]
-                ):
-                    RNS.log(
-                        f"TrenchChat [sync]: omitting message {r['message_id'][:12]}… "
-                        f"from sync response — requester {requester_hex[:12]}… "
-                        f"was not yet a member at ts={r['timestamp']:.0f}",
-                        RNS.LOG_DEBUG,
-                    )
-                    continue
-                valid_rows.append(r)
-            rows = valid_rows
-
-        if not rows:
-            return
+        rows = self._filter_rows_by_tenure(channel, channel_hash_hex, requester_hex, rows)
 
         packed = msgpack.packb(
             [self._row_to_dict(r) for r in rows],
             use_bin_type=True,
         )
         self._send_raw(requester_hex, {
-            F_MSG_TYPE:      MT_SYNC_RESPONSE,
-            F_CHANNEL_HASH:  bytes.fromhex(channel_hash_hex),
-            F_SYNC_MESSAGES: packed,
+            F_MSG_TYPE:        MT_SYNC_RESPONSE,
+            F_CHANNEL_HASH:    bytes.fromhex(channel_hash_hex),
+            F_SYNC_MESSAGES:   packed,
+            F_SYNC_TRUNCATED:  truncated,
+            F_SYNC_NEXT_START: next_start,
         })
+
+    def _filter_rows_by_tenure(self, channel, channel_hash_hex: str,
+                               requester_hex: str, rows: list) -> list:
+        """Drop rows neither the sender nor the requester was a member for.
+
+        Only applied when tenure data exists for the channel (skips open-join
+        channels and channels bootstrapped before this feature). Two
+        independent checks:
+          - sender: the claimed author must actually have been a member at
+            that timestamp, or the message could be a kicked member's replay
+            or an outright forgery.
+          - requester (unless they hold the full_sync permission): the peer
+            asking for sync must themselves have been a member at that
+            timestamp, or sync becomes a way to backfill history from before
+            they ever joined. full_sync is a per-role permission (like
+            send_message/invite/...), off by default -- an admin grants it to
+            whichever role(s) should be able to backfill full history, e.g.
+            admin but not member.
+        """
+        if not self._storage.has_any_tenure(channel_hash_hex):
+            return rows
+
+        perms = permissions_from_json(channel["permissions"]) if channel else {}
+        requester_role = self._storage.get_role(channel_hash_hex, requester_hex)
+        full_sync = has_permission(perms, requester_role, FULL_SYNC)
+        valid_rows = []
+        for r in rows:
+            if not self._storage.was_member_at(channel_hash_hex, r["sender_hash"],
+                                                r["timestamp"]):
+                RNS.log(
+                    f"TrenchChat [sync]: omitting message {r['message_id'][:12]}… "
+                    f"from sync response — sender {r['sender_hash'][:12]}… "
+                    f"was not a member at ts={r['timestamp']:.0f}",
+                    RNS.LOG_WARNING,
+                )
+                continue
+            if not full_sync and not self._storage.was_member_at(
+                channel_hash_hex, requester_hex, r["timestamp"]
+            ):
+                RNS.log(
+                    f"TrenchChat [sync]: omitting message {r['message_id'][:12]}… "
+                    f"from sync response — requester {requester_hex[:12]}… "
+                    f"was not yet a member at ts={r['timestamp']:.0f}",
+                    RNS.LOG_DEBUG,
+                )
+                continue
+            valid_rows.append(r)
+        return valid_rows
 
     def _handle_sync_response(self, fields: dict, channel_hash_hex: str,
                               responder_hex: str = ""):
@@ -361,13 +405,15 @@ class SyncManager:
         # The gate is that we asked this peer for this channel, not that they
         # are a member: by design any reachable peer may serve history and our
         # local roster need not list them.
-        if not self._claim_pending_request(channel_hash_hex, responder_hex):
+        claim = self._claim_pending_request(channel_hash_hex, responder_hex)
+        if claim is None:
             RNS.log(
                 f"TrenchChat [sync]: dropping unsolicited sync response for "
                 f"{channel_hash_hex[:12]}… from {responder_hex[:12]}…",
                 RNS.LOG_WARNING,
             )
             return
+        requested_since, peer_hex = claim
 
         packed = fields.get(F_SYNC_MESSAGES)
         if not packed:
@@ -376,6 +422,9 @@ class SyncManager:
             messages = unpack_wire(packed)
         except Exception as e:
             RNS.log(f"TrenchChat: sync_response unpack error: {e}", RNS.LOG_WARNING)
+            return
+        if not isinstance(messages, list):
+            RNS.log("TrenchChat: sync_response payload is not a list", RNS.LOG_WARNING)
             return
 
         has_tenure = self._storage.has_any_tenure(channel_hash_hex)
@@ -387,7 +436,7 @@ class SyncManager:
                 perms = permissions_from_json(channel["permissions"])
                 my_role = self._storage.get_role(channel_hash_hex, my_hex)
                 full_sync = has_permission(perms, my_role, FULL_SYNC)
-        inserted_any = False
+        inserted_count = 0
         newest_ts = 0.0
         for m in messages:
             try:
@@ -442,7 +491,7 @@ class SyncManager:
                     image_data=image_data,
                 )
                 if inserted:
-                    inserted_any = True
+                    inserted_count += 1
                     self._storage.touch_channel(channel_hash_hex)
                     self._messaging.notify_message_received(
                         channel_hash_hex, m.get("message_id", "")
@@ -450,17 +499,31 @@ class SyncManager:
             except Exception as e:
                 RNS.log(f"TrenchChat: sync_response insert error: {e}", RNS.LOG_WARNING)
 
-        if inserted_any:
+        if inserted_count:
             # Clear hints now that we have the messages
             self._storage.clear_missed_deliveries(channel_hash_hex, self._identity.hash_hex)
+            self._status.clear_gap(channel_hash_hex)
 
-        if newest_ts > 0.0:
-            # Advance to the newest message actually present in this batch,
-            # not wall-clock time -- a response capped at
-            # MAX_RESPONSE_MESSAGES otherwise strands everything past the
-            # cap forever, since the next request would start from "now"
-            # instead of resuming right after this batch.
-            self._storage.update_last_sync(channel_hash_hex, newest_ts)
+        # Advance to the newest message actually present in this batch, not
+        # wall-clock time -- a response capped at MAX_RESPONSE_MESSAGES
+        # otherwise strands everything past the cap forever, since the next
+        # request would start from "now" instead of resuming right after this
+        # batch.  The responder's own resume point covers the case where its
+        # tenure filtering emptied the batch we can see.
+        resume_ts = max(newest_ts, self._coerce_float(fields.get(F_SYNC_NEXT_START)))
+        if resume_ts > 0.0:
+            self._storage.update_last_sync(channel_hash_hex, resume_ts)
+
+        truncated = bool(fields.get(F_SYNC_TRUNCATED, False))
+        self._status.response_received(
+            channel_hash_hex, peer_hex,
+            received=len(messages), inserted=inserted_count, truncated=truncated,
+        )
+
+        # Only chain a follow-up when the resume point actually moved past what
+        # we asked for; a responder that repeats itself can't induce a loop.
+        if truncated and resume_ts > requested_since:
+            self._continue_sync(channel_hash_hex, peer_hex, resume_ts)
 
     # --- helpers ---
 
@@ -511,13 +574,52 @@ class SyncManager:
             d["image_data"] = bytes(image_data)
         return d
 
-    def _send_sync_request(self, dest_hex: str, channel_hash_hex: str, since_ts: float):
-        self._record_pending_request(channel_hash_hex, dest_hex)
-        self._send_raw(dest_hex, {
+    @staticmethod
+    def _coerce_float(value) -> float:
+        """Read a float off the wire, treating anything unusable as 0.0."""
+        try:
+            return max(float(value), 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _send_sync_request(self, dest_hex: str, channel_hash_hex: str, since_ts: float,
+                           continuation: bool = False) -> bool:
+        """Ask a peer for anything on this channel newer than since_ts."""
+        if not continuation:
+            with self._continuations_lock:
+                self._continuations.pop((channel_hash_hex, dest_hex), None)
+
+        self._record_pending_request(channel_hash_hex, dest_hex, since_ts)
+        sent = self._send_raw(dest_hex, {
             F_MSG_TYPE:          MT_SYNC_REQUEST,
             F_CHANNEL_HASH:      bytes.fromhex(channel_hash_hex),
             F_SYNC_WINDOW_START: since_ts,
         })
+        if sent:
+            self._status.request_sent(channel_hash_hex, dest_hex)
+        else:
+            # Nothing went out, so nothing can answer it.  Dropping the entry
+            # also keeps a response from a peer we never reached from being
+            # treated as solicited.
+            self._drop_pending_request(channel_hash_hex, dest_hex)
+            self._status.request_unreachable(channel_hash_hex, dest_hex)
+        return sent
+
+    def _continue_sync(self, channel_hash_hex: str, peer_hex: str, resume_ts: float):
+        """Ask the same peer for the next batch after a truncated response."""
+        key = (channel_hash_hex, peer_hex)
+        with self._continuations_lock:
+            count = self._continuations.get(key, 0)
+            if count >= MAX_SYNC_CONTINUATIONS:
+                RNS.log(
+                    f"TrenchChat [sync]: continuation budget exhausted for "
+                    f"{channel_hash_hex[:12]}… from {peer_hex[:12]}…",
+                    RNS.LOG_WARNING,
+                )
+                return
+            self._continuations[key] = count + 1
+
+        self._send_sync_request(peer_hex, channel_hash_hex, resume_ts, continuation=True)
 
     # --- outstanding sync request tracking ---
 
@@ -536,27 +638,40 @@ class SyncManager:
             pass
         return forms
 
-    def _record_pending_request(self, channel_hash_hex: str, dest_hex: str):
+    def _record_pending_request(self, channel_hash_hex: str, dest_hex: str,
+                                since_ts: float = 0.0):
         """Remember that we asked dest_hex for history on this channel."""
-        now = time.time()
+        entry = (time.time(), since_ts, dest_hex)
         with self._pending_requests_lock:
             for form in self._peer_key_forms(dest_hex):
-                self._pending_requests[(channel_hash_hex, form)] = now
+                self._pending_requests[(channel_hash_hex, form)] = entry
 
-    def _claim_pending_request(self, channel_hash_hex: str, responder_hex: str) -> bool:
+    def _drop_pending_request(self, channel_hash_hex: str, dest_hex: str):
+        """Forget a request that was never actually sent."""
+        with self._pending_requests_lock:
+            for form in self._peer_key_forms(dest_hex):
+                self._pending_requests.pop((channel_hash_hex, form), None)
+
+    def _claim_pending_request(self, channel_hash_hex: str,
+                               responder_hex: str) -> tuple[float, str] | None:
         """Consume the outstanding request this response claims to answer.
 
+        Returns the window start we asked for and the identity hex we addressed
+        the request to, or None if nothing was outstanding.  A response may
+        identify its sender by either the identity or the delivery destination
+        hash, so the recorded form is what the rest of the exchange keys on.
         Consuming the entry makes a single request answerable only once.
         """
         now = time.time()
         with self._pending_requests_lock:
-            for stale_key, ts in list(self._pending_requests.items()):
+            for stale_key, (ts, _since, _peer) in list(self._pending_requests.items()):
                 if now - ts > SYNC_RESPONSE_WINDOW_SECS:
                     del self._pending_requests[stale_key]
-            claimed = False
+            claimed = None
             for form in self._peer_key_forms(responder_hex):
-                if self._pending_requests.pop((channel_hash_hex, form), None) is not None:
-                    claimed = True
+                entry = self._pending_requests.pop((channel_hash_hex, form), None)
+                if entry is not None:
+                    claimed = (entry[1], entry[2])
             return claimed
 
     def _deep_sync_allowed(self, channel_hash_hex: str, requester_hex: str) -> bool:
@@ -580,13 +695,14 @@ class SyncManager:
             self._deep_sync_last_served[key] = now
             return True
 
-    def _send_raw(self, dest_hex: str, fields: dict):
+    def _send_raw(self, dest_hex: str, fields: dict) -> bool:
+        """Send a control message to a peer. Returns False if it couldn't go out."""
         try:
             identity_hash = bytes.fromhex(dest_hex)
             delivery_dest_hash = RNS.Destination.hash(identity_hash, "lxmf", "delivery")
             dest_identity = RNS.Identity.recall(delivery_dest_hash)
             if dest_identity is None:
-                return
+                return False
             dest = RNS.Destination(
                 dest_identity,
                 RNS.Destination.OUT,
@@ -602,5 +718,7 @@ class SyncManager:
             )
             lxm.fields = fields
             self._router.send(lxm)
+            return True
         except Exception as e:
             RNS.log(f"TrenchChat: sync send error to {dest_hex}: {e}", RNS.LOG_WARNING)
+            return False

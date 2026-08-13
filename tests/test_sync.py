@@ -219,6 +219,156 @@ class TestSyncRequestResponse:
             assert wait_for_message(bob.storage, ch_hash, mid, timeout=5), \
                 f"Bob never received message {mid[:12]}… stranded past the cap"
 
+    def test_capped_batch_continues_without_another_trigger(self, peer_factory):
+        """
+        A truncated response chains its own follow-up request, so a backfill
+        larger than one batch completes on its own instead of waiting for an
+        unrelated announce to drive the next request.
+        """
+        from trenchchat.core.sync import MAX_RESPONSE_MESSAGES
+
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+        carol = peer_factory("carol")
+
+        ch_hash = alice.channel_mgr.create_channel("continue-sync", "", "public")
+        _seed_channel_on_peer(carol, ch_hash, "continue-sync", alice.identity.hash_hex)
+        _seed_channel_on_peer(bob, ch_hash, "continue-sync", alice.identity.hash_hex)
+
+        window_start = time.time()
+        total = MAX_RESPONSE_MESSAGES + 10
+        msg_ids = []
+        for i in range(total):
+            ts = window_start + i + 1
+            msg_ids.append(_insert_message(carol.storage, ch_hash,
+                                           alice.identity.hash_hex, f"Message {i}", ts))
+
+        bob.sync_mgr._send_sync_request(carol.identity.hash_hex, ch_hash, window_start)
+
+        assert wait_for(
+            lambda: len(bob.storage.get_messages(ch_hash)) == total, timeout=10,
+        ), (
+            f"only {len(bob.storage.get_messages(ch_hash))} of {total} messages "
+            "arrived; the truncated batch did not continue on its own"
+        )
+        # Let the last leg of the chain land before the fixture closes storage.
+        time.sleep(0.3)
+
+    def test_continuation_stops_at_the_budget(self, peer_factory):
+        """
+        A peer that marks every response truncated can't drive requests
+        forever: the chain is capped per (channel, peer).
+        """
+        from trenchchat.core.protocol import (
+            F_CHANNEL_HASH, F_MSG_TYPE, F_SYNC_MESSAGES, F_SYNC_NEXT_START,
+            F_SYNC_TRUNCATED, MT_SYNC_RESPONSE,
+        )
+        from trenchchat.core.sync import MAX_SYNC_CONTINUATIONS
+
+        import msgpack
+
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+        carol = peer_factory("carol")
+
+        ch_hash = alice.channel_mgr.create_channel("budget-sync", "", "public")
+        _seed_channel_on_peer(carol, ch_hash, "budget-sync", alice.identity.hash_hex)
+        _seed_channel_on_peer(bob, ch_hash, "budget-sync", alice.identity.hash_hex)
+
+        requests = []
+        original = bob.sync_mgr._send_raw
+
+        def counting_send_raw(dest_hex, fields):
+            requests.append(fields.get(F_MSG_TYPE))
+            return original(dest_hex, fields)
+
+        bob.sync_mgr._send_raw = counting_send_raw
+
+        # Every response claims more history and advances the resume point, so
+        # only the budget can stop the chain.
+        resume = time.time()
+        bob.sync_mgr._send_sync_request(carol.identity.hash_hex, ch_hash, resume)
+        for _ in range(MAX_SYNC_CONTINUATIONS + 5):
+            resume += 10
+            bob.sync_mgr._handle_sync_response(
+                {
+                    F_MSG_TYPE:        MT_SYNC_RESPONSE,
+                    F_CHANNEL_HASH:    bytes.fromhex(ch_hash),
+                    F_SYNC_MESSAGES:   msgpack.packb([], use_bin_type=True),
+                    F_SYNC_TRUNCATED:  True,
+                    F_SYNC_NEXT_START: resume,
+                },
+                ch_hash,
+                carol.identity.hash_hex,
+            )
+
+        continuations = requests.count("sync_request") - 1
+        assert continuations == MAX_SYNC_CONTINUATIONS, (
+            f"expected the chain to stop after {MAX_SYNC_CONTINUATIONS} "
+            f"continuations, got {continuations}"
+        )
+
+    def test_caught_up_peer_still_answers(self, peer_factory):
+        """
+        A responder with nothing to send answers anyway. Silence would be
+        indistinguishable from an unreachable or unwilling peer.
+        """
+        from trenchchat.core.protocol import F_MSG_TYPE, MT_SYNC_RESPONSE
+
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+        carol = peer_factory("carol")
+
+        ch_hash = alice.channel_mgr.create_channel("ack-sync", "", "public")
+        _seed_channel_on_peer(carol, ch_hash, "ack-sync", alice.identity.hash_hex)
+        _seed_channel_on_peer(bob, ch_hash, "ack-sync", alice.identity.hash_hex)
+
+        responses = []
+        original = carol.sync_mgr._send_raw
+
+        def recording_send_raw(dest_hex, fields):
+            if fields.get(F_MSG_TYPE) == MT_SYNC_RESPONSE:
+                responses.append(fields)
+            return original(dest_hex, fields)
+
+        carol.sync_mgr._send_raw = recording_send_raw
+
+        bob.sync_mgr._send_sync_request(carol.identity.hash_hex, ch_hash, time.time())
+
+        assert wait_for(lambda: len(responses) == 1, timeout=5), \
+            "Carol never answered a sync request she had nothing to serve"
+
+    def test_unauthorised_request_gets_no_answer(self, peer_factory):
+        """
+        The empty answer is only for peers entitled to the channel: a
+        non-member must not learn anything from the shape of the reply.
+        """
+        from trenchchat.core.protocol import F_MSG_TYPE, MT_SYNC_RESPONSE
+
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+        carol = peer_factory("carol")
+
+        ch_hash = alice.channel_mgr.create_channel("closed-ack", "", "invite")
+        _seed_channel_on_peer(carol, ch_hash, "closed-ack", alice.identity.hash_hex,
+                              access_mode="invite")
+
+        responses = []
+        original = carol.sync_mgr._send_raw
+
+        def recording_send_raw(dest_hex, fields):
+            if fields.get(F_MSG_TYPE) == MT_SYNC_RESPONSE:
+                responses.append(fields)
+            return original(dest_hex, fields)
+
+        carol.sync_mgr._send_raw = recording_send_raw
+
+        bob.sync_mgr._send_sync_request(carol.identity.hash_hex, ch_hash, time.time())
+        time.sleep(0.5)
+
+        assert responses == [], \
+            "Carol answered a sync request from a peer with no claim to the channel"
+
     def test_sync_response_is_idempotent(self, peer_factory):
         """
         Receiving the same sync response twice does not create duplicate messages.
@@ -578,9 +728,10 @@ class TestSyncOnChannelJoin:
         sync_requests_seen = []
         orig_send_sync_request = bob.sync_mgr._send_sync_request
 
-        def spy(dest_hex, channel_hash_hex, since_ts):
+        def spy(dest_hex, channel_hash_hex, since_ts, continuation=False):
             sync_requests_seen.append((dest_hex, channel_hash_hex))
-            return orig_send_sync_request(dest_hex, channel_hash_hex, since_ts)
+            return orig_send_sync_request(dest_hex, channel_hash_hex, since_ts,
+                                          continuation)
 
         bob.sync_mgr._send_sync_request = spy
 

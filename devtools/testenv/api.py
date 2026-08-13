@@ -31,6 +31,7 @@ from trenchchat.core.permissions import (
     ROLE_ADMIN, ROLE_MEMBER, PRESET_OPEN, PRESET_PRIVATE,
     is_open_join, permissions_from_json,
 )
+from trenchchat.core.presence import resolve_display_name
 
 from backend_core import Backend
 
@@ -238,6 +239,10 @@ def create_app(backend: Backend) -> FastAPI:
     def _on_emoji_received(emoji_hash: str):
         bus.emit("emoji_received", emoji_hash=emoji_hash)
 
+    def _on_sync_status(channel_hash_hex: str):
+        bus.emit("sync_status", channel_hash=channel_hash_hex,
+                 status=backend.sync_mgr.status.get_status(channel_hash_hex))
+
     backend.messaging.add_message_callback(_on_message)
     backend.invite_mgr.add_invite_callback(_on_invite)
     backend.invite_mgr.add_channel_joined_callback(_on_channel_joined)
@@ -247,6 +252,7 @@ def create_app(backend: Backend) -> FastAPI:
     backend.avatar_mgr.add_avatar_callback(_on_avatar_changed)
     backend.reaction_mgr.add_reaction_callback(_on_reaction_changed)
     backend.reaction_mgr.add_emoji_callback(_on_emoji_received)
+    backend.sync_mgr.status.add_status_callback(_on_sync_status)
 
     # --- identity ---
 
@@ -498,6 +504,18 @@ def create_app(backend: Backend) -> FastAPI:
     @app.get("/channels/{channel_hash}/members")
     def list_members(channel_hash: str):
         return [dict(row) for row in backend.storage.get_members(channel_hash)]
+
+    @app.get("/channels/{channel_hash}/sync_status")
+    def get_sync_status(channel_hash: str):
+        # Same tracker the GUI will read: who we asked for history, who
+        # answered, and whether anything is still missing.
+        status = backend.sync_mgr.status.get_status(channel_hash)
+        for peer in status["peers"]:
+            peer["display_name"] = resolve_display_name(
+                peer["identity_hash"], backend.identity.hash_hex,
+                backend.storage, backend.config,
+            )
+        return status
 
     @app.get("/channels/{channel_hash}/my_permissions")
     def my_permissions(channel_hash: str):

@@ -777,6 +777,14 @@ class Storage:
     def get_subscriptions(self) -> list[sqlite3.Row]:
         return self._fetchall("SELECT * FROM subscriptions")
 
+    def get_last_sync(self, channel_hash: str) -> float:
+        """Return the channel's sync watermark, or 0.0 if it isn't subscribed."""
+        row = self._fetchone(
+            "SELECT last_sync_at FROM subscriptions WHERE channel_hash = ?",
+            (channel_hash,)
+        )
+        return float(row["last_sync_at"]) if row else 0.0
+
     def update_last_sync(self, channel_hash: str, ts: float | None = None):
         """Advance last_sync_at to *ts*, or wall-clock time if not given."""
         with self._tx():

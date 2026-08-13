@@ -15,6 +15,10 @@ LXMF fields layout:
     0x0D  image_data        bytes|None  — JPEG image attachment payload (max 320 KB)
     0x28  scope_kind        str         — "server" when a control message targets a
                                           server scope; absent means a single channel
+    0x50  sync_truncated    bool        — responder capped this batch and holds more
+                                          history (sync_response)
+    0x51  sync_next_start   float       — timestamp to resume the next request from
+                                          (sync_response)
 """
 
 import hashlib
