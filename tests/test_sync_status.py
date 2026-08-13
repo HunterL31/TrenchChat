@@ -100,6 +100,28 @@ class TestStateDerivation:
         tracker.response_received(CHANNEL, PEER, received=5, inserted=5, truncated=False)
         assert tracker.get_state(CHANNEL) == SyncState.SYNCED
 
+    def test_recheck_of_a_settled_channel_stays_synced(self, tracker):
+        """Every peer announce re-asks; a settled channel must not flicker."""
+        tracker.request_sent(CHANNEL, PEER)
+        tracker.response_received(CHANNEL, PEER, received=0, inserted=0, truncated=False)
+        tracker.request_sent(CHANNEL, PEER)
+        assert tracker.get_state(CHANNEL) == SyncState.SYNCED
+        assert tracker.get_status(CHANNEL)["pending_peers"] == 0
+
+    def test_recheck_that_finds_history_reports_syncing_again(self, tracker):
+        tracker.request_sent(CHANNEL, PEER)
+        tracker.response_received(CHANNEL, PEER, received=0, inserted=0, truncated=False)
+        tracker.request_sent(CHANNEL, PEER)
+        tracker.response_received(CHANNEL, PEER, received=50, inserted=50, truncated=True)
+        assert tracker.get_state(CHANNEL) == SyncState.INCOMPLETE
+
+    def test_recheck_of_an_unsettled_channel_still_reports_syncing(self, tracker):
+        tracker.request_sent(CHANNEL, PEER)
+        tracker.response_received(CHANNEL, PEER, received=1, inserted=1, truncated=False)
+        tracker.note_gap(CHANNEL)
+        tracker.request_sent(CHANNEL, PEER)
+        assert tracker.get_state(CHANNEL) == SyncState.SYNCING
+
     def test_known_gap_is_incomplete(self, tracker):
         tracker.request_sent(CHANNEL, PEER)
         tracker.response_received(CHANNEL, PEER, received=0, inserted=0, truncated=False)
@@ -180,6 +202,16 @@ class TestStatusCallbacks:
         seen = []
         tracker.add_status_callback(seen.append)
         tracker.note_gap(CHANNEL)
+        assert seen == []
+
+    def test_callback_does_not_fire_on_a_routine_recheck(self, tracker):
+        tracker.request_sent(CHANNEL, PEER)
+        tracker.response_received(CHANNEL, PEER, received=0, inserted=0, truncated=False)
+        seen = []
+        tracker.add_status_callback(seen.append)
+
+        tracker.request_sent(CHANNEL, PEER)
+        tracker.response_received(CHANNEL, PEER, received=0, inserted=0, truncated=False)
         assert seen == []
 
     def test_one_failing_callback_does_not_block_the_others(self, tracker):

@@ -95,16 +95,29 @@ class SyncStatusTracker:
         if changed:
             self._fire(channel_hash_hex)
 
-    def request_sent(self, channel_hash_hex: str, peer_hex: str) -> None:
-        """A sync request went out to this peer."""
+    def request_sent(self, channel_hash_hex: str, peer_hex: str,
+                     continuation: bool = False) -> None:
+        """A sync request went out to this peer.
+
+        Re-asking a peer that already answered, on a channel that is already up
+        to date, is a routine re-check -- every peer announce triggers one. It
+        leaves the reported state alone, so a settled channel doesn't flicker
+        for the life of the session; an answer carrying anything new still
+        moves it.
+        """
         with self._lock:
             before = self._snapshot_locked(channel_hash_hex)
             rec = self._channels.setdefault(channel_hash_hex, _ChannelRecord())
             rec.attempted = True
             peer = rec.peers.setdefault(peer_hex, _PeerRecord())
-            peer.state = PeerSyncState.PENDING
+
+            quiet = (not continuation
+                     and peer.state == PeerSyncState.ANSWERED
+                     and self._derive_locked(channel_hash_hex) == SyncState.SYNCED)
             peer.requested_at = time.time()
-            peer.truncated = False
+            if not quiet:
+                peer.state = PeerSyncState.PENDING
+                peer.truncated = False
             changed = before != self._snapshot_locked(channel_hash_hex)
         if changed:
             self._fire(channel_hash_hex)

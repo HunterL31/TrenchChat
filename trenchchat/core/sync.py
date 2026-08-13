@@ -643,7 +643,8 @@ class SyncManager:
             F_SYNC_WINDOW_START: since_ts,
         })
         if sent:
-            self._status.request_sent(channel_hash_hex, dest_hex)
+            self._status.request_sent(channel_hash_hex, dest_hex,
+                                      continuation=continuation)
         else:
             # Nothing went out, so nothing can answer it.  Dropping the entry
             # also keeps a response from a peer we never reached from being
