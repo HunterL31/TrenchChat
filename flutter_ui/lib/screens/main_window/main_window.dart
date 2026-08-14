@@ -87,7 +87,8 @@ class _MainWindowState extends State<MainWindow> {
             ),
             ChannelColumn(
               serverName: serverName,
-              serverMemberCount: null,
+              serverMemberCount:
+                  selectedServer != null ? state.serverMemberCounts[selectedServer] : null,
               channels: channels,
               directChannels: state.standaloneChannels,
               selectedChannelHash: state.selectedChannelHash,

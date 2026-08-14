@@ -54,6 +54,13 @@ class ApiClient {
         .toList();
   }
 
+  Future<List<Member>> getServerMembers(String serverHashHex) async {
+    final res = await _http.get(_u('/servers/$serverHashHex/members'));
+    return (jsonDecode(res.body) as List<dynamic>)
+        .map((e) => Member.fromJson(e as Map<String, dynamic>))
+        .toList();
+  }
+
   Future<List<Message>> getMessages(String channelHashHex) async {
     final res = await _http.get(_u('/channels/$channelHashHex/messages'));
     return (jsonDecode(res.body) as List<dynamic>)

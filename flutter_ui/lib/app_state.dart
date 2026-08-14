@@ -30,6 +30,7 @@ class AppState extends ChangeNotifier {
   List<Server> servers = [];
   List<Channel> standaloneChannels = [];
   final Map<String, List<Channel>> channelsByServer = {};
+  final Map<String, int> serverMemberCounts = {};
 
   String? selectedServerHash;
   String? selectedChannelHash;
@@ -68,6 +69,7 @@ class AppState extends ChangeNotifier {
       standaloneChannels = await api.getChannels();
       for (final s in servers) {
         channelsByServer[s.hash] = await api.getServerChannels(s.hash);
+        serverMemberCounts[s.hash] = (await api.getServerMembers(s.hash)).length;
       }
 
       selectedServerHash = servers.isNotEmpty ? servers.first.hash : null;
