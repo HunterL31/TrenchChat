@@ -77,6 +77,15 @@ MAX_RESPONSE_MESSAGES = 50
 # slow multi-hop mesh round trip without leaving the window open indefinitely.
 SYNC_RESPONSE_WINDOW_SECS = 300
 
+# How far back a responder will look, beyond a never-before-served peer's own
+# claimed window start, before it's trusted as given. A first-time peer's
+# claim can be inflated -- borrowed from a different responder's disjoint
+# answer landing first in the same reconnect round (A1, test_sync_multipeer.py)
+# -- so a responder they've never actually served widens its floor to absorb
+# that, but only within this bound; a claim off by more than this reflects the
+# peer's own, unrelated history and is trusted as given rather than re-swept.
+PEER_TRUST_HORIZON_SECS = 300
+
 # How often a single peer may trigger a deep (pre-SYNC_WINDOW_SECS) backfill
 # sweep on a given channel from this responder. A soft mitigation against a
 # flood of costly full timestamp sweeps, not a hard security boundary --
@@ -171,8 +180,7 @@ class SyncManager:
         known-online peers (those whose RNS path is already resolved).
         """
         for sub in self._storage.get_subscriptions():
-            channel_hash_hex = sub["channel_hash"]
-            self._request_sync_for_channel(channel_hash_hex, sub["last_sync_at"])
+            self._request_sync_for_channel(sub["channel_hash"])
 
     def _on_channel_joined(self, channel_hash_hex: str, channel_name: str):
         """
@@ -194,10 +202,18 @@ class SyncManager:
         role = self._storage.get_role(channel_hash_hex, self._identity.hash_hex)
         return (channel["permissions"] if channel else "", role or "")
 
-    def _request_sync_for_channel(self, channel_hash_hex: str, since_ts: float):
-        # History withheld under an earlier role sits behind the watermark, so
-        # resuming incrementally would never look back past it. A change in what
-        # we are entitled to see is the one moment worth re-asking from the start.
+    def _request_sync_for_channel(self, channel_hash_hex: str, since_ts: float | None = None):
+        """Ask every known peer on this channel for anything new.
+
+        *since_ts*, when given, overrides each peer's individual progress and
+        is sent to every peer uniformly -- used for a fresh channel join
+        (nothing to resume from yet) and below, when entitlement changes
+        (history withheld under an earlier role must be re-asked from the
+        start for every peer, not just resumed incrementally). Otherwise each
+        peer is asked from its own per-(channel, peer) sync progress, not the
+        channel-wide watermark -- see A1 in test_sync_multipeer.py for why a
+        shared watermark strands disjoint history held by different peers.
+        """
         with self._sync_policy_lock:
             previous = self._sync_policy.get(channel_hash_hex)
         if previous is not None and previous != self._sync_policy_for(channel_hash_hex):
@@ -213,7 +229,9 @@ class SyncManager:
             self._status.note_no_peers(channel_hash_hex)
             return
         for peer_hex in peers:
-            self._send_sync_request(peer_hex, channel_hash_hex, since_ts)
+            peer_since = since_ts if since_ts is not None else \
+                self._storage.get_peer_sync_progress(channel_hash_hex, peer_hex)
+            self._send_sync_request(peer_hex, channel_hash_hex, peer_since)
 
     def _on_member_list_updated(self, channel_hash_hex: str):
         """Clear pending outbound messages for this channel if we were removed.
@@ -249,12 +267,16 @@ class SyncManager:
         self._messaging.flush_pending(peer_hex)
         self._flush_pending_hints(peer_hex)
 
-        # Send sync requests for every channel we share with this peer
+        # Send sync requests for every channel we share with this peer, from
+        # our own progress with this specific peer -- not the channel-wide
+        # watermark, which a different peer's disjoint history may have
+        # advanced past everything this one holds (A1, test_sync_multipeer.py).
         for sub in self._storage.get_subscriptions():
             channel_hash_hex = sub["channel_hash"]
             if peer_hex not in self._get_channel_peers(channel_hash_hex):
                 continue
-            self._send_sync_request(peer_hex, channel_hash_hex, sub["last_sync_at"])
+            since_ts = self._storage.get_peer_sync_progress(channel_hash_hex, peer_hex)
+            self._send_sync_request(peer_hex, channel_hash_hex, since_ts)
 
     # --- missed-delivery hint broadcast ---
 
@@ -393,6 +415,16 @@ class SyncManager:
             window_start = time.time() - SYNC_WINDOW_SECS
         window_start = max(window_start, 0.0)
 
+        # A peer we've never actually served before gets the benefit of the
+        # doubt for PEER_TRUST_HORIZON_SECS behind their claimed window_start
+        # -- their own channel-wide watermark can be inflated by a different
+        # responder's disjoint answer landing first in the same reconnect
+        # round (A1, test_sync_multipeer.py). A peer we HAVE served keeps
+        # resuming from what we actually gave them, not from this horizon.
+        own_progress = self._storage.get_peer_sync_progress(channel_hash_hex, requester_hex)
+        trust_floor = max(own_progress, window_start - PEER_TRUST_HORIZON_SECS, 0.0)
+        sweep_start = min(window_start, trust_floor)
+
         # Hints name exact messages this peer missed, including ones older than
         # their window.  They supplement the timestamp sweep rather than
         # replacing it: a hint naming a message we don't hold resolves to
@@ -419,14 +451,14 @@ class SyncManager:
             return
 
         swept_rows, truncated, scan_cursor = self._collect_permitted_rows(
-            channel, channel_hash_hex, requester_hex, window_start
+            channel, channel_hash_hex, requester_hex, sweep_start
         )
 
         # A hinted message newer than the sweep reached has to wait for the
         # sweep to reach it. The requester advances its watermark to the newest
         # message in the response, so sending one out of band would strand
         # every message between it and where the sweep actually got to.
-        frontier = swept_rows[-1]["timestamp"] if swept_rows else window_start
+        frontier = swept_rows[-1]["timestamp"] if swept_rows else sweep_start
         rows = self._merge_rows(
             [r for r in hinted_rows if r["timestamp"] <= frontier], swept_rows
         )
@@ -450,6 +482,21 @@ class SyncManager:
         if truncated:
             response_fields[F_SYNC_SCAN_CURSOR] = scan_cursor
         sent = self._send_raw(requester_hex, response_fields)
+
+        # Remember how far we've actually scanned for this peer, so a later
+        # request from them resumes from real, confirmed progress instead of
+        # re-widening under the trust horizon every time. scan_cursor tracks
+        # this regardless of what was withheld, which is what lets a chain of
+        # truncated, all-withheld batches (D2, TestSweepScanCap) keep advancing
+        # instead of re-triggering deep-sync classification on every batch.
+        if sent:
+            advance_to = scan_cursor
+            if rows:
+                advance_to = max(advance_to, rows[-1]["timestamp"])
+            if advance_to > own_progress:
+                self._storage.advance_peer_sync_progress(
+                    channel_hash_hex, requester_hex, advance_to
+                )
 
         # A hint we just served has done its job. The requester clears only its
         # own hints, and a hint naming them is never broadcast to them, so
@@ -765,6 +812,8 @@ class SyncManager:
 
         if newest_ts > self._storage.get_last_sync(channel_hash_hex):
             self._storage.update_last_sync(channel_hash_hex, newest_ts)
+        if newest_ts > 0:
+            self._storage.advance_peer_sync_progress(channel_hash_hex, peer_hex, newest_ts)
 
         truncated = bool(fields.get(F_SYNC_TRUNCATED, False))
         self._status.response_received(
@@ -856,8 +905,13 @@ class SyncManager:
         if sent:
             # Asking from 0 is a request for the whole transcript, not a
             # re-check, even before we hold anything to compare against.
+            # Compared against this specific peer's own progress, not the
+            # channel-wide watermark -- a peer legitimately behind on a
+            # multi-peer channel would otherwise look like a gap-filling
+            # request on every routine re-check.
             reaching_back = (since_ts <= 0.0
-                             or since_ts < self._storage.get_last_sync(channel_hash_hex))
+                             or since_ts < self._storage.get_peer_sync_progress(
+                                 channel_hash_hex, dest_hex))
             self._status.request_sent(
                 channel_hash_hex, dest_hex, continuation=continuation,
                 reaching_back=reaching_back,

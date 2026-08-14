@@ -119,6 +119,28 @@ CREATE TABLE IF NOT EXISTS missed_deliveries (
 CREATE INDEX IF NOT EXISTS idx_missed_deliveries_recipient
     ON missed_deliveries(recipient_hash, channel_hash);
 
+-- Durable copy of SubscriptionManager's in-memory subscriber sets, so a
+-- restart doesn't strand a public channel's peer discovery. Carries no more
+-- trust than the in-memory set did: it is a cache of a peer identity, not a
+-- signed record.
+CREATE TABLE IF NOT EXISTS channel_subscribers (
+    channel_hash  TEXT NOT NULL,
+    identity_hash TEXT NOT NULL,
+    added_at      REAL NOT NULL,
+    PRIMARY KEY (channel_hash, identity_hash)
+);
+
+-- Per-(channel, peer) sync watermark, distinct from subscriptions.last_sync_at
+-- (which stays the channel-wide "newest message I hold"). Lets a request to
+-- one peer resume from what that peer specifically has already given us,
+-- instead of a watermark another peer's disjoint history advanced.
+CREATE TABLE IF NOT EXISTS sync_progress (
+    channel_hash TEXT NOT NULL,
+    peer_hash    TEXT NOT NULL,
+    last_sync_at REAL NOT NULL DEFAULT 0,
+    PRIMARY KEY (channel_hash, peer_hash)
+);
+
 CREATE TABLE IF NOT EXISTS membership_tenure (
     channel_hash  TEXT NOT NULL,
     identity_hash TEXT NOT NULL,
@@ -792,6 +814,71 @@ class Storage:
                 "UPDATE subscriptions SET last_sync_at = ? WHERE channel_hash = ?",
                 (ts if ts is not None else time.time(), channel_hash)
             )
+
+    # --- channel subscribers (durable copy of SubscriptionManager state) ---
+
+    def add_channel_subscriber(self, channel_hash: str, identity_hash: str) -> None:
+        with self._tx():
+            self._conn.execute("""
+                INSERT OR IGNORE INTO channel_subscribers
+                    (channel_hash, identity_hash, added_at)
+                VALUES (?, ?, ?)
+            """, (channel_hash, identity_hash, time.time()))
+
+    def remove_channel_subscriber(self, channel_hash: str, identity_hash: str) -> None:
+        with self._tx():
+            self._conn.execute(
+                "DELETE FROM channel_subscribers WHERE channel_hash = ? AND identity_hash = ?",
+                (channel_hash, identity_hash),
+            )
+
+    def replace_channel_subscribers(self, channel_hash: str,
+                                    identity_hashes: set[str] | list[str]) -> None:
+        """Replace the full subscriber set for a channel atomically."""
+        with self._tx():
+            self._conn.execute(
+                "DELETE FROM channel_subscribers WHERE channel_hash = ?", (channel_hash,)
+            )
+            now = time.time()
+            self._conn.executemany("""
+                INSERT INTO channel_subscribers (channel_hash, identity_hash, added_at)
+                VALUES (?, ?, ?)
+            """, [(channel_hash, ih, now) for ih in identity_hashes])
+
+    def get_all_channel_subscribers(self) -> dict[str, set[str]]:
+        """Return every channel's persisted subscriber set, keyed by channel hash.
+
+        Used once at startup to seed SubscriptionManager's in-memory cache;
+        per-call lookups afterward stay in memory rather than hitting storage.
+        """
+        rows = self._fetchall("SELECT channel_hash, identity_hash FROM channel_subscribers")
+        result: dict[str, set[str]] = {}
+        for row in rows:
+            result.setdefault(row["channel_hash"], set()).add(row["identity_hash"])
+        return result
+
+    # --- per-(channel, peer) sync progress ---
+
+    def get_peer_sync_progress(self, channel_hash: str, peer_hash: str) -> float:
+        """Return the sync watermark for a specific (channel, peer) pair.
+
+        A peer we have never synced with has no row and starts from 0.0.
+        """
+        row = self._fetchone(
+            "SELECT last_sync_at FROM sync_progress WHERE channel_hash = ? AND peer_hash = ?",
+            (channel_hash, peer_hash),
+        )
+        return float(row["last_sync_at"]) if row else 0.0
+
+    def advance_peer_sync_progress(self, channel_hash: str, peer_hash: str, ts: float) -> None:
+        """Advance the (channel, peer) watermark to *ts*, never regressing it."""
+        with self._tx():
+            self._conn.execute("""
+                INSERT INTO sync_progress (channel_hash, peer_hash, last_sync_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(channel_hash, peer_hash) DO UPDATE SET
+                    last_sync_at = MAX(last_sync_at, excluded.last_sync_at)
+            """, (channel_hash, peer_hash, ts))
 
     # --- members ---
     #

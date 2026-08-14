@@ -66,8 +66,14 @@ class SubscriptionManager:
         self._storage = storage
         self._router = router
 
-        # In-memory subscriber lists: channel_hash_hex -> set of identity_hash_hex
-        self._subscribers: dict[str, set[str]] = {}
+        # In-memory subscriber lists: channel_hash_hex -> set of identity_hash_hex.
+        # Loaded from storage so a restart doesn't strand a public channel's
+        # peer discovery (see storage.get_all_channel_subscribers); every
+        # mutation below writes through to storage. Read path stays in
+        # memory -- get_subscribers() never hits storage per call.
+        self._subscribers: dict[str, set[str]] = {
+            ch: set(ids) for ch, ids in storage.get_all_channel_subscribers().items()
+        }
         # Monotonic per-channel counter; owners bump it, receivers reject
         # anything not newer than what they hold.
         self._subscriber_versions: dict[str, int] = {}
@@ -107,11 +113,13 @@ class SubscriptionManager:
         if channel_hash_hex not in self._subscribers:
             self._subscribers[channel_hash_hex] = set()
         self._subscribers[channel_hash_hex].add(identity_hex)
+        self._storage.add_channel_subscriber(channel_hash_hex, identity_hex)
         self._broadcast_subscriber_list(channel_hash_hex)
 
     def _remove_subscriber(self, channel_hash_hex: str, identity_hex: str):
         if channel_hash_hex in self._subscribers:
             self._subscribers[channel_hash_hex].discard(identity_hex)
+        self._storage.remove_channel_subscriber(channel_hash_hex, identity_hex)
 
     def _broadcast_subscriber_list(self, channel_hash_hex: str):
         """Send the current subscriber list to all subscribers.
@@ -244,6 +252,7 @@ class SubscriptionManager:
         with self._version_lock:
             self._subscriber_versions[channel_hash_hex] = version
         self._subscribers[channel_hash_hex] = valid
+        self._storage.replace_channel_subscribers(channel_hash_hex, valid)
 
     def _recall_owner_identity(self, owner_hex: str):
         if owner_hex == self._identity.hash_hex:
