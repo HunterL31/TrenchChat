@@ -1,0 +1,105 @@
+// 1a: no-chrome compose row. Enter sends, Shift+Enter inserts a newline.
+// There is deliberately no Send button.
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+
+import '../../theme/tokens.dart';
+
+class ComposeBar extends StatefulWidget {
+  const ComposeBar({
+    super.key,
+    required this.channelName,
+    required this.enabled,
+    required this.onSend,
+  });
+
+  final String channelName;
+  final bool enabled;
+  final Future<void> Function(String content) onSend;
+
+  @override
+  State<ComposeBar> createState() => _ComposeBarState();
+}
+
+class _ComposeBarState extends State<ComposeBar> {
+  final TextEditingController _controller = TextEditingController();
+  final FocusNode _focusNode = FocusNode();
+
+  @override
+  void initState() {
+    super.initState();
+    HardwareKeyboard.instance.addHandler(_onKeyEvent);
+  }
+
+  @override
+  void dispose() {
+    HardwareKeyboard.instance.removeHandler(_onKeyEvent);
+    _controller.dispose();
+    _focusNode.dispose();
+    super.dispose();
+  }
+
+  bool _onKeyEvent(KeyEvent event) {
+    if (!_focusNode.hasFocus) return false;
+    if (event is KeyDownEvent && event.logicalKey == LogicalKeyboardKey.enter) {
+      if (HardwareKeyboard.instance.isShiftPressed) {
+        return false; // let the TextField insert the newline
+      }
+      _submit();
+      return true; // swallow -- no newline, no default handling
+    }
+    return false;
+  }
+
+  void _submit() {
+    final text = _controller.text;
+    if (text.trim().isEmpty || !widget.enabled) return;
+    _controller.clear();
+    widget.onSend(text);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      decoration: BoxDecoration(
+        color: TCColors.bgSurface,
+        border: Border(top: BorderSide(color: TCColors.borderSubtle)),
+      ),
+      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
+          Text('＋', style: TextStyle(fontSize: 17, color: TCColors.textTertiary)),
+          const SizedBox(width: 10),
+          Expanded(
+            child: TextField(
+              controller: _controller,
+              focusNode: _focusNode,
+              enabled: widget.enabled,
+              minLines: 1,
+              maxLines: 6,
+              style: TextStyle(fontSize: TCType.textBodyMd, color: TCColors.textPrimary),
+              decoration: InputDecoration(
+                isDense: true,
+                border: InputBorder.none,
+                hintText: 'Message #${widget.channelName}…',
+                hintStyle: TextStyle(fontSize: TCType.textBodyMd, color: TCColors.textTertiary),
+              ),
+            ),
+          ),
+          const SizedBox(width: 10),
+          Text('☺', style: TextStyle(fontSize: 17, color: TCColors.textTertiary)),
+          const SizedBox(width: 10),
+          Text(
+            'ENTER TO SEND · SHIFT+ENTER NEWLINE',
+            style: TextStyle(
+              fontSize: TCType.textMicro,
+              color: TCColors.textTertiary,
+              letterSpacing: TCType.letterSpacingFor(TCType.textMicro, TCType.trackingWide),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
