@@ -8,13 +8,23 @@ from unittest.mock import patch, MagicMock
 import time
 import pytest
 
+import RNS
+
 from trenchchat.core.link_quality import (
-    LinkQuality, score_path, quality_label,
+    LinkQuality, score_path, score_channel, quality_label,
     _RTT_EXCELLENT_MS, _RTT_GOOD_MS, _RTT_FAIR_MS,
     _PATH_FRESH_SECS, _PATH_STALE_SECS,
 )
 
 DEST_HEX = "aa" * 16   # 32-char fake hex
+SELF_HEX = "00" * 16
+PEER_A_HEX = "bb" * 16
+PEER_B_HEX = "cc" * 16
+
+
+def _delivery_hex(identity_hex: str) -> str:
+    """The path-table key score_channel derives for a member's identity hash."""
+    return RNS.Destination.hash(bytes.fromhex(identity_hex), "lxmf", "delivery").hex()
 
 
 # ---------------------------------------------------------------------------
@@ -180,3 +190,78 @@ class TestQualityLabel:
 
     def test_unknown_label(self):
         assert quality_label(LinkQuality.UNKNOWN) == "Unknown"
+
+
+# ---------------------------------------------------------------------------
+# score_channel
+# ---------------------------------------------------------------------------
+
+def _mock_recipients(recipients: list[str]):
+    return patch("trenchchat.core.actions.compute_channel_recipients",
+                return_value=recipients)
+
+
+def _mock_channel_path_table(entries: dict[str, tuple[int, float]]):
+    """Patch Transport with a path table keyed by identity hex.
+
+    entries maps identity_hex -> (hops, ttl_secs).
+    """
+    expires_at = {
+        identity_hex: time.time() + ttl_secs for identity_hex, (_, ttl_secs) in entries.items()
+    }
+    path_table = {
+        bytes.fromhex(_delivery_hex(identity_hex)): (0, None, hops, expires_at[identity_hex],
+                                                      None, None)
+        for identity_hex, (hops, _) in entries.items()
+    }
+    return patch("trenchchat.core.link_quality.RNS.Transport",
+                 active_links=[], path_table=path_table)
+
+
+class TestScoreChannel:
+    def test_no_recipients_is_unknown(self):
+        with _mock_recipients([]):
+            quality, hops = score_channel(MagicMock(), MagicMock(), DEST_HEX, SELF_HEX)
+        assert (quality, hops) == (LinkQuality.UNKNOWN, 0)
+
+    def test_only_self_is_unknown(self):
+        with _mock_recipients([SELF_HEX]):
+            quality, hops = score_channel(MagicMock(), MagicMock(), DEST_HEX, SELF_HEX)
+        assert (quality, hops) == (LinkQuality.UNKNOWN, 0)
+
+    def test_all_unknown_paths_is_unknown(self):
+        with _mock_recipients([PEER_A_HEX, PEER_B_HEX]), \
+             patch("trenchchat.core.link_quality.RNS.Transport",
+                   active_links=[], path_table={}):
+            quality, hops = score_channel(MagicMock(), MagicMock(), DEST_HEX, SELF_HEX)
+        assert (quality, hops) == (LinkQuality.UNKNOWN, 0)
+
+    def test_mixed_tiers_returns_the_worst(self):
+        entries = {
+            PEER_A_HEX: (1, _PATH_FRESH_SECS + 60),   # 1 hop, fresh -> EXCELLENT
+            PEER_B_HEX: (3, _PATH_STALE_SECS / 2),    # 3 hops, very stale -> POOR
+        }
+        with _mock_recipients([PEER_A_HEX, PEER_B_HEX]), _mock_channel_path_table(entries):
+            quality, _ = score_channel(MagicMock(), MagicMock(), DEST_HEX, SELF_HEX)
+        assert quality == LinkQuality.POOR
+
+    def test_hop_count_is_the_maximum(self):
+        entries = {
+            PEER_A_HEX: (1, _PATH_FRESH_SECS + 60),
+            PEER_B_HEX: (3, _PATH_FRESH_SECS + 60),
+        }
+        with _mock_recipients([PEER_A_HEX, PEER_B_HEX]), _mock_channel_path_table(entries):
+            _, hops = score_channel(MagicMock(), MagicMock(), DEST_HEX, SELF_HEX)
+        assert hops == 3
+
+    def test_unknown_peer_is_skipped_not_scored_poor(self):
+        entries = {PEER_A_HEX: (1, _PATH_FRESH_SECS + 60)}   # PEER_B has no path entry
+        with _mock_recipients([PEER_A_HEX, PEER_B_HEX]), _mock_channel_path_table(entries):
+            quality, hops = score_channel(MagicMock(), MagicMock(), DEST_HEX, SELF_HEX)
+        assert (quality, hops) == (LinkQuality.EXCELLENT, 1)
+
+    def test_self_excluded_from_scoring(self):
+        entries = {PEER_A_HEX: (1, _PATH_FRESH_SECS + 60)}
+        with _mock_recipients([SELF_HEX, PEER_A_HEX]), _mock_channel_path_table(entries):
+            quality, hops = score_channel(MagicMock(), MagicMock(), DEST_HEX, SELF_HEX)
+        assert (quality, hops) == (LinkQuality.EXCELLENT, 1)
