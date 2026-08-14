@@ -19,6 +19,8 @@ class ChannelColumn extends StatelessWidget {
     required this.selectedChannelHash,
     required this.onSelectChannel,
     required this.onlinePresence,
+    this.onCreateChannel,
+    this.onJoinChannel,
   });
 
   final String? serverName;
@@ -28,6 +30,8 @@ class ChannelColumn extends StatelessWidget {
   final String? selectedChannelHash;
   final ValueChanged<String> onSelectChannel;
   final List<PresenceEntry> onlinePresence;
+  final VoidCallback? onCreateChannel;
+  final VoidCallback? onJoinChannel;
 
   @override
   Widget build(BuildContext context) {
@@ -137,11 +141,15 @@ class ChannelColumn extends StatelessWidget {
               border: Border(top: BorderSide(color: TCColors.borderSubtle)),
             ),
             padding: const EdgeInsets.all(10),
-            child: const Row(
+            child: Row(
               children: [
-                Expanded(child: TcGhostButton(label: '＋ CHANNEL', onPressed: null)),
-                SizedBox(width: 6),
-                Expanded(child: TcGhostButton(label: '⤵ JOIN', onPressed: null)),
+                Expanded(
+                  child: TcGhostButton(label: '＋ CHANNEL', onPressed: onCreateChannel),
+                ),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: TcGhostButton(label: '⤵ JOIN', onPressed: onJoinChannel),
+                ),
               ],
             ),
           ),

@@ -8,6 +8,9 @@ import '../../api/models/message.dart';
 import '../../api/models/server.dart';
 import '../../app_state.dart';
 import '../../theme/tokens.dart';
+import '../dialogs/join_channel_dialog.dart';
+import '../dialogs/new_channel_dialog.dart';
+import '../dialogs/new_server_dialog.dart';
 import 'channel_column.dart';
 import 'channel_header.dart';
 import 'compose_bar.dart';
@@ -24,6 +27,22 @@ class MainWindow extends StatefulWidget {
 
 class _MainWindowState extends State<MainWindow> {
   ChannelTab _tab = ChannelTab.chat;
+
+  // Dialogs show their own inline error text for a failed submit; this is
+  // the catch-all for actions with no dialog to show it in (a failed send,
+  // a failed background reload) so AppState.actionError has exactly one
+  // place it surfaces app-wide.
+  String? _lastShownActionError;
+
+  void _maybeShowActionError(AppState state) {
+    final message = state.actionError;
+    if (message == null || message == _lastShownActionError) return;
+    _lastShownActionError = message;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
+    });
+  }
 
   String _displayNameFor(String identityHashHex, String fallback) {
     final channelHash = widget.state.selectedChannelHash;
@@ -58,6 +77,8 @@ class _MainWindowState extends State<MainWindow> {
           );
         }
 
+        _maybeShowActionError(state);
+
         final selectedServer = state.selectedServerHash;
         final serverName = selectedServer != null
             ? state.servers.firstWhere((s) => s.hash == selectedServer).name
@@ -84,6 +105,7 @@ class _MainWindowState extends State<MainWindow> {
               ],
               selectedHash: state.selectedServerHash,
               onSelect: (hash) => state.selectServer(hash),
+              onAddServer: () => showNewServerDialog(context, state),
             ),
             ChannelColumn(
               serverName: serverName,
@@ -94,6 +116,9 @@ class _MainWindowState extends State<MainWindow> {
               selectedChannelHash: state.selectedChannelHash,
               onSelectChannel: (hash) => state.selectChannel(hash),
               onlinePresence: presence,
+              onCreateChannel: () =>
+                  showNewChannelDialog(context, state, serverHashHex: selectedServer),
+              onJoinChannel: () => showJoinChannelDialog(context, state),
             ),
             Expanded(
               child: Column(

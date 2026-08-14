@@ -29,6 +29,7 @@ class AppState extends ChangeNotifier {
 
   List<Server> servers = [];
   List<Channel> standaloneChannels = [];
+  List<Channel> discoveredChannels = [];
   final Map<String, List<Channel>> channelsByServer = {};
   final Map<String, int> serverMemberCounts = {};
 
@@ -44,6 +45,12 @@ class AppState extends ChangeNotifier {
 
   bool loading = true;
   String? error;
+
+  /// Set by a failed mutating action (send, create, join, ...). Distinct from
+  /// [error], which is fatal and takes over the whole screen on init failure --
+  /// this one is transient and meant for a toast/snackbar, cleared on the next
+  /// attempt. Single surface so every call site reports failures the same way.
+  String? actionError;
 
   Channel? get selectedChannel {
     final hash = selectedChannelHash;
@@ -96,19 +103,23 @@ class AppState extends ChangeNotifier {
   }
 
   Future<void> loadChannel(String channelHashHex) async {
-    final results = await Future.wait([
-      api.getMembers(channelHashHex),
-      api.getMessages(channelHashHex),
-      api.getChannelPresence(channelHashHex),
-      api.getChannelLinkQuality(channelHashHex),
-      api.getMyPermissions(channelHashHex),
-    ]);
-    membersByChannel[channelHashHex] = results[0] as List<Member>;
-    messagesByChannel[channelHashHex] = results[1] as List<Message>;
-    presenceByChannel[channelHashHex] = results[2] as List<PresenceEntry>;
-    linkQualityByChannel[channelHashHex] = results[3] as ChannelLinkQuality;
-    permissionsByChannel[channelHashHex] = results[4] as ChannelPermissions;
-    notifyListeners();
+    try {
+      final results = await Future.wait([
+        api.getMembers(channelHashHex),
+        api.getMessages(channelHashHex),
+        api.getChannelPresence(channelHashHex),
+        api.getChannelLinkQuality(channelHashHex),
+        api.getMyPermissions(channelHashHex),
+      ]);
+      membersByChannel[channelHashHex] = results[0] as List<Member>;
+      messagesByChannel[channelHashHex] = results[1] as List<Message>;
+      presenceByChannel[channelHashHex] = results[2] as List<PresenceEntry>;
+      linkQualityByChannel[channelHashHex] = results[3] as ChannelLinkQuality;
+      permissionsByChannel[channelHashHex] = results[4] as ChannelPermissions;
+      notifyListeners();
+    } catch (e) {
+      _reportActionError(e);
+    }
   }
 
   Future<void> selectServer(String serverHashHex) async {
@@ -143,7 +154,94 @@ class AppState extends ChangeNotifier {
   Future<bool> sendMessage(String content) async {
     final channelHashHex = selectedChannelHash;
     if (channelHashHex == null || content.trim().isEmpty) return false;
-    return api.sendMessage(channelHashHex, content.trim());
+    try {
+      return await api.sendMessage(channelHashHex, content.trim());
+    } catch (e) {
+      _reportActionError(e);
+      return false;
+    }
+  }
+
+  /// Standalone channels announced on the mesh but not yet joined. Refreshed
+  /// on demand (join dialog open) and live on [ChannelDiscoveredEvent].
+  Future<void> refreshDiscoveredChannels() async {
+    try {
+      discoveredChannels = await api.getDiscoveredChannels();
+      notifyListeners();
+    } catch (e) {
+      _reportActionError(e);
+    }
+  }
+
+  /// Returns the new server's hash, or null (with [actionError] set) on failure.
+  Future<String?> createServer(String name, String description) async {
+    try {
+      final hash = await api.createServer(name, description);
+      servers = await api.getServers();
+      channelsByServer.putIfAbsent(hash, () => []);
+      serverMemberCounts[hash] = (await api.getServerMembers(hash)).length;
+      notifyListeners();
+      return hash;
+    } catch (e) {
+      _reportActionError(e);
+      return null;
+    }
+  }
+
+  /// Creates a channel inside [serverHashHex], inheriting the server's
+  /// permissions. Returns the new channel's hash, or null (with
+  /// [actionError] set -- e.g. missing create_channel permission) on failure.
+  Future<String?> createChannelInServer(
+      String serverHashHex, String name, String description) async {
+    try {
+      final hash = await api.createServerChannel(serverHashHex, name, description);
+      channelsByServer[serverHashHex] = await api.getServerChannels(serverHashHex);
+      selectedServerHash = serverHashHex;
+      notifyListeners();
+      await selectChannel(hash);
+      return hash;
+    } catch (e) {
+      _reportActionError(e);
+      return null;
+    }
+  }
+
+  /// Creates a standalone channel with [access] `"public"` or `"invite"`.
+  /// Returns the new channel's hash, or null (with [actionError] set) on failure.
+  Future<String?> createStandaloneChannel(
+      String name, String description, String access) async {
+    try {
+      final hash = await api.createChannel(name, description, access);
+      standaloneChannels = await api.getChannels();
+      notifyListeners();
+      await selectChannel(hash);
+      return hash;
+    } catch (e) {
+      _reportActionError(e);
+      return null;
+    }
+  }
+
+  /// Joins a previously-discovered standalone public channel.
+  Future<bool> joinChannel(String channelHashHex) async {
+    try {
+      final ok = await api.joinChannel(channelHashHex);
+      if (ok) {
+        standaloneChannels = await api.getChannels();
+        discoveredChannels = discoveredChannels.where((c) => c.hash != channelHashHex).toList();
+        notifyListeners();
+        await selectChannel(channelHashHex);
+      }
+      return ok;
+    } catch (e) {
+      _reportActionError(e);
+      return false;
+    }
+  }
+
+  void _reportActionError(Object e) {
+    actionError = e is ApiException ? e.message : e.toString();
+    notifyListeners();
   }
 
   void _onEvent(TcEvent event) {
@@ -179,6 +277,8 @@ class AppState extends ChangeNotifier {
         break;
       case ChannelJoinedEvent():
         break;
+      case ChannelDiscoveredEvent():
+        unawaited(refreshDiscoveredChannels());
     }
   }
 
