@@ -126,6 +126,8 @@ After B confirms receipt (via `MT_SYNC_RESPONSE` processing), the hints for B ar
 
 **Hint TTL**: Hints older than the sync window (default 7 days) are pruned at startup via `storage.purge_old_missed_deliveries(before_ts)`.
 
+**Retry**: If a subscriber's identity can't be recalled at broadcast time, the hint isn't dropped — `SyncManager` requests the subscriber's path and queues the hint (capped at `MAX_QUEUED_HINTS_PER_PEER` per peer), mirroring `Messaging`'s pending-retry queue. `on_peer_appeared` flushes queued hints alongside `flush_pending`, so a hint aimed at a momentarily unreachable peer still reaches them once they're back.
+
 **Limitation**: Hints only reach peers who are online at the exact moment A detects failure. If all peers except A are offline, no hints are stored anywhere. Mechanism 3 covers this.
 
 ---
@@ -162,7 +164,9 @@ Every authorised request is answered, **including with an empty message list**. 
 
 The 50-message chunk limit keeps responses within LXMF message size constraints. A response that hits the cap carries `F_SYNC_TRUNCATED`, and the requester immediately asks the same peer for the next batch. Without that, everything past the cap waits for an unrelated announce to drive the next request. The chain is bounded by `MAX_SYNC_CONTINUATIONS` per (channel, peer) and only continues while the watermark actually advances, so a peer that flags every batch truncated can't induce unbounded requests.
 
-The sweep fills a batch with rows the requester may actually see, **scanning past withheld ones** (`_collect_permitted_rows`, bounded by `MAX_SWEEP_SCAN`). Tenure filtering can otherwise empty a batch while the responder still holds newer history the requester is entitled to, stranding them at that timestamp.
+The sweep fills a batch with rows the requester may actually see, **scanning past withheld ones** (`_collect_permitted_rows`, bounded by `MAX_SWEEP_SCAN`). Tenure filtering can otherwise empty a batch while the responder still holds newer history the requester is entitled to, stranding them at that timestamp. A batch that hits `MAX_SWEEP_SCAN` while every scanned row was withheld carries `F_SYNC_SCAN_CURSOR` — how far the sweep actually reached — so the requester's *next* request resumes from there instead of asking the same withheld run over again; that field never touches the persisted watermark (below), only the next request's `F_SYNC_WINDOW_START`.
+
+Rows are grouped by timestamp as the sweep scans, and a batch or scan cursor never splits a group: `F_SYNC_WINDOW_START` and `F_SYNC_SCAN_CURSOR` are bare floats with no row-id tie-breaker, so several messages sharing the exact same timestamp — plausible on a coarse clock — must be included, or withheld and resumed from, as a whole, or whichever half landed on the wrong side of a split would be silently skipped by every future sweep (`Storage.get_messages_after` filters on strict `timestamp >`). A single group larger than `MAX_RESPONSE_MESSAGES` still ships whole rather than stalling forever. Internally, `_collect_permitted_rows` sweeps by an (timestamp, row id) cursor into `Storage.get_messages_after` so a group spanning an internal page boundary is scanned as one run.
 
 The requester's watermark only ever advances over messages it actually accepted — never past ones the responder withheld or it rejected itself, and never backwards, since a hint can serve a message older than everything already held. A permission decision is not permanent: a role or `full_sync` grant still propagating would otherwise leave history withheld for good, since the watermark would already be past it. The cost is that the responder re-scans that withheld run on each request, which is bounded and indexed.
 
@@ -232,6 +236,7 @@ Defined in `trenchchat/core/protocol.py`:
 | `F_MISSED_FOR` | `0x09` | `str` | `missed_delivery` |
 | `F_MISSED_MSG_ID` | `0x0A` | `str` | `missed_delivery` |
 | `F_SYNC_TRUNCATED` | `0x50` | `bool` | `sync_response` |
+| `F_SYNC_SCAN_CURSOR` | `0x51` | `float` | `sync_response` (only when truncated) |
 
 ---
 

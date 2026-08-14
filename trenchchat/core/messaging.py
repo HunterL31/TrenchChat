@@ -17,6 +17,9 @@ LXMF fields layout:
                                           server scope; absent means a single channel
     0x50  sync_truncated    bool        — responder capped this batch and holds more
                                           history (sync_response)
+    0x51  sync_scan_cursor  float       — furthest timestamp the responder's sweep
+                                          reached, even if withheld outright; only set
+                                          when truncated (sync_response)
 """
 
 import hashlib

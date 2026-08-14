@@ -242,22 +242,30 @@ def peer_factory(rns_instance, tmp_path):
         # session -- several hundred by the end of a full run -- and the
         # interpreter eventually faults on Windows partway through. Tearing
         # each one down with the peer keeps a full-suite run stable.
-        def _stop_router(r=router, ch=channel_mgr):
+        def _stop_router(r=router, ch=channel_mgr, sv=server_mgr, ident=identity):
             r.lxmf_router.exit_handler()
-            # exit_handler tears down LXMF's own delivery destinations but not
-            # the ones this app registers directly with RNS.Transport, which
-            # otherwise stay in the global destination table for the life of
-            # the session.
-            for dest in (getattr(r, "_user_dest", None),
-                         getattr(r, "_delivery_dest", None)):
+            # exit_handler tears down LXMF's own delivery/user destinations and
+            # unhooks propagation_destination's callbacks, but never deregisters
+            # propagation_destination itself, nor the destinations Identity and
+            # ChannelManager/ServerManager register directly with RNS.Transport --
+            # all of those otherwise stay in the global destination table for the
+            # life of the session.
+            owned = (list(getattr(ch, "_owned_destinations", {}).values())
+                     + list(getattr(sv, "_owned_destinations", {}).values()))
+            for dest in ([getattr(r, "_user_dest", None),
+                          getattr(r, "_delivery_dest", None),
+                          r.lxmf_router.propagation_destination,
+                          ident.destination]
+                         + owned):
                 if dest is not None:
                     try:
                         RNS.Transport.deregister_destination(dest)
                     except Exception:
                         pass
-            for dest in list(getattr(ch, "_owned_destinations", {}).values()):
+            handler = getattr(ch, "_announce_handler", None)
+            if handler is not None:
                 try:
-                    RNS.Transport.deregister_destination(dest)
+                    RNS.Transport.deregister_announce_handler(handler)
                 except Exception:
                     pass
 

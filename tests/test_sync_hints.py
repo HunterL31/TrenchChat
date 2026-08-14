@@ -19,7 +19,6 @@ hint once served.
 import time
 
 import pytest
-import RNS
 
 from tests.helpers import wait_for, wait_for_message
 from trenchchat.core.messaging import _compute_message_id
@@ -59,23 +58,6 @@ def _insert_message(storage, ch_hash, sender_hex, content, ts=None):
         received_at=ts,
     )
     return msg_id
-
-
-def _stop_peer(peer):
-    """Fully release a peer's identity so peer_factory can rebuild it, modelling a restart.
-
-    peer.teardown() releases the LXMF router's delivery/user destinations, but
-    two more stay registered in RNS.Transport afterwards: the Identity
-    wrapper's own IN destination (created in its __init__, never torn down),
-    and LXMRouter's propagation_destination (created unconditionally in its
-    __init__; exit_handler() only clears its callbacks, never deregisters it).
-    Left registered, a second peer_factory() call for the same identity hash
-    fails with "already registered destination".
-    """
-    lxmf_router = peer.router.lxmf_router
-    peer.teardown()
-    RNS.Transport.deregister_destination(peer.identity.destination)
-    RNS.Transport.deregister_destination(lxmf_router.propagation_destination)
 
 
 # ---------------------------------------------------------------------------
@@ -169,7 +151,7 @@ class TestHintDurabilityAcrossRestart:
                                   "held across a restart", ts)
         carol.storage.record_missed_delivery(ch_hash, bob.identity.hash_hex, msg_id)
 
-        _stop_peer(carol)
+        carol.teardown()
         carol2 = peer_factory("carol")
 
         assert msg_id in carol2.storage.get_missed_message_ids(
@@ -208,7 +190,7 @@ class TestHintDurabilityAcrossRestart:
         )
         carol.storage._conn.commit()
 
-        _stop_peer(carol)
+        carol.teardown()
         carol2 = peer_factory("carol")
 
         assert carol2.storage.get_missed_message_ids(ch_hash, bob.identity.hash_hex) == [], \

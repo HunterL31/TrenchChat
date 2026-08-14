@@ -66,6 +66,9 @@ F_SUBSCRIBER_SIG    = 0x32   # bytes — owner Ed25519 signature over the list
 
 # --- Sync status fields ---
 F_SYNC_TRUNCATED    = 0x50   # bool — responder capped this batch; it holds more history
+F_SYNC_SCAN_CURSOR  = 0x51   # float — furthest timestamp the responder's sweep reached,
+                             #         even if every row there was withheld from the
+                             #         requester (sync_response, only set when truncated)
 
 # --- Message type strings ---
 MT_SUBSCRIBE        = "subscribe"

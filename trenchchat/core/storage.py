@@ -1158,14 +1158,32 @@ class Storage:
     # --- message sync helpers ---
 
     def get_messages_after(self, channel_hash: str, since_ts: float,
-                           limit: int = 50) -> list[sqlite3.Row]:
-        """Fetch up to `limit` messages for a channel with timestamp > since_ts."""
+                           limit: int = 50,
+                           after_id: int | None = None) -> list[sqlite3.Row]:
+        """Fetch up to `limit` messages ordered after (since_ts, after_id).
+
+        Rows are ordered by timestamp then the internal autoincrement id, so
+        several messages sharing the exact same timestamp still have a strict
+        total order. Without after_id this is a plain timestamp > since_ts
+        filter, matching a fresh sweep with nothing to resume from. With it,
+        rows at exactly since_ts are only included past that id -- otherwise
+        a page boundary landing mid-tie would drop every row after the first
+        sharing that timestamp on the next call.
+        """
+        if after_id is None:
+            return self._fetchall("""
+                SELECT * FROM messages
+                WHERE channel_hash = ? AND timestamp > ?
+                ORDER BY timestamp ASC, id ASC
+                LIMIT ?
+            """, (channel_hash, since_ts, limit))
         return self._fetchall("""
             SELECT * FROM messages
-            WHERE channel_hash = ? AND timestamp > ?
-            ORDER BY timestamp ASC, received_at ASC
+            WHERE channel_hash = ?
+              AND (timestamp > ? OR (timestamp = ? AND id > ?))
+            ORDER BY timestamp ASC, id ASC
             LIMIT ?
-        """, (channel_hash, since_ts, limit))
+        """, (channel_hash, since_ts, since_ts, after_id, limit))
 
     def get_messages_by_ids(self, channel_hash: str,
                             message_ids: list[str]) -> list[sqlite3.Row]:

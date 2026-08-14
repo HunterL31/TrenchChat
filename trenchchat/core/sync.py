@@ -59,7 +59,7 @@ from trenchchat.core.permissions import (
 )
 from trenchchat.core.protocol import (
     F_CHANNEL_HASH, F_MSG_TYPE,
-    F_SYNC_WINDOW_START, F_SYNC_MESSAGES, F_SYNC_TRUNCATED,
+    F_SYNC_WINDOW_START, F_SYNC_MESSAGES, F_SYNC_TRUNCATED, F_SYNC_SCAN_CURSOR,
     F_MISSED_FOR, F_MISSED_MSG_ID,
     MT_MISSED_DELIVERY, MT_SYNC_REQUEST, MT_SYNC_RESPONSE,
     SYNC_WINDOW_SECS,
@@ -100,6 +100,11 @@ MAX_SWEEP_SCAN = MAX_RESPONSE_MESSAGES * 20
 # this enough to backfill a substantial history in one reconnect.
 MAX_SYNC_CONTINUATIONS = 20
 
+# How many missed-delivery hints are queued for retry against a single
+# unreachable peer before the oldest is dropped, so a burst of failed
+# deliveries can't grow the retry queue without bound.
+MAX_QUEUED_HINTS_PER_PEER = 50
+
 
 class SyncManager:
     def __init__(self, identity: Identity, storage: Storage, router: Router,
@@ -111,10 +116,23 @@ class SyncManager:
         self._subscription_mgr = subscription_mgr
         self._invite_mgr = invite_mgr
 
-        # (channel_hash_hex, peer_hex) -> time the request was issued.  A sync
-        # response is only applied if it answers one of these.
-        self._pending_requests: dict[tuple[str, str], float] = {}
+        # (channel_hash_hex, peer_hex) -> list of (issued_at, since_ts,
+        # dest_hex, request_id) entries.  A peer may have more than one
+        # outstanding request at once (e.g. a startup sync and an
+        # announce-driven request racing each other), so this is a FIFO
+        # queue per key rather than a single slot -- each legitimate
+        # response claims and removes exactly one entry.  The same entry is
+        # recorded under both key forms a peer may be identified by (see
+        # _peer_key_forms); claiming it under either form removes both.
+        self._pending_requests: dict[tuple[str, str], list[tuple]] = {}
         self._pending_requests_lock = threading.Lock()
+        self._pending_request_seq = 0
+
+        # dest_hex -> list of missed-delivery hint field dicts that could not
+        # be sent because the peer's identity was momentarily unresolvable.
+        # Retried from on_peer_appeared once the peer is reachable again.
+        self._pending_hints: dict[str, list[dict]] = {}
+        self._pending_hints_lock = threading.Lock()
 
         # (channel_hash_hex, peer_hex) -> time we last served that peer a
         # deep backfill sweep for that channel.  In-memory only; a restart
@@ -229,6 +247,7 @@ class SyncManager:
         self._router.release_quarantined(peer_hex)
 
         self._messaging.flush_pending(peer_hex)
+        self._flush_pending_hints(peer_hex)
 
         # Send sync requests for every channel we share with this peer
         for sub in self._storage.get_subscriptions():
@@ -249,15 +268,49 @@ class SyncManager:
         for dest_hex in subscriber_hashes:
             if dest_hex in (self._identity.hash_hex, missed_peer_hex):
                 continue
-            self._send_raw(dest_hex, {
+            fields = {
                 F_MSG_TYPE:      MT_MISSED_DELIVERY,
                 F_CHANNEL_HASH:  bytes.fromhex(channel_hash_hex),
                 F_MISSED_FOR:    missed_peer_hex,
                 F_MISSED_MSG_ID: msg_id,
-            })
+            }
+            if not self._send_raw(dest_hex, fields):
+                self._queue_hint_for_retry(dest_hex, fields)
 
         # Record the hint locally too (we are also a potential responder)
         self._storage.record_missed_delivery(channel_hash_hex, missed_peer_hex, msg_id)
+
+    def _queue_hint_for_retry(self, dest_hex: str, fields: dict):
+        """Request the peer's path and queue a hint that failed to send.
+
+        Mirrors Messaging._on_delivery_failed's request_path + queue pattern:
+        unlike a chat message, a missed-delivery hint has no other way back
+        once _send_raw fails, so without this it is lost even after the
+        target peer becomes reachable again.
+        """
+        try:
+            identity_hash = bytes.fromhex(dest_hex)
+            delivery_dest_hash = RNS.Destination.hash(identity_hash, "lxmf", "delivery")
+            RNS.Transport.request_path(delivery_dest_hash)
+        except (ValueError, TypeError) as e:
+            RNS.log(
+                f"TrenchChat [sync]: could not request path for {dest_hex[:12]}…: {e}",
+                RNS.LOG_WARNING,
+            )
+            return
+        with self._pending_hints_lock:
+            queued = self._pending_hints.setdefault(dest_hex, [])
+            queued.append(fields)
+            if len(queued) > MAX_QUEUED_HINTS_PER_PEER:
+                del queued[0]
+
+    def _flush_pending_hints(self, dest_hex: str):
+        """Retry any missed-delivery hints queued for a peer now reachable."""
+        with self._pending_hints_lock:
+            queued = self._pending_hints.pop(dest_hex, [])
+        for fields in queued:
+            if not self._send_raw(dest_hex, fields):
+                self._queue_hint_for_retry(dest_hex, fields)
 
     # --- inbound message handler ---
 
@@ -365,7 +418,7 @@ class SyncManager:
             )
             return
 
-        swept_rows, truncated = self._collect_permitted_rows(
+        swept_rows, truncated, scan_cursor = self._collect_permitted_rows(
             channel, channel_hash_hex, requester_hex, window_start
         )
 
@@ -385,12 +438,18 @@ class SyncManager:
             [self._row_to_dict(r) for r in rows],
             use_bin_type=True,
         )
-        sent = self._send_raw(requester_hex, {
+        response_fields = {
             F_MSG_TYPE:       MT_SYNC_RESPONSE,
             F_CHANNEL_HASH:   bytes.fromhex(channel_hash_hex),
             F_SYNC_MESSAGES:  packed,
             F_SYNC_TRUNCATED: truncated,
-        })
+        }
+        # Lets the requester's next request resume past a run of rows it was
+        # scanned but not entitled to, without touching its persisted
+        # watermark -- see _handle_sync_response's resume_ts handling.
+        if truncated:
+            response_fields[F_SYNC_SCAN_CURSOR] = scan_cursor
+        sent = self._send_raw(requester_hex, response_fields)
 
         # A hint we just served has done its job. The requester clears only its
         # own hints, and a hint naming them is never broadcast to them, so
@@ -409,7 +468,8 @@ class SyncManager:
         return sorted(by_id.values(), key=lambda r: r["timestamp"])
 
     def _collect_permitted_rows(self, channel, channel_hash_hex: str,
-                                requester_hex: str, window_start: float) -> tuple[list, bool]:
+                                requester_hex: str,
+                                window_start: float) -> tuple[list, bool, float]:
         """Sweep forward from window_start for rows this requester may see.
 
         Scanning past withheld rows here, instead of returning a batch that
@@ -419,41 +479,91 @@ class SyncManager:
         decision into their watermark permanently, so history withheld while
         a role or grant was still propagating could never be recovered.
 
-        Returns the rows to send and whether more remain beyond them.
+        Rows are grouped by timestamp as they're scanned, and a group is
+        only ever included, or resumed from, as a whole. since_ts travels
+        over the wire as a bare float with no row-id tie-breaker, so a batch
+        or a scan cursor that split a tied-timestamp group down the middle
+        would strand whichever half landed on the wrong side forever -- a
+        real risk on coarse clocks. A single group larger than
+        MAX_RESPONSE_MESSAGES is still shipped whole rather than stalling.
+        The internal (timestamp, row id) cursor into Storage.get_messages_after
+        is what lets a group spanning an internal page boundary be scanned
+        as one run in the first place.
+
+        Returns the rows to send, whether more remain beyond them, and the
+        furthest timestamp whose group was fully resolved -- which may be
+        past every row returned, when an entire group was withheld outright.
         """
         permitted: list = []
-        cursor = window_start
+        scan_cursor = window_start
+        cursor_ts = window_start
+        cursor_id: int | None = None
         scanned = 0
         truncated = False
 
+        run_ts: float | None = None
+        run_rows: list = []
+
+        def try_flush_run() -> bool:
+            """Add the just-finished timestamp group to permitted, unless
+            doing so would exceed the response cap -- in which case the
+            whole group is left for the next request instead of being split.
+            """
+            nonlocal scan_cursor, truncated
+            if not run_rows:
+                return True
+            filtered = self._filter_rows_by_tenure(
+                channel, channel_hash_hex, requester_hex, run_rows
+            )
+            if len(permitted) + len(filtered) > MAX_RESPONSE_MESSAGES:
+                truncated = True
+                return False
+            permitted.extend(filtered)
+            scan_cursor = run_ts
+            return True
+
         while True:
             page = self._storage.get_messages_after(
-                channel_hash_hex, cursor, MAX_RESPONSE_MESSAGES
+                channel_hash_hex, cursor_ts, MAX_RESPONSE_MESSAGES, after_id=cursor_id
             )
             if not page:
+                try_flush_run()
                 break
-            cursor = page[-1]["timestamp"]
-            scanned += len(page)
-            permitted.extend(self._filter_rows_by_tenure(
-                channel, channel_hash_hex, requester_hex, page
-            ))
 
-            if len(permitted) >= MAX_RESPONSE_MESSAGES:
-                permitted = permitted[:MAX_RESPONSE_MESSAGES]
-                truncated = True
+            stop = False
+            for row in page:
+                if run_ts is not None and row["timestamp"] != run_ts:
+                    flushed = try_flush_run()
+                    run_rows = []
+                    if not flushed:
+                        stop = True
+                        break
+                    if scanned >= MAX_SWEEP_SCAN:
+                        truncated = True
+                        stop = True
+                        break
+
+                run_ts = row["timestamp"]
+                run_rows.append(row)
+                cursor_ts = row["timestamp"]
+                cursor_id = row["id"]
+                scanned += 1
+
+            if stop:
                 break
             if len(page) < MAX_RESPONSE_MESSAGES:
-                break
-            if scanned >= MAX_SWEEP_SCAN:
-                truncated = True
-                RNS.log(
-                    f"TrenchChat [sync]: sweep for {requester_hex[:12]}… on "
-                    f"{channel_hash_hex[:12]}… stopped after {scanned} rows",
-                    RNS.LOG_DEBUG,
-                )
+                try_flush_run()
                 break
 
-        return permitted, truncated
+        if truncated:
+            RNS.log(
+                f"TrenchChat [sync]: sweep for {requester_hex[:12]}… on "
+                f"{channel_hash_hex[:12]}… stopped after {scanned} rows scanned, "
+                f"{len(permitted)} permitted",
+                RNS.LOG_DEBUG,
+            )
+
+        return permitted, truncated, scan_cursor
 
     def _filter_rows_by_tenure(self, channel, channel_hash_hex: str,
                                requester_hex: str, rows: list) -> list:
@@ -662,10 +772,26 @@ class SyncManager:
             received=len(messages), inserted=inserted_count, truncated=truncated,
         )
 
-        # Only chain a follow-up when the watermark actually moved past what we
-        # asked for; a responder that repeats itself can't induce a loop.
-        if truncated and newest_ts > requested_since:
-            self._continue_sync(channel_hash_hex, peer_hex, newest_ts)
+        # A truncated response whose scan ran entirely through rows withheld
+        # from us never advances newest_ts, since nothing was accepted -- but
+        # the responder still made forward progress worth resuming from.
+        # F_SYNC_SCAN_CURSOR carries that progress for the next request only;
+        # it never feeds the persisted watermark above, so a withheld run
+        # is re-scanned (bounded, indexed) rather than ever being skipped.
+        resume_ts = newest_ts
+        scan_cursor_raw = fields.get(F_SYNC_SCAN_CURSOR)
+        if scan_cursor_raw is not None:
+            try:
+                scan_cursor = float(scan_cursor_raw)
+            except (TypeError, ValueError):
+                scan_cursor = None
+            if scan_cursor is not None and scan_cursor > resume_ts:
+                resume_ts = scan_cursor
+
+        # Only chain a follow-up when we actually have somewhere new to resume
+        # from; a responder that repeats itself can't induce a loop.
+        if truncated and resume_ts > requested_since:
+            self._continue_sync(channel_hash_hex, peer_hex, resume_ts)
 
     # --- helpers ---
 
@@ -721,7 +847,7 @@ class SyncManager:
 
         with self._sync_policy_lock:
             self._sync_policy[channel_hash_hex] = self._sync_policy_for(channel_hash_hex)
-        self._record_pending_request(channel_hash_hex, dest_hex, since_ts)
+        req_id = self._record_pending_request(channel_hash_hex, dest_hex, since_ts)
         sent = self._send_raw(dest_hex, {
             F_MSG_TYPE:          MT_SYNC_REQUEST,
             F_CHANNEL_HASH:      bytes.fromhex(channel_hash_hex),
@@ -740,7 +866,7 @@ class SyncManager:
             # Nothing went out, so nothing can answer it.  Dropping the entry
             # also keeps a response from a peer we never reached from being
             # treated as solicited.
-            self._drop_pending_request(channel_hash_hex, dest_hex)
+            self._drop_pending_request(channel_hash_hex, dest_hex, req_id)
             self._status.request_unreachable(channel_hash_hex, dest_hex)
         return sent
 
@@ -778,39 +904,87 @@ class SyncManager:
         return forms
 
     def _record_pending_request(self, channel_hash_hex: str, dest_hex: str,
-                                since_ts: float = 0.0):
-        """Remember that we asked dest_hex for history on this channel."""
-        entry = (time.time(), since_ts, dest_hex)
-        with self._pending_requests_lock:
-            for form in self._peer_key_forms(dest_hex):
-                self._pending_requests[(channel_hash_hex, form)] = entry
+                                since_ts: float = 0.0) -> int:
+        """Remember that we asked dest_hex for history on this channel.
 
-    def _drop_pending_request(self, channel_hash_hex: str, dest_hex: str):
-        """Forget a request that was never actually sent."""
+        A peer may have more than one request outstanding at once, so this
+        appends to a per-(channel, peer-key-form) queue rather than replacing
+        a single slot -- otherwise a second trigger racing an earlier one
+        (e.g. startup sync and an announce-driven request) would overwrite
+        the first request's entry before either could be claimed. Returns a
+        request id so a failed send can retract exactly this entry.
+        """
+        with self._pending_requests_lock:
+            self._pending_request_seq += 1
+            req_id = self._pending_request_seq
+            entry = (time.time(), since_ts, dest_hex, req_id)
+            for form in self._peer_key_forms(dest_hex):
+                self._pending_requests.setdefault((channel_hash_hex, form), []).append(entry)
+        return req_id
+
+    def _drop_pending_request(self, channel_hash_hex: str, dest_hex: str,
+                              req_id: int | None = None):
+        """Forget a request that was never actually sent.
+
+        Drops exactly req_id when given; otherwise drops the most recently
+        recorded entry for dest_hex on this channel.
+        """
         with self._pending_requests_lock:
             for form in self._peer_key_forms(dest_hex):
-                self._pending_requests.pop((channel_hash_hex, form), None)
+                key = (channel_hash_hex, form)
+                entries = self._pending_requests.get(key)
+                if not entries:
+                    continue
+                if req_id is not None:
+                    entries[:] = [e for e in entries if e[3] != req_id]
+                else:
+                    entries.pop()
+                if not entries:
+                    del self._pending_requests[key]
 
     def _claim_pending_request(self, channel_hash_hex: str,
                                responder_hex: str) -> tuple[float, str] | None:
-        """Consume the outstanding request this response claims to answer.
+        """Consume the oldest outstanding request this response could answer.
 
         Returns the window start we asked for and the identity hex we addressed
         the request to, or None if nothing was outstanding.  A response may
         identify its sender by either the identity or the delivery destination
         hash, so the recorded form is what the rest of the exchange keys on.
-        Consuming the entry makes a single request answerable only once.
+        Consuming the entry makes a single request answerable only once; a
+        second, independently outstanding request to the same peer remains
+        queued for a later response to claim.
         """
         now = time.time()
         with self._pending_requests_lock:
-            for stale_key, (ts, _since, _peer) in list(self._pending_requests.items()):
-                if now - ts > SYNC_RESPONSE_WINDOW_SECS:
+            for stale_key, entries in list(self._pending_requests.items()):
+                fresh = [e for e in entries if now - e[0] <= SYNC_RESPONSE_WINDOW_SECS]
+                if fresh:
+                    self._pending_requests[stale_key] = fresh
+                else:
                     del self._pending_requests[stale_key]
+
             claimed = None
+            claimed_req_id = None
             for form in self._peer_key_forms(responder_hex):
-                entry = self._pending_requests.pop((channel_hash_hex, form), None)
-                if entry is not None:
-                    claimed = (entry[1], entry[2])
+                key = (channel_hash_hex, form)
+                entries = self._pending_requests.get(key)
+                if entries:
+                    _issued, since, peer, claimed_req_id = entries.pop(0)
+                    claimed = (since, peer)
+                    if not entries:
+                        del self._pending_requests[key]
+                    break
+            if claimed is not None:
+                # The same request was recorded under the peer's other key
+                # form too; remove that twin copy so it can't be claimed again.
+                for form in self._peer_key_forms(claimed[1]):
+                    key = (channel_hash_hex, form)
+                    entries = self._pending_requests.get(key)
+                    if not entries:
+                        continue
+                    entries[:] = [e for e in entries if e[3] != claimed_req_id]
+                    if not entries:
+                        del self._pending_requests[key]
             return claimed
 
     def _deep_sync_allowed(self, channel_hash_hex: str, requester_hex: str) -> bool:

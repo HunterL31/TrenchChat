@@ -12,7 +12,6 @@ lost on restart; everything Storage persisted to SQLite survives.
 import time
 
 import msgpack
-import RNS
 
 from tests.helpers import wait_for, wait_for_message, wait_for_subscriber
 from trenchchat.core.messaging import _compute_message_id
@@ -61,39 +60,17 @@ def _insert_message(storage, ch_hash, sender_hex, content, ts=None):
 # Restart helpers
 # ---------------------------------------------------------------------------
 
-def _stop_peer(peer):
-    """Fully tear a TestPeer down so its identity can be reused by a fresh
-    peer_factory() call, modeling a process restart.
-
-    TestPeer.teardown() (conftest.py) deregisters the LXMF delivery
-    destination, the trenchchat.user destination, and any owned-channel
-    destinations -- but two more IN destinations are registered with
-    RNS.Transport and never deregistered by that teardown or by LXMF's own
-    exit_handler():
-      - Identity.__init__ registers the identity's own IN destination
-        (trenchchat/core/identity.py:88-94).
-      - LXMRouter.__init__ unconditionally creates and registers a
-        propagation_destination (LXMF/LXMRouter.py:190); exit_handler() only
-        unhooks its callbacks/request handlers, never deregisters it.
-    Without clearing these too, a second peer_factory() call for the same
-    identity raises "Attempt to register an already registered destination."
-    """
-    for dest in (peer.identity.destination,
-                 peer.router.lxmf_router.propagation_destination):
-        try:
-            RNS.Transport.deregister_destination(dest)
-        except Exception:
-            pass
-    peer.teardown()
-
-
 def _restart_peer(peer_factory, peer):
     """Simulate a process restart: tear the peer down, then rebuild it fresh
     over the same on-disk identity file and storage.db via a second
     peer_factory() call for the same name (conftest.py's make_peer() does
     peer_dir.mkdir(..., exist_ok=True), so the directory is happily reused).
+
+    peer.teardown() (conftest.py) fully deregisters everything the peer
+    registered with RNS.Transport, so the identity is free for a fresh
+    peer_factory() call under the same name.
     """
-    _stop_peer(peer)
+    peer.teardown()
     return peer_factory(peer.name)
 
 
