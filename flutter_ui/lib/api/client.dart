@@ -90,7 +90,15 @@ class ApiClient {
 
   Future<Uint8List?> getPeerAvatar(String peerHashHex) async {
     final res = await _http.get(_u('/peers/$peerHashHex/avatar'));
-    final body = jsonDecode(res.body) as Map<String, dynamic>;
+    // A peer with no avatar is routine, and an unreachable backend must not
+    // throw out of a widget build -- treat anything undecodable as "no avatar".
+    final Object? body;
+    try {
+      body = jsonDecode(res.body);
+    } on FormatException {
+      return null;
+    }
+    if (body is! Map<String, dynamic>) return null;
     final b64 = body['avatar_data_b64'] as String?;
     if (b64 == null) return null;
     return base64Decode(b64);
