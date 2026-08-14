@@ -216,6 +216,19 @@ CREATE TABLE IF NOT EXISTS pending_member_docs (
     meta_blob     BLOB NOT NULL,
     received_at   REAL NOT NULL
 );
+
+-- Invite tokens received but not yet accepted or declined. Durable copy of
+-- what used to live only in MainWindow._pending_invites, so a restart
+-- before the user decides doesn't lose the invite. Carries no more trust
+-- than the in-memory list did: the token is still verified at accept time.
+CREATE TABLE IF NOT EXISTS pending_invites (
+    channel_hash  TEXT PRIMARY KEY,
+    channel_name  TEXT NOT NULL DEFAULT '',
+    token         BLOB NOT NULL,
+    expiry        REAL NOT NULL,
+    admin_hash    TEXT NOT NULL,
+    received_at   REAL NOT NULL
+);
 """
 
 
@@ -1367,6 +1380,36 @@ class Storage:
             self._conn.execute(
                 "DELETE FROM pending_member_docs WHERE channel_hash = ?",
                 (channel_hash,),
+            )
+
+    # --- pending (unaccepted) invites ---
+
+    def record_pending_invite(self, channel_hash: str, channel_name: str,
+                              token: bytes, expiry: float, admin_hash: str) -> None:
+        with self._tx():
+            self._conn.execute("""
+                INSERT OR REPLACE INTO pending_invites
+                    (channel_hash, channel_name, token, expiry, admin_hash, received_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (channel_hash, channel_name, token, expiry, admin_hash, time.time()))
+
+    def get_pending_invites(self) -> list[sqlite3.Row]:
+        """Return unexpired pending invites, oldest first."""
+        return self._fetchall("""
+            SELECT * FROM pending_invites WHERE expiry > ? ORDER BY received_at
+        """, (time.time(),))
+
+    def clear_pending_invite(self, channel_hash: str) -> None:
+        with self._tx():
+            self._conn.execute(
+                "DELETE FROM pending_invites WHERE channel_hash = ?", (channel_hash,)
+            )
+
+    def purge_expired_pending_invites(self, now: float | None = None) -> None:
+        with self._tx():
+            self._conn.execute(
+                "DELETE FROM pending_invites WHERE expiry < ?",
+                (now if now is not None else time.time(),),
             )
 
     # --- spent / revoked invite tokens ---

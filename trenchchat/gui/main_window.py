@@ -313,6 +313,15 @@ class MainWindow(QMainWindow):
         channel_mgr.add_channel_discovered_callback(self._on_channel_discovered)
         presence_mgr.add_presence_callback(self._on_presence_changed)
 
+        # Restore invites received before a previous restart, but not yet
+        # accepted or declined.
+        for inv in invite_mgr.list_pending_invites():
+            self._pending_invites.append((
+                inv["channel_hash_hex"], inv["channel_name"], inv["token"],
+                inv["expiry"], inv["admin_hash_hex"],
+            ))
+        self._update_invite_bar()
+
         self._avatar_updated.connect(self._on_avatar_updated_main_thread)
         if avatar_mgr is not None:
             avatar_mgr.add_avatar_callback(self._avatar_updated.emit)
@@ -1482,6 +1491,8 @@ class MainWindow(QMainWindow):
             channel_hash, _name, token, _expiry, _admin = self._pending_invites.pop(0)
             if token is None:
                 self._invite_mgr.decline_pending_membership(channel_hash)
+            else:
+                self._invite_mgr.decline_invite(channel_hash)
         self._update_invite_bar()
 
     @pyqtSlot()

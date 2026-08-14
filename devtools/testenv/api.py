@@ -208,7 +208,16 @@ def create_app(backend: Backend) -> FastAPI:
 
     # Pending invites, exactly like MainWindow._pending_invites -- nothing
     # is sent to the network until the user explicitly accepts or declines.
+    # Seeded from storage so a restart doesn't lose an invite awaiting a
+    # decision.
     pending_invites: list[dict[str, Any]] = []
+    for inv in backend.invite_mgr.list_pending_invites():
+        pending_invites.append({
+            "channel_hash_hex": inv["channel_hash_hex"], "channel_name": inv["channel_name"],
+            "token_hex": inv["token"].hex(), "expiry": inv["expiry"],
+            "admin_hex": inv["admin_hash_hex"],
+            "scope_kind": backend.invite_mgr.invite_scope_kind(inv["channel_hash_hex"]),
+        })
 
     def _on_invite(channel_hash_hex, channel_name, token, expiry, admin_hex):
         # A re-invite to the same channel refreshes the pending entry (new
@@ -618,6 +627,7 @@ def create_app(backend: Backend) -> FastAPI:
         match = next((i for i in pending_invites if i["channel_hash_hex"] == channel_hash), None)
         if match is not None:
             pending_invites.remove(match)
+        backend.invite_mgr.decline_invite(channel_hash)
         return {"ok": True}
 
     # --- messages ---
