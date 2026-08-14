@@ -47,6 +47,22 @@ _GIF_INLINE_LOOPS = 2
 
 _INLINE_EMOJI_PX = 20   # height of inline emoji images in message text
 
+
+def _should_group(sender_hash: str, sender_name: str,
+                  last_sender: str | None, last_name: str | None,
+                  ts: float, last_ts: float) -> bool:
+    """Return True if a message folds into the previous row's group.
+
+    The name is part of the key because a grouped row renders as a
+    MessageContinuation, which carries no name header -- so a message sent
+    after a rename would display under the sender's previous name.
+    """
+    return (
+        sender_hash == last_sender
+        and sender_name == last_name
+        and (ts - last_ts) < GROUP_WINDOW_SECS
+    )
+
 # Matches :name@hexhash: (new unambiguous format) or :name: (legacy).
 # Group 1 = name, group 2 = 64-char hex hash (may be absent for legacy tokens).
 _EMOJI_TOKEN_RE = re.compile(
@@ -840,6 +856,7 @@ class ChannelView(QWidget):
         self._restore_to_id: str | None = restore_to_id
         # Grouping state — reset on load_history, updated per appended row
         self._last_sender: str | None = None
+        self._last_name: str | None = None
         self._last_ts: float = 0.0
 
         layout = QVBoxLayout(self)
@@ -877,6 +894,7 @@ class ChannelView(QWidget):
         self._avatar_cache.clear()
         self._bubbles_by_sender.clear()
         self._last_sender = None
+        self._last_name = None
         self._last_ts = 0.0
         # Clear existing bubbles (keep the stretch at index 0)
         while self._msg_layout.count() > 1:
@@ -961,11 +979,11 @@ class ChannelView(QWidget):
         ts = row["timestamp"]
         received_at = row["received_at"]
 
-        grouped = (
-            sender_hash == self._last_sender
-            and (ts - self._last_ts) < GROUP_WINDOW_SECS
-        )
+        grouped = _should_group(sender_hash, sender_name,
+                                self._last_sender, self._last_name,
+                                ts, self._last_ts)
         self._last_sender = sender_hash
+        self._last_name = sender_name
         self._last_ts = ts
 
         image_data = row["image_data"] if "image_data" in row.keys() else None

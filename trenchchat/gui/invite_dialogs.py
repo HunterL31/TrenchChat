@@ -20,6 +20,7 @@ from trenchchat.core.permissions import (
     ROLE_ADMIN, ROLE_MEMBER, ROLE_OWNER,
     SEND_MESSAGE,
 )
+from trenchchat.core.presence import resolve_display_name
 from trenchchat.core.storage import Storage
 from trenchchat.core.user_directory import UserDirectory
 
@@ -226,16 +227,41 @@ def _is_valid_hex(value: str) -> bool:
 # MembersDialog — view members, promote/demote admins, remove members
 # ---------------------------------------------------------------------------
 
+def member_label(identity_hex: str, stored_name: str, own_hex: str,
+                 storage: Storage, config=None,
+                 user_directory: UserDirectory | None = None) -> str:
+    """Best available display name for a member row.
+
+    members.display_name is empty for every remote peer -- the signed
+    member-list document carries identity hashes only -- so the stored name
+    is just a fast path for the rows that do have one.
+    """
+    if stored_name:
+        return stored_name
+    prefix_fallback = identity_hex[:12] + "…"
+    resolved = resolve_display_name(identity_hex, own_hex, storage, config)
+    if resolved != prefix_fallback:
+        return resolved
+    if user_directory is not None:
+        for entry in user_directory.search(identity_hex):
+            if entry["identity_hash"] == identity_hex and entry["display_name"]:
+                return entry["display_name"]
+    return prefix_fallback
+
+
 class MembersDialog(QDialog):
     ROLE_DATA = Qt.ItemDataRole.UserRole + 1
 
     def __init__(self, channel_hash_hex: str, channel_name: str,
                  storage: Storage, own_hash_hex: str,
-                 is_local_admin: bool, parent=None):
+                 is_local_admin: bool, parent=None,
+                 config=None, user_directory: UserDirectory | None = None):
         super().__init__(parent)
         self._channel_hash = channel_hash_hex
         self._storage = storage
         self._own_hex = own_hash_hex
+        self._config = config
+        self._user_directory = user_directory
 
         self._can_kick = storage.has_permission(channel_hash_hex, own_hash_hex, KICK)
         self._can_manage_roles = storage.has_permission(channel_hash_hex, own_hash_hex, MANAGE_ROLES)
@@ -286,7 +312,10 @@ class MembersDialog(QDialog):
     def _populate(self):
         self._list.clear()
         for row in self._storage.get_members(self._channel_hash):
-            label = row["display_name"] or row["identity_hash"][:16] + "…"
+            label = member_label(
+                row["identity_hash"], row["display_name"], self._own_hex,
+                self._storage, self._config, self._user_directory,
+            )
             role = row["role"]
             role_tag = f"  [{role}]" if role in (ROLE_OWNER, ROLE_ADMIN) else ""
             own_tag = "  (you)" if row["identity_hash"] == self._own_hex else ""
