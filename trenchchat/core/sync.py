@@ -362,12 +362,20 @@ class SyncManager:
             [self._row_to_dict(r) for r in rows],
             use_bin_type=True,
         )
-        self._send_raw(requester_hex, {
+        sent = self._send_raw(requester_hex, {
             F_MSG_TYPE:       MT_SYNC_RESPONSE,
             F_CHANNEL_HASH:   bytes.fromhex(channel_hash_hex),
             F_SYNC_MESSAGES:  packed,
             F_SYNC_TRUNCATED: truncated,
         })
+
+        # A hint we just served has done its job. The requester clears only its
+        # own hints, and a hint naming them is never broadcast to them, so
+        # without this the row lives here until the window purge.
+        if sent and missed_ids:
+            served = {r["message_id"] for r in rows}
+            if served.issuperset(missed_ids):
+                self._storage.clear_missed_deliveries(channel_hash_hex, requester_hex)
 
     def _merge_rows(self, *row_sets: list) -> list:
         """Combine row lists, dropping duplicate ids and ordering oldest first."""
@@ -490,16 +498,24 @@ class SyncManager:
             return
         requested_since, peer_hex = claim
 
+        # A malformed answer still answers the request.  Leaving the peer
+        # pending would strand the channel reporting "syncing" for the rest of
+        # the session, since nothing else ever resolves that request.
         packed = fields.get(F_SYNC_MESSAGES)
-        if not packed:
-            return
-        try:
-            messages = unpack_wire(packed)
-        except Exception as e:
-            RNS.log(f"TrenchChat: sync_response unpack error: {e}", RNS.LOG_WARNING)
-            return
-        if not isinstance(messages, list):
-            RNS.log("TrenchChat: sync_response payload is not a list", RNS.LOG_WARNING)
+        messages = None
+        if packed:
+            try:
+                unpacked = unpack_wire(packed)
+            except Exception as e:
+                RNS.log(f"TrenchChat: sync_response unpack error: {e}", RNS.LOG_WARNING)
+            else:
+                if isinstance(unpacked, list):
+                    messages = unpacked
+                else:
+                    RNS.log("TrenchChat: sync_response payload is not a list",
+                            RNS.LOG_WARNING)
+        if messages is None:
+            self._status.response_malformed(channel_hash_hex, peer_hex)
             return
 
         has_tenure = self._storage.has_any_tenure(channel_hash_hex)
@@ -512,7 +528,8 @@ class SyncManager:
                 my_role = self._storage.get_role(channel_hash_hex, my_hex)
                 full_sync = has_permission(perms, my_role, FULL_SYNC)
         inserted_count = 0
-        newest_ts = 0.0
+        accepted_ts: list[float] = []
+        failed_ts: float | None = None
         for m in messages:
             try:
                 sender_hash = m.get("sender_hash", "")
@@ -544,10 +561,6 @@ class SyncManager:
                     )
                     continue
 
-                # Only messages that passed validation move the watermark: a
-                # message we refused is not one we have.
-                newest_ts = max(newest_ts, msg_ts)
-
                 image_data = m.get("image_data")
                 if isinstance(image_data, str):
                     image_data = image_data.encode()
@@ -568,6 +581,8 @@ class SyncManager:
                     received_at=time.time(),
                     image_data=image_data,
                 )
+                accepted_ts.append(msg_ts)
+
                 if inserted:
                     inserted_count += 1
                     self._storage.touch_channel(channel_hash_hex)
@@ -576,6 +591,11 @@ class SyncManager:
                     )
             except Exception as e:
                 RNS.log(f"TrenchChat: sync_response insert error: {e}", RNS.LOG_WARNING)
+                try:
+                    msg_ts = float(m.get("timestamp"))
+                except (TypeError, ValueError):
+                    continue
+                failed_ts = msg_ts if failed_ts is None else min(failed_ts, msg_ts)
 
         if inserted_count:
             # Clear hints now that we have the messages
@@ -592,6 +612,13 @@ class SyncManager:
         # Never backwards, either: a hint can serve a message older than
         # everything we already hold, and rewinding the watermark over it would
         # re-request history we have on every future sync.
+        # And never past a message whose insert failed -- the rows after it
+        # landed, but resuming beyond the gap would hide it from every future
+        # sweep, since get_messages_after filters on a strict timestamp >.
+        usable_ts = ([t for t in accepted_ts if t < failed_ts]
+                     if failed_ts is not None else accepted_ts)
+        newest_ts = max(usable_ts) if usable_ts else 0.0
+
         if newest_ts > self._storage.get_last_sync(channel_hash_hex):
             self._storage.update_last_sync(channel_hash_hex, newest_ts)
 
@@ -665,8 +692,14 @@ class SyncManager:
             F_SYNC_WINDOW_START: since_ts,
         })
         if sent:
-            self._status.request_sent(channel_hash_hex, dest_hex,
-                                      continuation=continuation)
+            # Asking from 0 is a request for the whole transcript, not a
+            # re-check, even before we hold anything to compare against.
+            reaching_back = (since_ts <= 0.0
+                             or since_ts < self._storage.get_last_sync(channel_hash_hex))
+            self._status.request_sent(
+                channel_hash_hex, dest_hex, continuation=continuation,
+                reaching_back=reaching_back,
+            )
         else:
             # Nothing went out, so nothing can answer it.  Dropping the entry
             # also keeps a response from a peer we never reached from being

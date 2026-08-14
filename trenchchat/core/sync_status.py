@@ -96,7 +96,7 @@ class SyncStatusTracker:
             self._fire(channel_hash_hex)
 
     def request_sent(self, channel_hash_hex: str, peer_hex: str,
-                     continuation: bool = False) -> None:
+                     continuation: bool = False, reaching_back: bool = False) -> None:
         """A sync request went out to this peer.
 
         Re-asking a peer that already answered, on a channel that is already up
@@ -104,6 +104,11 @@ class SyncStatusTracker:
         leaves the reported state alone, so a settled channel doesn't flicker
         for the life of the session; an answer carrying anything new still
         moves it.
+
+        *reaching_back* marks a request for history older than our watermark.
+        That is not a re-check but a real attempt to fill a gap, so it must
+        show -- otherwise a round where every peer stays silent still reports
+        the channel as up to date.
         """
         with self._lock:
             before = self._snapshot_locked(channel_hash_hex)
@@ -112,6 +117,7 @@ class SyncStatusTracker:
             peer = rec.peers.setdefault(peer_hex, _PeerRecord())
 
             quiet = (not continuation
+                     and not reaching_back
                      and peer.state == PeerSyncState.ANSWERED
                      and self._derive_locked(channel_hash_hex) == SyncState.SYNCED)
             peer.requested_at = time.time()
@@ -148,6 +154,22 @@ class SyncStatusTracker:
             peer.messages_received += received
             peer.truncated = truncated
             rec.received_count += inserted
+            changed = before != self._snapshot_locked(channel_hash_hex)
+        if changed:
+            self._fire(channel_hash_hex)
+
+    def response_malformed(self, channel_hash_hex: str, peer_hex: str) -> None:
+        """A peer answered, but the payload was unusable.
+
+        The request is resolved either way -- nothing else will ever answer
+        it -- but the peer told us nothing, so it counts as silent rather
+        than answered.
+        """
+        with self._lock:
+            before = self._snapshot_locked(channel_hash_hex)
+            rec = self._channels.setdefault(channel_hash_hex, _ChannelRecord())
+            peer = rec.peers.setdefault(peer_hex, _PeerRecord())
+            peer.state = PeerSyncState.SILENT
             changed = before != self._snapshot_locked(channel_hash_hex)
         if changed:
             self._fire(channel_hash_hex)
@@ -242,7 +264,13 @@ class SyncStatusTracker:
         if rec.gap or any(p.truncated for p in rec.peers.values()):
             return SyncState.INCOMPLETE
         if PeerSyncState.ANSWERED in states:
-            return SyncState.SYNCED
+            # One peer answering says nothing about what a peer that went
+            # silent was holding, so a single answer can't certify the channel
+            # while others never replied.
+            if all(s in (PeerSyncState.ANSWERED, PeerSyncState.UNREACHABLE)
+                   for s in states):
+                return SyncState.SYNCED
+            return SyncState.INCOMPLETE
         if states and all(s == PeerSyncState.UNREACHABLE for s in states):
             return SyncState.WAITING
         return SyncState.INCOMPLETE
