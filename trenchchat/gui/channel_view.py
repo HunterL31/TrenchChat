@@ -19,13 +19,14 @@ import re
 import time
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QScrollArea, QLabel, QSizePolicy, QDialog,
-    QPushButton,
+    QPushButton, QStackedWidget,
 )
 from PyQt6.QtCore import Qt, QTimer, QBuffer, QByteArray, QIODevice, pyqtSignal
 from PyQt6.QtGui import QColor, QIcon, QPixmap, QPainter, QPainterPath, QMovie
 
 from trenchchat.core.reaction import ReactionManager
 from trenchchat.core.storage import Storage
+from trenchchat.core.sync_status import SyncState
 
 # Messages received more than this many seconds after their timestamp are "late"
 LATE_THRESHOLD_SECS = 30.0
@@ -858,6 +859,7 @@ class ChannelView(QWidget):
         self._last_sender: str | None = None
         self._last_name: str | None = None
         self._last_ts: float = 0.0
+        self._sync_state: str = SyncState.UNKNOWN.value
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -876,7 +878,15 @@ class ChannelView(QWidget):
         self._msg_layout.addStretch()
 
         self._scroll.setWidget(self._container)
-        layout.addWidget(self._scroll)
+
+        self._empty_placeholder = QLabel("No messages yet")
+        self._empty_placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._empty_placeholder.setStyleSheet("color: #666; font-size: 13px;")
+
+        self._view_stack = QStackedWidget()
+        self._view_stack.addWidget(self._scroll)
+        self._view_stack.addWidget(self._empty_placeholder)
+        layout.addWidget(self._view_stack)
 
         self._out_of_order_bar = QLabel()
         self._out_of_order_bar.setStyleSheet(
@@ -884,6 +894,13 @@ class ChannelView(QWidget):
         )
         self._out_of_order_bar.hide()
         layout.addWidget(self._out_of_order_bar)
+
+        self._sync_bar = QLabel()
+        self._sync_bar.setStyleSheet(
+            "background: #1e2a3a; color: #7eb8f7; padding: 4px 8px; font-size: 11px;"
+        )
+        self._sync_bar.hide()
+        layout.addWidget(self._sync_bar)
 
         self.load_history()
 
@@ -905,6 +922,7 @@ class ChannelView(QWidget):
         rows = self._storage.get_messages(self._channel_hash, limit=_MESSAGE_HISTORY_LIMIT)
         for row in rows:
             self._append_bubble(row, scroll=False)
+        self._update_empty_state()
 
         # Consume the restore point: scroll to it on first open, then clear so
         # subsequent reloads (out-of-order arrivals) scroll to bottom instead.
@@ -1038,6 +1056,7 @@ class ChannelView(QWidget):
 
         self._bubble_map[msg_id] = widget
         self._msg_layout.insertWidget(self._msg_layout.count(), widget)
+        self._update_empty_state()
 
         if scroll:
             QTimer.singleShot(50, self._scroll_to_bottom)
@@ -1089,3 +1108,37 @@ class ChannelView(QWidget):
     def clear_out_of_order_indicator(self):
         self._out_of_order_count = 0
         self._out_of_order_bar.hide()
+
+    def set_sync_status(self, status: dict) -> None:
+        """Update the sync bar and empty-history placeholder from tracker status."""
+        self._sync_state = status.get("state", SyncState.UNKNOWN.value)
+        self._render_sync_bar(status)
+        self._update_empty_state()
+
+    def _render_sync_bar(self, status: dict) -> None:
+        state = status.get("state", SyncState.UNKNOWN.value)
+        if state == SyncState.SYNCING.value:
+            text = "Syncing…"
+            pending = status.get("pending_peers", 0)
+            if pending > 0:
+                text += f" ({pending} peers)"
+            self._sync_bar.setText(text)
+            self._sync_bar.show()
+        elif state == SyncState.INCOMPLETE.value:
+            self._sync_bar.setText("Some history is missing")
+            self._sync_bar.show()
+        elif state == SyncState.WAITING.value:
+            self._sync_bar.setText("No peers available to sync from")
+            self._sync_bar.show()
+        else:
+            self._sync_bar.hide()
+
+    def _update_empty_state(self) -> None:
+        if self._displayed_ids:
+            self._view_stack.setCurrentWidget(self._scroll)
+            return
+        if self._sync_state == SyncState.SYNCING.value:
+            self._empty_placeholder.setText("Syncing history…")
+        else:
+            self._empty_placeholder.setText("No messages yet")
+        self._view_stack.setCurrentWidget(self._empty_placeholder)

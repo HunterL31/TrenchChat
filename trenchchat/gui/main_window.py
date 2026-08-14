@@ -43,6 +43,7 @@ from trenchchat.core.subscription import SubscriptionManager
 from trenchchat.core.invite import InviteManager
 from trenchchat.core.reaction import ReactionManager
 from trenchchat.core.sync import SyncManager
+from trenchchat.core.sync_status import SyncState
 from trenchchat.core.user_directory import UserDirectory
 from trenchchat.network.router import Router
 from trenchchat.network.announce import PeerAnnounceHandler
@@ -248,6 +249,7 @@ class MainWindow(QMainWindow):
     _avatar_updated       = pyqtSignal(str)         # identity_hash_hex
     _reaction_updated     = pyqtSignal(str, str)    # channel_hash_hex, message_id
     _emoji_received       = pyqtSignal(str)         # emoji_hash — new emoji image arrived
+    _sync_status_changed  = pyqtSignal(str)         # channel_hash_hex
 
     def __init__(self, config: Config, identity: Identity, storage: Storage,
                  rns: "RNS.Reticulum", router: Router, channel_mgr: ChannelManager,
@@ -276,6 +278,9 @@ class MainWindow(QMainWindow):
         self._pending_invites: list[tuple] = []
 
         self._channel_views: dict[str, ChannelView] = {}
+        # channel_hash_hex -> SyncState value, for channels currently syncing or
+        # incomplete; entries are removed once a channel settles.
+        self._channel_sync_state: dict[str, str] = {}
         self._current_channel: str | None = None
         self._settings = QSettings("TrenchChat", "TrenchChat")
         # Server hashes whose channels are hidden in the sidebar. QSettings
@@ -321,6 +326,8 @@ class MainWindow(QMainWindow):
         self._sync_mgr = SyncManager(
             identity, storage, router, messaging, subscription_mgr, invite_mgr
         )
+        self._sync_status_changed.connect(self._on_sync_status_changed_main_thread)
+        self._sync_mgr.status.add_status_callback(self._sync_status_changed.emit)
 
         def _on_peer_appeared(peer_hex: str, iface) -> None:
             self._sync_mgr.on_peer_appeared(peer_hex)
@@ -694,7 +701,8 @@ class MainWindow(QMainWindow):
         perms = permissions_from_json(row["permissions"])
         lock = " 🔒" if not is_open_join(perms) else ""
         prefix = "    # " if indented else "# "
-        item = QListWidgetItem(f"{prefix}{row['name']}{lock}")
+        sync_mark = " ⟳" if row["hash"] in self._channel_sync_state else ""
+        item = QListWidgetItem(f"{prefix}{row['name']}{lock}{sync_mark}")
         item.setData(Qt.ItemDataRole.UserRole, row["hash"])
         self._channel_list_widget.addItem(item)
 
@@ -809,7 +817,9 @@ class MainWindow(QMainWindow):
             self._channel_views[channel_hash_hex] = view
             self._stack.addWidget(view)
 
-        self._stack.setCurrentWidget(self._channel_views[channel_hash_hex])
+        current_view = self._channel_views[channel_hash_hex]
+        current_view.set_sync_status(self._sync_mgr.status.get_status(channel_hash_hex))
+        self._stack.setCurrentWidget(current_view)
 
         channel = self._storage.get_channel(channel_hash_hex)
         if channel:
@@ -1276,6 +1286,23 @@ class MainWindow(QMainWindow):
         """
         for view in self._channel_views.values():
             view.load_history()
+
+    @pyqtSlot(str)
+    @pyqtSlot(str)
+    def _on_sync_status_changed_main_thread(self, channel_hash_hex: str) -> None:
+        """Update the sidebar indicator, and the channel view if it's visible."""
+        status = self._sync_mgr.status.get_status(channel_hash_hex)
+        state = status["state"]
+        if state in (SyncState.SYNCING.value, SyncState.INCOMPLETE.value):
+            self._channel_sync_state[channel_hash_hex] = state
+        else:
+            self._channel_sync_state.pop(channel_hash_hex, None)
+        self._refresh_channel_list()
+
+        if channel_hash_hex == self._current_channel:
+            view = self._channel_views.get(channel_hash_hex)
+            if view is not None:
+                view.set_sync_status(status)
 
     @pyqtSlot(str, str)
     def _on_react_requested(self, channel_hash_hex: str, message_id: str) -> None:
