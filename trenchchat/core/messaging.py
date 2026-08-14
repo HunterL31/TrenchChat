@@ -169,6 +169,19 @@ class Messaging:
             if not self._pending[dest_hex]:
                 del self._pending[dest_hex]
 
+    def _may_receive(self, channel_hash_hex: str, dest_hex: str) -> bool:
+        """Whether this peer is still entitled to receive the channel's messages.
+
+        A queue survives a kick, so a message queued before one would otherwise
+        be pushed at the peer the moment they reappear.
+        """
+        channel = self._storage.get_channel(channel_hash_hex)
+        if channel is None:
+            return False
+        if is_open_join(permissions_from_json(channel["permissions"])):
+            return True
+        return self._storage.is_member(channel_hash_hex, dest_hex)
+
     def flush_pending(self, dest_hex: str):
         """Attempt to deliver all queued messages for a peer whose path is now known."""
         queued = self._pending.pop(dest_hex, [])
@@ -184,6 +197,14 @@ class Messaging:
                 return
             for params in queued:
                 try:
+                    if not self._may_receive(params["channel_hash_hex"], dest_hex):
+                        RNS.log(
+                            f"TrenchChat: dropping queued message for "
+                            f"{dest_hex[:12]}… — no longer a member of "
+                            f"{params['channel_hash_hex'][:12]}…",
+                            RNS.LOG_WARNING,
+                        )
+                        continue
                     lxm = self._build_lxm(dest_identity, params)
                     subs = params.get("subscriber_hashes", [])
                     lxm.register_failed_callback(

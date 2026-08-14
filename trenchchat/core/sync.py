@@ -119,12 +119,16 @@ class SyncManager:
         # (channel_hash_hex, peer_hex) -> time we last served that peer a
         # deep backfill sweep for that channel.  In-memory only; a restart
         # resets it, which is acceptable for a soft rate limit.
-        self._deep_sync_last_served: dict[tuple[str, str], float] = {}
+        self._deep_sync_last_served: dict[tuple[str, str], tuple[float, str]] = {}
         self._deep_sync_lock = threading.Lock()
 
         # (channel_hash_hex, peer_hex) -> continuation requests chained so far
         self._continuations: dict[tuple[str, str], int] = {}
         self._continuations_lock = threading.Lock()
+
+        # channel_hash_hex -> the entitlement the last request was issued under
+        self._sync_policy: dict[str, tuple[str, str]] = {}
+        self._sync_policy_lock = threading.Lock()
 
         self._status = SyncStatusTracker(storage)
 
@@ -166,7 +170,26 @@ class SyncManager:
         """
         self._request_sync_for_channel(channel_hash_hex, 0.0)
 
+    def _sync_policy_for(self, channel_hash_hex: str) -> tuple[str, str]:
+        """What our entitlement to this channel's history currently depends on."""
+        channel = self._storage.get_channel(channel_hash_hex)
+        role = self._storage.get_role(channel_hash_hex, self._identity.hash_hex)
+        return (channel["permissions"] if channel else "", role or "")
+
     def _request_sync_for_channel(self, channel_hash_hex: str, since_ts: float):
+        # History withheld under an earlier role sits behind the watermark, so
+        # resuming incrementally would never look back past it. A change in what
+        # we are entitled to see is the one moment worth re-asking from the start.
+        with self._sync_policy_lock:
+            previous = self._sync_policy.get(channel_hash_hex)
+        if previous is not None and previous != self._sync_policy_for(channel_hash_hex):
+            RNS.log(
+                f"TrenchChat [sync]: sync entitlement changed for "
+                f"{channel_hash_hex[:12]}… — re-asking from the start",
+                RNS.LOG_NOTICE,
+            )
+            since_ts = 0.0
+
         peers = self._get_channel_peers(channel_hash_hex)
         if not peers:
             self._status.note_no_peers(channel_hash_hex)
@@ -450,10 +473,11 @@ class SyncManager:
             whichever role(s) should be able to backfill full history, e.g.
             admin but not member.
         """
+        perms = permissions_from_json(channel["permissions"]) if channel else {}
+
         if not self._storage.has_any_tenure(channel_hash_hex):
             return rows
 
-        perms = permissions_from_json(channel["permissions"]) if channel else {}
         requester_role = self._storage.get_role(channel_hash_hex, requester_hex)
         full_sync = has_permission(perms, requester_role, FULL_SYNC)
         valid_rows = []
@@ -483,6 +507,17 @@ class SyncManager:
     def _handle_sync_response(self, fields: dict, channel_hash_hex: str,
                               responder_hex: str = ""):
         if not self._storage.is_subscribed(channel_hash_hex):
+            return
+
+        # Membership can change while a request is in flight, and tenure only
+        # says what we were entitled to when each message was sent -- this is
+        # the only check on whether we are still entitled to receive any of it.
+        if not self._peer_may_participate(channel_hash_hex, self._identity.hash_hex):
+            RNS.log(
+                f"TrenchChat [sync]: dropping sync response for "
+                f"{channel_hash_hex[:12]}… — we are no longer a member",
+                RNS.LOG_WARNING,
+            )
             return
 
         # The gate is that we asked this peer for this channel, not that they
@@ -521,12 +556,11 @@ class SyncManager:
         has_tenure = self._storage.has_any_tenure(channel_hash_hex)
         my_hex = self._identity.hash_hex
         full_sync = False
-        if has_tenure:
-            channel = self._storage.get_channel(channel_hash_hex)
-            if channel:
-                perms = permissions_from_json(channel["permissions"])
-                my_role = self._storage.get_role(channel_hash_hex, my_hex)
-                full_sync = has_permission(perms, my_role, FULL_SYNC)
+        channel = self._storage.get_channel(channel_hash_hex)
+        perms = permissions_from_json(channel["permissions"]) if channel else {}
+        if has_tenure and channel:
+            my_role = self._storage.get_role(channel_hash_hex, my_hex)
+            full_sync = has_permission(perms, my_role, FULL_SYNC)
         inserted_count = 0
         accepted_ts: list[float] = []
         failed_ts: float | None = None
@@ -685,6 +719,8 @@ class SyncManager:
             with self._continuations_lock:
                 self._continuations.pop((channel_hash_hex, dest_hex), None)
 
+        with self._sync_policy_lock:
+            self._sync_policy[channel_hash_hex] = self._sync_policy_for(channel_hash_hex)
         self._record_pending_request(channel_hash_hex, dest_hex, since_ts)
         sent = self._send_raw(dest_hex, {
             F_MSG_TYPE:          MT_SYNC_REQUEST,
@@ -785,17 +821,25 @@ class SyncManager:
         attempt within DEEP_SYNC_COOLDOWN_SECS. Only guards the timestamp-
         sweep fallback -- hint-targeted responses are already small and
         exact, not a bulk-sweep concern.
+
+        A permissions change lifts the cooldown early: the refusal it would
+        otherwise enforce was decided under a policy that no longer applies,
+        and the requester would be made to wait it out for history they are
+        now entitled to.
         """
         now = time.time()
         key = (channel_hash_hex, requester_hex)
+        channel = self._storage.get_channel(channel_hash_hex)
+        policy = channel["permissions"] if channel else ""
         with self._deep_sync_lock:
-            for stale_key, ts in list(self._deep_sync_last_served.items()):
-                if now - ts > DEEP_SYNC_COOLDOWN_PRUNE_SECS:
+            for stale_key, entry in list(self._deep_sync_last_served.items()):
+                if now - entry[0] > DEEP_SYNC_COOLDOWN_PRUNE_SECS:
                     del self._deep_sync_last_served[stale_key]
             last = self._deep_sync_last_served.get(key)
-            if last is not None and now - last < DEEP_SYNC_COOLDOWN_SECS:
+            if (last is not None and now - last[0] < DEEP_SYNC_COOLDOWN_SECS
+                    and last[1] == policy):
                 return False
-            self._deep_sync_last_served[key] = now
+            self._deep_sync_last_served[key] = (now, policy)
             return True
 
     def _send_raw(self, dest_hex: str, fields: dict) -> bool:

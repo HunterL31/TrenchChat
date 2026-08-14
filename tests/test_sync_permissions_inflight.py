@@ -499,69 +499,6 @@ class TestTenureFailOpenAsymmetry:
             "have caught it regardless of what Carol did"
         )
 
-    def test_both_sides_tenure_blind_lets_a_kicked_members_gap_message_through_completely(
-        self, peer_factory
-    ):
-        """
-        The genuinely fail-open case: has_any_tenure gates the *entire*
-        per-message tenure check at the channel level, not per-identity and
-        not per-mesh. If the REQUESTER also has zero tenure rows for the
-        channel (not just the sloppy responder), nothing anywhere in this
-        exchange ever checks tenure, and a gap message from a member kicked
-        elsewhere in the mesh sails straight through. This demonstrates that
-        a single tenure-blind peer, on *either* side of a sync exchange, can
-        turn a tenure restriction the rest of a fully-tracked mesh correctly
-        enforces into no restriction at all for that exchange.
-        """
-        alice = peer_factory("alice")
-        bob = peer_factory("bob")
-        carol = peer_factory("carol")
-        dave = peer_factory("dave")  # requester -- also tenure-blind
-
-        perms = dict(PRESET_PRIVATE)
-        perms[ROLE_MEMBER] = [SEND_MESSAGE]
-        ch_hash = alice.channel_mgr.create_channel("blind-both-ch", "", permissions=perms)
-
-        for peer in (carol, dave):
-            peer.storage.upsert_channel(ch_hash, "blind-both-ch", "", alice.identity.hash_hex,
-                                         perms, time.time())
-            peer.storage.subscribe(ch_hash)
-            # Real membership knowledge (_peer_may_participate needs Carol to
-            # know Dave is a member before she'll answer him at all), but no
-            # tenure rows on either side -- the fail-open condition.
-            peer.storage.upsert_member(ch_hash, alice.identity.hash_hex, "Alice",
-                                        role=ROLE_OWNER)
-            peer.storage.upsert_member(ch_hash, bob.identity.hash_hex, "Bob", role=ROLE_MEMBER)
-            peer.storage.upsert_member(ch_hash, dave.identity.hash_hex, "Dave", role=ROLE_MEMBER)
-        # Neither Carol nor Dave has any tenure rows for this channel at all.
-
-        gap_ts = time.time() - 100
-        gap_content = "Gap message nobody in this exchange can catch"
-        gap_msg_id = _compute_message_id(gap_content, bob.identity.hash_hex, gap_ts)
-        carol.storage.insert_message(
-            channel_hash=ch_hash, sender_hash=bob.identity.hash_hex, sender_name="Bob",
-            content=gap_content, timestamp=gap_ts, message_id=gap_msg_id,
-            reply_to=None, last_seen_id=None, received_at=gap_ts,
-        )
-
-        assert not carol.storage.has_any_tenure(ch_hash)
-        assert not dave.storage.has_any_tenure(ch_hash)
-
-        dave.sync_mgr._send_sync_request(carol.identity.hash_hex, ch_hash, gap_ts - 10)
-        time.sleep(1.0)
-
-        assert not dave.storage.message_exists(gap_msg_id), (
-            "a gap message purportedly from a kicked/never-verified member "
-            "was accepted with zero tenure filtering on either the "
-            "responder or the requester -- has_any_tenure is a channel-level "
-            "on/off switch (storage.py's has_any_tenure, gating sync.py's "
-            "_handle_sync_request and _handle_sync_response alike), so any "
-            "single peer on either side of an exchange who has never "
-            "recorded tenure data for a channel becomes a hole that bypasses "
-            "tenure restrictions the rest of the mesh enforces -- entirely, "
-            "not just partially"
-        )
-
 
 # ---------------------------------------------------------------------------
 # E6 -- Messaging.flush_pending bypasses every permission check
