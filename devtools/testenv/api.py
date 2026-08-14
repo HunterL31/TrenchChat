@@ -33,15 +33,20 @@ from trenchchat.core import actions
 from trenchchat.core.image import MAX_IMAGE_BYTES, is_gif, prepare_image
 from trenchchat.core.avatar import compress_avatar
 from trenchchat.core.interfaces_config import load_interfaces_config
+from trenchchat.core.link_quality import score_channel
 from trenchchat.core.network_data import gather_network_data
 from trenchchat.core.permissions import (
     ALL_PERMISSIONS, CREATE_CHANNEL, INVITE, KICK, MANAGE_CHANNEL, MANAGE_ROLES,
-    ROLE_ADMIN, ROLE_MEMBER, PRESET_OPEN, PRESET_PRIVATE,
+    ROLE_ADMIN, ROLE_MEMBER, SEND_MESSAGE, PRESET_OPEN, PRESET_PRIVATE,
     is_open_join, permissions_from_json,
 )
 from trenchchat.core.presence import resolve_display_name
 
 from backend_core import Backend
+
+# Default page size for GET /channels/{h}/messages -- a mobile-sane recent
+# window; older history is paged in via ?before=<timestamp>.
+DEFAULT_MESSAGE_PAGE_SIZE = 50
 
 
 class CreateChannelRequest(BaseModel):
@@ -148,6 +153,7 @@ def _message_to_dict(row, reactions: list[dict[str, Any]] | None = None) -> dict
         "sender_name": row["sender_name"],
         "content": row["content"],
         "timestamp": row["timestamp"],
+        "received_at": row["received_at"],
         "reply_to": row["reply_to"],
         "has_image": bool(row["image_data"]) if "image_data" in row.keys() else False,
         "reactions": reactions or [],
@@ -523,6 +529,24 @@ def create_app(backend: Backend) -> FastAPI:
     def list_members(channel_hash: str):
         return [dict(row) for row in backend.storage.get_members(channel_hash)]
 
+    @app.get("/channels/{channel_hash}/presence")
+    def get_channel_presence(channel_hash: str):
+        # Same roster PresenceManager already computes for the GUI's member
+        # list -- online/offline status per member (invite-only) or
+        # currently-online subscriber (public).
+        return backend.presence_mgr.get_online_for_channel(
+            channel_hash, backend.storage, backend.subscription_mgr,
+        )
+
+    @app.get("/channels/{channel_hash}/link_quality")
+    def get_channel_link_quality(channel_hash: str):
+        # Worst-case reachability across the channel's recipients -- the
+        # honest answer to "how well can I reach this channel", not the best.
+        quality, hops = score_channel(
+            backend.storage, backend.subscription_mgr, channel_hash, backend.identity.hash_hex,
+        )
+        return {"quality": quality.name.lower(), "hops": hops}
+
     @app.get("/channels/{channel_hash}/sync_status")
     def get_sync_status(channel_hash: str):
         # Same tracker the GUI will read: who we asked for history, who
@@ -545,6 +569,7 @@ def create_app(backend: Backend) -> FastAPI:
             "kick": backend.storage.has_permission(channel_hash, my_hex, KICK),
             "manage_roles": backend.storage.has_permission(channel_hash, my_hex, MANAGE_ROLES),
             "manage_channel": backend.storage.has_permission(channel_hash, my_hex, MANAGE_CHANNEL),
+            "send_message": backend.storage.has_permission(channel_hash, my_hex, SEND_MESSAGE),
         }
 
     @app.get("/channels/{channel_hash}/permissions")
@@ -632,12 +657,18 @@ def create_app(backend: Backend) -> FastAPI:
     # --- messages ---
 
     @app.get("/channels/{channel_hash}/messages")
-    def list_messages(channel_hash: str):
+    def list_messages(channel_hash: str, limit: int = DEFAULT_MESSAGE_PAGE_SIZE,
+                      before: float | None = None):
+        # Newest-anchored page via storage.get_recent_messages(), not
+        # get_messages() -- that one is oldest-anchored and used by sync.
+        # Pass the oldest timestamp already loaded as `before` to page
+        # further back in history.
         return [
             _message_to_dict(
                 m, _reactions_summary(backend.storage, m["message_id"], backend.identity.hash_hex)
             )
-            for m in backend.storage.get_messages(channel_hash)
+            for m in backend.storage.get_recent_messages(channel_hash, limit=limit,
+                                                          before_ts=before)
         ]
 
     @app.get("/channels/{channel_hash}/messages/{message_id}/image")
