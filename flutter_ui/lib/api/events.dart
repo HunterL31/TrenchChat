@@ -35,6 +35,11 @@ sealed class TcEvent {
           json['channel_hash'] as String,
           json['channel_name'] as String,
         );
+      case 'channel_discovered':
+        return ChannelDiscoveredEvent(
+          json['channel_hash'] as String,
+          json['channel_name'] as String,
+        );
       default:
         return null;
     }
@@ -66,6 +71,16 @@ class MemberListUpdatedEvent extends TcEvent {
 
 class ChannelJoinedEvent extends TcEvent {
   const ChannelJoinedEvent(this.channelHash, this.channelName);
+  final String channelHash;
+  final String channelName;
+}
+
+/// A standalone public channel was heard via a real-time announce but not
+/// yet joined. Carries only hash + name, so handlers that need the full
+/// channel record (description, creator, open_join) should re-fetch
+/// GET /channels/discovered rather than construct one from this event.
+class ChannelDiscoveredEvent extends TcEvent {
+  const ChannelDiscoveredEvent(this.channelHash, this.channelName);
   final String channelHash;
   final String channelName;
 }

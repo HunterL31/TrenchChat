@@ -87,6 +87,70 @@ class _TcGhostButtonState extends State<TcGhostButton> {
   }
 }
 
+/// Filled variant for a dialog's confirming action (Create, Join, ...).
+/// Same hover-brightens/press-darkens rule as [TcGhostButton], just filled
+/// with the accent color instead of outlined.
+class TcPrimaryButton extends StatefulWidget {
+  const TcPrimaryButton({
+    super.key,
+    required this.label,
+    required this.onPressed,
+  });
+
+  final String label;
+  final VoidCallback? onPressed;
+
+  @override
+  State<TcPrimaryButton> createState() => _TcPrimaryButtonState();
+}
+
+class _TcPrimaryButtonState extends State<TcPrimaryButton> {
+  bool _hover = false;
+  bool _pressed = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final disabled = widget.onPressed == null;
+    final Color bg = disabled
+        ? TCColors.bgInset
+        : _pressed
+            ? TCColors.accentPrimaryActive
+            : _hover
+                ? TCColors.accentPrimaryHover
+                : TCColors.accentPrimary;
+    final Color fg = disabled ? TCColors.textDisabled : TCColors.textOnAccent;
+
+    return MouseRegion(
+      cursor: disabled ? SystemMouseCursors.basic : SystemMouseCursors.click,
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() {
+        _hover = false;
+        _pressed = false;
+      }),
+      child: GestureDetector(
+        onTapDown: disabled ? null : (_) => setState(() => _pressed = true),
+        onTapUp: disabled ? null : (_) => setState(() => _pressed = false),
+        onTapCancel: disabled ? null : () => setState(() => _pressed = false),
+        onTap: widget.onPressed,
+        child: AnimatedContainer(
+          duration: TCEffects.durationMed,
+          curve: TCEffects.easeTerminal,
+          padding: const EdgeInsets.symmetric(horizontal: TCSpace.space4, vertical: 8),
+          decoration: BoxDecoration(color: bg),
+          child: Text(
+            widget.label,
+            style: TextStyle(
+              fontSize: TCType.textCaption,
+              color: fg,
+              letterSpacing: TCType.letterSpacingFor(TCType.textCaption, TCType.trackingWide),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class TcIconButton extends StatefulWidget {
   const TcIconButton({
     super.key,

@@ -12,58 +12,144 @@ import 'models/message.dart';
 import 'models/permissions.dart';
 import 'models/server.dart';
 
+/// Thrown for any non-2xx response. [message] prefers the backend's own
+/// `{"error": "..."}` body (used for expected failures like a permission
+/// gate), falling back to FastAPI's validation `{"detail": ...}` shape or a
+/// bare status line.
+class ApiException implements Exception {
+  const ApiException(this.statusCode, this.message);
+
+  final int statusCode;
+  final String message;
+
+  @override
+  String toString() => 'ApiException($statusCode): $message';
+}
+
 class ApiClient {
-  ApiClient({required this.baseUrl}) : _http = http.Client();
+  ApiClient({required this.baseUrl, http.Client? client}) : _http = client ?? http.Client();
 
   final String baseUrl;
   final http.Client _http;
 
+  static const Map<String, String> _jsonHeaders = {'content-type': 'application/json'};
+
   Uri _u(String path) => Uri.parse('$baseUrl$path');
+
+  /// Uniform response handling: throws [ApiException] for any non-2xx status,
+  /// otherwise returns the decoded JSON body.
+  dynamic _decode(http.Response res) {
+    if (res.statusCode < 200 || res.statusCode >= 300) {
+      String message = 'HTTP ${res.statusCode}';
+      try {
+        final body = jsonDecode(res.body);
+        if (body is Map<String, dynamic>) {
+          if (body['error'] is String) {
+            message = body['error'] as String;
+          } else if (body['detail'] != null) {
+            message = body['detail'].toString();
+          }
+        }
+      } on FormatException {
+        // Body wasn't JSON; fall back to the bare status message above.
+      }
+      throw ApiException(res.statusCode, message);
+    }
+    try {
+      return jsonDecode(res.body);
+    } on FormatException {
+      throw ApiException(res.statusCode, 'Malformed response body');
+    }
+  }
 
   Future<Map<String, dynamic>> getMe() async {
     final res = await _http.get(_u('/me'));
-    return jsonDecode(res.body) as Map<String, dynamic>;
+    return _decode(res) as Map<String, dynamic>;
   }
 
   Future<List<Server>> getServers() async {
     final res = await _http.get(_u('/servers'));
-    return (jsonDecode(res.body) as List<dynamic>)
+    return (_decode(res) as List<dynamic>)
         .map((e) => Server.fromJson(e as Map<String, dynamic>))
         .toList();
   }
 
+  Future<String> createServer(String name, String description) async {
+    final res = await _http.post(
+      _u('/servers'),
+      headers: _jsonHeaders,
+      body: jsonEncode({'name': name, 'description': description}),
+    );
+    return (_decode(res) as Map<String, dynamic>)['hash'] as String;
+  }
+
   Future<List<Channel>> getServerChannels(String serverHashHex) async {
     final res = await _http.get(_u('/servers/$serverHashHex/channels'));
-    return (jsonDecode(res.body) as List<dynamic>)
+    return (_decode(res) as List<dynamic>)
         .map((e) => Channel.fromJson(e as Map<String, dynamic>))
         .toList();
+  }
+
+  /// Creates a channel inside a server. Throws [ApiException] with status 403
+  /// when the caller lacks `create_channel` on that server.
+  Future<String> createServerChannel(
+      String serverHashHex, String name, String description) async {
+    final res = await _http.post(
+      _u('/servers/$serverHashHex/channels'),
+      headers: _jsonHeaders,
+      body: jsonEncode({'name': name, 'description': description}),
+    );
+    return (_decode(res) as Map<String, dynamic>)['hash'] as String;
   }
 
   /// Joined standalone (non-server) channels.
   Future<List<Channel>> getChannels() async {
     final res = await _http.get(_u('/channels'));
-    return (jsonDecode(res.body) as List<dynamic>)
+    return (_decode(res) as List<dynamic>)
         .map((e) => Channel.fromJson(e as Map<String, dynamic>))
         .toList();
   }
 
+  /// Standalone channels announced on the mesh but not yet joined.
+  Future<List<Channel>> getDiscoveredChannels() async {
+    final res = await _http.get(_u('/channels/discovered'));
+    return (_decode(res) as List<dynamic>)
+        .map((e) => Channel.fromJson(e as Map<String, dynamic>))
+        .toList();
+  }
+
+  /// [access] is `"public"` or `"invite"`.
+  Future<String> createChannel(String name, String description, String access) async {
+    final res = await _http.post(
+      _u('/channels'),
+      headers: _jsonHeaders,
+      body: jsonEncode({'name': name, 'description': description, 'access': access}),
+    );
+    return (_decode(res) as Map<String, dynamic>)['hash'] as String;
+  }
+
+  Future<bool> joinChannel(String channelHashHex) async {
+    final res = await _http.post(_u('/channels/$channelHashHex/join'));
+    return (_decode(res) as Map<String, dynamic>)['ok'] as bool? ?? false;
+  }
+
   Future<List<Member>> getMembers(String channelHashHex) async {
     final res = await _http.get(_u('/channels/$channelHashHex/members'));
-    return (jsonDecode(res.body) as List<dynamic>)
+    return (_decode(res) as List<dynamic>)
         .map((e) => Member.fromJson(e as Map<String, dynamic>))
         .toList();
   }
 
   Future<List<Member>> getServerMembers(String serverHashHex) async {
     final res = await _http.get(_u('/servers/$serverHashHex/members'));
-    return (jsonDecode(res.body) as List<dynamic>)
+    return (_decode(res) as List<dynamic>)
         .map((e) => Member.fromJson(e as Map<String, dynamic>))
         .toList();
   }
 
   Future<List<Message>> getMessages(String channelHashHex) async {
     final res = await _http.get(_u('/channels/$channelHashHex/messages'));
-    return (jsonDecode(res.body) as List<dynamic>)
+    return (_decode(res) as List<dynamic>)
         .map((e) => Message.fromJson(e as Map<String, dynamic>))
         .toList();
   }
@@ -71,54 +157,55 @@ class ApiClient {
   Future<bool> sendMessage(String channelHashHex, String content) async {
     final res = await _http.post(
       _u('/channels/$channelHashHex/messages'),
-      headers: {'content-type': 'application/json'},
+      headers: _jsonHeaders,
       body: jsonEncode({'content': content}),
     );
-    final body = jsonDecode(res.body) as Map<String, dynamic>;
-    return body['ok'] as bool? ?? false;
+    return (_decode(res) as Map<String, dynamic>)['ok'] as bool? ?? false;
   }
 
   Future<ChannelPermissions> getMyPermissions(String channelHashHex) async {
     final res = await _http.get(_u('/channels/$channelHashHex/my_permissions'));
-    return ChannelPermissions.fromJson(jsonDecode(res.body) as Map<String, dynamic>);
+    return ChannelPermissions.fromJson(_decode(res) as Map<String, dynamic>);
   }
 
   Future<PresenceEntry> getPeerPresence(String peerHashHex) async {
     final res = await _http.get(_u('/peers/$peerHashHex/presence'));
-    return PresenceEntry.fromJson(jsonDecode(res.body) as Map<String, dynamic>);
+    return PresenceEntry.fromJson(_decode(res) as Map<String, dynamic>);
   }
 
   Future<Uint8List?> getPeerAvatar(String peerHashHex) async {
-    final res = await _http.get(_u('/peers/$peerHashHex/avatar'));
     // A peer with no avatar is routine, and an unreachable backend must not
-    // throw out of a widget build -- treat anything undecodable as "no avatar".
-    final Object? body;
+    // throw out of a widget build -- treat any decode/status failure as
+    // "no avatar" rather than propagating.
+    final Map<String, dynamic> body;
     try {
-      body = jsonDecode(res.body);
-    } on FormatException {
+      final res = await _http.get(_u('/peers/$peerHashHex/avatar'));
+      body = _decode(res) as Map<String, dynamic>;
+    } catch (_) {
       return null;
     }
-    if (body is! Map<String, dynamic>) return null;
     final b64 = body['avatar_data_b64'] as String?;
     if (b64 == null) return null;
     return base64Decode(b64);
   }
 
   Future<void> addReaction(String channelHashHex, String messageId, String emojiHash) async {
-    await _http.post(
+    final res = await _http.post(
       _u('/channels/$channelHashHex/messages/$messageId/reactions'),
-      headers: {'content-type': 'application/json'},
+      headers: _jsonHeaders,
       body: jsonEncode({'emoji_hash': emojiHash}),
     );
+    _decode(res);
   }
 
   Future<void> removeReaction(String channelHashHex, String messageId, String emojiHash) async {
-    await _http.delete(_u('/channels/$channelHashHex/messages/$messageId/reactions/$emojiHash'));
+    final res = await _http.delete(_u('/channels/$channelHashHex/messages/$messageId/reactions/$emojiHash'));
+    _decode(res);
   }
 
   Future<Map<String, dynamic>> getNetworkMap() async {
     final res = await _http.get(_u('/network/map'));
-    return jsonDecode(res.body) as Map<String, dynamic>;
+    return _decode(res) as Map<String, dynamic>;
   }
 
   // --- Phase B seams -----------------------------------------------------

@@ -18,11 +18,13 @@ class ServerRail extends StatelessWidget {
     required this.servers,
     required this.selectedHash,
     required this.onSelect,
+    this.onAddServer,
   });
 
   final List<ServerRailEntry> servers;
   final String? selectedHash;
   final ValueChanged<String> onSelect;
+  final VoidCallback? onAddServer;
 
   String _initials(String name) {
     final trimmed = name.trim();
@@ -63,7 +65,7 @@ class ServerRail extends StatelessWidget {
             ),
             const SizedBox(height: 12),
           ],
-          const _AddServerTile(),
+          _AddServerTile(onTap: onAddServer),
           const Spacer(),
           const Padding(
             padding: EdgeInsets.only(bottom: 12),
@@ -128,7 +130,9 @@ class _ServerTileState extends State<_ServerTile> {
 }
 
 class _AddServerTile extends StatefulWidget {
-  const _AddServerTile();
+  const _AddServerTile({this.onTap});
+
+  final VoidCallback? onTap;
 
   @override
   State<_AddServerTile> createState() => _AddServerTileState();
@@ -139,21 +143,25 @@ class _AddServerTileState extends State<_AddServerTile> {
 
   @override
   Widget build(BuildContext context) {
+    final disabled = widget.onTap == null;
     return MouseRegion(
-      cursor: SystemMouseCursors.click,
+      cursor: disabled ? SystemMouseCursors.basic : SystemMouseCursors.click,
       onEnter: (_) => setState(() => _hover = true),
       onExit: (_) => setState(() => _hover = false),
-      child: DashedBorder(
-        color: _hover ? TCColors.borderStrong : TCColors.borderDefault,
-        child: SizedBox(
-          width: 38,
-          height: 38,
-          child: Center(
-            child: Text(
-              '+',
-              style: TextStyle(
-                fontSize: 16,
-                color: _hover ? TCColors.textSecondary : TCColors.textTertiary,
+      child: GestureDetector(
+        onTap: widget.onTap,
+        child: DashedBorder(
+          color: _hover ? TCColors.borderStrong : TCColors.borderDefault,
+          child: SizedBox(
+            width: 38,
+            height: 38,
+            child: Center(
+              child: Text(
+                '+',
+                style: TextStyle(
+                  fontSize: 16,
+                  color: _hover ? TCColors.textSecondary : TCColors.textTertiary,
+                ),
               ),
             ),
           ),

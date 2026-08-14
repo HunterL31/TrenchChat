@@ -1,0 +1,125 @@
+// The one dialog pattern in this app -- every modal (new server, new
+// channel, join channel, and whatever gets added after them) should call
+// [showTcDialog] and wrap its content in [TcDialogShell] rather than
+// inventing its own presentation or reaching for a raw M3 AlertDialog.
+// AlertDialog is wrong here: buildAppTheme() sets no dialogTheme, so it
+// renders with default Material rounded corners and surface tint, which
+// clashes with this terminal-styled design language.
+//
+// The shell uses NotchedPanel (theme/notch.dart) -- "reserved for emphasis
+// panels only" per that file's own comment, and a modal is exactly that --
+// plus TCEffects.shadowModal, the ported --shadow-modal token that was
+// sitting unused before this.
+import 'package:flutter/material.dart';
+
+import '../theme/effects.dart';
+import '../theme/notch.dart';
+import '../theme/tokens.dart';
+
+/// Presents [builder] as a centered modal with a dark scrim, fade + scale-in
+/// transition, and tap-outside-to-dismiss. Returns whatever the dialog's
+/// content pops via `Navigator.pop(context, value)`.
+Future<T?> showTcDialog<T>({
+  required BuildContext context,
+  required WidgetBuilder builder,
+}) {
+  return showGeneralDialog<T>(
+    context: context,
+    barrierDismissible: true,
+    barrierLabel: 'Dismiss',
+    barrierColor: const Color.fromRGBO(0, 0, 0, 0.6),
+    transitionDuration: TCEffects.durationMed,
+    pageBuilder: (context, animation, secondaryAnimation) {
+      // showGeneralDialog gives us no Material ancestor (unlike showDialog's
+      // Dialog wrapper) -- TextField and other Material widgets need one.
+      return Center(
+        child: Material(
+          type: MaterialType.transparency,
+          child: builder(context),
+        ),
+      );
+    },
+    transitionBuilder: (context, animation, secondaryAnimation, child) {
+      final curved = CurvedAnimation(parent: animation, curve: TCEffects.easeTerminal);
+      return FadeTransition(
+        opacity: curved,
+        child: ScaleTransition(
+          scale: Tween<double>(begin: 0.96, end: 1.0).animate(curved),
+          child: child,
+        ),
+      );
+    },
+  );
+}
+
+/// Shared chrome for dialog content: notched panel, title rule, and a
+/// bottom-aligned action row. Dialogs supply their form fields as [children]
+/// and their buttons as [actions].
+class TcDialogShell extends StatelessWidget {
+  const TcDialogShell({
+    super.key,
+    required this.title,
+    required this.children,
+    this.actions = const [],
+    this.width = 380,
+    this.errorText,
+  });
+
+  final String title;
+  final List<Widget> children;
+  final List<Widget> actions;
+  final double width;
+  final String? errorText;
+
+  @override
+  Widget build(BuildContext context) {
+    return NotchedPanel(
+      notch: TCSpace.notch,
+      color: TCColors.bgSurfaceRaised,
+      border: TCColors.borderDefault,
+      boxShadow: TCEffects.shadowModal,
+      child: Container(
+        width: width,
+        padding: const EdgeInsets.all(20),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              title,
+              style: TextStyle(
+                fontFamily: TCType.fontDisplay,
+                fontSize: 22,
+                height: 1.1,
+                color: TCColors.green100,
+              ),
+            ),
+            const SizedBox(height: 10),
+            Container(height: 1, color: TCColors.borderSubtle),
+            const SizedBox(height: 16),
+            ...children,
+            if (errorText != null) ...[
+              const SizedBox(height: 12),
+              Text(
+                errorText!,
+                style: TextStyle(fontSize: TCType.textCaption, color: TCColors.statusDanger),
+              ),
+            ],
+            if (actions.isNotEmpty) ...[
+              const SizedBox(height: 20),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.end,
+                children: [
+                  for (int i = 0; i < actions.length; i++) ...[
+                    if (i > 0) const SizedBox(width: 8),
+                    actions[i],
+                  ],
+                ],
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
