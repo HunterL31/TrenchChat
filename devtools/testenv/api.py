@@ -32,6 +32,11 @@ from pydantic import BaseModel
 from trenchchat.core import actions
 from trenchchat.core.image import MAX_IMAGE_BYTES, is_gif, prepare_image
 from trenchchat.core.avatar import compress_avatar
+from trenchchat.core.interfaces_config import (
+    DuplicateInterfaceError, EDITABLE_TYPES, InterfaceConfigError,
+    build_interface_config_dict, delete_interface, load_interfaces_config,
+    missing_required_field, write_interface,
+)
 from trenchchat.core.permissions import (
     ALL_PERMISSIONS, CREATE_CHANNEL, INVITE, KICK, MANAGE_CHANNEL, MANAGE_ROLES,
     ROLE_ADMIN, ROLE_MEMBER, PRESET_OPEN, PRESET_PRIVATE,
@@ -101,6 +106,30 @@ class UpdateRolesRequest(BaseModel):
     remove_members: list[str] = []
     add_admins: list[str] = []
     remove_admins: list[str] = []
+
+
+class SettingsUpdateRequest(BaseModel):
+    propagation_enabled: bool | None = None
+    propagation_node_name: str | None = None
+    propagation_storage_limit_mb: int | None = None
+    channel_filter_mode: str | None = None
+    channel_filter_hashes: list[str] | None = None
+    outbound_propagation_node: str | None = None
+
+
+class CreateInterfaceRequest(BaseModel):
+    name: str
+    type: str
+    enabled: bool = True
+    type_values: dict[str, str] = {}
+    common_values: dict[str, str] = {}
+
+
+class UpdateInterfaceRequest(BaseModel):
+    type: str
+    enabled: bool = True
+    type_values: dict[str, str] = {}
+    common_values: dict[str, str] = {}
 
 
 def _channel_to_dict(row) -> dict[str, Any]:
@@ -291,6 +320,21 @@ def create_app(backend: Backend) -> FastAPI:
         backend.router.announce_user()
         return {"ok": True}
 
+    @app.get("/settings")
+    def get_settings():
+        return actions.read_settings(backend.config)
+
+    @app.post("/settings")
+    def update_settings(req: SettingsUpdateRequest):
+        # Same entry point the Settings dialog's _on_accept uses, minus
+        # display_name/avatar which have their own endpoints above.
+        updates = req.model_dump(exclude_unset=True)
+        try:
+            actions.apply_settings(backend.config, backend.router, updates)
+        except ValueError as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+        return {"ok": True, "settings": actions.read_settings(backend.config)}
+
     @app.get("/peers/{peer_hash}/presence")
     def get_peer_presence(peer_hash: str):
         return {
@@ -308,9 +352,6 @@ def create_app(backend: Backend) -> FastAPI:
     def get_interfaces():
         # Same data source InterfacesWidget.load_interfaces() merges: the
         # configured [interfaces] section plus live rns.get_interface_stats().
-        # Read-only -- live editing is a separate, bigger scope-add.
-        from trenchchat.gui.interfaces_widget import load_interfaces_config
-
         cfg_interfaces = load_interfaces_config(backend.rns_config_path)
         try:
             stats_result = backend.rns.get_interface_stats()
@@ -328,15 +369,97 @@ def create_app(backend: Backend) -> FastAPI:
         for name, cfg in cfg_interfaces.items():
             stats = stats_by_name.get(name, {})
             enabled_str = cfg.get("enabled", cfg.get("interface_enabled", "Yes"))
+            iface_type = cfg.get("type", "Unknown")
             result.append({
                 "name": name,
-                "type": cfg.get("type", "Unknown"),
+                "type": iface_type,
                 "enabled": enabled_str.lower() in ("yes", "true", "1"),
+                "editable": iface_type in EDITABLE_TYPES,
                 "status": stats.get("status"),
                 "rxb": stats.get("rxb"),
                 "txb": stats.get("txb"),
             })
         return result
+
+    @app.post("/reticulum/interfaces")
+    def create_interface(req: CreateInterfaceRequest):
+        # Same write path InterfacesWidget._on_add -> _write_interface uses;
+        # see trenchchat/core/interfaces_config.py for the shared logic.
+        name = req.name.strip()
+        if not name:
+            return JSONResponse(
+                {"ok": False, "error": "interface name is required"}, status_code=400,
+            )
+        if req.type not in EDITABLE_TYPES:
+            return JSONResponse(
+                {"ok": False, "error": f"'{req.type}' is not an editable interface type"},
+                status_code=400,
+            )
+        missing = missing_required_field(req.type, req.type_values)
+        if missing is not None:
+            return JSONResponse(
+                {"ok": False, "error": f"'{missing}' is required"}, status_code=400,
+            )
+
+        cfg = build_interface_config_dict(
+            name, req.type, req.enabled, req.type_values, req.common_values,
+        )
+        try:
+            write_interface(backend.rns_config_path, name, cfg, is_new=True)
+        except DuplicateInterfaceError as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=409)
+        except InterfaceConfigError as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+        return {"ok": True, "name": name, "restart_required": True}
+
+    @app.put("/reticulum/interfaces/{name}")
+    def update_interface(name: str, req: UpdateInterfaceRequest):
+        # Same write path InterfacesWidget._on_edit -> _write_interface uses.
+        cfg_interfaces = load_interfaces_config(backend.rns_config_path)
+        existing = cfg_interfaces.get(name)
+        if existing is None:
+            return JSONResponse(
+                {"ok": False, "error": "no such interface"}, status_code=404,
+            )
+        existing_type = existing.get("type", "")
+        if existing_type not in EDITABLE_TYPES:
+            return JSONResponse(
+                {"ok": False, "error": f"interfaces of type '{existing_type}' "
+                                       "cannot be edited"},
+                status_code=403,
+            )
+        if req.type not in EDITABLE_TYPES:
+            return JSONResponse(
+                {"ok": False, "error": f"'{req.type}' is not an editable interface type"},
+                status_code=400,
+            )
+        missing = missing_required_field(req.type, req.type_values)
+        if missing is not None:
+            return JSONResponse(
+                {"ok": False, "error": f"'{missing}' is required"}, status_code=400,
+            )
+
+        cfg = build_interface_config_dict(
+            name, req.type, req.enabled, req.type_values, req.common_values,
+        )
+        try:
+            write_interface(backend.rns_config_path, name, cfg, is_new=False)
+        except InterfaceConfigError as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+        return {"ok": True, "name": name, "restart_required": True}
+
+    @app.delete("/reticulum/interfaces/{name}")
+    def remove_interface(name: str):
+        # Same write path InterfacesWidget._on_delete uses.
+        try:
+            deleted = delete_interface(backend.rns_config_path, name)
+        except InterfaceConfigError as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+        if not deleted:
+            return JSONResponse(
+                {"ok": False, "error": "no such interface"}, status_code=404,
+            )
+        return {"ok": True, "restart_required": True}
 
     @app.get("/directory")
     def search_directory(q: str = ""):
