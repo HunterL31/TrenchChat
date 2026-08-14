@@ -1,23 +1,41 @@
 """
-Announce-based peer presence tracking.
+Announce-based peer presence tracking, plus an application-level beacon.
 
-A peer is considered "online" if their LXMF delivery announce was received
-within PRESENCE_TIMEOUT_SECS (default 3 minutes, ~3 announce cycles at 60s
-each with margin).
+A peer is considered "online" if we last heard from them (announce or any
+inbound LXMF message) within PRESENCE_TIMEOUT_SECS. Announces alone are not
+reliable evidence of this in a multi-hop mesh: a transport node damps
+repeat announces for a destination it already has a path to, so a fresh
+observer behind a transport node can go tens of minutes without hearing one
+even though the peer is online. PresenceBeacon below compensates by sending
+a small signed LXMF packet -- not subject to that damping -- to channel
+peers we have gone quiet with.
 
-This module has no network side-effects -- it only records timestamps from
-announces that are already being received by PeerAnnounceHandler.
+This module has no network side-effects of its own beyond PresenceBeacon's
+sends -- PresenceManager only records timestamps from announces and messages
+that are already being received elsewhere.
 """
 
+import random
 import time
 import threading
 
 import RNS
+import LXMF
 import msgpack
 
-from trenchchat.core.protocol import unpack_wire
+from trenchchat.core.actions import compute_channel_recipients
+from trenchchat.core.protocol import F_MSG_TYPE, MT_PRESENCE, unpack_wire
 
-PRESENCE_TIMEOUT_SECS = 180
+PRESENCE_TIMEOUT_SECS = 300
+
+# A peer is beaconed only after this long without inbound evidence of them --
+# an active conversation never triggers a beacon. Leaves a 2-minute margin
+# for the beacon to arrive before PRESENCE_TIMEOUT_SECS expires.
+PRESENCE_BEACON_AFTER_SECS = 180
+
+# Per-peer jitter applied to the beacon-after threshold, as a fraction of it,
+# so peers that went quiet together don't beacon each other in lockstep.
+PRESENCE_BEACON_JITTER_FRACTION = 0.2
 
 
 def resolve_display_name(identity_hex: str, self_hex: str, storage, config=None) -> str:
@@ -70,9 +88,11 @@ def resolve_display_name(identity_hex: str, self_hex: str, storage, config=None)
 class PresenceManager:
     """Tracks peer online/offline status based on LXMF delivery announces."""
 
-    def __init__(self, self_hex: str, config=None):
+    def __init__(self, self_hex: str, config=None,
+                timeout_secs: float = PRESENCE_TIMEOUT_SECS):
         self._self_hex = self_hex
         self._config = config  # optional Config; used to read current display_name
+        self._timeout = timeout_secs
         # identity_hash_hex -> last announce timestamp
         self._last_seen: dict[str, float] = {}
         self._lock = threading.Lock()
@@ -103,6 +123,13 @@ class PresenceManager:
         with self._lock:
             return self._is_online_locked(peer_hex)
 
+    def last_seen_at(self, peer_hex: str) -> float:
+        """Unix timestamp of the last inbound evidence from peer_hex, or 0.0
+        if none has ever been recorded. Inbound evidence only -- our own
+        outbound sends never touch this."""
+        with self._lock:
+            return self._last_seen.get(peer_hex, 0.0)
+
     def get_online_peers(self) -> set[str]:
         """Return the set of identity hashes currently considered online (excluding self)."""
         now = time.time()
@@ -110,7 +137,7 @@ class PresenceManager:
             return {
                 hex_id
                 for hex_id, ts in self._last_seen.items()
-                if now - ts < PRESENCE_TIMEOUT_SECS
+                if now - ts < self._timeout
             }
 
     def get_online_for_channel(
@@ -181,7 +208,7 @@ class PresenceManager:
             stale = [
                 hex_id
                 for hex_id, ts in self._last_seen.items()
-                if now - ts >= PRESENCE_TIMEOUT_SECS
+                if now - ts >= self._timeout
             ]
             for hex_id in stale:
                 del self._last_seen[hex_id]
@@ -198,7 +225,7 @@ class PresenceManager:
         ts = self._last_seen.get(peer_hex)
         if ts is None:
             return False
-        return time.time() - ts < PRESENCE_TIMEOUT_SECS
+        return time.time() - ts < self._timeout
 
     def _fire_callbacks(self, peer_hex: str, is_online: bool) -> None:
         for cb in self._callbacks:
@@ -206,3 +233,96 @@ class PresenceManager:
                 cb(peer_hex, is_online)
             except Exception as e:
                 RNS.log(f"TrenchChat [presence]: callback error: {e}", RNS.LOG_ERROR)
+
+
+class PresenceBeacon:
+    """Sends a signed MT_PRESENCE liveness beacon to channel peers we have
+    gone quiet with, so presence survives transport nodes that damp repeat
+    announces (see module docstring).
+
+    Two clocks matter here and must stay separate: PresenceManager's
+    last_seen (inbound evidence a peer is alive) and this class's last_sent
+    (our own outbound traffic, which only suppresses our beacon -- it must
+    never make a peer appear online).
+    """
+
+    def __init__(self, identity, storage, router, subscription_mgr, presence_mgr,
+                beacon_after_secs: float = PRESENCE_BEACON_AFTER_SECS,
+                jitter_fraction: float = PRESENCE_BEACON_JITTER_FRACTION):
+        self._identity = identity
+        self._storage = storage
+        self._router = router
+        self._subscription_mgr = subscription_mgr
+        self._presence_mgr = presence_mgr
+        self._beacon_after = beacon_after_secs
+        self._jitter_fraction = jitter_fraction
+        self._last_sent: dict[str, float] = {}
+        self._jitter: dict[str, float] = {}
+        self._lock = threading.Lock()
+
+    def record_sent(self, peer_hex: str) -> None:
+        """Record outbound traffic to peer_hex. Suppresses our beacon to them
+        only -- never treat this as evidence they are online."""
+        with self._lock:
+            self._last_sent[peer_hex] = time.time()
+
+    def tick(self) -> None:
+        """Beacon every channel peer gone quiet for longer than their
+        (jittered) threshold. Call this periodically from the same loop that
+        already prunes presence -- no dedicated timer needed."""
+        now = time.time()
+        for peer_hex in self._channel_peers():
+            if now - self._quiet_since(peer_hex) >= self._threshold(peer_hex):
+                self._send_beacon(peer_hex)
+
+    # --- private helpers ---
+
+    def _quiet_since(self, peer_hex: str) -> float:
+        with self._lock:
+            last_sent = self._last_sent.get(peer_hex, 0.0)
+        return max(self._presence_mgr.last_seen_at(peer_hex), last_sent)
+
+    def _threshold(self, peer_hex: str) -> float:
+        with self._lock:
+            jitter = self._jitter.get(peer_hex)
+            if jitter is None:
+                spread = self._beacon_after * self._jitter_fraction
+                jitter = random.uniform(-spread, spread)
+                self._jitter[peer_hex] = jitter
+        return max(0.0, self._beacon_after + jitter)
+
+    def _channel_peers(self) -> set[str]:
+        peers: set[str] = set()
+        for sub in self._storage.get_subscriptions():
+            peers.update(compute_channel_recipients(
+                self._storage, self._subscription_mgr, sub["channel_hash"],
+                self._identity.hash_hex,
+            ))
+        peers.discard(self._identity.hash_hex)
+        return peers
+
+    def _send_beacon(self, peer_hex: str) -> None:
+        identity_hash = bytes.fromhex(peer_hex)
+        delivery_dest_hash = RNS.Destination.hash(identity_hash, "lxmf", "delivery")
+        dest_identity = RNS.Identity.recall(delivery_dest_hash)
+        if dest_identity is None:
+            RNS.Transport.request_path(delivery_dest_hash)
+            return
+
+        dest = RNS.Destination(
+            dest_identity,
+            RNS.Destination.OUT,
+            RNS.Destination.SINGLE,
+            "lxmf",
+            "delivery",
+        )
+        lxm = LXMF.LXMessage(
+            dest,
+            self._router.delivery_destination,
+            "",
+            desired_method=LXMF.LXMessage.DIRECT,
+        )
+        lxm.fields = {F_MSG_TYPE: MT_PRESENCE}
+        self._router.send(lxm)
+        self.record_sent(peer_hex)
+        RNS.log(f"TrenchChat [presence]: beacon sent to {peer_hex[:12]}…", RNS.LOG_DEBUG)

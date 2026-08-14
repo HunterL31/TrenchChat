@@ -85,6 +85,39 @@ def test_refreshing_seen_keeps_peer_online():
 
 
 # ---------------------------------------------------------------------------
+# injectable timeout_secs
+# ---------------------------------------------------------------------------
+
+def test_custom_timeout_used_instead_of_default():
+    """A peer with an injected short timeout goes offline after that timeout
+    elapses, even though the default constant is far longer."""
+    mgr = PresenceManager(SELF_HEX, timeout_secs=5.0)
+    now = time.time()
+    with patch("trenchchat.core.presence.time") as mock_time:
+        mock_time.time.return_value = now
+        mgr.record_seen(PEER_A)
+        assert mgr.is_online(PEER_A)
+
+        mock_time.time.return_value = now + 5.0 + 1
+        assert not mgr.is_online(PEER_A)
+
+
+def test_default_timeout_unchanged_when_not_specified():
+    """Omitting timeout_secs must still honor PRESENCE_TIMEOUT_SECS."""
+    mgr = make_mgr()
+    now = time.time()
+    with patch("trenchchat.core.presence.time") as mock_time:
+        mock_time.time.return_value = now
+        mgr.record_seen(PEER_A)
+
+        mock_time.time.return_value = now + PRESENCE_TIMEOUT_SECS - 5
+        assert mgr.is_online(PEER_A)
+
+        mock_time.time.return_value = now + PRESENCE_TIMEOUT_SECS + 1
+        assert not mgr.is_online(PEER_A)
+
+
+# ---------------------------------------------------------------------------
 # get_online_peers
 # ---------------------------------------------------------------------------
 

@@ -81,6 +81,7 @@ MT_AVATAR_UPDATE    = "avatar_update"
 MT_REACTION         = "reaction"        # notify channel: reactor added/removed emoji on a message
 MT_EMOJI_REQUEST    = "emoji_request"   # ask a peer for emoji image data by hash
 MT_EMOJI_RESPONSE   = "emoji_response"  # respond with the emoji image bytes
+MT_PRESENCE         = "presence"        # signed liveness beacon; empty content, no other fields
 
 
 # --- sync window ---

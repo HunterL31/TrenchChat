@@ -48,7 +48,7 @@ from trenchchat.core.protocol import (
     F_MEMBER_LIST_DOC, F_CHANNEL_NAME, F_CHANNEL_DESC,
     F_CHANNEL_CREATOR, F_CHANNEL_ACCESS, F_CHANNEL_CREATED_AT,
     F_CHANNEL_PERMISSIONS, F_SCOPE_KIND,
-    MT_JOIN_REQUEST, MT_MEMBER_LIST_UPDATE, MT_INVITE,
+    MT_JOIN_REQUEST, MT_MEMBER_LIST_UPDATE, MT_INVITE, MT_PRESENCE,
     SYNC_WINDOW_SECS,
     unpack_wire,
 )
@@ -1287,6 +1287,12 @@ class InviteManager:
             return
         if isinstance(msg_type, bytes):
             msg_type = msg_type.decode(errors="replace")
+
+        # Presence beacons carry no channel hash by design; they're handled
+        # entirely by PresenceManager.record_seen via the router's delivery
+        # callback, so there's nothing for invite.py to do with them.
+        if msg_type == MT_PRESENCE:
+            return
 
         RNS.log(f"TrenchChat [invite]: received control message type={msg_type!r}",
                 RNS.LOG_DEBUG)

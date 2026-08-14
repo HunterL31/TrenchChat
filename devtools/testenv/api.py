@@ -10,6 +10,12 @@ which both this file and trenchchat/gui/main_window.py import from.
 
 This means a bug (or a fix) exercised through this API is exercising the
 same code path a real client would hit.
+
+The "--- link control ---" group below is the one exception: it has no
+actions.py counterpart because it isn't application logic at all -- it's
+dev-harness process control (dropping/restoring this tester's own network
+link so the UI can simulate going offline), so it calls Backend.go_offline
+/go_online directly.
 """
 
 import asyncio
@@ -243,6 +249,9 @@ def create_app(backend: Backend) -> FastAPI:
         bus.emit("sync_status", channel_hash=channel_hash_hex,
                  status=backend.sync_mgr.status.get_status(channel_hash_hex))
 
+    def _on_link_status(is_online: bool):
+        bus.emit("net_status", online=is_online)
+
     backend.messaging.add_message_callback(_on_message)
     backend.invite_mgr.add_invite_callback(_on_invite)
     backend.invite_mgr.add_channel_joined_callback(_on_channel_joined)
@@ -253,6 +262,7 @@ def create_app(backend: Backend) -> FastAPI:
     backend.reaction_mgr.add_reaction_callback(_on_reaction_changed)
     backend.reaction_mgr.add_emoji_callback(_on_emoji_received)
     backend.sync_mgr.status.add_status_callback(_on_sync_status)
+    backend.add_link_callback(_on_link_status)
 
     # --- identity ---
 
@@ -694,6 +704,32 @@ def create_app(backend: Backend) -> FastAPI:
         except ValueError as e:
             return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
         return {"ok": True, "emoji_hash": emoji_hash}
+
+    # --- link control ---
+
+    @app.get("/net/status")
+    def get_net_status():
+        iface = backend.link_interface()
+        return {
+            "online": backend.link_online(),
+            "detached": bool(getattr(iface, "detached", True)) if iface is not None else True,
+            "interface": str(iface) if iface is not None else None,
+            "rxb": getattr(iface, "rxb", 0) if iface is not None else 0,
+            "txb": getattr(iface, "txb", 0) if iface is not None else 0,
+        }
+
+    @app.post("/net/offline")
+    def net_offline():
+        ok = backend.go_offline()
+        return {"ok": ok, "online": False}
+
+    @app.post("/net/online")
+    def net_online():
+        # go_online() only starts the reconnect; the link isn't actually up
+        # for another 5-15s, so "online" here always reports False -- poll
+        # /net/status (or watch for the net_status WS event) for the real state.
+        ok = backend.go_online()
+        return {"ok": ok, "online": False}
 
     # --- live updates ---
 

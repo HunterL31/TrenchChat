@@ -35,7 +35,7 @@ from trenchchat.core.permissions import (
     CREATE_CHANNEL, INVITE, MANAGE_CHANNEL, SEND_MESSAGE, PRESETS, PRESET_PRIVATE,
     is_discoverable, is_open_join, permissions_from_json,
 )
-from trenchchat.core.presence import PresenceManager, resolve_display_name
+from trenchchat.core.presence import PresenceBeacon, PresenceManager, resolve_display_name
 from trenchchat.core.storage import Storage
 from trenchchat.core.channel import ChannelManager
 from trenchchat.core.messaging import Messaging
@@ -254,7 +254,7 @@ class MainWindow(QMainWindow):
                  messaging: Messaging, subscription_mgr: SubscriptionManager,
                  invite_mgr: InviteManager, presence_mgr: PresenceManager,
                  user_directory: UserDirectory, avatar_mgr=None, reaction_mgr=None,
-                 server_mgr=None):
+                 server_mgr=None, presence_beacon: PresenceBeacon | None = None):
         super().__init__()
         self._config = config
         self._identity = identity
@@ -267,6 +267,7 @@ class MainWindow(QMainWindow):
         self._subscription_mgr = subscription_mgr
         self._invite_mgr = invite_mgr
         self._presence_mgr = presence_mgr
+        self._presence_beacon = presence_beacon
         self._user_directory = user_directory
         self._avatar_mgr = avatar_mgr
         self._reaction_mgr: ReactionManager | None = reaction_mgr
@@ -1326,9 +1327,12 @@ class MainWindow(QMainWindow):
         )
 
     def _on_presence_tick(self) -> None:
-        """Periodic timer: prune stale presence and user directory entries, refresh the panel."""
+        """Periodic timer: prune stale presence, directory and sync state, refresh the panel."""
         self._presence_mgr.prune()
         self._user_directory.prune()
+        self._sync_mgr.status.prune()
+        if self._presence_beacon is not None:
+            self._presence_beacon.tick()
         self._refresh_online_panel()
 
     def _seed_user_directory(self, peer_hex: str) -> None:

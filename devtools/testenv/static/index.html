@@ -8,7 +8,7 @@
   :root {
     --bg: #1e1f22; --panel: #2b2d31; --panel2: #313338; --border: #3f4147;
     --text: #dbdee1; --dim: #949ba4; --accent: #5865f2; --accent2: #4752c4;
-    --danger: #da373c; --ok: #23a55a;
+    --danger: #da373c; --ok: #23a55a; --warn: #f0b232;
   }
   * { box-sizing: border-box; }
   body {
@@ -27,18 +27,41 @@
   }
   #reset-btn:hover { background: #c62d31; }
   #reset-btn:disabled { opacity: 0.5; cursor: default; }
-  main { flex: 1; display: flex; overflow: hidden; }
-  .pane {
-    flex: 1; display: flex; flex-direction: column; min-width: 0;
-    border-right: 1px solid var(--border);
+  main {
+    flex: 1; display: grid; grid-template-columns: repeat(var(--cols, 2), minmax(0,1fr));
+    grid-auto-rows: minmax(320px, 1fr); overflow-y: auto; overflow-x: hidden;
   }
-  .pane:last-child { border-right: none; }
+  .pane {
+    display: flex; flex-direction: column; min-width: 0; overflow: hidden;
+    border-right: 1px solid var(--border); border-bottom: 1px solid var(--border);
+  }
+  .pane.offline .pane-header { background: #3a2626; }
+  .pane.offline { opacity: 0.75; }
   .pane-header {
     padding: 10px 14px; background: var(--panel2); border-bottom: 1px solid var(--border);
   }
   .pane-name { font-weight: 700; font-size: 14px; }
   .pane-hash { font-size: 11px; color: var(--dim); font-family: monospace; }
-  .peer-status { font-size: 11px; color: var(--dim); margin-top: 3px; }
+  .pane-controls { margin-top: 6px; display: flex; align-items: center; flex-wrap: wrap; gap: 4px; }
+  .link-btn {
+    background: var(--panel2); color: var(--text); border: 1px solid var(--border);
+    border-radius: 4px; padding: 3px 9px; font-size: 11px; cursor: pointer;
+  }
+  .link-btn:hover { border-color: var(--accent); }
+  .proc-btn {
+    border: none; border-radius: 4px; padding: 3px 9px; font-size: 11px; cursor: pointer;
+    color: white; font-weight: 700;
+  }
+  .proc-btn.kill { background: var(--danger); }
+  .proc-btn.kill:hover { background: #c62d31; }
+  .proc-btn.start { background: var(--ok); }
+  .link-down-badge {
+    display: none; background: var(--danger); color: white; font-size: 10px;
+    font-weight: 700; letter-spacing: 0.03em; border-radius: 4px; padding: 2px 7px;
+  }
+  .pane.offline .link-down-badge { display: inline-block; }
+  .peer-strip { font-size: 11px; color: var(--dim); margin-top: 4px; display: flex; flex-wrap: wrap; gap: 8px; }
+  .peer-chip { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
   .avatar-thumb {
     display: inline-block; width: 22px; height: 22px; border-radius: 50%;
     background-color: var(--panel); background-size: cover; background-position: center;
@@ -217,6 +240,8 @@
     background: var(--dim); margin-right: 6px;
   }
   .status-dot.up { background: var(--ok); }
+  .status-dot.stopped { background: var(--danger); }
+  .status-dot.down { background: var(--warn); }
   #toast {
     position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%);
     background: var(--panel2); border: 1px solid var(--border); border-radius: 6px;
@@ -273,27 +298,15 @@
   .directory-item:hover { background: var(--panel); }
   .dir-hash { color: var(--dim); font-size: 11px; font-family: monospace; margin-left: auto; }
 
-  /* --- Mobile: stack the two tester panes instead of squeezing them
-     side by side into unusable slivers. --- */
+  /* --- Mobile: stack panes one per row instead of squeezing them into
+     unusable slivers. --- */
   @media (max-width: 860px) {
     header {
       flex-wrap: wrap;
     }
     header h1 { font-size: 13px; }
     #hint { display: none; }
-    main {
-      flex-direction: column;
-      overflow-y: auto;
-      overflow-x: hidden;
-    }
-    .pane {
-      border-right: none;
-      border-bottom: 2px solid var(--border);
-      flex: none;
-      height: 48vh;
-      min-height: 320px;
-    }
-    .pane:last-child { border-bottom: none; }
+    main { --cols: 1 !important; }
     .channel-list {
       width: 120px;
     }
@@ -316,7 +329,7 @@
 <body>
 
 <header>
-  <h1>TrenchChat test environment &mdash; <span id="hint">two isolated testers, real backend, no manual key exchange</span></h1>
+  <h1>TrenchChat test environment &mdash; <span id="hint">N isolated testers, real backends, no manual key exchange</span></h1>
   <button id="reset-btn" onclick="resetEnvironment()">Reset environment</button>
 </header>
 
@@ -400,14 +413,23 @@
 </div>
 
 <script>
-const TESTERS = ['A', 'B'];
-const state = {
-  A: { port: null, me: null, channels: [], activeChannel: null, activeServer: null, servers: [], serverChannels: {}, serverPerms: {}, collapsedServers: new Set(), ws: null, invites: [], pendingImage: null, replyTarget: null },
-  B: { port: null, me: null, channels: [], activeChannel: null, activeServer: null, servers: [], serverChannels: {}, serverPerms: {}, collapsedServers: new Set(), ws: null, invites: [], pendingImage: null, replyTarget: null },
-};
+let TESTERS = [];
+let state = {};
 // Per-tag cache of identity_hash -> data URL (or null if confirmed no avatar).
-const avatarCache = { A: {}, B: {} };
+let avatarCache = {};
+let emojiLibrary = {};
+// identity_hash -> tag, populated as each tester's /me resolves.
+let hashToTag = {};
 let newChannelForTag = null;
+
+function blankState(port) {
+  return {
+    port, me: null, channels: [], activeChannel: null, activeServer: null,
+    servers: [], serverChannels: {}, serverPerms: {}, collapsedServers: new Set(),
+    ws: null, invites: [], pendingImage: null, replyTarget: null,
+    net: { online: null, reconnecting: false }, killed: false,
+  };
+}
 
 function apiBase(tag) {
   return `http://${location.hostname}:${state[tag].port}`;
@@ -415,7 +437,10 @@ function apiBase(tag) {
 function wsBase(tag) {
   return `ws://${location.hostname}:${state[tag].port}`;
 }
-function other(tag) { return tag === 'A' ? 'B' : 'A'; }
+
+function colsFor(n) {
+  return n <= 6 ? Math.min(n, 3) : 4;
+}
 
 function toast(msg) {
   const t = document.getElementById('toast');
@@ -470,9 +495,18 @@ function renderShell() {
           <input type="file" accept="image/*" id="avatar-file-${tag}" style="display:none" onchange="uploadAvatar('${tag}')">
         </div>
         <div class="pane-hash" id="hash-${tag}">connecting...</div>
-        <div class="peer-status">
-          <span class="status-dot" id="peer-dot-${tag}"></span>
-          <span id="peer-status-text-${tag}">Tester ${other(tag)} status unknown</span>
+        <div class="pane-controls">
+          <button class="link-btn" id="link-btn-${tag}" onclick="toggleLink('${tag}')">Go offline</button>
+          <button class="proc-btn kill" id="kill-btn-${tag}" onclick="killTester('${tag}')">Kill</button>
+          <button class="proc-btn start" id="start-btn-${tag}" style="display:none"
+                 onclick="startTester('${tag}')">Start</button>
+          <span class="link-down-badge">&#9940; LINK DOWN</span>
+        </div>
+        <div class="peer-strip" id="peer-strip-${tag}">
+          ${TESTERS.filter(o => o !== tag).map(o => `
+            <span class="peer-chip" id="peer-chip-${tag}-${o}" title="Tester ${o}">
+              <span class="status-dot" id="peer-dot-${tag}-${o}"></span>${o}
+            </span>`).join('')}
         </div>
       </div>
       <div class="invite-bar" id="invite-bar-${tag}">
@@ -523,9 +557,6 @@ function renderShell() {
 }
 
 async function connectTester(tag) {
-  const cfg = await (await fetch('/config')).json();
-  state[tag].port = tag === 'A' ? cfg.a_api_port : cfg.b_api_port;
-
   for (let i = 0; i < 20; i++) {
     try {
       state[tag].me = await api(tag, '/me');
@@ -538,7 +569,9 @@ async function connectTester(tag) {
     document.getElementById(`hash-${tag}`).textContent = 'failed to connect';
     return;
   }
-  document.getElementById(`dot-${tag}`).classList.add('up');
+  hashToTag[state[tag].me.hash_hex] = tag;
+  const dot = document.getElementById(`dot-${tag}`);
+  if (dot) { dot.classList.remove('stopped'); dot.classList.add('up'); }
   document.getElementById(`hash-${tag}`).textContent = state[tag].me.hash_hex.slice(0, 16) + '…';
   document.getElementById(`name-display-${tag}`).textContent = state[tag].me.display_name;
 
@@ -547,9 +580,15 @@ async function connectTester(tag) {
   await refreshDiscovered(tag);
   await refreshInvites(tag);
   connectWs(tag);
-  refreshPeerPresence(tag);
   refreshOwnAvatar(tag);
   refreshEmojiLibrary(tag);
+  try {
+    const net = await api(tag, '/net/status');
+    applyNetStatus(tag, net.online);
+  } catch (e) {
+    // transient -- next net_status WS event will catch up
+  }
+  applyProcState(tag);
 }
 
 function avatarDataUrl(b64) {
@@ -601,23 +640,114 @@ function uploadAvatar(tag) {
   input.value = '';
 }
 
-function setPeerStatus(tag, isOnline) {
-  const dot = document.getElementById(`peer-dot-${tag}`);
-  const text = document.getElementById(`peer-status-text-${tag}`);
-  if (!dot || !text) return;
-  dot.classList.toggle('up', isOnline);
-  text.textContent = `Tester ${other(tag)} ${isOnline ? 'online' : 'offline'}`;
+// Peer strip chips reflect authoritative orchestrator /status, not gossip
+// presence -- announces are damped by the hub and gossip presence decays to
+// permanently-offline through it. Three states: process stopped, link down, up.
+function setPeerChipState(tag, otherTag, testerStatus) {
+  const dot = document.getElementById(`peer-dot-${tag}-${otherTag}`);
+  if (!dot) return;
+  dot.classList.remove('up', 'stopped', 'down');
+  let title, cls;
+  if (!testerStatus || !testerStatus.alive) {
+    cls = 'stopped'; title = `Tester ${otherTag}: process stopped`;
+  } else if (testerStatus.link_online) {
+    cls = 'up'; title = `Tester ${otherTag}: online`;
+  } else {
+    cls = 'down'; title = `Tester ${otherTag}: link down`;
+  }
+  dot.classList.add(cls);
+  dot.title = title;
 }
 
-async function refreshPeerPresence(tag) {
-  const target = other(tag);
-  if (!state[target].me || !state[tag].me) return;
+async function refreshTesterStatus() {
+  let testers;
   try {
-    const res = await api(tag, `/peers/${state[target].me.hash_hex}/presence`);
-    setPeerStatus(tag, res.is_online);
+    testers = (await (await fetch('/status')).json()).testers;
   } catch (e) {
-    // transient -- next poll or WS event will catch up
+    return; // transient -- next poll will catch up
   }
+  TESTERS.forEach(tag => {
+    TESTERS.filter(o => o !== tag).forEach(otherTag => {
+      setPeerChipState(tag, otherTag, testers[otherTag]);
+    });
+  });
+}
+
+function applyNetStatus(tag, online) {
+  state[tag].net.online = online;
+  state[tag].net.reconnecting = false;
+  const pane = document.getElementById(`pane-${tag}`);
+  if (pane) pane.classList.toggle('offline', !online);
+  const btn = document.getElementById(`link-btn-${tag}`);
+  if (btn) {
+    btn.disabled = state[tag].killed;
+    btn.textContent = online ? 'Go offline' : 'Go online';
+  }
+}
+
+function applyProcState(tag) {
+  const killBtn = document.getElementById(`kill-btn-${tag}`);
+  const startBtn = document.getElementById(`start-btn-${tag}`);
+  const linkBtn = document.getElementById(`link-btn-${tag}`);
+  const killed = state[tag].killed;
+  if (killBtn) killBtn.style.display = killed ? 'none' : '';
+  if (startBtn) startBtn.style.display = killed ? '' : 'none';
+  if (linkBtn) linkBtn.disabled = killed;
+}
+
+function toggleLink(tag) {
+  if (state[tag].net.online) goOffline(tag); else goOnline(tag);
+}
+
+async function goOffline(tag) {
+  const btn = document.getElementById(`link-btn-${tag}`);
+  if (btn) btn.disabled = true;
+  try {
+    await api(tag, '/net/offline', {method: 'POST'});
+  } catch (e) {
+    toast(`Tester ${tag}: offline request failed`);
+  }
+  if (btn) btn.disabled = state[tag].killed;
+}
+
+async function goOnline(tag) {
+  const btn = document.getElementById(`link-btn-${tag}`);
+  state[tag].net.reconnecting = true;
+  if (btn) { btn.disabled = true; btn.textContent = 'reconnecting…'; }
+  try {
+    await api(tag, '/net/online', {method: 'POST'});
+  } catch (e) {
+    toast(`Tester ${tag}: online request failed`);
+    state[tag].net.reconnecting = false;
+    if (btn) { btn.disabled = state[tag].killed; btn.textContent = 'Go online'; }
+  }
+}
+
+async function killTester(tag) {
+  state[tag].killed = true;
+  applyProcState(tag);
+  try {
+    await fetch(`/testers/${tag}/kill`, {method: 'POST'});
+  } catch (e) {
+    toast(`Tester ${tag}: kill request failed`);
+  }
+}
+
+async function startTester(tag) {
+  try {
+    const res = await fetch(`/testers/${tag}/start`, {method: 'POST'});
+    const body = await res.json();
+    if (!body.ok && body.error !== 'already running') {
+      toast(`Tester ${tag}: start failed`);
+      return;
+    }
+  } catch (e) {
+    toast(`Tester ${tag}: start request failed`);
+    return;
+  }
+  state[tag].killed = false;
+  applyProcState(tag);
+  await connectTester(tag);
 }
 
 function connectWs(tag) {
@@ -638,10 +768,8 @@ function connectWs(tag) {
     } else if (msg.type === 'channel_discovered') {
       toast(`Tester ${tag}: discovered #${msg.channel_name}`);
       refreshDiscovered(tag);
-    } else if (msg.type === 'presence') {
-      // This harness only ever has one peer per tester, so any presence
-      // event on tag's socket is about tag's counterpart.
-      setPeerStatus(tag, msg.is_online);
+    } else if (msg.type === 'net_status') {
+      applyNetStatus(tag, msg.online);
     } else if (msg.type === 'avatar_updated') {
       delete avatarCache[tag][msg.identity_hash];
       if (state[tag].me && msg.identity_hash === state[tag].me.hash_hex) refreshOwnAvatar(tag);
@@ -656,7 +784,15 @@ function connectWs(tag) {
       });
     }
   };
-  ws.onclose = () => setTimeout(() => connectWs(tag), 2000);
+  ws.onclose = () => {
+    if (state[tag].killed) {
+      const dot = document.getElementById(`dot-${tag}`);
+      if (dot) { dot.classList.remove('up'); dot.classList.add('stopped'); }
+      const hashEl = document.getElementById(`hash-${tag}`);
+      if (hashEl) hashEl.textContent = 'PROCESS STOPPED';
+    }
+    setTimeout(() => connectWs(tag), 2000);
+  };
   state[tag].ws = ws;
 }
 
@@ -931,8 +1067,6 @@ function reactionChipHtml(tag, messageId, r) {
       ${img}<span>${r.count}</span>
     </span>`;
 }
-
-const emojiLibrary = { A: [], B: [] };
 
 async function refreshEmojiLibrary(tag) {
   emojiLibrary[tag] = await api(tag, '/emoji');
@@ -1329,32 +1463,47 @@ async function resetEnvironment() {
   closeMembersModal();
   closePermissionsModal();
   TESTERS.forEach(tag => {
-    if (state[tag].ws) state[tag].ws.close();
-    state[tag] = { port: null, me: null, channels: [], activeChannel: null, activeServer: null, servers: [], serverChannels: {}, serverPerms: {}, collapsedServers: new Set(), ws: null, invites: [], pendingImage: null, replyTarget: null };
-    avatarCache[tag] = {};
-    emojiLibrary[tag] = [];
+    if (state[tag] && state[tag].ws) state[tag].ws.close();
   });
   closeEmojiPicker();
   closeNetworkModal();
-  renderShell();
   try {
     const res = await fetch('/reset', {method: 'POST'});
     const body = await res.json();
-    if (!body.ok) toast('Reset had trouble bringing both testers back up');
+    if (!body.ok) toast('Reset had trouble bringing all testers back up');
   } catch (e) {
     toast('Reset request failed: ' + e);
   }
-  await Promise.all(TESTERS.map(connectTester));
+  await init();
   btn.disabled = false;
   btn.textContent = 'Reset environment';
 }
 
-renderShell();
-TESTERS.forEach(connectTester);
-// Fallback poll: covers the startup race where a tester's own /me hasn't
-// resolved yet when its counterpart first tries to read presence, and any
-// WS reconnect gap. Live updates still come from the 'presence' WS event.
-setInterval(() => TESTERS.forEach(refreshPeerPresence), 5000);
+async function init() {
+  const cfg = await (await fetch('/config')).json();
+  TESTERS = cfg.testers.map(t => t.tag);
+  state = {};
+  avatarCache = {};
+  emojiLibrary = {};
+  hashToTag = {};
+  cfg.testers.forEach(t => {
+    state[t.tag] = blankState(t.api_port);
+    avatarCache[t.tag] = {};
+    emojiLibrary[t.tag] = [];
+  });
+  document.getElementById('panes').style.setProperty('--cols', colsFor(TESTERS.length));
+  renderShell();
+  await Promise.all(TESTERS.map(connectTester));
+  refreshTesterStatus();
+  if (!presencePollStarted) {
+    presencePollStarted = true;
+    setInterval(refreshTesterStatus, 5000);
+  }
+}
+
+let presencePollStarted = false;
+
+init();
 </script>
 </body>
 </html>
