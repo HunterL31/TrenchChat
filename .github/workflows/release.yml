@@ -50,19 +50,7 @@ jobs:
       - name: Run test suite
         env:
           QT_QPA_PLATFORM: offscreen
-        # One process per test file. Every peer built by the peer_factory
-        # fixture stands up an LXMF router whose threads outlive teardown, and
-        # past a few hundred the interpreter faults mid-run with no report (see
-        # tests/conftest.py). Per-file isolation caps the accumulation. Runs
-        # every file before failing so one crash doesn't hide the rest.
-        run: |
-          failed=0
-          for f in tests/test_*.py; do
-            echo "::group::$f"
-            python -m pytest "$f" || failed=1
-            echo "::endgroup::"
-          done
-          exit $failed
+        run: python -m pytest tests/ -v
 
   # ---------------------------------------------------------------------------
   # bump_version — compute the next semver from git tags.

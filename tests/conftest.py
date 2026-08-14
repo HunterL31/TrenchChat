@@ -77,12 +77,26 @@ class TestTransport:
     def __init__(self):
         # delivery_dest_hash_hex -> Router
         self._peers: dict[str, Router] = {}
+        self._threads: list[threading.Thread] = []
 
     def register(self, peer: "TestPeer"):
         dest_hash_hex = peer.router.delivery_destination.hash.hex()
         self._peers[dest_hash_hex] = peer.router
         # Patch the peer's router.send to go through this transport
         peer.router.send = self._make_send(peer.identity.hash_hex)
+
+    def unregister(self, peer: "TestPeer"):
+        """Stop delivering to a peer and wait for anything already in flight.
+
+        Delivery runs on its own thread, so without this a message dispatched
+        moments before teardown lands in handlers that then query a Storage
+        whose connection has just been closed. sqlite3 doesn't raise across
+        threads for that -- it faults the interpreter.
+        """
+        self._peers.pop(peer.router.delivery_destination.hash.hex(), None)
+        for thread in list(self._threads):
+            thread.join(timeout=2.0)
+        self._threads = [t for t in self._threads if t.is_alive()]
 
     def _make_send(self, sender_identity_hex: str):
         def send(lxm: LXMF.LXMessage):
@@ -105,12 +119,17 @@ class TestTransport:
             # Deliver asynchronously (matches real LXMF behaviour)
             def _deliver():
                 time.sleep(0.05)
+                # The recipient may have been torn down while this was queued.
+                if self._peers.get(dest_hash_hex) is not recipient_router:
+                    return
                 try:
                     recipient_router._on_message_received(lxm)
                 except Exception as e:
                     import RNS as _RNS
                     _RNS.log(f"TestTransport: delivery error: {e}", _RNS.LOG_ERROR)
-            threading.Thread(target=_deliver, daemon=True).start()
+            thread = threading.Thread(target=_deliver, daemon=True)
+            self._threads.append(thread)
+            thread.start()
         return send
 
 
@@ -276,6 +295,9 @@ def peer_factory(rns_instance, tmp_path):
                 except Exception:
                     pass
 
+        # Order matters: stop inbound delivery before anything it touches goes
+        # away, and close storage last.
+        peer._teardown_callbacks.append(lambda p=peer: transport.unregister(p))
         peer._teardown_callbacks.append(_stop_router)
         peer._teardown_callbacks.append(storage.close)
         created_peers.append(peer)
