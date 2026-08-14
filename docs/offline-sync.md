@@ -190,6 +190,8 @@ Sync is otherwise invisible: a freshly joined channel shows an empty pane while 
 
 `SYNCED` requires a peer to have actually answered — a silent peer never counts as up to date, which is what the empty response above exists to make possible.
 
+`SYNCED` is scoped to peers we know about. A peer whose announce never reached us is never asked and can't be accounted for — on a partition-tolerant mesh there's no way to enumerate everyone who might hold history. `SYNCED` means "every peer we know about answered and had nothing more," not "no history exists anywhere." `get_status()`'s `answered_peers` count says how many peers back that claim.
+
 ---
 
 ## Peer Reconnect Detection

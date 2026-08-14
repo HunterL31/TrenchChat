@@ -14,7 +14,7 @@ from trenchchat.core.fileutils import secure_file
 from trenchchat.core.lockbox import sqlcipher_hex_key
 from trenchchat.core.permissions import (
     PRESET_OPEN, PRESET_PRIVATE, PRESET_SERVER, ROLE_ADMIN, ROLE_MEMBER, ROLE_OWNER,
-    has_permission as _check_permission,
+    has_permission as _check_permission, is_open_join,
     permissions_from_json, permissions_to_json,
 )
 
@@ -363,7 +363,15 @@ class Storage:
         self._conn.commit()
 
     def _migrate_tenure(self):
-        """Create membership_tenure table and backfill current members if the table is new."""
+        """Create membership_tenure table and backfill current members if the table is new.
+
+        Skips open-join channels: ChannelManager.create_channel deliberately
+        never opens tenure for them, so backfilling one here from the members
+        table would make has_any_tenure() true and wrongly turn on tenure
+        filtering for subscribers who hold no tenure record of their own --
+        this runs on every startup, not just a genuine schema upgrade, since
+        an open-join channel's tenure count legitimately stays at 0 forever.
+        """
         # The table is created by SCHEMA, but it may be empty on first run with
         # an existing database.  Backfill open intervals from current members.
         count = self._conn.execute(
@@ -373,12 +381,21 @@ class Storage:
             rows = self._conn.execute(
                 "SELECT channel_hash, identity_hash, added_at FROM members"
             ).fetchall()
-            if rows:
+            to_insert = []
+            for r in rows:
+                channel_row = self._conn.execute(
+                    "SELECT permissions FROM channels WHERE hash = ?",
+                    (r["channel_hash"],),
+                ).fetchone()
+                if channel_row and is_open_join(permissions_from_json(channel_row["permissions"])):
+                    continue
+                to_insert.append((r["channel_hash"], r["identity_hash"], r["added_at"]))
+            if to_insert:
                 self._conn.executemany("""
                     INSERT OR IGNORE INTO membership_tenure
                         (channel_hash, identity_hash, joined_at, left_at)
                     VALUES (?, ?, ?, NULL)
-                """, [(r["channel_hash"], r["identity_hash"], r["added_at"]) for r in rows])
+                """, to_insert)
                 self._conn.commit()
 
     def _repair_tenure_from_message_history(self):

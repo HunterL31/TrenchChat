@@ -143,20 +143,27 @@ class TestPruneHasNoProductionCaller:
         )
 
 
-class TestEmptyResponseHonestyAtScale:
-    def test_all_known_peers_answering_empty_does_not_certify_full_history(
+class TestSyncedIsScopedToKnownPeers:
+    def test_synced_means_every_known_peer_answered_not_full_history(
         self, peer_factory
     ):
         """
-        Carol, Dave, and Eve are the only peers Bob's local view knows about
-        for this channel, and each genuinely has nothing new for him -- they
+        SYNCED is a settled, scoped claim: "every peer we know about answered
+        and had nothing more" -- not "no history exists anywhere". Carol,
+        Dave, and Eve are the only peers Bob's local view knows about for
+        this channel, and each genuinely has nothing new for him -- they
         answer honestly with an empty list. Frank is a real member holding a
         message Bob has never seen, but Frank's announce never reached Bob,
         so Bob's local peer list never included him and he was never asked.
 
-        The channel still settles to SYNCED off the three honest empty
-        answers, even though history exists that Bob is missing -- the exact
-        "up to date while messages are missing" shape this file targets.
+        On a partition-tolerant mesh there is no way to enumerate every peer
+        who might hold history, so an unknown peer like Frank is out of
+        scope by design -- SYNCED honestly reports "up to date with the
+        peers I know about", and asserting the answered-peer count that
+        backs the claim (rather than just the state) keeps a regression that
+        silently narrows peer discovery from passing unnoticed: if Bob's
+        peer list ever quietly dropped Carol, Dave, or Eve, this would still
+        see SYNCED but the count would fall below 3.
         """
         alice = peer_factory("alice")
         bob = peer_factory("bob")
@@ -169,7 +176,7 @@ class TestEmptyResponseHonestyAtScale:
         for peer in (bob, carol, dave, eve, frank):
             _seed_channel_on_peer(peer, ch_hash, "f2-scale", alice.identity.hash_hex)
 
-        frank_msg_id = _insert_message(
+        _insert_message(
             frank.storage, ch_hash, alice.identity.hash_hex,
             "only Frank has this", time.time(),
         )
@@ -183,10 +190,15 @@ class TestEmptyResponseHonestyAtScale:
             timeout=5,
         ), "Carol, Dave, and Eve never all answered"
 
-        state = bob.sync_mgr.status.get_state(ch_hash)
-        assert state != SyncState.SYNCED, (
-            f"reported {state.value} as up to date while Frank still holds "
-            f"{frank_msg_id[:12]}… that Bob was never even asked about"
+        status = bob.sync_mgr.status.get_status(ch_hash)
+        assert status["state"] == SyncState.SYNCED.value, (
+            f"expected SYNCED once every known peer answered honestly, "
+            f"got {status['state']}"
+        )
+        assert status["answered_peers"] == 3, (
+            "the SYNCED claim should be backed by exactly the three peers "
+            f"Bob actually knew about and asked, got {status['answered_peers']} -- "
+            "Frank is correctly out of scope since his announce never reached Bob"
         )
 
 

@@ -19,6 +19,13 @@ makes.  A channel's state is derived from its peer records:
 SYNCED requires a peer to have actually answered.  A peer with nothing to send
 replies with an empty sync response for exactly this reason: without it,
 "caught up" and "never answered" are the same silence.
+
+SYNCED is scoped to peers we know about.  A peer whose announce never reached
+us is never asked and can't be accounted for -- on a partition-tolerant mesh
+there is no way to enumerate everyone who might hold history, so SYNCED means
+"every peer we know about answered and had nothing more," not "no history
+exists anywhere." get_status()'s "answered_peers" count says how many peers
+that claim rests on.
 """
 
 import threading
@@ -223,15 +230,17 @@ class SyncStatusTracker:
                 for peer_hex, peer in sorted(rec.peers.items())
             ] if rec else []
             pending = sum(1 for p in peers if p["state"] == PeerSyncState.PENDING.value)
+            answered = sum(1 for p in peers if p["state"] == PeerSyncState.ANSWERED.value)
             received_count = rec.received_count if rec else 0
 
         return {
-            "channel_hash":   channel_hash_hex,
-            "state":          state.value,
-            "peers":          peers,
-            "pending_peers":  pending,
-            "received_count": received_count,
-            "last_synced_at": self._storage.get_last_sync(channel_hash_hex),
+            "channel_hash":    channel_hash_hex,
+            "state":           state.value,
+            "peers":           peers,
+            "pending_peers":   pending,
+            "answered_peers":  answered,
+            "received_count":  received_count,
+            "last_synced_at":  self._storage.get_last_sync(channel_hash_hex),
         }
 
     # --- private helpers ---
