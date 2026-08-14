@@ -243,6 +243,13 @@ def peer_factory(rns_instance, tmp_path):
         # interpreter eventually faults on Windows partway through. Tearing
         # each one down with the peer keeps a full-suite run stable.
         def _stop_router(r=router, ch=channel_mgr, sv=server_mgr, ident=identity):
+            # LXMRouter.jobloop is `while True` with no exit condition, and
+            # exit_handler sets a flag jobloop never reads, so every router
+            # keeps a thread calling jobs() against torn-down state for the
+            # life of the process -- which is what faults the interpreter once
+            # enough have piled up. LXMF exposes no way to stop it, so make the
+            # thread harmless: it keeps spinning, but on nothing.
+            r.lxmf_router.jobs = lambda: None
             r.lxmf_router.exit_handler()
             # exit_handler tears down LXMF's own delivery/user destinations and
             # unhooks propagation_destination's callbacks, but never deregisters
