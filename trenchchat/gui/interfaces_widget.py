@@ -23,10 +23,10 @@ Supported types for create/edit
 Interfaces of other types already in the config are displayed read-only.
 """
 
-import os
-
 import RNS
 from configobj import ConfigObj
+
+from trenchchat.core.interfaces_config import load_interfaces_config
 
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import (
@@ -166,26 +166,6 @@ def _fmt_bytes(n: int) -> str:
     if n < 1024 * 1024:
         return f"{n / 1024:.1f} KB"
     return f"{n / (1024 * 1024):.1f} MB"
-
-
-def load_interfaces_config(config_path: str) -> dict[str, dict]:
-    """Read the [interfaces] section from the Reticulum config file.
-
-    Returns a dict mapping interface name to its config dict (including 'type').
-    Returns an empty dict if the file does not exist or has no [interfaces] section.
-    """
-    if not os.path.isfile(config_path):
-        return {}
-    try:
-        cfg = ConfigObj(config_path)
-    except Exception:
-        return {}
-    interfaces_section = cfg.get("interfaces", {})
-    result = {}
-    for name, section in interfaces_section.items():
-        if isinstance(section, dict):
-            result[name] = dict(section)
-    return result
 
 
 def build_interface_config_dict(

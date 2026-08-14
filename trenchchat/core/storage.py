@@ -792,6 +792,32 @@ class Storage:
             LIMIT ?
         """, (channel_hash, before_ts, limit))
 
+    def get_recent_messages(self, channel_hash: str, limit: int = 50,
+                            before_ts: float | None = None) -> list[sqlite3.Row]:
+        """
+        Up to `limit` most recent messages, oldest first for display.
+
+        before_ts, when given, bounds the page to messages strictly older
+        than it -- pass the oldest timestamp already loaded to page further
+        back. Unlike get_messages(), this is newest-anchored: it always
+        returns the tail of the channel's history, not the head.
+        """
+        if before_ts is None:
+            rows = self._fetchall("""
+                SELECT * FROM messages
+                WHERE channel_hash = ?
+                ORDER BY timestamp DESC, received_at DESC
+                LIMIT ?
+            """, (channel_hash, limit))
+        else:
+            rows = self._fetchall("""
+                SELECT * FROM messages
+                WHERE channel_hash = ? AND timestamp < ?
+                ORDER BY timestamp DESC, received_at DESC
+                LIMIT ?
+            """, (channel_hash, before_ts, limit))
+        return list(reversed(rows))
+
     def get_latest_message_id(self, channel_hash: str) -> str | None:
         row = self._fetchone("""
             SELECT message_id FROM messages

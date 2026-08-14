@@ -77,6 +77,21 @@ def _path_ttl(dest_hex: str) -> float | None:
     return None
 
 
+def _path_hops_and_via(dest_hex: str) -> tuple[int, str | None] | None:
+    """Return (hops, via_hex) from the path table for dest_hex, or None if unknown."""
+    try:
+        dest_hash = bytes.fromhex(dest_hex)
+        entry = RNS.Transport.path_table.get(dest_hash)
+        if entry is None:
+            return None
+        hops = entry[2]     # index 2 = hop count
+        via = entry[1]      # index 1 = next-hop destination hash
+        via_hex = via.hex() if isinstance(via, (bytes, bytearray)) else None
+        return hops, via_hex
+    except Exception:
+        return None
+
+
 def score_path(
     dest_hex: str,
     hops: int,
@@ -170,3 +185,43 @@ def quality_label(quality: LinkQuality) -> str:
         LinkQuality.POOR:      "Poor",
         LinkQuality.UNKNOWN:   "Unknown",
     }[quality]
+
+
+def score_channel(storage, subscription_mgr, channel_hash_hex: str,
+                  self_hash_hex: str) -> tuple[LinkQuality, int]:
+    """
+    Worst link quality and max hop count across the channel's reachable recipients.
+
+    Recipients are the channel's delivery targets (see
+    actions.compute_channel_recipients), excluding self. A recipient with no
+    known path is skipped rather than scored POOR -- it isn't classifiable,
+    not merely bad. Returns (UNKNOWN, 0) when the channel has no other
+    recipients, or none of them have a known path.
+    """
+    from trenchchat.core.actions import compute_channel_recipients
+
+    recipients = [
+        identity_hex
+        for identity_hex in compute_channel_recipients(
+            storage, subscription_mgr, channel_hash_hex, self_hash_hex)
+        if identity_hex != self_hash_hex
+    ]
+
+    worst = LinkQuality.EXCELLENT
+    max_hops = 0
+    reachable = False
+
+    for identity_hex in recipients:
+        dest_hex = RNS.Destination.hash(bytes.fromhex(identity_hex), "lxmf", "delivery").hex()
+        path_info = _path_hops_and_via(dest_hex)
+        if path_info is None:
+            continue
+        hops, via_hex = path_info
+        quality = score_path(dest_hex, hops, via_hex)
+        worst = min(worst, quality)
+        max_hops = max(max_hops, hops)
+        reachable = True
+
+    if not reachable:
+        return LinkQuality.UNKNOWN, 0
+    return worst, max_hops
