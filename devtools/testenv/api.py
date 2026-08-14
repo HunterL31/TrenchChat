@@ -32,6 +32,8 @@ from pydantic import BaseModel
 from trenchchat.core import actions
 from trenchchat.core.image import MAX_IMAGE_BYTES, is_gif, prepare_image
 from trenchchat.core.avatar import compress_avatar
+from trenchchat.core.interfaces_config import load_interfaces_config
+from trenchchat.core.network_data import gather_network_data
 from trenchchat.core.permissions import (
     ALL_PERMISSIONS, CREATE_CHANNEL, INVITE, KICK, MANAGE_CHANNEL, MANAGE_ROLES,
     ROLE_ADMIN, ROLE_MEMBER, PRESET_OPEN, PRESET_PRIVATE,
@@ -301,7 +303,6 @@ def create_app(backend: Backend) -> FastAPI:
     @app.get("/network/map")
     def get_network_map():
         # Same free function NetworkMapDialog calls -- no GUI coupling.
-        from trenchchat.gui.network_map import gather_network_data
         return gather_network_data(backend.rns, backend.identity.hash_hex, backend.storage)
 
     @app.get("/reticulum/interfaces")
@@ -309,8 +310,6 @@ def create_app(backend: Backend) -> FastAPI:
         # Same data source InterfacesWidget.load_interfaces() merges: the
         # configured [interfaces] section plus live rns.get_interface_stats().
         # Read-only -- live editing is a separate, bigger scope-add.
-        from trenchchat.gui.interfaces_widget import load_interfaces_config
-
         cfg_interfaces = load_interfaces_config(backend.rns_config_path)
         try:
             stats_result = backend.rns.get_interface_stats()
