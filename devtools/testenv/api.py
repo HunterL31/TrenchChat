@@ -492,7 +492,8 @@ def create_app(backend: Backend) -> FastAPI:
 
     @app.post("/channels/{channel_hash}/leave")
     def leave_channel(channel_hash: str):
-        ok = actions.leave_channel(backend.storage, backend.subscription_mgr, channel_hash)
+        ok = actions.leave_channel(backend.storage, backend.subscription_mgr,
+                                   backend.channel_mgr, channel_hash)
         return {"ok": ok}
 
     @app.get("/channels/{channel_hash}/members")

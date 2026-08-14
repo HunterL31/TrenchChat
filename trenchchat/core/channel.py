@@ -136,12 +136,18 @@ class ChannelManager:
         alone -- otherwise toggling "Discoverable" on in the permissions
         dialog broadcasts an invite-only channel's existence to the whole
         mesh even though open_join stays off.
+
+        A channel the owner has left is never announced. Ownership and
+        membership are tracked separately, so without this check leaving a
+        channel you created keeps advertising it to the mesh forever.
         """
         dest = self._owned_destinations.get(channel_hash_hex)
         if dest is None:
             return
         channel = self._storage.get_channel(channel_hash_hex)
         if channel is None:
+            return
+        if not self._storage.is_subscribed(channel_hash_hex):
             return
         perms = permissions_from_json(channel["permissions"])
         if not is_discoverable(perms) or not is_open_join(perms):
@@ -205,9 +211,22 @@ class ChannelManager:
     def is_owner(self, channel_hash_hex: str) -> bool:
         return channel_hash_hex in self._owned_destinations
 
+    def release_owned_channel(self, channel_hash_hex: str) -> None:
+        """Stop owning a channel's destination, so it is no longer announced."""
+        dest = self._owned_destinations.pop(channel_hash_hex, None)
+        if dest is None:
+            return
+        try:
+            RNS.Transport.deregister_destination(dest)
+        except Exception as e:
+            RNS.log(f"TrenchChat: failed to deregister channel destination: {e}",
+                    RNS.LOG_WARNING)
+
     def restore_owned_channels(self):
         """Re-create RNS destinations for channels we created (called on startup)."""
         for row in self._storage.get_all_channels():
+            if not self._storage.is_subscribed(row["hash"]):
+                continue
             if row["creator_hash"] == self._identity.hash_hex:
                 aspect = _sanitise_name(row["name"])
                 dest = RNS.Destination(

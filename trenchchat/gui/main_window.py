@@ -1193,7 +1193,8 @@ class MainWindow(QMainWindow):
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
         if confirm == QMessageBox.StandardButton.Yes:
-            actions.leave_channel(self._storage, self._subscription_mgr, channel_hash)
+            actions.leave_channel(self._storage, self._subscription_mgr,
+                                  self._channel_mgr, channel_hash)
             if channel_hash in self._channel_views:
                 view = self._channel_views.pop(channel_hash)
                 self._stack.removeWidget(view)
