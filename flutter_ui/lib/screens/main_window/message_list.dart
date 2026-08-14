@@ -1,4 +1,6 @@
 // 1a: avatar message rows, author grouping, date dividers, reaction chips.
+import 'dart:typed_data';
+
 import 'package:flutter/material.dart';
 
 import '../../api/models/message.dart';
@@ -46,12 +48,21 @@ class MessageList extends StatefulWidget {
     required this.messages,
     required this.meHashHex,
     required this.displayNameFor,
+    this.avatarBytesFor,
+    this.ensureAvatarLoaded,
     this.onToggleReaction,
   });
 
   final List<Message> messages;
   final String meHashHex;
   final String Function(String identityHashHex, String fallback) displayNameFor;
+
+  /// Synchronous cache read -- null until [ensureAvatarLoaded] has fetched it.
+  final Uint8List? Function(String identityHashHex)? avatarBytesFor;
+
+  /// Fire-and-forget: triggers the async fetch that populates the cache.
+  final void Function(String identityHashHex)? ensureAvatarLoaded;
+
   final void Function(String messageId, String emojiHash)? onToggleReaction;
 
   @override
@@ -96,6 +107,8 @@ class _MessageListState extends State<MessageList> {
               isContinuation: row.isContinuation,
               isOwn: row.message.senderHash == widget.meHashHex,
               displayName: widget.displayNameFor(row.message.senderHash, row.message.senderName),
+              avatarBytes: widget.avatarBytesFor?.call(row.message.senderHash),
+              ensureAvatarLoaded: widget.ensureAvatarLoaded,
               onToggleReaction: widget.onToggleReaction,
             ),
         };
@@ -139,6 +152,8 @@ class _MessageRowWidget extends StatelessWidget {
     required this.isContinuation,
     required this.isOwn,
     required this.displayName,
+    this.avatarBytes,
+    this.ensureAvatarLoaded,
     this.onToggleReaction,
   });
 
@@ -146,10 +161,15 @@ class _MessageRowWidget extends StatelessWidget {
   final bool isContinuation;
   final bool isOwn;
   final String displayName;
+  final Uint8List? avatarBytes;
+  final void Function(String identityHashHex)? ensureAvatarLoaded;
   final void Function(String messageId, String emojiHash)? onToggleReaction;
 
   @override
   Widget build(BuildContext context) {
+    if (!isContinuation && avatarBytes == null) {
+      ensureAvatarLoaded?.call(message.senderHash);
+    }
     final bg = isOwn ? const Color.fromRGBO(255, 255, 255, 0.02) : Colors.transparent;
     final body = Text(
       message.content,
@@ -205,7 +225,7 @@ class _MessageRowWidget extends StatelessWidget {
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Avatar(name: displayName, size: 34),
+          Avatar(name: displayName, imageBytes: avatarBytes, size: 34),
           const SizedBox(width: 12),
           Expanded(
             child: Column(

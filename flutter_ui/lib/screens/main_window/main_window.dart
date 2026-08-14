@@ -110,6 +110,8 @@ class _MainWindowState extends State<MainWindow> {
                             messages: messages,
                             meHashHex: state.meHashHex,
                             displayNameFor: _displayNameFor,
+                            avatarBytesFor: (hash) => state.avatarCache[hash],
+                            ensureAvatarLoaded: (hash) => state.avatarFor(hash),
                             onToggleReaction: channelHash == null
                                 ? null
                                 : (messageId, emojiHash) {
