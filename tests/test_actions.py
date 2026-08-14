@@ -7,6 +7,8 @@ from a silently-filtered request.
 
 import time
 
+import pytest
+
 from tests.helpers import wait_for_member
 from trenchchat.core import actions
 from trenchchat.core.permissions import (
@@ -132,3 +134,100 @@ class TestJoinPublicChannel:
         assert joined is False
         assert not bob.storage.is_subscribed(ch_hash), \
             "Bob self-joined an invite-only channel via a bare subscribe"
+
+
+class TestSettings:
+    def test_read_settings_matches_config_defaults(self, peer_factory):
+        alice = peer_factory("alice")
+
+        settings = actions.read_settings(alice.config)
+
+        assert settings == {
+            "propagation_enabled": False,
+            "propagation_node_name": "",
+            "propagation_storage_limit_mb": 256,
+            "channel_filter_mode": "allowlist",
+            "channel_filter_hashes": [],
+            "outbound_propagation_node": None,
+        }
+
+    def test_apply_settings_writes_simple_fields(self, peer_factory):
+        alice = peer_factory("alice")
+
+        actions.apply_settings(alice.config, alice.router, {
+            "propagation_node_name": "my-node",
+            "propagation_storage_limit_mb": 512,
+            "channel_filter_mode": "all",
+            "channel_filter_hashes": ["aa", "bb"],
+        })
+
+        assert alice.config.propagation_node_name == "my-node"
+        assert alice.config.propagation_storage_limit_mb == 512
+        assert alice.config.channel_filter_mode == "all"
+        assert alice.config.channel_filter_hashes == ["aa", "bb"]
+
+    def test_apply_settings_only_touches_provided_keys(self, peer_factory):
+        alice = peer_factory("alice")
+        alice.config.propagation_node_name = "keep-me"
+
+        actions.apply_settings(alice.config, alice.router, {
+            "propagation_storage_limit_mb": 128,
+        })
+
+        assert alice.config.propagation_node_name == "keep-me"
+        assert alice.config.propagation_storage_limit_mb == 128
+
+    def test_apply_settings_enables_propagation_via_router(self, peer_factory):
+        alice = peer_factory("alice")
+
+        actions.apply_settings(alice.config, alice.router, {"propagation_enabled": True})
+
+        assert alice.config.propagation_enabled is True
+
+    def test_apply_settings_disables_propagation_via_router(self, peer_factory):
+        alice = peer_factory("alice")
+        alice.router.enable_propagation()
+        assert alice.config.propagation_enabled is True
+
+        actions.apply_settings(alice.config, alice.router, {"propagation_enabled": False})
+
+        assert alice.config.propagation_enabled is False
+
+    def test_apply_settings_enable_is_a_noop_when_already_enabled(self, peer_factory):
+        """A redundant enable=True must not re-trigger enable_propagation's
+        side effects when nothing changed."""
+        alice = peer_factory("alice")
+        alice.router.enable_propagation()
+
+        actions.apply_settings(alice.config, alice.router, {"propagation_enabled": True})
+
+        assert alice.config.propagation_enabled is True
+
+    def test_apply_settings_sets_outbound_propagation_node(self, peer_factory):
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+
+        actions.apply_settings(alice.config, alice.router, {
+            "outbound_propagation_node": bob.identity.hash_hex,
+        })
+
+        assert alice.config.outbound_propagation_node == bob.identity.hash_hex
+
+    def test_apply_settings_clears_outbound_propagation_node(self, peer_factory):
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+        alice.router.set_outbound_propagation_node(bob.identity.hash_hex)
+
+        actions.apply_settings(alice.config, alice.router, {
+            "outbound_propagation_node": None,
+        })
+
+        assert alice.config.outbound_propagation_node is None
+
+    def test_apply_settings_rejects_invalid_channel_filter_mode(self, peer_factory):
+        alice = peer_factory("alice")
+
+        with pytest.raises(ValueError):
+            actions.apply_settings(alice.config, alice.router, {
+                "channel_filter_mode": "bogus",
+            })

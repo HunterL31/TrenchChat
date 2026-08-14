@@ -325,7 +325,12 @@ class Router:
                 self._identity.rns_identity
             )
         else:
-            self._router.set_outbound_propagation_node(None)
+            # LXMF's own setter rejects anything that isn't a valid
+            # destination hash, so it has no way to clear the node.
+            self._router.outbound_propagation_node = None
+            if self._router.outbound_propagation_link is not None:
+                self._router.outbound_propagation_link.teardown()
+                self._router.outbound_propagation_link = None
 
     def sync_from_propagation_node(self):
         """Manually trigger a sync pull from the configured propagation node."""

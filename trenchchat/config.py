@@ -1,4 +1,5 @@
 import base64
+import copy
 import json
 import os
 from pathlib import Path
@@ -30,7 +31,10 @@ _DEFAULTS = {
 
 
 def _deep_merge(base: dict, override: dict) -> dict:
-    result = dict(base)
+    # Must deep-copy: setters mutate nested dicts (e.g. "propagation_node")
+    # in place, and a shallow copy would leave those as shared references
+    # to _DEFAULTS -- and to every other Config instance's data.
+    result = copy.deepcopy(base)
     for key, value in override.items():
         if key in result and isinstance(result[key], dict) and isinstance(value, dict):
             result[key] = _deep_merge(result[key], value)
