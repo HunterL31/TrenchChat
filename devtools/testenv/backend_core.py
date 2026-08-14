@@ -27,12 +27,19 @@ from trenchchat.core.messaging import Messaging
 from trenchchat.core.subscription import SubscriptionManager
 from trenchchat.core.invite import InviteManager
 from trenchchat.core.sync import SyncManager
-from trenchchat.core.presence import PresenceManager
+from trenchchat.core.presence import PresenceBeacon, PresenceManager
 from trenchchat.core.user_directory import UserDirectory
 from trenchchat.core.avatar import AvatarManager
 from trenchchat.core.reaction import ReactionManager
 from trenchchat.network.router import Router
 from trenchchat.network.announce import PeerAnnounceHandler, UserAnnounceHandler
+
+_LINK_INTERFACE_NAME = "TesterLink"
+
+# Shortened presence intervals so a hand test can observe the beacon
+# surviving the hub in minutes instead of the production 300s/180s.
+_PRESENCE_TIMEOUT_SECS = 60.0
+_PRESENCE_BEACON_AFTER_SECS = 30.0
 
 RETICULUM_CONFIG_TEMPLATE = """\
 [reticulum]
@@ -93,6 +100,7 @@ class Backend:
                 instance_name: str, enable_transport: bool = False):
         self.data_dir = data_dir
         data_dir.mkdir(parents=True, exist_ok=True)
+        self._link_callbacks: list = []
 
         rns_dir = data_dir / "reticulum"
         _write_reticulum_config(rns_dir, instance_name, role,
@@ -117,7 +125,13 @@ class Backend:
         self.invite_mgr = InviteManager(self.identity, self.storage, self.router)
         self.sync_mgr = SyncManager(self.identity, self.storage, self.router,
                                     self.messaging, self.subscription_mgr, self.invite_mgr)
-        self.presence_mgr = PresenceManager(self.identity.hash_hex, self.config)
+        self.presence_mgr = PresenceManager(self.identity.hash_hex, self.config,
+                                            timeout_secs=_PRESENCE_TIMEOUT_SECS)
+        self.presence_beacon = PresenceBeacon(
+            self.identity, self.storage, self.router, self.subscription_mgr,
+            self.presence_mgr, beacon_after_secs=_PRESENCE_BEACON_AFTER_SECS,
+        )
+        self.router.add_outbound_callback(self.presence_beacon.record_sent)
         self.user_directory = UserDirectory(self.identity.hash_hex)
         self.avatar_mgr = AvatarManager(self.identity, self.config, self.storage, self.router)
         self.reaction_mgr = ReactionManager(self.identity, self.storage, self.router)
@@ -204,6 +218,8 @@ class Backend:
                 try:
                     self.presence_mgr.prune()
                     self.user_directory.prune()
+                    self.sync_mgr.status.prune()
+                    self.presence_beacon.tick()
                 except Exception as e:
                     RNS.log(f"TesterBackend: presence prune failed: {e}", RNS.LOG_WARNING)
 
@@ -254,6 +270,64 @@ class Backend:
                 return True
             time.sleep(interval)
         return peer_hash_hex is None or self.path_known(peer_hash_hex)
+
+    def link_interface(self):
+        """Return this backend's own TesterLink interface object, or None."""
+        for iface in RNS.Transport.interfaces:
+            if _LINK_INTERFACE_NAME in str(iface):
+                return iface
+        return None
+
+    def link_online(self) -> bool:
+        """Whether the TesterLink interface is currently connected."""
+        iface = self.link_interface()
+        return iface is not None and iface.online and not iface.detached
+
+    def add_link_callback(self, cb) -> None:
+        """Register a callback invoked with (is_online: bool) on link state change."""
+        self._link_callbacks.append(cb)
+
+    def _fire_link_callbacks(self, is_online: bool) -> None:
+        for cb in self._link_callbacks:
+            try:
+                cb(is_online)
+            except Exception as e:
+                RNS.log(f"TrenchChat [link]: callback error: {e}", RNS.LOG_ERROR)
+
+    def go_offline(self) -> bool:
+        """Detach the TesterLink interface, simulating this tester dropping off the
+        network. Returns False if there's no interface, or it isn't ours to control
+        (non-initiator, e.g. the listening side of a TCPServerInterface)."""
+        iface = self.link_interface()
+        if iface is None or not getattr(iface, "initiator", False):
+            return False
+        iface.detach()
+        self._fire_link_callbacks(False)
+        return True
+
+    def go_online(self) -> bool:
+        """Reconnect a previously detached TesterLink interface.
+
+        detach() leaves the interface with detached=True and IN/OUT False (set by
+        the read loop's teardown()); reconnect() never resets any of the three, so
+        without clearing them by hand the interface stays blackholed even after the
+        socket reconnects.
+        """
+        iface = self.link_interface()
+        if iface is None or not getattr(iface, "initiator", False):
+            return False
+
+        iface.detached = False
+        iface.IN = True
+        iface.OUT = True
+
+        def _reconnect():
+            iface.reconnect()
+            self.warm_up(timeout=10.0, interval=1.0)
+            self._fire_link_callbacks(self.link_online())
+
+        threading.Thread(target=_reconnect, daemon=True, name="link-reconnect").start()
+        return True
 
 
 def wait_for_identity_file(data_dir: Path, timeout: float = 15.0) -> dict:

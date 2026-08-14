@@ -199,6 +199,33 @@ This closes the last path to unsolicited channel membership.
 
 ## Still open
 
+### 0. Tenure filtering is a channel-level switch, so a tenure-blind peer is a hole
+
+`storage.has_any_tenure(channel)` gates the *entire* per-message tenure check,
+on both the responder side (`_filter_rows_by_tenure`) and the receiver side
+(`_handle_sync_response`). It asks whether the channel has any tenure rows at
+all, not whether this particular sender can be vouched for.
+
+A peer that holds a roster for a closed channel but has never recorded tenure
+data therefore applies no tenure filtering at all. When that peer is the
+*responder*, the requester's own re-check still catches it — that is the
+defence, and it is covered by
+`tests/test_sync_permissions_inflight.py::TestTenureFailOpenAsymmetry`. When
+the *requester* is also tenure-blind, nothing in the exchange checks tenure and
+a message from a member kicked elsewhere in the mesh is accepted.
+
+Failing closed on "closed channel with no tenure rows" is **not** the fix: a
+roster without tenure is a legitimate state (bootstrapped or seeded peers,
+channels predating the feature), and rejecting sync there breaks working
+peers — `tests/test_adversarial.py::test_sync_response_cannot_be_replayed`
+pins exactly that case. A real fix needs per-identity provenance rather than a
+channel-level flag, so that "I cannot vouch for this sender" is distinguishable
+from "this channel has no tenure history".
+
+Bounded by: it only affects peers with no tenure data for a channel, and any
+accepted member-list document opens tenure intervals, so the window closes as
+soon as one arrives.
+
 ### 1. Encryption at rest is off by default, and the PIN is weak
 
 Without a PIN the private key and the entire message database are stored in

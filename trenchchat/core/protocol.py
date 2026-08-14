@@ -12,6 +12,7 @@ Field key registry
 0x20–0x2F  Member-list fields
 0x30–0x3F  Subscription fields
 0x40–0x4F  Reaction fields
+0x50–0x5F  Sync status fields
 """
 
 # --- Common / messaging fields ---
@@ -63,6 +64,12 @@ F_SUBSCRIBER_LIST   = 0x30   # bytes — msgpack list of hex identity hashes
 F_SUBSCRIBER_VERSION = 0x31  # int   — monotonic counter per channel
 F_SUBSCRIBER_SIG    = 0x32   # bytes — owner Ed25519 signature over the list
 
+# --- Sync status fields ---
+F_SYNC_TRUNCATED    = 0x50   # bool — responder capped this batch; it holds more history
+F_SYNC_SCAN_CURSOR  = 0x51   # float — furthest timestamp the responder's sweep reached,
+                             #         even if every row there was withheld from the
+                             #         requester (sync_response, only set when truncated)
+
 # --- Message type strings ---
 MT_SUBSCRIBE        = "subscribe"
 MT_UNSUBSCRIBE      = "unsubscribe"
@@ -77,6 +84,7 @@ MT_AVATAR_UPDATE    = "avatar_update"
 MT_REACTION         = "reaction"        # notify channel: reactor added/removed emoji on a message
 MT_EMOJI_REQUEST    = "emoji_request"   # ask a peer for emoji image data by hash
 MT_EMOJI_RESPONSE   = "emoji_response"  # respond with the emoji image bytes
+MT_PRESENCE         = "presence"        # signed liveness beacon; empty content, no other fields
 
 
 # --- sync window ---

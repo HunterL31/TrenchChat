@@ -77,12 +77,26 @@ class TestTransport:
     def __init__(self):
         # delivery_dest_hash_hex -> Router
         self._peers: dict[str, Router] = {}
+        self._threads: list[threading.Thread] = []
 
     def register(self, peer: "TestPeer"):
         dest_hash_hex = peer.router.delivery_destination.hash.hex()
         self._peers[dest_hash_hex] = peer.router
         # Patch the peer's router.send to go through this transport
         peer.router.send = self._make_send(peer.identity.hash_hex)
+
+    def unregister(self, peer: "TestPeer"):
+        """Stop delivering to a peer and wait for anything already in flight.
+
+        Delivery runs on its own thread, so without this a message dispatched
+        moments before teardown lands in handlers that then query a Storage
+        whose connection has just been closed. sqlite3 doesn't raise across
+        threads for that -- it faults the interpreter.
+        """
+        self._peers.pop(peer.router.delivery_destination.hash.hex(), None)
+        for thread in list(self._threads):
+            thread.join(timeout=2.0)
+        self._threads = [t for t in self._threads if t.is_alive()]
 
     def _make_send(self, sender_identity_hex: str):
         def send(lxm: LXMF.LXMessage):
@@ -105,12 +119,17 @@ class TestTransport:
             # Deliver asynchronously (matches real LXMF behaviour)
             def _deliver():
                 time.sleep(0.05)
+                # The recipient may have been torn down while this was queued.
+                if self._peers.get(dest_hash_hex) is not recipient_router:
+                    return
                 try:
                     recipient_router._on_message_received(lxm)
                 except Exception as e:
                     import RNS as _RNS
                     _RNS.log(f"TestTransport: delivery error: {e}", _RNS.LOG_ERROR)
-            threading.Thread(target=_deliver, daemon=True).start()
+            thread = threading.Thread(target=_deliver, daemon=True)
+            self._threads.append(thread)
+            thread.start()
         return send
 
 
@@ -242,25 +261,43 @@ def peer_factory(rns_instance, tmp_path):
         # session -- several hundred by the end of a full run -- and the
         # interpreter eventually faults on Windows partway through. Tearing
         # each one down with the peer keeps a full-suite run stable.
-        def _stop_router(r=router, ch=channel_mgr):
+        def _stop_router(r=router, ch=channel_mgr, sv=server_mgr, ident=identity):
+            # LXMRouter.jobloop is `while True` with no exit condition, and
+            # exit_handler sets a flag jobloop never reads, so every router
+            # keeps a thread calling jobs() against torn-down state for the
+            # life of the process -- which is what faults the interpreter once
+            # enough have piled up. LXMF exposes no way to stop it, so make the
+            # thread harmless: it keeps spinning, but on nothing.
+            r.lxmf_router.jobs = lambda: None
             r.lxmf_router.exit_handler()
-            # exit_handler tears down LXMF's own delivery destinations but not
-            # the ones this app registers directly with RNS.Transport, which
-            # otherwise stay in the global destination table for the life of
-            # the session.
-            for dest in (getattr(r, "_user_dest", None),
-                         getattr(r, "_delivery_dest", None)):
+            # exit_handler tears down LXMF's own delivery/user destinations and
+            # unhooks propagation_destination's callbacks, but never deregisters
+            # propagation_destination itself, nor the destinations Identity and
+            # ChannelManager/ServerManager register directly with RNS.Transport --
+            # all of those otherwise stay in the global destination table for the
+            # life of the session.
+            owned = (list(getattr(ch, "_owned_destinations", {}).values())
+                     + list(getattr(sv, "_owned_destinations", {}).values()))
+            for dest in ([getattr(r, "_user_dest", None),
+                          getattr(r, "_delivery_dest", None),
+                          r.lxmf_router.propagation_destination,
+                          ident.destination]
+                         + owned):
                 if dest is not None:
                     try:
                         RNS.Transport.deregister_destination(dest)
                     except Exception:
                         pass
-            for dest in list(getattr(ch, "_owned_destinations", {}).values()):
+            handler = getattr(ch, "_announce_handler", None)
+            if handler is not None:
                 try:
-                    RNS.Transport.deregister_destination(dest)
+                    RNS.Transport.deregister_announce_handler(handler)
                 except Exception:
                     pass
 
+        # Order matters: stop inbound delivery before anything it touches goes
+        # away, and close storage last.
+        peer._teardown_callbacks.append(lambda p=peer: transport.unregister(p))
         peer._teardown_callbacks.append(_stop_router)
         peer._teardown_callbacks.append(storage.close)
         created_peers.append(peer)

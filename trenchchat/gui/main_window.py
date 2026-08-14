@@ -35,7 +35,7 @@ from trenchchat.core.permissions import (
     CREATE_CHANNEL, INVITE, MANAGE_CHANNEL, SEND_MESSAGE, PRESETS, PRESET_PRIVATE,
     is_discoverable, is_open_join, permissions_from_json,
 )
-from trenchchat.core.presence import PresenceManager, resolve_display_name
+from trenchchat.core.presence import PresenceBeacon, PresenceManager, resolve_display_name
 from trenchchat.core.storage import Storage
 from trenchchat.core.channel import ChannelManager
 from trenchchat.core.messaging import Messaging
@@ -43,6 +43,7 @@ from trenchchat.core.subscription import SubscriptionManager
 from trenchchat.core.invite import InviteManager
 from trenchchat.core.reaction import ReactionManager
 from trenchchat.core.sync import SyncManager
+from trenchchat.core.sync_status import SyncState
 from trenchchat.core.user_directory import UserDirectory
 from trenchchat.network.router import Router
 from trenchchat.network.announce import PeerAnnounceHandler
@@ -248,13 +249,14 @@ class MainWindow(QMainWindow):
     _avatar_updated       = pyqtSignal(str)         # identity_hash_hex
     _reaction_updated     = pyqtSignal(str, str)    # channel_hash_hex, message_id
     _emoji_received       = pyqtSignal(str)         # emoji_hash — new emoji image arrived
+    _sync_status_changed  = pyqtSignal(str)         # channel_hash_hex
 
     def __init__(self, config: Config, identity: Identity, storage: Storage,
                  rns: "RNS.Reticulum", router: Router, channel_mgr: ChannelManager,
                  messaging: Messaging, subscription_mgr: SubscriptionManager,
                  invite_mgr: InviteManager, presence_mgr: PresenceManager,
                  user_directory: UserDirectory, avatar_mgr=None, reaction_mgr=None,
-                 server_mgr=None):
+                 server_mgr=None, presence_beacon: PresenceBeacon | None = None):
         super().__init__()
         self._config = config
         self._identity = identity
@@ -267,6 +269,7 @@ class MainWindow(QMainWindow):
         self._subscription_mgr = subscription_mgr
         self._invite_mgr = invite_mgr
         self._presence_mgr = presence_mgr
+        self._presence_beacon = presence_beacon
         self._user_directory = user_directory
         self._avatar_mgr = avatar_mgr
         self._reaction_mgr: ReactionManager | None = reaction_mgr
@@ -275,6 +278,9 @@ class MainWindow(QMainWindow):
         self._pending_invites: list[tuple] = []
 
         self._channel_views: dict[str, ChannelView] = {}
+        # channel_hash_hex -> SyncState value, for channels currently syncing or
+        # incomplete; entries are removed once a channel settles.
+        self._channel_sync_state: dict[str, str] = {}
         self._current_channel: str | None = None
         self._settings = QSettings("TrenchChat", "TrenchChat")
         # Server hashes whose channels are hidden in the sidebar. QSettings
@@ -307,6 +313,15 @@ class MainWindow(QMainWindow):
         channel_mgr.add_channel_discovered_callback(self._on_channel_discovered)
         presence_mgr.add_presence_callback(self._on_presence_changed)
 
+        # Restore invites received before a previous restart, but not yet
+        # accepted or declined.
+        for inv in invite_mgr.list_pending_invites():
+            self._pending_invites.append((
+                inv["channel_hash_hex"], inv["channel_name"], inv["token"],
+                inv["expiry"], inv["admin_hash_hex"],
+            ))
+        self._update_invite_bar()
+
         self._avatar_updated.connect(self._on_avatar_updated_main_thread)
         if avatar_mgr is not None:
             avatar_mgr.add_avatar_callback(self._avatar_updated.emit)
@@ -320,6 +335,8 @@ class MainWindow(QMainWindow):
         self._sync_mgr = SyncManager(
             identity, storage, router, messaging, subscription_mgr, invite_mgr
         )
+        self._sync_status_changed.connect(self._on_sync_status_changed_main_thread)
+        self._sync_mgr.status.add_status_callback(self._sync_status_changed.emit)
 
         def _on_peer_appeared(peer_hex: str, iface) -> None:
             self._sync_mgr.on_peer_appeared(peer_hex)
@@ -693,7 +710,8 @@ class MainWindow(QMainWindow):
         perms = permissions_from_json(row["permissions"])
         lock = " 🔒" if not is_open_join(perms) else ""
         prefix = "    # " if indented else "# "
-        item = QListWidgetItem(f"{prefix}{row['name']}{lock}")
+        sync_mark = " ⟳" if row["hash"] in self._channel_sync_state else ""
+        item = QListWidgetItem(f"{prefix}{row['name']}{lock}{sync_mark}")
         item.setData(Qt.ItemDataRole.UserRole, row["hash"])
         self._channel_list_widget.addItem(item)
 
@@ -808,7 +826,9 @@ class MainWindow(QMainWindow):
             self._channel_views[channel_hash_hex] = view
             self._stack.addWidget(view)
 
-        self._stack.setCurrentWidget(self._channel_views[channel_hash_hex])
+        current_view = self._channel_views[channel_hash_hex]
+        current_view.set_sync_status(self._sync_mgr.status.get_status(channel_hash_hex))
+        self._stack.setCurrentWidget(current_view)
 
         channel = self._storage.get_channel(channel_hash_hex)
         if channel:
@@ -1276,6 +1296,23 @@ class MainWindow(QMainWindow):
         for view in self._channel_views.values():
             view.load_history()
 
+    @pyqtSlot(str)
+    @pyqtSlot(str)
+    def _on_sync_status_changed_main_thread(self, channel_hash_hex: str) -> None:
+        """Update the sidebar indicator, and the channel view if it's visible."""
+        status = self._sync_mgr.status.get_status(channel_hash_hex)
+        state = status["state"]
+        if state in (SyncState.SYNCING.value, SyncState.INCOMPLETE.value):
+            self._channel_sync_state[channel_hash_hex] = state
+        else:
+            self._channel_sync_state.pop(channel_hash_hex, None)
+        self._refresh_channel_list()
+
+        if channel_hash_hex == self._current_channel:
+            view = self._channel_views.get(channel_hash_hex)
+            if view is not None:
+                view.set_sync_status(status)
+
     @pyqtSlot(str, str)
     def _on_react_requested(self, channel_hash_hex: str, message_id: str) -> None:
         """User clicked the react button -- show the EmojiPicker popup."""
@@ -1326,9 +1363,12 @@ class MainWindow(QMainWindow):
         )
 
     def _on_presence_tick(self) -> None:
-        """Periodic timer: prune stale presence and user directory entries, refresh the panel."""
+        """Periodic timer: prune stale presence, directory and sync state, refresh the panel."""
         self._presence_mgr.prune()
         self._user_directory.prune()
+        self._sync_mgr.status.prune()
+        if self._presence_beacon is not None:
+            self._presence_beacon.tick()
         self._refresh_online_panel()
 
     def _seed_user_directory(self, peer_hex: str) -> None:
@@ -1451,6 +1491,8 @@ class MainWindow(QMainWindow):
             channel_hash, _name, token, _expiry, _admin = self._pending_invites.pop(0)
             if token is None:
                 self._invite_mgr.decline_pending_membership(channel_hash)
+            else:
+                self._invite_mgr.decline_invite(channel_hash)
         self._update_invite_bar()
 
     @pyqtSlot()

@@ -52,6 +52,7 @@ class Router:
         self._identity = identity
         self._filter = PropagationFilter(config)
         self._delivery_callbacks: list = []
+        self._outbound_callbacks: list = []
         # source_hash hex -> list of (received_at, LXMessage) awaiting identity
         self._quarantine: dict[str, list] = {}
         self._quarantine_lock = threading.Lock()
@@ -273,10 +274,29 @@ class Router:
         if callback in self._delivery_callbacks:
             self._delivery_callbacks.remove(callback)
 
+    def add_outbound_callback(self, callback):
+        """Register a callback invoked with (dest_identity_hex: str) on every
+        outbound send. Used by PresenceBeacon to suppress redundant beacons --
+        must never be treated as evidence a peer received anything."""
+        if callback not in self._outbound_callbacks:
+            self._outbound_callbacks.append(callback)
+
     # --- send ---
 
     def send(self, message: LXMF.LXMessage):
         self._router.handle_outbound(message)
+        self._notify_outbound(message)
+
+    def _notify_outbound(self, message: LXMF.LXMessage) -> None:
+        identity = getattr(message.destination, "identity", None)
+        if identity is None:
+            return
+        dest_hex = identity.hash.hex()
+        for cb in self._outbound_callbacks:
+            try:
+                cb(dest_hex)
+            except Exception as e:
+                RNS.log(f"TrenchChat: outbound callback error: {e}", RNS.LOG_ERROR)
 
     # --- propagation node ---
 

@@ -32,7 +32,7 @@ from trenchchat.core.storage import Storage
 from trenchchat.core.channel import ChannelManager
 from trenchchat.core.server import ServerManager
 from trenchchat.core.messaging import Messaging
-from trenchchat.core.presence import PresenceManager
+from trenchchat.core.presence import PresenceBeacon, PresenceManager
 from trenchchat.core.subscription import SubscriptionManager
 from trenchchat.core.invite import InviteManager
 from trenchchat.core.user_directory import UserDirectory
@@ -104,6 +104,10 @@ def main():
     subscription_mgr = SubscriptionManager(identity, storage, router)
     invite_mgr = InviteManager(identity, storage, router)
     presence_mgr = PresenceManager(identity.hash_hex, config)
+    presence_beacon = PresenceBeacon(
+        identity, storage, router, subscription_mgr, presence_mgr
+    )
+    router.add_outbound_callback(presence_beacon.record_sent)
     user_directory = UserDirectory(identity.hash_hex)
     avatar_mgr = AvatarManager(identity, config, storage, router)
     reaction_mgr = ReactionManager(identity, storage, router)
@@ -196,6 +200,7 @@ def main():
         user_directory=user_directory,
         avatar_mgr=avatar_mgr,
         reaction_mgr=reaction_mgr,
+        presence_beacon=presence_beacon,
     )
     window.show()
 

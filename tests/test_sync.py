@@ -219,6 +219,166 @@ class TestSyncRequestResponse:
             assert wait_for_message(bob.storage, ch_hash, mid, timeout=5), \
                 f"Bob never received message {mid[:12]}… stranded past the cap"
 
+    def test_capped_batch_continues_without_another_trigger(self, peer_factory):
+        """
+        A truncated response chains its own follow-up request, so a backfill
+        larger than one batch completes on its own instead of waiting for an
+        unrelated announce to drive the next request.
+        """
+        from trenchchat.core.sync import MAX_RESPONSE_MESSAGES
+
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+        carol = peer_factory("carol")
+
+        ch_hash = alice.channel_mgr.create_channel("continue-sync", "", "public")
+        _seed_channel_on_peer(carol, ch_hash, "continue-sync", alice.identity.hash_hex)
+        _seed_channel_on_peer(bob, ch_hash, "continue-sync", alice.identity.hash_hex)
+
+        window_start = time.time()
+        total = MAX_RESPONSE_MESSAGES + 10
+        msg_ids = []
+        for i in range(total):
+            ts = window_start + i + 1
+            msg_ids.append(_insert_message(carol.storage, ch_hash,
+                                           alice.identity.hash_hex, f"Message {i}", ts))
+
+        bob.sync_mgr._send_sync_request(carol.identity.hash_hex, ch_hash, window_start)
+
+        assert wait_for(
+            lambda: len(bob.storage.get_messages(ch_hash)) == total, timeout=10,
+        ), (
+            f"only {len(bob.storage.get_messages(ch_hash))} of {total} messages "
+            "arrived; the truncated batch did not continue on its own"
+        )
+        # Let the last leg of the chain land before the fixture closes storage.
+        time.sleep(0.3)
+
+    def test_continuation_stops_at_the_budget(self, peer_factory):
+        """
+        A peer that marks every response truncated can't drive requests
+        forever: the chain is capped per (channel, peer).
+        """
+        from trenchchat.core.protocol import (
+            F_CHANNEL_HASH, F_MSG_TYPE, F_SYNC_MESSAGES, F_SYNC_TRUNCATED,
+            MT_SYNC_RESPONSE,
+        )
+        from trenchchat.core.sync import MAX_SYNC_CONTINUATIONS
+
+        import msgpack
+
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+        carol = peer_factory("carol")
+
+        ch_hash = alice.channel_mgr.create_channel("budget-sync", "", "public")
+        _seed_channel_on_peer(carol, ch_hash, "budget-sync", alice.identity.hash_hex)
+        _seed_channel_on_peer(bob, ch_hash, "budget-sync", alice.identity.hash_hex)
+
+        requests = []
+
+        # Count Bob's outbound requests without delivering them. Letting Carol
+        # actually answer makes the count racy: each real (empty) response
+        # claims the pending entry the next synthetic response needs, cutting
+        # the chain short by a varying amount.
+        def counting_send_raw(dest_hex, fields):
+            requests.append(fields.get(F_MSG_TYPE))
+            return True
+
+        bob.sync_mgr._send_raw = counting_send_raw
+
+        # Every response carries a newer message and claims more behind it, so
+        # only the budget can stop the chain.
+        ts = time.time()
+        bob.sync_mgr._send_sync_request(carol.identity.hash_hex, ch_hash, ts)
+        for i in range(MAX_SYNC_CONTINUATIONS + 5):
+            ts += 10
+            bob.sync_mgr._handle_sync_response(
+                {
+                    F_MSG_TYPE:       MT_SYNC_RESPONSE,
+                    F_CHANNEL_HASH:   bytes.fromhex(ch_hash),
+                    F_SYNC_MESSAGES:  msgpack.packb([{
+                        "sender_hash":  alice.identity.hash_hex,
+                        "sender_name":  "Alice",
+                        "content":      f"chain {i}",
+                        "timestamp":    ts,
+                        "message_id":   f"chain-{i}",
+                        "reply_to":     None,
+                        "last_seen_id": None,
+                    }], use_bin_type=True),
+                    F_SYNC_TRUNCATED: True,
+                },
+                ch_hash,
+                carol.identity.hash_hex,
+            )
+
+        continuations = requests.count("sync_request") - 1
+        assert continuations == MAX_SYNC_CONTINUATIONS, (
+            f"expected the chain to stop after {MAX_SYNC_CONTINUATIONS} "
+            f"continuations, got {continuations}"
+        )
+
+    def test_caught_up_peer_still_answers(self, peer_factory):
+        """
+        A responder with nothing to send answers anyway. Silence would be
+        indistinguishable from an unreachable or unwilling peer.
+        """
+        from trenchchat.core.protocol import F_MSG_TYPE, MT_SYNC_RESPONSE
+
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+        carol = peer_factory("carol")
+
+        ch_hash = alice.channel_mgr.create_channel("ack-sync", "", "public")
+        _seed_channel_on_peer(carol, ch_hash, "ack-sync", alice.identity.hash_hex)
+        _seed_channel_on_peer(bob, ch_hash, "ack-sync", alice.identity.hash_hex)
+
+        responses = []
+        original = carol.sync_mgr._send_raw
+
+        def recording_send_raw(dest_hex, fields):
+            if fields.get(F_MSG_TYPE) == MT_SYNC_RESPONSE:
+                responses.append(fields)
+            return original(dest_hex, fields)
+
+        carol.sync_mgr._send_raw = recording_send_raw
+
+        bob.sync_mgr._send_sync_request(carol.identity.hash_hex, ch_hash, time.time())
+
+        assert wait_for(lambda: len(responses) == 1, timeout=5), \
+            "Carol never answered a sync request she had nothing to serve"
+
+    def test_unauthorised_request_gets_no_answer(self, peer_factory):
+        """
+        The empty answer is only for peers entitled to the channel: a
+        non-member must not learn anything from the shape of the reply.
+        """
+        from trenchchat.core.protocol import F_MSG_TYPE, MT_SYNC_RESPONSE
+
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+        carol = peer_factory("carol")
+
+        ch_hash = alice.channel_mgr.create_channel("closed-ack", "", "invite")
+        _seed_channel_on_peer(carol, ch_hash, "closed-ack", alice.identity.hash_hex,
+                              access_mode="invite")
+
+        responses = []
+        original = carol.sync_mgr._send_raw
+
+        def recording_send_raw(dest_hex, fields):
+            if fields.get(F_MSG_TYPE) == MT_SYNC_RESPONSE:
+                responses.append(fields)
+            return original(dest_hex, fields)
+
+        carol.sync_mgr._send_raw = recording_send_raw
+
+        bob.sync_mgr._send_sync_request(carol.identity.hash_hex, ch_hash, time.time())
+        time.sleep(0.5)
+
+        assert responses == [], \
+            "Carol answered a sync request from a peer with no claim to the channel"
+
     def test_sync_response_is_idempotent(self, peer_factory):
         """
         Receiving the same sync response twice does not create duplicate messages.
@@ -270,6 +430,168 @@ class TestSyncRequestResponse:
             lambda: bob.storage.get_missed_message_ids(ch_hash, bob.identity.hash_hex) == [],
             timeout=5,
         ), "Bob's missed-delivery hints were not cleared after sync"
+
+    def test_unresolvable_hint_does_not_shadow_the_sweep(self, peer_factory):
+        """A hint naming a message the responder lacks must not cost Bob the rest.
+
+        Hints reach every reachable subscriber, so most holders of a hint never
+        have the message it names. If that empty lookup stood as the whole
+        answer, Bob would be starved of all history from Carol until the hint
+        aged out -- and the empty response would report the channel as synced.
+        """
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+        carol = peer_factory("carol")
+
+        ch_hash = alice.channel_mgr.create_channel("hint-shadow", "", "public")
+        _seed_channel_on_peer(carol, ch_hash, "hint-shadow", alice.identity.hash_hex)
+        _seed_channel_on_peer(bob, ch_hash, "hint-shadow", alice.identity.hash_hex)
+
+        ts = time.time()
+        carol.storage.record_missed_delivery(ch_hash, bob.identity.hash_hex,
+                                              "de" * 32)
+        msg_id = _insert_message(carol.storage, ch_hash, alice.identity.hash_hex,
+                                  "Bob must still get this", ts + 1)
+
+        bob.sync_mgr._send_sync_request(carol.identity.hash_hex, ch_hash, ts)
+
+        assert wait_for_message(bob.storage, ch_hash, msg_id, timeout=5), \
+            "an unresolvable hint suppressed the timestamp sweep"
+
+    def test_hint_and_sweep_are_served_together(self, peer_factory):
+        """One response carries both the hinted message and newer swept history."""
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+        carol = peer_factory("carol")
+
+        ch_hash = alice.channel_mgr.create_channel("hint-plus-sweep", "", "public")
+        _seed_channel_on_peer(carol, ch_hash, "hint-plus-sweep", alice.identity.hash_hex)
+        _seed_channel_on_peer(bob, ch_hash, "hint-plus-sweep", alice.identity.hash_hex)
+
+        ts = time.time()
+        hinted_id = _insert_message(carol.storage, ch_hash, alice.identity.hash_hex,
+                                     "the one Bob missed", ts + 1)
+        carol.storage.record_missed_delivery(ch_hash, bob.identity.hash_hex, hinted_id)
+        newer_id = _insert_message(carol.storage, ch_hash, alice.identity.hash_hex,
+                                    "and the one after it", ts + 2)
+
+        bob.sync_mgr._send_sync_request(carol.identity.hash_hex, ch_hash, ts)
+
+        assert wait_for_message(bob.storage, ch_hash, hinted_id, timeout=5)
+        assert wait_for_message(bob.storage, ch_hash, newer_id, timeout=5), \
+            "the hint suppressed newer history Bob also lacked"
+
+    def test_hint_resolves_on_a_busy_channel(self, peer_factory):
+        """A hint must resolve however much traffic sits in front of it.
+
+        Looking the id up by paging forward from the window start and filtering
+        the page silently loses any hint past the first page, so on a busy
+        channel the hint mechanism quietly stops working.
+        """
+        from trenchchat.core.sync import MAX_RESPONSE_MESSAGES
+
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+        carol = peer_factory("carol")
+
+        ch_hash = alice.channel_mgr.create_channel("busy-hint", "", "public")
+        _seed_channel_on_peer(carol, ch_hash, "busy-hint", alice.identity.hash_hex)
+        _seed_channel_on_peer(bob, ch_hash, "busy-hint", alice.identity.hash_hex)
+
+        ts = time.time()
+        for i in range(1, MAX_RESPONSE_MESSAGES + 10):
+            _insert_message(carol.storage, ch_hash, alice.identity.hash_hex,
+                            f"traffic {i}", ts + i)
+        buried_id = _insert_message(carol.storage, ch_hash, alice.identity.hash_hex,
+                                     "buried behind a page of traffic",
+                                     ts + MAX_RESPONSE_MESSAGES + 10)
+        carol.storage.record_missed_delivery(ch_hash, bob.identity.hash_hex, buried_id)
+
+        # Bob asks from past the whole backlog, so only the hint can deliver it.
+        bob.sync_mgr._send_sync_request(carol.identity.hash_hex, ch_hash, ts + 100000)
+
+        assert wait_for_message(bob.storage, ch_hash, buried_id, timeout=5), \
+            "the hint never resolved past the first page of channel traffic"
+
+    def test_throttled_deep_request_stays_silent_even_with_hints(self, peer_factory):
+        """A hint must not become a back door around the deep-sync cooldown.
+
+        Answering a throttled request with only the hinted messages hands the
+        requester history out of order: they advance their watermark to the
+        newest message in the response, stranding the whole un-served backlog
+        behind it.
+        """
+        from trenchchat.core.protocol import (
+            F_CHANNEL_HASH, F_MSG_TYPE, F_SYNC_WINDOW_START,
+            MT_SYNC_REQUEST, MT_SYNC_RESPONSE,
+        )
+        from trenchchat.core.sync import MAX_RESPONSE_MESSAGES
+
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+        carol = peer_factory("carol")
+
+        ch_hash = alice.channel_mgr.create_channel("hint-throttle", "", "public")
+        _seed_channel_on_peer(carol, ch_hash, "hint-throttle", alice.identity.hash_hex)
+        _seed_channel_on_peer(bob, ch_hash, "hint-throttle", alice.identity.hash_hex)
+
+        ts = time.time()
+        for i in range(1, MAX_RESPONSE_MESSAGES + 11):
+            _insert_message(carol.storage, ch_hash, alice.identity.hash_hex,
+                            f"backlog {i}", ts + i)
+        recent_id = _insert_message(carol.storage, ch_hash, alice.identity.hash_hex,
+                                     "the one Bob was told he missed", ts + 5000)
+        carol.storage.record_missed_delivery(ch_hash, bob.identity.hash_hex, recent_id)
+
+        responses = []
+        original = carol.sync_mgr._send_raw
+
+        def capture(dest_hex, fields):
+            if fields.get(F_MSG_TYPE) == MT_SYNC_RESPONSE:
+                responses.append(fields)
+            return True
+
+        carol.sync_mgr._send_raw = capture
+
+        deep_request = {
+            F_MSG_TYPE:          MT_SYNC_REQUEST,
+            F_CHANNEL_HASH:      bytes.fromhex(ch_hash),
+            F_SYNC_WINDOW_START: 0.0,
+        }
+        carol.sync_mgr._handle_sync_request(deep_request, ch_hash,
+                                            bob.identity.hash_hex)
+        assert len(responses) == 1, "the first deep request went unanswered"
+
+        carol.sync_mgr._handle_sync_request(deep_request, ch_hash,
+                                            bob.identity.hash_hex)
+        assert len(responses) == 1, \
+            "a hint let a throttled deep request through the cooldown"
+
+    def test_watermark_does_not_regress_on_an_older_hinted_message(self, peer_factory):
+        """Accepting a message older than the watermark must not rewind it.
+
+        Otherwise every later sync re-requests history we already hold, and the
+        deep-sync cooldown starts throttling the recovery it was meant to pace.
+        """
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+        carol = peer_factory("carol")
+
+        ch_hash = alice.channel_mgr.create_channel("no-rewind", "", "public")
+        _seed_channel_on_peer(carol, ch_hash, "no-rewind", alice.identity.hash_hex)
+        _seed_channel_on_peer(bob, ch_hash, "no-rewind", alice.identity.hash_hex)
+
+        ts = time.time()
+        old_id = _insert_message(carol.storage, ch_hash, alice.identity.hash_hex,
+                                  "older than Bob's watermark", ts - 600)
+        carol.storage.record_missed_delivery(ch_hash, bob.identity.hash_hex, old_id)
+        bob.storage.update_last_sync(ch_hash, ts)
+
+        bob.sync_mgr._send_sync_request(carol.identity.hash_hex, ch_hash, ts)
+        assert wait_for_message(bob.storage, ch_hash, old_id, timeout=5)
+
+        assert bob.storage.get_last_sync(ch_hash) == pytest.approx(ts), \
+            "watermark rewound over a hint-served message Bob already had past"
 
 
 # ---------------------------------------------------------------------------
@@ -578,9 +900,10 @@ class TestSyncOnChannelJoin:
         sync_requests_seen = []
         orig_send_sync_request = bob.sync_mgr._send_sync_request
 
-        def spy(dest_hex, channel_hash_hex, since_ts):
+        def spy(dest_hex, channel_hash_hex, since_ts, continuation=False):
             sync_requests_seen.append((dest_hex, channel_hash_hex))
-            return orig_send_sync_request(dest_hex, channel_hash_hex, since_ts)
+            return orig_send_sync_request(dest_hex, channel_hash_hex, since_ts,
+                                          continuation)
 
         bob.sync_mgr._send_sync_request = spy
 
@@ -1000,6 +1323,88 @@ class TestTenureSyncFiltering:
 
         assert wait_for_message(bob.storage, ch_hash, before_msg_id, timeout=5), \
             "Bob did not receive pre-join history via sync despite full_sync being enabled"
+
+    def test_withheld_history_does_not_advance_the_watermark(self, peer_factory,
+                                                             monkeypatch):
+        """
+        Withholding is a permission decision, and permissions change. If a
+        watermark moved past history that was withheld, granting full_sync
+        later could never recover it -- the requester would ask only for
+        messages newer than history it never received, and report itself up
+        to date.
+        """
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+
+        ch_hash = alice.channel_mgr.create_channel("withheld-watermark", "", "invite")
+        # See test_pre_join_history_excluded_by_default for why these sleeps
+        # are needed instead of relying on call ordering alone.
+        time.sleep(0.02)
+        before_msg_id = _insert_message(alice.storage, ch_hash, alice.identity.hash_hex,
+                                        "sent before Bob joined")
+        time.sleep(0.02)
+
+        alice.invite_mgr.publish_member_list(ch_hash, add_members=[bob.identity.hash])
+        assert wait_for_member(alice.storage, ch_hash, bob.identity.hash_hex)
+        _confirm_membership(bob, ch_hash)
+        assert wait_for(lambda: bob.storage.is_member(ch_hash, bob.identity.hash_hex), timeout=5)
+
+        bob.sync_mgr._send_sync_request(alice.identity.hash_hex, ch_hash, 0.0)
+        time.sleep(0.5)
+
+        assert not bob.storage.message_exists(before_msg_id), \
+            "test setup: pre-join history should be withheld with full_sync off"
+        assert bob.storage.get_last_sync(ch_hash) == 0.0, \
+            "the watermark advanced past history Bob was never sent"
+
+        # Grant full_sync; the backfill Bob was previously refused must now
+        # reach him, which is only possible if his watermark stayed put.
+        perms = dict(alice.storage.get_channel_permissions(ch_hash))
+        perms[ROLE_MEMBER] = list(perms.get(ROLE_MEMBER, [])) + [FULL_SYNC]
+        alice.storage.set_channel_permissions(ch_hash, perms)
+        bob.storage.set_channel_permissions(ch_hash, perms)
+
+        # Recovery still reaches back to 0, so it is a deep request like the
+        # first one; in the real app the cooldown just paces it by a minute.
+        monkeypatch.setattr("trenchchat.core.sync.DEEP_SYNC_COOLDOWN_SECS", 0)
+        bob.sync_mgr._send_sync_request(alice.identity.hash_hex, ch_hash,
+                                        bob.storage.get_last_sync(ch_hash))
+
+        assert wait_for_message(bob.storage, ch_hash, before_msg_id, timeout=5), \
+            "history withheld before the grant never arrived after it"
+
+    def test_sweep_scans_past_withheld_history(self, peer_factory):
+        """
+        A new member behind a full batch of history they may not see must
+        still reach the messages they may: the responder sweeps past what it
+        withholds instead of answering with an empty batch.
+        """
+        from trenchchat.core.sync import MAX_RESPONSE_MESSAGES
+
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+
+        ch_hash = alice.channel_mgr.create_channel("sweep-past", "", "invite")
+        time.sleep(0.02)
+        for i in range(MAX_RESPONSE_MESSAGES + 5):
+            _insert_message(alice.storage, ch_hash, alice.identity.hash_hex,
+                            f"before Bob joined {i}")
+        time.sleep(0.02)
+
+        alice.invite_mgr.publish_member_list(ch_hash, add_members=[bob.identity.hash])
+        assert wait_for_member(alice.storage, ch_hash, bob.identity.hash_hex)
+        _confirm_membership(bob, ch_hash)
+        assert wait_for(lambda: bob.storage.is_member(ch_hash, bob.identity.hash_hex), timeout=5)
+
+        time.sleep(0.02)
+        after_msg_id = _insert_message(alice.storage, ch_hash, alice.identity.hash_hex,
+                                       "sent after Bob joined")
+
+        bob.sync_mgr._send_sync_request(alice.identity.hash_hex, ch_hash, 0.0)
+
+        assert wait_for_message(bob.storage, ch_hash, after_msg_id, timeout=5), \
+            "Bob never reached the message he was entitled to behind a batch " \
+            "of withheld pre-join history"
 
     def test_full_sync_granted_to_admin_but_not_member(self, peer_factory):
         """

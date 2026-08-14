@@ -10,6 +10,12 @@ which both this file and trenchchat/gui/main_window.py import from.
 
 This means a bug (or a fix) exercised through this API is exercising the
 same code path a real client would hit.
+
+The "--- link control ---" group below is the one exception: it has no
+actions.py counterpart because it isn't application logic at all -- it's
+dev-harness process control (dropping/restoring this tester's own network
+link so the UI can simulate going offline), so it calls Backend.go_offline
+/go_online directly.
 """
 
 import asyncio
@@ -31,6 +37,7 @@ from trenchchat.core.permissions import (
     ROLE_ADMIN, ROLE_MEMBER, PRESET_OPEN, PRESET_PRIVATE,
     is_open_join, permissions_from_json,
 )
+from trenchchat.core.presence import resolve_display_name
 
 from backend_core import Backend
 
@@ -201,7 +208,16 @@ def create_app(backend: Backend) -> FastAPI:
 
     # Pending invites, exactly like MainWindow._pending_invites -- nothing
     # is sent to the network until the user explicitly accepts or declines.
+    # Seeded from storage so a restart doesn't lose an invite awaiting a
+    # decision.
     pending_invites: list[dict[str, Any]] = []
+    for inv in backend.invite_mgr.list_pending_invites():
+        pending_invites.append({
+            "channel_hash_hex": inv["channel_hash_hex"], "channel_name": inv["channel_name"],
+            "token_hex": inv["token"].hex(), "expiry": inv["expiry"],
+            "admin_hex": inv["admin_hash_hex"],
+            "scope_kind": backend.invite_mgr.invite_scope_kind(inv["channel_hash_hex"]),
+        })
 
     def _on_invite(channel_hash_hex, channel_name, token, expiry, admin_hex):
         # A re-invite to the same channel refreshes the pending entry (new
@@ -238,6 +254,13 @@ def create_app(backend: Backend) -> FastAPI:
     def _on_emoji_received(emoji_hash: str):
         bus.emit("emoji_received", emoji_hash=emoji_hash)
 
+    def _on_sync_status(channel_hash_hex: str):
+        bus.emit("sync_status", channel_hash=channel_hash_hex,
+                 status=backend.sync_mgr.status.get_status(channel_hash_hex))
+
+    def _on_link_status(is_online: bool):
+        bus.emit("net_status", online=is_online)
+
     backend.messaging.add_message_callback(_on_message)
     backend.invite_mgr.add_invite_callback(_on_invite)
     backend.invite_mgr.add_channel_joined_callback(_on_channel_joined)
@@ -247,6 +270,8 @@ def create_app(backend: Backend) -> FastAPI:
     backend.avatar_mgr.add_avatar_callback(_on_avatar_changed)
     backend.reaction_mgr.add_reaction_callback(_on_reaction_changed)
     backend.reaction_mgr.add_emoji_callback(_on_emoji_received)
+    backend.sync_mgr.status.add_status_callback(_on_sync_status)
+    backend.add_link_callback(_on_link_status)
 
     # --- identity ---
 
@@ -499,6 +524,18 @@ def create_app(backend: Backend) -> FastAPI:
     def list_members(channel_hash: str):
         return [dict(row) for row in backend.storage.get_members(channel_hash)]
 
+    @app.get("/channels/{channel_hash}/sync_status")
+    def get_sync_status(channel_hash: str):
+        # Same tracker the GUI will read: who we asked for history, who
+        # answered, and whether anything is still missing.
+        status = backend.sync_mgr.status.get_status(channel_hash)
+        for peer in status["peers"]:
+            peer["display_name"] = resolve_display_name(
+                peer["identity_hash"], backend.identity.hash_hex,
+                backend.storage, backend.config,
+            )
+        return status
+
     @app.get("/channels/{channel_hash}/my_permissions")
     def my_permissions(channel_hash: str):
         # Lets the UI gate kick/promote/demote controls the same way
@@ -590,6 +627,7 @@ def create_app(backend: Backend) -> FastAPI:
         match = next((i for i in pending_invites if i["channel_hash_hex"] == channel_hash), None)
         if match is not None:
             pending_invites.remove(match)
+        backend.invite_mgr.decline_invite(channel_hash)
         return {"ok": True}
 
     # --- messages ---
@@ -676,6 +714,32 @@ def create_app(backend: Backend) -> FastAPI:
         except ValueError as e:
             return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
         return {"ok": True, "emoji_hash": emoji_hash}
+
+    # --- link control ---
+
+    @app.get("/net/status")
+    def get_net_status():
+        iface = backend.link_interface()
+        return {
+            "online": backend.link_online(),
+            "detached": bool(getattr(iface, "detached", True)) if iface is not None else True,
+            "interface": str(iface) if iface is not None else None,
+            "rxb": getattr(iface, "rxb", 0) if iface is not None else 0,
+            "txb": getattr(iface, "txb", 0) if iface is not None else 0,
+        }
+
+    @app.post("/net/offline")
+    def net_offline():
+        ok = backend.go_offline()
+        return {"ok": ok, "online": False}
+
+    @app.post("/net/online")
+    def net_online():
+        # go_online() only starts the reconnect; the link isn't actually up
+        # for another 5-15s, so "online" here always reports False -- poll
+        # /net/status (or watch for the net_status WS event) for the real state.
+        ok = backend.go_online()
+        return {"ok": ok, "online": False}
 
     # --- live updates ---
 

@@ -14,7 +14,7 @@ from trenchchat.core.fileutils import secure_file
 from trenchchat.core.lockbox import sqlcipher_hex_key
 from trenchchat.core.permissions import (
     PRESET_OPEN, PRESET_PRIVATE, PRESET_SERVER, ROLE_ADMIN, ROLE_MEMBER, ROLE_OWNER,
-    has_permission as _check_permission,
+    has_permission as _check_permission, is_open_join,
     permissions_from_json, permissions_to_json,
 )
 
@@ -119,6 +119,28 @@ CREATE TABLE IF NOT EXISTS missed_deliveries (
 CREATE INDEX IF NOT EXISTS idx_missed_deliveries_recipient
     ON missed_deliveries(recipient_hash, channel_hash);
 
+-- Durable copy of SubscriptionManager's in-memory subscriber sets, so a
+-- restart doesn't strand a public channel's peer discovery. Carries no more
+-- trust than the in-memory set did: it is a cache of a peer identity, not a
+-- signed record.
+CREATE TABLE IF NOT EXISTS channel_subscribers (
+    channel_hash  TEXT NOT NULL,
+    identity_hash TEXT NOT NULL,
+    added_at      REAL NOT NULL,
+    PRIMARY KEY (channel_hash, identity_hash)
+);
+
+-- Per-(channel, peer) sync watermark, distinct from subscriptions.last_sync_at
+-- (which stays the channel-wide "newest message I hold"). Lets a request to
+-- one peer resume from what that peer specifically has already given us,
+-- instead of a watermark another peer's disjoint history advanced.
+CREATE TABLE IF NOT EXISTS sync_progress (
+    channel_hash TEXT NOT NULL,
+    peer_hash    TEXT NOT NULL,
+    last_sync_at REAL NOT NULL DEFAULT 0,
+    PRIMARY KEY (channel_hash, peer_hash)
+);
+
 CREATE TABLE IF NOT EXISTS membership_tenure (
     channel_hash  TEXT NOT NULL,
     identity_hash TEXT NOT NULL,
@@ -192,6 +214,19 @@ CREATE TABLE IF NOT EXISTS pending_member_docs (
     admin_hash    TEXT NOT NULL,
     doc_blob      BLOB NOT NULL,
     meta_blob     BLOB NOT NULL,
+    received_at   REAL NOT NULL
+);
+
+-- Invite tokens received but not yet accepted or declined. Durable copy of
+-- what used to live only in MainWindow._pending_invites, so a restart
+-- before the user decides doesn't lose the invite. Carries no more trust
+-- than the in-memory list did: the token is still verified at accept time.
+CREATE TABLE IF NOT EXISTS pending_invites (
+    channel_hash  TEXT PRIMARY KEY,
+    channel_name  TEXT NOT NULL DEFAULT '',
+    token         BLOB NOT NULL,
+    expiry        REAL NOT NULL,
+    admin_hash    TEXT NOT NULL,
     received_at   REAL NOT NULL
 );
 """
@@ -341,7 +376,15 @@ class Storage:
         self._conn.commit()
 
     def _migrate_tenure(self):
-        """Create membership_tenure table and backfill current members if the table is new."""
+        """Create membership_tenure table and backfill current members if the table is new.
+
+        Skips open-join channels: ChannelManager.create_channel deliberately
+        never opens tenure for them, so backfilling one here from the members
+        table would make has_any_tenure() true and wrongly turn on tenure
+        filtering for subscribers who hold no tenure record of their own --
+        this runs on every startup, not just a genuine schema upgrade, since
+        an open-join channel's tenure count legitimately stays at 0 forever.
+        """
         # The table is created by SCHEMA, but it may be empty on first run with
         # an existing database.  Backfill open intervals from current members.
         count = self._conn.execute(
@@ -351,12 +394,21 @@ class Storage:
             rows = self._conn.execute(
                 "SELECT channel_hash, identity_hash, added_at FROM members"
             ).fetchall()
-            if rows:
+            to_insert = []
+            for r in rows:
+                channel_row = self._conn.execute(
+                    "SELECT permissions FROM channels WHERE hash = ?",
+                    (r["channel_hash"],),
+                ).fetchone()
+                if channel_row and is_open_join(permissions_from_json(channel_row["permissions"])):
+                    continue
+                to_insert.append((r["channel_hash"], r["identity_hash"], r["added_at"]))
+            if to_insert:
                 self._conn.executemany("""
                     INSERT OR IGNORE INTO membership_tenure
                         (channel_hash, identity_hash, joined_at, left_at)
                     VALUES (?, ?, ?, NULL)
-                """, [(r["channel_hash"], r["identity_hash"], r["added_at"]) for r in rows])
+                """, to_insert)
                 self._conn.commit()
 
     def _repair_tenure_from_message_history(self):
@@ -777,6 +829,14 @@ class Storage:
     def get_subscriptions(self) -> list[sqlite3.Row]:
         return self._fetchall("SELECT * FROM subscriptions")
 
+    def get_last_sync(self, channel_hash: str) -> float:
+        """Return the channel's sync watermark, or 0.0 if it isn't subscribed."""
+        row = self._fetchone(
+            "SELECT last_sync_at FROM subscriptions WHERE channel_hash = ?",
+            (channel_hash,)
+        )
+        return float(row["last_sync_at"]) if row else 0.0
+
     def update_last_sync(self, channel_hash: str, ts: float | None = None):
         """Advance last_sync_at to *ts*, or wall-clock time if not given."""
         with self._tx():
@@ -784,6 +844,71 @@ class Storage:
                 "UPDATE subscriptions SET last_sync_at = ? WHERE channel_hash = ?",
                 (ts if ts is not None else time.time(), channel_hash)
             )
+
+    # --- channel subscribers (durable copy of SubscriptionManager state) ---
+
+    def add_channel_subscriber(self, channel_hash: str, identity_hash: str) -> None:
+        with self._tx():
+            self._conn.execute("""
+                INSERT OR IGNORE INTO channel_subscribers
+                    (channel_hash, identity_hash, added_at)
+                VALUES (?, ?, ?)
+            """, (channel_hash, identity_hash, time.time()))
+
+    def remove_channel_subscriber(self, channel_hash: str, identity_hash: str) -> None:
+        with self._tx():
+            self._conn.execute(
+                "DELETE FROM channel_subscribers WHERE channel_hash = ? AND identity_hash = ?",
+                (channel_hash, identity_hash),
+            )
+
+    def replace_channel_subscribers(self, channel_hash: str,
+                                    identity_hashes: set[str] | list[str]) -> None:
+        """Replace the full subscriber set for a channel atomically."""
+        with self._tx():
+            self._conn.execute(
+                "DELETE FROM channel_subscribers WHERE channel_hash = ?", (channel_hash,)
+            )
+            now = time.time()
+            self._conn.executemany("""
+                INSERT INTO channel_subscribers (channel_hash, identity_hash, added_at)
+                VALUES (?, ?, ?)
+            """, [(channel_hash, ih, now) for ih in identity_hashes])
+
+    def get_all_channel_subscribers(self) -> dict[str, set[str]]:
+        """Return every channel's persisted subscriber set, keyed by channel hash.
+
+        Used once at startup to seed SubscriptionManager's in-memory cache;
+        per-call lookups afterward stay in memory rather than hitting storage.
+        """
+        rows = self._fetchall("SELECT channel_hash, identity_hash FROM channel_subscribers")
+        result: dict[str, set[str]] = {}
+        for row in rows:
+            result.setdefault(row["channel_hash"], set()).add(row["identity_hash"])
+        return result
+
+    # --- per-(channel, peer) sync progress ---
+
+    def get_peer_sync_progress(self, channel_hash: str, peer_hash: str) -> float:
+        """Return the sync watermark for a specific (channel, peer) pair.
+
+        A peer we have never synced with has no row and starts from 0.0.
+        """
+        row = self._fetchone(
+            "SELECT last_sync_at FROM sync_progress WHERE channel_hash = ? AND peer_hash = ?",
+            (channel_hash, peer_hash),
+        )
+        return float(row["last_sync_at"]) if row else 0.0
+
+    def advance_peer_sync_progress(self, channel_hash: str, peer_hash: str, ts: float) -> None:
+        """Advance the (channel, peer) watermark to *ts*, never regressing it."""
+        with self._tx():
+            self._conn.execute("""
+                INSERT INTO sync_progress (channel_hash, peer_hash, last_sync_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(channel_hash, peer_hash) DO UPDATE SET
+                    last_sync_at = MAX(last_sync_at, excluded.last_sync_at)
+            """, (channel_hash, peer_hash, ts))
 
     # --- members ---
     #
@@ -1150,14 +1275,44 @@ class Storage:
     # --- message sync helpers ---
 
     def get_messages_after(self, channel_hash: str, since_ts: float,
-                           limit: int = 50) -> list[sqlite3.Row]:
-        """Fetch up to `limit` messages for a channel with timestamp > since_ts."""
+                           limit: int = 50,
+                           after_id: int | None = None) -> list[sqlite3.Row]:
+        """Fetch up to `limit` messages ordered after (since_ts, after_id).
+
+        Rows are ordered by timestamp then the internal autoincrement id, so
+        several messages sharing the exact same timestamp still have a strict
+        total order. Without after_id this is a plain timestamp > since_ts
+        filter, matching a fresh sweep with nothing to resume from. With it,
+        rows at exactly since_ts are only included past that id -- otherwise
+        a page boundary landing mid-tie would drop every row after the first
+        sharing that timestamp on the next call.
+        """
+        if after_id is None:
+            return self._fetchall("""
+                SELECT * FROM messages
+                WHERE channel_hash = ? AND timestamp > ?
+                ORDER BY timestamp ASC, id ASC
+                LIMIT ?
+            """, (channel_hash, since_ts, limit))
         return self._fetchall("""
             SELECT * FROM messages
-            WHERE channel_hash = ? AND timestamp > ?
-            ORDER BY timestamp ASC, received_at ASC
+            WHERE channel_hash = ?
+              AND (timestamp > ? OR (timestamp = ? AND id > ?))
+            ORDER BY timestamp ASC, id ASC
             LIMIT ?
-        """, (channel_hash, since_ts, limit))
+        """, (channel_hash, since_ts, since_ts, after_id, limit))
+
+    def get_messages_by_ids(self, channel_hash: str,
+                            message_ids: list[str]) -> list[sqlite3.Row]:
+        """Fetch a channel's messages matching the given ids, oldest first."""
+        if not message_ids:
+            return []
+        placeholders = ",".join("?" * len(message_ids))
+        return self._fetchall(f"""
+            SELECT * FROM messages
+            WHERE channel_hash = ? AND message_id IN ({placeholders})
+            ORDER BY timestamp ASC, received_at ASC
+        """, (channel_hash, *message_ids))
 
     # --- missed_deliveries ---
 
@@ -1225,6 +1380,36 @@ class Storage:
             self._conn.execute(
                 "DELETE FROM pending_member_docs WHERE channel_hash = ?",
                 (channel_hash,),
+            )
+
+    # --- pending (unaccepted) invites ---
+
+    def record_pending_invite(self, channel_hash: str, channel_name: str,
+                              token: bytes, expiry: float, admin_hash: str) -> None:
+        with self._tx():
+            self._conn.execute("""
+                INSERT OR REPLACE INTO pending_invites
+                    (channel_hash, channel_name, token, expiry, admin_hash, received_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (channel_hash, channel_name, token, expiry, admin_hash, time.time()))
+
+    def get_pending_invites(self) -> list[sqlite3.Row]:
+        """Return unexpired pending invites, oldest first."""
+        return self._fetchall("""
+            SELECT * FROM pending_invites WHERE expiry > ? ORDER BY received_at
+        """, (time.time(),))
+
+    def clear_pending_invite(self, channel_hash: str) -> None:
+        with self._tx():
+            self._conn.execute(
+                "DELETE FROM pending_invites WHERE channel_hash = ?", (channel_hash,)
+            )
+
+    def purge_expired_pending_invites(self, now: float | None = None) -> None:
+        with self._tx():
+            self._conn.execute(
+                "DELETE FROM pending_invites WHERE expiry < ?",
+                (now if now is not None else time.time(),),
             )
 
     # --- spent / revoked invite tokens ---

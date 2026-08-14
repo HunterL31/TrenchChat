@@ -48,7 +48,7 @@ from trenchchat.core.protocol import (
     F_MEMBER_LIST_DOC, F_CHANNEL_NAME, F_CHANNEL_DESC,
     F_CHANNEL_CREATOR, F_CHANNEL_ACCESS, F_CHANNEL_CREATED_AT,
     F_CHANNEL_PERMISSIONS, F_SCOPE_KIND,
-    MT_JOIN_REQUEST, MT_MEMBER_LIST_UPDATE, MT_INVITE,
+    MT_JOIN_REQUEST, MT_MEMBER_LIST_UPDATE, MT_INVITE, MT_PRESENCE,
     SYNC_WINDOW_SECS,
     unpack_wire,
 )
@@ -174,6 +174,7 @@ class InviteManager:
         # scope_hex -> "server" | "channel", learned from an inbound invite.
         # Presentation only: trust anchoring is the accepted_invites table.
         self._invite_scope_kinds: dict[str, str] = {}
+        self._storage.purge_expired_pending_invites()
         router.add_delivery_callback(self._on_lxmf_message)
 
     def invite_scope_kind(self, scope_hash_hex: str) -> str:
@@ -322,6 +323,25 @@ class InviteManager:
 
     def decline_pending_membership(self, channel_hash_hex: str) -> None:
         self._storage.clear_pending_member_doc(channel_hash_hex)
+
+    # --- pending invite tokens ---
+
+    def list_pending_invites(self) -> list[dict]:
+        """Received invite tokens not yet accepted or declined, unexpired."""
+        return [
+            {
+                "channel_hash_hex": row["channel_hash"],
+                "channel_name":     row["channel_name"],
+                "token":            bytes(row["token"]),
+                "expiry":           row["expiry"],
+                "admin_hash_hex":   row["admin_hash"],
+            }
+            for row in self._storage.get_pending_invites()
+        ]
+
+    def decline_invite(self, channel_hash_hex: str) -> None:
+        """Drop a received invite token without acting on it."""
+        self._storage.clear_pending_invite(channel_hash_hex)
 
     def accept_pending_membership(self, channel_hash_hex: str) -> bool:
         """Confirm a held document: anchor it to its signer, then apply it."""
@@ -1248,6 +1268,7 @@ class InviteManager:
         self._storage.record_accepted_invite(
             channel_hash_hex, admin_hash_hex, expiry
         )
+        self._storage.clear_pending_invite(channel_hash_hex)
         self._send_raw(admin_hash_hex, {
             F_MSG_TYPE:     MT_JOIN_REQUEST,
             F_CHANNEL_HASH: bytes.fromhex(channel_hash_hex),
@@ -1287,6 +1308,12 @@ class InviteManager:
             return
         if isinstance(msg_type, bytes):
             msg_type = msg_type.decode(errors="replace")
+
+        # Presence beacons carry no channel hash by design; they're handled
+        # entirely by PresenceManager.record_seen via the router's delivery
+        # callback, so there's nothing for invite.py to do with them.
+        if msg_type == MT_PRESENCE:
+            return
 
         RNS.log(f"TrenchChat [invite]: received control message type={msg_type!r}",
                 RNS.LOG_DEBUG)
@@ -1414,6 +1441,9 @@ class InviteManager:
                 if not channel_name:
                     channel = self._storage.get_channel(channel_hash_hex)
                     channel_name = channel["name"] if channel else channel_hash_hex[:12]
+                self._storage.record_pending_invite(
+                    channel_hash_hex, channel_name, token, float(expiry), admin_hex
+                )
                 for cb in self._invite_callbacks:
                     try:
                         cb(channel_hash_hex, channel_name, token, expiry, admin_hex)

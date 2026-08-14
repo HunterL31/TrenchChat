@@ -126,6 +126,8 @@ After B confirms receipt (via `MT_SYNC_RESPONSE` processing), the hints for B ar
 
 **Hint TTL**: Hints older than the sync window (default 7 days) are pruned at startup via `storage.purge_old_missed_deliveries(before_ts)`.
 
+**Retry**: If a subscriber's identity can't be recalled at broadcast time, the hint isn't dropped — `SyncManager` requests the subscriber's path and queues the hint (capped at `MAX_QUEUED_HINTS_PER_PEER` per peer), mirroring `Messaging`'s pending-retry queue. `on_peer_appeared` flushes queued hints alongside `flush_pending`, so a hint aimed at a momentarily unreachable peer still reaches them once they're back.
+
 **Limitation**: Hints only reach peers who are online at the exact moment A detects failure. If all peers except A are offline, no hints are stored anywhere. Mechanism 3 covers this.
 
 ---
@@ -147,13 +149,48 @@ Fields:
 
 Any online peer that is subscribed (or is a member of an invite-only channel) responds. The responder's logic:
 
-1. **Check hints first**: `storage.get_missed_message_ids(channel_hash, B_hash)` — if non-empty, fetch exactly those messages (targeted; avoids a full sweep).
-2. **Timestamp fallback**: if no hints exist, `storage.get_messages_after(channel_hash, window_start, limit=50)` — returns the 50 oldest messages since `window_start`.
-3. **Send** as `MT_SYNC_RESPONSE` with the full message records packed via msgpack.
+1. **Resolve hints**: `storage.get_missed_message_ids(channel_hash, B_hash)`, then look those ids up directly (`storage.get_messages_by_ids`). These name exact messages B missed, including ones older than B's window.
+2. **Sweep**: `_collect_permitted_rows(...)` from `window_start`, capped at 50.
+3. **Merge and send** as `MT_SYNC_RESPONSE`, deduplicated by message id and ordered oldest first.
 
-The 50-message chunk limit keeps responses within LXMF message size constraints. Subsequent sync cycles fill any remaining gaps.
+Hints **supplement** the sweep rather than replacing it. Letting a hint short-circuit the sweep breaks two ways, both of which strand B silently while the empty response reports the channel as synced:
+
+- Hints are broadcast to every reachable subscriber, so most holders of a hint never have the message it names. That lookup resolves to nothing, and if it stood as the whole answer B would get nothing from that peer until the hint aged out.
+- A responder that answers only the hinted message never serves the newer history B also lacks, and the hint is never cleared on the responder side — so it would keep answering with the same one message on every future request.
+
+A hinted message **newer than where the sweep reached** is held back for the sweep to reach in order. B advances its watermark to the newest message in a response, so serving one out of band would strand everything between it and the sweep frontier.
+
+Every authorised request is answered, **including with an empty message list**. Silence is ambiguous — "nothing for you", "never received it", and "not allowed" all look identical — so a requester could never tell that it is actually up to date. Requests the responder refuses (unauthorised peer, or a throttled deep sweep) stay silent, so neither leaks a signal.
+
+The 50-message chunk limit keeps responses within LXMF message size constraints. A response that hits the cap carries `F_SYNC_TRUNCATED`, and the requester immediately asks the same peer for the next batch. Without that, everything past the cap waits for an unrelated announce to drive the next request. The chain is bounded by `MAX_SYNC_CONTINUATIONS` per (channel, peer) and only continues while the watermark actually advances, so a peer that flags every batch truncated can't induce unbounded requests.
+
+The sweep fills a batch with rows the requester may actually see, **scanning past withheld ones** (`_collect_permitted_rows`, bounded by `MAX_SWEEP_SCAN`). Tenure filtering can otherwise empty a batch while the responder still holds newer history the requester is entitled to, stranding them at that timestamp. A batch that hits `MAX_SWEEP_SCAN` while every scanned row was withheld carries `F_SYNC_SCAN_CURSOR` — how far the sweep actually reached — so the requester's *next* request resumes from there instead of asking the same withheld run over again; that field never touches the persisted watermark (below), only the next request's `F_SYNC_WINDOW_START`.
+
+Rows are grouped by timestamp as the sweep scans, and a batch or scan cursor never splits a group: `F_SYNC_WINDOW_START` and `F_SYNC_SCAN_CURSOR` are bare floats with no row-id tie-breaker, so several messages sharing the exact same timestamp — plausible on a coarse clock — must be included, or withheld and resumed from, as a whole, or whichever half landed on the wrong side of a split would be silently skipped by every future sweep (`Storage.get_messages_after` filters on strict `timestamp >`). A single group larger than `MAX_RESPONSE_MESSAGES` still ships whole rather than stalling forever. Internally, `_collect_permitted_rows` sweeps by an (timestamp, row id) cursor into `Storage.get_messages_after` so a group spanning an internal page boundary is scanned as one run.
+
+The requester's watermark only ever advances over messages it actually accepted — never past ones the responder withheld or it rejected itself, and never backwards, since a hint can serve a message older than everything already held. A permission decision is not permanent: a role or `full_sync` grant still propagating would otherwise leave history withheld for good, since the watermark would already be past it. The cost is that the responder re-scans that withheld run on each request, which is bounded and indexed.
 
 On receiving `MT_SYNC_RESPONSE`, B inserts each message with `Storage.insert_message()`, which is idempotent — the `UNIQUE(message_id)` constraint silently discards duplicates. New messages fire the normal GUI message callbacks so the chat view updates live.
+
+---
+
+## Sync Status
+
+**File**: `trenchchat/core/sync_status.py` — `SyncStatusTracker`, owned by `SyncManager` and exposed as `sync_mgr.status`
+
+Sync is otherwise invisible: a freshly joined channel shows an empty pane while a backfill is already in flight, and the messages then appear looking exactly like live traffic. The tracker records what was asked of whom and what came back, so a frontend can show it. It has no network side effects — it only observes calls `SyncManager` already makes.
+
+| State | Meaning |
+|-------|---------|
+| `SYNCING` | at least one request outstanding |
+| `SYNCED` | a peer answered and reported nothing further |
+| `INCOMPLETE` | a known gap: a truncated batch, or a hint naming us |
+| `WAITING` | no reachable peer to sync from |
+| `UNKNOWN` | never attempted |
+
+`SYNCED` requires a peer to have actually answered — a silent peer never counts as up to date, which is what the empty response above exists to make possible.
+
+`SYNCED` is scoped to peers we know about. A peer whose announce never reached us is never asked and can't be accounted for — on a partition-tolerant mesh there's no way to enumerate everyone who might hold history. `SYNCED` means "every peer we know about answered and had nothing more," not "no history exists anywhere." `get_status()`'s `answered_peers` count says how many peers back that claim.
 
 ---
 
@@ -192,7 +229,7 @@ Requests never look back further than `now - SYNC_WINDOW_SECS`, preventing unbou
 
 ## New LXMF Field Constants
 
-Defined in `trenchchat/core/messaging.py`:
+Defined in `trenchchat/core/protocol.py`:
 
 | Field | Key | Type | Used in |
 |-------|-----|------|---------|
@@ -200,6 +237,8 @@ Defined in `trenchchat/core/messaging.py`:
 | `F_SYNC_MESSAGES` | `0x08` | `bytes` (msgpack) | `sync_response` |
 | `F_MISSED_FOR` | `0x09` | `str` | `missed_delivery` |
 | `F_MISSED_MSG_ID` | `0x0A` | `str` | `missed_delivery` |
+| `F_SYNC_TRUNCATED` | `0x50` | `bool` | `sync_response` |
+| `F_SYNC_SCAN_CURSOR` | `0x51` | `float` | `sync_response` (only when truncated) |
 
 ---
 

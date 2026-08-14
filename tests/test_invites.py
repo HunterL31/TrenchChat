@@ -383,3 +383,108 @@ class TestDepartedTenureFormatCompatibility:
                                         channels_blob=channels_blob)
         assert both != departed_only
         assert both != channels_only
+
+
+# ---------------------------------------------------------------------------
+# Pending invite persistence (regression: an invite received but not yet
+# accepted used to live only in memory, so a recipient restart before
+# deciding lost it permanently).
+# ---------------------------------------------------------------------------
+
+def _restart_peer(peer_factory, peer):
+    """Simulate a process restart: tear the peer down, then rebuild it fresh
+    over the same on-disk identity file and storage.db (see
+    tests/test_sync_restart.py's _restart_peer for the full rationale).
+    """
+    peer.teardown()
+    return peer_factory(peer.name)
+
+
+class TestPendingInvitePersistence:
+    def test_invite_survives_restart_and_can_still_be_accepted(self, peer_factory):
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+
+        ch_hash = alice.channel_mgr.create_channel("persist-invite", "", "invite")
+        alice.invite_mgr.send_invite(ch_hash, bob.identity.hash_hex)
+
+        assert wait_for(
+            lambda: len(bob.invite_mgr.list_pending_invites()) == 1, timeout=5
+        ), "Bob never received the invite"
+
+        bob = _restart_peer(peer_factory, bob)
+
+        pending = bob.invite_mgr.list_pending_invites()
+        assert len(pending) == 1, \
+            "the pending invite did not survive Bob's restart"
+        inv = pending[0]
+        assert inv["channel_hash_hex"] == ch_hash
+
+        bob.invite_mgr.send_join_request(
+            inv["channel_hash_hex"], inv["token"], inv["expiry"], inv["admin_hash_hex"]
+        )
+
+        assert wait_for_member(alice.storage, ch_hash, bob.identity.hash_hex, timeout=5), \
+            "Bob was not added to Alice's member list after accepting the restored invite"
+        assert wait_for_member(bob.storage, ch_hash, bob.identity.hash_hex, timeout=5), \
+            "Bob did not receive the member list update"
+
+    def test_expired_invite_not_pending_after_restart(self, peer_factory):
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+
+        ch_hash = alice.channel_mgr.create_channel("persist-invite-expired", "", "invite")
+        alice.invite_mgr.send_invite(ch_hash, bob.identity.hash_hex, ttl=2.0)
+
+        assert wait_for(
+            lambda: len(bob.invite_mgr.list_pending_invites()) == 1, timeout=5
+        ), "Bob never received the invite"
+
+        time.sleep(2.2)
+        bob = _restart_peer(peer_factory, bob)
+
+        assert bob.invite_mgr.list_pending_invites() == [], (
+            "an expired invite should not be presented as pending after a restart"
+        )
+
+    def test_accept_removes_stored_pending_invite(self, peer_factory):
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+
+        ch_hash = alice.channel_mgr.create_channel("persist-invite-accept", "", "invite")
+        alice.invite_mgr.send_invite(ch_hash, bob.identity.hash_hex)
+
+        assert wait_for(
+            lambda: len(bob.invite_mgr.list_pending_invites()) == 1, timeout=5
+        ), "Bob never received the invite"
+
+        inv = bob.invite_mgr.list_pending_invites()[0]
+        bob.invite_mgr.send_join_request(
+            inv["channel_hash_hex"], inv["token"], inv["expiry"], inv["admin_hash_hex"]
+        )
+
+        assert bob.invite_mgr.list_pending_invites() == [], \
+            "accepting should clear the stored pending invite row immediately"
+
+        bob = _restart_peer(peer_factory, bob)
+        assert bob.invite_mgr.list_pending_invites() == [], \
+            "an accepted invite should not reappear after a restart"
+
+    def test_decline_removes_stored_pending_invite(self, peer_factory):
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+
+        ch_hash = alice.channel_mgr.create_channel("persist-invite-decline", "", "invite")
+        alice.invite_mgr.send_invite(ch_hash, bob.identity.hash_hex)
+
+        assert wait_for(
+            lambda: len(bob.invite_mgr.list_pending_invites()) == 1, timeout=5
+        ), "Bob never received the invite"
+
+        bob.invite_mgr.decline_invite(ch_hash)
+        assert bob.invite_mgr.list_pending_invites() == [], \
+            "declining should clear the stored pending invite row immediately"
+
+        bob = _restart_peer(peer_factory, bob)
+        assert bob.invite_mgr.list_pending_invites() == [], \
+            "a declined invite should not reappear after a restart"
