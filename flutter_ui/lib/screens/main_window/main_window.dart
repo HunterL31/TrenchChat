@@ -23,6 +23,10 @@ import 'map_tab.dart';
 import 'message_list.dart';
 import 'server_rail.dart';
 
+/// Below this width the three-column shell collapses to a single pane with
+/// the rail + channel column in a drawer.
+const double compactBreakpoint = 700;
+
 class MainWindow extends StatefulWidget {
   const MainWindow({super.key, required this.state});
   final AppState state;
@@ -33,6 +37,7 @@ class MainWindow extends StatefulWidget {
 
 class _MainWindowState extends State<MainWindow> {
   ChannelTab _tab = ChannelTab.chat;
+  final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
 
   // Dialogs show their own inline error text for a failed submit; this is
   // the catch-all for actions with no dialog to show it in (a failed send,
@@ -118,35 +123,40 @@ class _MainWindowState extends State<MainWindow> {
             : ChannelLinkQuality.unknown;
         final permissions = channelHash != null ? state.permissionsByChannel[channelHash] : null;
 
-        return Row(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            ServerRail(
-              servers: [
-                for (final s in state.servers) ServerRailEntry(hash: s.hash, name: s.name),
-              ],
-              selectedHash: state.selectedServerHash,
-              onSelect: (hash) => state.selectServer(hash),
-              onAddServer: () => showNewServerDialog(context, state),
-              onSettings: () => showSettingsDialog(context, state),
-            ),
-            ChannelColumn(
-              serverName: serverName,
-              serverMemberCount:
-                  selectedServer != null ? state.serverMemberCounts[selectedServer] : null,
-              channels: channels,
-              directChannels: state.standaloneChannels,
-              selectedChannelHash: state.selectedChannelHash,
-              onSelectChannel: (hash) => state.selectChannel(hash),
-              onlinePresence: presence,
-              pendingInvites: state.pendingInvites,
-              onTapInvite: (invite) => showIncomingInviteDialog(context, state, invite),
-              onCreateChannel: () =>
-                  showNewChannelDialog(context, state, serverHashHex: selectedServer),
-              onJoinChannel: () => showJoinChannelDialog(context, state),
-            ),
-            Expanded(
-              child: Column(
+        final compact = MediaQuery.of(context).size.width < compactBreakpoint;
+
+        final rail = ServerRail(
+          servers: [
+            for (final s in state.servers) ServerRailEntry(hash: s.hash, name: s.name),
+          ],
+          selectedHash: state.selectedServerHash,
+          onSelect: (hash) => state.selectServer(hash),
+          onAddServer: () => showNewServerDialog(context, state),
+          onSettings: () => showSettingsDialog(context, state),
+        );
+
+        final channelColumn = ChannelColumn(
+          serverName: serverName,
+          serverMemberCount:
+              selectedServer != null ? state.serverMemberCounts[selectedServer] : null,
+          channels: channels,
+          directChannels: state.standaloneChannels,
+          selectedChannelHash: state.selectedChannelHash,
+          onSelectChannel: (hash) {
+            state.selectChannel(hash);
+            if (_scaffoldKey.currentState?.isDrawerOpen ?? false) {
+              _scaffoldKey.currentState!.closeDrawer();
+            }
+          },
+          onlinePresence: presence,
+          pendingInvites: state.pendingInvites,
+          onTapInvite: (invite) => showIncomingInviteDialog(context, state, invite),
+          onCreateChannel: () =>
+              showNewChannelDialog(context, state, serverHashHex: selectedServer),
+          onJoinChannel: () => showJoinChannelDialog(context, state),
+        );
+
+        final content = Column(
                 children: [
                   ChannelHeader(
                     channelName: channel?.name ?? '',
@@ -154,6 +164,9 @@ class _MainWindowState extends State<MainWindow> {
                     linkQuality: linkQuality,
                     activeTab: _tab,
                     onTabSelected: (t) => setState(() => _tab = t),
+                    compact: compact,
+                    onOpenNav:
+                        compact ? () => _scaffoldKey.currentState?.openDrawer() : null,
                     onViewMembers: channel == null || channelHash == null
                         ? null
                         : () => showMembersDialog(
@@ -199,10 +212,34 @@ class _MainWindowState extends State<MainWindow> {
                       },
                       pickEmoji: () async =>
                           (await showEmojiPickerDialog(context, state))?.composeToken,
+                      compact: compact,
                     ),
                 ],
+              );
+
+        if (compact) {
+          return Scaffold(
+            key: _scaffoldKey,
+            backgroundColor: TCColors.bgApp,
+            drawer: Drawer(
+              width: 266,
+              backgroundColor: TCColors.bgSurface,
+              shape: const RoundedRectangleBorder(),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [rail, channelColumn],
               ),
             ),
+            body: SafeArea(child: content),
+          );
+        }
+
+        return Row(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            rail,
+            channelColumn,
+            Expanded(child: content),
           ],
         );
       },

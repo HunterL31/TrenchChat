@@ -193,8 +193,20 @@ class TcIcons {
       Offset(8, 4.4), Offset(9.1, 5.5), Offset(8, 6.6), Offset(6.9, 5.5),
     ],
   ]);
+  static const menu = TcIconData('menu', [
+    [
+      Offset(3, 4.5), Offset(13, 4.5),
+    ],
+    [
+      Offset(3, 8), Offset(13, 8),
+    ],
+    [
+      Offset(3, 11.5), Offset(13, 11.5),
+    ],
+  ]);
+
   static const List<TcIconData> all = [
-    settings, lock, plus, join, emoji, hash, users, close, search, send, sync, map, iface,
+    settings, lock, plus, join, emoji, hash, users, close, search, send, sync, map, iface, menu,
   ];
 }
 

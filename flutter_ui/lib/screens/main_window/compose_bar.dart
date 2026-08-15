@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../../theme/tokens.dart';
+import '../../widgets/tc_button.dart';
 import '../../widgets/tc_icon.dart';
 
 class ComposeBar extends StatefulWidget {
@@ -13,11 +14,16 @@ class ComposeBar extends StatefulWidget {
     required this.enabled,
     required this.onSend,
     this.pickEmoji,
+    this.compact = false,
   });
 
   final String channelName;
   final bool enabled;
   final Future<void> Function(String content) onSend;
+
+  /// Narrow/touch mode: swaps the keyboard hint for a send button, since
+  /// mobile keyboards have no Enter-to-send.
+  final bool compact;
 
   /// Opens the emoji picker; the returned compose token (a unicode char or
   /// `:name@hash:`) is inserted at the cursor.
@@ -116,14 +122,22 @@ class _ComposeBarState extends State<ComposeBar> {
             ),
           ),
           const SizedBox(width: 10),
-          Text(
-            'ENTER TO SEND · SHIFT+ENTER NEWLINE',
-            style: TextStyle(
-              fontSize: TCType.textMicro,
-              color: TCColors.textTertiary,
-              letterSpacing: TCType.letterSpacingFor(TCType.textMicro, TCType.trackingWide),
+          if (widget.compact)
+            TcIconButton(
+              icon: TcIcons.send,
+              tooltip: 'Send',
+              size: 30,
+              onPressed: widget.enabled ? _submit : null,
+            )
+          else
+            Text(
+              'ENTER TO SEND · SHIFT+ENTER NEWLINE',
+              style: TextStyle(
+                fontSize: TCType.textMicro,
+                color: TCColors.textTertiary,
+                letterSpacing: TCType.letterSpacingFor(TCType.textMicro, TCType.trackingWide),
+              ),
             ),
-          ),
         ],
       ),
     );

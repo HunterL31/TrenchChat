@@ -18,6 +18,8 @@ class ChannelHeader extends StatelessWidget {
     required this.activeTab,
     required this.onTabSelected,
     this.onViewMembers,
+    this.onOpenNav,
+    this.compact = false,
   });
 
   final String channelName;
@@ -26,6 +28,12 @@ class ChannelHeader extends StatelessWidget {
   final ChannelTab activeTab;
   final ValueChanged<ChannelTab> onTabSelected;
   final VoidCallback? onViewMembers;
+
+  /// Compact layout: shows a menu button that opens the navigation drawer.
+  final VoidCallback? onOpenNav;
+
+  /// Narrow-screen mode: menu button, no topic, signal meter without labels.
+  final bool compact;
 
   String get _levelLabel => switch (linkQuality.level) {
         LinkQualityLevel.excellent => 'EXCELLENT',
@@ -50,19 +58,35 @@ class ChannelHeader extends StatelessWidget {
       ),
       child: Row(
         children: [
-          Text('#', style: TextStyle(color: TCColors.accentPrimary, fontSize: 15)),
-          Text(channelName, style: TextStyle(color: TCColors.green100, fontSize: 15)),
-          if (topic.isNotEmpty) ...[
-            const SizedBox(width: 12),
-            Expanded(
-              child: Text(
-                topic,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(fontSize: TCType.textCaption, color: TCColors.textTertiary),
-              ),
+          if (compact && onOpenNav != null) ...[
+            TcIconButton(icon: TcIcons.menu, tooltip: 'Channels', size: 26, onPressed: onOpenNav),
+            const SizedBox(width: 8),
+          ],
+          Expanded(
+            child: Row(
+              children: [
+                Text('#', style: TextStyle(color: TCColors.accentPrimary, fontSize: 15)),
+                Flexible(
+                  child: Text(
+                    channelName,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(color: TCColors.green100, fontSize: 15),
+                  ),
+                ),
+                if (topic.isNotEmpty && !compact) ...[
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Text(
+                      topic,
+                      overflow: TextOverflow.ellipsis,
+                      style:
+                          TextStyle(fontSize: TCType.textCaption, color: TCColors.textTertiary),
+                    ),
+                  ),
+                ],
+              ],
             ),
-          ] else
-            const Spacer(),
+          ),
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 3),
             decoration: BoxDecoration(
@@ -73,15 +97,18 @@ class ChannelHeader extends StatelessWidget {
               mainAxisSize: MainAxisSize.min,
               children: [
                 SignalMeter(level: linkQuality.level, size: 12),
-                const SizedBox(width: 7),
-                Text(
-                  '$_levelLabel · $hopsLabel',
-                  style: TextStyle(
-                    fontSize: TCType.textMicro,
-                    color: TCColors.textSecondary,
-                    letterSpacing: TCType.letterSpacingFor(TCType.textMicro, TCType.trackingWide),
+                if (!compact) ...[
+                  const SizedBox(width: 7),
+                  Text(
+                    '$_levelLabel · $hopsLabel',
+                    style: TextStyle(
+                      fontSize: TCType.textMicro,
+                      color: TCColors.textSecondary,
+                      letterSpacing:
+                          TCType.letterSpacingFor(TCType.textMicro, TCType.trackingWide),
+                    ),
                   ),
-                ),
+                ],
               ],
             ),
           ),

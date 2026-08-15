@@ -73,13 +73,15 @@ class TcDialogShell extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // Never wider than the screen minus a margin, so phone viewports fit.
+    final maxWidth = MediaQuery.of(context).size.width - 24;
     return NotchedPanel(
       notch: TCSpace.notch,
       color: TCColors.bgSurfaceRaised,
       border: TCColors.borderDefault,
       boxShadow: TCEffects.shadowModal,
       child: Container(
-        width: width,
+        width: maxWidth < width ? maxWidth : width,
         padding: const EdgeInsets.all(20),
         child: Column(
           mainAxisSize: MainAxisSize.min,
