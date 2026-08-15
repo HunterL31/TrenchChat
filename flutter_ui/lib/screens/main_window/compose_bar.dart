@@ -19,7 +19,10 @@ class ComposeBar extends StatefulWidget {
 
   final String channelName;
   final bool enabled;
-  final Future<void> Function(String content) onSend;
+
+  /// Returns whether the message was accepted; on false the composed text is
+  /// restored so a failed send never eats the user's words.
+  final Future<bool> Function(String content) onSend;
 
   /// Narrow/touch mode: swaps the keyboard hint for a send button, since
   /// mobile keyboards have no Enter-to-send.
@@ -63,11 +66,15 @@ class _ComposeBarState extends State<ComposeBar> {
     return false;
   }
 
-  void _submit() {
+  Future<void> _submit() async {
     final text = _controller.text;
     if (text.trim().isEmpty || !widget.enabled) return;
     _controller.clear();
-    widget.onSend(text);
+    final ok = await widget.onSend(text);
+    if (!ok && mounted && _controller.text.isEmpty) {
+      _controller.text = text;
+      _controller.selection = TextSelection.collapsed(offset: text.length);
+    }
   }
 
   Future<void> _insertEmoji() async {

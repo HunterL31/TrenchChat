@@ -207,9 +207,7 @@ class _MainWindowState extends State<MainWindow> {
                     ComposeBar(
                       channelName: channel?.name ?? '',
                       enabled: channelHash != null && (permissions?.sendMessage ?? true),
-                      onSend: (content) async {
-                        await state.sendMessage(content);
-                      },
+                      onSend: (content) => state.sendMessage(content),
                       pickEmoji: () async =>
                           (await showEmojiPickerDialog(context, state))?.composeToken,
                       compact: compact,

@@ -107,6 +107,7 @@ class AppState extends ChangeNotifier {
       loading = false;
       notifyListeners();
 
+      _socket.onReconnected = _onSocketReconnected;
       _sub = _socket.events.listen(_onEvent);
       unawaited(ensureEmojiLoaded());
     } catch (e) {
@@ -165,14 +166,45 @@ class AppState extends ChangeNotifier {
     return data;
   }
 
+  /// Anything whose WS events may have been missed while the socket was down.
+  void _onSocketReconnected() {
+    final channelHash = selectedChannelHash;
+    if (channelHash != null) unawaited(loadChannel(channelHash));
+    unawaited(refreshInvites());
+    unawaited(refreshEmoji());
+  }
+
   Future<bool> sendMessage(String content) async {
     final channelHashHex = selectedChannelHash;
     if (channelHashHex == null || content.trim().isEmpty) return false;
     try {
-      return await api.sendMessage(channelHashHex, content.trim());
+      final result = await api.sendMessage(channelHashHex, content.trim());
+      if (result.ok) {
+        // The WS event echoes it too; this covers a dropped socket so the
+        // sender always sees their own message land.
+        unawaited(refreshMessages(channelHashHex));
+        return true;
+      }
+      actionError = switch (result.reason) {
+        'no_send_permission' => "You don't have permission to send in this channel.",
+        'no_recipients' =>
+          'Not sent: no known subscribers to deliver to yet. Try again once peers are online.',
+        _ => 'Message was not sent.',
+      };
+      notifyListeners();
+      return false;
     } catch (e) {
       _reportActionError(e);
       return false;
+    }
+  }
+
+  Future<void> refreshMessages(String channelHashHex) async {
+    try {
+      messagesByChannel[channelHashHex] = await api.getMessages(channelHashHex);
+      notifyListeners();
+    } catch (_) {
+      // Next WS event or channel reload will catch it up.
     }
   }
 

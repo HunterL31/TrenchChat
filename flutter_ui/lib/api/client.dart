@@ -159,13 +159,17 @@ class ApiClient {
         .toList();
   }
 
-  Future<bool> sendMessage(String channelHashHex, String content) async {
+  /// [reason] is the backend's machine-readable cause when [ok] is false
+  /// (`no_send_permission`, `no_recipients`).
+  Future<({bool ok, String? reason})> sendMessage(
+      String channelHashHex, String content) async {
     final res = await _http.post(
       _u('/channels/$channelHashHex/messages'),
       headers: _jsonHeaders,
       body: jsonEncode({'content': content}),
     );
-    return (_decode(res) as Map<String, dynamic>)['ok'] as bool? ?? false;
+    final body = _decode(res) as Map<String, dynamic>;
+    return (ok: body['ok'] as bool? ?? false, reason: body['reason'] as String?);
   }
 
   Future<ChannelPermissions> getMyPermissions(String channelHashHex) async {

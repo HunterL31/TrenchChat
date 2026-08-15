@@ -787,12 +787,26 @@ def create_app(backend: Backend) -> FastAPI:
                 if len(raw) <= MAX_IMAGE_BYTES:
                     image_data = raw
 
+        # Messaging fires its message callback only for inbound LXMF, so the
+        # sender's own message never reaches the WS bus by itself -- the Qt
+        # client refreshes its own view after sending instead. Detect the
+        # stored message by id and emit it here so browser clients update
+        # live too. This also catches the silent-drop case: send_message
+        # returns True but stores nothing when the recipient list is empty,
+        # which must not be reported to the client as a successful send.
+        before = backend.storage.get_latest_message_id(channel_hash)
         sent = actions.send_message(
             backend.storage, backend.subscription_mgr, backend.messaging,
             channel_hash, backend.identity.hash_hex, req.content,
             reply_to=req.reply_to, image_data=image_data,
         )
-        return {"ok": sent}
+        after = backend.storage.get_latest_message_id(channel_hash)
+        stored = sent and after is not None and after != before
+        if stored:
+            _on_message(channel_hash, after)
+            return {"ok": True}
+        return {"ok": False,
+                "reason": "no_send_permission" if not sent else "no_recipients"}
 
     # --- reactions and custom emoji ---
 
