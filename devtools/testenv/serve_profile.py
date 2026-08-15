@@ -4,7 +4,7 @@ built Flutter web client on the same port, so the client can be tested from
 a browser against real channels and the real mesh.
 
     python devtools/testenv/serve_profile.py
-    # then open http://127.0.0.1:8801/  (or http://<host>:8801/ remotely)
+    # then open http://127.0.0.1:8810/  (or http://<host>:8810/ remotely)
 
 Uses ~/.trenchchat and the default Reticulum config, wired exactly like
 main.py. Close the desktop client first: both processes would announce the
@@ -26,6 +26,10 @@ if str(_REPO_ROOT) not in sys.path:
 
 _DEFAULT_WEB_DIR = _REPO_ROOT / "flutter_ui" / "build" / "web"
 
+# Clear of the dev environment's range -- orchestrator on 8800, tester APIs
+# on 8801-8808 -- so a real-profile server can run alongside it.
+_DEFAULT_PORT = 8810
+
 # Mirrors main.py's minute reannounce and main_window.py's startup sync delay.
 _REANNOUNCE_SECS = 60.0
 _STARTUP_SYNC_DELAY_SECS = 3.0
@@ -36,8 +40,9 @@ def main():
         description="Serve the real TrenchChat profile + web client over HTTP")
     parser.add_argument("--host", default="0.0.0.0",
                         help="bind address (default 0.0.0.0)")
-    parser.add_argument("--port", type=int, default=8801,
-                        help="port for the API and web client (default 8801)")
+    parser.add_argument("--port", type=int, default=_DEFAULT_PORT,
+                        help=f"port for the API and web client (default {_DEFAULT_PORT}, "
+                             "clear of the dev environment's 8800-8808)")
     parser.add_argument("--rns-configdir", default=None,
                         help="Reticulum config directory (default: the "
                              "machine's usual one, ~/.reticulum)")

@@ -53,12 +53,15 @@ Two ways to serve it:
   ```bash
   # from the repo root; close the desktop client first (same identity, same DB)
   .venv/bin/python devtools/testenv/serve_profile.py
-  # open http://127.0.0.1:8801/
+  # open http://127.0.0.1:8810/
   ```
 
   One port serves both the API and the web client, so tunnelling that single
-  port (`ssh -L 8801:localhost:8801 box`) is all remote access needs.
-  PIN-locked profiles are refused -- there's no headless unlock path yet.
+  port (`ssh -L 8810:localhost:8810 box`) is all remote access needs. The
+  default port sits clear of the dev environment's 8800-8808, so both can run
+  at once. PIN-locked profiles are refused -- there's no headless unlock path
+  yet. To point the *desktop* app at a real-profile server instead of tester
+  A, build it with `--dart-define=TC_API_URL=http://127.0.0.1:8810`.
 
 - **Against the throwaway testers** -- start `orchestrator.py` as usual, serve
   `build/web` with any static server, and point the page at a tester with the
