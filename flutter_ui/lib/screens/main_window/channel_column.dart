@@ -2,6 +2,7 @@
 // ONLINE roster footer, +CHANNEL / JOIN ghost buttons.
 import 'package:flutter/material.dart';
 
+import '../../api/models/invite.dart';
 import '../../api/models/member.dart';
 import '../../api/models/server.dart';
 import '../../theme/effects.dart';
@@ -20,6 +21,8 @@ class ChannelColumn extends StatelessWidget {
     required this.selectedChannelHash,
     required this.onSelectChannel,
     required this.onlinePresence,
+    this.pendingInvites = const [],
+    this.onTapInvite,
     this.onCreateChannel,
     this.onJoinChannel,
   });
@@ -31,6 +34,8 @@ class ChannelColumn extends StatelessWidget {
   final String? selectedChannelHash;
   final ValueChanged<String> onSelectChannel;
   final List<PresenceEntry> onlinePresence;
+  final List<PendingInvite> pendingInvites;
+  final ValueChanged<PendingInvite>? onTapInvite;
   final VoidCallback? onCreateChannel;
   final VoidCallback? onJoinChannel;
 
@@ -77,6 +82,11 @@ class ChannelColumn extends StatelessWidget {
             child: ListView(
               padding: EdgeInsets.zero,
               children: [
+                if (pendingInvites.isNotEmpty) ...[
+                  const _SectionLabel('INVITES'),
+                  for (final invite in pendingInvites)
+                    _InviteRow(invite: invite, onTap: onTapInvite),
+                ],
                 if (channels.isNotEmpty) ...[
                   const _SectionLabel('CHANNELS'),
                   for (final c in channels)
@@ -179,6 +189,51 @@ class _SectionLabel extends StatelessWidget {
           fontSize: TCType.textMicro,
           color: TCColors.textSecondary,
           letterSpacing: TCType.letterSpacingFor(TCType.textMicro, TCType.trackingWider),
+        ),
+      ),
+    );
+  }
+}
+
+class _InviteRow extends StatefulWidget {
+  const _InviteRow({required this.invite, required this.onTap});
+
+  final PendingInvite invite;
+  final ValueChanged<PendingInvite>? onTap;
+
+  @override
+  State<_InviteRow> createState() => _InviteRowState();
+}
+
+class _InviteRowState extends State<_InviteRow> {
+  bool _hover = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() => _hover = false),
+      child: GestureDetector(
+        onTap: widget.onTap == null ? null : () => widget.onTap!(widget.invite),
+        child: AnimatedContainer(
+          duration: TCEffects.durationMed,
+          curve: TCEffects.easeTerminal,
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+          color: _hover ? TCColors.bgHover : Colors.transparent,
+          child: Row(
+            children: [
+              TcIcon(TcIcons.join, size: 12, color: TCColors.accentSecondary),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Text(
+                  widget.invite.channelName,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(fontSize: 13, color: TCColors.amber300),
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );

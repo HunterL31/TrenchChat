@@ -4,6 +4,8 @@ import 'package:flutter/material.dart';
 import '../../api/models/link_quality.dart';
 import '../../theme/tokens.dart';
 import '../../widgets/signal_meter.dart';
+import '../../widgets/tc_button.dart';
+import '../../widgets/tc_icon.dart';
 
 enum ChannelTab { chat, map, iface }
 
@@ -15,6 +17,7 @@ class ChannelHeader extends StatelessWidget {
     required this.linkQuality,
     required this.activeTab,
     required this.onTabSelected,
+    this.onViewMembers,
   });
 
   final String channelName;
@@ -22,6 +25,7 @@ class ChannelHeader extends StatelessWidget {
   final ChannelLinkQuality linkQuality;
   final ChannelTab activeTab;
   final ValueChanged<ChannelTab> onTabSelected;
+  final VoidCallback? onViewMembers;
 
   String get _levelLabel => switch (linkQuality.level) {
         LinkQualityLevel.excellent => 'EXCELLENT',
@@ -81,6 +85,15 @@ class ChannelHeader extends StatelessWidget {
               ],
             ),
           ),
+          if (onViewMembers != null) ...[
+            const SizedBox(width: 8),
+            TcIconButton(
+              icon: TcIcons.users,
+              tooltip: 'Members',
+              size: 26,
+              onPressed: onViewMembers,
+            ),
+          ],
           const SizedBox(width: 8),
           Row(
             children: [

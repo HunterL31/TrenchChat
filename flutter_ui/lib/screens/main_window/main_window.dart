@@ -8,12 +8,17 @@ import '../../api/models/message.dart';
 import '../../api/models/server.dart';
 import '../../app_state.dart';
 import '../../theme/tokens.dart';
+import '../dialogs/incoming_invite_dialog.dart';
 import '../dialogs/join_channel_dialog.dart';
+import '../dialogs/members_dialog.dart';
 import '../dialogs/new_channel_dialog.dart';
 import '../dialogs/new_server_dialog.dart';
+import '../dialogs/settings_dialog.dart';
 import 'channel_column.dart';
 import 'channel_header.dart';
 import 'compose_bar.dart';
+import 'iface_tab.dart';
+import 'map_tab.dart';
 import 'message_list.dart';
 import 'server_rail.dart';
 
@@ -106,6 +111,7 @@ class _MainWindowState extends State<MainWindow> {
               selectedHash: state.selectedServerHash,
               onSelect: (hash) => state.selectServer(hash),
               onAddServer: () => showNewServerDialog(context, state),
+              onSettings: () => showSettingsDialog(context, state),
             ),
             ChannelColumn(
               serverName: serverName,
@@ -116,6 +122,8 @@ class _MainWindowState extends State<MainWindow> {
               selectedChannelHash: state.selectedChannelHash,
               onSelectChannel: (hash) => state.selectChannel(hash),
               onlinePresence: presence,
+              pendingInvites: state.pendingInvites,
+              onTapInvite: (invite) => showIncomingInviteDialog(context, state, invite),
               onCreateChannel: () =>
                   showNewChannelDialog(context, state, serverHashHex: selectedServer),
               onJoinChannel: () => showJoinChannelDialog(context, state),
@@ -129,10 +137,20 @@ class _MainWindowState extends State<MainWindow> {
                     linkQuality: linkQuality,
                     activeTab: _tab,
                     onTabSelected: (t) => setState(() => _tab = t),
+                    onViewMembers: channel == null || channelHash == null
+                        ? null
+                        : () => showMembersDialog(
+                              context,
+                              state,
+                              channelHashHex: channelHash,
+                              channelName: channel.name,
+                            ),
                   ),
                   Expanded(
-                    child: _tab == ChannelTab.chat
-                        ? MessageList(
+                    child: switch (_tab) {
+                      ChannelTab.map => MapTab(state: state),
+                      ChannelTab.iface => IfaceTab(state: state),
+                      ChannelTab.chat => MessageList(
                             messages: messages,
                             meHashHex: state.meHashHex,
                             displayNameFor: _displayNameFor,
@@ -152,13 +170,8 @@ class _MainWindowState extends State<MainWindow> {
                                       state.api.addReaction(channelHash, messageId, emojiHash);
                                     }
                                   },
-                          )
-                        : Center(
-                            child: Text(
-                              _tab == ChannelTab.map ? 'MAP not in this spike' : 'IFACE not in this spike',
-                              style: TextStyle(color: TCColors.textTertiary),
-                            ),
                           ),
+                    },
                   ),
                   if (_tab == ChannelTab.chat)
                     ComposeBar(
