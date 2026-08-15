@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../../theme/tokens.dart';
+import '../../widgets/tc_icon.dart';
 
 class ComposeBar extends StatefulWidget {
   const ComposeBar({
@@ -69,7 +70,7 @@ class _ComposeBarState extends State<ComposeBar> {
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.center,
         children: [
-          Text('＋', style: TextStyle(fontSize: 17, color: TCColors.textTertiary)),
+          TcIcon(TcIcons.plus, size: 15, color: TCColors.textTertiary),
           const SizedBox(width: 10),
           Expanded(
             child: TextField(
@@ -88,7 +89,7 @@ class _ComposeBarState extends State<ComposeBar> {
             ),
           ),
           const SizedBox(width: 10),
-          Text('☺', style: TextStyle(fontSize: 17, color: TCColors.textTertiary)),
+          TcIcon(TcIcons.emoji, size: 15, color: TCColors.textTertiary),
           const SizedBox(width: 10),
           Text(
             'ENTER TO SEND · SHIFT+ENTER NEWLINE',

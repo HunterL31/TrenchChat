@@ -8,6 +8,7 @@ import '../../theme/effects.dart';
 import '../../theme/tokens.dart';
 import '../../widgets/status_dot.dart';
 import '../../widgets/tc_button.dart';
+import '../../widgets/tc_icon.dart';
 
 class ChannelColumn extends StatelessWidget {
   const ChannelColumn({
@@ -144,11 +145,11 @@ class ChannelColumn extends StatelessWidget {
             child: Row(
               children: [
                 Expanded(
-                  child: TcGhostButton(label: '＋ CHANNEL', onPressed: onCreateChannel),
+                  child: TcGhostButton(icon: TcIcons.plus, label: 'CHANNEL', onPressed: onCreateChannel),
                 ),
                 const SizedBox(width: 6),
                 Expanded(
-                  child: TcGhostButton(label: '⤵ JOIN', onPressed: onJoinChannel),
+                  child: TcGhostButton(icon: TcIcons.join, label: 'JOIN', onPressed: onJoinChannel),
                 ),
               ],
             ),
@@ -235,7 +236,7 @@ class _ChannelRowState extends State<_ChannelRow> {
                 ),
               ),
               if (widget.channel.isInviteOnly)
-                Text('🔒', style: TextStyle(fontSize: TCType.textMicro, color: TCColors.textTertiary)),
+                TcIcon(TcIcons.lock, size: TCType.textMicro, color: TCColors.textTertiary),
             ],
           ),
         ),

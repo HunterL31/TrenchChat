@@ -5,6 +5,7 @@ import '../../theme/effects.dart';
 import '../../theme/tokens.dart';
 import '../../widgets/dashed_border.dart';
 import '../../widgets/tc_button.dart';
+import '../../widgets/tc_icon.dart';
 
 class ServerRailEntry {
   const ServerRailEntry({required this.hash, required this.name});
@@ -69,7 +70,7 @@ class ServerRail extends StatelessWidget {
           const Spacer(),
           const Padding(
             padding: EdgeInsets.only(bottom: 12),
-            child: TcIconButton(icon: '⚙', tooltip: 'Settings', onPressed: null),
+            child: TcIconButton(icon: TcIcons.settings, tooltip: 'Settings', onPressed: null),
           ),
         ],
       ),
