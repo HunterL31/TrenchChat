@@ -13,6 +13,7 @@ import '../../widgets/status_dot.dart';
 import '../../widgets/tc_button.dart';
 import '../../widgets/tc_dialog.dart';
 import 'invite_dialog.dart';
+import 'permissions_dialog.dart';
 
 const _roleOwner = 'owner';
 const _roleAdmin = 'admin';
@@ -113,6 +114,16 @@ class _MembersDialogContentState extends State<_MembersDialogContent> {
         width: 440,
         errorText: _error,
         actions: [
+          if (perms?.manageChannel ?? false)
+            TcGhostButton(
+              label: 'PERMS',
+              onPressed: () => showPermissionsDialog(
+                context,
+                state,
+                channelHashHex: widget.channelHashHex,
+                channelName: widget.channelName,
+              ),
+            ),
           TcGhostButton(
             label: 'INVITE',
             onPressed: () => showInviteDialog(

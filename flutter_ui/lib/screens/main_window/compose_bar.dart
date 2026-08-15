@@ -12,11 +12,16 @@ class ComposeBar extends StatefulWidget {
     required this.channelName,
     required this.enabled,
     required this.onSend,
+    this.pickEmoji,
   });
 
   final String channelName;
   final bool enabled;
   final Future<void> Function(String content) onSend;
+
+  /// Opens the emoji picker; the returned compose token (a unicode char or
+  /// `:name@hash:`) is inserted at the cursor.
+  final Future<String?> Function()? pickEmoji;
 
   @override
   State<ComposeBar> createState() => _ComposeBarState();
@@ -59,6 +64,18 @@ class _ComposeBarState extends State<ComposeBar> {
     widget.onSend(text);
   }
 
+  Future<void> _insertEmoji() async {
+    final token = await widget.pickEmoji?.call();
+    if (token == null || !mounted) return;
+    final text = _controller.text;
+    final selection = _controller.selection;
+    final start = selection.isValid ? selection.start : text.length;
+    final end = selection.isValid ? selection.end : text.length;
+    _controller.text = text.replaceRange(start, end, token);
+    _controller.selection = TextSelection.collapsed(offset: start + token.length);
+    _focusNode.requestFocus();
+  }
+
   @override
   Widget build(BuildContext context) {
     return Container(
@@ -89,7 +106,15 @@ class _ComposeBarState extends State<ComposeBar> {
             ),
           ),
           const SizedBox(width: 10),
-          TcIcon(TcIcons.emoji, size: 15, color: TCColors.textTertiary),
+          MouseRegion(
+            cursor: widget.pickEmoji == null
+                ? SystemMouseCursors.basic
+                : SystemMouseCursors.click,
+            child: GestureDetector(
+              onTap: widget.pickEmoji == null ? null : _insertEmoji,
+              child: TcIcon(TcIcons.emoji, size: 15, color: TCColors.textTertiary),
+            ),
+          ),
           const SizedBox(width: 10),
           Text(
             'ENTER TO SEND · SHIFT+ENTER NEWLINE',

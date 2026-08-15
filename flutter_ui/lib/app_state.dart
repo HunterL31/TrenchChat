@@ -9,6 +9,7 @@ import 'package:http/http.dart' as http;
 
 import 'api/client.dart';
 import 'api/events.dart';
+import 'api/models/emoji.dart';
 import 'api/models/invite.dart';
 import 'api/models/link_quality.dart';
 import 'api/models/member.dart';
@@ -48,6 +49,11 @@ class AppState extends ChangeNotifier {
   final Map<String, ChannelLinkQuality> linkQualityByChannel = {};
   final Map<String, ChannelPermissions> permissionsByChannel = {};
   final Map<String, Uint8List?> avatarCache = {};
+
+  /// Custom emoji library, keyed by emoji hash. Loaded lazily on first
+  /// [ensureEmojiLoaded] and kept fresh on [EmojiReceivedEvent].
+  final Map<String, CustomEmoji> customEmojis = {};
+  bool _emojisLoaded = false;
 
   bool loading = true;
   String? error;
@@ -102,6 +108,7 @@ class AppState extends ChangeNotifier {
       notifyListeners();
 
       _sub = _socket.events.listen(_onEvent);
+      unawaited(ensureEmojiLoaded());
     } catch (e) {
       error = e.toString();
       loading = false;
@@ -326,6 +333,50 @@ class AppState extends ChangeNotifier {
     }
   }
 
+  /// Replaces the role-permission matrix. Returns false when the backend's
+  /// MANAGE_CHANNEL gate dropped the change.
+  Future<bool> updateChannelPermissions(
+      String channelHashHex, List<String> admin, List<String> member) async {
+    try {
+      return await api.updateChannelPermissions(channelHashHex, admin, member);
+    } catch (e) {
+      _reportActionError(e);
+      return false;
+    }
+  }
+
+  /// Loads the custom emoji library once; safe to call from build paths.
+  Future<void> ensureEmojiLoaded() async {
+    if (_emojisLoaded) return;
+    _emojisLoaded = true;
+    await refreshEmoji();
+  }
+
+  Future<void> refreshEmoji() async {
+    try {
+      final list = await api.getEmoji();
+      customEmojis
+        ..clear()
+        ..addEntries(list.map((e) => MapEntry(e.emojiHash, e)));
+      notifyListeners();
+    } catch (_) {
+      // A missing emoji library is cosmetic; chips fall back to hash text.
+    }
+  }
+
+  /// Imports a custom emoji. Returns true on success; on failure
+  /// [actionError] is set.
+  Future<bool> importEmoji(String name, String imageDataB64) async {
+    try {
+      await api.importEmoji(name, imageDataB64);
+      await refreshEmoji();
+      return true;
+    } catch (e) {
+      _reportActionError(e);
+      return false;
+    }
+  }
+
   /// Saves the propagation/outbound settings. Returns true on success; on
   /// failure [actionError] is set.
   Future<bool> saveSettings(TcSettings settings) async {
@@ -393,6 +444,8 @@ class AppState extends ChangeNotifier {
         unawaited(refreshDiscoveredChannels());
       case InviteReceivedEvent():
         unawaited(refreshInvites());
+      case EmojiReceivedEvent():
+        unawaited(refreshEmoji());
     }
   }
 

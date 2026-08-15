@@ -58,4 +58,17 @@ void main() {
   test('layout is deterministic across calls', () {
     expect(layoutMapNodes(_data(), size), layoutMapNodes(_data(), size));
   });
+
+  test('the peers-only filter keeps self and peers, drops infrastructure', () {
+    final byId = {for (final n in _data().nodes) n.id: n};
+    expect(isPeerNode(byId['self']!), isTrue);
+    expect(isPeerNode(byId['peer-a']!), isTrue);
+    expect(isPeerNode(byId['__iface__Hub']!), isFalse);
+    expect(isPeerNode(byId['relay']!), isFalse);
+  });
+
+  test('quality tiers map to distinct colors, unknown included', () {
+    final colors = [4, 3, 2, 1, 0].map(mapQualityColor).toSet();
+    expect(colors, hasLength(5));
+  });
 }

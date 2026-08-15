@@ -72,16 +72,23 @@ class MapNode {
 }
 
 class MapEdge {
-  const MapEdge({required this.src, required this.dst, required this.direct});
+  const MapEdge({
+    required this.src,
+    required this.dst,
+    required this.direct,
+    required this.quality,
+  });
 
   final String src;
   final String dst;
   final bool direct;
+  final int quality;
 
   factory MapEdge.fromJson(Map<String, dynamic> json) => MapEdge(
         src: json['src'] as String,
         dst: json['dst'] as String,
         direct: json['direct'] as bool? ?? false,
+        quality: (json['quality'] as num?)?.toInt() ?? 0,
       );
 }
 

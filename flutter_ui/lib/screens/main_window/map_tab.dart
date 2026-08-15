@@ -12,7 +12,23 @@ import '../../app_state.dart';
 import '../../theme/effects.dart';
 import '../../theme/tokens.dart';
 import '../../widgets/tc_button.dart';
+import '../../widgets/tc_checkbox.dart';
 import '../../widgets/tc_icon.dart';
+
+/// Same tiers as the Qt map's _COL_QUALITY and SignalMeter, so the map
+/// agrees with the header's link chip: 4=excellent .. 1=poor, 0=unknown.
+Color mapQualityColor(int quality) => switch (quality) {
+      4 => TCColors.green400,
+      3 => HSLColor.fromAHSL(1, 70, 0.85, 0.55).toColor(),
+      2 => TCColors.amber400,
+      1 => TCColors.statusDanger,
+      _ => TCColors.ink500,
+    };
+
+/// Nodes kept by the "peers only" filter: real TrenchChat identities, not
+/// infrastructure (interfaces, transports, unresolved hashes).
+bool isPeerNode(MapNode node) =>
+    node.kind == MapNodeKind.self || node.kind == MapNodeKind.peer;
 
 /// Radial positions for every node, in [size] coordinates. Self sits at the
 /// center; interfaces on the innermost ring; everything else on a ring per
@@ -62,11 +78,28 @@ class MapTab extends StatefulWidget {
 class _MapTabState extends State<MapTab> {
   NetworkMapData? _data;
   String? _error;
+  bool _peersOnly = false;
 
   @override
   void initState() {
     super.initState();
     _refresh();
+  }
+
+  NetworkMapData _filtered(NetworkMapData data) {
+    if (!_peersOnly) return data;
+    final nodes = data.nodes.where(isPeerNode).toList();
+    final kept = nodes.map((n) => n.id).toSet();
+    return NetworkMapData(
+      nodes: nodes,
+      edges: data.edges
+          .where((e) => kept.contains(e.src) && kept.contains(e.dst))
+          .toList(),
+      interfaces: data.interfaces,
+      nodeCount: data.nodeCount,
+      pathCount: data.pathCount,
+      interfaceCount: data.interfaceCount,
+    );
   }
 
   Future<void> _refresh() async {
@@ -138,12 +171,49 @@ class _MapTabState extends State<MapTab> {
                       ),
                     )
                   : ClipRect(
-                      child: CustomPaint(
-                        painter: _NetworkMapPainter(data: data),
-                        child: const SizedBox.expand(),
+                      child: InteractiveViewer(
+                        constrained: true,
+                        minScale: 0.4,
+                        maxScale: 4,
+                        boundaryMargin: const EdgeInsets.all(600),
+                        child: CustomPaint(
+                          painter: _NetworkMapPainter(data: _filtered(data)),
+                          child: const SizedBox.expand(),
+                        ),
                       ),
                     ),
             ),
+          ),
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              TcCheckbox(
+                value: _peersOnly,
+                label: 'PEERS ONLY',
+                onChanged: (v) => setState(() => _peersOnly = v),
+              ),
+              const Spacer(),
+              for (final (label, quality) in const [
+                ('EXCELLENT', 4),
+                ('GOOD', 3),
+                ('FAIR', 2),
+                ('POOR', 1),
+                ('UNKNOWN', 0),
+              ]) ...[
+                Container(width: 8, height: 8, color: mapQualityColor(quality)),
+                const SizedBox(width: 4),
+                Text(
+                  label,
+                  style: TextStyle(
+                    fontSize: TCType.textMicro,
+                    color: TCColors.textSecondary,
+                    letterSpacing:
+                        TCType.letterSpacingFor(TCType.textMicro, TCType.trackingWide),
+                  ),
+                ),
+                const SizedBox(width: 10),
+              ],
+            ],
           ),
         ],
       ),
@@ -176,17 +246,15 @@ class _NetworkMapPainter extends CustomPainter {
   void paint(Canvas canvas, Size size) {
     final positions = layoutMapNodes(data, size);
 
-    final directEdge = Paint()
-      ..color = TCColors.green500
-      ..strokeWidth = 1.2;
-    final indirectEdge = Paint()
-      ..color = TCColors.ink700
-      ..strokeWidth = 1;
     for (final edge in data.edges) {
       final a = positions[edge.src];
       final b = positions[edge.dst];
       if (a == null || b == null) continue;
-      canvas.drawLine(a, b, edge.direct ? directEdge : indirectEdge);
+      final color = mapQualityColor(edge.quality);
+      final paint = Paint()
+        ..color = edge.direct ? color : color.withValues(alpha: 0.35)
+        ..strokeWidth = edge.direct ? 1.2 : 1;
+      canvas.drawLine(a, b, paint);
     }
 
     for (final node in data.nodes) {
@@ -224,12 +292,12 @@ class _NetworkMapPainter extends CustomPainter {
             ..strokeWidth = 1.5,
         );
       case MapNodeKind.transport:
-        canvas.drawPath(diamond, Paint()..color = TCColors.green600);
+        canvas.drawPath(diamond, Paint()..color = mapQualityColor(node.quality));
       case MapNodeKind.peer:
         canvas.drawRect(
           rect,
           Paint()
-            ..color = TCColors.green300
+            ..color = mapQualityColor(node.quality)
             ..style = PaintingStyle.stroke
             ..strokeWidth = 1.5,
         );

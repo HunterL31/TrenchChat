@@ -12,6 +12,7 @@ import '../../widgets/tc_button.dart';
 import '../../widgets/tc_checkbox.dart';
 import '../../widgets/tc_dialog.dart';
 import '../../widgets/tc_text_field.dart';
+import 'pin_dialogs.dart';
 
 Future<void> showSettingsDialog(BuildContext context, AppState state) {
   return showTcDialog<void>(
@@ -41,6 +42,11 @@ class _SettingsDialogContentState extends State<_SettingsDialogContent> {
   bool _propEnabled = false;
   String _filterMode = 'allowlist';
   final Set<String> _filterHashes = {};
+
+  /// Session-local stand-in for the lockbox PIN state -- the lockbox has no
+  /// API surface yet (locked-start design still open), so the ported PIN
+  /// dialogs are exercised against this rather than persisted.
+  String? _sessionPin;
 
   @override
   void initState() {
@@ -206,6 +212,38 @@ class _SettingsDialogContentState extends State<_SettingsDialogContent> {
                       value: _filterMode,
                       onSelected: (v) => setState(() => _filterMode = v),
                     ),
+                    const SizedBox(height: 16),
+                    Container(height: 1, color: TCColors.borderSubtle),
+                    const SizedBox(height: 12),
+                    _sectionLabel('SECURITY'),
+                    const SizedBox(height: 8),
+                    Text(
+                      _sessionPin != null
+                          ? 'Your identity and message database are protected by a PIN.'
+                          : 'No PIN is set. Your identity file and message database '
+                              'are stored unencrypted.',
+                      style: TextStyle(
+                          fontSize: TCType.textBodySm, color: TCColors.textSecondary),
+                    ),
+                    const SizedBox(height: 8),
+                    Row(
+                      children: [
+                        if (_sessionPin == null)
+                          TcGhostButton(label: 'SET PIN…', onPressed: _onSetPin)
+                        else ...[
+                          TcGhostButton(label: 'CHANGE PIN…', onPressed: _onChangePin),
+                          const SizedBox(width: 6),
+                          TcGhostButton(label: 'LOCK NOW', onPressed: _onLockNow),
+                        ],
+                      ],
+                    ),
+                    const SizedBox(height: 6),
+                    Text(
+                      'The lock screen and PIN dialogs are UI-only in this spike '
+                      '— the lockbox is not reachable over the API yet.',
+                      style: TextStyle(
+                          fontSize: TCType.textMicro, color: TCColors.textTertiary),
+                    ),
                     if (_filterMode == 'allowlist' && _allChannels.isNotEmpty) ...[
                       const SizedBox(height: 10),
                       Container(
@@ -241,6 +279,23 @@ class _SettingsDialogContentState extends State<_SettingsDialogContent> {
               ),
             ],
     );
+  }
+
+  Future<void> _onSetPin() async {
+    final pin = await showSetPinDialog(context);
+    if (pin != null && mounted) setState(() => _sessionPin = pin);
+  }
+
+  Future<void> _onChangePin() async {
+    final change = await showChangePinDialog(
+      context,
+      verifyPin: (pin) => pin == _sessionPin,
+    );
+    if (change != null && mounted) setState(() => _sessionPin = change.newPin);
+  }
+
+  Future<void> _onLockNow() async {
+    await showUnlockDialog(context, verifyPin: (pin) => pin == _sessionPin);
   }
 
   Widget _sectionLabel(String label) => Text(

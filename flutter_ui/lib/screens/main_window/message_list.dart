@@ -3,6 +3,7 @@ import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 
+import '../../api/models/emoji.dart';
 import '../../api/models/message.dart';
 import '../../format.dart';
 import '../../grouping.dart';
@@ -10,6 +11,9 @@ import '../../name_color.dart';
 import '../../theme/tokens.dart';
 import '../../widgets/avatar.dart';
 import '../../widgets/badge.dart';
+import '../../widgets/emoji_text.dart';
+import '../../widgets/tc_button.dart';
+import '../../widgets/tc_icon.dart';
 
 sealed class _Row {}
 
@@ -51,6 +55,8 @@ class MessageList extends StatefulWidget {
     this.avatarBytesFor,
     this.ensureAvatarLoaded,
     this.onToggleReaction,
+    this.onReact,
+    this.emojiLibrary = const {},
   });
 
   final List<Message> messages;
@@ -64,6 +70,12 @@ class MessageList extends StatefulWidget {
   final void Function(String identityHashHex)? ensureAvatarLoaded;
 
   final void Function(String messageId, String emojiHash)? onToggleReaction;
+
+  /// Opens the emoji picker for a message (the hover react button).
+  final void Function(String messageId)? onReact;
+
+  /// Custom emoji by hash, for reaction chips and inline :name@hash: tokens.
+  final Map<String, CustomEmoji> emojiLibrary;
 
   @override
   State<MessageList> createState() => _MessageListState();
@@ -110,6 +122,8 @@ class _MessageListState extends State<MessageList> {
               avatarBytes: widget.avatarBytesFor?.call(row.message.senderHash),
               ensureAvatarLoaded: widget.ensureAvatarLoaded,
               onToggleReaction: widget.onToggleReaction,
+              onReact: widget.onReact,
+              emojiLibrary: widget.emojiLibrary,
             ),
         };
       },
@@ -146,7 +160,7 @@ class _DateDivider extends StatelessWidget {
   }
 }
 
-class _MessageRowWidget extends StatelessWidget {
+class _MessageRowWidget extends StatefulWidget {
   const _MessageRowWidget({
     required this.message,
     required this.isContinuation,
@@ -155,6 +169,8 @@ class _MessageRowWidget extends StatelessWidget {
     this.avatarBytes,
     this.ensureAvatarLoaded,
     this.onToggleReaction,
+    this.onReact,
+    this.emojiLibrary = const {},
   });
 
   final Message message;
@@ -164,6 +180,48 @@ class _MessageRowWidget extends StatelessWidget {
   final Uint8List? avatarBytes;
   final void Function(String identityHashHex)? ensureAvatarLoaded;
   final void Function(String messageId, String emojiHash)? onToggleReaction;
+  final void Function(String messageId)? onReact;
+  final Map<String, CustomEmoji> emojiLibrary;
+
+  @override
+  State<_MessageRowWidget> createState() => _MessageRowWidgetState();
+}
+
+class _MessageRowWidgetState extends State<_MessageRowWidget> {
+  bool _hover = false;
+
+  Message get message => widget.message;
+  bool get isContinuation => widget.isContinuation;
+  bool get isOwn => widget.isOwn;
+  String get displayName => widget.displayName;
+  Uint8List? get avatarBytes => widget.avatarBytes;
+  void Function(String identityHashHex)? get ensureAvatarLoaded => widget.ensureAvatarLoaded;
+  void Function(String messageId, String emojiHash)? get onToggleReaction =>
+      widget.onToggleReaction;
+
+  /// Wraps a row in the hover tracker and the react affordance.
+  Widget _withReactButton(Widget row) {
+    return MouseRegion(
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() => _hover = false),
+      child: Stack(
+        children: [
+          row,
+          if (_hover && widget.onReact != null)
+            Positioned(
+              right: 20,
+              top: 2,
+              child: TcIconButton(
+                icon: TcIcons.emoji,
+                tooltip: 'React',
+                size: 22,
+                onPressed: () => widget.onReact!(message.messageId),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -171,12 +229,17 @@ class _MessageRowWidget extends StatelessWidget {
       ensureAvatarLoaded?.call(message.senderHash);
     }
     final bg = isOwn ? const Color.fromRGBO(255, 255, 255, 0.02) : Colors.transparent;
-    final body = Text(
-      message.content,
-      style: TextStyle(
-        fontSize: TCType.textBodyMd,
-        height: TCType.leadingBody,
-        color: TCColors.textPrimary,
+    final body = Text.rich(
+      TextSpan(
+        children: emojiSpans(
+          message.content,
+          widget.emojiLibrary,
+          TextStyle(
+            fontSize: TCType.textBodyMd,
+            height: TCType.leadingBody,
+            color: TCColors.textPrimary,
+          ),
+        ),
       ),
     );
 
@@ -186,7 +249,7 @@ class _MessageRowWidget extends StatelessWidget {
         (message.receivedAt! - message.timestamp) > lateThresholdSecs;
 
     if (isContinuation) {
-      return Container(
+      return _withReactButton(Container(
         color: bg,
         padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 1),
         child: Row(
@@ -209,17 +272,21 @@ class _MessageRowWidget extends StatelessWidget {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   body,
-                  if (message.reactions.isNotEmpty) _ReactionRow(message: message, onToggle: onToggleReaction),
+                  if (message.reactions.isNotEmpty)
+                    _ReactionRow(
+                        message: message,
+                        onToggle: onToggleReaction,
+                        emojiLibrary: widget.emojiLibrary),
                 ],
               ),
             ),
           ],
         ),
-      );
+      ));
     }
 
     final color = nameColor(message.senderHash, isOwn: isOwn);
-    return Container(
+    return _withReactButton(Container(
       color: bg,
       padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 6),
       child: Row(
@@ -263,20 +330,25 @@ class _MessageRowWidget extends StatelessWidget {
                   ],
                 ),
                 body,
-                if (message.reactions.isNotEmpty) _ReactionRow(message: message, onToggle: onToggleReaction),
+                if (message.reactions.isNotEmpty)
+                  _ReactionRow(
+                      message: message,
+                      onToggle: onToggleReaction,
+                      emojiLibrary: widget.emojiLibrary),
               ],
             ),
           ),
         ],
       ),
-    );
+    ));
   }
 }
 
 class _ReactionRow extends StatelessWidget {
-  const _ReactionRow({required this.message, this.onToggle});
+  const _ReactionRow({required this.message, this.onToggle, this.emojiLibrary = const {}});
   final Message message;
   final void Function(String messageId, String emojiHash)? onToggle;
+  final Map<String, CustomEmoji> emojiLibrary;
 
   @override
   Widget build(BuildContext context) {
@@ -290,6 +362,7 @@ class _ReactionRow extends StatelessWidget {
               emoji: r.emojiHash,
               count: r.count,
               reactedByMe: r.reactedByMe,
+              imageBytes: emojiLibrary[r.emojiHash]?.imageBytes,
               onTap: onToggle == null ? null : () => onToggle!(message.messageId, r.emojiHash),
             ),
         ],

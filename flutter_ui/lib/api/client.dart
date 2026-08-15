@@ -6,6 +6,7 @@ import 'dart:typed_data';
 
 import 'package:http/http.dart' as http;
 
+import 'models/emoji.dart';
 import 'models/interface.dart';
 import 'models/invite.dart';
 import 'models/link_quality.dart';
@@ -312,6 +313,38 @@ class ApiClient {
 
   Future<void> declineInvite(String channelHashHex) async {
     final res = await _http.post(_u('/invites/$channelHashHex/decline'));
+    _decode(res);
+  }
+
+  Future<ScopePermissions> getChannelPermissions(String channelHashHex) async {
+    final res = await _http.get(_u('/channels/$channelHashHex/permissions'));
+    return ScopePermissions.fromJson(_decode(res) as Map<String, dynamic>);
+  }
+
+  /// Returns false when the backend's MANAGE_CHANNEL gate dropped the change.
+  Future<bool> updateChannelPermissions(
+      String channelHashHex, List<String> admin, List<String> member) async {
+    final res = await _http.post(
+      _u('/channels/$channelHashHex/permissions'),
+      headers: _jsonHeaders,
+      body: jsonEncode({'admin': admin, 'member': member}),
+    );
+    return (_decode(res) as Map<String, dynamic>)['ok'] as bool? ?? false;
+  }
+
+  Future<List<CustomEmoji>> getEmoji() async {
+    final res = await _http.get(_u('/emoji'));
+    return (_decode(res) as List<dynamic>)
+        .map((e) => CustomEmoji.fromJson(e as Map<String, dynamic>))
+        .toList();
+  }
+
+  Future<void> importEmoji(String name, String imageDataB64) async {
+    final res = await _http.post(
+      _u('/emoji/import'),
+      headers: _jsonHeaders,
+      body: jsonEncode({'name': name, 'image_data_b64': imageDataB64}),
+    );
     _decode(res);
   }
 

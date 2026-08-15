@@ -8,6 +8,7 @@ import '../../api/models/message.dart';
 import '../../api/models/server.dart';
 import '../../app_state.dart';
 import '../../theme/tokens.dart';
+import '../dialogs/emoji_picker_dialog.dart';
 import '../dialogs/incoming_invite_dialog.dart';
 import '../dialogs/join_channel_dialog.dart';
 import '../dialogs/members_dialog.dart';
@@ -47,6 +48,22 @@ class _MainWindowState extends State<MainWindow> {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
     });
+  }
+
+  /// Adds the reaction if the viewer hasn't reacted with [emojiKey] yet,
+  /// removes it if they have -- same toggle the chips use.
+  void _toggleReaction(String channelHash, String messageId, String emojiKey) {
+    final state = widget.state;
+    final msg = (state.messagesByChannel[channelHash] ?? [])
+        .firstWhere((m) => m.messageId == messageId);
+    final mine = msg.reactions
+        .where((r) => r.emojiHash == emojiKey)
+        .any((r) => r.reactedByMe);
+    if (mine) {
+      state.api.removeReaction(channelHash, messageId, emojiKey);
+    } else {
+      state.api.addReaction(channelHash, messageId, emojiKey);
+    }
   }
 
   String _displayNameFor(String identityHashHex, String fallback) {
@@ -156,19 +173,19 @@ class _MainWindowState extends State<MainWindow> {
                             displayNameFor: _displayNameFor,
                             avatarBytesFor: (hash) => state.avatarCache[hash],
                             ensureAvatarLoaded: (hash) => state.avatarFor(hash),
+                            emojiLibrary: state.customEmojis,
                             onToggleReaction: channelHash == null
                                 ? null
-                                : (messageId, emojiHash) {
-                                    final msg = (state.messagesByChannel[channelHash] ?? [])
-                                        .firstWhere((m) => m.messageId == messageId);
-                                    final mine = msg.reactions
-                                        .where((r) => r.emojiHash == emojiHash)
-                                        .any((r) => r.reactedByMe);
-                                    if (mine) {
-                                      state.api.removeReaction(channelHash, messageId, emojiHash);
-                                    } else {
-                                      state.api.addReaction(channelHash, messageId, emojiHash);
-                                    }
+                                : (messageId, emojiHash) =>
+                                    _toggleReaction(channelHash, messageId, emojiHash),
+                            onReact: channelHash == null
+                                ? null
+                                : (messageId) async {
+                                    final selection =
+                                        await showEmojiPickerDialog(context, state);
+                                    if (selection == null) return;
+                                    _toggleReaction(
+                                        channelHash, messageId, selection.reactionKey);
                                   },
                           ),
                     },
@@ -180,6 +197,8 @@ class _MainWindowState extends State<MainWindow> {
                       onSend: (content) async {
                         await state.sendMessage(content);
                       },
+                      pickEmoji: () async =>
+                          (await showEmojiPickerDialog(context, state))?.composeToken,
                     ),
                 ],
               ),
