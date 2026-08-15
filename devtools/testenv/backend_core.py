@@ -206,17 +206,10 @@ class Backend:
             PeerAnnounceHandler(_on_peer_appeared)
         )
 
-        # Also mark a peer as seen on any inbound LXMF message, covering
-        # peers reached via a backchannel link without a prior announce
-        # (same rationale as main_window.py's _on_inbound_message).
-        def _on_inbound_message(message) -> None:
-            if not message.source_hash:
-                return
-            sender_identity = RNS.Identity.recall(message.source_hash)
-            if sender_identity is not None:
-                self.presence_mgr.record_seen(sender_identity.hash.hex())
-
-        self.router.add_delivery_callback(_on_inbound_message)
+        # Also update presence from any inbound LXMF message, covering peers
+        # reached via a backchannel link without a prior announce, and peers
+        # signing off (same rationale as main_window.py's _on_inbound_message).
+        self.router.add_delivery_callback(self.presence_mgr.record_inbound)
 
         self.channel_mgr.restore_owned_channels()
         self.server_mgr.restore_owned_servers()
@@ -282,7 +275,13 @@ class Backend:
             json.dumps({"hash_hex": self.hash_hex, "display_name": self.config.display_name})
         )
 
+    def announce_offline(self) -> int:
+        """Same notice main.py sends from aboutToQuit -- tell channel peers we
+        are shutting down so they drop us to offline now."""
+        return self.presence_beacon.announce_offline()
+
     def close(self):
+        self.router.stop()
         self.storage.close()
 
     def path_known(self, peer_hash_hex: str) -> bool:

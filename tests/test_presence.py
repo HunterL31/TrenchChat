@@ -243,6 +243,72 @@ def test_callback_exception_does_not_propagate():
 
 
 # ---------------------------------------------------------------------------
+# record_offline — a peer's graceful-shutdown notice
+# ---------------------------------------------------------------------------
+
+def test_record_offline_marks_peer_offline():
+    mgr = make_mgr()
+    mgr.record_seen(PEER_A)
+    mgr.record_offline(PEER_A)
+    assert not mgr.is_online(PEER_A)
+
+
+def test_record_offline_fires_callback_once():
+    mgr = make_mgr()
+    events: list[tuple] = []
+    mgr.record_seen(PEER_A)
+    mgr.add_presence_callback(lambda peer, online: events.append((peer, online)))
+
+    mgr.record_offline(PEER_A)
+    assert events == [(PEER_A, False)]
+
+
+def test_record_offline_for_unknown_peer_fires_nothing():
+    mgr = make_mgr()
+    events: list[tuple] = []
+    mgr.add_presence_callback(lambda peer, online: events.append((peer, online)))
+
+    mgr.record_offline(PEER_A)
+    assert events == []
+
+
+def test_record_offline_ignores_self():
+    mgr = make_mgr()
+    events: list[tuple] = []
+    mgr.add_presence_callback(lambda peer, online: events.append((peer, online)))
+
+    mgr.record_offline(SELF_HEX)
+    assert mgr.is_online(SELF_HEX)
+    assert events == []
+
+
+def test_peer_comes_back_online_after_record_offline():
+    """The core requirement: going offline must leave nothing behind that
+    stops the peer coming straight back -- e.g. a shutdown they cancelled."""
+    mgr = make_mgr()
+    events: list[tuple] = []
+    mgr.record_seen(PEER_A)
+    mgr.record_offline(PEER_A)
+    mgr.add_presence_callback(lambda peer, online: events.append((peer, online)))
+
+    mgr.record_seen(PEER_A)
+
+    assert mgr.is_online(PEER_A)
+    assert events == [(PEER_A, True)]
+
+
+def test_record_offline_does_not_affect_other_peers():
+    mgr = make_mgr()
+    mgr.record_seen(PEER_A)
+    mgr.record_seen(PEER_B)
+
+    mgr.record_offline(PEER_A)
+
+    assert not mgr.is_online(PEER_A)
+    assert mgr.is_online(PEER_B)
+
+
+# ---------------------------------------------------------------------------
 # get_online_for_channel
 # ---------------------------------------------------------------------------
 
