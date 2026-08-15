@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import 'app_state.dart';
@@ -9,8 +10,27 @@ import 'theme/tokens.dart';
 /// Tester A defaults to :8801 when running orchestrator.py --testers 2.
 const String defaultBaseUrl = 'http://127.0.0.1:8801';
 
+/// Backend address resolution, in priority order:
+/// 1. `--dart-define=TC_API_URL=...` baked in at build time.
+/// 2. On web, the page's `?api=` query parameter.
+/// 3. On web, the page origin -- covers serve_profile.py (and anything else)
+///    hosting the client and the API on one port, which is what makes a
+///    remotely tunnelled or LAN-served page work with no configuration.
+/// 4. The tester-A default.
+String resolveBaseUrl({Uri? pageUri, bool isWeb = kIsWeb}) {
+  const fromEnv = String.fromEnvironment('TC_API_URL');
+  if (fromEnv.isNotEmpty) return fromEnv;
+  if (isWeb) {
+    final uri = pageUri ?? Uri.base;
+    final api = uri.queryParameters['api'];
+    if (api != null && api.isNotEmpty) return api;
+    return uri.origin;
+  }
+  return defaultBaseUrl;
+}
+
 void main() {
-  runApp(const TrenchChatApp());
+  runApp(TrenchChatApp(baseUrl: resolveBaseUrl()));
 }
 
 class TrenchChatApp extends StatefulWidget {
