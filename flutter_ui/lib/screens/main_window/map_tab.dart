@@ -1,7 +1,10 @@
 // MAP tab -- port of network_map.py's NetworkMapWidget over GET /network/map.
-// The Qt widget runs a force-directed layout; this uses a deterministic
-// radial one (self centered, interfaces on the inner ring, peers ringed by
-// hop count) so the picture is stable across refreshes and testable.
+// The Qt widget runs a force-directed layout; this uses a deterministic radial
+// one (self centered, interfaces on the inner ring, peers ringed by hop count)
+// so the picture is stable across refreshes and testable. Nodes are placed in
+// angular sectors under the node they route through, ring radii grow to fit
+// their labels, and labels anchor on the side of the node facing away from
+// center so they stay off the edge lines.
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
@@ -30,40 +33,227 @@ Color mapQualityColor(int quality) => switch (quality) {
 bool isPeerNode(MapNode node) =>
     node.kind == MapNodeKind.self || node.kind == MapNodeKind.peer;
 
-/// Radial positions for every node, in [size] coordinates. Self sits at the
-/// center; interfaces on the innermost ring; everything else on a ring per
-/// hop count. Deterministic: nodes are ordered by id within each ring.
-Map<String, Offset> layoutMapNodes(NetworkMapData data, Size size) {
-  final center = Offset(size.width / 2, size.height / 2);
-  final positions = <String, Offset>{};
+const double _nodeHalf = 5.0;
+const double _labelMaxWidth = 140.0;
+const double _labelHeight = 14.0;
+const double _labelGap = 6.0;
+const double _ringGap = 84.0;
+const double _innerRadius = 64.0;
+const double _arcGap = 18.0;
+const double _contentMargin = 40.0;
 
-  final rings = <int, List<MapNode>>{};
-  for (final node in data.nodes) {
-    if (node.kind == MapNodeKind.self) {
-      positions[node.id] = center;
-      continue;
-    }
-    final ring = node.kind == MapNodeKind.interface_ ? 1 : (node.hops.clamp(1, 6) + 1);
-    rings.putIfAbsent(ring, () => []).add(node);
-  }
-  if (rings.isEmpty) return positions;
+/// A node label's estimated box (layout coordinates) and how the text is
+/// anchored inside it when the measured width differs from the estimate.
+class MapLabel {
+  const MapLabel({required this.rect, required this.align});
 
-  final maxRing = rings.keys.reduce(math.max);
-  final maxRadius = math.min(size.width, size.height) / 2 - 40;
-  for (final entry in rings.entries) {
-    final nodes = entry.value..sort((a, b) => a.id.compareTo(b.id));
-    final radius = maxRadius * entry.key / maxRing;
-    for (int i = 0; i < nodes.length; i++) {
-      // Start at -90deg so a lone node sits above the center; stagger rings
-      // half a slot so adjacent rings don't line up into a single spoke.
-      final angle = -math.pi / 2 +
-          2 * math.pi * i / nodes.length +
-          (entry.key.isEven ? math.pi / nodes.length : 0);
-      positions[nodes[i].id] =
-          center + Offset(math.cos(angle), math.sin(angle)) * radius;
+  final Rect rect;
+  final TextAlign align;
+}
+
+/// Result of [layoutMapNodes]: node positions and label boxes in content
+/// coordinates, the content size, and where self / the ring center landed.
+class MapLayout {
+  const MapLayout({
+    required this.positions,
+    required this.labels,
+    required this.size,
+    required this.center,
+  });
+
+  final Map<String, Offset> positions;
+  final Map<String, MapLabel> labels;
+  final Size size;
+  final Offset center;
+}
+
+double _estimateLabelWidth(String label) =>
+    math.min(label.length * 6.2 + 4, _labelMaxWidth);
+
+/// Radial positions for every node. Self sits at the center; interfaces on
+/// the innermost ring; everything else ringed by hop count, with the distinct
+/// ring keys compacted to consecutive indices so one distant node can't
+/// squeeze the inner rings. Each node is placed inside the angular sector of
+/// the node it routes through (sector width proportional to subtree size),
+/// and a ring's radius grows until neighboring labels fit along its arc.
+/// Deterministic: all ties break by node id.
+MapLayout layoutMapNodes(NetworkMapData data) {
+  final byId = {for (final n in data.nodes) n.id: n};
+  String? selfId;
+  for (final n in data.nodes) {
+    if (n.kind == MapNodeKind.self) {
+      selfId = n.id;
+      break;
     }
   }
-  return positions;
+
+  final ringKeyById = <String, int>{};
+  for (final n in data.nodes) {
+    if (n.id == selfId) continue;
+    ringKeyById[n.id] = n.kind == MapNodeKind.interface_ ? 0 : math.max(n.hops, 1);
+  }
+  final distinctKeys = ringKeyById.values.toSet().toList()..sort();
+  final ringIndexByKey = {
+    for (var i = 0; i < distinctKeys.length; i++) distinctKeys[i]: i + 1,
+  };
+  final ringOf = <String, int>{?selfId: 0};
+  ringKeyById.forEach((id, key) => ringOf[id] = ringIndexByKey[key]!);
+
+  // Parent = the edge neighbor closest inward; nodes with no inward edge hang
+  // off self, so every subtree stays inside its parent's angular sector and
+  // relay->peer edges come out as short radial spokes.
+  final neighbors = <String, Set<String>>{};
+  for (final e in data.edges) {
+    if (!byId.containsKey(e.src) || !byId.containsKey(e.dst)) continue;
+    neighbors.putIfAbsent(e.src, () => {}).add(e.dst);
+    neighbors.putIfAbsent(e.dst, () => {}).add(e.src);
+  }
+  const root = '__root__';
+  final parentOf = <String, String>{};
+  for (final id in ringKeyById.keys) {
+    final myRing = ringOf[id]!;
+    var parent = selfId ?? root;
+    var parentRing = 0;
+    final sorted = (neighbors[id] ?? const <String>{}).toList()..sort();
+    for (final nb in sorted) {
+      final nbRing = ringOf[nb];
+      if (nbRing == null || nbRing >= myRing) continue;
+      if (nbRing > parentRing) {
+        parent = nb;
+        parentRing = nbRing;
+      }
+    }
+    parentOf[id] = parent;
+  }
+  final childrenOf = <String, List<String>>{};
+  parentOf.forEach((id, p) => childrenOf.putIfAbsent(p, () => []).add(id));
+
+  final weights = <String, int>{};
+  int weigh(String id) => weights[id] ??=
+      1 + (childrenOf[id] ?? const []).fold(0, (s, c) => s + weigh(c));
+
+  final angleOf = <String, double>{};
+  void assignSectors(String id, double start, double sweep) {
+    final kids = List.of(childrenOf[id] ?? const <String>[])
+      ..sort((a, b) {
+        final byRing = ringOf[a]!.compareTo(ringOf[b]!);
+        return byRing != 0 ? byRing : a.compareTo(b);
+      });
+    if (kids.isEmpty) return;
+    final total = kids.fold(0, (s, c) => s + weigh(c));
+    var cursor = start;
+    for (final kid in kids) {
+      final share = sweep * weigh(kid) / total;
+      angleOf[kid] = cursor + share / 2;
+      assignSectors(kid, cursor, share);
+      cursor += share;
+    }
+  }
+
+  assignSectors(selfId ?? root, -math.pi / 2, 2 * math.pi);
+
+  final idsByRing = <int, List<String>>{};
+  for (final id in ringKeyById.keys) {
+    idsByRing.putIfAbsent(ringOf[id]!, () => []).add(id);
+  }
+  final ringCount = distinctKeys.length;
+  final radii = List<double>.filled(ringCount + 1, 0);
+  var prev = 0.0;
+  for (var k = 1; k <= ringCount; k++) {
+    var r = math.max(prev + _ringGap, _innerRadius);
+    final ids = List.of(idsByRing[k] ?? const <String>[])
+      ..sort((a, b) => angleOf[a]!.compareTo(angleOf[b]!));
+    if (ids.length > 1) {
+      for (var i = 0; i < ids.length; i++) {
+        final a = ids[i];
+        final b = ids[(i + 1) % ids.length];
+        final gap = (angleOf[b]! - angleOf[a]!) % (2 * math.pi);
+        if (gap <= 1e-4) continue;
+        final need =
+            (_estimateLabelWidth(byId[a]!.label) + _estimateLabelWidth(byId[b]!.label)) / 2 +
+                _arcGap;
+        r = math.max(r, need / gap);
+      }
+    }
+    r = math.min(r, prev + 4 * _ringGap);
+    radii[k] = r;
+    prev = r;
+  }
+
+  final positions = <String, Offset>{?selfId: Offset.zero};
+  angleOf.forEach((id, theta) {
+    positions[id] =
+        Offset(math.cos(theta), math.sin(theta)) * radii[ringOf[id]!];
+  });
+
+  // Labels anchor on the side of the node facing away from center, so they
+  // stay off the radial edge lines. Overlapping labels are pushed outward.
+  MapLabel place(String id, Offset pos) {
+    final w = _estimateLabelWidth(byId[id]!.label);
+    const h = _labelHeight;
+    final theta = angleOf[id];
+    final dx = theta == null ? 0.0 : math.cos(theta);
+    final dy = theta == null ? 1.0 : math.sin(theta);
+    if (dx > 0.5) {
+      return MapLabel(
+          rect: Rect.fromLTWH(pos.dx + _nodeHalf + _labelGap, pos.dy - h / 2, w, h),
+          align: TextAlign.left);
+    }
+    if (dx < -0.5) {
+      return MapLabel(
+          rect: Rect.fromLTWH(pos.dx - _nodeHalf - _labelGap - w, pos.dy - h / 2, w, h),
+          align: TextAlign.right);
+    }
+    if (dy >= 0) {
+      return MapLabel(
+          rect: Rect.fromLTWH(pos.dx - w / 2, pos.dy + _nodeHalf + _labelGap, w, h),
+          align: TextAlign.center);
+    }
+    return MapLabel(
+        rect: Rect.fromLTWH(pos.dx - w / 2, pos.dy - _nodeHalf - _labelGap - h, w, h),
+        align: TextAlign.center);
+  }
+
+  final order = positions.keys.toList()
+    ..sort((a, b) {
+      final byRing = ringOf[a]!.compareTo(ringOf[b]!);
+      if (byRing != 0) return byRing;
+      final byAngle = (angleOf[a] ?? 0).compareTo(angleOf[b] ?? 0);
+      return byAngle != 0 ? byAngle : a.compareTo(b);
+    });
+  final labels = <String, MapLabel>{};
+  final placedRects = <Rect>[];
+  for (final id in order) {
+    var label = place(id, positions[id]!);
+    final theta = angleOf[id] ?? math.pi / 2;
+    final push = Offset(math.cos(theta), math.sin(theta)) * (_labelHeight + 2);
+    for (var attempt = 0;
+        attempt < 4 && placedRects.any((r) => r.overlaps(label.rect.inflate(2)));
+        attempt++) {
+      label = MapLabel(rect: label.rect.shift(push), align: label.align);
+    }
+    placedRects.add(label.rect);
+    labels[id] = label;
+  }
+
+  Rect? bounds;
+  void include(Rect r) => bounds = bounds?.expandToInclude(r) ?? r;
+  for (final p in positions.values) {
+    include(Rect.fromCircle(center: p, radius: _nodeHalf + 8));
+  }
+  for (final l in labels.values) {
+    include(l.rect);
+  }
+  final content =
+      (bounds ?? const Rect.fromLTWH(-100, -100, 200, 200)).inflate(_contentMargin);
+  final shift = -content.topLeft;
+  return MapLayout(
+    positions: positions.map((id, p) => MapEntry(id, p + shift)),
+    labels: labels.map(
+        (id, l) => MapEntry(id, MapLabel(rect: l.rect.shift(shift), align: l.align))),
+    size: content.size,
+    center: shift,
+  );
 }
 
 class MapTab extends StatefulWidget {
@@ -244,28 +434,63 @@ class _NetworkMapPainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
-    final positions = layoutMapNodes(data, size);
+    final layout = layoutMapNodes(data);
+    final fit = math.min(1.0,
+        math.min(size.width / layout.size.width, size.height / layout.size.height));
+    canvas.save();
+    canvas.translate((size.width - layout.size.width * fit) / 2,
+        (size.height - layout.size.height * fit) / 2);
+    canvas.scale(fit);
 
     for (final edge in data.edges) {
-      final a = positions[edge.src];
-      final b = positions[edge.dst];
+      final a = layout.positions[edge.src];
+      final b = layout.positions[edge.dst];
       if (a == null || b == null) continue;
+      final delta = b - a;
+      final len = delta.distance;
+      if (len < 2 * (_nodeHalf + 4)) continue;
+      final dir = delta / len;
+      final start = a + dir * (_nodeHalf + 4);
+      final end = b - dir * (_nodeHalf + 4);
       final color = mapQualityColor(edge.quality);
       final paint = Paint()
         ..color = edge.direct ? color : color.withValues(alpha: 0.35)
-        ..strokeWidth = edge.direct ? 1.2 : 1;
-      canvas.drawLine(a, b, paint);
+        ..strokeWidth = edge.direct ? 1.2 : 1
+        ..style = PaintingStyle.stroke;
+      if (edge.direct) {
+        canvas.drawLine(start, end, paint);
+      } else {
+        // Bow indirect paths away from center so they don't ride coincident
+        // with the direct radial spokes.
+        final mid = (start + end) / 2;
+        var perp = Offset(-dir.dy, dir.dx);
+        final out = mid - layout.center;
+        if (perp.dx * out.dx + perp.dy * out.dy < 0) perp = -perp;
+        final ctrl = mid + perp * math.min(18.0, len * 0.15);
+        canvas.drawPath(
+          Path()
+            ..moveTo(start.dx, start.dy)
+            ..quadraticBezierTo(ctrl.dx, ctrl.dy, end.dx, end.dy),
+          paint,
+        );
+      }
     }
 
     for (final node in data.nodes) {
-      final pos = positions[node.id];
+      final pos = layout.positions[node.id];
       if (pos == null) continue;
       _drawNode(canvas, node, pos);
     }
+    for (final node in data.nodes) {
+      final label = layout.labels[node.id];
+      if (label == null) continue;
+      _drawLabel(canvas, node, label);
+    }
+    canvas.restore();
   }
 
   void _drawNode(Canvas canvas, MapNode node, Offset pos) {
-    const half = 5.0;
+    const half = _nodeHalf;
     final rect = Rect.fromCircle(center: pos, radius: half);
     final diamond = Path()
       ..moveTo(pos.dx, pos.dy - half - 2)
@@ -310,22 +535,38 @@ class _NetworkMapPainter extends CustomPainter {
             ..strokeWidth = 1,
         );
     }
+  }
 
+  void _drawLabel(Canvas canvas, MapNode node, MapLabel label) {
     final painter = TextPainter(
       text: TextSpan(
         text: node.label,
         style: TextStyle(
           fontFamily: TCType.fontMono,
           fontSize: TCType.textMicro,
-          color: node.kind == MapNodeKind.self ? TCColors.green100 : TCColors.textSecondary,
+          color: node.kind == MapNodeKind.self
+              ? TCColors.green100
+              : TCColors.textSecondary,
           shadows: node.kind == MapNodeKind.self ? [TCEffects.textGlowGreen] : null,
         ),
       ),
       textDirection: TextDirection.ltr,
       maxLines: 1,
       ellipsis: '…',
-    )..layout(maxWidth: 140);
-    painter.paint(canvas, pos + Offset(-painter.width / 2, half + 6));
+    )..layout(maxWidth: _labelMaxWidth);
+
+    final x = switch (label.align) {
+      TextAlign.left => label.rect.left,
+      TextAlign.right => label.rect.right - painter.width,
+      _ => label.rect.center.dx - painter.width / 2,
+    };
+    final y = label.rect.center.dy - painter.height / 2;
+    // Backing box so text stays readable where an edge passes underneath.
+    canvas.drawRect(
+      Rect.fromLTWH(x - 3, y - 1, painter.width + 6, painter.height + 2),
+      Paint()..color = TCColors.bgSurface,
+    );
+    painter.paint(canvas, Offset(x, y));
   }
 
   @override

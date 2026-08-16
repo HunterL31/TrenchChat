@@ -1,4 +1,4 @@
-import 'dart:ui';
+import 'dart:math' as math;
 
 import 'package:flutter_test/flutter_test.dart';
 
@@ -26,9 +26,6 @@ NetworkMapData _data() => NetworkMapData.fromJson({
     });
 
 void main() {
-  const size = Size(800, 600);
-  final center = Offset(size.width / 2, size.height / 2);
-
   test('parses nodes, edges, and stats from the gather_network_data shape', () {
     final data = _data();
     expect(data.nodes, hasLength(6));
@@ -40,15 +37,16 @@ void main() {
     expect(data.interfaceCount, 1);
   });
 
-  test('self sits at the center and every node gets a position', () {
-    final positions = layoutMapNodes(_data(), size);
-    expect(positions['self'], center);
-    expect(positions, hasLength(6));
+  test('self sits at the layout center and every node gets a position', () {
+    final layout = layoutMapNodes(_data());
+    expect(layout.positions['self'], layout.center);
+    expect(layout.positions, hasLength(6));
+    expect(layout.labels, hasLength(6));
   });
 
   test('interfaces sit closer to the center than peers, and rings grow with hops', () {
-    final positions = layoutMapNodes(_data(), size);
-    double distance(String id) => (positions[id]! - center).distance;
+    final layout = layoutMapNodes(_data());
+    double distance(String id) => (layout.positions[id]! - layout.center).distance;
 
     expect(distance('__iface__Hub'), lessThan(distance('peer-a')));
     expect(distance('peer-a'), closeTo(distance('peer-b'), 1e-6));
@@ -56,7 +54,52 @@ void main() {
   });
 
   test('layout is deterministic across calls', () {
-    expect(layoutMapNodes(_data(), size), layoutMapNodes(_data(), size));
+    final first = layoutMapNodes(_data());
+    final second = layoutMapNodes(_data());
+    expect(first.positions, second.positions);
+    expect(first.size, second.size);
+  });
+
+  test('label boxes never overlap', () {
+    final labels = layoutMapNodes(_data()).labels.entries.toList();
+    for (var i = 0; i < labels.length; i++) {
+      for (var j = i + 1; j < labels.length; j++) {
+        expect(labels[i].value.rect.overlaps(labels[j].value.rect), isFalse,
+            reason: '${labels[i].key} overlaps ${labels[j].key}');
+      }
+    }
+  });
+
+  test('a multi-hop peer lands in its relay sector, keeping the edge radial', () {
+    final layout = layoutMapNodes(_data());
+    double angleOf(String id) {
+      final v = layout.positions[id]! - layout.center;
+      return math.atan2(v.dy, v.dx);
+    }
+
+    expect(angleOf('far-peer'), closeTo(angleOf('relay'), 1e-6));
+  });
+
+  test('a distant outlier does not squeeze the inner rings', () {
+    final data = NetworkMapData.fromJson({
+      'nodes': [
+        {'id': 'self', 'label': 'This device', 'kind': 'self', 'hops': 0},
+        {'id': '__iface__Hub', 'label': 'Hub', 'kind': 'interface', 'hops': 0},
+        {'id': 'far', 'label': 'far', 'kind': 'peer', 'hops': 6},
+      ],
+      'edges': [
+        {'src': 'self', 'dst': '__iface__Hub', 'hops': 0, 'direct': true},
+        {'src': 'self', 'dst': 'far', 'hops': 6, 'direct': false},
+      ],
+      'interfaces': [],
+      'stats': {'node_count': 3, 'path_count': 1, 'interface_count': 1},
+    });
+    final layout = layoutMapNodes(data);
+    double distance(String id) => (layout.positions[id]! - layout.center).distance;
+
+    // The hop-6 peer occupies the next ring out, not six rings out.
+    expect(distance('__iface__Hub'), greaterThan(60));
+    expect(distance('far'), lessThan(distance('__iface__Hub') * 3));
   });
 
   test('the peers-only filter keeps self and peers, drops infrastructure', () {

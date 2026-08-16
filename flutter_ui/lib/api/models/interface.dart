@@ -9,6 +9,7 @@ class RetInterface {
     this.status,
     this.rxb,
     this.txb,
+    this.config = const {},
   });
 
   final String name;
@@ -24,6 +25,10 @@ class RetInterface {
   final int? rxb;
   final int? txb;
 
+  /// The interface's raw config section (string values), for pre-filling
+  /// the edit dialog.
+  final Map<String, String> config;
+
   factory RetInterface.fromJson(Map<String, dynamic> json) => RetInterface(
         name: json['name'] as String,
         type: json['type'] as String? ?? 'Unknown',
@@ -32,5 +37,7 @@ class RetInterface {
         status: json['status'] as bool?,
         rxb: (json['rxb'] as num?)?.toInt(),
         txb: (json['txb'] as num?)?.toInt(),
+        config: (json['config'] as Map<String, dynamic>? ?? {})
+            .map((k, v) => MapEntry(k, v.toString())),
       );
 }
