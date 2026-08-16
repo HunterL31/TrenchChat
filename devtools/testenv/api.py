@@ -143,6 +143,14 @@ class UpdateInterfaceRequest(BaseModel):
     common_values: dict[str, str] = {}
 
 
+class VoiceMuteRequest(BaseModel):
+    muted: bool
+
+
+class VoiceToneRequest(BaseModel):
+    enabled: bool
+
+
 def _channel_to_dict(row) -> dict[str, Any]:
     keys = row.keys()
     return {
@@ -312,6 +320,16 @@ def create_app(backend: Backend) -> FastAPI:
     def _on_link_status(is_online: bool):
         bus.emit("net_status", online=is_online)
 
+    def _on_voice_roster(channel_hash_hex: str):
+        bus.emit("voice_roster", channel_hash=channel_hash_hex)
+
+    def _on_voice_speaking(channel_hash_hex: str, peer_hex: str, speaking: bool):
+        bus.emit("voice_speaking", channel_hash=channel_hash_hex,
+                 identity_hash=peer_hex, speaking=speaking)
+
+    def _on_voice_session(state: str):
+        bus.emit("voice_session", state=state)
+
     backend.messaging.add_message_callback(_on_message)
     backend.invite_mgr.add_invite_callback(_on_invite)
     backend.invite_mgr.add_channel_joined_callback(_on_channel_joined)
@@ -324,6 +342,9 @@ def create_app(backend: Backend) -> FastAPI:
     backend.reaction_mgr.add_emoji_callback(_on_emoji_received)
     backend.sync_mgr.status.add_status_callback(_on_sync_status)
     backend.add_link_callback(_on_link_status)
+    backend.voice_mgr.add_roster_callback(_on_voice_roster)
+    backend.voice_mgr.add_speaking_callback(_on_voice_speaking)
+    backend.voice_mgr.add_session_callback(_on_voice_session)
 
     # --- identity ---
 
@@ -939,6 +960,60 @@ def create_app(backend: Backend) -> FastAPI:
         except ValueError as e:
             return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
         return {"ok": True, "emoji_hash": emoji_hash}
+
+    # --- voice ---
+
+    @app.post("/channels/{channel_hash}/voice/join")
+    def join_voice(channel_hash: str):
+        # Same call the future GUI voice control makes; join_voice_channel()
+        # re-applies the VOICE_CHAT gate itself, so an unauthorized request
+        # is silently dropped and reported via ok=False.
+        joined = actions.join_voice_channel(
+            backend.storage, backend.voice_mgr, channel_hash,
+            backend.identity.hash_hex,
+        )
+        return {"ok": joined}
+
+    @app.post("/voice/leave")
+    def leave_voice():
+        return {"ok": actions.leave_voice_channel(backend.voice_mgr)}
+
+    @app.post("/voice/mute")
+    def set_voice_mute(req: VoiceMuteRequest):
+        actions.set_voice_muted(backend.voice_mgr, req.muted)
+        return {"ok": True}
+
+    @app.get("/channels/{channel_hash}/voice/roster")
+    def get_voice_roster(channel_hash: str):
+        roster = backend.voice_mgr.get_roster(channel_hash)
+        for entry in roster:
+            entry["display_name"] = resolve_display_name(
+                entry["identity_hash"], backend.identity.hash_hex,
+                backend.storage, backend.config,
+            )
+        return roster
+
+    @app.get("/voice/status")
+    def get_voice_status():
+        return {
+            "channel": backend.voice_mgr.current_channel,
+            "muted": backend.voice_mgr.is_muted,
+            "stats": backend.voice_mgr.frame_stats(),
+            "audio": backend.voice_mgr.audio_status(),
+        }
+
+    @app.post("/voice/test_tone")
+    def set_test_tone(req: VoiceToneRequest):
+        # Dev-harness control (like /net/offline): drives the headless
+        # TonePipeline so two workers can prove the frame path end to end.
+        pipeline = backend.voice_mgr.audio_pipeline
+        if pipeline is None or not hasattr(pipeline, "set_tone_enabled"):
+            return JSONResponse(
+                {"ok": False, "error": "no tone pipeline active"},
+                status_code=409,
+            )
+        pipeline.set_tone_enabled(req.enabled)
+        return {"ok": True}
 
     # --- link control ---
 

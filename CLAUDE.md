@@ -70,7 +70,9 @@ needed for normal development.
 `identity.py`, `channel.py`, `messaging.py`, `subscription.py`, `invite.py`, `sync.py`, `storage.py`
 (SQLite, optionally SQLCipher-encrypted), `permissions.py`, `presence.py`, `reaction.py`, `avatar.py`,
 `user_directory.py`, `lockbox.py` (PIN-based encryption gate), `link_quality.py`, `image.py`,
-`fileutils.py`. UI code — the Flutter client and the legacy Qt GUI (`trenchchat/gui/`) alike —
+`fileutils.py`, `voice.py` (live group voice: LXMF signalling + roster; frames flow over RNS Links
+via `network/voice_transport.py`, audio primitives in `core/audio/` — see `docs/voice.md`).
+UI code — the Flutter client and the legacy Qt GUI (`trenchchat/gui/`) alike —
 must never construct LXMF messages or touch protocol fields directly: it reads `Storage`-backed
 state for display and delegates all mutations to the relevant core manager (the Flutter client via
 the HTTP/WS API, the Qt GUI directly). RNS/LXMF callbacks fire on background threads; Qt code must
