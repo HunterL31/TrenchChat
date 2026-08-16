@@ -82,6 +82,9 @@ voice_mgr.get_roster(channel_hash_hex) -> list[dict]
 #   {identity_hash, muted, joined_at, speaking,
 #    link_state: "self" | "streaming" | "connecting" | "unreachable" | "signalled"}
 voice_mgr.frame_stats() / voice_mgr.audio_status()
+#   frame_stats()["rx_quality"] carries per-sender received/lost/late frame
+#   counts, loss_pct, and smoothed inter-arrival jitter_ms — the backend
+#   signal for a per-peer connection-quality indicator in the UI.
 
 voice_mgr.add_roster_callback(cb)     # cb(channel_hash_hex)
 voice_mgr.add_speaking_callback(cb)   # cb(channel_hash_hex, peer_hex, speaking)
@@ -120,12 +123,20 @@ Config keys (all under `"voice"` in `~/.trenchchat/config.json`):
   runs the target's authorize callback, so core enforcement is exercised).
 - `tests/test_voice_audio.py` — jitter buffer (always runs), mixer/Opus
   (skip cleanly without numpy/libopus).
+- `tests/test_voice_quality.py` — receive-quality metrics (loss, late,
+  jitter), and a comparison against Discord's standard voice profile:
+  same codec settings (Opus 48 kHz mono, 20 ms frames), the Discord
+  default 64 kbps bitrate must fit the wire format across VBR peaks,
+  spectral fidelity thresholds at 64 kbps and the 16 kbps mesh default,
+  an algorithmic latency budget ≤ 150 ms, and per-stream bandwidth at the
+  mesh default staying at or below Discord's per-stream default.
 - `tests/test_adversarial.py::TestAdversarialVoice` — unauthorized
   signalling and link attempts, revocation mid-call.
 - `devtools/testenv/smoke_test.py` — the real-network proof: two OS
   processes over a real TCP Reticulum link do the full invite → sync →
-  chat flow, then join voice, exchange tone frames over real identified
-  links, and verify both directions streamed.
+  chat flow, then join voice, stream the tone for a 5 s measurement
+  window, and verify both directions streamed with Discord-comparable
+  measured quality (loss ≤ 2 %, jitter ≤ 30 ms).
 
 ## Packaging follow-ups (not yet done)
 

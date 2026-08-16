@@ -31,11 +31,21 @@ CODEC_OPUS = 0x00
 
 VOICE_FRAME_MS = 20
 VOICE_FRAMES_PER_PACKET = 2
-VOICE_MAX_FRAME_BYTES = 200
+VOICE_MAX_FRAME_BYTES = 255      # u8 length field; covers Opus VBR peaks at 64 kbps
 VOICE_MAX_FRAMES_PER_PACKET = 8
+# Total VP_AUDIO payload budget. Kept safely under the 431-byte link MDU
+# (rns 1.4.2) without importing RNS here; senders flush a bundle early
+# rather than exceed it, since high-bitrate VBR peaks can make even two
+# frames too big for one packet.
+VOICE_MAX_PACKET_PAYLOAD = 400
 CHANNEL_HASH_LEN = 16
 
 SEQ_MODULUS = 1 << 16
+
+
+def seq_distance(a: int, b: int) -> int:
+    """Signed modular distance from b to a (positive when a is newer)."""
+    return ((a - b + SEQ_MODULUS // 2) % SEQ_MODULUS) - SEQ_MODULUS // 2
 
 
 def pack_hello(channel_hash: bytes, codec_id: int = CODEC_OPUS) -> bytes:
@@ -71,12 +81,35 @@ def pack_audio(seq: int, frames: list[bytes]) -> bytes:
     if not frames or len(frames) > VOICE_MAX_FRAMES_PER_PACKET:
         raise ValueError("frame count out of range")
     parts = [struct.pack("!BHB", VP_AUDIO, seq % SEQ_MODULUS, len(frames))]
+    size = 4
     for frame in frames:
         if not frame or len(frame) > VOICE_MAX_FRAME_BYTES:
             raise ValueError("frame size out of range")
+        size += 1 + len(frame)
         parts.append(struct.pack("!B", len(frame)))
         parts.append(frame)
+    if size > VOICE_MAX_PACKET_PAYLOAD:
+        raise ValueError("audio packet over the payload budget")
     return b"".join(parts)
+
+
+def bundle_frames(frames: list[bytes]) -> list[list[bytes]]:
+    """Split encoded frames into bundles that each fit one audio packet."""
+    bundles: list[list[bytes]] = []
+    current: list[bytes] = []
+    size = 4
+    for frame in frames:
+        need = 1 + len(frame)
+        if current and (size + need > VOICE_MAX_PACKET_PAYLOAD
+                        or len(current) >= VOICE_MAX_FRAMES_PER_PACKET):
+            bundles.append(current)
+            current = []
+            size = 4
+        current.append(frame)
+        size += need
+    if current:
+        bundles.append(current)
+    return bundles
 
 
 def unpack_audio(payload: bytes) -> tuple[int, list[bytes]]:

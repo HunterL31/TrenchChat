@@ -44,7 +44,7 @@ class FakeVoiceTransport(VoiceTransportBase):
         self.self_hex = self_hex
         self.registry = registry
         self._delay = delivery_delay
-        self._drop_every_n = drop_every_n
+        self.drop_every_n = drop_every_n
         self.fail_connect_to: set[str] = set(fail_connect_to or ())
         self._channel: str | None = None
         self._streams: set[str] = set()
@@ -129,7 +129,7 @@ class FakeVoiceTransport(VoiceTransportBase):
 
     def send_frames(self, seq: int, frames: list[bytes]) -> None:
         self._tx_counter += 1
-        if self._drop_every_n and self._tx_counter % self._drop_every_n == 0:
+        if self.drop_every_n and self._tx_counter % self.drop_every_n == 0:
             return
         for peer_hex in list(self._streams):
             target = self.registry.transports.get(peer_hex)

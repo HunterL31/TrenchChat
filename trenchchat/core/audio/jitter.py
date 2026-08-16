@@ -10,16 +10,11 @@ before resuming, trading a little latency for a stretch of smooth audio.
 
 import threading
 
+from trenchchat.network.voice_wire import SEQ_MODULUS as _SEQ_MODULUS
+from trenchchat.network.voice_wire import seq_distance as _seq_distance
+
 JITTER_TARGET_FRAMES = 4
 JITTER_MAX_FRAMES = 25
-
-_SEQ_MODULUS = 1 << 16
-_SEQ_HALF = _SEQ_MODULUS // 2
-
-
-def _seq_distance(a: int, b: int) -> int:
-    """Signed modular distance from b to a (positive when a is newer)."""
-    return ((a - b + _SEQ_HALF) % _SEQ_MODULUS) - _SEQ_HALF
 
 
 class JitterBuffer:

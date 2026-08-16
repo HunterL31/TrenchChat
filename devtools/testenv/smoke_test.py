@@ -27,6 +27,15 @@ for p in (str(_REPO_ROOT), str(_TESTENV_DIR)):
 _PORT = 41501
 _BASE = _TESTENV_DIR / "smoke_data"
 
+# How long both sides stream the test tone to sample quality metrics.
+_VOICE_MEASURE_SECS = 5.0
+# Discord-comparable quality floor for the measured tone stream: Discord
+# voice degrades noticeably past ~2% loss / ~30 ms jitter, so a loopback
+# run that can't stay inside those bounds indicates a transport regression
+# (e.g. accidental retransmission or pacing stalls), not a bad network.
+_VOICE_MAX_LOSS_PCT = 2.0
+_VOICE_MAX_JITTER_MS = 30.0
+
 
 def tester_a(base: Path):
     from backend_core import Backend
@@ -157,15 +166,22 @@ def _run_voice_phase(backend, ch_hash: str, peer_hash: str,
             break
         time.sleep(0.5)
 
+    # Keep the tone running: this window is both the quality-measurement
+    # sample and a hold so the peer's own success check doesn't race this
+    # side's departure.
+    time.sleep(_VOICE_MEASURE_SECS)
+
+    stats = backend.voice_mgr.frame_stats()
+    quality = stats["rx_quality"].get(peer_hash, {})
     result = {
         "joined": True,
         "peer_streaming": streaming,
-        "rx_frames": rx_frames,
-        "tx_packets": backend.voice_mgr.frame_stats()["tx_packets"],
+        "rx_frames": stats["rx_frames"].get(peer_hash, rx_frames),
+        "tx_packets": stats["tx_packets"],
+        "loss_pct": quality.get("loss_pct"),
+        "jitter_ms": quality.get("jitter_ms"),
+        "late": quality.get("late"),
     }
-    # Hold the session briefly so the peer's own success check doesn't race
-    # this side's departure.
-    time.sleep(5.0)
     backend.voice_mgr.leave_voice()
     return result
 
@@ -298,6 +314,14 @@ def main() -> int:
     a_voice = (a_result or {}).get("voice") or {}
     b_voice = (b_result or {}).get("voice") or {}
 
+    def voice_quality_ok(voice: dict) -> bool:
+        return (
+            voice.get("loss_pct") is not None
+            and voice["loss_pct"] <= _VOICE_MAX_LOSS_PCT
+            and voice.get("jitter_ms") is not None
+            and voice["jitter_ms"] <= _VOICE_MAX_JITTER_MS
+        )
+
     ok = bool(
         a_result and b_result
         and a_result.get("joined")
@@ -312,6 +336,9 @@ def main() -> int:
         # Voice: real links established both ways and tone frames flowed.
         and a_voice.get("peer_streaming") and a_voice.get("rx_frames", 0) > 0
         and b_voice.get("peer_streaming") and b_voice.get("rx_frames", 0) > 0
+        # And the measured stream held Discord-comparable quality.
+        and voice_quality_ok(a_voice)
+        and voice_quality_ok(b_voice)
     )
     print("SMOKE TEST:", "PASS" if ok else "FAIL")
     return 0 if ok else 1

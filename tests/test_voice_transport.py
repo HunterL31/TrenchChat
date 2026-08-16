@@ -56,11 +56,24 @@ class TestVoiceWire:
         with pytest.raises(ValueError):
             pack_audio(1, [])
 
-    def test_audio_fits_link_mdu(self):
+    def test_audio_payload_budget_fits_link_mdu(self):
         import RNS
+        assert voice_wire.VOICE_MAX_PACKET_PAYLOAD <= RNS.Link.MDU
+
+    def test_audio_rejects_over_budget_bundle(self):
         frames = [b"\xff" * VOICE_MAX_FRAME_BYTES
                   for _ in range(voice_wire.VOICE_FRAMES_PER_PACKET)]
-        assert len(pack_audio(0, frames)) <= RNS.Link.MDU
+        with pytest.raises(ValueError):
+            pack_audio(0, frames)
+
+    def test_bundle_frames_respects_budget(self):
+        import RNS
+        frames = [b"\xff" * VOICE_MAX_FRAME_BYTES for _ in range(5)] + \
+                 [b"\x01" * 40 for _ in range(5)]
+        bundles = voice_wire.bundle_frames(frames)
+        assert [f for bundle in bundles for f in bundle] == frames
+        assert all(len(pack_audio(0, bundle)) <= RNS.Link.MDU
+                   for bundle in bundles)
 
     def test_hello_roundtrip(self):
         channel_hash = bytes(range(16))

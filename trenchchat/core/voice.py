@@ -36,6 +36,9 @@ from trenchchat.core.protocol import (
 from trenchchat.core.storage import Storage
 from trenchchat.core.subscription import SubscriptionManager
 from trenchchat.network.router import Router
+from trenchchat.network.voice_wire import (
+    SEQ_MODULUS, VOICE_FRAME_MS, seq_distance,
+)
 
 VOICE_STATE_REFRESH_SECS = 60.0
 VOICE_ROSTER_TTL_SECS = 180.0
@@ -93,6 +96,7 @@ class VoiceManager:
 
         self._tx_packets = 0
         self._rx_frames: dict[str, int] = {}
+        self._rx_quality: dict[str, dict] = {}
         self._last_frame_at: dict[str, float] = {}
         self._speaking: dict[str, bool] = {}
 
@@ -176,6 +180,7 @@ class VoiceManager:
             roster = self._rosters.get(channel_hash_hex, {})
             roster.pop(self._identity.hash_hex, None)
             self._rx_frames.clear()
+            self._rx_quality.clear()
             self._last_frame_at.clear()
             self._speaking.clear()
         self._notify_roster(channel_hash_hex)
@@ -266,10 +271,29 @@ class VoiceManager:
         self._update_speaking(now)
 
     def frame_stats(self) -> dict:
+        """Transmit/receive counters plus per-sender receive quality.
+
+        rx_quality per peer: received/lost/late frame counts, loss_pct, and
+        smoothed inter-arrival jitter in ms (RFC 3550-style, using frame
+        sequence numbers as the send clock). This is the backend signal for
+        a per-peer connection-quality indicator.
+        """
         with self._lock:
+            quality = {}
+            for peer_hex, q in self._rx_quality.items():
+                total = q["received"] + q["lost"]
+                quality[peer_hex] = {
+                    "received": q["received"],
+                    "lost": q["lost"],
+                    "late": q["late"],
+                    "jitter_ms": round(q["jitter_ms"], 2),
+                    "loss_pct": round(100.0 * q["lost"] / total, 2)
+                    if total else 0.0,
+                }
             return {
                 "tx_packets": self._tx_packets,
                 "rx_frames": dict(self._rx_frames),
+                "rx_quality": quality,
             }
 
     def audio_status(self) -> dict:
@@ -412,6 +436,7 @@ class VoiceManager:
             self._rx_frames[peer_hex] = \
                 self._rx_frames.get(peer_hex, 0) + len(frames)
             self._last_frame_at[peer_hex] = now
+            self._track_rx_quality(peer_hex, seq, len(frames), now)
             if not self._speaking.get(peer_hex, False):
                 self._speaking[peer_hex] = True
                 newly_speaking = True
@@ -423,6 +448,41 @@ class VoiceManager:
             except Exception as e:
                 RNS.log(f"TrenchChat [voice]: playback error: {e}",
                         RNS.LOG_ERROR)
+
+    def _track_rx_quality(self, peer_hex: str, seq: int, count: int,
+                          now: float):
+        """Caller holds the lock. Frame seq numbers are the send clock:
+        a jump past the expected next seq counts as loss (recredited if the
+        packet later arrives late), and the deviation between arrival
+        spacing and seq spacing feeds a smoothed jitter estimate."""
+        q = self._rx_quality.get(peer_hex)
+        if q is None:
+            q = {"received": 0, "lost": 0, "late": 0, "jitter_ms": 0.0,
+                 "next_seq": None, "last_seq": None, "last_arrival": 0.0}
+            self._rx_quality[peer_hex] = q
+        q["received"] += count
+
+        if q["next_seq"] is not None:
+            gap = seq_distance(seq, q["next_seq"])
+            if gap > 0:
+                q["lost"] += gap
+            elif gap < 0:
+                q["late"] += count
+                q["lost"] = max(0, q["lost"] - count)
+        if q["next_seq"] is None or \
+                seq_distance(seq + count, q["next_seq"]) > 0:
+            q["next_seq"] = (seq + count) % SEQ_MODULUS
+
+        if q["last_seq"] is not None:
+            seq_delta = seq_distance(seq, q["last_seq"])
+            if seq_delta > 0:
+                expected_secs = seq_delta * VOICE_FRAME_MS / 1000.0
+                deviation_ms = abs(
+                    (now - q["last_arrival"]) - expected_secs) * 1000.0
+                q["jitter_ms"] += (deviation_ms - q["jitter_ms"]) / 16.0
+        if q["last_seq"] is None or seq_distance(seq, q["last_seq"]) > 0:
+            q["last_seq"] = seq
+            q["last_arrival"] = now
 
     def _on_encoded(self, seq: int, frames: list[bytes]):
         """Encoded audio from the local pipeline, ready to transmit."""

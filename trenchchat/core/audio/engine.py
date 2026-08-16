@@ -25,7 +25,7 @@ import RNS
 
 from trenchchat.core.audio.jitter import JitterBuffer
 from trenchchat.network.voice_wire import (
-    VOICE_FRAME_MS, VOICE_FRAMES_PER_PACKET,
+    VOICE_FRAME_MS, VOICE_FRAMES_PER_PACKET, VOICE_MAX_PACKET_PAYLOAD,
 )
 
 FRAME_SAMPLES = 48000 * VOICE_FRAME_MS // 1000
@@ -159,6 +159,7 @@ class AudioPipeline:
     def _encode_loop(self) -> None:
         bundle: list[bytes] = []
         bundle_seq = 0
+        bundle_size = 4
         while self._running:
             try:
                 pcm = self._pcm_in.get(timeout=0.2)
@@ -168,6 +169,7 @@ class AudioPipeline:
                 continue
             if not self._gate_open(pcm):
                 bundle.clear()
+                bundle_size = 4
                 continue
             try:
                 encoded = self._encoder.encode(pcm)
@@ -175,13 +177,22 @@ class AudioPipeline:
                 RNS.log(f"TrenchChat [voice]: encode error: {e}",
                         RNS.LOG_ERROR)
                 continue
+            # High-bitrate VBR peaks can overflow the packet payload budget;
+            # flush the pending bundle early rather than exceed it.
+            if bundle and bundle_size + 1 + len(encoded) > \
+                    VOICE_MAX_PACKET_PAYLOAD:
+                self._on_encoded(bundle_seq, list(bundle))
+                bundle.clear()
+                bundle_size = 4
             if not bundle:
                 bundle_seq = self._seq
             bundle.append(encoded)
+            bundle_size += 1 + len(encoded)
             self._seq = (self._seq + 1) % _SEQ_MODULUS
             if len(bundle) >= VOICE_FRAMES_PER_PACKET:
                 self._on_encoded(bundle_seq, list(bundle))
                 bundle.clear()
+                bundle_size = 4
 
     def _gate_open(self, pcm: bytes) -> bool:
         """Mute switch plus voice-activity gate.
