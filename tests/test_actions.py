@@ -231,3 +231,45 @@ class TestSettings:
             actions.apply_settings(alice.config, alice.router, {
                 "channel_filter_mode": "bogus",
             })
+
+
+class TestVoiceActions:
+    def test_authorized_join_returns_true(self, peer_factory):
+        alice, bob, ch_hash = _setup_channel_with_member(peer_factory)
+        joined = actions.join_voice_channel(
+            bob.storage, bob.voice_mgr, ch_hash, bob.identity.hash_hex,
+        )
+        assert joined is True
+        assert bob.voice_mgr.current_channel == ch_hash
+
+    def test_unauthorized_join_returns_false_and_is_a_noop(self, peer_factory):
+        alice, bob, ch_hash = _setup_channel_with_member(
+            peer_factory, member_perms=[])  # no voice_chat
+        joined = actions.join_voice_channel(
+            bob.storage, bob.voice_mgr, ch_hash, bob.identity.hash_hex,
+        )
+        assert joined is False
+        assert bob.voice_mgr.current_channel is None
+
+    def test_unknown_channel_join_returns_false(self, peer_factory):
+        bob = peer_factory("bob")
+        assert actions.join_voice_channel(
+            bob.storage, bob.voice_mgr, "ab" * 16, bob.identity.hash_hex,
+        ) is False
+
+    def test_leave_reports_whether_in_session(self, peer_factory):
+        alice, bob, ch_hash = _setup_channel_with_member(peer_factory)
+        assert actions.leave_voice_channel(bob.voice_mgr) is False
+        actions.join_voice_channel(
+            bob.storage, bob.voice_mgr, ch_hash, bob.identity.hash_hex,
+        )
+        assert actions.leave_voice_channel(bob.voice_mgr) is True
+        assert bob.voice_mgr.current_channel is None
+
+    def test_set_voice_muted_passthrough(self, peer_factory):
+        alice, bob, ch_hash = _setup_channel_with_member(peer_factory)
+        actions.join_voice_channel(
+            bob.storage, bob.voice_mgr, ch_hash, bob.identity.hash_hex,
+        )
+        actions.set_voice_muted(bob.voice_mgr, True)
+        assert bob.voice_mgr.is_muted is True

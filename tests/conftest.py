@@ -33,7 +33,10 @@ from trenchchat.core.subscription import SubscriptionManager
 from trenchchat.core.invite import InviteManager
 from trenchchat.core.server import ServerManager
 from trenchchat.core.sync import SyncManager
+from trenchchat.core.voice import VoiceManager
 from trenchchat.network.router import Router
+
+from tests.fake_voice import FakeVoiceRegistry, FakeVoiceTransport
 
 
 # ---------------------------------------------------------------------------
@@ -153,6 +156,8 @@ class TestPeer:
     subscription_mgr: SubscriptionManager
     invite_mgr: InviteManager
     sync_mgr: SyncManager
+    voice_mgr: VoiceManager
+    voice_transport: FakeVoiceTransport
     _teardown_callbacks: list = field(default_factory=list, repr=False)
 
     def announce(self):
@@ -221,6 +226,7 @@ def peer_factory(rns_instance, tmp_path):
     """
     created_peers: list[TestPeer] = []
     transport = TestTransport()
+    voice_registry = FakeVoiceRegistry()
 
     def make_peer(name: str, display_name: str | None = None) -> TestPeer:
         peer_dir = tmp_path / name
@@ -244,6 +250,10 @@ def peer_factory(rns_instance, tmp_path):
         invite_mgr = InviteManager(identity, storage, router)
         sync_mgr = SyncManager(identity, storage, router, messaging,
                                subscription_mgr, invite_mgr)
+        voice_transport = FakeVoiceTransport(identity.hash_hex, voice_registry)
+        voice_mgr = VoiceManager(identity, storage, router, subscription_mgr,
+                                 config, transport=voice_transport,
+                                 state_refresh_secs=0.5, roster_ttl_secs=2.0)
 
         channel_mgr.restore_owned_channels()
         server_mgr.restore_owned_servers()
@@ -261,7 +271,30 @@ def peer_factory(rns_instance, tmp_path):
             subscription_mgr=subscription_mgr,
             invite_mgr=invite_mgr,
             sync_mgr=sync_mgr,
+            voice_mgr=voice_mgr,
+            voice_transport=voice_transport,
         )
+
+        # Drive VoiceManager.tick the way main.py's QTimer / the testenv
+        # ticker thread would, so fallback dialing, roster TTL expiry and
+        # speaking decay behave under wait_for polling.
+        ticker_stop = threading.Event()
+
+        def _voice_ticker():
+            while not ticker_stop.wait(0.2):
+                try:
+                    voice_mgr.tick()
+                except Exception as e:
+                    RNS.log(f"TestVoiceTicker: {e}", RNS.LOG_ERROR)
+
+        ticker_thread = threading.Thread(target=_voice_ticker, daemon=True)
+        ticker_thread.start()
+
+        def _stop_voice():
+            ticker_stop.set()
+            ticker_thread.join(timeout=2.0)
+            voice_mgr.leave_voice()
+            voice_transport.stop()
         # Every peer stands up an LXMRouter with its own destinations, links
         # and callbacks.  Left running, these accumulate across the whole
         # session -- several hundred by the end of a full run -- and the
@@ -301,8 +334,9 @@ def peer_factory(rns_instance, tmp_path):
                 except Exception:
                     pass
 
-        # Order matters: stop inbound delivery before anything it touches goes
-        # away, and close storage last.
+        # Order matters: stop the voice ticker and inbound delivery before
+        # anything they touch goes away, and close storage last.
+        peer._teardown_callbacks.append(_stop_voice)
         peer._teardown_callbacks.append(lambda p=peer: transport.unregister(p))
         peer._teardown_callbacks.append(_stop_router)
         peer._teardown_callbacks.append(storage.close)
