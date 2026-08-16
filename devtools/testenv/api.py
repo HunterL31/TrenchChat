@@ -378,6 +378,15 @@ def create_app(backend: Backend) -> FastAPI:
                 "status": stats.get("status"),
                 "rxb": stats.get("rxb"),
                 "txb": stats.get("txb"),
+                # The raw config section, so an edit dialog can show current
+                # values -- the Qt widget reads the config file directly, but
+                # a remote client can't. ConfigObj parses comma values into
+                # lists; flatten those back to the string form the editor
+                # writes.
+                "config": {
+                    k: (", ".join(str(x) for x in v) if isinstance(v, list) else str(v))
+                    for k, v in cfg.items()
+                },
             })
         return result
 

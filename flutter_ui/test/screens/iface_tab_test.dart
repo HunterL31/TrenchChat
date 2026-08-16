@@ -4,6 +4,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_ui/app_state.dart';
 import 'package:flutter_ui/screens/main_window/iface_tab.dart';
 import 'package:flutter_ui/widgets/tc_button.dart';
+import 'package:flutter_ui/widgets/tc_checkbox.dart';
 
 import '../fake_backend.dart';
 
@@ -22,6 +23,13 @@ void main() {
         'type': 'TCPClientInterface',
         'enabled': true,
         'editable': true,
+        'config': {
+          'type': 'TCPClientInterface',
+          'target_host': 'rmap.world',
+          'target_port': '4242',
+          'kiss_framing': 'Yes',
+          'networkname': 'coast-mesh',
+        },
         'status': true,
         'rxb': 2048,
         'txb': 512,
@@ -114,5 +122,38 @@ void main() {
     await tester.tap(find.text('SAVE'));
     await tester.pump();
     expect(find.text("'Target host' is required."), findsOneWidget);
+  });
+
+  testWidgets('EDIT pre-fills the dialog from the interface config', (tester) async {
+    await tester.pumpWidget(_harness(state));
+    await settle(tester);
+
+    await tester.tap(find.text('EDIT').first);
+    await tester.pumpAndSettle();
+
+    expect(find.text('Edit Interface'), findsOneWidget);
+    expect(find.widgetWithText(TextField, 'rmap.world'), findsOneWidget);
+    expect(find.widgetWithText(TextField, '4242'), findsOneWidget);
+
+    // Lower fields build lazily below the dialog's scroll fold; drag the
+    // dialog's own list (the last ListView) to reach them.
+    final dialogList = find.byType(ListView).last;
+    Future<void> scrollDown() async {
+      await tester.drag(dialogList, const Offset(0, -250));
+      await tester.pumpAndSettle();
+    }
+
+    await scrollDown();
+    final kiss = tester.widget<TcCheckbox>(
+        find.widgetWithText(TcCheckbox, 'KISS framing'));
+    expect(kiss.value, isTrue);
+
+    // A key absent from the config falls back to the type default.
+    await scrollDown();
+    expect(find.widgetWithText(TextField, '5'), findsOneWidget);
+
+    await scrollDown();
+    await scrollDown();
+    expect(find.widgetWithText(TextField, 'coast-mesh'), findsOneWidget);
   });
 }

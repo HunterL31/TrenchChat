@@ -159,18 +159,26 @@ class _InterfaceDialogContentState extends State<_InterfaceDialogContent> {
 
   /// (Re)seed per-field state for the active type, keeping any state a field
   /// key already has (so flipping type back and forth doesn't lose input).
+  /// When editing, the existing interface's config values win over the
+  /// type's defaults -- same as the Qt dialog's _make_field_widget.
   void _initFieldState() {
+    final existing = widget.existing?.config ?? const {};
     for (final spec in _activeSpecs) {
+      final raw = existing[spec.key];
       switch (spec.kind) {
         case _FieldKind.flag:
-          _flagValues.putIfAbsent(spec.key, () => _isYes(spec.defaultValue));
+          _flagValues.putIfAbsent(
+              spec.key, () => _isYes(raw ?? spec.defaultValue));
         case _FieldKind.choice:
-          _choiceValues.putIfAbsent(spec.key, () => spec.defaultValue);
+          _choiceValues.putIfAbsent(spec.key,
+              () => spec.choices.contains(raw) ? raw! : spec.defaultValue);
         case _FieldKind.text:
         case _FieldKind.integer:
         case _FieldKind.decimal:
           _textValues.putIfAbsent(
-              spec.key, () => TextEditingController(text: spec.defaultValue));
+              spec.key,
+              () => TextEditingController(
+                  text: (raw == null || raw.isEmpty) ? spec.defaultValue : raw));
       }
     }
   }
