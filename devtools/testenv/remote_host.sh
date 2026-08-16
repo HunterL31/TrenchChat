@@ -1,18 +1,20 @@
 #!/usr/bin/env bash
 # Boot the remote-testing stack in a headless container: a Tailscale node
-# (userspace networking), the two-tester environment, and remote_proxy.py
-# serving the Flutter web client backed by tester A.
+# (userspace networking), the Flutter web client backed by its own dedicated
+# identity (serve_profile.py, joined to the testenv hub), and the dev
+# environment alongside it so the mesh has other users to talk to.
 #
 # Usage: remote_host.sh [start|stop|status]
 #
 # Join is non-interactive when TS_AUTHKEY (or TS_AUTH_KEY) is set -- e.g. a
 # reusable+ephemeral key injected as an environment variable; otherwise a
 # login URL is printed once. Tailscale state persists in the state dir, so
-# restarts reconnect without re-authenticating.
+# restarts reconnect without re-authenticating. The client's profile lives in
+# ~/.trenchchat, so its identity survives restarts too.
 #
 # Overrides: TRENCHCHAT_REMOTE_STATE (state dir, default ~/.trenchchat-remote),
 # TRENCHCHAT_REMOTE_VENV (python venv), TRENCHCHAT_REMOTE_HOSTNAME (node name),
-# REMOTE_PROXY_PORT (default 8899).
+# REMOTE_CLIENT_PORT (default 8899), TESTENV_TESTERS (default 4).
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -22,7 +24,9 @@ TS_DIR="$STATE_DIR/tailscale"
 TS_SOCK="$TS_DIR/tailscaled.sock"
 TS_VERSION="1.86.2"
 TS_HOSTNAME="${TRENCHCHAT_REMOTE_HOSTNAME:-trenchchat-dev}"
-PROXY_PORT="${REMOTE_PROXY_PORT:-8899}"
+CLIENT_PORT="${REMOTE_CLIENT_PORT:-8899}"
+TESTERS="${TESTENV_TESTERS:-4}"
+HUB_PORT=41001
 AUTH_KEY="${TS_AUTHKEY:-${TS_AUTH_KEY:-}}"
 
 log() { echo "[remote-host] $*"; }
@@ -59,6 +63,27 @@ ensure_tailscale() {
         tar xz -C "$TS_DIR/bin" --strip-components=1
 }
 
+ensure_rns_config() {
+    [ -f "$STATE_DIR/rns/config" ] && return
+    mkdir -p "$STATE_DIR/rns"
+    cat >"$STATE_DIR/rns/config" <<EOF
+[reticulum]
+enable_transport = False
+share_instance = No
+instance_name = trenchchat_remote_client
+
+[logging]
+loglevel = 3
+
+[interfaces]
+  [[TestenvHub]]
+    type = TCPClientInterface
+    interface_enabled = true
+    target_host = 127.0.0.1
+    target_port = $HUB_PORT
+EOF
+}
+
 start_tailscale() {
     if ! ts version --daemon >/dev/null 2>&1; then
         log "starting tailscaled (userspace networking)"
@@ -77,19 +102,22 @@ start_tailscale() {
     fi
 }
 
-start_backend() {
-    if ! port_up 8800; then
-        log "starting two-tester environment"
-        nohup "$VENV/bin/python" "$REPO_ROOT/devtools/testenv/orchestrator.py" \
-            --testers 2 >"$STATE_DIR/orchestrator.log" 2>&1 &
-        echo $! >"$STATE_DIR/orchestrator.pid"
-    fi
-    if ! port_up "$PROXY_PORT"; then
-        log "starting single-origin proxy on $PROXY_PORT"
-        nohup "$VENV/bin/python" "$REPO_ROOT/devtools/testenv/remote_proxy.py" \
-            >"$STATE_DIR/proxy.log" 2>&1 &
-        echo $! >"$STATE_DIR/proxy.pid"
-    fi
+start_testenv() {
+    port_up 8800 && return
+    log "starting dev environment ($TESTERS testers)"
+    nohup "$VENV/bin/python" "$REPO_ROOT/devtools/testenv/orchestrator.py" \
+        --testers "$TESTERS" >"$STATE_DIR/orchestrator.log" 2>&1 &
+    echo $! >"$STATE_DIR/orchestrator.pid"
+}
+
+start_client() {
+    port_up "$CLIENT_PORT" && return
+    log "starting web client (own identity) on $CLIENT_PORT"
+    ensure_rns_config
+    nohup "$VENV/bin/python" "$REPO_ROOT/devtools/testenv/serve_profile.py" \
+        --port "$CLIENT_PORT" --rns-configdir "$STATE_DIR/rns" \
+        >"$STATE_DIR/client.log" 2>&1 &
+    echo $! >"$STATE_DIR/client.pid"
 }
 
 cmd_start() {
@@ -97,13 +125,14 @@ cmd_start() {
     ensure_venv
     ensure_web_build
     ensure_tailscale
-    start_backend
+    start_testenv
+    start_client
     start_tailscale || true
     cmd_status
 }
 
 cmd_stop() {
-    for name in proxy orchestrator tailscaled; do
+    for name in client orchestrator tailscaled; do
         if [ -f "$STATE_DIR/$name.pid" ]; then
             kill "$(cat "$STATE_DIR/$name.pid")" 2>/dev/null || true
             rm -f "$STATE_DIR/$name.pid"
@@ -115,14 +144,15 @@ cmd_stop() {
 }
 
 cmd_status() {
-    port_up 8800 && log "backend: up" || log "backend: down"
-    port_up "$PROXY_PORT" && log "proxy: up" || log "proxy: down"
+    port_up 8800 && log "dev environment: up" || log "dev environment: down"
+    port_up "$CLIENT_PORT" && log "web client: up" || log "web client: down"
     local ip
     ip="$(ts ip -4 2>/dev/null || true)"
     if [ -n "$ip" ]; then
         log "tailscale: $(ts status --json 2>/dev/null |
             grep -o '"BackendState": "[^"]*"' | head -1)"
-        log "open: http://$ip:$PROXY_PORT/  (or http://$TS_HOSTNAME:$PROXY_PORT/ with MagicDNS)"
+        log "web client:      http://$ip:$CLIENT_PORT/"
+        log "dev environment: http://$ip:8800/"
     else
         log "tailscale: not connected"
     fi
