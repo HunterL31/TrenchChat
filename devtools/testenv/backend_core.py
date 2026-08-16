@@ -18,7 +18,8 @@ from pathlib import Path
 
 import RNS
 
-from trenchchat.config import Config
+from trenchchat.config import DATA_DIR, Config
+from trenchchat.core import lockbox
 from trenchchat.core.identity import Identity
 from trenchchat.core.storage import Storage
 from trenchchat.core.channel import ChannelManager
@@ -117,7 +118,45 @@ class Backend:
         self.storage = Storage(db_path=data_dir / "storage.db")
         self.router = Router(self.config, self.identity,
                              storagepath=str(data_dir / "messagestore"))
+        self._wire_managers(
+            presence_timeout_secs=_PRESENCE_TIMEOUT_SECS,
+            presence_beacon_after_secs=_PRESENCE_BEACON_AFTER_SECS,
+        )
 
+    @classmethod
+    def for_real_profile(cls, rns_configdir: str | None = None) -> "Backend":
+        """Backend over the machine's real profile: ~/.trenchchat plus the
+        default Reticulum config (real interfaces, real mesh), constructed
+        exactly like main.py's wiring. Must not run alongside the desktop
+        client -- both would announce the same identity and contend for the
+        same database.
+
+        Raises RuntimeError for a PIN-locked profile: there is no headless
+        unlock path yet (see the migration board's unlock design question).
+        """
+        if lockbox.is_locked():
+            raise RuntimeError(
+                "This profile is PIN-locked and the headless backend has no "
+                "unlock path yet. Remove the PIN in the desktop client's "
+                "Settings to use it here."
+            )
+        self = cls.__new__(cls)
+        self.data_dir = DATA_DIR
+        self._link_callbacks = []
+        self.config = Config()
+        self.rns = RNS.Reticulum(configdir=rns_configdir, loglevel=RNS.LOG_NOTICE)
+        self.rns_config_path = str(Path(RNS.Reticulum.configdir) / "config")
+        self.identity = Identity(self.config)
+        self.storage = Storage()
+        self.router = Router(self.config, self.identity)
+        self._wire_managers()
+        return self
+
+    def _wire_managers(self, presence_timeout_secs: float | None = None,
+                       presence_beacon_after_secs: float | None = None) -> None:
+        """Managers and announce handlers shared by both constructors,
+        mirroring main.py. The presence overrides shorten the testenv's
+        observation windows; None keeps the production defaults."""
         self.channel_mgr = ChannelManager(self.identity, self.storage)
         self.server_mgr = ServerManager(self.identity, self.storage)
         self.messaging = Messaging(self.identity, self.storage, self.router)
@@ -125,11 +164,17 @@ class Backend:
         self.invite_mgr = InviteManager(self.identity, self.storage, self.router)
         self.sync_mgr = SyncManager(self.identity, self.storage, self.router,
                                     self.messaging, self.subscription_mgr, self.invite_mgr)
+        presence_kwargs = {}
+        if presence_timeout_secs is not None:
+            presence_kwargs["timeout_secs"] = presence_timeout_secs
         self.presence_mgr = PresenceManager(self.identity.hash_hex, self.config,
-                                            timeout_secs=_PRESENCE_TIMEOUT_SECS)
+                                            **presence_kwargs)
+        beacon_kwargs = {}
+        if presence_beacon_after_secs is not None:
+            beacon_kwargs["beacon_after_secs"] = presence_beacon_after_secs
         self.presence_beacon = PresenceBeacon(
             self.identity, self.storage, self.router, self.subscription_mgr,
-            self.presence_mgr, beacon_after_secs=_PRESENCE_BEACON_AFTER_SECS,
+            self.presence_mgr, **beacon_kwargs,
         )
         self.router.add_outbound_callback(self.presence_beacon.record_sent)
         self.user_directory = UserDirectory(self.identity.hash_hex)

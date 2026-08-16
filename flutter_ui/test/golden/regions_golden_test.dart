@@ -91,7 +91,7 @@ void main() {
 
   testWidgets('compose_bar', (tester) async {
     await tester.pumpWidget(_harness(
-      ComposeBar(channelName: 'general', enabled: true, onSend: (_) async {}),
+      ComposeBar(channelName: 'general', enabled: true, onSend: (_) async => true),
       width: 900,
     ));
     await tester.pump();

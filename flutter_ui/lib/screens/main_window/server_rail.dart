@@ -5,6 +5,7 @@ import '../../theme/effects.dart';
 import '../../theme/tokens.dart';
 import '../../widgets/dashed_border.dart';
 import '../../widgets/tc_button.dart';
+import '../../widgets/tc_icon.dart';
 
 class ServerRailEntry {
   const ServerRailEntry({required this.hash, required this.name});
@@ -19,12 +20,14 @@ class ServerRail extends StatelessWidget {
     required this.selectedHash,
     required this.onSelect,
     this.onAddServer,
+    this.onSettings,
   });
 
   final List<ServerRailEntry> servers;
   final String? selectedHash;
   final ValueChanged<String> onSelect;
   final VoidCallback? onAddServer;
+  final VoidCallback? onSettings;
 
   String _initials(String name) {
     final trimmed = name.trim();
@@ -67,9 +70,13 @@ class ServerRail extends StatelessWidget {
           ],
           _AddServerTile(onTap: onAddServer),
           const Spacer(),
-          const Padding(
-            padding: EdgeInsets.only(bottom: 12),
-            child: TcIconButton(icon: '⚙', tooltip: 'Settings', onPressed: null),
+          Padding(
+            padding: const EdgeInsets.only(bottom: 12),
+            child: TcIconButton(
+              icon: TcIcons.settings,
+              tooltip: 'Settings',
+              onPressed: onSettings,
+            ),
           ),
         ],
       ),

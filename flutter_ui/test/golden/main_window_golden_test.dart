@@ -35,4 +35,35 @@ void main() {
       matchesGoldenFile('goldens/main_window_1440x900.png'),
     );
   });
+
+  testWidgets('compact shell at phone size, closed and with the drawer open',
+      (tester) async {
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+
+    final state = AppState(baseUrl: 'http://127.0.0.1:65500');
+    populateFixtureState(state);
+    addTearDown(state.dispose);
+
+    await tester.pumpWidget(MaterialApp(
+      theme: buildAppTheme(),
+      debugShowCheckedModeBanner: false,
+      home: Scaffold(body: MainWindow(state: state)),
+    ));
+    await tester.pump();
+    await tester.pump();
+
+    await expectLater(
+      find.byType(MainWindow),
+      matchesGoldenFile('goldens/main_window_390x844.png'),
+    );
+
+    await tester.tap(find.byTooltip('Channels'));
+    await tester.pumpAndSettle();
+    await expectLater(
+      find.byType(MainWindow),
+      matchesGoldenFile('goldens/main_window_390x844_drawer.png'),
+    );
+  });
 }

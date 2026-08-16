@@ -31,6 +31,49 @@ from a modified `main()`; there's no runtime flag for this yet.
 - `8801`, `8802`, ... -- one FastAPI (REST + WebSocket) per tester, in start order
 - `41001` -- the Reticulum hub's TCP listener the testers connect through
 
+## Testing from a browser
+
+The client also compiles for web, which makes remote validation easy: build it
+once, then serve it next to a backend and open it from any browser.
+
+```bash
+# from flutter_ui/
+flutter build web
+```
+
+The build is fully self-contained (`web/flutter_bootstrap.js` pins CanvasKit to
+the bundled copy instead of the engine's default gstatic.com fetch), so it works
+offline / off-grid.
+
+Two ways to serve it:
+
+- **Against your real profile** -- `~/.trenchchat` plus your usual Reticulum
+  config, wired exactly like `main.py`:
+
+  ```bash
+  # from the repo root; close the desktop client first (same identity, same DB)
+  .venv/bin/python devtools/testenv/serve_profile.py
+  # open http://127.0.0.1:8810/
+  ```
+
+  One port serves both the API and the web client, so tunnelling that single
+  port (`ssh -L 8810:localhost:8810 box`) is all remote access needs. The
+  default port sits clear of the dev environment's 8800-8808, so both can run
+  at once. PIN-locked profiles are refused -- there's no headless unlock path
+  yet. To point the *desktop* app at a real-profile server instead of tester
+  A, build it with `--dart-define=TC_API_URL=http://127.0.0.1:8810`.
+
+- **Against the throwaway testers** -- start `orchestrator.py` as usual, serve
+  `build/web` with any static server, and point the page at a tester with the
+  `?api=` query parameter (e.g. `?api=http://127.0.0.1:8802`).
+
+Backend address resolution lives in `resolveBaseUrl()` (`lib/main.dart`):
+`--dart-define=TC_API_URL` beats `?api=`, which beats the page origin on web;
+desktop keeps the tester-A default.
+
+Web caveat: the emoji import dialog reads a typed file path via `dart:io`,
+which throws in a browser -- everything else is functional.
+
 ## Tests
 
 ```bash

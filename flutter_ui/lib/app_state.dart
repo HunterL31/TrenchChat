@@ -5,19 +5,25 @@
 import 'dart:async';
 
 import 'package:flutter/foundation.dart';
+import 'package:http/http.dart' as http;
 
 import 'api/client.dart';
 import 'api/events.dart';
+import 'api/models/emoji.dart';
+import 'api/models/invite.dart';
 import 'api/models/link_quality.dart';
 import 'api/models/member.dart';
 import 'api/models/message.dart';
 import 'api/models/permissions.dart';
 import 'api/models/server.dart';
+import 'api/models/settings.dart';
 import 'api/ws.dart';
 
 class AppState extends ChangeNotifier {
-  AppState({required String baseUrl})
-      : api = ApiClient(baseUrl: baseUrl),
+  /// [httpClient] lets tests inject a mock transport; the real app leaves it
+  /// null and gets a standard IO client.
+  AppState({required String baseUrl, http.Client? httpClient})
+      : api = ApiClient(baseUrl: baseUrl, client: httpClient),
         _socket = TcSocket(baseUrl: baseUrl);
 
   final ApiClient api;
@@ -30,6 +36,7 @@ class AppState extends ChangeNotifier {
   List<Server> servers = [];
   List<Channel> standaloneChannels = [];
   List<Channel> discoveredChannels = [];
+  List<PendingInvite> pendingInvites = [];
   final Map<String, List<Channel>> channelsByServer = {};
   final Map<String, int> serverMemberCounts = {};
 
@@ -42,6 +49,11 @@ class AppState extends ChangeNotifier {
   final Map<String, ChannelLinkQuality> linkQualityByChannel = {};
   final Map<String, ChannelPermissions> permissionsByChannel = {};
   final Map<String, Uint8List?> avatarCache = {};
+
+  /// Custom emoji library, keyed by emoji hash. Loaded lazily on first
+  /// [ensureEmojiLoaded] and kept fresh on [EmojiReceivedEvent].
+  final Map<String, CustomEmoji> customEmojis = {};
+  bool _emojisLoaded = false;
 
   bool loading = true;
   String? error;
@@ -74,6 +86,7 @@ class AppState extends ChangeNotifier {
 
       servers = await api.getServers();
       standaloneChannels = await api.getChannels();
+      pendingInvites = await api.getInvites();
       for (final s in servers) {
         channelsByServer[s.hash] = await api.getServerChannels(s.hash);
         serverMemberCounts[s.hash] = (await api.getServerMembers(s.hash)).length;
@@ -94,7 +107,9 @@ class AppState extends ChangeNotifier {
       loading = false;
       notifyListeners();
 
+      _socket.onReconnected = _onSocketReconnected;
       _sub = _socket.events.listen(_onEvent);
+      unawaited(ensureEmojiLoaded());
     } catch (e) {
       error = e.toString();
       loading = false;
@@ -151,14 +166,45 @@ class AppState extends ChangeNotifier {
     return data;
   }
 
+  /// Anything whose WS events may have been missed while the socket was down.
+  void _onSocketReconnected() {
+    final channelHash = selectedChannelHash;
+    if (channelHash != null) unawaited(loadChannel(channelHash));
+    unawaited(refreshInvites());
+    unawaited(refreshEmoji());
+  }
+
   Future<bool> sendMessage(String content) async {
     final channelHashHex = selectedChannelHash;
     if (channelHashHex == null || content.trim().isEmpty) return false;
     try {
-      return await api.sendMessage(channelHashHex, content.trim());
+      final result = await api.sendMessage(channelHashHex, content.trim());
+      if (result.ok) {
+        // The WS event echoes it too; this covers a dropped socket so the
+        // sender always sees their own message land.
+        unawaited(refreshMessages(channelHashHex));
+        return true;
+      }
+      actionError = switch (result.reason) {
+        'no_send_permission' => "You don't have permission to send in this channel.",
+        'no_recipients' =>
+          'Not sent: no known subscribers to deliver to yet. Try again once peers are online.',
+        _ => 'Message was not sent.',
+      };
+      notifyListeners();
+      return false;
     } catch (e) {
       _reportActionError(e);
       return false;
+    }
+  }
+
+  Future<void> refreshMessages(String channelHashHex) async {
+    try {
+      messagesByChannel[channelHashHex] = await api.getMessages(channelHashHex);
+      notifyListeners();
+    } catch (_) {
+      // Next WS event or channel reload will catch it up.
     }
   }
 
@@ -239,6 +285,155 @@ class AppState extends ChangeNotifier {
     }
   }
 
+  Future<void> refreshInvites() async {
+    try {
+      pendingInvites = await api.getInvites();
+      notifyListeners();
+    } catch (e) {
+      _reportActionError(e);
+    }
+  }
+
+  /// Accepts a pending invite and joins its channel/server. Returns true on
+  /// success; on failure [actionError] is set.
+  Future<bool> acceptInvite(String channelHashHex) async {
+    try {
+      final ok = await api.acceptInvite(channelHashHex);
+      pendingInvites =
+          pendingInvites.where((i) => i.channelHashHex != channelHashHex).toList();
+      if (ok) {
+        // The accepted scope may be a server or a standalone channel; refresh
+        // both lists rather than guessing from scope_kind.
+        servers = await api.getServers();
+        standaloneChannels = await api.getChannels();
+        for (final s in servers) {
+          channelsByServer[s.hash] ??= await api.getServerChannels(s.hash);
+        }
+      }
+      notifyListeners();
+      return ok;
+    } catch (e) {
+      _reportActionError(e);
+      return false;
+    }
+  }
+
+  Future<void> declineInvite(String channelHashHex) async {
+    try {
+      await api.declineInvite(channelHashHex);
+      pendingInvites =
+          pendingInvites.where((i) => i.channelHashHex != channelHashHex).toList();
+      notifyListeners();
+    } catch (e) {
+      _reportActionError(e);
+    }
+  }
+
+  /// Sends an invite for the channel. Returns true on success; on failure
+  /// [actionError] is set.
+  Future<bool> inviteToChannel(String channelHashHex, String peerHashHex) async {
+    try {
+      await api.inviteToChannel(channelHashHex, peerHashHex);
+      return true;
+    } catch (e) {
+      _reportActionError(e);
+      return false;
+    }
+  }
+
+  /// Kick/promote/demote, then refresh the member list. Returns false when
+  /// the backend's permission gate dropped the request.
+  Future<bool> updateChannelRoles(
+    String channelHashHex, {
+    List<String> removeMembers = const [],
+    List<String> addAdmins = const [],
+    List<String> removeAdmins = const [],
+  }) async {
+    try {
+      final ok = await api.updateChannelRoles(
+        channelHashHex,
+        removeMembers: removeMembers,
+        addAdmins: addAdmins,
+        removeAdmins: removeAdmins,
+      );
+      membersByChannel[channelHashHex] = await api.getMembers(channelHashHex);
+      notifyListeners();
+      return ok;
+    } catch (e) {
+      _reportActionError(e);
+      return false;
+    }
+  }
+
+  /// Replaces the role-permission matrix. Returns false when the backend's
+  /// MANAGE_CHANNEL gate dropped the change.
+  Future<bool> updateChannelPermissions(
+      String channelHashHex, List<String> admin, List<String> member) async {
+    try {
+      return await api.updateChannelPermissions(channelHashHex, admin, member);
+    } catch (e) {
+      _reportActionError(e);
+      return false;
+    }
+  }
+
+  /// Loads the custom emoji library once; safe to call from build paths.
+  Future<void> ensureEmojiLoaded() async {
+    if (_emojisLoaded) return;
+    _emojisLoaded = true;
+    await refreshEmoji();
+  }
+
+  Future<void> refreshEmoji() async {
+    try {
+      final list = await api.getEmoji();
+      customEmojis
+        ..clear()
+        ..addEntries(list.map((e) => MapEntry(e.emojiHash, e)));
+      notifyListeners();
+    } catch (_) {
+      // A missing emoji library is cosmetic; chips fall back to hash text.
+    }
+  }
+
+  /// Imports a custom emoji. Returns true on success; on failure
+  /// [actionError] is set.
+  Future<bool> importEmoji(String name, String imageDataB64) async {
+    try {
+      await api.importEmoji(name, imageDataB64);
+      await refreshEmoji();
+      return true;
+    } catch (e) {
+      _reportActionError(e);
+      return false;
+    }
+  }
+
+  /// Saves the propagation/outbound settings. Returns true on success; on
+  /// failure [actionError] is set.
+  Future<bool> saveSettings(TcSettings settings) async {
+    try {
+      await api.updateSettings(settings);
+      return true;
+    } catch (e) {
+      _reportActionError(e);
+      return false;
+    }
+  }
+
+  /// Sets the display name and re-announces. Returns true on success.
+  Future<bool> saveDisplayName(String displayName) async {
+    try {
+      await api.setDisplayName(displayName);
+      meDisplayName = displayName;
+      notifyListeners();
+      return true;
+    } catch (e) {
+      _reportActionError(e);
+      return false;
+    }
+  }
+
   void _reportActionError(Object e) {
     actionError = e is ApiException ? e.message : e.toString();
     notifyListeners();
@@ -279,6 +474,10 @@ class AppState extends ChangeNotifier {
         break;
       case ChannelDiscoveredEvent():
         unawaited(refreshDiscoveredChannels());
+      case InviteReceivedEvent():
+        unawaited(refreshInvites());
+      case EmojiReceivedEvent():
+        unawaited(refreshEmoji());
     }
   }
 

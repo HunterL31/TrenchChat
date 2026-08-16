@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 
 import '../theme/effects.dart';
 import '../theme/tokens.dart';
+import 'tc_icon.dart';
 
 class TcGhostButton extends StatefulWidget {
   const TcGhostButton({
@@ -14,7 +15,7 @@ class TcGhostButton extends StatefulWidget {
   });
 
   final String label;
-  final String? icon;
+  final TcIconData? icon;
   final VoidCallback? onPressed;
 
   @override
@@ -64,7 +65,7 @@ class _TcGhostButtonState extends State<TcGhostButton> {
             mainAxisSize: MainAxisSize.min,
             children: [
               if (widget.icon != null) ...[
-                Text(widget.icon!, style: TextStyle(fontSize: TCType.textCaption, color: fg)),
+                TcIcon(widget.icon!, size: TCType.textCaption, color: fg),
                 const SizedBox(width: 6),
               ],
               Flexible(
@@ -160,7 +161,7 @@ class TcIconButton extends StatefulWidget {
     this.size = 30,
   });
 
-  final String icon;
+  final TcIconData icon;
   final String tooltip;
   final double size;
   final VoidCallback? onPressed;
@@ -192,12 +193,10 @@ class _TcIconButtonState extends State<TcIconButton> {
               color: _hover ? TCColors.bgHover : Colors.transparent,
               border: Border.all(color: _hover ? TCColors.borderStrong : TCColors.borderDefault),
             ),
-            child: Text(
+            child: TcIcon(
               widget.icon,
-              style: TextStyle(
-                fontSize: 14,
-                color: _hover ? TCColors.textPrimary : TCColors.textSecondary,
-              ),
+              size: 14,
+              color: _hover ? TCColors.textPrimary : TCColors.textSecondary,
             ),
           ),
         ),

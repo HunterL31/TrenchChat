@@ -6,11 +6,16 @@ import 'dart:typed_data';
 
 import 'package:http/http.dart' as http;
 
+import 'models/emoji.dart';
+import 'models/interface.dart';
+import 'models/invite.dart';
 import 'models/link_quality.dart';
 import 'models/member.dart';
 import 'models/message.dart';
+import 'models/network_map.dart';
 import 'models/permissions.dart';
 import 'models/server.dart';
+import 'models/settings.dart';
 
 /// Thrown for any non-2xx response. [message] prefers the backend's own
 /// `{"error": "..."}` body (used for expected failures like a permission
@@ -154,13 +159,17 @@ class ApiClient {
         .toList();
   }
 
-  Future<bool> sendMessage(String channelHashHex, String content) async {
+  /// [reason] is the backend's machine-readable cause when [ok] is false
+  /// (`no_send_permission`, `no_recipients`).
+  Future<({bool ok, String? reason})> sendMessage(
+      String channelHashHex, String content) async {
     final res = await _http.post(
       _u('/channels/$channelHashHex/messages'),
       headers: _jsonHeaders,
       body: jsonEncode({'content': content}),
     );
-    return (_decode(res) as Map<String, dynamic>)['ok'] as bool? ?? false;
+    final body = _decode(res) as Map<String, dynamic>;
+    return (ok: body['ok'] as bool? ?? false, reason: body['reason'] as String?);
   }
 
   Future<ChannelPermissions> getMyPermissions(String channelHashHex) async {
@@ -206,6 +215,161 @@ class ApiClient {
   Future<Map<String, dynamic>> getNetworkMap() async {
     final res = await _http.get(_u('/network/map'));
     return _decode(res) as Map<String, dynamic>;
+  }
+
+  Future<NetworkMapData> getNetworkMapData() async =>
+      NetworkMapData.fromJson(await getNetworkMap());
+
+  Future<TcSettings> getSettings() async {
+    final res = await _http.get(_u('/settings'));
+    return TcSettings.fromJson(_decode(res) as Map<String, dynamic>);
+  }
+
+  Future<void> updateSettings(TcSettings settings) async {
+    final res = await _http.post(
+      _u('/settings'),
+      headers: _jsonHeaders,
+      body: jsonEncode(settings.toJson()),
+    );
+    _decode(res);
+  }
+
+  Future<void> setDisplayName(String displayName) async {
+    final res = await _http.post(
+      _u('/me/display_name'),
+      headers: _jsonHeaders,
+      body: jsonEncode({'display_name': displayName}),
+    );
+    _decode(res);
+  }
+
+  Future<List<RetInterface>> getInterfaces() async {
+    final res = await _http.get(_u('/reticulum/interfaces'));
+    return (_decode(res) as List<dynamic>)
+        .map((e) => RetInterface.fromJson(e as Map<String, dynamic>))
+        .toList();
+  }
+
+  Future<void> createInterface(String name, String type, bool enabled,
+      Map<String, String> typeValues, Map<String, String> commonValues) async {
+    final res = await _http.post(
+      _u('/reticulum/interfaces'),
+      headers: _jsonHeaders,
+      body: jsonEncode({
+        'name': name,
+        'type': type,
+        'enabled': enabled,
+        'type_values': typeValues,
+        'common_values': commonValues,
+      }),
+    );
+    _decode(res);
+  }
+
+  Future<void> updateInterface(String name, String type, bool enabled,
+      Map<String, String> typeValues, Map<String, String> commonValues) async {
+    final res = await _http.put(
+      _u('/reticulum/interfaces/${Uri.encodeComponent(name)}'),
+      headers: _jsonHeaders,
+      body: jsonEncode({
+        'type': type,
+        'enabled': enabled,
+        'type_values': typeValues,
+        'common_values': commonValues,
+      }),
+    );
+    _decode(res);
+  }
+
+  Future<void> deleteInterface(String name) async {
+    final res =
+        await _http.delete(_u('/reticulum/interfaces/${Uri.encodeComponent(name)}'));
+    _decode(res);
+  }
+
+  Future<List<DirectoryEntry>> searchDirectory(String query) async {
+    final res = await _http.get(_u('/directory?q=${Uri.encodeQueryComponent(query)}'));
+    return (_decode(res) as List<dynamic>)
+        .map((e) => DirectoryEntry.fromJson(e as Map<String, dynamic>))
+        .toList();
+  }
+
+  Future<void> inviteToChannel(String channelHashHex, String peerHashHex) async {
+    final res = await _http.post(
+      _u('/channels/$channelHashHex/invite'),
+      headers: _jsonHeaders,
+      body: jsonEncode({'peer_hash_hex': peerHashHex}),
+    );
+    _decode(res);
+  }
+
+  Future<List<PendingInvite>> getInvites() async {
+    final res = await _http.get(_u('/invites'));
+    return (_decode(res) as List<dynamic>)
+        .map((e) => PendingInvite.fromJson(e as Map<String, dynamic>))
+        .toList();
+  }
+
+  Future<bool> acceptInvite(String channelHashHex) async {
+    final res = await _http.post(_u('/invites/$channelHashHex/accept'));
+    return (_decode(res) as Map<String, dynamic>)['ok'] as bool? ?? false;
+  }
+
+  Future<void> declineInvite(String channelHashHex) async {
+    final res = await _http.post(_u('/invites/$channelHashHex/decline'));
+    _decode(res);
+  }
+
+  Future<ScopePermissions> getChannelPermissions(String channelHashHex) async {
+    final res = await _http.get(_u('/channels/$channelHashHex/permissions'));
+    return ScopePermissions.fromJson(_decode(res) as Map<String, dynamic>);
+  }
+
+  /// Returns false when the backend's MANAGE_CHANNEL gate dropped the change.
+  Future<bool> updateChannelPermissions(
+      String channelHashHex, List<String> admin, List<String> member) async {
+    final res = await _http.post(
+      _u('/channels/$channelHashHex/permissions'),
+      headers: _jsonHeaders,
+      body: jsonEncode({'admin': admin, 'member': member}),
+    );
+    return (_decode(res) as Map<String, dynamic>)['ok'] as bool? ?? false;
+  }
+
+  Future<List<CustomEmoji>> getEmoji() async {
+    final res = await _http.get(_u('/emoji'));
+    return (_decode(res) as List<dynamic>)
+        .map((e) => CustomEmoji.fromJson(e as Map<String, dynamic>))
+        .toList();
+  }
+
+  Future<void> importEmoji(String name, String imageDataB64) async {
+    final res = await _http.post(
+      _u('/emoji/import'),
+      headers: _jsonHeaders,
+      body: jsonEncode({'name': name, 'image_data_b64': imageDataB64}),
+    );
+    _decode(res);
+  }
+
+  /// Kick members and grant/revoke admin in one call. Returns false when the
+  /// backend's own KICK/MANAGE_ROLES gate silently dropped the request.
+  Future<bool> updateChannelRoles(
+    String channelHashHex, {
+    List<String> removeMembers = const [],
+    List<String> addAdmins = const [],
+    List<String> removeAdmins = const [],
+  }) async {
+    final res = await _http.post(
+      _u('/channels/$channelHashHex/roles'),
+      headers: _jsonHeaders,
+      body: jsonEncode({
+        'remove_members': removeMembers,
+        'add_admins': addAdmins,
+        'remove_admins': removeAdmins,
+      }),
+    );
+    return (_decode(res) as Map<String, dynamic>)['ok'] as bool? ?? false;
   }
 
   // --- Phase B seams -----------------------------------------------------

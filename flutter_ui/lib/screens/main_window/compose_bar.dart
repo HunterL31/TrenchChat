@@ -4,6 +4,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../../theme/tokens.dart';
+import '../../widgets/tc_button.dart';
+import '../../widgets/tc_icon.dart';
 
 class ComposeBar extends StatefulWidget {
   const ComposeBar({
@@ -11,11 +13,24 @@ class ComposeBar extends StatefulWidget {
     required this.channelName,
     required this.enabled,
     required this.onSend,
+    this.pickEmoji,
+    this.compact = false,
   });
 
   final String channelName;
   final bool enabled;
-  final Future<void> Function(String content) onSend;
+
+  /// Returns whether the message was accepted; on false the composed text is
+  /// restored so a failed send never eats the user's words.
+  final Future<bool> Function(String content) onSend;
+
+  /// Narrow/touch mode: swaps the keyboard hint for a send button, since
+  /// mobile keyboards have no Enter-to-send.
+  final bool compact;
+
+  /// Opens the emoji picker; the returned compose token (a unicode char or
+  /// `:name@hash:`) is inserted at the cursor.
+  final Future<String?> Function()? pickEmoji;
 
   @override
   State<ComposeBar> createState() => _ComposeBarState();
@@ -51,11 +66,27 @@ class _ComposeBarState extends State<ComposeBar> {
     return false;
   }
 
-  void _submit() {
+  Future<void> _submit() async {
     final text = _controller.text;
     if (text.trim().isEmpty || !widget.enabled) return;
     _controller.clear();
-    widget.onSend(text);
+    final ok = await widget.onSend(text);
+    if (!ok && mounted && _controller.text.isEmpty) {
+      _controller.text = text;
+      _controller.selection = TextSelection.collapsed(offset: text.length);
+    }
+  }
+
+  Future<void> _insertEmoji() async {
+    final token = await widget.pickEmoji?.call();
+    if (token == null || !mounted) return;
+    final text = _controller.text;
+    final selection = _controller.selection;
+    final start = selection.isValid ? selection.start : text.length;
+    final end = selection.isValid ? selection.end : text.length;
+    _controller.text = text.replaceRange(start, end, token);
+    _controller.selection = TextSelection.collapsed(offset: start + token.length);
+    _focusNode.requestFocus();
   }
 
   @override
@@ -69,7 +100,7 @@ class _ComposeBarState extends State<ComposeBar> {
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.center,
         children: [
-          Text('＋', style: TextStyle(fontSize: 17, color: TCColors.textTertiary)),
+          TcIcon(TcIcons.plus, size: 15, color: TCColors.textTertiary),
           const SizedBox(width: 10),
           Expanded(
             child: TextField(
@@ -88,16 +119,32 @@ class _ComposeBarState extends State<ComposeBar> {
             ),
           ),
           const SizedBox(width: 10),
-          Text('☺', style: TextStyle(fontSize: 17, color: TCColors.textTertiary)),
-          const SizedBox(width: 10),
-          Text(
-            'ENTER TO SEND · SHIFT+ENTER NEWLINE',
-            style: TextStyle(
-              fontSize: TCType.textMicro,
-              color: TCColors.textTertiary,
-              letterSpacing: TCType.letterSpacingFor(TCType.textMicro, TCType.trackingWide),
+          MouseRegion(
+            cursor: widget.pickEmoji == null
+                ? SystemMouseCursors.basic
+                : SystemMouseCursors.click,
+            child: GestureDetector(
+              onTap: widget.pickEmoji == null ? null : _insertEmoji,
+              child: TcIcon(TcIcons.emoji, size: 15, color: TCColors.textTertiary),
             ),
           ),
+          const SizedBox(width: 10),
+          if (widget.compact)
+            TcIconButton(
+              icon: TcIcons.send,
+              tooltip: 'Send',
+              size: 30,
+              onPressed: widget.enabled ? _submit : null,
+            )
+          else
+            Text(
+              'ENTER TO SEND · SHIFT+ENTER NEWLINE',
+              style: TextStyle(
+                fontSize: TCType.textMicro,
+                color: TCColors.textTertiary,
+                letterSpacing: TCType.letterSpacingFor(TCType.textMicro, TCType.trackingWide),
+              ),
+            ),
         ],
       ),
     );

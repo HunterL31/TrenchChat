@@ -40,6 +40,13 @@ sealed class TcEvent {
           json['channel_hash'] as String,
           json['channel_name'] as String,
         );
+      case 'invite_received':
+        return InviteReceivedEvent(
+          json['channel_hash'] as String,
+          json['channel_name'] as String,
+        );
+      case 'emoji_received':
+        return EmojiReceivedEvent(json['emoji_hash'] as String);
       default:
         return null;
     }
@@ -83,4 +90,18 @@ class ChannelDiscoveredEvent extends TcEvent {
   const ChannelDiscoveredEvent(this.channelHash, this.channelName);
   final String channelHash;
   final String channelName;
+}
+
+/// An invite arrived (or was refreshed) for a channel or server. Full detail
+/// (inviter, expiry, scope) comes from re-fetching GET /invites.
+class InviteReceivedEvent extends TcEvent {
+  const InviteReceivedEvent(this.channelHash, this.channelName);
+  final String channelHash;
+  final String channelName;
+}
+
+/// A peer shared a custom emoji we didn't have; the library changed.
+class EmojiReceivedEvent extends TcEvent {
+  const EmojiReceivedEvent(this.emojiHash);
+  final String emojiHash;
 }
