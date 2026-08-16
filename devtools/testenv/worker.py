@@ -4,7 +4,7 @@ API over uvicorn. Launched by orchestrator.py via multiprocessing.
 
     python worker.py <tag> <data_dir> <display_name> <role> <listen_port>
                      <peer_host> <peer_port> <api_port> <instance_name>
-                     <enable_transport>
+                     <enable_transport> <link_bitrate>
 """
 
 import sys
@@ -26,14 +26,14 @@ if str(_REPO_ROOT) not in sys.path:
 
 def run(tag: str, data_dir: str, display_name: str, role: str, listen_port: int,
        peer_host: str, peer_port: int, api_port: int, instance_name: str,
-       enable_transport: bool = False):
+       enable_transport: bool = False, link_bitrate: int = 0):
     import uvicorn
     from backend_core import Backend
     from api import create_app
 
     backend = Backend(
         Path(data_dir), display_name, role, listen_port, peer_host, peer_port,
-        instance_name, enable_transport=enable_transport,
+        instance_name, enable_transport=enable_transport, link_bitrate=link_bitrate,
     )
     backend.write_identity_file()
     backend.start_heartbeat(interval=10.0)
@@ -46,7 +46,8 @@ def run(tag: str, data_dir: str, display_name: str, role: str, listen_port: int,
 
 if __name__ == "__main__":
     (_, tag, data_dir, display_name, role, listen_port, peer_host, peer_port,
-     api_port, instance_name, enable_transport) = sys.argv
+     api_port, instance_name, enable_transport, link_bitrate) = sys.argv
     run(tag, data_dir, display_name, role, int(listen_port), peer_host,
        int(peer_port), int(api_port), instance_name,
-       enable_transport=enable_transport.lower() in ("1", "true", "yes"))
+       enable_transport=enable_transport.lower() in ("1", "true", "yes"),
+       link_bitrate=int(link_bitrate))

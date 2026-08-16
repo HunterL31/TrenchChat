@@ -38,6 +38,12 @@ from trenchchat.network.announce import PeerAnnounceHandler, UserAnnounceHandler
 
 _LINK_INTERFACE_NAME = "TesterLink"
 
+# TCPInterface.HW_MTU. A configured bitrate at or below 62500 makes RNS's
+# optimise_mtu() set HW_MTU to None, which its own HDLC read loop then adds an
+# int to -- every inbound frame raises, so the tester can send but never
+# receive. Pinning the MTU turns optimise_mtu() into a no-op and avoids it.
+_TCP_HW_MTU_BYTES = 262144
+
 # Shortened presence intervals so a hand test can observe the beacon
 # surviving the hub in minutes instead of the production 300s/180s.
 _PRESENCE_TIMEOUT_SECS = 60.0
@@ -62,7 +68,8 @@ loglevel = 3
 
 def _write_reticulum_config(rns_dir: Path, instance_name: str, role: str,
                             listen_port: int, peer_host: str, peer_port: int,
-                            enable_transport: bool = False) -> None:
+                            enable_transport: bool = False,
+                            link_bitrate: int = 0) -> None:
     """
     role="server": bind a TCPServerInterface on 127.0.0.1:listen_port.
     role="client": dial a TCPClientInterface at peer_host:peer_port.
@@ -74,6 +81,10 @@ def _write_reticulum_config(rns_dir: Path, instance_name: str, role: str,
     plugged into its TCPServerInterface and the other tester) -- off by
     default since a plain 2-tester link never needs to route through
     either side.
+
+    link_bitrate: when the orchestrator is shaping this tester's link, the
+    shaped rate in bps, so RNS's announce pacing and MTU match what the
+    wire is actually doing. Omitted at 0, which leaves RNS's own guess.
     """
     if role == "server":
         iface_type = "TCPServerInterface"
@@ -83,6 +94,10 @@ def _write_reticulum_config(rns_dir: Path, instance_name: str, role: str,
         iface_body = f"    target_host = {peer_host}\n    target_port = {peer_port}"
     else:
         raise ValueError(f"unknown role: {role}")
+
+    if link_bitrate > 0:
+        iface_body += (f"\n    bitrate = {link_bitrate}"
+                       f"\n    fixed_mtu = {_TCP_HW_MTU_BYTES}")
 
     rns_dir.mkdir(parents=True, exist_ok=True)
     config_text = RETICULUM_CONFIG_TEMPLATE.format(
@@ -99,7 +114,8 @@ class Backend:
 
     def __init__(self, data_dir: Path, display_name: str, role: str,
                 listen_port: int, peer_host: str, peer_port: int,
-                instance_name: str, enable_transport: bool = False):
+                instance_name: str, enable_transport: bool = False,
+                link_bitrate: int = 0):
         self.data_dir = data_dir
         data_dir.mkdir(parents=True, exist_ok=True)
         self._link_callbacks: list = []
@@ -107,7 +123,8 @@ class Backend:
         rns_dir = data_dir / "reticulum"
         _write_reticulum_config(rns_dir, instance_name, role,
                                 listen_port, peer_host, peer_port,
-                                enable_transport=enable_transport)
+                                enable_transport=enable_transport,
+                                link_bitrate=link_bitrate)
         self.rns_config_path = str(rns_dir / "config")
 
         self.config = Config(data_dir=data_dir)

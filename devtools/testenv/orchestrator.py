@@ -23,7 +23,10 @@ data directories back to a fresh-install state, and relaunch them.
 Ports (fixed, all on this machine):
     8800        orchestrator (this page + /reset)
     8801, 8802, ... one API + WebSocket port per tester, in tag order
-    41001       hub's Reticulum TCP listener (every tester dials this)
+    41001       hub's Reticulum TCP listener (every shaper dials this)
+    41101, 41102, ... one link shaper per tester, in tag order -- the tester
+                dials this, so its link can be given a simulated bandwidth,
+                latency and frame loss (see link_profiles.py)
 """
 
 import argparse
@@ -40,6 +43,12 @@ import httpx
 import uvicorn
 from fastapi import FastAPI
 from fastapi.responses import FileResponse, JSONResponse
+from pydantic import BaseModel
+
+from link_profiles import (
+    DEFAULT_PROFILE_NAME, LINK_PROFILES, LinkProfile, resolve as resolve_profile,
+)
+from link_shaper import ShaperPool
 
 _TESTENV_DIR = Path(__file__).resolve().parent
 _DATA_DIR = _TESTENV_DIR / "data"
@@ -49,6 +58,7 @@ _HUB = _TESTENV_DIR / "hub.py"
 _ORCH_PORT = 8800
 _API_PORT_BASE = 8801
 _LINK_PORT = 41001
+_SHAPER_PORT_BASE = 41101
 
 _DEFAULT_TESTERS = 4
 _MAX_TESTERS = 8
@@ -61,6 +71,7 @@ _HUB_INSTANCE_NAME = "trenchchat_testenv_hub"
 _TESTERS: dict[str, dict] = {}
 _processes: dict[str, subprocess.Popen] = {}
 _hub_process: subprocess.Popen | None = None
+_shapers = ShaperPool("127.0.0.1", _LINK_PORT)
 
 
 def _tags(n: int) -> list[str]:
@@ -73,10 +84,17 @@ def _build_testers(n: int) -> dict[str, dict]:
         testers[tag] = dict(
             tag=tag, data_dir=_DATA_DIR / f"tester{tag}", display_name=f"Tester {tag}",
             role="client", listen_port=_LINK_PORT, peer_host="127.0.0.1",
-            peer_port=_LINK_PORT, api_port=_API_PORT_BASE + i,
+            peer_port=_SHAPER_PORT_BASE + i, api_port=_API_PORT_BASE + i,
             instance_name=f"trenchchat_testenv_{tag.lower()}", enable_transport=False,
+            link_profile=DEFAULT_PROFILE_NAME, link_params=None,
         )
     return testers
+
+
+def _tester_profile(tag: str) -> LinkProfile:
+    """The profile a tester is currently set to, overrides applied."""
+    t = _TESTERS[tag]
+    return resolve_profile(t["link_profile"], **(t["link_params"] or {}))
 
 
 def _lan_ip() -> str:
@@ -106,7 +124,9 @@ def _preflight_ports() -> None:
     """Bind-test every port this run needs before touching any process or
     data directory. An orphaned worker/hub left over from a crashed run is
     the most likely reason one of these is already taken."""
-    ports = [_ORCH_PORT, _LINK_PORT] + [t["api_port"] for t in _TESTERS.values()]
+    ports = ([_ORCH_PORT, _LINK_PORT]
+             + [t["api_port"] for t in _TESTERS.values()]
+             + [t["peer_port"] for t in _TESTERS.values()])
     busy = [p for p in ports if not _check_port_free(p)]
     if busy:
         print(f"ERROR: port(s) already in use: {busy}")
@@ -118,10 +138,12 @@ def _preflight_ports() -> None:
 def _launch(tag: str) -> subprocess.Popen:
     t = _TESTERS[tag]
     t["data_dir"].mkdir(parents=True, exist_ok=True)
+    t["launched_bitrate"] = _tester_profile(tag).bitrate_bps
     args = [
         sys.executable, str(_WORKER), t["tag"], str(t["data_dir"]), t["display_name"],
         t["role"], str(t["listen_port"]), t["peer_host"], str(t["peer_port"]),
         str(t["api_port"]), t["instance_name"], str(t["enable_transport"]),
+        str(t["launched_bitrate"]),
     ]
     return subprocess.Popen(args)
 
@@ -186,6 +208,7 @@ def _wait_hub_ready(timeout: float = 15.0) -> bool:
 
 def _start_all() -> None:
     global _hub_process
+    _shapers.start({tag: t["peer_port"] for tag, t in _TESTERS.items()})
     _hub_process = _launch_hub()
     if not _wait_hub_ready():
         print("WARNING: hub did not open its listener in time; testers may fail to link.")
@@ -226,10 +249,12 @@ def index():
 def config():
     return {
         "testers": [
-            {"tag": tag, "display_name": t["display_name"], "api_port": t["api_port"]}
+            {"tag": tag, "display_name": t["display_name"], "api_port": t["api_port"],
+             "link_profile": t["link_profile"]}
             for tag, t in _TESTERS.items()
         ],
         "hub_port": _LINK_PORT,
+        "link_profiles": [p.as_dict() for p in LINK_PROFILES.values()],
     }
 
 
@@ -259,9 +284,14 @@ async def status():
 
     testers = {}
     for tag, t in _TESTERS.items():
+        profile = _tester_profile(tag)
         testers[tag] = {
             "alive": alive[tag], "api_port": t["api_port"],
             "link_online": link_online.get(tag) if alive[tag] else None,
+            "link_profile": t["link_profile"],
+            "link_summary": profile.summary(),
+            "bitrate_hint_stale": profile.bitrate_bps != t.get("launched_bitrate"),
+            "shaper": _shapers.stats(tag),
         }
     hub_alive = _hub_process is not None and _hub_process.poll() is None
     return {"testers": testers, "hub": {"alive": hub_alive}}
@@ -271,6 +301,10 @@ async def status():
 def reset():
     _stop_all()
     _wipe_data()
+    for t in _TESTERS.values():
+        t["link_profile"] = DEFAULT_PROFILE_NAME
+        t["link_params"] = None
+    _shapers.reset_profiles()
     _start_all()
     ready = _wait_ready()
     if not all(ready.values()):
@@ -314,6 +348,37 @@ def reset_tester(tag: str):
     _wipe_tester(tag)
     _processes[tag] = _launch(tag)
     return {"ok": True}
+
+
+class LinkProfileBody(BaseModel):
+    profile: str
+    bitrate_bps: int | None = None
+    latency_ms: float | None = None
+    jitter_ms: float | None = None
+    loss_pct: float | None = None
+
+
+@app.post("/testers/{tag}/link_profile")
+def set_link_profile(tag: str, body: LinkProfileBody):
+    """Retune a tester's simulated link. Shaping applies immediately; the
+    matching bitrate hint only reaches RNS when the tester next restarts."""
+    if tag not in _TESTERS:
+        return JSONResponse({"ok": False, "error": f"unknown tester {tag}"}, status_code=404)
+
+    overrides = body.model_dump(exclude={"profile"}, exclude_none=True)
+    try:
+        profile = resolve_profile(body.profile, **overrides)
+    except ValueError as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+
+    _TESTERS[tag]["link_profile"] = body.profile
+    _TESTERS[tag]["link_params"] = overrides or None
+    _shapers.set_profile(tag, profile)
+    launched_bitrate = _TESTERS[tag].get("launched_bitrate")
+    return {
+        "ok": True, "applied": "live", "profile": profile.as_dict(),
+        "restart_required_for_bitrate_hint": profile.bitrate_bps != launched_bitrate,
+    }
 
 
 @app.post("/hub/kill")
@@ -367,6 +432,7 @@ def main():
         uvicorn.run(app, host="0.0.0.0", port=_ORCH_PORT, log_level="warning")
     finally:
         _stop_all()
+        _shapers.stop()
 
 
 if __name__ == "__main__":
