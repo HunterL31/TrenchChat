@@ -74,10 +74,11 @@ the API/UI layer on top:
 |---------------|------|
 | 8800          | Orchestrator (the web page, `/config`, `/status`, `/reset`, per-tester/hub controls) |
 | 8801, 8802, ... | Each tester's API + WebSocket, one port per tester in tag order (A, B, C, ...) |
-| 41001         | The hub's Reticulum TCP listener -- every tester dials this |
+| 41001         | The hub's Reticulum TCP listener -- every shaper dials this |
+| 41101, 41102, ... | Each tester's link shaper, one port per tester in tag order; the tester dials this instead of the hub |
 
 `--testers N` (default 4, capped at 8) controls how many testers launch, and
-therefore how many API ports are used above 8801.
+therefore how many API and shaper ports are used above 8801 and 41101.
 
 ## Endpoints
 
@@ -85,9 +86,10 @@ therefore how many API ports are used above 8801.
 
 | Endpoint | Purpose |
 |----------|---------|
-| `GET /config` | `{"testers": [{"tag","display_name","api_port"}, ...], "hub_port"}` |
-| `GET /status` | `{"testers": {tag: {"alive","api_port"}}, "hub": {"alive"}}` |
-| `POST /reset` | Kill everything, wipe all data, relaunch fresh |
+| `GET /config` | `{"testers": [{"tag","display_name","api_port","link_profile"}, ...], "hub_port", "link_profiles"}` |
+| `GET /status` | `{"testers": {tag: {"alive","api_port","link_online","link_profile","link_summary","bitrate_hint_stale","shaper"}}, "hub": {"alive"}}` |
+| `POST /testers/{tag}/link_profile` | Set the simulated link: `{"profile": "lora_fast"}`, or `"custom"` with any of `bitrate_bps`/`latency_ms`/`jitter_ms`/`loss_pct` |
+| `POST /reset` | Kill everything, wipe all data, reset every link profile, relaunch fresh |
 | `POST /testers/{tag}/kill` | Terminate one tester's process |
 | `POST /testers/{tag}/start` | Launch one tester's process (data dir untouched) |
 | `POST /testers/{tag}/restart` | Kill then start one tester |
@@ -106,12 +108,45 @@ the top of `api.py` -- this is dev-harness process control, not app logic):
 | `POST /net/offline` | Detach this tester's link to the hub |
 | `POST /net/online` | Start reconnecting (takes 5-15s; poll `/net/status` or watch the `net_status` WS event) |
 
+## Simulating slow and lossy links
+
+Every tester dials its own shaper (41101+) instead of the hub directly, so one
+pane's link can be made to behave like a real radio while the others stay fast.
+Pick a profile from the dropdown in a pane's controls, or POST to
+`/testers/{tag}/link_profile`.
+
+| Profile | Rate | Delay | Loss |
+|---------|------|-------|------|
+| Broadband | uncapped | -- | -- |
+| Satellite | 256 kbps | 800 ± 40 ms | 0.5% |
+| Serial 9600 baud | 9.6 kbps | 10 ± 2 ms | -- |
+| LoRa SF7 / 125 kHz | 5.5 kbps | 60 ± 20 ms | 1% |
+| LoRa SF10 / 125 kHz | 977 bps | 120 ± 40 ms | 3% |
+| Packet radio (AX.25 1200) | 1.2 kbps | 300 ± 100 ms | 5% |
+| Flaky link | 62.5 kbps | 250 ± 150 ms | 15% |
+| Custom... | whatever you set | | |
+
+The LoRa rates come from the same formula `RNodeInterface` uses, at 125 kHz
+bandwidth and coding rate 4:5.
+
+Shaping applies to the stream immediately -- no restart. The matching `bitrate`
+is also written into that tester's `[[TesterLink]]` stanza so RNS's own announce
+pacing agrees with the wire, but a config is only read at boot, so that half
+lands on the tester's next restart. The `&#8635;` marker next to the dropdown
+means the two currently disagree.
+
+**Flaky link is the profile worth reaching for.** Pending retry, missed-delivery
+hints and timestamp-fallback sync only run on a degraded link, and dropping
+frames is the only way to exercise them without killing a process outright.
+
 ## Files
 
 | File | Purpose |
 |------|---------|
 | `backend_core.py` | Headless backend wiring (Identity/Storage/Router/managers), per-tester Reticulum config generation, link online/offline control |
 | `hub.py` | Standalone headless Reticulum transport node every tester connects through |
+| `link_profiles.py` | The named link profiles (LoRa, packet radio, serial, satellite, ...) the UI offers |
+| `link_shaper.py` | Per-tester TCP shim between tester and hub applying bandwidth, latency, jitter and frame loss |
 | `api.py` | FastAPI wrapper -- every endpoint calls `trenchchat.core.actions` or a manager method directly (except the link-control group -- see above) |
 | `worker.py` | Subprocess entry point: one tester's `Backend` + its `uvicorn` server |
 | `orchestrator.py` | Spawns the hub and every tester, serves the UI, handles `/reset` and per-tester/hub lifecycle |
@@ -176,6 +211,18 @@ knowing before you go looking for a bug in your own changes:
   invite → join request → member-list update → sync request → sync
   response is four separate hops, not one -- give it several seconds
   before concluding something didn't work.
+- **A configured `bitrate` needs `fixed_mtu` beside it.** RNS's
+  `optimise_mtu()` sets `HW_MTU = None` for any bitrate at or below
+  62500, and `TCPInterface.check_frame_len` then adds an int to it on
+  every inbound frame. The tester still sends, but never receives --
+  it comes up with zero paths and an empty directory. Pinning
+  `fixed_mtu` makes `optimise_mtu()` a no-op, which is why
+  `backend_core.py` always writes the two together.
+- **A tester left on a very slow profile falls behind.** At 977 bps the
+  app's own announces, presence beacons and heartbeats are a real
+  fraction of the link, so a message queues behind them: expect seconds,
+  not milliseconds, and tens of seconds on packet radio. That is the
+  simulation working, not a stall.
 - **Link drop vs process kill preserve different state.** Going offline
   keeps everything in memory (pending retry queue, sync status,
   subscriber cache) and only tears down the network link; killing the
