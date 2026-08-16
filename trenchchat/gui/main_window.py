@@ -256,7 +256,8 @@ class MainWindow(QMainWindow):
                  messaging: Messaging, subscription_mgr: SubscriptionManager,
                  invite_mgr: InviteManager, presence_mgr: PresenceManager,
                  user_directory: UserDirectory, avatar_mgr=None, reaction_mgr=None,
-                 server_mgr=None, presence_beacon: PresenceBeacon | None = None):
+                 server_mgr=None, presence_beacon: PresenceBeacon | None = None,
+                 voice_mgr=None):
         super().__init__()
         self._config = config
         self._identity = identity
@@ -273,6 +274,10 @@ class MainWindow(QMainWindow):
         self._user_directory = user_directory
         self._avatar_mgr = avatar_mgr
         self._reaction_mgr: ReactionManager | None = reaction_mgr
+        # Stored only for now; the voice UI lands with the frontend rework.
+        # That UI must gate its join control on has_permission(channel, self,
+        # VOICE_CHAT) and marshal VoiceManager callbacks through Qt signals.
+        self._voice_mgr = voice_mgr
 
         # Pending invites: list of (channel_hash_hex, channel_name, token, expiry, admin_hash_hex)
         self._pending_invites: list[tuple] = []

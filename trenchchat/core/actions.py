@@ -15,7 +15,7 @@ free of any GUI framework dependency.
 
 from trenchchat.core.permissions import (
     CREATE_CHANNEL, KICK, MANAGE_CHANNEL, MANAGE_ROLES, SEND_MESSAGE,
-    is_open_join, permissions_from_json,
+    VOICE_CHAT, is_open_join, permissions_from_json,
 )
 
 
@@ -165,6 +165,37 @@ def leave_channel(storage, subscription_mgr, channel_hash_hex: str) -> bool:
         return False
     subscription_mgr.unsubscribe(channel_hash_hex, channel["creator_hash"])
     return True
+
+
+def join_voice_channel(storage, voice_mgr, channel_hash_hex: str,
+                       self_hash_hex: str) -> bool:
+    """Outbound VOICE_CHAT guard + delegate to VoiceManager.join_voice.
+
+    Returns False (silent no-op) if the channel is unknown, the caller lacks
+    voice_chat on a non-open-join channel, or the join itself fails (already
+    in a session, session full). Core-side enforcement in VoiceManager is
+    still the real security boundary; this mirrors the GUI pre-flight guard.
+    """
+    channel = storage.get_channel(channel_hash_hex)
+    if channel is None:
+        return False
+    perms = permissions_from_json(channel["permissions"])
+    if not is_open_join(perms):
+        if not storage.has_permission(channel_hash_hex, self_hash_hex, VOICE_CHAT):
+            return False
+    return voice_mgr.join_voice(channel_hash_hex)
+
+
+def leave_voice_channel(voice_mgr) -> bool:
+    """Returns False if not currently in a voice session."""
+    if voice_mgr.current_channel is None:
+        return False
+    voice_mgr.leave_voice()
+    return True
+
+
+def set_voice_muted(voice_mgr, muted: bool) -> None:
+    voice_mgr.set_muted(muted)
 
 
 # ---------------------------------------------------------------------------

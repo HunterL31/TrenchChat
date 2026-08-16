@@ -36,6 +36,7 @@ F_CHANNEL_HASH = 0x01
 | `0x20–0x2F` | Member list | `F_MEMBER_LIST_DOC=0x21`, `F_CHANNEL_NAME=0x22`, `F_CHANNEL_DESC=0x23`, `F_CHANNEL_CREATOR=0x24`, `F_CHANNEL_ACCESS=0x25`, `F_CHANNEL_CREATED_AT=0x26`, `F_CHANNEL_PERMISSIONS=0x27`, `F_SCOPE_KIND=0x28` |
 | `0x30–0x3F` | Subscription | `F_SUBSCRIBER_LIST=0x30` |
 | `0x50–0x5F` | Sync status | `F_SYNC_TRUNCATED=0x50` |
+| `0x60–0x6F` | Voice | `F_VOICE_STATE=0x60`, `F_VOICE_MUTED=0x61`, `F_VOICE_JOINED_AT=0x62`, `F_VOICE_CODEC=0x63` |
 
 When adding a new field:
 1. Pick the next unused key in the appropriate range.
@@ -57,6 +58,9 @@ Control messages are identified by `fields[F_MSG_TYPE]`. Defined values:
 | `MT_MISSED_DELIVERY` | `"missed_delivery"` | `sync.py` |
 | `MT_SYNC_REQUEST` | `"sync_request"` | `sync.py` |
 | `MT_SYNC_RESPONSE` | `"sync_response"` | `sync.py` |
+| `MT_VOICE_JOIN` | `"voice_join"` | `voice.py` |
+| `MT_VOICE_LEAVE` | `"voice_leave"` | `voice.py` |
+| `MT_VOICE_STATE` | `"voice_state"` | `voice.py` |
 
 Chat messages have **no** `F_MSG_TYPE` field. Handlers should check `F_MSG_TYPE in fields`
 to distinguish control messages from chat messages.

@@ -13,6 +13,7 @@ Field key registry
 0x30–0x3F  Subscription fields
 0x40–0x4F  Reaction fields
 0x50–0x5F  Sync status fields
+0x60–0x6F  Voice fields
 """
 
 # --- Common / messaging fields ---
@@ -70,6 +71,12 @@ F_SYNC_SCAN_CURSOR  = 0x51   # float — furthest timestamp the responder's swee
                              #         even if every row there was withheld from the
                              #         requester (sync_response, only set when truncated)
 
+# --- Voice fields ---
+F_VOICE_STATE       = 0x60   # str   — "joined" | "left"
+F_VOICE_MUTED       = 0x61   # bool  — sender's current mute state
+F_VOICE_JOINED_AT   = 0x62   # float — Unix timestamp when the sender joined the voice session
+F_VOICE_CODEC       = 0x63   # str   — codec the sender transmits ("opus")
+
 # --- Message type strings ---
 MT_SUBSCRIBE        = "subscribe"
 MT_UNSUBSCRIBE      = "unsubscribe"
@@ -86,6 +93,9 @@ MT_EMOJI_REQUEST    = "emoji_request"   # ask a peer for emoji image data by has
 MT_EMOJI_RESPONSE   = "emoji_response"  # respond with the emoji image bytes
 MT_PRESENCE         = "presence"        # signed liveness beacon; empty content, no other fields
 MT_GOODBYE          = "goodbye"         # graceful-shutdown notice; empty content, no other fields
+MT_VOICE_JOIN       = "voice_join"      # sender entered the channel's voice session
+MT_VOICE_LEAVE      = "voice_leave"     # sender left the channel's voice session
+MT_VOICE_STATE      = "voice_state"     # periodic self-refresh, mute change, or reply to a join
 
 
 # --- sync window ---
