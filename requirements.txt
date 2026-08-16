@@ -22,6 +22,13 @@ Pillow==12.1.1
 # pyproject.toml and satisfied transitively via rns -- the PIN feature must
 # not depend on another package continuing to pull this in.
 cryptography==46.0.5
+# Voice chat (core/audio). sounddevice bundles PortAudio in its Windows and
+# macOS wheels; on Linux the distro libportaudio2 package is needed, and
+# opuslib needs a system libopus. The audio package degrades gracefully
+# (voice joins recv-only) when either system library is missing.
+sounddevice==0.5.2
+numpy==2.2.6
+opuslib==3.0.1
 
 # Development / testing
 pytest>=7.0,<9

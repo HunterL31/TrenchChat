@@ -62,6 +62,17 @@ echo "Installing dependencies..."
 .venv/bin/pip install --upgrade pip --quiet
 .venv/bin/pip install -r requirements.txt --quiet
 
+# Voice chat needs libopus and PortAudio at runtime. Missing libraries are
+# not fatal — voice joins recv-only — so only hint, never fail.
+if ! ldconfig -p 2>/dev/null | grep -q libopus; then
+    echo "NOTE: libopus not found — voice chat will be receive-silent."
+    echo "      Install it with e.g.: sudo apt install libopus0"
+fi
+if ! ldconfig -p 2>/dev/null | grep -q libportaudio; then
+    echo "NOTE: PortAudio not found — voice chat will be receive-silent."
+    echo "      Install it with e.g.: sudo apt install libportaudio2"
+fi
+
 echo ""
 echo "Setup complete. Launching TrenchChat..."
 echo ""
