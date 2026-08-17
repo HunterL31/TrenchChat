@@ -1238,3 +1238,69 @@ class TestFriends:
         db2 = Storage(db_path=db_path)
         assert db2.get_friend(peer)["last_seen_at"] == 99999.0
         db2.close()
+
+
+class TestSubscriberListVersions:
+    """The replay watermark for signed subscriber lists has to be durable."""
+
+    def test_absent_by_default(self, db):
+        assert db.get_all_subscriber_list_versions() == {}
+
+    def test_survives_close_reopen(self, tmp_path):
+        channel = "ab" * 16
+        db_path = tmp_path / "subs.db"
+        db1 = Storage(db_path=db_path)
+        db1.set_subscriber_list_version(channel, 5)
+        db1.close()
+
+        db2 = Storage(db_path=db_path)
+        assert db2.get_all_subscriber_list_versions() == {channel: 5}
+        db2.close()
+
+    def test_never_regresses(self, db):
+        channel = "ab" * 16
+        db.set_subscriber_list_version(channel, 5)
+        db.set_subscriber_list_version(channel, 3)
+        assert db.get_all_subscriber_list_versions()[channel] == 5
+
+
+class TestHasMessage:
+    """message_id is globally unique, so a failed insert is not proof of presence."""
+
+    def _insert(self, db, channel, message_id):
+        return db.insert_message(
+            channel_hash=channel, sender_hash="aa" * 16, sender_name="A",
+            content="hi", timestamp=1000.0, message_id=message_id,
+            reply_to=None, last_seen_id=None, received_at=1000.0,
+        )
+
+    def test_reports_only_this_channel(self, db):
+        here, elsewhere = "ab" * 16, "cd" * 16
+        for channel in (here, elsewhere):
+            db.upsert_channel(channel, "c", "", "creator", "public", 1000.0)
+        assert self._insert(db, elsewhere, "mid-1") is True
+
+        # Same id, different channel: the insert is refused and nothing landed
+        # here, so this channel does not have the message.
+        assert self._insert(db, here, "mid-1") is False
+        assert db.has_message(elsewhere, "mid-1") is True
+        assert db.has_message(here, "mid-1") is False
+
+    def test_blank_and_unknown_ids(self, db):
+        assert db.has_message("ab" * 16, "") is False
+        assert db.has_message("ab" * 16, "nope") is False
+
+
+class TestIsChannelSubscriber:
+    def test_reflects_the_subscriber_set(self, db):
+        channel, peer = "ab" * 16, "cc" * 16
+        assert db.is_channel_subscriber(channel, peer) is False
+
+        db.add_channel_subscriber(channel, peer)
+        assert db.is_channel_subscriber(channel, peer) is True
+
+        db.remove_channel_subscriber(channel, peer)
+        assert db.is_channel_subscriber(channel, peer) is False
+
+    def test_blank_identity(self, db):
+        assert db.is_channel_subscriber("ab" * 16, "") is False

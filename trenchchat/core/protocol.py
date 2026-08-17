@@ -124,6 +124,35 @@ MAX_WIRE_STR      = 1 * 1024 * 1024
 MAX_WIRE_BIN      = 2 * 1024 * 1024
 
 
+import math  # noqa: E402
+import time  # noqa: E402
+
+# How far ahead of our own clock a peer's timestamp may sit before it stops
+# being explainable as clock skew.
+MAX_CLOCK_SKEW_SECS = 300.0
+
+
+def wire_timestamp(value, now: float | None = None) -> float | None:
+    """A peer-supplied timestamp, or None if it isn't plausible.
+
+    F_TIMESTAMP is self-asserted and unverifiable. Unbounded, a far-future
+    value pins a message to the top of the transcript permanently, and on the
+    sync path it advances the requester's persisted watermark past history it
+    never received -- after which that peer is never asked for anything older
+    again. Callers decide the policy: substitute their own clock (direct
+    delivery, where the message is still worth keeping) or drop the row
+    (sync, where accepting it would move a watermark).
+    """
+    now = time.time() if now is None else now
+    try:
+        ts = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(ts) or ts < 0 or ts > now + MAX_CLOCK_SKEW_SECS:
+        return None
+    return ts
+
+
 def unpack_wire(payload: bytes, *, raw: bool = False):
     """msgpack.unpackb with explicit limits, for data received from a peer.
 

@@ -75,8 +75,13 @@ class SubscriptionManager:
             ch: set(ids) for ch, ids in storage.get_all_channel_subscribers().items()
         }
         # Monotonic per-channel counter; owners bump it, receivers reject
-        # anything not newer than what they hold.
-        self._subscriber_versions: dict[str, int] = {}
+        # anything not newer than what they hold. Loaded from storage because
+        # a counter that resets on restart is no replay defence at all: a
+        # captured older list is still validly signed, and replaying it
+        # resurrects removed subscribers -- which is what delivery is aimed at.
+        self._subscriber_versions: dict[str, int] = dict(
+            storage.get_all_subscriber_list_versions()
+        )
         self._version_lock = threading.Lock()
 
         router.add_delivery_callback(self._on_lxmf_message)
@@ -112,6 +117,10 @@ class SubscriptionManager:
     def _add_subscriber(self, channel_hash_hex: str, identity_hex: str):
         if channel_hash_hex not in self._subscribers:
             self._subscribers[channel_hash_hex] = set()
+        if identity_hex in self._subscribers[channel_hash_hex]:
+            # Already known: re-broadcasting would let a peer resending
+            # MT_SUBSCRIBE amplify one message into one per subscriber.
+            return
         self._subscribers[channel_hash_hex].add(identity_hex)
         self._storage.add_channel_subscriber(channel_hash_hex, identity_hex)
         self._broadcast_subscriber_list(channel_hash_hex)
@@ -158,6 +167,7 @@ class SubscriptionManager:
         with self._version_lock:
             version = self._subscriber_versions.get(channel_hash_hex, 0) + 1
             self._subscriber_versions[channel_hash_hex] = version
+            self._storage.set_subscriber_list_version(channel_hash_hex, version)
             return version
 
     # --- inbound handler ---
@@ -249,10 +259,17 @@ class SubscriptionManager:
             return
 
         valid = {h for h in hashes if _is_identity_hex(h)}
+        # Re-check the version under the lock that commits it. LXMF delivers on
+        # background threads, so two lists can both pass the check above
+        # against the same stale value and the loser then overwrite the
+        # winner -- a silent rollback to an older signed roster.
         with self._version_lock:
+            if version <= self._subscriber_versions.get(channel_hash_hex, 0):
+                return
             self._subscriber_versions[channel_hash_hex] = version
-        self._subscribers[channel_hash_hex] = valid
-        self._storage.replace_channel_subscribers(channel_hash_hex, valid)
+            self._subscribers[channel_hash_hex] = valid
+            self._storage.set_subscriber_list_version(channel_hash_hex, version)
+            self._storage.replace_channel_subscribers(channel_hash_hex, valid)
 
     def _recall_owner_identity(self, owner_hex: str):
         if owner_hex == self._identity.hash_hex:

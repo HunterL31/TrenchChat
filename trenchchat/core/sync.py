@@ -52,7 +52,7 @@ import LXMF
 import msgpack
 
 from trenchchat.core.identity import Identity
-from trenchchat.core.image import MAX_IMAGE_BYTES
+from trenchchat.core.image import MAX_IMAGE_BYTES, inbound_image_is_sane
 from trenchchat.core.messaging import Messaging
 from trenchchat.core.permissions import (
     FULL_SYNC, has_permission, is_open_join, permissions_from_json,
@@ -63,7 +63,7 @@ from trenchchat.core.protocol import (
     F_MISSED_FOR, F_MISSED_MSG_ID,
     MT_MISSED_DELIVERY, MT_SYNC_REQUEST, MT_SYNC_RESPONSE,
     SYNC_WINDOW_SECS,
-    unpack_wire,
+    unpack_wire, wire_timestamp,
 )
 from trenchchat.core.reaction import is_custom_emoji_hash
 from trenchchat.core.storage import Storage
@@ -125,6 +125,29 @@ def _coerce_str(value) -> str:
     if isinstance(value, bytes):
         return value.decode(errors="replace")
     return str(value) if value is not None else ""
+
+
+def _truncate_at_group_boundary(rows: list) -> tuple[list, bool]:
+    """Cut a batch to the response cap without splitting a timestamp group.
+
+    Returns (rows, dropped_any). F_SYNC_WINDOW_START is a bare float and
+    Storage.get_messages_after filters on a strict timestamp >, so messages
+    sharing one timestamp have to travel together: whichever half landed on
+    the far side of a cut would be skipped by every future sweep. A single
+    group larger than the cap ships whole rather than stalling forever --
+    the same rule _collect_permitted_rows applies while sweeping.
+    """
+    if len(rows) <= MAX_RESPONSE_MESSAGES:
+        return rows, False
+
+    boundary_ts = rows[MAX_RESPONSE_MESSAGES]["timestamp"]
+    cut = MAX_RESPONSE_MESSAGES
+    while cut > 0 and rows[cut - 1]["timestamp"] == boundary_ts:
+        cut -= 1
+    if cut == 0:
+        while cut < len(rows) and rows[cut]["timestamp"] == boundary_ts:
+            cut += 1
+    return rows[:cut], cut < len(rows)
 
 
 class SyncManager:
@@ -476,9 +499,8 @@ class SyncManager:
         rows = self._merge_rows(
             [r for r in hinted_rows if r["timestamp"] <= frontier], swept_rows
         )
-        if len(rows) > MAX_RESPONSE_MESSAGES:
-            rows = rows[:MAX_RESPONSE_MESSAGES]
-            truncated = True
+        rows, capped = _truncate_at_group_boundary(rows)
+        truncated = truncated or capped
 
         packed = msgpack.packb(
             [self._row_to_payload(r) for r in rows],
@@ -738,7 +760,20 @@ class SyncManager:
         for m in messages:
             try:
                 sender_hash = m.get("sender_hash", "")
-                msg_ts = float(m.get("timestamp", time.time()))
+                # Dropped rather than clamped, unlike direct delivery: an
+                # accepted row advances our persisted watermark, so taking a
+                # far-future timestamp here would stop us ever asking this
+                # peer for older history again.
+                checked_ts = wire_timestamp(m.get("timestamp"))
+                if checked_ts is None:
+                    RNS.log(
+                        f"TrenchChat [sync]: dropping synced message "
+                        f"{str(m.get('message_id', ''))[:12]}… — implausible "
+                        f"timestamp {m.get('timestamp')!r}",
+                        RNS.LOG_WARNING,
+                    )
+                    continue
+                msg_ts = checked_ts
 
                 # Validate tenure for invite-only channels with tenure data.
                 # Mirrors _handle_sync_request's two checks -- applied again
@@ -771,7 +806,8 @@ class SyncManager:
                     image_data = image_data.encode()
                 if not image_data:
                     image_data = None
-                elif len(image_data) > MAX_IMAGE_BYTES:
+                elif (len(image_data) > MAX_IMAGE_BYTES
+                        or not inbound_image_is_sane(image_data)):
                     image_data = None
 
                 inserted = self._storage.insert_message(
@@ -786,10 +822,17 @@ class SyncManager:
                     received_at=time.time(),
                     image_data=image_data,
                 )
-                accepted_ts.append(msg_ts)
-                self._apply_synced_reactions(
-                    channel_hash_hex, m, responder_hex
-                )
+                # A duplicate we already hold is still "accepted" -- the
+                # watermark should move past it. A failed insert for an id
+                # that lives in another channel is not: nothing landed here,
+                # so advancing would skip history we never received.
+                if inserted or self._storage.has_message(
+                    channel_hash_hex, m.get("message_id", "")
+                ):
+                    accepted_ts.append(msg_ts)
+                    self._apply_synced_reactions(
+                        channel_hash_hex, m, responder_hex
+                    )
 
                 if inserted:
                     inserted_count += 1

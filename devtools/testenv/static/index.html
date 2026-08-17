@@ -449,6 +449,7 @@
 <script>
 let TESTERS = [];
 let LINK_PROFILES = [];
+let API_TOKEN = '';
 let state = {};
 // Per-tag cache of identity_hash -> data URL (or null if confirmed no avatar).
 let avatarCache = {};
@@ -472,6 +473,17 @@ function apiBase(tag) {
 }
 function wsBase(tag) {
   return `ws://${location.hostname}:${state[tag].port}`;
+}
+// The tester APIs require this token (see api.py). A WebSocket handshake and
+// an <img> src can't carry a header, so those get it as a query parameter.
+function tokenParam(sep) {
+  return API_TOKEN ? `${sep}token=${encodeURIComponent(API_TOKEN)}` : '';
+}
+function withToken(opts) {
+  const merged = Object.assign({}, opts);
+  merged.headers = Object.assign({}, merged.headers || {},
+      API_TOKEN ? {'X-TC-Token': API_TOKEN} : {});
+  return merged;
 }
 
 function colsFor(n) {
@@ -512,7 +524,7 @@ function editDisplayName(tag) {
 }
 
 async function api(tag, path, opts) {
-  const res = await fetch(apiBase(tag) + path, opts);
+  const res = await fetch(apiBase(tag) + path, withToken(opts));
   if (!res.ok) throw new Error(`${tag} ${path} -> ${res.status}`);
   return res.json();
 }
@@ -560,10 +572,10 @@ async function toggleVoice(tag) {
 async function toggleTone(tag) {
   const btn = document.getElementById(`tone-btn-${tag}`);
   const enable = !btn.classList.contains('on');
-  const res = await fetch(apiBase(tag) + '/voice/test_tone', {
+  const res = await fetch(apiBase(tag) + '/voice/test_tone', withToken({
     method: 'POST', headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({enabled: enable}),
-  });
+  }));
   if (res.status === 409) {
     toast(`Tester ${tag}: join a voice session first`);
     return;
@@ -938,7 +950,7 @@ async function startTester(tag) {
 }
 
 function connectWs(tag) {
-  const ws = new WebSocket(wsBase(tag) + '/ws');
+  const ws = new WebSocket(wsBase(tag) + '/ws' + tokenParam('?'));
   ws.onmessage = (evt) => {
     const msg = JSON.parse(evt.data);
     if (msg.type === 'message' && msg.channel_hash === state[tag].activeChannel) {
@@ -1186,7 +1198,7 @@ async function renderMessages(tag) {
           <span class="content">${renderContent(tag, m.content)}</span>
           <button class="reply-btn" onclick='setReplyTarget("${tag}", ${JSON.stringify(m.message_id)}, ${JSON.stringify(m.sender_name || m.sender_hash.slice(0, 8))}, ${JSON.stringify(m.content || "(image)")})'>reply</button>
           <button class="react-btn" onclick="toggleEmojiPicker(event, '${tag}', '${m.message_id}')">+react</button>
-          ${m.has_image ? `<img class="attached" src="${apiBase(tag)}/channels/${state[tag].activeChannel}/messages/${m.message_id}/image">` : ''}
+          ${m.has_image ? `<img class="attached" src="${apiBase(tag)}/channels/${state[tag].activeChannel}/messages/${m.message_id}/image${tokenParam('?')}">` : ''}
           <div class="reactions">${chips}</div>
         </div>
       </div>
@@ -1695,6 +1707,7 @@ async function resetEnvironment() {
 
 async function init() {
   const cfg = await (await fetch('/config')).json();
+  API_TOKEN = cfg.api_token || '';
   TESTERS = cfg.testers.map(t => t.tag);
   LINK_PROFILES = cfg.link_profiles || [];
   state = {};

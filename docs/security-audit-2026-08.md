@@ -7,7 +7,13 @@ use by `main_flutter.py`). This audit re-verifies the hardening recorded in
 that document rather than replacing it: items there confirmed still-fixed are
 noted briefly; the new material is the findings and the test plan below.
 
-Baseline test run at audit time: `675 passed, 1 skipped` on the non-GUI suite.
+> **Status: everything except finding D (the PIN / encryption-at-rest rework)
+> has since been implemented.** See `docs/security-improvements.md` for what
+> landed, and §6 below for what was deliberately left. The findings are kept
+> here as written, so the reasoning behind each fix stays on record.
+
+Baseline test run at audit time: `675 passed, 1 skipped` on the non-GUI suite
+(704 after this work, same pre-existing Qt failures).
 The 10 failures + 9 collection errors seen in this environment are all Qt/GUI
 tests that need `libEGL.so.1` and a display (legacy client) — environmental,
 not code defects. The core, sync, adversarial, and API-adjacent suites are all
@@ -507,3 +513,31 @@ signature validation instead of the authorization/replay/DoS gap in question.
 None of the CRITICAL/HIGH items involve the Reticulum/LXMF cryptography, which
 remains sound. They are the application-layer trust and local-surface gaps that
 the network model, by design, leaves entirely to TrenchChat.
+
+---
+
+## 7. What was implemented, and what was left
+
+Items 1–6 above are done except the PIN work, plus most of the Low/DiD residue.
+Three things were deliberately *not* done, each because the honest fix is a
+decision rather than a patch:
+
+- **D — PIN / encryption at rest.** Needs a versioned KDF marker, a move to a
+  memory-hard KDF, removal of the verification oracle, persistent lockout in
+  `lockbox.unlock()`, and a re-key migration for existing databases. Its own
+  change.
+- **H — solicited sync authorship.** Now documented as a trust boundary
+  (`security-improvements.md` §0b). Closing it means propagating per-message
+  author signatures through sync — a protocol change, including a decision
+  about existing unsigned history.
+- **E, in part.** The exploitable half (decompression and frame bombs) is fixed
+  by `inbound_image_is_sane`, a header-only check that decodes no pixels.
+  Re-encoding every inbound image through one bounded library is the stronger
+  control but is lossy and costs CPU on the low-power hardware Reticulum
+  targets, and it would change an end-to-end property several tests pin
+  (images arrive byte-identical). That trade belongs to whoever owns the
+  product decision, not to a security pass.
+
+Also left, with reasoning recorded in `security-improvements.md`: `INVITE` on
+direct member additions (a test pins the current behaviour as intended), and
+storage-level size/retention caps.

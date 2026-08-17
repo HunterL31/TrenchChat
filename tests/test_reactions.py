@@ -29,7 +29,7 @@ from trenchchat.core.protocol import (
     F_REACTION_MSG_ID, F_REACTION_REMOVE, F_REACTION_UNICODE,
     MT_REACTION, MT_EMOJI_REQUEST, MT_EMOJI_RESPONSE,
 )
-from trenchchat.core.permissions import PRESET_PRIVATE, ROLE_MEMBER
+from trenchchat.core.permissions import PRESET_OPEN, PRESET_PRIVATE, ROLE_MEMBER
 from trenchchat.core.reaction import (
     EMOJI_FLUSH_BATCH, EMOJI_FLUSH_COOLDOWN_SECS, EMOJI_REQUEST_RETRY_SECS,
     MAX_EMOJI_BYTES,
@@ -611,6 +611,9 @@ class TestEmojiRequestResponse:
         sender_identity_mock = MagicMock()
         sender_identity_mock.hash = bytes.fromhex(sender_hex)
 
+        # A response only applies to an emoji we asked for; this is the
+        # state _request_emoji leaves behind.
+        mgr._pending_emoji_requests.add(emoji_hash)
         lxm = _make_lxm({
             F_MSG_TYPE: MT_EMOJI_RESPONSE,
             F_EMOJI_HASH: bytes.fromhex(emoji_hash),
@@ -634,6 +637,9 @@ class TestEmojiRequestResponse:
         sender_identity_mock = MagicMock()
         sender_identity_mock.hash = bytes.fromhex(sender_hex)
 
+        # A response only applies to an emoji we asked for; this is the
+        # state _request_emoji leaves behind.
+        mgr._pending_emoji_requests.add(emoji_hash)
         lxm = _make_lxm({
             F_MSG_TYPE:   MT_EMOJI_RESPONSE,
             F_EMOJI_HASH: bytes.fromhex(emoji_hash),
@@ -657,6 +663,9 @@ class TestEmojiRequestResponse:
         sender_identity_mock = MagicMock()
         sender_identity_mock.hash = bytes.fromhex(sender_hex)
 
+        # A response only applies to an emoji we asked for; this is the
+        # state _request_emoji leaves behind.
+        mgr._pending_emoji_requests.add(emoji_hash)
         lxm = _make_lxm({
             F_MSG_TYPE:   MT_EMOJI_RESPONSE,
             F_EMOJI_HASH: bytes.fromhex(emoji_hash),
@@ -721,6 +730,9 @@ class TestEmojiRequestResponse:
         sender_identity_mock = MagicMock()
         sender_identity_mock.hash = bytes.fromhex(sender_hex)
 
+        # A response only applies to an emoji we asked for; this is the
+        # state _request_emoji leaves behind.
+        mgr._pending_emoji_requests.add(emoji_hash)
         lxm = _make_lxm({
             F_MSG_TYPE: MT_EMOJI_RESPONSE,
             F_EMOJI_HASH: bytes.fromhex(emoji_hash),
@@ -808,6 +820,9 @@ class TestAdversarialReactions:
         img = _make_png()
         emoji_hash = compute_emoji_hash(img)
 
+        # A response only applies to an emoji we asked for; this is the
+        # state _request_emoji leaves behind.
+        mgr._pending_emoji_requests.add(emoji_hash)
         lxm = _make_lxm({
             F_MSG_TYPE: MT_EMOJI_RESPONSE,
             F_EMOJI_HASH: bytes.fromhex(emoji_hash),
@@ -821,6 +836,71 @@ class TestAdversarialReactions:
         # The response body is valid so the emoji IS stored even without sender resolve.
         # (The manager uses sender only for request routing, not emoji validation.)
         assert storage.emoji_exists(emoji_hash)
+
+    def test_unsolicited_emoji_response_is_discarded(self, reaction_mgr):
+        """An emoji nobody asked for is not written to the local library.
+
+        Storing unsolicited emoji lets any authenticated peer fill the library
+        at will, and a fresh hash per push slips past the exists-check that
+        would otherwise de-duplicate.
+        """
+        mgr, storage, identity, router = reaction_mgr
+        img = _make_png()
+        emoji_hash = compute_emoji_hash(img)
+
+        sender_hex = "dd" * 16
+        sender_identity_mock = MagicMock()
+        sender_identity_mock.hash = bytes.fromhex(sender_hex)
+
+        lxm = _make_lxm({
+            F_MSG_TYPE:   MT_EMOJI_RESPONSE,
+            F_EMOJI_HASH: bytes.fromhex(emoji_hash),
+            F_EMOJI_DATA: img,
+        }, source_hash_hex=sender_hex)
+
+        with patch(_REACTION_RECALL, return_value=sender_identity_mock):
+            self._deliver(router, lxm)
+
+        assert not storage.emoji_exists(emoji_hash), \
+            "An emoji response we never requested was stored"
+
+    def test_emoji_request_from_unrelated_peer_on_open_channel_is_refused(
+            self, reaction_mgr):
+        """Being in a public channel must not make us an open emoji server.
+
+        The open-join branch of the shared-channel check has to name the
+        requester; otherwise any node can enumerate the library.
+        """
+        mgr, storage, identity, router = reaction_mgr
+        img = _make_png()
+        emoji_hash = compute_emoji_hash(img)
+        storage.insert_emoji(emoji_hash, "test", img, time.time())
+
+        channel_hex = "dd" * 16
+        storage.upsert_channel(
+            hash=channel_hex, name="open", description="",
+            creator_hash="aa" * 16, permissions=PRESET_OPEN, created_at=0.0,
+        )
+        storage.subscribe(channel_hex)
+
+        stranger_hex = "cc" * 16
+        assert not mgr._shares_any_channel(stranger_hex), \
+            "An unrelated peer was treated as sharing an open-join channel"
+
+        stranger_identity = MagicMock()
+        stranger_identity.hash = bytes.fromhex(stranger_hex)
+        sent = []
+        router.send = lambda lxm: sent.append(lxm)
+
+        lxm = _make_lxm({
+            F_MSG_TYPE:   MT_EMOJI_REQUEST,
+            F_EMOJI_HASH: bytes.fromhex(emoji_hash),
+        }, source_hash_hex=stranger_hex)
+
+        with patch(_REACTION_RECALL, return_value=stranger_identity):
+            self._deliver(router, lxm)
+
+        assert not sent, "The emoji library answered an unrelated peer"
 
 
 # ---------------------------------------------------------------------------

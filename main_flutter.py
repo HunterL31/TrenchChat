@@ -93,7 +93,7 @@ def main():
 
     import uvicorn
 
-    from api import create_app
+    from api import create_app, generate_token
     from backend_core import Backend
 
     desktop_binary = None if args.browser else find_desktop_binary()
@@ -118,7 +118,8 @@ def main():
     backend.start_voice_ticker()
     threading.Timer(_STARTUP_SYNC_DELAY_SECS, backend.sync_mgr.request_sync_all).start()
 
-    app = create_app(backend)
+    api_token = generate_token()
+    app = create_app(backend, token=api_token)
     if _WEB_DIR.is_dir():
         from fastapi.staticfiles import StaticFiles
         # Mounted last, so every API route declared above still wins.
@@ -142,18 +143,21 @@ def main():
     signal.signal(signal.SIGINT, lambda *_: stop.set())
     signal.signal(signal.SIGTERM, lambda *_: stop.set())
 
+    client_url = f"{url}/?token={api_token}"
     print(f"TrenchChat backend up as {backend.identity.hash_hex} at {url}")
     if args.no_ui:
-        print("running headless; press Ctrl+C to quit")
+        print(f"running headless; open {client_url}")
+        print("press Ctrl+C to quit")
     elif desktop_binary is not None:
         print(f"opening desktop client: {desktop_binary}")
-        proc = subprocess.Popen([str(desktop_binary)],
-                                env=dict(os.environ, TC_API_URL=url))
+        proc = subprocess.Popen(
+            [str(desktop_binary)],
+            env=dict(os.environ, TC_API_URL=url, TC_API_TOKEN=api_token))
         threading.Thread(target=lambda: (proc.wait(), stop.set()),
                          daemon=True, name="ui-watcher").start()
     else:
-        print(f"opening web client: {url}")
-        webbrowser.open(url)
+        print(f"opening web client: {client_url}")
+        webbrowser.open(client_url)
         print("press Ctrl+C to quit")
 
     while not stop.wait(0.5):

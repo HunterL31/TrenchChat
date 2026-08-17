@@ -57,7 +57,7 @@ from trenchchat.core.permissions import (
     ALL_PERMISSIONS, FULL_SYNC, INVITE, KICK, MANAGE_CHANNEL, MANAGE_ROLES,
     PRESET_OPEN, PRESET_PRIVATE, ROLE_ADMIN, ROLE_MEMBER, ROLE_OWNER, SEND_MESSAGE,
 )
-from trenchchat.core.subscription import _subscriber_payload
+from trenchchat.core.subscription import SubscriptionManager, _subscriber_payload
 from trenchchat.core.protocol import (
     F_SUBSCRIBER_LIST, F_SUBSCRIBER_SIG, F_SUBSCRIBER_VERSION, MT_SUBSCRIBER_LIST,
     F_ADMIN_HASH, F_CHANNEL_HASH, F_DISPLAY_NAME, F_EXPIRY_TS, F_INVITE_TOKEN,
@@ -2047,6 +2047,45 @@ class TestAdversarialSubscriberList:
         assert "dd" * 16 not in bob.subscription_mgr.get_subscribers(ch_hash), \
             "An older signed subscriber list was replayed successfully"
 
+    def test_replay_is_still_rejected_after_a_restart(self, peer_factory):
+        """The version watermark has to outlive the process.
+
+        A captured older list stays validly signed forever, so if the
+        watermark only lives in memory a restart re-opens the replay --
+        resurrecting a removed subscriber, which is who delivery goes to.
+        """
+        alice, bob, ch_hash = self._setup(peer_factory)
+
+        def signed(members, version):
+            packed = msgpack.packb(members, use_bin_type=True)
+            sig = _sign(alice.identity.rns_identity,
+                        _subscriber_payload(ch_hash, version, packed))
+            return packed, version, sig
+
+        current = ["aa" * 16, "bb" * 16]
+        self._send(alice, bob, ch_hash, *signed(current, 5))
+
+        # Bob restarts: a fresh manager over the same storage, exactly as the
+        # app rebuilds it. The roster is persisted, so the watermark must be.
+        restarted = SubscriptionManager(bob.identity, bob.storage, bob.router)
+        assert set(restarted.get_subscribers(ch_hash)) == set(current)
+
+        restarted._handle_subscriber_list(
+            {
+                F_MSG_TYPE:           MT_SUBSCRIBER_LIST,
+                F_CHANNEL_HASH:       bytes.fromhex(ch_hash),
+                F_SUBSCRIBER_LIST:    signed(["aa" * 16, "dd" * 16], 3)[0],
+                F_SUBSCRIBER_VERSION: 3,
+                F_SUBSCRIBER_SIG:     signed(["aa" * 16, "dd" * 16], 3)[2],
+            },
+            ch_hash,
+            alice.identity.hash_hex,
+        )
+
+        assert "dd" * 16 not in restarted.get_subscribers(ch_hash), \
+            "An older signed subscriber list was replayed across a restart"
+        assert set(restarted.get_subscribers(ch_hash)) == set(current)
+
 
 # ---------------------------------------------------------------------------
 # SERVERS
@@ -2280,6 +2319,25 @@ class TestAdversarialServerBinding:
             F_CHANNEL_CREATOR: alice.identity.hash_hex,
         }, real)
         assert bob.storage.get_server(real) is not None
+
+    def test_standalone_channel_creator_must_bind_to_the_hash(self, peer_factory):
+        """The same binding servers get, for a standalone channel's metadata.
+
+        creator_hash arrives unsigned and then serves as a trusted-signer
+        fallback for later documents, so an unbindable claim must not become a
+        local channel row.
+        """
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+
+        assert bob.invite_mgr._creator_binds(
+            channel_hash_for(alice.identity.hash, "real-ch"),
+            alice.identity.hash_hex, "real-ch",
+        ), "a correctly minted channel hash failed to bind"
+
+        assert not bob.invite_mgr._creator_binds(
+            "cd" * 16, alice.identity.hash_hex, "real-ch",
+        ), "a channel hash unrelated to its claimed creator was accepted"
 
     def test_server_doc_for_another_server_is_rejected(self, peer_factory):
         alice, bob, s = _server_with_member(peer_factory)

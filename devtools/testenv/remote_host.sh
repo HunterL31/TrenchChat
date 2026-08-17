@@ -106,8 +106,11 @@ start_tailscale() {
 start_testenv() {
     port_up 8800 && return
     log "starting dev environment ($TESTERS testers)"
+    # Both servers bind localhost by default; hosting for the tailnet is the
+    # whole point of this script, so it opts in explicitly. The API token
+    # printed in each log is what protects the exposed identities.
     nohup "$VENV/bin/python" "$REPO_ROOT/devtools/testenv/orchestrator.py" \
-        --testers "$TESTERS" >"$STATE_DIR/orchestrator.log" 2>&1 &
+        --testers "$TESTERS" --host 0.0.0.0 >"$STATE_DIR/orchestrator.log" 2>&1 &
     echo $! >"$STATE_DIR/orchestrator.pid"
 }
 
@@ -116,7 +119,7 @@ start_client() {
     log "starting web client (own identity) on $CLIENT_PORT"
     ensure_rns_config
     nohup "$VENV/bin/python" "$REPO_ROOT/devtools/testenv/serve_profile.py" \
-        --port "$CLIENT_PORT" --rns-configdir "$STATE_DIR/rns" \
+        --port "$CLIENT_PORT" --host 0.0.0.0 --rns-configdir "$STATE_DIR/rns" \
         >"$STATE_DIR/client.log" 2>&1 &
     echo $! >"$STATE_DIR/client.pid"
 }
@@ -165,7 +168,7 @@ cmd_status() {
     if [ -n "$ip" ]; then
         log "tailscale: $(ts status --json 2>/dev/null |
             grep -o '"BackendState": "[^"]*"' | head -1)"
-        log "web client:      http://$ip:$CLIENT_PORT/"
+        log "web client:      http://$ip:$CLIENT_PORT/  (token in client.log)"
         log "dev environment: http://$ip:8800/"
     else
         log "tailscale: not connected"

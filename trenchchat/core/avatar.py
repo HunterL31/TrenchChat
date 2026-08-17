@@ -29,6 +29,7 @@ from PIL import Image
 
 from trenchchat.config import Config
 from trenchchat.core.identity import Identity
+from trenchchat.core.image import inbound_image_is_sane
 from trenchchat.core.protocol import (
     F_MSG_TYPE, F_AVATAR_DATA, F_AVATAR_VERSION,
     MT_AVATAR_UPDATE,
@@ -42,6 +43,9 @@ MAX_AVATAR_BYTES = 16384
 
 SEND_RATE_LIMIT_SECS = 60
 RECEIVE_RATE_LIMIT_SECS = SEND_RATE_LIMIT_SECS
+
+# Ceiling on how many senders the receive-throttle map tracks at once.
+MAX_TRACKED_SENDERS = 512
 
 
 def compress_avatar(image_bytes: bytes) -> bytes:
@@ -265,6 +269,16 @@ class AvatarManager:
             )
             return
 
+        # The size cap bounds the payload, not the raster it decodes to, and
+        # these bytes go to the client's image decoder.
+        if not inbound_image_is_sane(avatar_data):
+            RNS.log(
+                f"TrenchChat [avatar]: rejected avatar from {sender_hex[:12]}… — "
+                f"header declares an implausible decode",
+                RNS.LOG_WARNING,
+            )
+            return
+
         # Receive rate limiting
         with self._lock:
             now = time.time()
@@ -276,6 +290,12 @@ class AvatarManager:
                 )
                 return
             self._last_received[sender_hex] = now
+            if len(self._last_received) > MAX_TRACKED_SENDERS:
+                # Identities are free to mint, so this map has to be bounded by
+                # something other than the number of peers who talk to us.
+                for stale in [h for h, t in self._last_received.items()
+                              if now - t > RECEIVE_RATE_LIMIT_SECS]:
+                    del self._last_received[stale]
 
         existing = self._storage.get_peer_avatar(sender_hex)
         if existing is not None:

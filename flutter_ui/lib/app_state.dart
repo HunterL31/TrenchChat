@@ -28,9 +28,9 @@ const Duration _reactionRefreshWindow = Duration(milliseconds: 250);
 class AppState extends ChangeNotifier {
   /// [httpClient] lets tests inject a mock transport; the real app leaves it
   /// null and gets a standard IO client.
-  AppState({required String baseUrl, http.Client? httpClient})
-      : api = ApiClient(baseUrl: baseUrl, client: httpClient),
-        _socket = TcSocket(baseUrl: baseUrl);
+  AppState({required String baseUrl, http.Client? httpClient, String token = ''})
+      : api = ApiClient(baseUrl: baseUrl, client: httpClient, token: token),
+        _socket = TcSocket(baseUrl: baseUrl, token: token);
 
   final ApiClient api;
   final TcSocket _socket;

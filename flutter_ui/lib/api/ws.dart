@@ -12,8 +12,11 @@ const Duration _reconnectBaseDelay = Duration(seconds: 1);
 const Duration _reconnectMaxDelay = Duration(seconds: 30);
 
 class TcSocket {
-  TcSocket({required String baseUrl})
-      : _uri = Uri.parse('${baseUrl.replaceFirst('http', 'ws')}/ws');
+  /// The token goes in the query string because a browser cannot set headers
+  /// on a WebSocket handshake, and this socket carries every inbound message.
+  TcSocket({required String baseUrl, String token = ''})
+      : _uri = Uri.parse('${baseUrl.replaceFirst('http', 'ws')}/ws'
+            '${token.isEmpty ? '' : '?token=${Uri.encodeQueryComponent(token)}'}');
 
   final Uri _uri;
   final StreamController<TcEvent> _events = StreamController.broadcast();

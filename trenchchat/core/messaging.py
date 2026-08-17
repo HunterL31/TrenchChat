@@ -40,8 +40,9 @@ from trenchchat.core.protocol import (
     F_CHANNEL_HASH, F_DISPLAY_NAME, F_TIMESTAMP, F_MESSAGE_ID,
     F_REPLY_TO, F_LAST_SEEN_ID, F_SYNC_WINDOW_START, F_SYNC_MESSAGES,
     F_MISSED_FOR, F_MISSED_MSG_ID, F_MSG_TYPE, F_IMAGE_DATA,
+    wire_timestamp,
 )
-from trenchchat.core.image import MAX_IMAGE_BYTES
+from trenchchat.core.image import MAX_IMAGE_BYTES, inbound_image_is_sane
 from trenchchat.core.storage import Storage
 from trenchchat.network.router import Router
 
@@ -315,23 +316,36 @@ class Messaging:
             if sender_identity else (message.source_hash.hex() if message.source_hash else "")
 
         channel = self._storage.get_channel(channel_hash_hex)
-        if channel:
-            perms = permissions_from_json(channel["permissions"])
-            if not is_open_join(perms):
-                if not self._storage.is_member(channel_hash_hex, sender_hex):
-                    return
-                if not self._storage.has_permission(channel_hash_hex, sender_hex, SEND_MESSAGE):
-                    RNS.log(
-                        f"TrenchChat: dropping message from {sender_hex[:12]}… — "
-                        f"no {SEND_MESSAGE} permission on channel {channel_hash_hex[:12]}…",
-                        RNS.LOG_WARNING,
-                    )
-                    return
+        if channel is None:
+            # Subscribed with no channel row: the permission model has nothing
+            # to check against, so there is no way to authorise this. Fail
+            # closed, matching reaction.py's _may_react.
+            RNS.log(
+                f"TrenchChat: dropping message for unknown channel "
+                f"{channel_hash_hex[:12]}… from {sender_hex[:12]}…",
+                RNS.LOG_WARNING,
+            )
+            return
+
+        perms = permissions_from_json(channel["permissions"])
+        if not is_open_join(perms):
+            if not self._storage.is_member(channel_hash_hex, sender_hex):
+                return
+            if not self._storage.has_permission(channel_hash_hex, sender_hex, SEND_MESSAGE):
+                RNS.log(
+                    f"TrenchChat: dropping message from {sender_hex[:12]}… — "
+                    f"no {SEND_MESSAGE} permission on channel {channel_hash_hex[:12]}…",
+                    RNS.LOG_WARNING,
+                )
+                return
         sender_name = fields.get(F_DISPLAY_NAME, "")
         if isinstance(sender_name, bytes):
             sender_name = sender_name.decode(errors="replace")
 
-        timestamp = fields.get(F_TIMESTAMP) or time.time()
+        # A sender's own clock is the best evidence available for when they
+        # sent something, but an implausible value is not evidence of
+        # anything -- fall back to ours rather than storing it.
+        timestamp = wire_timestamp(fields.get(F_TIMESTAMP)) or time.time()
         msg_id = fields.get(F_MESSAGE_ID, "")
         if isinstance(msg_id, bytes):
             msg_id = msg_id.decode(errors="replace")
@@ -357,6 +371,13 @@ class Messaging:
             RNS.log(
                 f"TrenchChat: dropping oversized image ({len(image_data)} bytes, "
                 f"max {MAX_IMAGE_BYTES}) from {sender_hex[:12]}…",
+                RNS.LOG_WARNING,
+            )
+            image_data = None
+        elif not inbound_image_is_sane(image_data):
+            RNS.log(
+                f"TrenchChat: dropping image from {sender_hex[:12]}… — header "
+                f"declares an implausible decode",
                 RNS.LOG_WARNING,
             )
             image_data = None

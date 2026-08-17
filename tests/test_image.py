@@ -271,3 +271,74 @@ class TestCompressGif:
         result = compress_gif(data)
         n_compressed = Image.open(io.BytesIO(result)).n_frames
         assert n_compressed == n_original
+
+
+# ---------------------------------------------------------------------------
+# inbound_image_is_sane
+# ---------------------------------------------------------------------------
+
+import struct  # noqa: E402
+import zlib  # noqa: E402
+
+from trenchchat.core.image import (  # noqa: E402
+    MAX_GIF_FRAMES, MAX_INBOUND_DECODED_PIXELS, inbound_image_is_sane,
+)
+
+
+def _png_declaring(width: int, height: int) -> bytes:
+    """A tiny PNG whose IHDR claims the given dimensions.
+
+    This is the shape of a decompression bomb: the file stays small while the
+    header tells the decoder to allocate width*height pixels.
+    """
+    def chunk(kind: bytes, payload: bytes) -> bytes:
+        return (struct.pack(">I", len(payload)) + kind + payload
+                + struct.pack(">I", zlib.crc32(kind + payload) & 0xFFFFFFFF))
+
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr)
+            + chunk(b"IDAT", zlib.compress(b"\x00" * 16)) + chunk(b"IEND", b""))
+
+
+def _gif_with_frames(count: int) -> bytes:
+    """An animated GIF of `count` tiny frames -- small bytes, long decode.
+
+    Frames alternate colour: identical frames get collapsed on save, which
+    would leave a one-frame GIF and prove nothing.
+    """
+    frames = [Image.new("L", (2, 2), 0 if i % 2 else 255) for i in range(count)]
+    buf = io.BytesIO()
+    frames[0].save(buf, format="GIF", save_all=True, append_images=frames[1:])
+    return buf.getvalue()
+
+
+class TestInboundImageIsSane:
+    """The byte cap bounds the payload, not the raster it expands to."""
+
+    def test_ordinary_image_passes(self):
+        assert inbound_image_is_sane(_make_jpeg(200, 150))
+        assert inbound_image_is_sane(_make_png(64, 64))
+
+    def test_oversized_declared_dimensions_are_rejected(self):
+        side = int(MAX_INBOUND_DECODED_PIXELS ** 0.5) + 1000
+        bomb = _png_declaring(side, side)
+        assert len(bomb) < 1024, "the point is that the file itself is tiny"
+        assert not inbound_image_is_sane(bomb), \
+            "an image declaring a multi-gigapixel decode was accepted"
+
+    def test_frame_bomb_is_rejected(self):
+        assert not inbound_image_is_sane(_gif_with_frames(MAX_GIF_FRAMES + 1)), \
+            "a GIF with more frames than the cap was accepted"
+
+    def test_animation_within_the_frame_cap_passes(self):
+        assert inbound_image_is_sane(_gif_with_frames(5))
+
+    def test_unparseable_bytes_are_left_alone(self):
+        """Not provably hostile, and stored as an opaque blob either way.
+
+        Normalising these by re-encoding every inbound image is the stronger
+        control, at the cost of being lossy and expensive on the low-power
+        hardware Reticulum targets -- see docs/security-audit-2026-08.md.
+        """
+        assert inbound_image_is_sane(b"\xff\xd8\xff\xe0" + b"\x00" * 100)
+        assert inbound_image_is_sane(b"not an image at all")
