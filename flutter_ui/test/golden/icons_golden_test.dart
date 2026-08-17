@@ -13,6 +13,9 @@ void main() {
   setUpAll(loadTestFonts);
 
   testWidgets('icon pack at 16px and 32px', (tester) async {
+    // The catalog outgrew the default 800px test surface.
+    await tester.binding.setSurfaceSize(const Size(1400, 600));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
     await tester.pumpWidget(MaterialApp(
       theme: buildAppTheme(),
       debugShowCheckedModeBanner: false,

@@ -49,6 +49,16 @@ sealed class TcEvent {
         return EmojiReceivedEvent(json['emoji_hash'] as String);
       case 'friend_updated':
         return FriendUpdatedEvent(json['identity_hash'] as String);
+      case 'voice_roster':
+        return VoiceRosterEvent(json['channel_hash'] as String);
+      case 'voice_speaking':
+        return VoiceSpeakingEvent(
+          json['channel_hash'] as String,
+          json['identity_hash'] as String,
+          json['speaking'] as bool,
+        );
+      case 'voice_session':
+        return VoiceSessionEvent(json['state'] as String);
       default:
         return null;
     }
@@ -114,4 +124,27 @@ class EmojiReceivedEvent extends TcEvent {
 class FriendUpdatedEvent extends TcEvent {
   const FriendUpdatedEvent(this.identityHash);
   final String identityHash;
+}
+
+/// A channel's voice roster changed. Carries only the hash; handlers
+/// re-fetch GET /channels/{hash}/voice/roster for the full roster.
+class VoiceRosterEvent extends TcEvent {
+  const VoiceRosterEvent(this.channelHash);
+  final String channelHash;
+}
+
+/// A voice participant started or stopped speaking; applied in place.
+class VoiceSpeakingEvent extends TcEvent {
+  const VoiceSpeakingEvent(this.channelHash, this.identityHash, this.speaking);
+  final String channelHash;
+  final String identityHash;
+  final bool speaking;
+}
+
+/// Our own voice session changed: 'joined' | 'left' | 'audio_error'.
+/// audio_error means the session is up but capture/playback failed --
+/// the client stays in the call, listening-only.
+class VoiceSessionEvent extends TcEvent {
+  const VoiceSessionEvent(this.state);
+  final String state;
 }

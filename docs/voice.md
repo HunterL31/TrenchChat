@@ -96,9 +96,13 @@ Rules for the GUI, same as every other manager:
 - **Callbacks fire on background threads.** Emit Qt signals; never touch
   widgets directly from them (`.claude/rules/gui-conventions.md`).
 - **Gate the join control** on `storage.has_permission(channel_hash,
-  self_hex, VOICE_CHAT)` — that is the GUI layer of the three-layer
-  enforcement (`.claude/rules/permission-enforcement.md`); the actions
-  guard and core enforcement already exist.
+  self_hex, VOICE_CHAT)` (open-join channels need no permission row) —
+  that is the GUI layer of the three-layer enforcement
+  (`.claude/rules/permission-enforcement.md`). The Flutter client
+  implements this gate in `main_window.dart` via
+  `GET /channels/{h}/my_permissions`; its voice UI lives in
+  `channel_column.dart` (roster section) and `voice_panel.dart`
+  (session panel), with quality polled from `GET /voice/status`.
 - `"audio_error"` means the session is up but capture/playback failed
   (missing system library, no device); show recv-only/muted state, don't
   treat it as a failed join.

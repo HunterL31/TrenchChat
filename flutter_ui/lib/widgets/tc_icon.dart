@@ -193,6 +193,60 @@ class TcIcons {
       Offset(8, 4.4), Offset(9.1, 5.5), Offset(8, 6.6), Offset(6.9, 5.5),
     ],
   ]);
+  static const mic = TcIconData('mic', [
+    [
+      Offset(6.25, 3.5), Offset(7, 2.75), Offset(9, 2.75), Offset(9.75, 3.5),
+      Offset(9.75, 8), Offset(9, 8.75), Offset(7, 8.75), Offset(6.25, 8),
+      Offset(6.25, 3.5),
+    ],
+    [
+      Offset(4.25, 7), Offset(4.25, 9), Offset(6.25, 11), Offset(9.75, 11),
+      Offset(11.75, 9), Offset(11.75, 7),
+    ],
+    [
+      Offset(8, 11), Offset(8, 13.25),
+    ],
+    [
+      Offset(5.5, 13.25), Offset(10.5, 13.25),
+    ],
+  ]);
+
+  static const micMuted = TcIconData('micMuted', [
+    [
+      Offset(6.25, 3.5), Offset(7, 2.75), Offset(9, 2.75), Offset(9.75, 3.5),
+      Offset(9.75, 8), Offset(9, 8.75), Offset(7, 8.75), Offset(6.25, 8),
+      Offset(6.25, 3.5),
+    ],
+    [
+      Offset(4.25, 7), Offset(4.25, 9), Offset(6.25, 11), Offset(9.75, 11),
+      Offset(11.75, 9), Offset(11.75, 7),
+    ],
+    [
+      Offset(8, 11), Offset(8, 13.25),
+    ],
+    [
+      Offset(5.5, 13.25), Offset(10.5, 13.25),
+    ],
+    [
+      Offset(3.25, 3.25), Offset(12.75, 12.75),
+    ],
+  ]);
+
+  static const headset = TcIconData('headset', [
+    [
+      Offset(3.5, 9.5), Offset(3.5, 6), Offset(6, 3.5), Offset(10, 3.5),
+      Offset(12.5, 6), Offset(12.5, 9.5),
+    ],
+    [
+      Offset(3, 9.5), Offset(5.25, 9.5), Offset(5.25, 12.75), Offset(3, 12.75),
+      Offset(3, 9.5),
+    ],
+    [
+      Offset(10.75, 9.5), Offset(13, 9.5), Offset(13, 12.75), Offset(10.75, 12.75),
+      Offset(10.75, 9.5),
+    ],
+  ]);
+
   static const menu = TcIconData('menu', [
     [
       Offset(3, 4.5), Offset(13, 4.5),
@@ -206,7 +260,8 @@ class TcIcons {
   ]);
 
   static const List<TcIconData> all = [
-    settings, lock, plus, join, emoji, hash, users, close, search, send, sync, map, iface, menu,
+    settings, lock, plus, join, emoji, hash, users, close, search, send, sync, map, iface,
+    mic, micMuted, headset, menu,
   ];
 }
 

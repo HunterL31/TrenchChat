@@ -39,7 +39,7 @@ from trenchchat.core.interfaces_config import (
 )
 from trenchchat.core.permissions import (
     ALL_PERMISSIONS, CREATE_CHANNEL, INVITE, KICK, MANAGE_CHANNEL, MANAGE_ROLES,
-    ROLE_ADMIN, ROLE_MEMBER, PRESET_OPEN, PRESET_PRIVATE,
+    ROLE_ADMIN, ROLE_MEMBER, PRESET_OPEN, PRESET_PRIVATE, VOICE_CHAT,
     is_open_join, permissions_from_json,
 )
 from trenchchat.core.presence import resolve_display_name
@@ -778,6 +778,7 @@ def create_app(backend: Backend) -> FastAPI:
             "kick": backend.storage.has_permission(channel_hash, my_hex, KICK),
             "manage_roles": backend.storage.has_permission(channel_hash, my_hex, MANAGE_ROLES),
             "manage_channel": backend.storage.has_permission(channel_hash, my_hex, MANAGE_CHANNEL),
+            "voice_chat": backend.storage.has_permission(channel_hash, my_hex, VOICE_CHAT),
         }
 
     @app.get("/channels/{channel_hash}/permissions")

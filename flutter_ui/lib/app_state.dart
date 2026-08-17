@@ -18,6 +18,7 @@ import 'api/models/message.dart';
 import 'api/models/permissions.dart';
 import 'api/models/server.dart';
 import 'api/models/settings.dart';
+import 'api/models/voice.dart';
 import 'api/ws.dart';
 
 class AppState extends ChangeNotifier {
@@ -51,6 +52,23 @@ class AppState extends ChangeNotifier {
   final Map<String, ChannelPermissions> permissionsByChannel = {};
   final Map<String, Uint8List?> avatarCache = {};
 
+  final Map<String, List<VoiceParticipant>> voiceRosterByChannel = {};
+
+  /// The live voice session, straight from GET /voice/status; idle when not
+  /// in a call. Refreshed on session events and by [_voicePollTimer].
+  VoiceStatus voiceStatus = VoiceStatus.idle;
+
+  /// Optimistic local mute state; reconciled from the backend on each poll.
+  bool voiceMuted = false;
+
+  /// Set by a `voice_session: audio_error` event: the session is up but
+  /// capture/playback failed -- we stay in the call, listening-only.
+  bool voiceAudioError = false;
+  Timer? _voicePollTimer;
+
+  String? get voiceChannelHash => voiceStatus.channel;
+  LinkQualityLevel get voiceQualityLevel => voiceOverallLevel(voiceStatus);
+
   /// Custom emoji library, keyed by emoji hash. Loaded lazily on first
   /// [ensureEmojiLoaded] and kept fresh on [EmojiReceivedEvent].
   final Map<String, CustomEmoji> customEmojis = {};
@@ -71,7 +89,10 @@ class AppState extends ChangeNotifier {
 
   Channel? get selectedChannel {
     final hash = selectedChannelHash;
-    if (hash == null) return null;
+    return hash == null ? null : channelByHash(hash);
+  }
+
+  Channel? channelByHash(String hash) {
     for (final c in standaloneChannels) {
       if (c.hash == hash) return c;
     }
@@ -117,6 +138,9 @@ class AppState extends ChangeNotifier {
       _socket.onReconnected = _onSocketReconnected;
       _sub = _socket.events.listen(_onEvent);
       unawaited(ensureEmojiLoaded());
+      // The backend session outlives client restarts; pick it up if live.
+      await refreshVoiceStatus();
+      if (voiceStatus.channel != null) _startVoicePoll();
     } catch (e) {
       error = e.toString();
       loading = false;
@@ -132,12 +156,14 @@ class AppState extends ChangeNotifier {
         api.getChannelPresence(channelHashHex),
         api.getChannelLinkQuality(channelHashHex),
         api.getMyPermissions(channelHashHex),
+        api.getVoiceRoster(channelHashHex),
       ]);
       membersByChannel[channelHashHex] = results[0] as List<Member>;
       messagesByChannel[channelHashHex] = results[1] as List<Message>;
       presenceByChannel[channelHashHex] = results[2] as List<PresenceEntry>;
       linkQualityByChannel[channelHashHex] = results[3] as ChannelLinkQuality;
       permissionsByChannel[channelHashHex] = results[4] as ChannelPermissions;
+      voiceRosterByChannel[channelHashHex] = results[5] as List<VoiceParticipant>;
       notifyListeners();
     } catch (e) {
       _reportActionError(e);
@@ -179,6 +205,7 @@ class AppState extends ChangeNotifier {
     if (channelHash != null) unawaited(loadChannel(channelHash));
     unawaited(refreshInvites());
     unawaited(refreshEmoji());
+    unawaited(refreshVoiceStatus());
   }
 
   Future<bool> sendMessage(String content) async {
@@ -290,6 +317,93 @@ class AppState extends ChangeNotifier {
       _reportActionError(e);
       return false;
     }
+  }
+
+  /// Joins [channelHashHex]'s voice session. Returns false (with
+  /// [actionError] set) when the backend refused the join.
+  Future<bool> joinVoice(String channelHashHex) async {
+    try {
+      final ok = await api.joinVoice(channelHashHex);
+      if (ok) {
+        await refreshVoiceStatus();
+        await refreshVoiceRoster(channelHashHex);
+        _startVoicePoll();
+        return true;
+      }
+      // The backend gives no machine-readable reason yet.
+      actionError =
+          "Couldn't join voice — no permission, already in a call, or the room is full.";
+      notifyListeners();
+      return false;
+    } catch (e) {
+      _reportActionError(e);
+      return false;
+    }
+  }
+
+  Future<bool> leaveVoice() async {
+    final oldChannel = voiceStatus.channel;
+    try {
+      final ok = await api.leaveVoice();
+      _stopVoicePoll();
+      voiceStatus = VoiceStatus.idle;
+      voiceAudioError = false;
+      notifyListeners();
+      if (oldChannel != null) unawaited(refreshVoiceRoster(oldChannel));
+      return ok;
+    } catch (e) {
+      _reportActionError(e);
+      return false;
+    }
+  }
+
+  /// Optimistic: flips the local state immediately, reverts on failure.
+  Future<bool> toggleVoiceMute() async {
+    final target = !voiceMuted;
+    voiceMuted = target;
+    notifyListeners();
+    try {
+      await api.setVoiceMuted(target);
+      return true;
+    } catch (e) {
+      voiceMuted = !target;
+      _reportActionError(e);
+      return false;
+    }
+  }
+
+  Future<void> refreshVoiceRoster(String channelHashHex) async {
+    try {
+      voiceRosterByChannel[channelHashHex] = await api.getVoiceRoster(channelHashHex);
+      notifyListeners();
+    } catch (_) {
+      // Next WS event or poll tick will catch it up.
+    }
+  }
+
+  Future<void> refreshVoiceStatus() async {
+    try {
+      voiceStatus = await api.getVoiceStatus();
+      voiceMuted = voiceStatus.muted;
+      notifyListeners();
+    } catch (_) {
+      // Next poll tick will catch it up.
+    }
+  }
+
+  /// Quality isn't pushed over WS, so poll /voice/status while in a session;
+  /// the roster refresh also self-heals any missed voice_roster event.
+  void _startVoicePoll() {
+    _voicePollTimer ??= Timer.periodic(const Duration(seconds: 4), (_) {
+      unawaited(refreshVoiceStatus());
+      final channelHash = voiceStatus.channel;
+      if (channelHash != null) unawaited(refreshVoiceRoster(channelHash));
+    });
+  }
+
+  void _stopVoicePoll() {
+    _voicePollTimer?.cancel();
+    _voicePollTimer = null;
   }
 
   Future<void> refreshInvites() async {
@@ -544,11 +658,41 @@ class AppState extends ChangeNotifier {
         unawaited(refreshEmoji());
       case FriendUpdatedEvent():
         unawaited(loadFriends());
+      case VoiceRosterEvent(:final channelHash):
+        if (channelHash == selectedChannelHash ||
+            channelHash == voiceStatus.channel ||
+            voiceRosterByChannel.containsKey(channelHash)) {
+          unawaited(refreshVoiceRoster(channelHash));
+        }
+      case VoiceSpeakingEvent(:final channelHash, :final identityHash, :final speaking):
+        final roster = voiceRosterByChannel[channelHash];
+        if (roster != null) {
+          final idx = roster.indexWhere((p) => p.identityHash == identityHash);
+          if (idx >= 0) {
+            roster[idx] = roster[idx].copyWith(speaking: speaking);
+            notifyListeners();
+          }
+        }
+      case VoiceSessionEvent(:final state):
+        switch (state) {
+          case 'joined':
+            unawaited(refreshVoiceStatus());
+            _startVoicePoll();
+          case 'left':
+            _stopVoicePoll();
+            voiceStatus = VoiceStatus.idle;
+            voiceAudioError = false;
+            notifyListeners();
+          case 'audio_error':
+            voiceAudioError = true;
+            notifyListeners();
+        }
     }
   }
 
   @override
   void dispose() {
+    _voicePollTimer?.cancel();
     _sub?.cancel();
     _socket.close();
     api.close();

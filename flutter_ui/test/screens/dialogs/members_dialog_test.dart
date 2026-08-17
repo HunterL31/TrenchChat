@@ -86,6 +86,7 @@ void main() {
       manageRoles: false,
       manageChannel: false,
       sendMessage: true,
+      voiceChat: true,
     );
     await open(tester);
 
@@ -99,6 +100,7 @@ void main() {
       manageRoles: true,
       manageChannel: false,
       sendMessage: true,
+      voiceChat: true,
     );
     await open(tester);
 

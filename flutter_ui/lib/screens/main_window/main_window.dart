@@ -6,6 +6,7 @@ import '../../api/models/link_quality.dart';
 import '../../api/models/member.dart';
 import '../../api/models/message.dart';
 import '../../api/models/server.dart';
+import '../../api/models/voice.dart';
 import '../../app_state.dart';
 import '../../theme/tokens.dart';
 import '../dialogs/add_friend_dialog.dart';
@@ -24,6 +25,7 @@ import 'iface_tab.dart';
 import 'map_tab.dart';
 import 'message_list.dart';
 import 'server_rail.dart';
+import 'voice_panel.dart';
 
 /// Below this width the three-column shell collapses to a single pane with
 /// the rail + channel column in a drawer.
@@ -126,6 +128,18 @@ class _MainWindowState extends State<MainWindow> {
         final permissions = channelHash != null ? state.permissionsByChannel[channelHash] : null;
         final friendHashes = state.friends.map((f) => f.identityHash).toSet();
 
+        final List<VoiceParticipant> voiceRoster = channelHash != null
+            ? state.voiceRosterByChannel[channelHash] ?? const []
+            : const [];
+        final inVoice = state.voiceChannelHash != null;
+        // GUI gate, mirroring actions.join_voice_channel: open-join channels
+        // need no permission row; the actions guard and VoiceManager's core
+        // enforcement remain the real boundaries.
+        final canJoinVoice = channel != null &&
+            channelHash != null &&
+            !inVoice &&
+            (channel.openJoin || (permissions?.voiceChat ?? false));
+
         final compact = MediaQuery.of(context).size.width < compactBreakpoint;
 
         final rail = ServerRail(
@@ -160,7 +174,26 @@ class _MainWindowState extends State<MainWindow> {
           onJoinChannel: () => showJoinChannelDialog(context, state),
           friendHashes: friendHashes,
           onAddFriend: (hash) => showAddFriendDialog(context, state, identityHash: hash),
+          voiceParticipants: voiceRoster,
+          onJoinVoice: canJoinVoice ? () => state.joinVoice(channelHash) : null,
         );
+
+        final voicePanel = inVoice
+            ? VoicePanel(
+                channelName: state.channelByHash(state.voiceChannelHash!)?.name ?? '',
+                quality: state.voiceQualityLevel,
+                muted: state.voiceMuted,
+                audioError: state.voiceAudioError,
+                onToggleMute: () => state.toggleVoiceMute(),
+                onLeave: () => state.leaveVoice(),
+              )
+            : null;
+        final channelPane = voicePanel == null
+            ? channelColumn
+            : Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [Expanded(child: channelColumn), voicePanel],
+              );
 
         final content = Column(
                 children: [
@@ -213,6 +246,9 @@ class _MainWindowState extends State<MainWindow> {
                           ),
                     },
                   ),
+                  // In compact mode the drawer hides the column's panel, so
+                  // mute/leave stay reachable above the compose bar.
+                  if (compact && voicePanel != null) voicePanel,
                   if (_tab == ChannelTab.chat)
                     ComposeBar(
                       channelName: channel?.name ?? '',
@@ -235,7 +271,7 @@ class _MainWindowState extends State<MainWindow> {
               shape: const RoundedRectangleBorder(),
               child: Row(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [rail, channelColumn],
+                children: [rail, Expanded(child: channelPane)],
               ),
             ),
             body: SafeArea(child: content),
@@ -246,7 +282,7 @@ class _MainWindowState extends State<MainWindow> {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             rail,
-            channelColumn,
+            SizedBox(width: 206, child: channelPane),
             Expanded(child: content),
           ],
         );

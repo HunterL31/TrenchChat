@@ -103,7 +103,7 @@ void main() {
     ];
     state.presenceByChannel[kGeneralHash] = fixturePresence();
     state.permissionsByChannel[kGeneralHash] = const ChannelPermissions(
-        kick: true, manageRoles: true, manageChannel: true, sendMessage: true);
+        kick: true, manageRoles: true, manageChannel: true, sendMessage: true, voiceChat: true);
     await openAndSnap(tester, 'goldens/members_dialog.png',
         (context, state) => showMembersDialog(context, state,
             channelHashHex: kGeneralHash, channelName: 'general'));
