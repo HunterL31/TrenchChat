@@ -24,6 +24,7 @@ class ChannelColumn extends StatelessWidget {
     this.pendingInvites = const [],
     this.onTapInvite,
     this.onCreateChannel,
+    this.onCreateDirectChannel,
     this.onJoinChannel,
   });
 
@@ -37,6 +38,10 @@ class ChannelColumn extends StatelessWidget {
   final List<PendingInvite> pendingInvites;
   final ValueChanged<PendingInvite>? onTapInvite;
   final VoidCallback? onCreateChannel;
+
+  /// Creates a standalone channel regardless of which server is selected;
+  /// keeps direct channels reachable while a server occupies the main button.
+  final VoidCallback? onCreateDirectChannel;
   final VoidCallback? onJoinChannel;
 
   @override
@@ -96,8 +101,8 @@ class ChannelColumn extends StatelessWidget {
                       onTap: () => onSelectChannel(c.hash),
                     ),
                 ],
-                if (directChannels.isNotEmpty) ...[
-                  const _SectionLabel('DIRECT CHANNELS'),
+                if (directChannels.isNotEmpty || onCreateDirectChannel != null) ...[
+                  _SectionLabel('DIRECT CHANNELS', onAdd: onCreateDirectChannel),
                   for (final c in directChannels)
                     _ChannelRow(
                       channel: c,
@@ -176,20 +181,35 @@ String _shortHash(String hex) {
 }
 
 class _SectionLabel extends StatelessWidget {
-  const _SectionLabel(this.label);
+  const _SectionLabel(this.label, {this.onAdd});
   final String label;
+  final VoidCallback? onAdd;
 
   @override
   Widget build(BuildContext context) {
+    final text = Text(
+      label,
+      style: TextStyle(
+        fontSize: TCType.textMicro,
+        color: TCColors.textSecondary,
+        letterSpacing: TCType.letterSpacingFor(TCType.textMicro, TCType.trackingWider),
+      ),
+    );
+    if (onAdd == null) {
+      return Padding(padding: const EdgeInsets.fromLTRB(14, 12, 14, 6), child: text);
+    }
     return Padding(
-      padding: const EdgeInsets.fromLTRB(14, 12, 14, 6),
-      child: Text(
-        label,
-        style: TextStyle(
-          fontSize: TCType.textMicro,
-          color: TCColors.textSecondary,
-          letterSpacing: TCType.letterSpacingFor(TCType.textMicro, TCType.trackingWider),
-        ),
+      padding: const EdgeInsets.fromLTRB(14, 6, 8, 0),
+      child: Row(
+        children: [
+          Expanded(child: text),
+          TcIconButton(
+            icon: TcIcons.plus,
+            tooltip: 'New direct channel',
+            size: 22,
+            onPressed: onAdd,
+          ),
+        ],
       ),
     );
   }
