@@ -138,18 +138,76 @@ degraded or interrupted link.
 
 | ID | Peers | Actions | Expected result |
 |---|---|---|---|
-| C1 | A,B,C | B goes offline (link drop); A sends 3; B goes online | B receives all 3. Pending-retry (mechanism 1) flushes on B's announce |
-| C2 | A,B,C,D | B offline; A sends 3; A offline; B online (only C, D reachable) | B backfills all 3 from C or D — missed-delivery hints (mechanism 2) let a third party serve messages the sender never delivered |
-| C3 | A,B,C | Same as C1 but B is **killed and restarted** instead of link-dropped | B still ends with all 3, but via a cold path: in-memory retry queue and sync status are gone, backfill comes from `request_sync_all` 3s after boot |
-| C4 | A,D | D offline; A sends 60 (> `MAX_RESPONSE_MESSAGES` = 50); D online | D ends with all 60 and `state == synced`. Only passes if a truncated batch chains its own follow-up request |
-| C5 | A,B,C | B offline for messages 1–5; B online, C offline for 6–10; C online | Both end with all 10, sourced from different responders — per-(channel, peer) watermarks, not a channel-wide one |
-| C6 | A,D | D issues repeated deep (pre-window) sync requests in a burst | First deep sweep answered; subsequent ones inside `DEEP_SYNC_COOLDOWN_SECS` (60s) are silently refused. D's sync state reflects "not yet complete", never a flood on A |
-| C7 | A,B | B joins invite-only, observing sync state throughout | Progression `unknown → syncing → synced`. With every other peer offline: `waiting`. With a known unclosable gap: `incomplete` |
-| C8 | A,D | D joins without `full_sync` (gets no backlog); A grants `full_sync` to member | D's entitlement changed, so its next request re-asks from 0 rather than resuming — backlog arrives without D restarting |
-| C9 | A,B,C | A kicks C; C requests sync | Request refused silently; C's message set frozen at kick time; C receives nothing further |
-| C10 | A,B,C,D | Hub killed (total partition); each peer sends 2; hub restarted | During partition every peer shows `waiting`; after restart all four converge on 8 messages |
-| C11 | A,B,C,D | All 4 offline simultaneously, each sends 2 locally, all come online | Full mesh convergence on 8 — the hardest sync case, four disjoint histories reconciling at once |
-| C12 | A,B | B offline past `SYNC_WINDOW_SECS` (7 days, clock-shifted); B online | Deep backfill is served but rate-limited; assert what B ends up holding, and that neither peer spins |
+Built: C1–C5, C7, C10, C11. C6, C8, C9 and C12 need an invite-only channel
+(family B) or control of the clock, and are deferred.
+
+| ID | Peers | Actions | Expected result |
+|---|---|---|---|
+| C1 | A,B,C | B goes offline (link drop); A sends 3; B goes online | ✅ B receives all 3, in 1.0–5.0s |
+| C2 | A,B,C,D | B offline; A sends 3; A offline; B online (only C, D reachable) | ⚠️ **Intermittent.** Passed in 15.6s on one run; on another B held 0/3 with both C and D stuck at `pending` — asked, never answered. Same shape as C11, see below |
+| C3 | A,B,C | Same as C1 but B is **killed and restarted** instead of link-dropped | ✅ B ends with its own history plus what it missed, in 3.5s, via the cold path |
+| C4 | A,D | D offline; A sends 60 (> `MAX_RESPONSE_MESSAGES` = 50); D online | ✅ D ends with all 60 and `state == synced`, in 18.1s — the truncated batch does chain its follow-up |
+| C5 | A,B,C | B offline for messages 1–5; B online, C offline for 6–10; C online | ✅ Both end with all 10, in 10.6s — per-(channel, peer) watermarks hold up |
+| C7 | A,B | B offline across a batch, then back; watch the sync state | ✅ Settles on `synced` with every message present |
+| C10 | A,B,C,D | Hub killed (total partition); each peer sends 1; hub restarted | ✅ All four reconcile in 12.1s once the hub returns |
+| C11 | A,B,C,D | All 4 offline simultaneously, each sends 2 locally, all come online | ❌ **Fails.** Every peer ends up missing precisely the *first* message each other peer sent while partitioned, never the second, and does not heal in 420s. See below |
+| C6 | A,D | D issues repeated deep (pre-window) sync requests in a burst | Deferred. First deep sweep answered; subsequent ones inside `DEEP_SYNC_COOLDOWN_SECS` (60s) silently refused |
+| C8 | A,D | D joins without `full_sync`; A grants `full_sync` to member | Deferred — needs invite-only. D's entitlement changed, so its next request re-asks from 0 |
+| C9 | A,B,C | A kicks C; C requests sync | Deferred — needs invite-only. Request refused silently; C's message set frozen at kick time |
+| C12 | A,B | B offline past `SYNC_WINDOW_SECS` (7 days, clock-shifted); B online | Deferred — needs clock control |
+
+#### C11: the first message of a partition is lost
+
+Seven of the eight built rows pass, several on the first attempt. C11 does not,
+and the shape of its failure is specific enough to be worth acting on:
+
+```
+A missing: B-alone-0, C-alone-0, D-alone-0
+B missing:            C-alone-0, D-alone-0
+C missing: A-alone-0,            D-alone-0
+D missing: A-alone-0, B-alone-0, C-alone-0
+```
+
+Each peer sent two messages while every peer was offline. The second of each
+pair propagated to everyone; the first reached nobody. Reproduced across three
+runs, and still incomplete after 420s, so it is not slow convergence.
+
+Everything around it works: C1 shows pending-retry flushing, C2 shows a third
+party serving what the sender never delivered, C5 shows disjoint histories
+reconciling, C10 shows a full partition healing once the hub returns. The
+difference in C11 is that *every* peer is both a requester and the sole source
+of its own history at the same moment. Not yet root-caused; the sync watermark
+is the obvious first place to look, since "first message skipped, later ones
+served" is what an over-advanced watermark would produce.
+
+Left strict rather than reclassified as a probe. The expectation is the sync
+design's own — any online member can serve any gap — so `--family C` exits
+non-zero until it is fixed, which is the correct signal for an open bug.
+
+#### C2 fails the same way, intermittently
+
+C2 passed in 15.6s on one run and failed on another with B holding 0 of 3 and
+its sync status reading:
+
+```
+state: syncing · answered_peers: 0
+peers: [Tester C: pending, Tester D: pending]
+```
+
+Both responders were asked and neither replied — and `sync.py` refuses
+requests *silently* by design, so "throttled or unauthorised" and "still in
+flight" are indistinguishable from the requester's side. `pending` forever is
+exactly what a silent refusal looks like.
+
+The likely link to C11: a peer with no local history requests from `since_ts=0`,
+which is older than `SYNC_WINDOW_SECS` and therefore a *deep* sweep, rate
+limited to one per `DEEP_SYNC_COOLDOWN_SECS` (60s) per (channel, peer). With
+announces every 10s the requester re-asks about six times per allowed sweep, so
+one lost or refused first request can leave it silently locked out. That would
+also explain why C11 loses precisely the earliest message of each partitioned
+peer. Unverified — but it is where both investigations should start, and it
+suggests `SyncStatusTracker` cannot currently distinguish "refused" from
+"waiting", which is a reporting gap in its own right.
 
 ### D — Degraded links
 
@@ -204,6 +262,8 @@ are now confirmed by a run; two are still unbuilt.
 |---|---|
 | **A5** — a public-channel join fires no sync request; backfill waits on the next peer announce | **Confirmed.** 0 messages at join, backfill at 1.0s / 9.1s tracking the 10s heartbeat. Up to 60s in the real client |
 | **A6** — `full_sync` has no effect on public channels; any subscriber can pull full history | **Confirmed.** Identical backfill with and without the grant. The UI offers the toggle regardless |
+| **C11 / C2** — a peer asking for history is never answered; a total partition loses the first message each peer sent | **Confirmed.** C11 fails every run, C2 intermittently. Details above |
+| **Subscribe has no retry** — `SubscriptionManager._send_raw` drops `MT_SUBSCRIBE` when the joiner's path to the owner is unresolved, and nothing re-sends it | **Confirmed.** Hit in C4's setup: the owner never registered the joiner, so it was silently absent from every send. Only re-joining recovers, which is what `flows._await_registration` now does |
 | **G1** — subscriber-list version counter is in-memory, so it resets on owner restart and surviving subscribers reject later lists as replays | Not yet built (family G) |
 | **F3** — reactions have no backfill path, so an offline peer misses them permanently | Not yet built (family F) |
 
@@ -221,6 +281,12 @@ drops when `Identity.recall()` returns `None`, i.e. the path was never
 resolved; once a path is known the message goes to LXMF, whose own outbound
 retry redelivers when the link returns. The no-retry gap is a cold-start race,
 not an offline-peer case.
+
+The narrow version of it is real, though, and family C found it by accident:
+C4's setup failed because the owner never registered a joiner whose `MT_SUBSCRIBE`
+went out before its path resolved. Same code path, but only reachable when the
+peers have never talked — which is why A10, whose peers were already in contact,
+could not produce it.
 
 The real cause was in the scenarios: they asserted fan-out before the owner had
 processed the joiners' `MT_SUBSCRIBE`, so the sends were addressed to a set the
@@ -241,12 +307,14 @@ Built and running, in `devtools/testenv/scenarios/`:
 |---|---|
 | `runner.py` | Spawns `orchestrator.py --testers N`, waits for every API, runs the selection, resets between scenarios, reports |
 | `peer.py` | `Peer` (one tester's API) and `Orchestrator` (process/link lifecycle). One method per endpoint, no logic |
-| `asserts.py` | Polling assertions: `wait_until`, `settle`, `hold_for`, `all_hold`, `converged`, `rosters_identical`, `subscribers_converged`, `sync_settled`, `diff_report`, `subscriber_views` |
+| `asserts.py` | Polling assertions: `wait_until`, `settle`, `hold_for`, `all_hold`, `subscribers_converged`, `diff_report`, `subscriber_views` |
 | `scenario.py` | The `@scenario` registry and the strict/probe distinction |
+| `flows.py` | Shared setup: discovery, joining with owner registration, link up/down |
 | `scen_public.py` | Family A |
+| `scen_sync.py` | Family C |
 
-Families B–G are not written yet; each is one more `scen_*.py` registering
-against the same runner.
+Families B and D–G are not written yet; each is one more `scen_*.py`
+registering against the same runner.
 
 ```bash
 .venv/bin/python devtools/testenv/scenarios/runner.py                # everything
@@ -283,13 +351,18 @@ stays the merge gate.
 
 ## Status
 
-Family A: 10 scenarios, 6 strict + 4 probes, ~6 minutes a run (most of it
-environment resets). Three consecutive clean runs after the ordering fix; the
-two failures before it were both the precondition gap described above.
+| Family | Scenarios | Result |
+|---|---|---|
+| A — public channels | 10 (6 strict, 4 probes) | All passing, three consecutive clean runs |
+| C — offline and sync | 8 (7 strict, 1 probe) | **C11 fails** consistently, **C2** intermittently; the other six pass |
 
-Remaining phases:
+Roughly 6–10 minutes a family, most of it environment resets between scenarios.
 
-1. Family C — the highest-value coverage and the reason for real networking.
+Remaining:
+
+1. Root-cause C11 and C2 together — both are peers asking for history and never
+   being answered.
 2. G1 and F3, the two unconfirmed suspected gaps.
-3. Families B and E — membership and permissions across 4 peers.
+3. Families B and E — membership and permissions across 4 peers, which also
+   unlocks the deferred C6/C8/C9.
 4. Families D, F, G.

@@ -90,27 +90,6 @@ def all_hold(peers, channel_hash: str, expected: set[str], *,
     return elapsed
 
 
-def converged(peers, channel_hash: str, *, timeout: float = DEFAULT_TIMEOUT) -> set[str]:
-    """Every peer agrees on the message set. Returns the agreed set."""
-    def same() -> bool:
-        sets = [p.contents(channel_hash) for p in peers]
-        return all(s == sets[0] for s in sets)
-
-    wait_until(same, f"{[p.tag for p in peers]} to converge on {channel_hash[:12]}", timeout)
-    return peers[0].contents(channel_hash)
-
-
-def rosters_identical(peers, channel_hash: str, *,
-                      timeout: float = DEFAULT_TIMEOUT) -> dict[str, str]:
-    """Every peer agrees on membership and roles. Returns the agreed roster."""
-    def same() -> bool:
-        rosters = [roster(p, channel_hash) for p in peers]
-        return all(r == rosters[0] and r for r in rosters)
-
-    wait_until(same, f"{[p.tag for p in peers]} rosters to match", timeout)
-    return roster(peers[0], channel_hash)
-
-
 def subscriber_views(peers, channel_hash: str) -> dict[str, list[str]]:
     """Each peer's subscriber set, by tag rather than raw hash.
 
@@ -156,12 +135,3 @@ def diff_report(peers, channel_hash: str, expected: set[str]) -> dict[str, dict]
             "extra": sorted(held - expected),
         }
     return report
-
-
-def sync_settled(peer, channel_hash: str, *, timeout: float = SLOW_TIMEOUT) -> dict:
-    """Wait for a channel to stop syncing. Returns the final status."""
-    wait_until(
-        lambda: peer.sync_status(channel_hash)["state"] != "syncing",
-        f"{peer.tag} sync on {channel_hash[:12]} to settle", timeout,
-    )
-    return peer.sync_status(channel_hash)

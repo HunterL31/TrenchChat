@@ -35,6 +35,7 @@ from peer import Orchestrator, Peer  # noqa: E402
 from scenario import PROBE, REGISTRY, Result  # noqa: E402
 
 import scen_public  # noqa: F401,E402  (registers family A)
+import scen_sync    # noqa: F401,E402  (registers family C)
 
 _ORCHESTRATOR = _TESTENV_DIR / "orchestrator.py"
 _BOOT_TIMEOUT = 180.0
@@ -42,13 +43,18 @@ _RESET_TIMEOUT = 180.0
 
 
 class Env:
-    """The tester roster a scenario runs against."""
+    """The tester roster a scenario runs against, plus process control."""
 
-    def __init__(self, peers: dict[str, Peer]):
+    def __init__(self, peers: dict[str, Peer], orch: Orchestrator):
         self._peers = peers
+        self.orch = orch
 
     def peers(self, *tags: str) -> tuple[Peer, ...]:
         return tuple(self._peers[t] for t in tags)
+
+    def wait_alive(self, peer: Peer, timeout: float = 120.0) -> None:
+        """Wait for a tester's API after a kill/start cycle."""
+        _wait(peer.alive, f"{peer.tag}'s API to come back", timeout)
 
     def all(self) -> list[Peer]:
         return list(self._peers.values())
@@ -110,7 +116,7 @@ def _wait_environment(orch: Orchestrator, testers: int) -> Env:
     for p in peers.values():
         _wait(p.alive, f"{p.tag}'s API", _BOOT_TIMEOUT)
         p.forget_hash()
-    return Env(peers)
+    return Env(peers, orch)
 
 
 def _reset(orch: Orchestrator, env: Env) -> None:

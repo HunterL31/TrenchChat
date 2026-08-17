@@ -14,43 +14,11 @@ from asserts import (
     all_hold, diff_report, discovered_hashes, hold_for, joined_hashes, settle,
     subscriber_views, subscribers_converged, wait_until, ScenarioFailure,
 )
+from flows import (
+    await_discovery as _await_discovery, go_offline, go_online,
+    join_all as _join_all, BACKFILL_TIMEOUT, DISCOVERY_TIMEOUT, NEGATIVE_HOLD_SECS,
+)
 from scenario import PROBE, scenario
-
-# Announces drive discovery and (family A's real subject) backfill. worker.py
-# runs the heartbeat at 10s, so anything announce-triggered needs room for
-# more than one cycle.
-DISCOVERY_TIMEOUT = 60.0
-BACKFILL_TIMEOUT = 90.0
-
-# How long a "never arrives" claim is held open before it counts as proven.
-NEGATIVE_HOLD_SECS = 15.0
-
-
-def _await_discovery(peers, channel_hash: str, timeout: float = DISCOVERY_TIMEOUT):
-    for p in peers:
-        wait_until(lambda p=p: channel_hash in discovered_hashes(p),
-                   f"{p.tag} to discover the channel", timeout)
-
-
-def _join_all(peers, channel_hash: str, owner=None):
-    """Join every peer, and wait for the owner to have registered them.
-
-    Joining only sets the joiner's own state; the owner learns of it from an
-    inbound MT_SUBSCRIBE that arrives separately. Until that lands the owner
-    addresses its sends to a set the joiner isn't in, so any fan-out assertion
-    made before this point is testing subscribe latency, not fan-out.
-    """
-    _await_discovery(peers, channel_hash)
-    for p in peers:
-        if not p.join(channel_hash):
-            raise ScenarioFailure(f"{p.tag} failed to join {channel_hash[:12]}")
-        wait_until(lambda p=p: channel_hash in joined_hashes(p),
-                   f"{p.tag} to show the channel as joined")
-    if owner is not None:
-        for p in peers:
-            wait_until(lambda p=p: p.hash in owner.subscribers(channel_hash),
-                       f"{owner.tag} to register {p.tag} as a subscriber",
-                       DISCOVERY_TIMEOUT)
 
 
 @scenario("A1", "A creates a public channel; B, C, D discover it unjoined")
@@ -256,8 +224,7 @@ def a10(env):
     a.send(ch, "seed")
     all_hold([b, c], ch, {"seed"}, timeout=DISCOVERY_TIMEOUT)
 
-    c.go_offline()
-    wait_until(lambda: not c.net_status()["online"], "C's link to drop")
+    go_offline(c)
 
     # The broadcast C is meant to miss: A re-sends the subscriber list to
     # everyone each time someone joins, and D joining is the last one.
@@ -267,8 +234,7 @@ def a10(env):
     wait_until(lambda: d.hash in b.subscribers(ch), "B to learn about D",
                DISCOVERY_TIMEOUT)
 
-    c.go_online()
-    wait_until(lambda: c.net_status()["online"], "C's link to come back", 60.0)
+    go_online(c)
 
     knows_d, learn_secs = settle(lambda: d.hash in c.subscribers(ch),
                                  "C to learn about D after reconnecting", 60.0)
