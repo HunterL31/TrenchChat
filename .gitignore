@@ -1,5 +1,8 @@
 # Virtual environment
 .venv/
+
+# Flutter SDK downloaded by setup.sh
+.flutter-sdk/
 venv/
 env/
 

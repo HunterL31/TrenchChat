@@ -32,20 +32,29 @@ msgpack
 ./setup.sh
 ```
 
+One command, end to end: virtual environment and all Python dependencies,
+the system libraries voice chat needs (libopus + PortAudio, offered via your
+package manager), a Flutter SDK download if you don't have one, the client
+build, and launch. Re-run it any time — each step skips what's already done.
+
+On SteamOS it detects whether the root filesystem is unlocked: unlocked
+decks get the normal pacman offer; read-only decks are pointed at the
+Distrobox route (`distrobox create --name trench --image ubuntu:24.04`,
+`distrobox enter trench`, re-run `./setup.sh` inside) or at
+`sudo steamos-readonly disable`.
+
 **Windows**
 
 ```bat
 setup.bat
 ```
 
-Both scripts create a virtual environment and install all dependencies.
-
-The Flutter client additionally needs a one-time build (requires the
+Creates the virtual environment and installs Python dependencies. The
+client additionally needs a one-time build (requires the
 [Flutter SDK](https://docs.flutter.dev/get-started/install)):
 
-```bash
-cd flutter_ui && flutter build web        # any platform
-cd flutter_ui && flutter build windows    # optional native desktop binary
+```bat
+cd flutter_ui && flutter build web        # or: flutter build windows
 ```
 
 ## Running
