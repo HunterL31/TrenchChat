@@ -102,4 +102,96 @@ void main() {
 
     expect(await client.joinChannel('chan-hash'), isTrue);
   });
+
+  test('getFriends decodes the friend list', () async {
+    final client = ApiClient(
+      baseUrl: 'http://example.test',
+      client: MockClient((request) async {
+        expect(request.url.path, '/friends');
+        // Mirrors a real FastAPI reply: UTF-8 bytes labelled `application/json`
+        // with no charset, which package:http would otherwise read as latin1.
+        return http.Response.bytes(
+          utf8.encode(jsonEncode([
+            {
+              'identity_hash': 'abc123',
+              'nickname': 'Alice',
+              'note': 'runs the coast node',
+              'display_name': 'f3a1…9c2e',
+              'added_at': 1000.0,
+              'last_seen_at': 2000.0,
+              'is_online': true,
+            }
+          ])),
+          200,
+          headers: const {'content-type': 'application/json'},
+        );
+      }),
+    );
+
+    final friends = await client.getFriends();
+    expect(friends, hasLength(1));
+    expect(friends.first.identityHash, 'abc123');
+    expect(friends.first.nickname, 'Alice');
+    expect(friends.first.displayName, 'f3a1…9c2e');
+    expect(friends.first.isOnline, isTrue);
+  });
+
+  test('addFriend posts identity_hash, nickname, and note', () async {
+    final client = ApiClient(
+      baseUrl: 'http://example.test',
+      client: MockClient((request) async {
+        expect(request.method, 'POST');
+        expect(request.url.path, '/friends');
+        final body = jsonDecode(request.body) as Map<String, dynamic>;
+        expect(body, {'identity_hash': 'abc123', 'nickname': 'Alice', 'note': 'a note'});
+        return http.Response(jsonEncode({'ok': true}), 200);
+      }),
+    );
+
+    expect(await client.addFriend('abc123', 'Alice', 'a note'), isTrue);
+  });
+
+  test('addFriend surfaces a 400 backend error', () async {
+    final client = ApiClient(
+      baseUrl: 'http://example.test',
+      client: MockClient((request) async {
+        return http.Response(jsonEncode({'ok': false, 'error': 'already a friend'}), 400);
+      }),
+    );
+
+    await expectLater(
+      () => client.addFriend('abc123', '', ''),
+      throwsA(isA<ApiException>()
+          .having((e) => e.statusCode, 'statusCode', 400)
+          .having((e) => e.message, 'message', 'already a friend')),
+    );
+  });
+
+  test('updateFriend PUTs only the provided fields', () async {
+    final client = ApiClient(
+      baseUrl: 'http://example.test',
+      client: MockClient((request) async {
+        expect(request.method, 'PUT');
+        expect(request.url.path, '/friends/abc123');
+        final body = jsonDecode(request.body) as Map<String, dynamic>;
+        expect(body, {'nickname': 'New name'});
+        return http.Response(jsonEncode({'ok': true}), 200);
+      }),
+    );
+
+    expect(await client.updateFriend('abc123', nickname: 'New name'), isTrue);
+  });
+
+  test('removeFriend DELETEs the friend', () async {
+    final client = ApiClient(
+      baseUrl: 'http://example.test',
+      client: MockClient((request) async {
+        expect(request.method, 'DELETE');
+        expect(request.url.path, '/friends/abc123');
+        return http.Response(jsonEncode({'ok': true}), 200);
+      }),
+    );
+
+    expect(await client.removeFriend('abc123'), isTrue);
+  });
 }

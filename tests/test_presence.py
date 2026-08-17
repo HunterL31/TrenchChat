@@ -231,6 +231,41 @@ def test_multiple_callbacks_all_fired():
     assert (PEER_A, True) in results_b
 
 
+def test_seen_callback_fires_on_every_record_seen_not_just_transitions():
+    """Unlike add_presence_callback, add_seen_callback must fire every time,
+    including repeated announces from a peer that is already online."""
+    mgr = make_mgr()
+    events: list[str] = []
+    mgr.add_seen_callback(events.append)
+
+    mgr.record_seen(PEER_A)
+    mgr.record_seen(PEER_A)
+    mgr.record_seen(PEER_A)
+
+    assert events == [PEER_A, PEER_A, PEER_A]
+
+
+def test_seen_callback_not_fired_for_self():
+    mgr = make_mgr()
+    events: list[str] = []
+    mgr.add_seen_callback(events.append)
+
+    mgr.record_seen(SELF_HEX)
+
+    assert events == []
+
+
+def test_seen_callback_exception_does_not_propagate():
+    """A bad seen-callback must not prevent other seen-callbacks from running."""
+    mgr = make_mgr()
+    results: list = []
+    mgr.add_seen_callback(lambda p: (_ for _ in ()).throw(RuntimeError("bad")))
+    mgr.add_seen_callback(results.append)
+
+    mgr.record_seen(PEER_A)
+    assert results == [PEER_A]
+
+
 def test_callback_exception_does_not_propagate():
     """A bad callback must not prevent other callbacks from running."""
     mgr = make_mgr()

@@ -14,6 +14,7 @@ class TcTextField extends StatelessWidget {
     this.hintText,
     this.autofocus = false,
     this.onSubmitted,
+    this.readOnly = false,
   });
 
   final String label;
@@ -21,6 +22,10 @@ class TcTextField extends StatelessWidget {
   final String? hintText;
   final bool autofocus;
   final ValueChanged<String>? onSubmitted;
+
+  /// When true, the field displays its value but rejects edits -- used for
+  /// an identity hash pre-filled from a context menu (see add_friend_dialog.dart).
+  final bool readOnly;
 
   @override
   Widget build(BuildContext context) {
@@ -46,7 +51,11 @@ class TcTextField extends StatelessWidget {
             controller: controller,
             autofocus: autofocus,
             onSubmitted: onSubmitted,
-            style: TextStyle(fontSize: TCType.textBodyMd, color: TCColors.textPrimary),
+            readOnly: readOnly,
+            style: TextStyle(
+              fontSize: TCType.textBodyMd,
+              color: readOnly ? TCColors.textSecondary : TCColors.textPrimary,
+            ),
             decoration: InputDecoration(
               isDense: true,
               border: InputBorder.none,

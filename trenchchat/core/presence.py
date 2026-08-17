@@ -113,12 +113,18 @@ class PresenceManager:
         self._last_seen: dict[str, float] = {}
         self._lock = threading.Lock()
         self._callbacks: list = []
+        self._seen_callbacks: list = []
 
     # --- public API ---
 
     def add_presence_callback(self, cb) -> None:
         """Register a callback invoked with (peer_hex: str, is_online: bool) on status change."""
         self._callbacks.append(cb)
+
+    def add_seen_callback(self, cb) -> None:
+        """Register a callback invoked with (peer_hex: str) on every record_seen,
+        not just online transitions."""
+        self._seen_callbacks.append(cb)
 
     def record_seen(self, peer_hex: str) -> None:
         """Record that a peer announced their delivery destination right now."""
@@ -131,6 +137,7 @@ class PresenceManager:
         if became_online:
             RNS.log(f"TrenchChat [presence]: peer online {peer_hex[:12]}…", RNS.LOG_DEBUG)
             self._fire_callbacks(peer_hex, True)
+        self._fire_seen_callbacks(peer_hex)
 
     def record_offline(self, peer_hex: str) -> None:
         """Mark a peer offline now, on their graceful-shutdown notice.
@@ -294,6 +301,13 @@ class PresenceManager:
                 cb(peer_hex, is_online)
             except Exception as e:
                 RNS.log(f"TrenchChat [presence]: callback error: {e}", RNS.LOG_ERROR)
+
+    def _fire_seen_callbacks(self, peer_hex: str) -> None:
+        for cb in self._seen_callbacks:
+            try:
+                cb(peer_hex)
+            except Exception as e:
+                RNS.log(f"TrenchChat [presence]: seen callback error: {e}", RNS.LOG_ERROR)
 
 
 class PresenceBeacon:

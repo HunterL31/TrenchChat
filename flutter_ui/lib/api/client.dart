@@ -7,6 +7,7 @@ import 'dart:typed_data';
 import 'package:http/http.dart' as http;
 
 import 'models/emoji.dart';
+import 'models/friend.dart';
 import 'models/interface.dart';
 import 'models/invite.dart';
 import 'models/link_quality.dart';
@@ -41,13 +42,18 @@ class ApiClient {
 
   Uri _u(String path) => Uri.parse('$baseUrl$path');
 
+  /// The backend labels JSON responses `application/json` with no charset, and
+  /// package:http falls back to latin1 when the charset is missing -- decode the
+  /// bytes as UTF-8 here so non-ASCII names and message text survive the trip.
+  String _bodyText(http.Response res) => utf8.decode(res.bodyBytes, allowMalformed: true);
+
   /// Uniform response handling: throws [ApiException] for any non-2xx status,
   /// otherwise returns the decoded JSON body.
   dynamic _decode(http.Response res) {
     if (res.statusCode < 200 || res.statusCode >= 300) {
       String message = 'HTTP ${res.statusCode}';
       try {
-        final body = jsonDecode(res.body);
+        final body = jsonDecode(_bodyText(res));
         if (body is Map<String, dynamic>) {
           if (body['error'] is String) {
             message = body['error'] as String;
@@ -61,7 +67,7 @@ class ApiClient {
       throw ApiException(res.statusCode, message);
     }
     try {
-      return jsonDecode(res.body);
+      return jsonDecode(_bodyText(res));
     } on FormatException {
       throw ApiException(res.statusCode, 'Malformed response body');
     }
@@ -210,6 +216,40 @@ class ApiClient {
   Future<void> removeReaction(String channelHashHex, String messageId, String emojiHash) async {
     final res = await _http.delete(_u('/channels/$channelHashHex/messages/$messageId/reactions/$emojiHash'));
     _decode(res);
+  }
+
+  Future<List<Friend>> getFriends() async {
+    final res = await _http.get(_u('/friends'));
+    return (_decode(res) as List<dynamic>)
+        .map((e) => Friend.fromJson(e as Map<String, dynamic>))
+        .toList();
+  }
+
+  Future<bool> addFriend(String identityHashHex, String nickname, String note) async {
+    final res = await _http.post(
+      _u('/friends'),
+      headers: _jsonHeaders,
+      body: jsonEncode({'identity_hash': identityHashHex, 'nickname': nickname, 'note': note}),
+    );
+    return (_decode(res) as Map<String, dynamic>)['ok'] as bool? ?? false;
+  }
+
+  /// Partial update: omit [nickname] or [note] to leave it unchanged.
+  Future<bool> updateFriend(String identityHashHex, {String? nickname, String? note}) async {
+    final body = <String, dynamic>{};
+    if (nickname != null) body['nickname'] = nickname;
+    if (note != null) body['note'] = note;
+    final res = await _http.put(
+      _u('/friends/$identityHashHex'),
+      headers: _jsonHeaders,
+      body: jsonEncode(body),
+    );
+    return (_decode(res) as Map<String, dynamic>)['ok'] as bool? ?? false;
+  }
+
+  Future<bool> removeFriend(String identityHashHex) async {
+    final res = await _http.delete(_u('/friends/$identityHashHex'));
+    return (_decode(res) as Map<String, dynamic>)['ok'] as bool? ?? false;
   }
 
   Future<Map<String, dynamic>> getNetworkMap() async {

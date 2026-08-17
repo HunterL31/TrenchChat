@@ -28,6 +28,7 @@ CLIENT_PORT="${REMOTE_CLIENT_PORT:-8899}"
 TESTERS="${TESTENV_TESTERS:-4}"
 HUB_PORT=41001
 AUTH_KEY="${TS_AUTHKEY:-${TS_AUTH_KEY:-}}"
+STOP_WAIT_SECS=15
 
 log() { echo "[remote-host] $*"; }
 
@@ -131,6 +132,17 @@ cmd_start() {
     cmd_status
 }
 
+# Wait for a port to stop answering, so a stop immediately followed by a start
+# doesn't see the dying service and skip relaunching it.
+await_port_down() {
+    local port="$1" i
+    for i in $(seq 1 "$STOP_WAIT_SECS"); do
+        port_up "$port" || return 0
+        sleep 1
+    done
+    log "warning: port $port still answering after ${STOP_WAIT_SECS}s"
+}
+
 cmd_stop() {
     for name in client orchestrator tailscaled; do
         if [ -f "$STATE_DIR/$name.pid" ]; then
@@ -140,6 +152,8 @@ cmd_stop() {
     done
     pkill -f 'testenv/[w]orker\.py' 2>/dev/null || true
     pkill -f 'testenv/[h]ub\.py' 2>/dev/null || true
+    await_port_down 8800
+    await_port_down "$CLIENT_PORT"
     log "stopped"
 }
 

@@ -7,9 +7,13 @@ gather_network_data() is tested here — no Qt widgets are instantiated.
 """
 
 import math
+import subprocess
+import sys
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from trenchchat.gui.network_map import gather_network_data, _fmt_bytes
+from trenchchat.core.network_map import gather_network_data
+from trenchchat.gui.network_map import _fmt_bytes
 
 
 SELF_HEX = "aa" * 16
@@ -36,7 +40,7 @@ def _peer_bytes(hex_id: str) -> bytes:
 
 def test_self_node_always_present():
     rns = _make_rns()
-    with patch("trenchchat.gui.network_map.RNS.Identity.recall", return_value=None):
+    with patch("trenchchat.core.network_map.RNS.Identity.recall", return_value=None):
         data = gather_network_data(rns, SELF_HEX)
     ids = {n["id"] for n in data["nodes"]}
     assert SELF_HEX in ids
@@ -44,7 +48,7 @@ def test_self_node_always_present():
 
 def test_self_node_kind_is_self():
     rns = _make_rns()
-    with patch("trenchchat.gui.network_map.RNS.Identity.recall", return_value=None):
+    with patch("trenchchat.core.network_map.RNS.Identity.recall", return_value=None):
         data = gather_network_data(rns, SELF_HEX)
     self_node = next(n for n in data["nodes"] if n["id"] == SELF_HEX)
     assert self_node["kind"] == "self"
@@ -53,7 +57,7 @@ def test_self_node_kind_is_self():
 
 def test_empty_path_table_returns_only_self():
     rns = _make_rns(path_table=[])
-    with patch("trenchchat.gui.network_map.RNS.Identity.recall", return_value=None):
+    with patch("trenchchat.core.network_map.RNS.Identity.recall", return_value=None):
         data = gather_network_data(rns, SELF_HEX)
     assert len(data["nodes"]) == 1
     assert data["edges"] == []
@@ -81,7 +85,7 @@ def test_direct_peer_classified_as_peer():
     def recall(dest_hash, **kwargs):
         return mock_identity
 
-    with patch("trenchchat.gui.network_map.RNS.Identity.recall", side_effect=recall):
+    with patch("trenchchat.core.network_map.RNS.Identity.recall", side_effect=recall):
         data = gather_network_data(rns, SELF_HEX)
 
     peer_node = next((n for n in data["nodes"] if n["id"] == PEER_HEX), None)
@@ -103,7 +107,7 @@ def test_unknown_destination_classified_as_unknown():
     ]
     rns = _make_rns(path_table=path_table)
 
-    with patch("trenchchat.gui.network_map.RNS.Identity.recall", return_value=None):
+    with patch("trenchchat.core.network_map.RNS.Identity.recall", return_value=None):
         data = gather_network_data(rns, SELF_HEX)
 
     unknown_node = next((n for n in data["nodes"] if n["id"] == UNKNOWN_HEX), None)
@@ -125,7 +129,7 @@ def test_multi_hop_via_node_classified_as_transport():
     ]
     rns = _make_rns(path_table=path_table)
 
-    with patch("trenchchat.gui.network_map.RNS.Identity.recall", return_value=None):
+    with patch("trenchchat.core.network_map.RNS.Identity.recall", return_value=None):
         data = gather_network_data(rns, SELF_HEX)
 
     transport_node = next((n for n in data["nodes"] if n["id"] == TRANSPORT_HEX), None)
@@ -149,7 +153,7 @@ def test_direct_path_creates_direct_edge():
         }
     ]
     rns = _make_rns(path_table=path_table)
-    with patch("trenchchat.gui.network_map.RNS.Identity.recall", return_value=None):
+    with patch("trenchchat.core.network_map.RNS.Identity.recall", return_value=None):
         data = gather_network_data(rns, SELF_HEX)
 
     assert any(
@@ -171,7 +175,7 @@ def test_multi_hop_path_creates_two_edges():
         }
     ]
     rns = _make_rns(path_table=path_table)
-    with patch("trenchchat.gui.network_map.RNS.Identity.recall", return_value=None):
+    with patch("trenchchat.core.network_map.RNS.Identity.recall", return_value=None):
         data = gather_network_data(rns, SELF_HEX)
 
     edge_pairs = {(e["src"], e["dst"]) for e in data["edges"]}
@@ -201,7 +205,7 @@ def test_no_duplicate_edges():
         },
     ]
     rns = _make_rns(path_table=path_table)
-    with patch("trenchchat.gui.network_map.RNS.Identity.recall", return_value=None):
+    with patch("trenchchat.core.network_map.RNS.Identity.recall", return_value=None):
         data = gather_network_data(rns, SELF_HEX)
 
     self_to_transport = [
@@ -229,7 +233,7 @@ def test_interface_stats_included():
         ]
     }
     rns = _make_rns(interface_stats=iface_stats)
-    with patch("trenchchat.gui.network_map.RNS.Identity.recall", return_value=None):
+    with patch("trenchchat.core.network_map.RNS.Identity.recall", return_value=None):
         data = gather_network_data(rns, SELF_HEX)
 
     assert len(data["interfaces"]) == 1
@@ -243,7 +247,7 @@ def test_interface_stats_error_returns_empty():
     """If get_interface_stats() raises, interfaces should be an empty list."""
     rns = _make_rns()
     rns.get_interface_stats.side_effect = RuntimeError("rpc error")
-    with patch("trenchchat.gui.network_map.RNS.Identity.recall", return_value=None):
+    with patch("trenchchat.core.network_map.RNS.Identity.recall", return_value=None):
         data = gather_network_data(rns, SELF_HEX)
     assert data["interfaces"] == []
 
@@ -252,7 +256,7 @@ def test_path_table_error_returns_only_self():
     """If get_path_table() raises, we should still get the self node."""
     rns = _make_rns()
     rns.get_path_table.side_effect = RuntimeError("rpc error")
-    with patch("trenchchat.gui.network_map.RNS.Identity.recall", return_value=None):
+    with patch("trenchchat.core.network_map.RNS.Identity.recall", return_value=None):
         data = gather_network_data(rns, SELF_HEX)
     assert len(data["nodes"]) == 1
     assert data["nodes"][0]["kind"] == "self"
@@ -278,7 +282,7 @@ def test_stats_counts_are_correct():
          "status": True, "rxb": 0, "txb": 0}
     ]}
     rns = _make_rns(path_table=path_table, interface_stats=iface_stats)
-    with patch("trenchchat.gui.network_map.RNS.Identity.recall", return_value=None):
+    with patch("trenchchat.core.network_map.RNS.Identity.recall", return_value=None):
         data = gather_network_data(rns, SELF_HEX)
 
     assert data["stats"]["path_count"] == 1
@@ -346,3 +350,19 @@ def test_dense_graph_nodes_do_not_overlap():
                 f"Nodes {ids[i][:8]} and {ids[j][:8]} overlap: "
                 f"distance {dist:.1f} < {min_separation}"
             )
+
+
+def test_core_module_imports_without_qt():
+    """The testenv API serves /network/map from a venv with no PyQt6, so this
+    module must not reach the Qt one. Blocking PyQt6 reproduces that install."""
+    script = (
+        "import sys\n"
+        "sys.modules['PyQt6'] = None\n"
+        "from trenchchat.core.network_map import gather_network_data\n"
+        "assert gather_network_data is not None\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script], cwd=Path(__file__).resolve().parent.parent,
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr

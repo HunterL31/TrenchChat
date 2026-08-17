@@ -47,6 +47,8 @@ sealed class TcEvent {
         );
       case 'emoji_received':
         return EmojiReceivedEvent(json['emoji_hash'] as String);
+      case 'friend_updated':
+        return FriendUpdatedEvent(json['identity_hash'] as String);
       default:
         return null;
     }
@@ -104,4 +106,12 @@ class InviteReceivedEvent extends TcEvent {
 class EmojiReceivedEvent extends TcEvent {
   const EmojiReceivedEvent(this.emojiHash);
   final String emojiHash;
+}
+
+/// A saved friend's record changed (nickname/note edited elsewhere, or a
+/// presence-driven last-seen update). Carries only the hash; handlers
+/// re-fetch GET /friends for the full record.
+class FriendUpdatedEvent extends TcEvent {
+  const FriendUpdatedEvent(this.identityHash);
+  final String identityHash;
 }

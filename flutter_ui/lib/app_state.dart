@@ -10,6 +10,7 @@ import 'package:http/http.dart' as http;
 import 'api/client.dart';
 import 'api/events.dart';
 import 'api/models/emoji.dart';
+import 'api/models/friend.dart';
 import 'api/models/invite.dart';
 import 'api/models/link_quality.dart';
 import 'api/models/member.dart';
@@ -54,6 +55,10 @@ class AppState extends ChangeNotifier {
   /// [ensureEmojiLoaded] and kept fresh on [EmojiReceivedEvent].
   final Map<String, CustomEmoji> customEmojis = {};
   bool _emojisLoaded = false;
+
+  /// Locally saved contacts. Tab-only: never used as the display name in
+  /// message bubbles or the presence roster (see friends_tab.dart).
+  List<Friend> friends = [];
 
   bool loading = true;
   String? error;
@@ -103,6 +108,8 @@ class AppState extends ChangeNotifier {
       if (selectedChannelHash != null) {
         await loadChannel(selectedChannelHash!);
       }
+
+      await loadFriends();
 
       loading = false;
       notifyListeners();
@@ -294,6 +301,15 @@ class AppState extends ChangeNotifier {
     }
   }
 
+  Future<void> loadFriends() async {
+    try {
+      friends = await api.getFriends();
+      notifyListeners();
+    } catch (e) {
+      _reportActionError(e);
+    }
+  }
+
   /// Accepts a pending invite and joins its channel/server. Returns true on
   /// success; on failure [actionError] is set.
   Future<bool> acceptInvite(String channelHashHex) async {
@@ -311,6 +327,18 @@ class AppState extends ChangeNotifier {
         }
       }
       notifyListeners();
+      return ok;
+    } catch (e) {
+      _reportActionError(e);
+      return false;
+    }
+  }
+
+  /// Returns true on success, or false (with [actionError] set) on failure.
+  Future<bool> addFriend(String identityHashHex, String nickname, String note) async {
+    try {
+      final ok = await api.addFriend(identityHashHex, nickname, note);
+      if (ok) await loadFriends();
       return ok;
     } catch (e) {
       _reportActionError(e);
@@ -358,6 +386,18 @@ class AppState extends ChangeNotifier {
       );
       membersByChannel[channelHashHex] = await api.getMembers(channelHashHex);
       notifyListeners();
+      return ok;
+    } catch (e) {
+      _reportActionError(e);
+      return false;
+    }
+  }
+
+  /// Partial update: omit [nickname] or [note] to leave it unchanged.
+  Future<bool> updateFriend(String identityHashHex, {String? nickname, String? note}) async {
+    try {
+      final ok = await api.updateFriend(identityHashHex, nickname: nickname, note: note);
+      if (ok) await loadFriends();
       return ok;
     } catch (e) {
       _reportActionError(e);
@@ -434,6 +474,17 @@ class AppState extends ChangeNotifier {
     }
   }
 
+  Future<bool> removeFriend(String identityHashHex) async {
+    try {
+      final ok = await api.removeFriend(identityHashHex);
+      if (ok) await loadFriends();
+      return ok;
+    } catch (e) {
+      _reportActionError(e);
+      return false;
+    }
+  }
+
   void _reportActionError(Object e) {
     actionError = e is ApiException ? e.message : e.toString();
     notifyListeners();
@@ -458,6 +509,19 @@ class AppState extends ChangeNotifier {
             list[idx] = PresenceEntry(identityHash: identityHash, isOnline: isOnline);
           }
         }
+        final friendIdx = friends.indexWhere((f) => f.identityHash == identityHash);
+        if (friendIdx >= 0) {
+          final f = friends[friendIdx];
+          friends[friendIdx] = Friend(
+            identityHash: f.identityHash,
+            nickname: f.nickname,
+            note: f.note,
+            displayName: f.displayName,
+            addedAt: f.addedAt,
+            lastSeenAt: f.lastSeenAt,
+            isOnline: isOnline,
+          );
+        }
         notifyListeners();
       case MemberListUpdatedEvent(:final channelHash):
         if (membersByChannel.containsKey(channelHash)) {
@@ -478,6 +542,8 @@ class AppState extends ChangeNotifier {
         unawaited(refreshInvites());
       case EmojiReceivedEvent():
         unawaited(refreshEmoji());
+      case FriendUpdatedEvent():
+        unawaited(loadFriends());
     }
   }
 

@@ -229,6 +229,15 @@ CREATE TABLE IF NOT EXISTS pending_invites (
     admin_hash    TEXT NOT NULL,
     received_at   REAL NOT NULL
 );
+
+-- Local-only saved contacts. Nothing here is ever sent to a peer.
+CREATE TABLE IF NOT EXISTS friends (
+    identity_hash TEXT PRIMARY KEY,
+    nickname      TEXT NOT NULL DEFAULT '',
+    note          TEXT NOT NULL DEFAULT '',
+    added_at      REAL NOT NULL,
+    last_seen_at  REAL NOT NULL DEFAULT 0
+);
 """
 
 
@@ -1639,3 +1648,45 @@ class Storage:
             "SELECT * FROM reactions WHERE message_id = ? ORDER BY reacted_at ASC",
             (message_id,),
         )
+
+    # --- friends (local-only saved contacts) ---
+
+    def upsert_friend(self, identity_hash: str, nickname: str, note: str) -> None:
+        """Create or update a friend. Preserves added_at on an existing row."""
+        with self._tx():
+            self._conn.execute("""
+                INSERT INTO friends (identity_hash, nickname, note, added_at, last_seen_at)
+                VALUES (?, ?, ?, ?, 0)
+                ON CONFLICT(identity_hash) DO UPDATE SET
+                    nickname=excluded.nickname,
+                    note=excluded.note
+            """, (identity_hash, nickname, note, time.time()))
+
+    def get_friend(self, identity_hash: str) -> dict | None:
+        row = self._fetchone(
+            "SELECT * FROM friends WHERE identity_hash = ?", (identity_hash,)
+        )
+        return dict(row) if row else None
+
+    def get_friends(self) -> list[dict]:
+        rows = self._fetchall(
+            "SELECT * FROM friends ORDER BY nickname, identity_hash"
+        )
+        return [dict(r) for r in rows]
+
+    def delete_friend(self, identity_hash: str) -> None:
+        with self._tx():
+            self._conn.execute(
+                "DELETE FROM friends WHERE identity_hash = ?", (identity_hash,)
+            )
+
+    def get_friend_hashes(self) -> set[str]:
+        rows = self._fetchall("SELECT identity_hash FROM friends")
+        return {r["identity_hash"] for r in rows}
+
+    def touch_friend_seen(self, identity_hash: str, seen_at: float) -> None:
+        with self._tx():
+            self._conn.execute(
+                "UPDATE friends SET last_seen_at = ? WHERE identity_hash = ?",
+                (seen_at, identity_hash),
+            )

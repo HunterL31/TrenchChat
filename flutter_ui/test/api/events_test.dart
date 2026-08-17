@@ -20,6 +20,16 @@ void main() {
     );
   });
 
+  test('parses a friend_updated event', () {
+    final event = TcEvent.tryParse(jsonEncode({
+      'type': 'friend_updated',
+      'identity_hash': 'abc123',
+    }));
+
+    expect(event, isA<FriendUpdatedEvent>());
+    expect((event as FriendUpdatedEvent).identityHash, 'abc123');
+  });
+
   test('unknown event types are ignored', () {
     expect(TcEvent.tryParse(jsonEncode({'type': 'sync_status'})), isNull);
   });

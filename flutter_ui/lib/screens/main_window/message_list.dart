@@ -13,6 +13,7 @@ import '../../widgets/avatar.dart';
 import '../../widgets/badge.dart';
 import '../../widgets/emoji_text.dart';
 import '../../widgets/tc_button.dart';
+import '../../widgets/tc_context_menu.dart';
 import '../../widgets/tc_icon.dart';
 
 sealed class _Row {}
@@ -57,6 +58,8 @@ class MessageList extends StatefulWidget {
     this.onToggleReaction,
     this.onReact,
     this.emojiLibrary = const {},
+    this.friendHashes = const {},
+    this.onAddFriend,
   });
 
   final List<Message> messages;
@@ -76,6 +79,14 @@ class MessageList extends StatefulWidget {
 
   /// Custom emoji by hash, for reaction chips and inline :name@hash: tokens.
   final Map<String, CustomEmoji> emojiLibrary;
+
+  /// Identity hashes already saved as a friend -- drives the "Add friend…"
+  /// vs "Edit friend…" context menu label.
+  final Set<String> friendHashes;
+
+  /// Fired with a sender's identity hash when "Add/Edit friend…" is chosen
+  /// from a message row's right-click menu.
+  final void Function(String identityHashHex)? onAddFriend;
 
   @override
   State<MessageList> createState() => _MessageListState();
@@ -124,6 +135,8 @@ class _MessageListState extends State<MessageList> {
               onToggleReaction: widget.onToggleReaction,
               onReact: widget.onReact,
               emojiLibrary: widget.emojiLibrary,
+              friendHashes: widget.friendHashes,
+              onAddFriend: widget.onAddFriend,
             ),
         };
       },
@@ -171,6 +184,8 @@ class _MessageRowWidget extends StatefulWidget {
     this.onToggleReaction,
     this.onReact,
     this.emojiLibrary = const {},
+    this.friendHashes = const {},
+    this.onAddFriend,
   });
 
   final Message message;
@@ -182,6 +197,14 @@ class _MessageRowWidget extends StatefulWidget {
   final void Function(String messageId, String emojiHash)? onToggleReaction;
   final void Function(String messageId)? onReact;
   final Map<String, CustomEmoji> emojiLibrary;
+
+  /// Identity hashes already saved as a friend -- drives the "Add friend…"
+  /// vs "Edit friend…" context menu label.
+  final Set<String> friendHashes;
+
+  /// Fired with the sender's identity hash when "Add/Edit friend…" is chosen
+  /// from the row's right-click menu.
+  final void Function(String identityHashHex)? onAddFriend;
 
   @override
   State<_MessageRowWidget> createState() => _MessageRowWidgetState();
@@ -198,6 +221,8 @@ class _MessageRowWidgetState extends State<_MessageRowWidget> {
   void Function(String identityHashHex)? get ensureAvatarLoaded => widget.ensureAvatarLoaded;
   void Function(String messageId, String emojiHash)? get onToggleReaction =>
       widget.onToggleReaction;
+  Set<String> get friendHashes => widget.friendHashes;
+  void Function(String identityHashHex)? get onAddFriend => widget.onAddFriend;
 
   /// Wraps a row in the hover tracker and the react affordance.
   Widget _withReactButton(Widget row) {
@@ -248,8 +273,9 @@ class _MessageRowWidgetState extends State<_MessageRowWidget> {
     final isLate = message.receivedAt != null &&
         (message.receivedAt! - message.timestamp) > lateThresholdSecs;
 
+    final Widget content;
     if (isContinuation) {
-      return _withReactButton(Container(
+      content = Container(
         color: bg,
         padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 1),
         child: Row(
@@ -282,65 +308,84 @@ class _MessageRowWidgetState extends State<_MessageRowWidget> {
             ),
           ],
         ),
-      ));
-    }
-
-    final color = nameColor(message.senderHash, isOwn: isOwn);
-    return _withReactButton(Container(
-      color: bg,
-      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 6),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Avatar(name: displayName, imageBytes: avatarBytes, size: 34),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  crossAxisAlignment: CrossAxisAlignment.baseline,
-                  textBaseline: TextBaseline.alphabetic,
-                  children: [
-                    Text(
-                      isOwn ? 'you' : displayName,
-                      style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: color),
-                    ),
-                    const SizedBox(width: 8),
-                    Text(
-                      '[${message.senderHash.substring(0, message.senderHash.length >= 8 ? 8 : message.senderHash.length)}]',
-                      style: TextStyle(fontSize: TCType.textMicro, color: TCColors.textTertiary),
-                    ),
-                    const SizedBox(width: 8),
-                    Text(
-                      formatTs(message.timestamp),
-                      style: TextStyle(fontSize: TCType.textMicro, color: TCColors.textTertiary),
-                    ),
-                    if (isLate) ...[
+      );
+    } else {
+      final color = nameColor(message.senderHash, isOwn: isOwn);
+      content = Container(
+        color: bg,
+        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 6),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Avatar(name: displayName, imageBytes: avatarBytes, size: 34),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.baseline,
+                    textBaseline: TextBaseline.alphabetic,
+                    children: [
+                      Text(
+                        isOwn ? 'you' : displayName,
+                        style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: color),
+                      ),
                       const SizedBox(width: 8),
                       Text(
-                        '⟳ received late',
-                        style: TextStyle(
-                          fontSize: TCType.textMicro,
-                          color: TCColors.textTertiary,
-                          fontStyle: FontStyle.italic,
-                        ),
+                        '[${message.senderHash.substring(0, message.senderHash.length >= 8 ? 8 : message.senderHash.length)}]',
+                        style: TextStyle(fontSize: TCType.textMicro, color: TCColors.textTertiary),
                       ),
+                      const SizedBox(width: 8),
+                      Text(
+                        formatTs(message.timestamp),
+                        style: TextStyle(fontSize: TCType.textMicro, color: TCColors.textTertiary),
+                      ),
+                      if (isLate) ...[
+                        const SizedBox(width: 8),
+                        Text(
+                          '⟳ received late',
+                          style: TextStyle(
+                            fontSize: TCType.textMicro,
+                            color: TCColors.textTertiary,
+                            fontStyle: FontStyle.italic,
+                          ),
+                        ),
+                      ],
                     ],
-                  ],
+                  ),
+                  body,
+                  if (message.reactions.isNotEmpty)
+                    _ReactionRow(
+                        message: message,
+                        onToggle: onToggleReaction,
+                        emojiLibrary: widget.emojiLibrary),
+                ],
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    final Widget withFriendMenu = onAddFriend == null
+        ? content
+        : GestureDetector(
+            onSecondaryTapDown: (details) => showTcContextMenu(
+              context: context,
+              position: details.globalPosition,
+              items: [
+                TcContextMenuItem(
+                  label:
+                      friendHashes.contains(message.senderHash) ? 'Edit friend…' : 'Add friend…',
+                  onTap: () => onAddFriend!(message.senderHash),
                 ),
-                body,
-                if (message.reactions.isNotEmpty)
-                  _ReactionRow(
-                      message: message,
-                      onToggle: onToggleReaction,
-                      emojiLibrary: widget.emojiLibrary),
               ],
             ),
-          ),
-        ],
-      ),
-    ));
+            child: content,
+          );
+
+    return _withReactButton(withFriendMenu);
   }
 }
 

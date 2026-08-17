@@ -21,6 +21,7 @@ import 'package:flutter_ui/screens/dialogs/members_dialog.dart';
 import 'package:flutter_ui/screens/dialogs/permissions_dialog.dart';
 import 'package:flutter_ui/screens/dialogs/pin_dialogs.dart';
 import 'package:flutter_ui/screens/dialogs/settings_dialog.dart';
+import 'package:flutter_ui/screens/main_window/friends_tab.dart';
 import 'package:flutter_ui/screens/main_window/iface_tab.dart';
 import 'package:flutter_ui/screens/main_window/map_tab.dart';
 import 'package:flutter_ui/theme/app_theme.dart';
@@ -223,5 +224,13 @@ void main() {
     await tester.pumpAndSettle();
     await expectLater(
         find.byType(MaterialApp), matchesGoldenFile('goldens/map_tab.png'));
+  });
+
+  testWidgets('friends tab', (tester) async {
+    state.friends = fixtureFriends();
+    await tester.pumpWidget(_harness(Scaffold(body: FriendsTab(state: state))));
+    await tester.pumpAndSettle();
+    await expectLater(
+        find.byType(MaterialApp), matchesGoldenFile('goldens/friends_tab.png'));
   });
 }
