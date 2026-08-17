@@ -111,6 +111,40 @@ def rosters_identical(peers, channel_hash: str, *,
     return roster(peers[0], channel_hash)
 
 
+def subscriber_views(peers, channel_hash: str) -> dict[str, list[str]]:
+    """Each peer's subscriber set, by tag rather than raw hash.
+
+    On an open-join channel this is the recipient list a send is addressed to,
+    so a peer missing from one view is a peer that send will never reach.
+    """
+    by_hash = {p.hash: p.tag for p in peers}
+    return {
+        p.tag: sorted(by_hash.get(h, h[:8]) for h in p.subscribers(channel_hash))
+        for p in peers
+    }
+
+
+def subscribers_converged(peers, channel_hash: str, *,
+                          timeout: float = DEFAULT_TIMEOUT) -> float:
+    """Every peer's subscriber set names every peer.
+
+    The open-join counterpart to waiting for a roster: a send is addressed to
+    whatever this set holds, so asserting fan-out before it has propagated
+    tests the timing of the owner's broadcast rather than the fan-out.
+    """
+    everyone = {p.hash for p in peers}
+
+    def known() -> bool:
+        # Every peer must know every *other* peer. The owner is never in its
+        # own subscriber set (that tracks inbound MT_SUBSCRIBE), while the
+        # list it broadcasts does name itself, so "knows everyone else" is the
+        # one condition that holds on both sides.
+        return all(everyone - {p.hash} <= set(p.subscribers(channel_hash)) for p in peers)
+
+    return wait_until(known, f"{[p.tag for p in peers]} to agree on the subscriber set",
+                      timeout)
+
+
 def diff_report(peers, channel_hash: str, expected: set[str]) -> dict[str, dict]:
     """Per-peer missing/extra against an expected message set, for failure detail."""
     report = {}

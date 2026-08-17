@@ -81,6 +81,15 @@ Getting these wrong produces phantom failures.
   and `messaging.py` drops a chat message if the receiver isn't marked
   subscribed/member yet. Scenarios wait for the roster to converge before
   sending.
+- **On a public channel, joining is not the same as being registered.**
+  `join_public_channel` sets the joiner's own state and sends `MT_SUBSCRIBE`;
+  the owner only adds them on receipt, and other subscribers only learn of them
+  from the owner's next broadcast. Three distinct moments, in order: the joiner
+  is subscribed → the owner has them in `get_subscribers` → every subscriber
+  does. A send addressed before the relevant one has passed goes to a set the
+  target isn't in, and no retry fixes it because the message was never
+  addressed to them. `_join_all(..., owner)` waits for the second;
+  `subscribers_converged()` waits for the third.
 - **A sync backfill is a chain, not an exchange.** Wait for sync state to leave
   `syncing` rather than sampling after a fixed sleep.
 
@@ -100,8 +109,9 @@ currently implies, and the scenario exists to confirm it.
 | A5 | A,B,C,D | A creates; B, C join; A sends 5; **then** D joins | ⚠ **Confirmed.** D holds 0 at the instant it joins — public join calls `subscription_mgr.subscribe()` only, no `channel_joined` callback, so nothing requests sync. Backfill lands on A's next peer announce: measured 1.0s and 9.1s on two runs, tracking the 10s heartbeat phase. Scales to a 60s worst case in the real app |
 | A6 | A,B,C,D | A6a: A creates public, grants `full_sync` to member, sends 5, D joins. A6b: identical without `full_sync` | ⚠ **Confirmed.** Both channels backfilled all 5 to D, with and without the grant. Public channels never open tenure, so `has_any_tenure` is false and tenure filtering — the only thing `full_sync` gates — never engages |
 | A7 | A,B,C | B leaves; A sends 2 | A removes B from subscribers; C holds both; B holds neither |
-| A8 | A,B,C,D | All 4 joined; each sends 2 in turn | All four converge on 9 messages (a seed plus 8). ⚠ **Intermittent**: failed once in four runs, never converging inside 90s. Left strict — the expectation is right; the flake needs root-causing |
-| A9 | A,B,C,D | A (owner) leaves its own channel, then C sends | ⚠ **Non-deterministic.** C's message reached B and D on one run and neither on the next. The departed owner never receives it, and stays unsubscribed, in both. Non-owner fan-out depends on a subscriber list only the owner broadcasts, and leaving stops the updates |
+| A8 | A,B,C,D | All 4 joined and the subscriber set has converged; each sends 2 in turn | All four converge on 9 messages (a seed plus 8). Roster settle measured at 0.5–4.0s |
+| A9 | A,B,C,D | A (owner) leaves its own channel, then C sends | C's message still reaches B and D — the subscriber lists they already hold are unaffected by the owner leaving. The departed owner does not receive it and stays unsubscribed |
+| A10 | A,B,C,D | B, C join; C goes offline; D joins (C misses the broadcast); C returns | C learns about D and its next send reaches D. Recovery measured at 0.5s, 1.0s and 18.1s across runs — LXMF's own retry backoff, not an application-level repair |
 
 ### B — Invite-only channels and membership
 
@@ -197,11 +207,31 @@ are now confirmed by a run; two are still unbuilt.
 | **G1** — subscriber-list version counter is in-memory, so it resets on owner restart and surviving subscribers reject later lists as replays | Not yet built (family G) |
 | **F3** — reactions have no backfill path, so an offline peer misses them permanently | Not yet built (family F) |
 
-Family A also turned up one gap that wasn't predicted: **non-owner fan-out on a
-public channel is unreliable** (A8 intermittent, A9 varying run to run). Both
-depend on the subscriber list the owner broadcasts, and nothing reconciles a
-subscriber's view if a broadcast is missed or the owner stops sending them.
-Worth root-causing before building more families on top of it.
+### One suspected gap that turned out not to be
+
+An earlier draft recorded a third finding from family A: that non-owner fan-out
+on a public channel was unreliable, from A8 failing intermittently and A9
+varying run to run. That was wrong, and the way it was wrong is worth keeping.
+
+The reasoning was that `SubscriptionManager._send_raw` has no retry queue, so a
+dropped subscriber-list broadcast would strand a peer permanently. A10 was
+written to demonstrate exactly that — take a subscriber offline across a roster
+change and watch it never recover. It recovered every time. `_send_raw` only
+drops when `Identity.recall()` returns `None`, i.e. the path was never
+resolved; once a path is known the message goes to LXMF, whose own outbound
+retry redelivers when the link returns. The no-retry gap is a cold-start race,
+not an offline-peer case.
+
+The real cause was in the scenarios: they asserted fan-out before the owner had
+processed the joiners' `MT_SUBSCRIBE`, so the sends were addressed to a set the
+targets weren't in. Waiting on the owner's registration (and, where a peer
+addresses other peers, on full subscriber convergence) made three consecutive
+family runs clean. It is a genuine ordering constraint — now written into the
+timing rules above — but it belongs to the harness, not the app.
+
+Worth stating plainly: an intermittent scenario is far more likely to be an
+under-specified precondition than a real race, and "no retry here" is not a bug
+until you check what the layer underneath does.
 
 ## Harness
 
@@ -211,7 +241,7 @@ Built and running, in `devtools/testenv/scenarios/`:
 |---|---|
 | `runner.py` | Spawns `orchestrator.py --testers N`, waits for every API, runs the selection, resets between scenarios, reports |
 | `peer.py` | `Peer` (one tester's API) and `Orchestrator` (process/link lifecycle). One method per endpoint, no logic |
-| `asserts.py` | Polling assertions: `wait_until`, `settle`, `hold_for`, `all_hold`, `converged`, `rosters_identical`, `sync_settled`, `diff_report` |
+| `asserts.py` | Polling assertions: `wait_until`, `settle`, `hold_for`, `all_hold`, `converged`, `rosters_identical`, `subscribers_converged`, `sync_settled`, `diff_report`, `subscriber_views` |
 | `scenario.py` | The `@scenario` registry and the strict/probe distinction |
 | `scen_public.py` | Family A |
 
@@ -222,8 +252,12 @@ against the same runner.
 .venv/bin/python devtools/testenv/scenarios/runner.py                # everything
 .venv/bin/python devtools/testenv/scenarios/runner.py --family A
 .venv/bin/python devtools/testenv/scenarios/runner.py --scenario A5 A6
+.venv/bin/python devtools/testenv/scenarios/runner.py --scenario A8 --repeat 6
 .venv/bin/python devtools/testenv/scenarios/runner.py --json out.json
 ```
+
+`--repeat` re-runs the selection to characterise a flake; `--attach` uses an
+orchestrator you already have running.
 
 Needs both `requirements.txt` and `devtools/testenv/requirements.txt` in the
 venv. Exits 0 if every strict scenario passed.
@@ -249,13 +283,13 @@ stays the merge gate.
 
 ## Status
 
-Family A: 9 scenarios, 6 strict + 3 probes. Two full runs — 6/6 strict passing
-on the second, 5/6 on the first (A8's intermittent failure).
+Family A: 10 scenarios, 6 strict + 4 probes, ~6 minutes a run (most of it
+environment resets). Three consecutive clean runs after the ordering fix; the
+two failures before it were both the precondition gap described above.
 
 Remaining phases:
 
-1. Root-cause the non-owner fan-out flake (A8/A9) before building on it.
-2. Family C — the highest-value coverage and the reason for real networking.
-3. G1 and F3, the two unconfirmed suspected gaps.
-4. Families B and E — membership and permissions across 4 peers.
-5. Families D, F, G.
+1. Family C — the highest-value coverage and the reason for real networking.
+2. G1 and F3, the two unconfirmed suspected gaps.
+3. Families B and E — membership and permissions across 4 peers.
+4. Families D, F, G.

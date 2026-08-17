@@ -100,6 +100,9 @@ class Peer:
     def members(self, channel_hash: str) -> list[dict]:
         return self._get(f"/channels/{channel_hash}/members")
 
+    def subscribers(self, channel_hash: str) -> list[str]:
+        return self._get(f"/channels/{channel_hash}/subscribers")
+
     def sync_status(self, channel_hash: str) -> dict:
         return self._get(f"/channels/{channel_hash}/sync_status")
 

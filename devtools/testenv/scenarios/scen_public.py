@@ -12,7 +12,7 @@ See docs/testenv-scenarios.md for the matrix these implement.
 
 from asserts import (
     all_hold, diff_report, discovered_hashes, hold_for, joined_hashes, settle,
-    wait_until, ScenarioFailure,
+    subscriber_views, subscribers_converged, wait_until, ScenarioFailure,
 )
 from scenario import PROBE, scenario
 
@@ -32,13 +32,25 @@ def _await_discovery(peers, channel_hash: str, timeout: float = DISCOVERY_TIMEOU
                    f"{p.tag} to discover the channel", timeout)
 
 
-def _join_all(peers, channel_hash: str):
+def _join_all(peers, channel_hash: str, owner=None):
+    """Join every peer, and wait for the owner to have registered them.
+
+    Joining only sets the joiner's own state; the owner learns of it from an
+    inbound MT_SUBSCRIBE that arrives separately. Until that lands the owner
+    addresses its sends to a set the joiner isn't in, so any fan-out assertion
+    made before this point is testing subscribe latency, not fan-out.
+    """
     _await_discovery(peers, channel_hash)
     for p in peers:
         if not p.join(channel_hash):
             raise ScenarioFailure(f"{p.tag} failed to join {channel_hash[:12]}")
         wait_until(lambda p=p: channel_hash in joined_hashes(p),
                    f"{p.tag} to show the channel as joined")
+    if owner is not None:
+        for p in peers:
+            wait_until(lambda p=p: p.hash in owner.subscribers(channel_hash),
+                       f"{owner.tag} to register {p.tag} as a subscriber",
+                       DISCOVERY_TIMEOUT)
 
 
 @scenario("A1", "A creates a public channel; B, C, D discover it unjoined")
@@ -59,7 +71,7 @@ def a1(env):
 def a2(env):
     a, b = env.peers("A", "B")
     ch = a.create_channel("a2-public", "public")
-    _join_all([b], ch)
+    _join_all([b], ch, a)
 
     if ch in discovered_hashes(b):
         raise ScenarioFailure("channel still listed as undiscovered/unjoined for B")
@@ -74,7 +86,7 @@ def a2(env):
 def a3(env):
     a, b, c, d = env.peers("A", "B", "C", "D")
     ch = a.create_channel("a3-public", "public")
-    _join_all([b, c], ch)
+    _join_all([b, c], ch, a)
 
     expected = {f"a3-{i}" for i in range(3)}
     for content in sorted(expected):
@@ -89,10 +101,12 @@ def a3(env):
 def a4(env):
     a, b, c, d = env.peers("A", "B", "C", "D")
     ch = a.create_channel("a4-public", "public")
-    _join_all([b, c], ch)
+    _join_all([b, c], ch, a)
 
-    # The subscriber list only reaches B and C once A has broadcast it, and B
-    # can't address C before that lands.
+    # B addresses its send to the subscriber list A broadcast, so that has to
+    # have landed before a fan-out assertion means anything.
+    subscribers_converged([a, b, c], ch, timeout=DISCOVERY_TIMEOUT)
+
     a.send(ch, "seed")
     all_hold([b, c], ch, {"seed"}, timeout=DISCOVERY_TIMEOUT)
 
@@ -110,7 +124,7 @@ def a5(env):
     long backfill actually takes and what triggers it."""
     a, b, c, d = env.peers("A", "B", "C", "D")
     ch = a.create_channel("a5-public", "public")
-    _join_all([b, c], ch)
+    _join_all([b, c], ch, a)
 
     backlog = {f"a5-{i}" for i in range(5)}
     for content in sorted(backlog):
@@ -179,7 +193,7 @@ def a6(env):
 def a7(env):
     a, b, c = env.peers("A", "B", "C")
     ch = a.create_channel("a7-public", "public")
-    _join_all([b, c], ch)
+    _join_all([b, c], ch, a)
 
     a.send(ch, "before-leave")
     all_hold([b, c], ch, {"before-leave"}, timeout=DISCOVERY_TIMEOUT)
@@ -200,9 +214,11 @@ def a7(env):
 def a8(env):
     a, b, c, d = env.peers("A", "B", "C", "D")
     ch = a.create_channel("a8-public", "public")
-    _join_all([b, c, d], ch)
+    _join_all([b, c, d], ch, a)
 
-    # Seeded so every subscriber learns the full roster before addressing it.
+    everyone = [a, b, c, d]
+    roster_secs = subscribers_converged(everyone, ch, timeout=DISCOVERY_TIMEOUT)
+
     a.send(ch, "seed")
     all_hold([b, c, d], ch, {"seed"}, timeout=DISCOVERY_TIMEOUT)
 
@@ -213,13 +229,64 @@ def a8(env):
             p.send(ch, content)
             expected.add(content)
 
-    everyone = [a, b, c, d]
     arrived, _ = settle(lambda: all(p.contents(ch) == expected for p in everyone),
                         "all four to hold every message", BACKFILL_TIMEOUT)
     if not arrived:
-        raise ScenarioFailure(f"did not converge on {len(expected)} messages: "
-                              f"{diff_report(everyone, ch, expected)}")
-    return {"messages": len(expected)}
+        raise ScenarioFailure(
+            f"did not converge on {len(expected)} messages: "
+            f"{diff_report(everyone, ch, expected)} | "
+            f"subscriber views: {subscriber_views(everyone, ch)}"
+        )
+    return {"messages": len(expected), "roster_settle_secs": round(roster_secs, 1)}
+
+
+@scenario("A10", "A subscriber offline across a roster change catches up", kind=PROBE)
+def a10(env):
+    """Written to prove SubscriptionManager._send_raw's missing retry queue
+    strands a subscriber that misses a broadcast. It does not: _send_raw only
+    drops when the path is unresolved, and for a peer whose path is already
+    known, LXMF's own outbound retry redelivers once the link returns.
+    Kept as the regression guard for that recovery.
+    """
+    a, b, c, d = env.peers("A", "B", "C", "D")
+    ch = a.create_channel("a10-public", "public")
+    _join_all([b, c], ch, a)
+    _await_discovery([d], ch)
+
+    a.send(ch, "seed")
+    all_hold([b, c], ch, {"seed"}, timeout=DISCOVERY_TIMEOUT)
+
+    c.go_offline()
+    wait_until(lambda: not c.net_status()["online"], "C's link to drop")
+
+    # The broadcast C is meant to miss: A re-sends the subscriber list to
+    # everyone each time someone joins, and D joining is the last one.
+    d.join(ch)
+    wait_until(lambda: d.hash in a.subscribers(ch), "A to register D as a subscriber",
+               DISCOVERY_TIMEOUT)
+    wait_until(lambda: d.hash in b.subscribers(ch), "B to learn about D",
+               DISCOVERY_TIMEOUT)
+
+    c.go_online()
+    wait_until(lambda: c.net_status()["online"], "C's link to come back", 60.0)
+
+    knows_d, learn_secs = settle(lambda: d.hash in c.subscribers(ch),
+                                 "C to learn about D after reconnecting", 60.0)
+
+    c.send(ch, "from-C-after-reconnect")
+    reached, reach_secs = settle(lambda: "from-C-after-reconnect" in d.contents(ch),
+                                 "C's message to reach D", 60.0)
+    notes = {
+        "c_knows_d_after_reconnect": knows_d,
+        "c_learned_after_secs": round(learn_secs, 1) if knows_d else None,
+        "c_message_reached_d": reached,
+        "reached_after_secs": round(reach_secs, 1) if reached else None,
+        "subscriber_views": subscriber_views([a, b, c, d], ch),
+    }
+    if not knows_d or not reached:
+        notes["surprise"] = ("a subscriber that missed one broadcast never "
+                             "recovered the roster")
+    return notes
 
 
 @scenario("A9", "The owner leaving its own public channel", kind=PROBE)
@@ -229,7 +296,8 @@ def a9(env):
     Records what the remaining subscribers see."""
     a, b, c, d = env.peers("A", "B", "C", "D")
     ch = a.create_channel("a9-public", "public")
-    _join_all([b, c, d], ch)
+    _join_all([b, c, d], ch, a)
+    subscribers_converged([a, b, c, d], ch, timeout=DISCOVERY_TIMEOUT)
 
     a.send(ch, "seed")
     all_hold([b, c, d], ch, {"seed"}, timeout=DISCOVERY_TIMEOUT)

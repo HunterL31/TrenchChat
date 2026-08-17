@@ -135,7 +135,8 @@ def _select(family: str | None, ids: list[str] | None) -> list:
         chosen = [s for s in chosen if s.id in wanted]
     if not chosen:
         raise SystemExit("no scenarios matched")
-    return sorted(chosen, key=lambda s: s.id)
+    # Natural order, so A10 follows A9 rather than A1.
+    return sorted(chosen, key=lambda s: (s.family, int(s.id[1:])))
 
 
 def _run_one(scen, env: Env) -> Result:
@@ -185,6 +186,8 @@ def main() -> int:
     parser.add_argument("--scenario", nargs="+", help="run specific matrix IDs")
     parser.add_argument("--attach", action="store_true",
                         help="use an already-running orchestrator instead of spawning one")
+    parser.add_argument("--repeat", type=int, default=1,
+                        help="run the selection N times, to characterise a flake")
     parser.add_argument("--json", help="write results to this path")
     args = parser.parse_args()
 
@@ -203,15 +206,22 @@ def main() -> int:
         env = _wait_environment(orch, args.testers)
         print(f"environment ready; running {len(chosen)} scenario(s)\n")
 
-        for i, scen in enumerate(chosen):
-            if i > 0:
-                print("  resetting environment...")
-                _reset(orch, env)
-            print(f"-> {scen.id}  {scen.title}")
-            result = _run_one(scen, env)
-            print(f"   {_MARK[result.status]} in {result.duration:.0f}s"
-                  + (f" -- {result.detail}" if result.detail else ""))
-            results.append(result)
+        first = True
+        for run in range(args.repeat):
+            if args.repeat > 1:
+                print(f"\n--- pass {run + 1}/{args.repeat} ---")
+            for scen in chosen:
+                if not first:
+                    print("  resetting environment...")
+                    _reset(orch, env)
+                first = False
+                print(f"-> {scen.id}  {scen.title}")
+                result = _run_one(scen, env)
+                if args.repeat > 1:
+                    result.id = f"{scen.id}#{run + 1}"
+                print(f"   {_MARK[result.status]} in {result.duration:.0f}s"
+                      + (f" -- {result.detail}" if result.detail else ""))
+                results.append(result)
     finally:
         if env is not None:
             env.close()
