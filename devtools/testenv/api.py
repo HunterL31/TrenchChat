@@ -226,6 +226,14 @@ def create_app(backend: Backend) -> FastAPI:
     async def _on_startup():
         bus.bind_loop(asyncio.get_running_loop())
 
+    @app.on_event("shutdown")
+    async def _on_shutdown():
+        # uvicorn runs this on SIGINT/SIGTERM, so both entry points quit
+        # gracefully: orchestrator.py's "kill tester", and Ctrl+C on
+        # serve_profile.py, which is a real client and really is going away.
+        backend.announce_offline()
+        backend.close()
+
     # --- wire backend callbacks (RNS/LXMF background threads) to the bus ---
 
     def _on_message(channel_hash_hex: str, message_id: str):

@@ -24,7 +24,7 @@ import LXMF
 import msgpack
 
 from trenchchat.core.actions import compute_channel_recipients
-from trenchchat.core.protocol import F_MSG_TYPE, MT_PRESENCE, unpack_wire
+from trenchchat.core.protocol import F_MSG_TYPE, MT_GOODBYE, MT_PRESENCE, unpack_wire
 
 PRESENCE_TIMEOUT_SECS = 300
 
@@ -36,6 +36,22 @@ PRESENCE_BEACON_AFTER_SECS = 180
 # Per-peer jitter applied to the beacon-after threshold, as a fraction of it,
 # so peers that went quiet together don't beacon each other in lockstep.
 PRESENCE_BEACON_JITTER_FRACTION = 0.2
+
+# How long announce_offline waits for its goodbyes to leave the process before
+# giving up on the stragglers. LXMF sends are asynchronous, so quitting straight
+# after handing them over would kill the process before anything went out.
+GOODBYE_DRAIN_SECS = 2.0
+GOODBYE_DRAIN_POLL_SECS = 0.05
+
+# An LXMessage in any of these has stopped moving -- nothing more will happen to
+# it without another send.
+_TERMINAL_SEND_STATES = (
+    LXMF.LXMessage.SENT,
+    LXMF.LXMessage.DELIVERED,
+    LXMF.LXMessage.FAILED,
+    LXMF.LXMessage.REJECTED,
+    LXMF.LXMessage.CANCELLED,
+)
 
 
 def resolve_display_name(identity_hex: str, self_hex: str, storage, config=None) -> str:
@@ -115,6 +131,51 @@ class PresenceManager:
         if became_online:
             RNS.log(f"TrenchChat [presence]: peer online {peer_hex[:12]}…", RNS.LOG_DEBUG)
             self._fire_callbacks(peer_hex, True)
+
+    def record_offline(self, peer_hex: str) -> None:
+        """Mark a peer offline now, on their graceful-shutdown notice.
+
+        Deliberately leaves no trace behind: the next record_seen brings the
+        peer straight back online, so a shutdown that gets cancelled -- or a
+        client that restarts immediately -- recovers with no special handling.
+        """
+        if peer_hex == self._self_hex:
+            return
+        with self._lock:
+            was_online = self._is_online_locked(peer_hex)
+            self._last_seen.pop(peer_hex, None)
+        if was_online:
+            RNS.log(f"TrenchChat [presence]: peer signed off {peer_hex[:12]}…", RNS.LOG_DEBUG)
+            self._fire_callbacks(peer_hex, False)
+
+    def record_inbound(self, message: LXMF.LXMessage) -> str | None:
+        """Record what an inbound message says about its sender's presence, and
+        return their identity hash hex.
+
+        A goodbye marks the sender offline; anything else is evidence they are
+        alive. Both verdicts are decided here so the two never race: every
+        inbound message reaches presence through this one call.
+
+        Returns None if the sender's identity can't be resolved, since
+        _last_seen is keyed by identity hash and source_hash is a delivery hash.
+        """
+        if not message.source_hash:
+            return None
+        sender_identity = RNS.Identity.recall(message.source_hash)
+        if sender_identity is None:
+            return None
+        sender_hex = sender_identity.hash.hex()
+
+        fields = message.fields or {}
+        msg_type = fields.get(F_MSG_TYPE)
+        if isinstance(msg_type, bytes):
+            msg_type = msg_type.decode(errors="replace")
+
+        if msg_type == MT_GOODBYE:
+            self.record_offline(sender_hex)
+        else:
+            self.record_seen(sender_hex)
+        return sender_hex
 
     def is_online(self, peer_hex: str) -> bool:
         """Return True if the peer is considered online (including self)."""
@@ -275,6 +336,40 @@ class PresenceBeacon:
             if now - self._quiet_since(peer_hex) >= self._threshold(peer_hex):
                 self._send_beacon(peer_hex)
 
+    def announce_offline(self, drain_secs: float = GOODBYE_DRAIN_SECS) -> int:
+        """Tell every channel peer we are shutting down, so they can drop us to
+        offline now rather than waiting out PRESENCE_TIMEOUT_SECS.
+
+        Blocks until the sends stop moving or drain_secs elapses, then returns
+        how many left the process. Best-effort: a peer whose path we don't hold,
+        or whose link doesn't come up in time, simply times us out as before.
+        """
+        sent = [
+            lxm for lxm in (
+                self._send_presence(peer_hex, MT_GOODBYE)
+                for peer_hex in self._channel_peers()
+            )
+            if lxm is not None
+        ]
+        if not sent:
+            return 0
+
+        deadline = time.time() + drain_secs
+        while time.time() < deadline:
+            if all(getattr(lxm, "state", None) in _TERMINAL_SEND_STATES for lxm in sent):
+                break
+            time.sleep(GOODBYE_DRAIN_POLL_SECS)
+
+        delivered = sum(
+            1 for lxm in sent if getattr(lxm, "state", None) in _TERMINAL_SEND_STATES
+        )
+        RNS.log(
+            f"TrenchChat [presence]: sent going-offline notice to "
+            f"{delivered}/{len(sent)} peers",
+            RNS.LOG_NOTICE,
+        )
+        return delivered
+
     # --- private helpers ---
 
     def _quiet_since(self, peer_hex: str) -> float:
@@ -302,12 +397,19 @@ class PresenceBeacon:
         return peers
 
     def _send_beacon(self, peer_hex: str) -> None:
+        if self._send_presence(peer_hex, MT_PRESENCE) is None:
+            return
+        RNS.log(f"TrenchChat [presence]: beacon sent to {peer_hex[:12]}…", RNS.LOG_DEBUG)
+
+    def _send_presence(self, peer_hex: str, msg_type: str) -> "LXMF.LXMessage | None":
+        """Send a one-field presence control message. Returns the message, or
+        None if the peer's path isn't known yet."""
         identity_hash = bytes.fromhex(peer_hex)
         delivery_dest_hash = RNS.Destination.hash(identity_hash, "lxmf", "delivery")
         dest_identity = RNS.Identity.recall(delivery_dest_hash)
         if dest_identity is None:
             RNS.Transport.request_path(delivery_dest_hash)
-            return
+            return None
 
         dest = RNS.Destination(
             dest_identity,
@@ -322,7 +424,7 @@ class PresenceBeacon:
             "",
             desired_method=LXMF.LXMessage.DIRECT,
         )
-        lxm.fields = {F_MSG_TYPE: MT_PRESENCE}
+        lxm.fields = {F_MSG_TYPE: msg_type}
         self._router.send(lxm)
         self.record_sent(peer_hex)
-        RNS.log(f"TrenchChat [presence]: beacon sent to {peer_hex[:12]}…", RNS.LOG_DEBUG)
+        return lxm

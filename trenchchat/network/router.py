@@ -298,6 +298,18 @@ class Router:
             except Exception as e:
                 RNS.log(f"TrenchChat: outbound callback error: {e}", RNS.LOG_ERROR)
 
+    def stop(self) -> None:
+        """Persist LXMF state and tear down delivery destinations.
+
+        LXMF registers this as an atexit hook, but RNS exits the process with
+        os._exit, which skips atexit entirely -- so shutdown has to call it.
+        Safe to call twice; LXMF guards against re-entry.
+        """
+        try:
+            self._router.exit_handler()
+        except Exception as e:
+            RNS.log(f"TrenchChat: LXMF shutdown error: {e}", RNS.LOG_ERROR)
+
     # --- propagation node ---
 
     def enable_propagation(self):

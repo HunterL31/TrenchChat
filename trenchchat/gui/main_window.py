@@ -376,17 +376,14 @@ class MainWindow(QMainWindow):
             ChannelAnnounceHandler(_on_channel_announce)
         )
 
-        # Also mark a peer as seen when we receive any inbound LXMF message from
-        # them.  This covers the case where a peer connects via a backchannel link
-        # and sends a message without having announced their delivery destination
-        # first (which is the normal LXMF direct-delivery flow).
+        # Also update presence from any inbound LXMF message.  This covers the
+        # case where a peer connects via a backchannel link and sends a message
+        # without having announced their delivery destination first (which is the
+        # normal LXMF direct-delivery flow), and it is where a peer's
+        # going-offline notice takes effect.
         def _on_inbound_message(message: "LXMF.LXMessage") -> None:
-            if not message.source_hash:
-                return
-            sender_identity = RNS.Identity.recall(message.source_hash)
-            if sender_identity is not None:
-                sender_hex = sender_identity.hash.hex()
-                self._presence_mgr.record_seen(sender_hex)
+            sender_hex = self._presence_mgr.record_inbound(message)
+            if sender_hex:
                 self._seed_user_directory(sender_hex)
 
         router.add_delivery_callback(_on_inbound_message)
