@@ -1,5 +1,6 @@
 """
-TrenchChat entry point.
+Legacy Qt entry point. The active client is the Flutter app -- launch it
+with main_flutter.py; this stays until the migration finishes.
 
 Startup order:
   1. Load config
