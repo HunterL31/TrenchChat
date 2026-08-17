@@ -65,13 +65,14 @@ for a channel.
 
 Getting these wrong produces phantom failures.
 
-- **The testenv announces far more often than the real app.**
-  `backend_core.start_heartbeat` announces every 1.5s; `main.py` re-announces
-  every 60s. `PeerAnnounceHandler` fires `on_peer_appeared` on *every* announce,
-  not just transitions — so anything that piggybacks on a peer announce
-  (pending flush, sync request) happens ~40× faster here than in production. Any
-  scenario whose result depends on that trigger must record time-to-converge,
-  not just convergence, and be read against a 60s worst case.
+- **The testenv announces far more often than the real app.** `worker.py` — what
+  the orchestrator launches — runs the heartbeat at 10s; `main.py` re-announces
+  every 60s. (`backend_core.start_heartbeat` defaults to 1.5s, which only
+  `smoke_test.py` uses.) `PeerAnnounceHandler` fires `on_peer_appeared` on
+  *every* announce, not just transitions, so anything piggybacking on a peer
+  announce — pending flush, sync request — happens ~6× faster here than in
+  production. Any scenario whose result depends on that trigger must record
+  time-to-converge, not just convergence, and be read against a 60s worst case.
 - **Warm up before inviting.** `invite.py`'s `_send_raw` has no retry queue. If
   the path isn't resolved when the invite is sent, it is dropped silently. The
   harness resolves paths first (`Backend.warm_up`) before any invite step.
@@ -96,11 +97,11 @@ currently implies, and the scenario exists to confirm it.
 | A2 | A,B | A creates; B joins | A's subscriber set = {B}; B receives the signed subscriber list; B's roster view includes A |
 | A3 | A,B,C,D | A creates; B, C join; A sends 3 | B and C hold all 3; D holds none |
 | A4 | A,B,C,D | B (subscriber, not owner) sends 1 | A and C hold it; D does not — recipients are the subscriber set plus self |
-| A5 | A,B,C,D | A creates; B, C join; A sends 5; **then** D joins | ⚠ D holds 0 immediately. Public join calls `subscription_mgr.subscribe()` only — no `channel_joined` callback, so nothing requests sync. Backfill waits for A's next peer announce (1.5s here, up to 60s in the real app) or D's next restart. Record time-to-backfill |
-| A6 | A,B,C,D | A6a: A creates public, grants `full_sync` to member, sends 5, D joins. A6b: identical without `full_sync` | Both give D the same 5 messages. Public channels never open tenure, so `has_any_tenure` is false and tenure filtering — the only thing `full_sync` gates — never engages. `full_sync` is a no-op on public channels |
+| A5 | A,B,C,D | A creates; B, C join; A sends 5; **then** D joins | ⚠ **Confirmed.** D holds 0 at the instant it joins — public join calls `subscription_mgr.subscribe()` only, no `channel_joined` callback, so nothing requests sync. Backfill lands on A's next peer announce: measured 1.0s and 9.1s on two runs, tracking the 10s heartbeat phase. Scales to a 60s worst case in the real app |
+| A6 | A,B,C,D | A6a: A creates public, grants `full_sync` to member, sends 5, D joins. A6b: identical without `full_sync` | ⚠ **Confirmed.** Both channels backfilled all 5 to D, with and without the grant. Public channels never open tenure, so `has_any_tenure` is false and tenure filtering — the only thing `full_sync` gates — never engages |
 | A7 | A,B,C | B leaves; A sends 2 | A removes B from subscribers; C holds both; B holds neither |
-| A8 | A,B,C,D | All 4 joined; each sends 2 in turn | All four converge on 8 messages |
-| A9 | A,B,C,D | A (owner) leaves its own channel, then C sends | Channel has no owner-side subscriber broadcast; define and assert intended behavior |
+| A8 | A,B,C,D | All 4 joined; each sends 2 in turn | All four converge on 9 messages (a seed plus 8). ⚠ **Intermittent**: failed once in four runs, never converging inside 90s. Left strict — the expectation is right; the flake needs root-causing |
+| A9 | A,B,C,D | A (owner) leaves its own channel, then C sends | ⚠ **Non-deterministic.** C's message reached B and D on one run and neither on the next. The departed owner never receives it, and stays unsubscribed, in both. Non-owner fan-out depends on a subscriber list only the owner broadcasts, and leaving stops the updates |
 
 ### B — Invite-only channels and membership
 
@@ -184,58 +185,77 @@ degraded or interrupted link.
 | G4 | A,B | A publishes a roster change and sends a chat message immediately after | Chat message may be dropped if the roster hasn't landed. Assert the settle requirement rather than leaving it to luck |
 | G5 | A,B,C | A single tester is reset (data wiped, same slot) | Returns as a **new identity**; old membership rows on B and C reference an identity that will never reappear. Assert the roster state that leaves behind |
 
-## Suspected gaps this matrix is built to confirm
+## Suspected gaps
 
-Four rows are worth running first — each has a concrete code-level reason to
-expect a failure or a surprise.
+Each has a concrete code-level reason to expect a failure or a surprise. Two
+are now confirmed by a run; two are still unbuilt.
 
-1. **G1** — subscriber-list version counter resets on owner restart, so
-   surviving subscribers reject every subsequent list as a replay.
-2. **A5** — a public-channel join fires no sync request; backfill waits on the
-   next peer announce, up to 60s in the real client.
-3. **F3** — reactions have no backfill path, so an offline peer misses them
-   permanently.
-4. **A6** — `full_sync` has no effect on public channels; anyone who subscribes
-   can pull full history. Worth confirming that's intended, since the UI offers
-   the toggle either way.
+| Gap | Status |
+|---|---|
+| **A5** — a public-channel join fires no sync request; backfill waits on the next peer announce | **Confirmed.** 0 messages at join, backfill at 1.0s / 9.1s tracking the 10s heartbeat. Up to 60s in the real client |
+| **A6** — `full_sync` has no effect on public channels; any subscriber can pull full history | **Confirmed.** Identical backfill with and without the grant. The UI offers the toggle regardless |
+| **G1** — subscriber-list version counter is in-memory, so it resets on owner restart and surviving subscribers reject later lists as replays | Not yet built (family G) |
+| **F3** — reactions have no backfill path, so an offline peer misses them permanently | Not yet built (family F) |
 
-## Harness plan
+Family A also turned up one gap that wasn't predicted: **non-owner fan-out on a
+public channel is unreliable** (A8 intermittent, A9 varying run to run). Both
+depend on the subscriber list the owner broadcasts, and nothing reconciles a
+subscriber's view if a broadcast is missed or the owner stops sending them.
+Worth root-causing before building more families on top of it.
 
+## Harness
+
+Built and running, in `devtools/testenv/scenarios/`:
+
+| File | Purpose |
+|---|---|
+| `runner.py` | Spawns `orchestrator.py --testers N`, waits for every API, runs the selection, resets between scenarios, reports |
+| `peer.py` | `Peer` (one tester's API) and `Orchestrator` (process/link lifecycle). One method per endpoint, no logic |
+| `asserts.py` | Polling assertions: `wait_until`, `settle`, `hold_for`, `all_hold`, `converged`, `rosters_identical`, `sync_settled`, `diff_report` |
+| `scenario.py` | The `@scenario` registry and the strict/probe distinction |
+| `scen_public.py` | Family A |
+
+Families B–G are not written yet; each is one more `scen_*.py` registering
+against the same runner.
+
+```bash
+.venv/bin/python devtools/testenv/scenarios/runner.py                # everything
+.venv/bin/python devtools/testenv/scenarios/runner.py --family A
+.venv/bin/python devtools/testenv/scenarios/runner.py --scenario A5 A6
+.venv/bin/python devtools/testenv/scenarios/runner.py --json out.json
 ```
-devtools/testenv/scenarios/
-    runner.py       # spawn orchestrator --testers N, poll readiness, run, tear down, report
-    peer.py         # HTTP wrapper: one method per action, plus wait_until / warm_up
-    asserts.py      # converged(), roster_equal(), messages_equal(), sync_settled()
-    scen_public.py  # family A
-    scen_invite.py  # family B
-    scen_sync.py    # family C
-    scen_links.py   # family D
-    scen_servers.py # family E
-    scen_social.py  # family F
-    scen_restart.py # family G
-```
 
-- `runner.py` spawns `orchestrator.py --testers 4` as a subprocess and polls
-  `GET /status` until every tester is alive. The orchestrator opens no browser,
-  so it is already headless-capable.
-- Between scenarios, `POST /reset` returns all four testers to fresh
-  identities with no history — full isolation without a process restart.
-- `peer.py` is a thin wrapper over one tester's API. No business logic: every
-  method is one endpoint call, so a scenario stays readable as a sequence of
-  user actions.
-- Every assertion polls. `wait_until(pred, timeout)` defaults to 30s, raised to
-  90s for anything on a degraded profile.
-- Each scenario emits a JSON record — pass/fail, time-to-converge, per-peer
-  final state — so timing regressions show up as data, not just red.
+Needs both `requirements.txt` and `devtools/testenv/requirements.txt` in the
+venv. Exits 0 if every strict scenario passed.
 
-Slow by design: the full matrix is minutes, not seconds. It belongs on a
-nightly or on-demand run, not on the per-PR gate — `pytest tests/` stays the
-merge gate.
+**Strict vs probe.** A strict scenario asserts settled behavior — failing is a
+bug. A probe tests a prediction about behavior nothing covers yet: it records
+what actually happened and never fails the run. That keeps a known gap from
+sitting permanently red while still reporting it every time.
 
-## Suggested phasing
+**Teardown owns the process group.** The orchestrator does not reap its hub and
+workers when it is terminated, and the survivors hold the ports the next run
+preflights against. `runner.py` starts it via `start_new_session=True` and kills
+the whole group.
 
-1. `runner.py`, `peer.py`, `asserts.py`, plus family A. Proves the harness.
+Every assertion polls — `wait_until` defaults to 30s, 90s for backfill and
+anything on a degraded profile. Each scenario emits a JSON record with
+pass/fail, duration and whatever it measured, so timing regressions show up as
+data rather than just red.
+
+Slow by design: family A alone is ~6 minutes, most of it environment resets. It
+belongs on a nightly or on-demand run, not the per-PR gate — `pytest tests/`
+stays the merge gate.
+
+## Status
+
+Family A: 9 scenarios, 6 strict + 3 probes. Two full runs — 6/6 strict passing
+on the second, 5/6 on the first (A8's intermittent failure).
+
+Remaining phases:
+
+1. Root-cause the non-owner fan-out flake (A8/A9) before building on it.
 2. Family C — the highest-value coverage and the reason for real networking.
-3. The four suspected-gap rows (G1, A5, F3, A6), each as a standalone run.
+3. G1 and F3, the two unconfirmed suspected gaps.
 4. Families B and E — membership and permissions across 4 peers.
 5. Families D, F, G.
