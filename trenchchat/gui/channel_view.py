@@ -15,7 +15,6 @@ import base64
 import datetime
 import hashlib
 import html
-import re
 import time
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QScrollArea, QLabel, QSizePolicy, QDialog,
@@ -24,7 +23,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QTimer, QBuffer, QByteArray, QIODevice, pyqtSignal
 from PyQt6.QtGui import QColor, QIcon, QPixmap, QPainter, QPainterPath, QMovie
 
-from trenchchat.core.reaction import ReactionManager
+from trenchchat.core.reaction import EMOJI_TOKEN_RE, ReactionManager
 from trenchchat.core.storage import Storage
 from trenchchat.core.sync_status import SyncState
 
@@ -64,12 +63,6 @@ def _should_group(sender_hash: str, sender_name: str,
         and (ts - last_ts) < GROUP_WINDOW_SECS
     )
 
-# Matches :name@hexhash: (new unambiguous format) or :name: (legacy).
-# Group 1 = name, group 2 = 64-char hex hash (may be absent for legacy tokens).
-_EMOJI_TOKEN_RE = re.compile(
-    r":([a-zA-Z0-9_-]+)(?:@([0-9a-fA-F]{64}))?:"
-)
-
 
 def _render_content(
     content: str,
@@ -93,7 +86,7 @@ def _render_content(
     last = 0
     found_any = False
 
-    for m in _EMOJI_TOKEN_RE.finditer(content):
+    for m in EMOJI_TOKEN_RE.finditer(content):
         name = m.group(1)
         emoji_hash = m.group(2)  # None for legacy :name: tokens
 

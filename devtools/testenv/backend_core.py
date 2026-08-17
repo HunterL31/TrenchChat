@@ -191,8 +191,10 @@ class Backend:
         self.messaging = Messaging(self.identity, self.storage, self.router)
         self.subscription_mgr = SubscriptionManager(self.identity, self.storage, self.router)
         self.invite_mgr = InviteManager(self.identity, self.storage, self.router)
+        self.reaction_mgr = ReactionManager(self.identity, self.storage, self.router)
         self.sync_mgr = SyncManager(self.identity, self.storage, self.router,
-                                    self.messaging, self.subscription_mgr, self.invite_mgr)
+                                    self.messaging, self.subscription_mgr, self.invite_mgr,
+                                    reaction_mgr=self.reaction_mgr)
         presence_kwargs = {}
         if presence_timeout_secs is not None:
             presence_kwargs["timeout_secs"] = presence_timeout_secs
@@ -208,7 +210,6 @@ class Backend:
         self.router.add_outbound_callback(self.presence_beacon.record_sent)
         self.user_directory = UserDirectory(self.identity.hash_hex)
         self.avatar_mgr = AvatarManager(self.identity, self.config, self.storage, self.router)
-        self.reaction_mgr = ReactionManager(self.identity, self.storage, self.router)
         self.friends_mgr = FriendsManager(self.storage, self.identity.hash_hex, self.presence_mgr)
         self.presence_mgr.add_seen_callback(self.friends_mgr.record_seen)
         self.presence_mgr.add_presence_callback(self.friends_mgr.record_presence)
@@ -246,6 +247,7 @@ class Backend:
             self.sync_mgr.on_peer_appeared(peer_hex)
             self.presence_mgr.record_seen(peer_hex)
             self.avatar_mgr.flush_avatar(peer_hex)
+            self.reaction_mgr.flush_pending_emoji(peer_hex)
 
         RNS.Transport.register_announce_handler(
             PeerAnnounceHandler(_on_peer_appeared)
@@ -317,6 +319,7 @@ class Backend:
                     self.user_directory.prune()
                     self.sync_mgr.status.prune()
                     self.presence_beacon.tick()
+                    self.reaction_mgr.retry_pending_emoji()
                 except Exception as e:
                     RNS.log(f"TesterBackend: presence prune failed: {e}", RNS.LOG_WARNING)
 

@@ -1649,6 +1649,27 @@ class Storage:
             (message_id,),
         )
 
+    def get_unresolved_reaction_emoji(self, reactor_hash: str) -> list[str]:
+        """Return emoji keys this peer reacted with that aren't in the local library."""
+        rows = self._fetchall("""
+            SELECT DISTINCT r.emoji_hash FROM reactions r
+            WHERE r.reactor_hash = ?
+              AND NOT EXISTS (
+                  SELECT 1 FROM custom_emojis e WHERE e.emoji_hash = r.emoji_hash
+              )
+        """, (reactor_hash,))
+        return [row["emoji_hash"] for row in rows]
+
+    def get_peers_with_unresolved_emoji(self) -> list[str]:
+        """Return every reactor who used an emoji missing from the local library."""
+        rows = self._fetchall("""
+            SELECT DISTINCT r.reactor_hash FROM reactions r
+            WHERE NOT EXISTS (
+                SELECT 1 FROM custom_emojis e WHERE e.emoji_hash = r.emoji_hash
+            )
+        """)
+        return [row["reactor_hash"] for row in rows]
+
     # --- friends (local-only saved contacts) ---
 
     def upsert_friend(self, identity_hash: str, nickname: str, note: str) -> None:

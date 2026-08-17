@@ -65,12 +65,17 @@ from trenchchat.core.protocol import (
     SYNC_WINDOW_SECS,
     unpack_wire,
 )
+from trenchchat.core.reaction import is_custom_emoji_hash
 from trenchchat.core.storage import Storage
 from trenchchat.core.sync_status import SyncStatusTracker
 from trenchchat.network.router import Router
 
 # Maximum messages returned in a single sync response (LXMF size budget)
 MAX_RESPONSE_MESSAGES = 50
+
+# Reactions ride along with each synced message so backfilled history isn't
+# stripped of them. Capped per message to bound the response size.
+MAX_REACTIONS_PER_MESSAGE = 32
 
 # How long an issued sync request stays answerable.  A response arriving
 # outside this window is treated as unsolicited.  Generous enough to cover a
@@ -115,15 +120,24 @@ MAX_SYNC_CONTINUATIONS = 20
 MAX_QUEUED_HINTS_PER_PEER = 50
 
 
+def _coerce_str(value) -> str:
+    """Decode a msgpack field that may arrive as bytes rather than str."""
+    if isinstance(value, bytes):
+        return value.decode(errors="replace")
+    return str(value) if value is not None else ""
+
+
 class SyncManager:
     def __init__(self, identity: Identity, storage: Storage, router: Router,
-                 messaging: Messaging, subscription_mgr, invite_mgr):
+                 messaging: Messaging, subscription_mgr, invite_mgr,
+                 reaction_mgr=None):
         self._identity = identity
         self._storage = storage
         self._router = router
         self._messaging = messaging
         self._subscription_mgr = subscription_mgr
         self._invite_mgr = invite_mgr
+        self._reaction_mgr = reaction_mgr
 
         # (channel_hash_hex, peer_hex) -> list of (issued_at, since_ts,
         # dest_hex, request_id) entries.  A peer may have more than one
@@ -467,7 +481,7 @@ class SyncManager:
             truncated = True
 
         packed = msgpack.packb(
-            [self._row_to_dict(r) for r in rows],
+            [self._row_to_payload(r) for r in rows],
             use_bin_type=True,
         )
         response_fields = {
@@ -773,6 +787,9 @@ class SyncManager:
                     image_data=image_data,
                 )
                 accepted_ts.append(msg_ts)
+                self._apply_synced_reactions(
+                    channel_hash_hex, m, responder_hex
+                )
 
                 if inserted:
                     inserted_count += 1
@@ -780,6 +797,10 @@ class SyncManager:
                     self._messaging.notify_message_received(
                         channel_hash_hex, m.get("message_id", "")
                     )
+                    if self._reaction_mgr is not None:
+                        self._reaction_mgr.request_missing_from_content(
+                            responder_hex, m.get("content", "")
+                        )
             except Exception as e:
                 RNS.log(f"TrenchChat: sync_response insert error: {e}", RNS.LOG_WARNING)
                 try:
@@ -871,6 +892,45 @@ class SyncManager:
             channel_hash_hex, message_ids[:MAX_RESPONSE_MESSAGES]
         )
 
+    def _apply_synced_reactions(self, channel_hash_hex: str, m: dict,
+                                responder_hex: str) -> None:
+        """Store the reactions that rode along with a synced message.
+
+        Reactions are trusted exactly as far as the message body they arrive
+        with -- the responder could forge either, which is the same
+        application-layer trust gap sync already carries for content.
+        """
+        reactions = m.get("reactions")
+        if not isinstance(reactions, list):
+            return
+        message_id = m.get("message_id", "")
+        if not message_id:
+            return
+
+        for r in reactions[:MAX_REACTIONS_PER_MESSAGE]:
+            if not isinstance(r, dict):
+                continue
+            emoji_key = _coerce_str(r.get("emoji", ""))
+            reactor = _coerce_str(r.get("reactor", ""))
+            if not emoji_key or not reactor:
+                continue
+            try:
+                reacted_at = float(r.get("at", 0.0))
+            except (TypeError, ValueError):
+                continue
+
+            self._storage.insert_reaction(
+                message_id=message_id,
+                emoji_hash=emoji_key,
+                reactor_hash=reactor,
+                channel_hash=channel_hash_hex,
+                reacted_at=reacted_at,
+            )
+            if self._reaction_mgr is not None and \
+                    is_custom_emoji_hash(emoji_key) and \
+                    not self._storage.emoji_exists(emoji_key):
+                self._reaction_mgr.request_emoji(responder_hex, emoji_key)
+
     @staticmethod
     def _row_to_dict(row) -> dict:
         d = {
@@ -885,6 +945,18 @@ class SyncManager:
         image_data = row["image_data"] if "image_data" in row.keys() else None
         if image_data:
             d["image_data"] = bytes(image_data)
+        return d
+
+    def _row_to_payload(self, row) -> dict:
+        """_row_to_dict plus the reactions on that message, for a sync response."""
+        d = self._row_to_dict(row)
+        reactions = [
+            {"emoji": r["emoji_hash"], "reactor": r["reactor_hash"],
+             "at": r["reacted_at"]}
+            for r in self._storage.get_reactions(row["message_id"])
+        ][:MAX_REACTIONS_PER_MESSAGE]
+        if reactions:
+            d["reactions"] = reactions
         return d
 
     def _send_sync_request(self, dest_hex: str, channel_hash_hex: str, since_ts: float,

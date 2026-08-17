@@ -63,6 +63,7 @@ from trenchchat.core.protocol import (
     F_ADMIN_HASH, F_CHANNEL_HASH, F_DISPLAY_NAME, F_EXPIRY_TS, F_INVITE_TOKEN,
     F_INVITEE_HASH, F_MEMBER_LIST_DOC, F_MESSAGE_ID, F_MSG_TYPE, F_TIMESTAMP,
     F_EMOJI_HASH, F_IMAGE_DATA, F_MISSED_FOR, F_REACTION_MSG_ID, F_REACTION_REMOVE,
+    F_REACTION_UNICODE,
     MT_GOODBYE, MT_JOIN_REQUEST, MT_MEMBER_LIST_UPDATE, MT_REACTION,
 )
 from trenchchat.core.presence import PresenceManager
@@ -1498,6 +1499,49 @@ class TestAdversarialReactions:
         rows = alice.storage.get_reactions("target-msg-2")
         assert not any(r["reactor_hash"] == bob.identity.hash_hex for r in rows), \
             "A member without send_message had their reaction stored"
+
+    def _react_unicode(self, peer, target, ch_hash, msg_id, emoji):
+        """Same as _react, but over the unicode reaction field."""
+        dest = RNS.Destination(
+            target.identity.rns_identity, RNS.Destination.OUT,
+            RNS.Destination.SINGLE, "lxmf", "delivery",
+        )
+        lxm = LXMF.LXMessage(dest, peer.router.delivery_destination, "",
+                             desired_method=LXMF.LXMessage.DIRECT)
+        lxm.fields = {
+            F_MSG_TYPE:          MT_REACTION,
+            F_CHANNEL_HASH:      bytes.fromhex(ch_hash),
+            F_REACTION_MSG_ID:   msg_id,
+            F_REACTION_UNICODE:  emoji,
+            F_REACTION_REMOVE:   False,
+        }
+        lxm.signature_validated = True
+        target.router._on_message_received(lxm)
+        time.sleep(0.2)
+
+    def test_non_member_unicode_reaction_is_rejected(self, peer_factory):
+        """The unicode reaction field is gated exactly like the hash field."""
+        alice, bob, ch_hash = _setup_channel_with_member(
+            peer_factory, member_perms=[SEND_MESSAGE]
+        )
+        carol = peer_factory("carol")
+
+        self._react_unicode(carol, bob, ch_hash, "target-msg-3", "\U0001F44D")
+
+        rows = bob.storage.get_reactions("target-msg-3")
+        assert not any(r["reactor_hash"] == carol.identity.hash_hex for r in rows), \
+            "A non-member's unicode reaction was stored on an invite-only channel"
+
+    def test_member_without_send_message_cannot_react_with_unicode(self, peer_factory):
+        alice, bob, ch_hash = _setup_channel_with_member(
+            peer_factory, member_perms=[]
+        )
+
+        self._react_unicode(bob, alice, ch_hash, "target-msg-4", "\U0001F44D")
+
+        rows = alice.storage.get_reactions("target-msg-4")
+        assert not any(r["reactor_hash"] == bob.identity.hash_hex for r in rows), \
+            "A member without send_message had their unicode reaction stored"
 
 
 # ---------------------------------------------------------------------------

@@ -26,11 +26,15 @@ from PIL import Image
 
 from trenchchat.core.protocol import (
     F_MSG_TYPE, F_CHANNEL_HASH, F_EMOJI_HASH, F_EMOJI_DATA, F_EMOJI_NAME,
-    F_REACTION_MSG_ID, F_REACTION_REMOVE,
+    F_REACTION_MSG_ID, F_REACTION_REMOVE, F_REACTION_UNICODE,
     MT_REACTION, MT_EMOJI_REQUEST, MT_EMOJI_RESPONSE,
 )
 from trenchchat.core.permissions import PRESET_PRIVATE, ROLE_MEMBER
-from trenchchat.core.reaction import ReactionManager, compute_emoji_hash, MAX_EMOJI_BYTES
+from trenchchat.core.reaction import (
+    EMOJI_FLUSH_BATCH, EMOJI_FLUSH_COOLDOWN_SECS, EMOJI_REQUEST_RETRY_SECS,
+    MAX_EMOJI_BYTES,
+    ReactionManager, compute_emoji_hash,
+)
 from trenchchat.core.storage import Storage
 
 
@@ -958,3 +962,355 @@ class TestRenderContent:
         assert not is_rich
         assert text == "hello world"
         storage.close()
+
+
+# ---------------------------------------------------------------------------
+# Unicode reaction keys (regression: built-in emoji never reached other peers)
+# ---------------------------------------------------------------------------
+
+class TestUnicodeReactionKeys:
+    """A reaction key is either a custom emoji's SHA-256 or a unicode char.
+
+    The wire format used to assume the former unconditionally, so reacting
+    with a built-in emoji raised out of _broadcast_reaction after the local
+    row had already been written -- the reactor saw their own chip and no
+    peer ever did.
+    """
+
+    def _broadcast_fields(self, mgr, router, emoji_key: str, remove: bool = False):
+        """Drive one broadcast to a single peer and return the sent lxm fields."""
+        sent = []
+        with patch(_REACTION_RECALL, return_value=MagicMock()), \
+             patch(_REACTION_DEST_HASH, return_value=b"\xde" * 32), \
+             patch(_REACTION_DEST) as MockDest, \
+             patch("trenchchat.core.reaction.LXMF.LXMessage") as MockLXM:
+            MockDest.OUT = "OUT"
+            MockDest.SINGLE = "SINGLE"
+            lxm_instance = MagicMock()
+            MockLXM.return_value = lxm_instance
+            router.send = lambda lxm: sent.append(lxm)
+            if remove:
+                mgr.remove_reaction("cc" * 16, "msg1", emoji_key, ["bb" * 16])
+            else:
+                mgr.add_reaction("cc" * 16, "msg1", emoji_key, ["bb" * 16])
+        assert len(sent) == 1, "reaction was not broadcast"
+        return lxm_instance.fields
+
+    def test_unicode_reaction_is_broadcast(self, reaction_mgr):
+        mgr, storage, identity, router = reaction_mgr
+        fields = self._broadcast_fields(mgr, router, "\U0001F44D")
+
+        assert fields[F_MSG_TYPE] == MT_REACTION
+        assert fields[F_REACTION_UNICODE] == "\U0001F44D"
+        assert F_EMOJI_HASH not in fields
+
+    def test_unicode_reaction_removal_is_broadcast(self, reaction_mgr):
+        mgr, storage, identity, router = reaction_mgr
+        fields = self._broadcast_fields(mgr, router, "❤️", remove=True)
+
+        assert fields[F_REACTION_UNICODE] == "❤️"
+        assert fields[F_REACTION_REMOVE] is True
+
+    def test_custom_emoji_still_uses_the_hash_field(self, reaction_mgr):
+        mgr, storage, identity, router = reaction_mgr
+        emoji_hash = compute_emoji_hash(_make_png())
+        fields = self._broadcast_fields(mgr, router, emoji_hash)
+
+        assert fields[F_EMOJI_HASH] == bytes.fromhex(emoji_hash)
+        assert F_REACTION_UNICODE not in fields
+
+    def test_inbound_unicode_reaction_stored(self, reaction_mgr):
+        mgr, storage, identity, router = reaction_mgr
+        sender_hex = "bb" * 16
+        channel = "cc" * 16
+        storage.upsert_channel(
+            hash=channel, name="test", description="",
+            creator_hash="aa" * 16, permissions=PRESET_PRIVATE, created_at=0.0,
+        )
+        storage.subscribe(channel)
+        storage.upsert_member(channel, sender_hex, "Member", role=ROLE_MEMBER)
+
+        sender_identity = MagicMock()
+        sender_identity.hash = bytes.fromhex(sender_hex)
+        lxm = _make_lxm({
+            F_MSG_TYPE: MT_REACTION,
+            F_CHANNEL_HASH: bytes.fromhex(channel),
+            F_REACTION_MSG_ID: "msg1",
+            F_REACTION_UNICODE: "\U0001F44D",
+            F_REACTION_REMOVE: False,
+        }, source_hash_hex=sender_hex)
+
+        with patch(_REACTION_RECALL, return_value=sender_identity):
+            for cb in router._delivery_callbacks:
+                cb(lxm)
+
+        rows = storage.get_reactions("msg1")
+        assert [r["emoji_hash"] for r in rows] == ["\U0001F44D"]
+
+    def test_inbound_unicode_reaction_requests_no_image(self, reaction_mgr):
+        """A unicode key is not a hash; it must never trigger an emoji fetch."""
+        mgr, storage, identity, router = reaction_mgr
+        sender_hex = "bb" * 16
+        channel = "cc" * 16
+        storage.upsert_channel(
+            hash=channel, name="test", description="",
+            creator_hash="aa" * 16, permissions=PRESET_PRIVATE, created_at=0.0,
+        )
+        storage.subscribe(channel)
+        storage.upsert_member(channel, sender_hex, "Member", role=ROLE_MEMBER)
+
+        sender_identity = MagicMock()
+        sender_identity.hash = bytes.fromhex(sender_hex)
+        lxm = _make_lxm({
+            F_MSG_TYPE: MT_REACTION,
+            F_CHANNEL_HASH: bytes.fromhex(channel),
+            F_REACTION_MSG_ID: "msg1",
+            F_REACTION_UNICODE: "\U0001F44D",
+        }, source_hash_hex=sender_hex)
+
+        sent = []
+        with patch(_REACTION_RECALL, return_value=sender_identity), \
+             patch(_REACTION_DEST_HASH, return_value=b"\xde" * 32), \
+             patch(_REACTION_DEST), \
+             patch("trenchchat.core.reaction.LXMF.LXMessage"):
+            router.send = lambda lxm_: sent.append(lxm_)
+            for cb in router._delivery_callbacks:
+                cb(lxm)
+
+        assert sent == []
+
+
+# ---------------------------------------------------------------------------
+# Inline :name@hash: fetch (regression: only the Qt render path requested them)
+# ---------------------------------------------------------------------------
+
+class TestInlineEmojiFetch:
+    """An inbound chat message pulls the emoji its tokens reference.
+
+    This lives in the core manager rather than a render path so every client
+    gets it -- the Flutter client never called the Qt-side hook, so inline
+    custom emoji stayed as literal text forever.
+    """
+
+    def _deliver_chat(self, mgr, router, sender_hex: str, content: str):
+        sender_identity = MagicMock()
+        sender_identity.hash = bytes.fromhex(sender_hex)
+        lxm = _make_lxm({}, source_hash_hex=sender_hex)
+        lxm.content = content
+
+        sent = []
+        with patch(_REACTION_RECALL, return_value=sender_identity), \
+             patch(_REACTION_DEST_HASH, return_value=b"\xde" * 32), \
+             patch(_REACTION_DEST) as MockDest, \
+             patch("trenchchat.core.reaction.LXMF.LXMessage") as MockLXM:
+            MockDest.OUT = "OUT"
+            MockDest.SINGLE = "SINGLE"
+            MockLXM.return_value = MagicMock()
+            router.send = lambda lxm_: sent.append(MockLXM.return_value.fields)
+            for cb in router._delivery_callbacks:
+                cb(lxm)
+        return sent
+
+    def test_unknown_inline_token_requests_the_emoji(self, reaction_mgr):
+        mgr, storage, identity, router = reaction_mgr
+        emoji_hash = compute_emoji_hash(_make_png())
+        sender_hex = "bb" * 16
+
+        sent = self._deliver_chat(
+            mgr, router, sender_hex, f"look :wave@{emoji_hash}: here"
+        )
+
+        assert len(sent) == 1
+        assert sent[0][F_MSG_TYPE] == MT_EMOJI_REQUEST
+        assert sent[0][F_EMOJI_HASH] == bytes.fromhex(emoji_hash)
+        assert sent[0][F_EMOJI_NAME] == "wave"
+
+    def test_known_inline_token_requests_nothing(self, reaction_mgr):
+        mgr, storage, identity, router = reaction_mgr
+        img = _make_png()
+        emoji_hash = compute_emoji_hash(img)
+        storage.insert_emoji(emoji_hash, "wave", img, time.time())
+
+        sent = self._deliver_chat(
+            mgr, router, "bb" * 16, f"look :wave@{emoji_hash}: here"
+        )
+        assert sent == []
+
+    def test_legacy_token_requests_nothing(self, reaction_mgr):
+        """A :name: token carries no hash, so there is nothing to ask for."""
+        mgr, storage, identity, router = reaction_mgr
+        sent = self._deliver_chat(mgr, router, "bb" * 16, "look :wave: here")
+        assert sent == []
+
+    def test_plain_message_requests_nothing(self, reaction_mgr):
+        mgr, storage, identity, router = reaction_mgr
+        sent = self._deliver_chat(mgr, router, "bb" * 16, "no tokens at all")
+        assert sent == []
+
+
+# ---------------------------------------------------------------------------
+# Emoji request retry (regression: a dropped request was never retried)
+# ---------------------------------------------------------------------------
+
+class TestEmojiRequestRetry:
+    """A silently-dropped emoji request must not block the hash forever.
+
+    The responder drops requests without replying (throttled, unknown hash, no
+    shared channel), so the requester's in-flight marker has to expire or the
+    emoji is unreachable for the life of the process.
+    """
+
+    def _request(self, mgr, router, peer_hex: str, emoji_hash: str) -> list:
+        sent = []
+        with patch(_REACTION_RECALL, return_value=MagicMock()), \
+             patch(_REACTION_DEST_HASH, return_value=b"\xde" * 32), \
+             patch(_REACTION_DEST) as MockDest, \
+             patch("trenchchat.core.reaction.LXMF.LXMessage") as MockLXM:
+            MockDest.OUT = "OUT"
+            MockDest.SINGLE = "SINGLE"
+            MockLXM.return_value = MagicMock()
+            router.send = lambda lxm: sent.append(lxm)
+            mgr.request_emoji(peer_hex, emoji_hash)
+        return sent
+
+    def test_request_retried_after_the_window_expires(self, reaction_mgr):
+        mgr, storage, identity, router = reaction_mgr
+        emoji_hash = compute_emoji_hash(_make_png())
+        peer_hex = "bb" * 16
+
+        assert len(self._request(mgr, router, peer_hex, emoji_hash)) == 1
+        assert self._request(mgr, router, peer_hex, emoji_hash) == []
+
+        with patch("trenchchat.core.reaction.time.time",
+                   return_value=time.time() + EMOJI_REQUEST_RETRY_SECS + 1):
+            assert len(self._request(mgr, router, peer_hex, emoji_hash)) == 1
+
+    def test_unresolved_path_requests_a_path_and_allows_retry(self, reaction_mgr):
+        mgr, storage, identity, router = reaction_mgr
+        emoji_hash = compute_emoji_hash(_make_png())
+        peer_hex = "bb" * 16
+        sent = []
+
+        with patch(_REACTION_RECALL, return_value=None), \
+             patch(_REACTION_DEST_HASH, return_value=b"\xde" * 32), \
+             patch(_REACTION_TRANSPORT) as mock_path:
+            router.send = lambda lxm: sent.append(lxm)
+            mgr.request_emoji(peer_hex, emoji_hash)
+
+        assert sent == []
+        mock_path.assert_called_once_with(b"\xde" * 32)
+        # No wait imposed on the retry: the request never went out.
+        assert len(self._request(mgr, router, peer_hex, emoji_hash)) == 1
+
+    def test_flush_re_requests_emoji_the_peer_reacted_with(self, reaction_mgr):
+        mgr, storage, identity, router = reaction_mgr
+        peer_hex = "bb" * 16
+        have = _make_png(color=(1, 2, 3))
+        have_hash = compute_emoji_hash(have)
+        storage.insert_emoji(have_hash, "have", have, time.time())
+        missing_hash = compute_emoji_hash(_make_png(color=(9, 9, 9)))
+
+        channel = "cc" * 16
+        for h in (have_hash, missing_hash, "\U0001F44D"):
+            storage.insert_reaction("msg1", h, peer_hex, channel, time.time())
+
+        sent = []
+        with patch(_REACTION_RECALL, return_value=MagicMock()), \
+             patch(_REACTION_DEST_HASH, return_value=b"\xde" * 32), \
+             patch(_REACTION_DEST) as MockDest, \
+             patch("trenchchat.core.reaction.LXMF.LXMessage") as MockLXM:
+            MockDest.OUT = "OUT"
+            MockDest.SINGLE = "SINGLE"
+            lxm_instance = MagicMock()
+            MockLXM.return_value = lxm_instance
+            router.send = lambda lxm: sent.append(dict(lxm_instance.fields))
+            mgr.flush_pending_emoji(peer_hex)
+
+        assert len(sent) == 1, "only the unresolved custom emoji should be requested"
+        assert sent[0][F_EMOJI_HASH] == bytes.fromhex(missing_hash)
+
+    def test_periodic_sweep_retries_every_peer(self, reaction_mgr):
+        """The maintenance tick is what actually gets a dropped emoji retried.
+
+        A peer announce is far too rare to rely on, and after a burst the
+        holder may send nothing else for minutes.
+        """
+        mgr, storage, identity, router = reaction_mgr
+        peer_a, peer_b = "bb" * 16, "dd" * 16
+        hash_a = compute_emoji_hash(_make_png(color=(7, 7, 7)))
+        hash_b = compute_emoji_hash(_make_png(color=(8, 8, 8)))
+        storage.insert_reaction("msg1", hash_a, peer_a, "cc" * 16, time.time())
+        storage.insert_reaction("msg2", hash_b, peer_b, "cc" * 16, time.time())
+
+        sent = []
+        with patch(_REACTION_RECALL, return_value=MagicMock()), \
+             patch(_REACTION_DEST_HASH, return_value=b"\xde" * 32), \
+             patch(_REACTION_DEST) as MockDest, \
+             patch("trenchchat.core.reaction.LXMF.LXMessage") as MockLXM:
+            MockDest.OUT = "OUT"
+            MockDest.SINGLE = "SINGLE"
+            lxm_instance = MagicMock()
+            MockLXM.return_value = lxm_instance
+            router.send = lambda m: sent.append(dict(lxm_instance.fields))
+            mgr.retry_pending_emoji()
+
+        requested = {f[F_EMOJI_HASH] for f in sent}
+        assert requested == {bytes.fromhex(hash_a), bytes.fromhex(hash_b)}
+
+    def test_sweep_is_a_noop_when_nothing_is_missing(self, reaction_mgr):
+        mgr, storage, identity, router = reaction_mgr
+        img = _make_png()
+        h = compute_emoji_hash(img)
+        storage.insert_emoji(h, "have", img, time.time())
+        storage.insert_reaction("msg1", h, "bb" * 16, "cc" * 16, time.time())
+
+        sent = []
+        router.send = lambda m: sent.append(m)
+        mgr.retry_pending_emoji()
+        assert sent == []
+
+    def test_flush_respects_its_cooldown(self, reaction_mgr):
+        """Back-to-back sweeps must not re-query and re-send every tick."""
+        mgr, storage, identity, router = reaction_mgr
+        peer_hex = "bb" * 16
+        h = compute_emoji_hash(_make_png(color=(7, 7, 7)))
+        storage.insert_reaction("msg1", h, peer_hex, "cc" * 16, time.time())
+
+        sent = []
+        with patch(_REACTION_RECALL, return_value=MagicMock()), \
+             patch(_REACTION_DEST_HASH, return_value=b"\xde" * 32), \
+             patch(_REACTION_DEST) as MockDest, \
+             patch("trenchchat.core.reaction.LXMF.LXMessage") as MockLXM:
+            MockDest.OUT = "OUT"
+            MockDest.SINGLE = "SINGLE"
+            MockLXM.return_value = MagicMock()
+            router.send = lambda m: sent.append(m)
+            mgr.retry_pending_emoji()
+            mgr.retry_pending_emoji()
+
+        assert len(sent) == 1
+
+    def test_flush_cooldown_is_shorter_than_the_request_window(self):
+        """Otherwise a sweep can keep landing before markers expire and stall."""
+        assert EMOJI_FLUSH_COOLDOWN_SECS < EMOJI_REQUEST_RETRY_SECS
+
+    def test_flush_batches_a_large_backlog(self, reaction_mgr):
+        """A backlog is drained in batches rather than re-tripping the throttle."""
+        mgr, storage, identity, router = reaction_mgr
+        peer_hex = "bb" * 16
+        for i in range(EMOJI_FLUSH_BATCH + 5):
+            storage.insert_reaction("msg1", f"{i:064x}", peer_hex,
+                                    "cc" * 16, time.time())
+
+        sent = []
+        with patch(_REACTION_RECALL, return_value=MagicMock()), \
+             patch(_REACTION_DEST_HASH, return_value=b"\xde" * 32), \
+             patch(_REACTION_DEST) as MockDest, \
+             patch("trenchchat.core.reaction.LXMF.LXMessage") as MockLXM:
+            MockDest.OUT = "OUT"
+            MockDest.SINGLE = "SINGLE"
+            MockLXM.return_value = MagicMock()
+            router.send = lambda m: sent.append(m)
+            mgr.flush_pending_emoji(peer_hex)
+
+        assert len(sent) == EMOJI_FLUSH_BATCH
