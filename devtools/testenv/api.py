@@ -473,6 +473,35 @@ def create_app(backend: Backend) -> FastAPI:
     @app.get("/directory")
     def search_directory(q: str = ""):
         results = backend.user_directory.search(q)
+        seen = {r["identity_hash"] for r in results}
+        # The announce-fed directory is in-memory, so it starts empty after a
+        # restart and transports suppress announce replays. Fall back to
+        # path-table peers with recallable identities -- the same peers the
+        # network map shows -- so invite lookup keeps working.
+        try:
+            path_table = backend.rns.get_path_table()
+        except Exception:
+            path_table = []
+        needle = q.strip().lower()
+        for entry in path_table:
+            dest = entry.get("hash")
+            if not isinstance(dest, bytes):
+                continue
+            identity = RNS.Identity.recall(dest)
+            if identity is None:
+                continue
+            if RNS.Destination.hash(identity.hash, "lxmf", "delivery") != dest:
+                continue
+            peer_hex = identity.hash.hex()
+            if peer_hex == backend.identity.hash_hex or peer_hex in seen:
+                continue
+            name = resolve_display_name(peer_hex, backend.identity.hash_hex,
+                                        backend.storage)
+            if needle and needle not in name.lower() and needle not in peer_hex:
+                continue
+            seen.add(peer_hex)
+            results.append({"identity_hash": peer_hex, "display_name": name})
+        results.sort(key=lambda r: (r["display_name"].lower(), r["identity_hash"]))
         for r in results:
             r["is_online"] = backend.presence_mgr.is_online(r["identity_hash"])
         return results
