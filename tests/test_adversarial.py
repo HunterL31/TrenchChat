@@ -2036,6 +2036,9 @@ def _server_with_member(peer_factory, member_perms=None):
     alice.invite_mgr.send_invite(s, bob.identity.hash_hex)
     assert wait_for_member(alice.storage, s, bob.identity.hash_hex, timeout=5)
     assert wait_for(lambda: bob.storage.get_server(s) is not None, timeout=5)
+    # The server row lands with the invite; the member-list doc arrives in a
+    # separate message, and the tests below read its stored version.
+    assert wait_for(lambda: bob.storage.get_member_list_version(s) is not None, timeout=5)
     return alice, bob, s
 
 
