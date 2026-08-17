@@ -80,6 +80,17 @@ class ImportEmojiRequest(BaseModel):
     image_data_b64: str
 
 
+class AddFriendRequest(BaseModel):
+    identity_hash: str
+    nickname: str = ""
+    note: str = ""
+
+
+class UpdateFriendRequest(BaseModel):
+    nickname: str | None = None
+    note: str | None = None
+
+
 class SendMessageRequest(BaseModel):
     content: str
     reply_to: str | None = None
@@ -285,6 +296,9 @@ def create_app(backend: Backend) -> FastAPI:
     def _on_avatar_changed(identity_hash_hex: str):
         bus.emit("avatar_updated", identity_hash=identity_hash_hex)
 
+    def _on_friend_updated(identity_hash_hex: str):
+        bus.emit("friend_updated", identity_hash=identity_hash_hex)
+
     def _on_reaction_changed(channel_hash_hex: str, message_id: str):
         bus.emit("reaction_updated", channel_hash=channel_hash_hex, message_id=message_id)
 
@@ -305,6 +319,7 @@ def create_app(backend: Backend) -> FastAPI:
     backend.channel_mgr.add_channel_discovered_callback(_on_channel_discovered)
     backend.presence_mgr.add_presence_callback(_on_presence_changed)
     backend.avatar_mgr.add_avatar_callback(_on_avatar_changed)
+    backend.friends_mgr.add_friends_callback(_on_friend_updated)
     backend.reaction_mgr.add_reaction_callback(_on_reaction_changed)
     backend.reaction_mgr.add_emoji_callback(_on_emoji_received)
     backend.sync_mgr.status.add_status_callback(_on_sync_status)
@@ -352,8 +367,9 @@ def create_app(backend: Backend) -> FastAPI:
 
     @app.get("/network/map")
     def get_network_map():
-        # Same free function NetworkMapDialog calls -- no GUI coupling.
-        from trenchchat.gui.network_map import gather_network_data
+        # Same free function NetworkMapDialog calls. Imported from core, not
+        # the Qt module, so this works in headless installs without PyQt6.
+        from trenchchat.core.network_map import gather_network_data
         return gather_network_data(backend.rns, backend.identity.hash_hex, backend.storage)
 
     @app.get("/reticulum/interfaces")
@@ -553,6 +569,32 @@ def create_app(backend: Backend) -> FastAPI:
             "avatar_data_b64": base64.b64encode(row["avatar_data"]).decode(),
             "avatar_version": row["avatar_version"],
         }
+
+    # --- friends (local-only saved contacts) ---
+
+    @app.get("/friends")
+    def list_friends():
+        return backend.friends_mgr.get_friends()
+
+    @app.post("/friends")
+    def add_friend(req: AddFriendRequest):
+        ok = backend.friends_mgr.add_friend(req.identity_hash, req.nickname, req.note)
+        if not ok:
+            return JSONResponse(
+                {"ok": False, "error": "invalid identity hash, or self"}, status_code=400,
+            )
+        return {"ok": True}
+
+    @app.put("/friends/{identity_hash}")
+    def update_friend(identity_hash: str, req: UpdateFriendRequest):
+        updates = req.model_dump(exclude_unset=True)
+        ok = backend.friends_mgr.update_friend(identity_hash, **updates)
+        return {"ok": ok}
+
+    @app.delete("/friends/{identity_hash}")
+    def remove_friend(identity_hash: str):
+        backend.friends_mgr.remove_friend(identity_hash)
+        return {"ok": True}
 
     # --- servers ---
 

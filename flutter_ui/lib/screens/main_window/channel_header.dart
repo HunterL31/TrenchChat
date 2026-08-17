@@ -7,7 +7,7 @@ import '../../widgets/signal_meter.dart';
 import '../../widgets/tc_button.dart';
 import '../../widgets/tc_icon.dart';
 
-enum ChannelTab { chat, map, iface }
+enum ChannelTab { chat, map, iface, friends }
 
 class ChannelHeader extends StatelessWidget {
   const ChannelHeader({
@@ -124,9 +124,18 @@ class ChannelHeader extends StatelessWidget {
           const SizedBox(width: 8),
           Row(
             children: [
-              _HeaderTab(label: 'CHAT', tab: ChannelTab.chat, active: activeTab, onTap: onTabSelected),
-              _HeaderTab(label: 'MAP', tab: ChannelTab.map, active: activeTab, onTap: onTabSelected),
-              _HeaderTab(label: 'IFACE', tab: ChannelTab.iface, active: activeTab, onTap: onTabSelected),
+              _HeaderTab(
+                  label: 'CHAT', icon: TcIcons.hash, tab: ChannelTab.chat,
+                  active: activeTab, onTap: onTabSelected, compact: compact),
+              _HeaderTab(
+                  label: 'MAP', icon: TcIcons.map, tab: ChannelTab.map,
+                  active: activeTab, onTap: onTabSelected, compact: compact),
+              _HeaderTab(
+                  label: 'IFACE', icon: TcIcons.iface, tab: ChannelTab.iface,
+                  active: activeTab, onTap: onTabSelected, compact: compact),
+              _HeaderTab(
+                  label: 'FRIENDS', icon: TcIcons.users, tab: ChannelTab.friends,
+                  active: activeTab, onTap: onTabSelected, compact: compact),
             ],
           ),
         ],
@@ -138,37 +147,50 @@ class ChannelHeader extends StatelessWidget {
 class _HeaderTab extends StatelessWidget {
   const _HeaderTab({
     required this.label,
+    required this.icon,
     required this.tab,
     required this.active,
     required this.onTap,
+    this.compact = false,
   });
 
   final String label;
+  final TcIconData icon;
   final ChannelTab tab;
   final ChannelTab active;
   final ValueChanged<ChannelTab> onTap;
 
+  /// Narrow-screen mode: icon instead of label, so four tabs still fit.
+  final bool compact;
+
   @override
   Widget build(BuildContext context) {
     final selected = tab == active;
+    final foreground = selected ? TCColors.green100 : TCColors.textTertiary;
     return GestureDetector(
       onTap: () => onTap(tab),
       child: MouseRegion(
         cursor: SystemMouseCursors.click,
-        child: Container(
-          margin: const EdgeInsets.only(left: 2),
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-          decoration: BoxDecoration(
-            color: selected ? TCColors.green900 : Colors.transparent,
-            border: Border.all(color: selected ? TCColors.borderAccent : TCColors.borderSubtle),
-          ),
-          child: Text(
-            label,
-            style: TextStyle(
-              fontSize: TCType.textCaption,
-              letterSpacing: TCType.letterSpacingFor(TCType.textCaption, TCType.trackingWide),
-              color: selected ? TCColors.green100 : TCColors.textTertiary,
+        child: Tooltip(
+          message: compact ? label : '',
+          child: Container(
+            margin: const EdgeInsets.only(left: 2),
+            padding: EdgeInsets.symmetric(horizontal: compact ? 7 : 10, vertical: 4),
+            decoration: BoxDecoration(
+              color: selected ? TCColors.green900 : Colors.transparent,
+              border: Border.all(color: selected ? TCColors.borderAccent : TCColors.borderSubtle),
             ),
+            child: compact
+                ? TcIcon(icon, size: 13, color: foreground)
+                : Text(
+                    label,
+                    style: TextStyle(
+                      fontSize: TCType.textCaption,
+                      letterSpacing:
+                          TCType.letterSpacingFor(TCType.textCaption, TCType.trackingWide),
+                      color: foreground,
+                    ),
+                  ),
           ),
         ),
       ),

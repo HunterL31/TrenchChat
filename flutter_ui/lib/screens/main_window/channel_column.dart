@@ -9,6 +9,7 @@ import '../../theme/effects.dart';
 import '../../theme/tokens.dart';
 import '../../widgets/status_dot.dart';
 import '../../widgets/tc_button.dart';
+import '../../widgets/tc_context_menu.dart';
 import '../../widgets/tc_icon.dart';
 
 class ChannelColumn extends StatelessWidget {
@@ -26,6 +27,8 @@ class ChannelColumn extends StatelessWidget {
     this.onCreateChannel,
     this.onCreateDirectChannel,
     this.onJoinChannel,
+    this.friendHashes = const {},
+    this.onAddFriend,
   });
 
   final String? serverName;
@@ -43,6 +46,15 @@ class ChannelColumn extends StatelessWidget {
   /// keeps direct channels reachable while a server occupies the main button.
   final VoidCallback? onCreateDirectChannel;
   final VoidCallback? onJoinChannel;
+
+  /// Identity hashes already saved as a friend -- drives the "Add friend…"
+  /// vs "Edit friend…" context menu label. Plain data, not a live AppState
+  /// read, so this leaf stays testable in isolation.
+  final Set<String> friendHashes;
+
+  /// Fired with an online peer's identity hash when "Add/Edit friend…" is
+  /// chosen from the roster row's right-click menu.
+  final void Function(String identityHashHex)? onAddFriend;
 
   @override
   Widget build(BuildContext context) {
@@ -135,18 +147,34 @@ class ChannelColumn extends StatelessWidget {
                 for (final p in online)
                   Padding(
                     padding: const EdgeInsets.symmetric(vertical: 3),
-                    child: Row(
-                      children: [
-                        const StatusDot(status: PresenceStatus.online, size: 10),
-                        const SizedBox(width: 9),
-                        Expanded(
-                          child: Text(
-                            _shortHash(p.identityHash),
-                            overflow: TextOverflow.ellipsis,
-                            style: TextStyle(fontSize: 12, color: TCColors.textSecondary),
+                    child: GestureDetector(
+                      onSecondaryTapDown: onAddFriend == null
+                          ? null
+                          : (details) => showTcContextMenu(
+                                context: context,
+                                position: details.globalPosition,
+                                items: [
+                                  TcContextMenuItem(
+                                    label: friendHashes.contains(p.identityHash)
+                                        ? 'Edit friend…'
+                                        : 'Add friend…',
+                                    onTap: () => onAddFriend!(p.identityHash),
+                                  ),
+                                ],
+                              ),
+                      child: Row(
+                        children: [
+                          const StatusDot(status: PresenceStatus.online, size: 10),
+                          const SizedBox(width: 9),
+                          Expanded(
+                            child: Text(
+                              _shortHash(p.identityHash),
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(fontSize: 12, color: TCColors.textSecondary),
+                            ),
                           ),
-                        ),
-                      ],
+                        ],
+                      ),
                     ),
                   ),
               ],

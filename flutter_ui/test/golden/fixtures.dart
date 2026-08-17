@@ -1,6 +1,7 @@
 // Fixed fixture data for the golden suite, echoing the same #general story
 // beats as the mockup (Main Window Directions.dc.html options 1a/1b) so the
 // rendered goldens are directly comparable to it.
+import 'package:flutter_ui/api/models/friend.dart';
 import 'package:flutter_ui/api/models/link_quality.dart';
 import 'package:flutter_ui/api/models/member.dart';
 import 'package:flutter_ui/api/models/message.dart';
@@ -123,6 +124,42 @@ List<Message> fixtureMessages() => [
           reactions: const [Reaction(emojiHash: '🔥', count: 1, reactedByMe: true)]),
     ];
 
+/// Timestamps are relative to render time rather than a fixed epoch, so the
+/// "now"/"2h"/"3d"/"never" buckets formatRelative() renders stay stable no
+/// matter when the golden suite runs.
+List<Friend> fixtureFriends() {
+  final now = DateTime.now().millisecondsSinceEpoch / 1000;
+  return [
+    Friend(
+      identityHash: kAliceHash,
+      nickname: 'Alice R.',
+      note: 'runs the coast relay node',
+      displayName: 'f3a1…9c2e',
+      addedAt: now - 30 * 86400,
+      lastSeenAt: now - 30,
+      isOnline: true,
+    ),
+    Friend(
+      identityHash: kBobHash,
+      nickname: '',
+      note: '',
+      displayName: '7b8d…41aa',
+      addedAt: now - 10 * 86400,
+      lastSeenAt: now - 2 * 3600,
+      isOnline: false,
+    ),
+    Friend(
+      identityHash: kDaveHash,
+      nickname: 'Dave',
+      note: 'relay op, night shift',
+      displayName: 'b1d7…5ff0',
+      addedAt: now - 5 * 86400,
+      lastSeenAt: 0,
+      isOnline: false,
+    ),
+  ];
+}
+
 /// Populates an already-constructed AppState with fixed fixture data (no
 /// network calls) so goldens are deterministic and don't need a live backend.
 void populateFixtureState(AppState state) {
@@ -148,6 +185,7 @@ void populateFixtureState(AppState state) {
       const ChannelLinkQuality(level: LinkQualityLevel.excellent, hops: 2);
   state.permissionsByChannel[kGeneralHash] =
       const ChannelPermissions(kick: false, manageRoles: false, manageChannel: false, sendMessage: true);
+  state.friends = fixtureFriends();
 
   // Seed every rendered identity as "no avatar" so building the tree never
   // reaches for the network; a cache miss would fire a real HTTP request.

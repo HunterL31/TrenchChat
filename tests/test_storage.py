@@ -1168,3 +1168,73 @@ class TestServerScopePermissions:
 
     def test_unknown_hash_is_still_empty(self, db):
         assert db.get_channel_permissions("ee" * 16) == {}
+
+
+# ---------------------------------------------------------------------------
+# Friends (local-only saved contacts)
+# ---------------------------------------------------------------------------
+
+class TestFriends:
+    def test_upsert_and_get_friend(self, db):
+        peer = "aa" * 16
+        db.upsert_friend(peer, "Al", "met at defcon")
+        row = db.get_friend(peer)
+        assert row is not None
+        assert row["identity_hash"] == peer
+        assert row["nickname"] == "Al"
+        assert row["note"] == "met at defcon"
+        assert row["last_seen_at"] == 0
+
+    def test_get_friend_missing_returns_none(self, db):
+        assert db.get_friend("bb" * 16) is None
+
+    def test_upsert_preserves_added_at(self, db):
+        peer = "cc" * 16
+        db.upsert_friend(peer, "Old", "old note")
+        first = db.get_friend(peer)
+        db.upsert_friend(peer, "New", "new note")
+        second = db.get_friend(peer)
+        assert second["added_at"] == first["added_at"]
+        assert second["nickname"] == "New"
+        assert second["note"] == "new note"
+
+    def test_get_friends_ordered_by_nickname_then_hash(self, db):
+        db.upsert_friend("cc" * 16, "Zeta", "")
+        db.upsert_friend("aa" * 16, "Alpha", "")
+        db.upsert_friend("bb" * 16, "Alpha", "")
+        rows = db.get_friends()
+        ordered = [(r["nickname"], r["identity_hash"]) for r in rows]
+        assert ordered == [
+            ("Alpha", "aa" * 16),
+            ("Alpha", "bb" * 16),
+            ("Zeta", "cc" * 16),
+        ]
+
+    def test_delete_friend(self, db):
+        peer = "dd" * 16
+        db.upsert_friend(peer, "Del", "")
+        db.delete_friend(peer)
+        assert db.get_friend(peer) is None
+
+    def test_get_friend_hashes(self, db):
+        db.upsert_friend("aa" * 16, "A", "")
+        db.upsert_friend("bb" * 16, "B", "")
+        assert db.get_friend_hashes() == {"aa" * 16, "bb" * 16}
+
+    def test_touch_friend_seen(self, db):
+        peer = "ee" * 16
+        db.upsert_friend(peer, "E", "")
+        db.touch_friend_seen(peer, 12345.0)
+        assert db.get_friend(peer)["last_seen_at"] == 12345.0
+
+    def test_touch_friend_seen_survives_close_reopen(self, tmp_path):
+        peer = "ff" * 16
+        db_path = tmp_path / "friends.db"
+        db1 = Storage(db_path=db_path)
+        db1.upsert_friend(peer, "F", "")
+        db1.touch_friend_seen(peer, 99999.0)
+        db1.close()
+
+        db2 = Storage(db_path=db_path)
+        assert db2.get_friend(peer)["last_seen_at"] == 99999.0
+        db2.close()

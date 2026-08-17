@@ -8,6 +8,7 @@ import '../../api/models/message.dart';
 import '../../api/models/server.dart';
 import '../../app_state.dart';
 import '../../theme/tokens.dart';
+import '../dialogs/add_friend_dialog.dart';
 import '../dialogs/emoji_picker_dialog.dart';
 import '../dialogs/incoming_invite_dialog.dart';
 import '../dialogs/join_channel_dialog.dart';
@@ -18,6 +19,7 @@ import '../dialogs/settings_dialog.dart';
 import 'channel_column.dart';
 import 'channel_header.dart';
 import 'compose_bar.dart';
+import 'friends_tab.dart';
 import 'iface_tab.dart';
 import 'map_tab.dart';
 import 'message_list.dart';
@@ -122,6 +124,7 @@ class _MainWindowState extends State<MainWindow> {
             ? state.linkQualityByChannel[channelHash] ?? ChannelLinkQuality.unknown
             : ChannelLinkQuality.unknown;
         final permissions = channelHash != null ? state.permissionsByChannel[channelHash] : null;
+        final friendHashes = state.friends.map((f) => f.identityHash).toSet();
 
         final compact = MediaQuery.of(context).size.width < compactBreakpoint;
 
@@ -155,6 +158,8 @@ class _MainWindowState extends State<MainWindow> {
               showNewChannelDialog(context, state, serverHashHex: selectedServer),
           onCreateDirectChannel: () => showNewChannelDialog(context, state),
           onJoinChannel: () => showJoinChannelDialog(context, state),
+          friendHashes: friendHashes,
+          onAddFriend: (hash) => showAddFriendDialog(context, state, identityHash: hash),
         );
 
         final content = Column(
@@ -181,6 +186,7 @@ class _MainWindowState extends State<MainWindow> {
                     child: switch (_tab) {
                       ChannelTab.map => MapTab(state: state),
                       ChannelTab.iface => IfaceTab(state: state),
+                      ChannelTab.friends => FriendsTab(state: state),
                       ChannelTab.chat => MessageList(
                             messages: messages,
                             meHashHex: state.meHashHex,
@@ -201,6 +207,9 @@ class _MainWindowState extends State<MainWindow> {
                                     _toggleReaction(
                                         channelHash, messageId, selection.reactionKey);
                                   },
+                            friendHashes: friendHashes,
+                            onAddFriend: (hash) =>
+                                showAddFriendDialog(context, state, identityHash: hash),
                           ),
                     },
                   ),

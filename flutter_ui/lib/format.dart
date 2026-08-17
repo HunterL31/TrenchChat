@@ -26,6 +26,17 @@ String formatDateDivider(double unixSeconds) {
   return '${_monthAbbrev[dt.month - 1].toUpperCase()} ${_pad2(dt.day)} ${dt.year}';
 }
 
+/// Relative "last seen" label for the friends panel: "now" under a minute,
+/// then minutes/hours/days; "never" for 0 (no last-seen timestamp recorded).
+String formatRelative(double unixSeconds) {
+  if (unixSeconds <= 0) return 'never';
+  final diffSecs = DateTime.now().millisecondsSinceEpoch / 1000 - unixSeconds;
+  if (diffSecs < 60) return 'now';
+  if (diffSecs < 3600) return '${(diffSecs / 60).floor()}m';
+  if (diffSecs < 86400) return '${(diffSecs / 3600).floor()}h';
+  return '${(diffSecs / 86400).floor()}d';
+}
+
 bool isSameLocalDay(double aUnixSeconds, double bUnixSeconds) {
   final a = DateTime.fromMillisecondsSinceEpoch((aUnixSeconds * 1000).round());
   final b = DateTime.fromMillisecondsSinceEpoch((bUnixSeconds * 1000).round());
