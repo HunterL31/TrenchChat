@@ -78,18 +78,28 @@ def _wait(pred, what: str, timeout: float) -> None:
     raise TimeoutError(f"timed out after {timeout:.0f}s waiting for {what}")
 
 
-def _boot(testers: int) -> subprocess.Popen:
+def _boot(testers: int, log_path: str | None = None) -> subprocess.Popen:
     """Launch the orchestrator in its own process group.
 
     Terminating the orchestrator alone leaves the hub and every worker it
     spawned running, which then holds the ports the next run preflights
     against. Killing the group reaps all of them.
+
+    With log_path set, every tester's RNS output is captured at debug level.
+    Refusals in sync.py are logged at debug and are silent on the wire, so
+    that is the only way to see why a peer never answered.
     """
     print(f"starting orchestrator with {testers} testers...")
+    env = dict(os.environ)
+    sink = subprocess.DEVNULL
+    if log_path:
+        env["TC_TESTENV_LOGLEVEL"] = "7"
+        sink = open(log_path, "w")
+        print(f"  capturing tester logs to {log_path}")
     return subprocess.Popen(
         [sys.executable, str(_ORCHESTRATOR), "--testers", str(testers)],
-        cwd=str(_TESTENV_DIR),
-        stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT,
+        cwd=str(_TESTENV_DIR), env=env,
+        stdout=sink, stderr=subprocess.STDOUT,
         start_new_session=True,
     )
 
@@ -200,6 +210,8 @@ def main() -> int:
     parser.add_argument("--repeat", type=int, default=1,
                         help="run the selection N times, to characterise a flake")
     parser.add_argument("--json", help="write results to this path")
+    parser.add_argument("--tester-log",
+                        help="capture every tester's RNS output at debug level here")
     args = parser.parse_args()
 
     chosen = _select(args.family, args.scenario)
@@ -213,7 +225,7 @@ def main() -> int:
             if orch.up():
                 raise SystemExit("an orchestrator is already running on 8800; "
                                  "stop it or pass --attach")
-            proc = _boot(args.testers)
+            proc = _boot(args.testers, args.tester_log)
         env = _wait_environment(orch, args.testers)
         print(f"environment ready; running {len(chosen)} scenario(s)\n")
 

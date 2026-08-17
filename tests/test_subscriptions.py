@@ -175,3 +175,52 @@ class TestSubscriberListBroadcast:
         # Bob is not the owner, so his subscriber set should remain empty
         # (The guard in _on_lxmf_message checks channel["creator_hash"] == sender_hex)
         assert bob.subscription_mgr.get_subscribers(ch_hash) == set()
+
+
+class TestSubscriberVersionSurvivesRestart:
+    def test_owner_restart_does_not_renumber_into_replay_rejection(self, peer_factory):
+        """
+        A restarted owner keeps numbering subscriber lists upward.
+
+        The counter used to live only in memory, so a restarted owner reissued
+        v1 while its subscribers still held the higher number from before.
+        Receivers reject anything not newer than what they hold, so every list
+        published after the restart was discarded as a replay -- leaving
+        existing subscribers permanently unaware of anyone who joined
+        afterwards (G1 in docs/testenv-scenarios.md).
+        """
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+        carol = peer_factory("carol")
+
+        ch_hash = alice.channel_mgr.create_channel("version-restart", "", "public")
+        for peer in (bob, carol):
+            peer.storage.upsert_channel(ch_hash, "version-restart", "",
+                                        alice.identity.hash_hex, "public", time.time())
+
+        bob.subscription_mgr.subscribe(ch_hash, owner_hash_hex=alice.identity.hash_hex)
+        assert wait_for_subscriber(alice, ch_hash, bob.identity.hash_hex, timeout=5)
+        assert wait_for(
+            lambda: bob.identity.hash_hex in bob.subscription_mgr.get_subscribers(ch_hash),
+            timeout=5,
+        ), "Bob never received the first subscriber list"
+
+        issued = alice.storage.get_all_subscriber_list_versions().get(ch_hash, 0)
+        assert issued > 0, "the owner never persisted a subscriber-list version"
+
+        # Restart the owner's manager against the same storage, exactly what a
+        # process restart does: memory gone, database intact.
+        from trenchchat.core.subscription import SubscriptionManager
+        restarted = SubscriptionManager(alice.identity, alice.storage, alice.router)
+        assert restarted._next_subscriber_version(ch_hash) > issued, (
+            "a restarted owner reissued a version its subscribers already hold, "
+            "so every later list is rejected as a replay"
+        )
+
+        # Carol joining is what the surviving subscriber must learn about.
+        carol.subscription_mgr.subscribe(ch_hash, owner_hash_hex=alice.identity.hash_hex)
+        assert wait_for_subscriber(alice, ch_hash, carol.identity.hash_hex, timeout=5)
+        assert wait_for(
+            lambda: carol.identity.hash_hex in bob.subscription_mgr.get_subscribers(ch_hash),
+            timeout=5,
+        ), "Bob never learned about a peer that joined after the owner restarted"

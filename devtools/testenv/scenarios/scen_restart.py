@@ -20,14 +20,16 @@ from scenario import PROBE, scenario
 RESTART_SETTLE = 120.0
 
 
-@scenario("G1", "A restarted owner's subscriber-list version resets", kind=PROBE)
+@scenario("G1", "A restarted owner keeps numbering subscriber lists upward")
 def g1(env):
-    """SubscriptionManager._subscriber_versions is an in-memory dict, so a
-    restarted owner starts numbering from 1 again while its subscribers still
-    hold the higher version from before. Receivers reject anything not newer
-    than what they hold, so a list published after the restart should be
-    discarded as a replay -- leaving existing subscribers permanently unaware
-    of anyone who joins afterwards.
+    """Regression guard for a fixed bug.
+
+    _subscriber_versions was an in-memory dict, so a restarted owner started
+    numbering from 1 again while its subscribers still held the higher version
+    from before. Receivers reject anything not newer than what they hold, so
+    every list published after the restart was discarded as a replay, leaving
+    existing subscribers permanently unaware of anyone who joined afterwards.
+    The counter is persisted now; this fails again if that regresses.
     """
     a, b, c, d = env.peers("A", "B", "C", "D")
     ch = public_channel(a, [b, c], "g1-public")
@@ -62,8 +64,10 @@ def g1(env):
         "subscriber_views": subscriber_views([a, b, c, d], ch),
     }
     if not (b_learns and c_learns and reached):
-        notes["surprise"] = ("existing subscribers never learned about a peer that "
-                             "joined after the owner restarted")
+        raise ScenarioFailure(
+            f"existing subscribers never learned about a peer that joined after "
+            f"the owner restarted: {notes}"
+        )
     return notes
 
 

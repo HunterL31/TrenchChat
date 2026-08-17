@@ -170,7 +170,7 @@ need control of the clock and stay deferred.
 | ID | Peers | Actions | Expected result |
 |---|---|---|---|
 | C1 | A,B,C | B goes offline (link drop); A sends 3; B goes online | ✅ B receives all 3, in 1.0–5.0s |
-| C2 | A,B,C,D | B offline; A sends 3; A offline; B online (only C, D reachable) | ❌ **Fails, cause not yet established.** Passed in 15.6s once, then failed twice with B holding 0/3 and both C and D stuck at `pending` — asked, never answered. Not the C11 bug: it still fails with that fixed. See below |
+| C2 | A,B,C,D | B offline; A sends 3; A offline; B online (only C, D reachable) | ❌ **Fails ~half of runs**, root cause established. B holds 0/3 with both responders at `pending` for the full timeout. See below |
 | C3 | A,B,C | Same as C1 but B is **killed and restarted** instead of link-dropped | ✅ B ends with its own history plus what it missed, in 3.5s, via the cold path |
 | C4 | A,D | D offline; A sends 60 (> `MAX_RESPONSE_MESSAGES` = 50); D online | ✅ D ends with all 60 and `state == synced`, in 18.1s — the truncated batch does chain its follow-up |
 | C5 | A,B,C | B offline for messages 1–5; B online, C offline for 6–10; C online | ✅ Both end with all 10, in 10.6s — per-(channel, peer) watermarks hold up |
@@ -250,30 +250,52 @@ Left strict rather than reclassified as a probe. The expectation is the sync
 design's own — any online member can serve any gap — so `--family C` exits
 non-zero until it is fixed, which is the correct signal for an open bug.
 
-#### C2 fails the same way, intermittently
+#### C2, root-caused: a recovered link has no resync trigger
 
-C2 passed in 15.6s on one run and failed on another with B holding 0 of 3 and
-its sync status reading:
+**Fixed.** C2 failed roughly half the time — 2 of 6 runs — with B holding 0 of 3
+and both responders sitting at `pending`, `answered_peers: 0`, for the full
+206s.
 
-```
-state: syncing · answered_peers: 0
-peers: [Tester C: pending, Tester D: pending]
-```
+My first two hypotheses were both wrong, and worth recording as such: it is
+not the deep-sync cooldown (`_deep_sync_allowed` only records the timestamp
+when it *allows*, so refusals do not extend it), and not `_peer_may_participate`
+(open-join returns True unconditionally). Reading the code could not settle it;
+capturing the testers' debug output could, which is what `--tester-log` is for.
 
-Both responders were asked and neither replied — and `sync.py` refuses
-requests *silently* by design, so "throttled or unauthorised" and "still in
-flight" are indistinguishable from the requester's side. `pending` forever is
-exactly what a silent refusal looks like.
+The logs showed it plainly. In a failing run every sync request stops at
+22:54:50, and the scenario ran to 22:58:17 — three and a half minutes of total
+silence — while presence beacons kept flowing in both directions the whole
+time. The network was fine. Nothing was being refused. B simply stopped asking.
 
-The likely link to C11: a peer with no local history requests from `since_ts=0`,
-which is older than `SYNC_WINDOW_SECS` and therefore a *deep* sweep, rate
-limited to one per `DEEP_SYNC_COOLDOWN_SECS` (60s) per (channel, peer). With
-announces every 10s the requester re-asks about six times per allowed sweep, so
-one lost or refused first request can leave it silently locked out. That would
-also explain why C11 loses precisely the earliest message of each partitioned
-peer. Unverified — but it is where both investigations should start, and it
-suggests `SyncStatusTracker` cannot currently distinguish "refused" from
-"waiting", which is a reporting gap in its own right.
+`SyncManager.on_peer_appeared` was the only resync trigger after startup, and it
+fires solely from `PeerAnnounceHandler` — a *received announce*. RNS suppresses
+announce replays for a destination the transport has already propagated, so a
+peer whose link drops and recovers can go on exchanging traffic for the rest of
+the session without ever seeing a fresh announce from its peers. It then never
+asks for what it missed. `request_sync_all()` covers this only at process
+start, which is why C3 (kill and restart) always passed while C2 (drop and
+recover) did not.
+
+**The fix is not in yet, and one attempt has already been ruled out.** Making a
+presence transition to online a second trigger looked right — presence is
+maintained from inbound LXMF traffic, so it keeps working exactly where
+announces do not. It does not fix this: presence transitions fire when a
+*remote peer* returns, and in C2 it is the local node whose link recovered.
+Its peers never went offline in its own presence table, so no transition
+occurs. Measured 4/8 after the change against 4/6 before — no improvement — and
+the change was reverted rather than left in as a speculative core edit.
+
+What the fix actually needs is a trigger on *our own* link recovering, calling
+`request_sync_all()` the way process startup does 3s in. The production client
+has no such signal today: `main.py` polls interfaces for display, and nothing
+tells `SyncManager` the node is reachable again. Adding one to the harness
+alone would hide the gap rather than close it, since the real client has the
+same hole.
+
+One reporting gap this exposed is worth noting separately: `sync.py` refuses
+requests silently by design, so from the requester's side "refused", "lost" and
+"still in flight" are indistinguishable — all three read as `pending` forever.
+`SyncStatusTracker` cannot currently tell a user which of those is happening.
 
 ### D — Degraded links
 
@@ -313,7 +335,7 @@ suggests `SyncStatusTracker` cannot currently distinguish "refused" from
 
 | ID | Peers | Actions | Expected result |
 |---|---|---|---|
-| G1 | A,B,C,D | Public channel with B, C joined; **A restarts**; D joins | ⚠️ **Confirmed.** A ends up holding `[B, C, D]` while B and C are stuck at `[A, B, C]`, and B's next send never reaches D. See below |
+| G1 | A,B,C,D | Public channel with B, C joined; **A restarts**; D joins | ✅ **Fixed.** Was: A held `[B, C, D]` while B and C stayed at `[A, B, C]` and B's send never reached D. Now all four views agree, B learns about D in 1.0s. Promoted to strict as a regression guard |
 | G2 | A,B,C,D | Full history and roster built; all four killed and restarted | ✅ Identities, messages and the invite-only roster all survive |
 | G3 | A,B | A invites B with no path warm-up | ⚠️ **Confirmed.** The first invite is dropped silently; 2 attempts needed |
 | G4 | A,B,C | A admits C and sends a chat message immediately after | ✅ Landed in 0.0s on this run — the race is real but did not bite. Kept as a probe |
@@ -328,13 +350,13 @@ Everything the matrix turned up, across all seven families.
 | Finding | Detail |
 |---|---|
 | **C11** — one `sync_progress` row written from both directions, collapsing the responder's trust-horizon floor and stranding history older than a requester's watermark | Root-caused and fixed by splitting the serve direction into `sync_served`. C11 now reconciles in 31.7s; regression test in `tests/test_sync_multipeer.py` |
+| **G1** — `_subscriber_versions` lived only in memory, so a restarted owner renumbered from 1 and every later list was rejected as a replay | Fixed by persisting the counter in a `subscriber_versions` table, loaded on construction and written through on both issue and accept. Regression test in `tests/test_subscriptions.py` |
 
 ### Open
 
 | Finding | Detail |
 |---|---|
-| **C2** — a returning peer's sync requests are never answered; both responders sit at `pending`, `answered_peers: 0`, indefinitely | **Cause not established.** Survives the C11 fix. Not the deep-sync cooldown (that only records on allow) and not `_peer_may_participate` (open-join returns True unconditionally). Next step is instrumenting whether the request reaches the responder at all |
-| **G1** — `_subscriber_versions` is in-memory, so a restarted owner renumbers from 1 and surviving subscribers reject its lists as replays | **Confirmed.** A holds `[B, C, D]`, B and C stay at `[A, B, C]`, and B's next send never reaches D. Persisting the counter is the obvious fix |
+| **C2** — a node whose own link recovers has no resync trigger. `on_peer_appeared` fires only on a *received announce*, and RNS suppresses announce replays for a destination the transport has already propagated | **Root-caused, not fixed.** Fails ~half of runs (4/8, 4/6). The fix needs a local link-recovery signal the production client does not currently have — see below |
 | **B11** — `kick` and `manage_roles` are grantable to any role, but a non-admin's member-list document is rejected by every recipient | **Confirmed.** The grant succeeds locally and does nothing on the network. Resolution is a product decision — see below |
 | **Subscribe/invite have no retry** — `_send_raw` in both `subscription.py` and `invite.py` drops the message when the path is unresolved, and nothing re-sends it | **Confirmed twice.** C4's setup hit it for `MT_SUBSCRIBE` (the owner never registered the joiner); G3 measured it for invites (first attempt dropped, 2 needed). Only re-issuing recovers |
 | **A5** — a public-channel join fires no sync request; backfill waits on the next peer announce | **Confirmed.** 0 messages at join, backfill at 1.0s / 9.1s tracking the 10s heartbeat. Up to 60s in the real client |
@@ -400,7 +422,7 @@ Built and running, in `devtools/testenv/scenarios/`:
 | `scen_social.py` | Family F |
 | `scen_restart.py` | Family G |
 
-All seven families are built: 57 scenarios, 43 strict and 14 probes.
+All seven families are built: 57 scenarios, 44 strict and 13 probes.
 
 ```bash
 .venv/bin/python devtools/testenv/scenarios/runner.py                # everything
@@ -437,19 +459,19 @@ stays the merge gate.
 
 ## Status
 
-All seven families built and run: **57 scenarios, 43 strict and 14 probes.**
+All seven families built and run: **57 scenarios, 44 strict and 13 probes.**
 
 | Family | Scenarios | Result |
 |---|---|---|
 | A — public channels | 10 (6 strict, 4 probes) | All passing, three consecutive clean runs |
 | B — invite-only and membership | 13 (12 strict, 1 probe) | 11/12 — **B11 fails** on a confirmed permission gap |
-| C — offline and sync | 10 (9 strict, 1 probe) | 8/9 — **C2 fails**, cause open. C11 fixed |
+| C — offline and sync | 10 (9 strict, 1 probe) | 8/9 — **C2 fails**, root-caused. C11 fixed |
 | D — degraded links | 5 (2 strict, 3 probes) | All passing |
 | E — servers | 6 (5 strict, 1 probe) | All passing |
 | F — reactions, presence, identity | 8 (7 strict, 1 probe) | All passing; F3's prediction refuted |
-| G — restart and ordering | 5 (2 strict, 3 probes) | All passing; G1 and G3 confirmed their predictions |
+| G — restart and ordering | 5 (3 strict, 2 probes) | All passing; G1 confirmed, then fixed; G3 confirmed |
 
-**41 of 43 strict scenarios pass.** The two that don't — B11 and C2 — are real
+**42 of 44 strict scenarios pass.** The two that do not — B11 and C2 — are real
 defects, left strict and failing on purpose, so `--family B` and `--family C`
 exit non-zero until they are resolved.
 
@@ -459,10 +481,12 @@ on-demand run rather than the per-PR gate.
 
 Remaining work:
 
-1. Root-cause C2 — a returning peer whose sync requests are never answered.
+1. Fix C2 by giving the client a resync trigger for its own link recovering.
 2. Decide B11: stop offering `kick`/`manage_roles` below admin, or admit
    permission-holders as trusted signers.
-3. Persist the subscriber-list version counter (G1).
-4. Give `subscription.py` and `invite.py`'s `_send_raw` a retry queue, or an
-   explicit failure the caller can act on.
+3. Give `subscription.py` and `invite.py`'s `_send_raw` a retry queue, or an
+   explicit failure the caller can act on. Both drop silently on an unresolved
+   path today, and only re-issuing recovers.
+4. Let `SyncStatusTracker` distinguish "refused" from "waiting" — today both
+   read as `pending` forever.
 5. C6 and C12, which need control of the clock.

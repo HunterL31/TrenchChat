@@ -12,6 +12,7 @@ multicast that has been observed to fail on this machine/network.
 """
 
 import json
+import os
 import threading
 import time
 from pathlib import Path
@@ -71,6 +72,22 @@ loglevel = 3
     interface_enabled = true
 {iface_body}
 """
+
+
+def _rns_loglevel() -> int:
+    """RNS verbosity for a tester, from TC_TESTENV_LOGLEVEL.
+
+    Defaults to LOG_NOTICE. Raise it to LOG_DEBUG (7) when a scenario needs to
+    see why a peer stayed silent -- refusals in sync.py are logged at debug
+    precisely because they are silent on the wire.
+    """
+    raw = os.environ.get("TC_TESTENV_LOGLEVEL")
+    if not raw:
+        return RNS.LOG_NOTICE
+    try:
+        return max(0, min(int(raw), 7))
+    except ValueError:
+        return RNS.LOG_NOTICE
 
 
 def _write_reticulum_config(rns_dir: Path, instance_name: str, role: str,
@@ -137,7 +154,7 @@ class Backend:
         self.config = Config(data_dir=data_dir)
         self.config.display_name = display_name
 
-        self.rns = RNS.Reticulum(configdir=str(rns_dir), loglevel=RNS.LOG_NOTICE)
+        self.rns = RNS.Reticulum(configdir=str(rns_dir), loglevel=_rns_loglevel())
 
         self.identity = Identity(self.config, identity_path=data_dir / "identity")
         self.storage = Storage(db_path=data_dir / "storage.db")
