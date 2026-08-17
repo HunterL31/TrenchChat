@@ -462,7 +462,7 @@ function blankState(port) {
     servers: [], serverChannels: {}, serverPerms: {}, collapsedServers: new Set(),
     ws: null, invites: [], pendingImage: null, replyTarget: null,
     net: { online: null, reconnecting: false }, killed: false,
-    linkProfile: 'broadband',
+    linkProfile: 'broadband', inVoice: false,
   };
 }
 
@@ -516,6 +516,46 @@ async function api(tag, path, opts) {
   return res.json();
 }
 
+function applyVoiceState(tag, inVoice) {
+  state[tag].inVoice = inVoice;
+  const voiceBtn = document.getElementById(`voice-btn-${tag}`);
+  if (voiceBtn) {
+    voiceBtn.textContent = inVoice ? 'Leave voice' : 'Join voice';
+    voiceBtn.classList.toggle('on', inVoice);
+  }
+  if (!inVoice) {
+    // Leaving voice tears down the audio pipeline, which stops the tone.
+    const toneBtn = document.getElementById(`tone-btn-${tag}`);
+    if (toneBtn) { toneBtn.classList.remove('on'); toneBtn.textContent = 'Tone'; }
+  }
+}
+
+async function refreshVoiceState(tag) {
+  try {
+    const status = await api(tag, '/voice/status');
+    applyVoiceState(tag, status.channel !== null);
+  } catch (e) { /* worker still starting; the next join/leave resyncs */ }
+}
+
+async function toggleVoice(tag) {
+  if (state[tag].inVoice) {
+    await api(tag, '/voice/leave', {method: 'POST'});
+    applyVoiceState(tag, false);
+    return;
+  }
+  const ch = state[tag].activeChannel;
+  if (!ch) {
+    toast(`Tester ${tag}: select a channel first`);
+    return;
+  }
+  const result = await api(tag, `/channels/${ch}/voice/join`, {method: 'POST'});
+  if (!result.ok) {
+    toast(`Tester ${tag}: couldn't join voice (no permission, or the room is full)`);
+    return;
+  }
+  applyVoiceState(tag, true);
+}
+
 async function toggleTone(tag) {
   const btn = document.getElementById(`tone-btn-${tag}`);
   const enable = !btn.classList.contains('on');
@@ -558,6 +598,8 @@ function renderShell() {
           <span class="restart-hint" id="restart-hint-${tag}"
                title="Shaping is live. Restart this tester to also apply the matching bitrate to its Reticulum config.">&#8635;</span>
           <button class="link-btn" id="link-btn-${tag}" onclick="toggleLink('${tag}')">Go offline</button>
+          <button class="tone-btn" id="voice-btn-${tag}" onclick="toggleVoice('${tag}')"
+                 title="Join/leave the selected channel's voice session">Join voice</button>
           <button class="tone-btn" id="tone-btn-${tag}" onclick="toggleTone('${tag}')"
                  title="Stream the voice test tone (requires being in a voice session)">Tone</button>
           <button class="proc-btn kill" id="kill-btn-${tag}" onclick="killTester('${tag}')">Kill</button>
@@ -642,6 +684,7 @@ async function connectTester(tag) {
   await refreshChannels(tag);
   await refreshDiscovered(tag);
   await refreshInvites(tag);
+  refreshVoiceState(tag);
   connectWs(tag);
   refreshOwnAvatar(tag);
   refreshEmojiLibrary(tag);
@@ -925,6 +968,8 @@ function connectWs(tag) {
       refreshEmojiLibrary(tag).then(() => {
         if (state[tag].activeChannel) renderMessages(tag);
       });
+    } else if (msg.type === 'voice_session') {
+      applyVoiceState(tag, msg.state === 'joined' || msg.state === 'audio_error');
     }
   };
   ws.onclose = () => {
