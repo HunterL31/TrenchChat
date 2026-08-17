@@ -319,7 +319,8 @@ Closing this properly means propagating per-message author signatures through
 sync so a relayed message is verifiable independently of who relayed it. That
 is a protocol change (a new signed field, and a decision about what to do with
 pre-existing unsigned history), so it is recorded here rather than patched
-around. Until then, "a peer relayed this" and "this peer wrote this" are
+around. `docs/proposal-author-signatures.md` works the design through and lists
+the four policy decisions it needs. Until then, "a peer relayed this" and "this peer wrote this" are
 different claims, and only the former is authenticated on the sync path.
 
 ### 1. Encryption at rest is off by default, and the PIN is weak

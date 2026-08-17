@@ -526,10 +526,12 @@ decision rather than a patch:
   memory-hard KDF, removal of the verification oracle, persistent lockout in
   `lockbox.unlock()`, and a re-key migration for existing databases. Its own
   change.
-- **H — solicited sync authorship.** Now documented as a trust boundary
+- **H — solicited sync authorship.** Documented as a trust boundary
   (`security-improvements.md` §0b). Closing it means propagating per-message
   author signatures through sync — a protocol change, including a decision
-  about existing unsigned history.
+  about existing unsigned history. Designed in
+  `docs/proposal-author-signatures.md`, awaiting sign-off on four policy
+  questions.
 - **E, in part.** The exploitable half (decompression and frame bombs) is fixed
   by `inbound_image_is_sane`, a header-only check that decodes no pixels.
   Re-encoding every inbound image through one bounded library is the stronger
