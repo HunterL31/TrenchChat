@@ -652,3 +652,82 @@ class TestMixedPermissionViews:
             "local permissions still deny full_sync -- the receive-side "
             "re-check in _handle_sync_response did not govern what was stored"
         )
+
+
+# ---------------------------------------------------------------------------
+# A7 -- a responder that acquires older history after the requester's
+#       watermark has already passed it
+# ---------------------------------------------------------------------------
+
+class TestResponderAcquiresOlderHistoryLater:
+    def test_mutual_sync_does_not_disable_the_trust_horizon(self, peer_factory):
+        """
+        A responder widens its sweep by PEER_TRUST_HORIZON_SECS behind the
+        requester's claimed window_start, so history it picked up after that
+        watermark was set is still served.
+
+        That widening is computed as max(own_progress, window_start - horizon),
+        where own_progress is how far this responder has synced *from* the
+        requester -- the opposite direction to what it is about to serve them.
+        Once two peers have synced from each other, own_progress is recent
+        enough to swallow the widening, and anything older than the requester's
+        watermark is stranded on both sides for good.
+
+        Reproduces the four-way partition case in
+        docs/testenv-scenarios.md (C11), where every peer ends up missing
+        precisely the oldest message each other peer wrote while partitioned.
+        """
+        from trenchchat.core.protocol import F_CHANNEL_HASH, F_MSG_TYPE, F_SYNC_WINDOW_START
+        from trenchchat.core.protocol import MT_SYNC_REQUEST
+
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+        carol = peer_factory("carol")
+
+        ch_hash = alice.channel_mgr.create_channel("late-older-history", "", "public")
+        _seed_channel_on_peer(bob, ch_hash, "late-older-history", alice.identity.hash_hex)
+        _seed_channel_on_peer(carol, ch_hash, "late-older-history", alice.identity.hash_hex)
+
+        base = time.time()
+
+        # Carol holds a message older than where Bob's watermark with her sits.
+        # In the partition case this is history Carol only picked up after Bob
+        # had already synced her newer messages.
+        stranded_id = _insert_message(carol.storage, ch_hash, alice.identity.hash_hex,
+                                      "written during the partition", base + 10)
+
+        # Bob has already synced Carol's newer history.
+        bob_watermark = base + 40
+        bob.storage.advance_peer_sync_progress(ch_hash, carol.identity.hash_hex,
+                                               bob_watermark)
+
+        # ... and Carol has synced *from* Bob, which is the direction
+        # own_progress actually tracks.
+        carol.storage.advance_peer_sync_progress(ch_hash, bob.identity.hash_hex,
+                                                 base + 60)
+
+        carol_responses = []
+        carol.sync_mgr._send_raw = (
+            lambda dest_hex, fields: carol_responses.append(fields) or True
+        )
+
+        carol.sync_mgr._handle_sync_request(
+            {
+                F_MSG_TYPE:          MT_SYNC_REQUEST,
+                F_CHANNEL_HASH:      bytes.fromhex(ch_hash),
+                F_SYNC_WINDOW_START: bob_watermark,
+            },
+            ch_hash, bob.identity.hash_hex,
+        )
+        assert len(carol_responses) == 1, "Carol never answered the request"
+
+        bob.sync_mgr._record_pending_request(ch_hash, carol.identity.hash_hex,
+                                             bob_watermark)
+        bob.sync_mgr._handle_sync_response(carol_responses[0], ch_hash,
+                                           carol.identity.hash_hex)
+
+        assert bob.storage.message_exists(stranded_id), (
+            "Bob never received history older than his watermark with Carol -- "
+            "Carol's own sync progress *from* Bob suppressed the trust-horizon "
+            "widening that should have covered it"
+        )

@@ -17,10 +17,11 @@ See docs/testenv-scenarios.md for the matrix these implement.
 """
 
 from asserts import (
-    all_hold, diff_report, settle, wait_until, ScenarioFailure,
+    all_hold, diff_report, hold_for, roster, settle, wait_until, ScenarioFailure,
 )
 from flows import (
-    go_offline, go_online, public_channel, BACKFILL_TIMEOUT, DISCOVERY_TIMEOUT,
+    go_offline, go_online, invite_and_accept, invite_only_channel, public_channel,
+    BACKFILL_TIMEOUT, DISCOVERY_TIMEOUT,
 )
 from scenario import PROBE, scenario
 
@@ -31,6 +32,10 @@ TRUNCATING_BACKLOG = MAX_RESPONSE_MESSAGES + 10
 
 # Reconciling several peers' disjoint history takes more than one exchange.
 CONVERGE_TIMEOUT = 180.0
+
+# full_sync is the only permission that changes what a responder will serve.
+ADMIN_WITH_FULL_SYNC = ["send_message", "invite", "kick", "manage_roles", "full_sync"]
+MEMBER_WITH_FULL_SYNC = ["send_message", "full_sync"]
 
 
 def _send_batch(peer, channel_hash: str, prefix: str, count: int) -> set[str]:
@@ -192,6 +197,57 @@ def c7(env):
         notes["surprise"] = (f"channel settled as {status.get('state')} with every "
                              f"message present")
     return notes
+
+
+@scenario("C8", "Granting full_sync re-asks for history already withheld")
+def c8(env):
+    """Entitlement changed, so the next request must re-ask from the start
+    rather than resuming from a watermark that already ran past the withheld
+    rows. Needs an invite-only channel: full_sync does nothing on a public one."""
+    a, d = env.peers("A", "D")
+    ch = a.create_channel("c8-private", "invite")
+
+    backlog = _send_batch(a, ch, "c8", 3)
+    a.invite(ch, d.hash)
+    invite_and_accept(a, d, ch)
+
+    withheld, _ = settle(lambda: d.contents(ch) == backlog,
+                         "history to arrive without full_sync", 20.0)
+    if withheld:
+        raise ScenarioFailure("history reached a member with no full_sync grant")
+
+    a.set_permissions(ch, admin=ADMIN_WITH_FULL_SYNC, member=MEMBER_WITH_FULL_SYNC)
+    arrived, elapsed = settle(lambda: d.contents(ch) == backlog,
+                              "the backlog to arrive once full_sync is granted",
+                              CONVERGE_TIMEOUT)
+    if not arrived:
+        raise ScenarioFailure(
+            f"granting full_sync did not re-open the withheld history: "
+            f"{diff_report([d], ch, backlog)}"
+        )
+    return {"backfill_secs": round(elapsed, 1), "messages": len(backlog)}
+
+
+@scenario("C9", "A kicked member's sync request is refused")
+def c9(env):
+    a, b, c = env.peers("A", "B", "C")
+    ch = invite_only_channel(a, [b, c], "c9-private",
+                             permissions=(ADMIN_WITH_FULL_SYNC, MEMBER_WITH_FULL_SYNC))
+
+    before = _send_batch(a, ch, "c9-before", 2)
+    all_hold([b, c], ch, before, timeout=DISCOVERY_TIMEOUT)
+
+    if not a.set_roles(ch, remove_members=[c.hash]):
+        raise ScenarioFailure("the kick was rejected")
+    wait_until(lambda: c.hash not in roster(a, ch), "C to be dropped",
+               DISCOVERY_TIMEOUT)
+
+    after = _send_batch(a, ch, "c9-after", 2)
+    all_hold([b], ch, before | after, timeout=DISCOVERY_TIMEOUT)
+
+    hold_for(lambda: c.contents(ch) == before,
+             "a kicked member's history to stay frozen at the kick", 20.0)
+    return {"frozen_at": len(before)}
 
 
 @scenario("C10", "A total partition heals when the hub returns")

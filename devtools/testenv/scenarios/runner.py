@@ -36,6 +36,11 @@ from scenario import PROBE, REGISTRY, Result  # noqa: E402
 
 import scen_public  # noqa: F401,E402  (registers family A)
 import scen_sync    # noqa: F401,E402  (registers family C)
+import scen_invite  # noqa: F401,E402  (registers family B)
+import scen_links   # noqa: F401,E402  (registers family D)
+import scen_servers # noqa: F401,E402  (registers family E)
+import scen_social  # noqa: F401,E402  (registers family F)
+import scen_restart # noqa: F401,E402  (registers family G)
 
 _ORCHESTRATOR = _TESTENV_DIR / "orchestrator.py"
 _BOOT_TIMEOUT = 180.0

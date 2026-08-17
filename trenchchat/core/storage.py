@@ -171,6 +171,18 @@ CREATE TABLE IF NOT EXISTS sync_progress (
     PRIMARY KEY (channel_hash, peer_hash)
 );
 
+-- How far we have *served* a peer, the opposite direction to sync_progress
+-- above. Kept in its own table rather than sharing that row: two peers that
+-- both request from and serve each other would otherwise overwrite each
+-- other's meaning, and the responder-side floor built from it would silently
+-- stop widening for exactly those peers.
+CREATE TABLE IF NOT EXISTS sync_served (
+    channel_hash   TEXT NOT NULL,
+    peer_hash      TEXT NOT NULL,
+    last_served_at REAL NOT NULL DEFAULT 0,
+    PRIMARY KEY (channel_hash, peer_hash)
+);
+
 CREATE TABLE IF NOT EXISTS membership_tenure (
     channel_hash  TEXT NOT NULL,
     identity_hash TEXT NOT NULL,
@@ -994,6 +1006,25 @@ class Storage:
                 VALUES (?, ?, ?)
                 ON CONFLICT(channel_hash, peer_hash) DO UPDATE SET
                     last_sync_at = MAX(last_sync_at, excluded.last_sync_at)
+            """, (channel_hash, peer_hash, ts))
+
+    def get_peer_served_progress(self, channel_hash: str, peer_hash: str) -> float:
+        """Return how far we have served a peer, or 0.0 if we never have."""
+        row = self._fetchone(
+            "SELECT last_served_at FROM sync_served WHERE channel_hash = ? AND peer_hash = ?",
+            (channel_hash, peer_hash),
+        )
+        return float(row["last_served_at"]) if row else 0.0
+
+    def advance_peer_served_progress(self, channel_hash: str, peer_hash: str,
+                                     ts: float) -> None:
+        """Advance how far we have served a peer, never regressing it."""
+        with self._tx():
+            self._conn.execute("""
+                INSERT INTO sync_served (channel_hash, peer_hash, last_served_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(channel_hash, peer_hash) DO UPDATE SET
+                    last_served_at = MAX(last_served_at, excluded.last_served_at)
             """, (channel_hash, peer_hash, ts))
 
     # --- members ---

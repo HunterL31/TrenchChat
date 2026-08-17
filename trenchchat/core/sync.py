@@ -459,8 +459,15 @@ class SyncManager:
         # responder's disjoint answer landing first in the same reconnect
         # round (A1, test_sync_multipeer.py). A peer we HAVE served keeps
         # resuming from what we actually gave them, not from this horizon.
-        own_progress = self._storage.get_peer_sync_progress(channel_hash_hex, requester_hex)
-        trust_floor = max(own_progress, window_start - PEER_TRUST_HORIZON_SECS, 0.0)
+        #
+        # Read from sync_served, not sync_progress: the latter records what we
+        # received *from* this peer, and using it here collapsed the two
+        # directions onto one row, switching the widening off for any pair that
+        # had synced from each other (A7).
+        served_progress = self._storage.get_peer_served_progress(
+            channel_hash_hex, requester_hex
+        )
+        trust_floor = max(served_progress, window_start - PEER_TRUST_HORIZON_SECS, 0.0)
         sweep_start = min(window_start, trust_floor)
 
         # Hints name exact messages this peer missed, including ones older than
@@ -530,8 +537,8 @@ class SyncManager:
             advance_to = scan_cursor
             if rows:
                 advance_to = max(advance_to, rows[-1]["timestamp"])
-            if advance_to > own_progress:
-                self._storage.advance_peer_sync_progress(
+            if advance_to > served_progress:
+                self._storage.advance_peer_served_progress(
                     channel_hash_hex, requester_hex, advance_to
                 )
 

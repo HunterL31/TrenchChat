@@ -45,6 +45,19 @@ class Peer:
         r.raise_for_status()
         return r.json()
 
+    def post_status(self, path: str, body: dict | None = None) -> tuple[int, dict]:
+        """POST returning (status_code, body) instead of raising.
+
+        Some endpoints refuse with a status rather than {"ok": false} -- a
+        server channel's permissions with 409, an unpermitted channel creation
+        with 403 -- and the refusal is the thing under test.
+        """
+        r = self._client.post(self._base + path, json=body if body is not None else {})
+        try:
+            return r.status_code, r.json()
+        except ValueError:
+            return r.status_code, {}
+
     def alive(self) -> bool:
         """True if this tester's API is answering. False across a kill."""
         try:
@@ -77,6 +90,83 @@ class Peer:
 
     def presence(self, peer_hash: str) -> dict:
         return self._get(f"/peers/{peer_hash}/presence")
+
+    # --- avatar ---
+
+    def set_avatar(self, image_data_b64: str) -> dict:
+        return self._post("/me/avatar", {"image_data_b64": image_data_b64})
+
+    def own_avatar(self) -> dict:
+        return self._get("/me/avatar")
+
+    def remove_avatar(self) -> dict:
+        return self._delete("/me/avatar")
+
+    def try_remove_avatar(self) -> int:
+        """Remove the avatar, returning the status instead of raising.
+
+        AvatarManager enforces one change per SEND_RATE_LIMIT_SECS and answers
+        429 until it elapses, so a set-then-remove sequence has to wait it out.
+        """
+        return self._client.delete(self._base + "/me/avatar").status_code
+
+    def peer_avatar(self, peer_hash: str) -> dict:
+        return self._get(f"/peers/{peer_hash}/avatar")
+
+    # --- friends ---
+
+    def friends(self) -> list[dict]:
+        return self._get("/friends")
+
+    def add_friend(self, identity_hash: str, nickname: str = "", note: str = "") -> dict:
+        return self._post("/friends", {"identity_hash": identity_hash,
+                                       "nickname": nickname, "note": note})
+
+    def remove_friend(self, identity_hash: str) -> dict:
+        return self._delete(f"/friends/{identity_hash}")
+
+    # --- servers ---
+
+    def create_server(self, name: str, description: str = "") -> str:
+        return self._post("/servers", {"name": name, "description": description})["hash"]
+
+    def servers(self) -> list[dict]:
+        return self._get("/servers")
+
+    def server_channels(self, server_hash: str) -> list[dict]:
+        return self._get(f"/servers/{server_hash}/channels")
+
+    def create_server_channel(self, server_hash: str, name: str,
+                              description: str = "") -> dict:
+        return self._post(f"/servers/{server_hash}/channels",
+                          {"name": name, "description": description})
+
+    def server_members(self, server_hash: str) -> list[dict]:
+        return self._get(f"/servers/{server_hash}/members")
+
+    def server_permissions(self, server_hash: str) -> dict:
+        return self._get(f"/servers/{server_hash}/permissions")
+
+    def set_server_permissions(self, server_hash: str, admin: list[str],
+                               member: list[str]) -> bool:
+        return self._post(f"/servers/{server_hash}/permissions",
+                          {"admin": admin, "member": member})["ok"]
+
+    def set_server_roles(self, server_hash: str, *,
+                         remove_members: list[str] | None = None,
+                         add_admins: list[str] | None = None,
+                         remove_admins: list[str] | None = None) -> bool:
+        return self._post(f"/servers/{server_hash}/roles", {
+            "remove_members": remove_members or [],
+            "add_admins": add_admins or [],
+            "remove_admins": remove_admins or [],
+        })["ok"]
+
+    def invite_to_server(self, server_hash: str, peer_hash: str) -> dict:
+        return self._post(f"/servers/{server_hash}/invite", {"peer_hash_hex": peer_hash})
+
+    def leave_server(self, server_hash: str) -> dict:
+        return self._post(f"/servers/{server_hash}/leave")
 
     # --- channels ---
 

@@ -7,8 +7,8 @@ than slept through.
 """
 
 from asserts import (
-    discovered_hashes, joined_hashes, settle, subscribers_converged, wait_until,
-    ScenarioFailure,
+    discovered_hashes, joined_hashes, roster, rosters_identical, settle,
+    subscribers_converged, wait_until, ScenarioFailure,
 )
 
 # Announces drive discovery and, on a public channel, backfill. worker.py runs
@@ -27,6 +27,10 @@ NEGATIVE_HOLD_SECS = 15.0
 # _await_registration), so wait a couple of announce cycles, then re-join.
 JOIN_REGISTER_TIMEOUT = 25.0
 JOIN_ATTEMPTS = 3
+
+# invite.py's _send_raw has the same no-retry behaviour as subscribe's.
+INVITE_TIMEOUT = 25.0
+INVITE_ATTEMPTS = 3
 
 
 def await_discovery(peers, channel_hash: str, timeout: float = DISCOVERY_TIMEOUT) -> None:
@@ -89,6 +93,51 @@ def public_channel(owner, joiners, name: str) -> str:
     channel_hash = owner.create_channel(name, "public")
     join_all(joiners, channel_hash, owner)
     subscribers_converged([owner, *joiners], channel_hash, timeout=DISCOVERY_TIMEOUT)
+    return channel_hash
+
+
+def invite_and_accept(inviter, invitee, channel_hash: str) -> None:
+    """Invite a peer and wait until the inviter's roster shows them as a member.
+
+    invite.py's _send_raw has no retry queue either, so an invite sent before
+    the invitee's path resolves is dropped silently and nothing re-sends it.
+    Re-issuing the invite is the only recovery, so this retries until a pending
+    invite actually appears rather than stalling a scenario on a cold path.
+    """
+    for attempt in range(INVITE_ATTEMPTS):
+        offered, _ = settle(
+            lambda: any(i["channel_hash_hex"] == channel_hash for i in invitee.invites()),
+            f"{invitee.tag} to receive an invite", INVITE_TIMEOUT,
+        )
+        if offered:
+            break
+        if attempt < INVITE_ATTEMPTS - 1:
+            inviter.invite(channel_hash, invitee.hash)
+    else:
+        raise ScenarioFailure(
+            f"{invitee.tag} never received an invite after {INVITE_ATTEMPTS} attempts"
+        )
+
+    invitee.accept_invite(channel_hash)
+    wait_until(lambda: invitee.hash in roster(inviter, channel_hash),
+               f"{inviter.tag} to admit {invitee.tag}", INVITE_TIMEOUT)
+
+
+def invite_only_channel(owner, invitees, name: str, permissions=None) -> str:
+    """Create an invite-only channel and admit every invitee.
+
+    *permissions* is an (admin, member) pair applied before anyone is invited,
+    for scenarios that need a grant in place from the start.
+    """
+    channel_hash = owner.create_channel(name, "invite")
+    if permissions is not None:
+        admin, member = permissions
+        owner.set_permissions(channel_hash, admin=admin, member=member)
+    for invitee in invitees:
+        owner.invite(channel_hash, invitee.hash)
+        invite_and_accept(owner, invitee, channel_hash)
+    if invitees:
+        rosters_identical([owner, *invitees], channel_hash, timeout=DISCOVERY_TIMEOUT)
     return channel_hash
 
 

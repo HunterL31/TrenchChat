@@ -126,10 +126,36 @@ currently implies, and the scenario exists to confirm it.
 | B7 | A,B,C,D | A promotes B to admin; B invites D; D accepts | All four rosters identical, B `admin`, D `member` |
 | B8 | A,B,D | A demotes B to member; B invites D | Join request rejected — `_handle_join_request` checks INVITE against B's current role; D never joins |
 | B9 | A,B,C | A revokes `send_message` from member role | C's message is dropped by A and B (and by C's own outbound guard); B, still admin, sends fine |
-| B10 | A,C | C calls `/roles` with `remove_members=[A]` | `{"ok": false}`, no document published, rosters unchanged on every peer — adversarial path, GUI bypassed |
-| B11 | A,B,C | A grants `kick` to member; C kicks B | B removed from all rosters — confirms a granted permission actually takes effect, the mirror of B10 |
+| B10 | A,C | C calls `/roles` with `remove_members=[A]` | ✅ `{"ok": false}`, no document published, rosters unchanged on every peer — adversarial path, GUI bypassed |
+| B11 | A,B,C | A grants `kick` to member; C kicks B | ❌ **Fails, and the failure is the finding.** The grant passes every local check and `/roles` reports success, but no peer ever applies it. See below |
 | B12 | A,B,C,D | A promotes B; A and B both publish a roster change within ~1s | Both documents validate against stored state; final rosters identical on all four; no split-brain |
 | B13 | A,B,C | C (member) attempts `/channels/{h}/permissions` | `{"ok": false}` — lacks `manage_channel`; stored perms unchanged everywhere |
+
+#### B11: a grantable permission that cannot take effect
+
+`kick` and `manage_roles` are grantable to any role — `ALL_PERMISSIONS` offers
+them, the permissions dialog exposes them, `has_permission` honours them, and
+`update_membership` lets the change through. So a member granted `kick` gets a
+successful `/roles` call and a published member-list document.
+
+Every recipient then discards it. `_validate_document` builds
+`trusted_signers` from the stored document's `admins | owners`, so a plain
+member is not a recognised signer no matter what permissions they hold. The
+kick takes effect on the actor's own device and nowhere else.
+
+Two layers disagree about what a permission means: the permission system treats
+`kick` as role-independent, the document layer ties signing authority to
+admin/owner. Both behaviours are defensible alone — signing authority *should*
+be narrow — but together they advertise a grant that silently does nothing.
+
+Worth noting what this does to **B10**, which asserts a member *cannot* kick the
+owner. B10 passes — but while B11 fails, it passes for the wrong reason: no
+member can effectively kick anyone. B11 is what gives B10 its meaning, which is
+why the pair is worth keeping together.
+
+Not fixed here: the resolution is a product decision (stop offering these
+permissions below admin, or admit permission-holders as trusted signers), not a
+bug with one obvious correction.
 
 ### C — Offline behavior and sync
 
@@ -138,25 +164,65 @@ degraded or interrupted link.
 
 | ID | Peers | Actions | Expected result |
 |---|---|---|---|
-Built: C1–C5, C7, C10, C11. C6, C8, C9 and C12 need an invite-only channel
-(family B) or control of the clock, and are deferred.
+Built: C1–C5, C7–C11. C6 (deep-sync cooldown) and C12 (a 7-day-old window)
+need control of the clock and stay deferred.
 
 | ID | Peers | Actions | Expected result |
 |---|---|---|---|
 | C1 | A,B,C | B goes offline (link drop); A sends 3; B goes online | ✅ B receives all 3, in 1.0–5.0s |
-| C2 | A,B,C,D | B offline; A sends 3; A offline; B online (only C, D reachable) | ⚠️ **Intermittent.** Passed in 15.6s on one run; on another B held 0/3 with both C and D stuck at `pending` — asked, never answered. Same shape as C11, see below |
+| C2 | A,B,C,D | B offline; A sends 3; A offline; B online (only C, D reachable) | ❌ **Fails, cause not yet established.** Passed in 15.6s once, then failed twice with B holding 0/3 and both C and D stuck at `pending` — asked, never answered. Not the C11 bug: it still fails with that fixed. See below |
 | C3 | A,B,C | Same as C1 but B is **killed and restarted** instead of link-dropped | ✅ B ends with its own history plus what it missed, in 3.5s, via the cold path |
 | C4 | A,D | D offline; A sends 60 (> `MAX_RESPONSE_MESSAGES` = 50); D online | ✅ D ends with all 60 and `state == synced`, in 18.1s — the truncated batch does chain its follow-up |
 | C5 | A,B,C | B offline for messages 1–5; B online, C offline for 6–10; C online | ✅ Both end with all 10, in 10.6s — per-(channel, peer) watermarks hold up |
 | C7 | A,B | B offline across a batch, then back; watch the sync state | ✅ Settles on `synced` with every message present |
 | C10 | A,B,C,D | Hub killed (total partition); each peer sends 1; hub restarted | ✅ All four reconcile in 12.1s once the hub returns |
-| C11 | A,B,C,D | All 4 offline simultaneously, each sends 2 locally, all come online | ❌ **Fails.** Every peer ends up missing precisely the *first* message each other peer sent while partitioned, never the second, and does not heal in 420s. See below |
-| C6 | A,D | D issues repeated deep (pre-window) sync requests in a burst | Deferred. First deep sweep answered; subsequent ones inside `DEEP_SYNC_COOLDOWN_SECS` (60s) silently refused |
-| C8 | A,D | D joins without `full_sync`; A grants `full_sync` to member | Deferred — needs invite-only. D's entitlement changed, so its next request re-asks from 0 |
-| C9 | A,B,C | A kicks C; C requests sync | Deferred — needs invite-only. Request refused silently; C's message set frozen at kick time |
+| C8 | A,D | D joins without `full_sync`; A grants `full_sync` to member | ✅ The backlog arrives 3.0s after the grant, without D restarting |
+| C9 | A,B,C | A kicks C; C requests sync | ✅ C's transcript stays frozen at the kick |
+| C11 | A,B,C,D | All 4 offline simultaneously, each sends 2 locally, all come online | ✅ **Fixed.** Reconciled all 9 messages in 31.7s. Failed on every run before the fix below |
 | C12 | A,B | B offline past `SYNC_WINDOW_SECS` (7 days, clock-shifted); B online | Deferred — needs clock control |
 
-#### C11: the first message of a partition is lost
+#### C11 and C2, root-caused: one watermark row, two directions
+
+**Fixed.** The `sync_progress` table was being written from both directions
+against the same `(channel_hash, peer_hash)` key:
+
+- `_handle_sync_response` advances `(channel, responder)` to the newest
+  timestamp we **received** from that peer.
+- `_handle_sync_request` advances `(channel, requester)` to how far we have
+  **served** that peer.
+
+For a pair that only ever consumes or only ever serves, the two never meet. For
+a pair that does both — which is every peer in a four-way partition recovery —
+they collide, and the more recent write wins.
+
+The damage lands in the responder's floor:
+
+```python
+own_progress = get_peer_sync_progress(channel, requester_hex)
+trust_floor  = max(own_progress, window_start - PEER_TRUST_HORIZON_SECS, 0.0)
+sweep_start  = min(window_start, trust_floor)
+```
+
+That widening exists so a responder still serves history older than the
+requester's claimed watermark — history the requester cannot know to ask for.
+But when `own_progress` is polluted by the *receive* direction it reads as
+recent, `trust_floor` rises to meet `window_start`, and `sweep_start` collapses
+back to a strict sweep. Combined with `get_messages_after`'s strict `>`, any
+message the responder acquired after the requester's watermark was set, but
+whose timestamp predates it, is invisible forever.
+
+That is exactly the `-alone-0` signature: the older message of each pair sits
+behind a watermark that a later, newer message had already pushed past.
+
+The fix separates the directions into a new `sync_served` table, restoring the
+original intent of the floor. `_handle_sync_request` now reads and writes served
+progress; `sync_progress` keeps its single receive-direction meaning.
+
+Covered by `TestResponderAcquiresOlderHistoryLater` in
+`tests/test_sync_multipeer.py`, which reproduces it in 0.3s in-process — the
+scenario found it, but the pytest suite is where it is pinned.
+
+#### C11 before the fix: the first message of a partition is lost
 
 Seven of the eight built rows pass, several on the first attempt. C11 does not,
 and the shape of its failure is specific enough to be worth acting on:
@@ -213,59 +279,75 @@ suggests `SyncStatusTracker` cannot currently distinguish "refused" from
 
 | ID | Peers | Actions | Expected result |
 |---|---|---|---|
-| D1 | A,B,C,D | A on `flaky` (15% loss); A sends 20 | All three peers eventually hold 20. Retries and hints visible in sync status; measure time-to-converge |
-| D2 | A,B | B on `lora_slow` (977 bps); A sends an image at `MAX_IMAGE_BYTES` | Transfer completes; measure duration. Slow is expected, stalled is not |
-| D3 | A,B,C,D | A broadband, B satellite, C `lora_fast`, D packet radio; each sends 2 | All converge on 8; arrival order differs per peer; no peer strands |
-| D4 | A,B | B on `flaky`, toggling offline/online during a 20-message burst | B converges on 20; no duplicates, no gaps |
-| D5 | A,B,C,D | All four on `lora_slow` during a roster change plus message burst | Convergence, with announce/beacon overhead visibly competing for the link — the documented "tester falls behind" case, asserted rather than assumed |
+| D1 | A,B,C,D | A on `flaky` (15% loss); A sends 10 | ✅ All three peers converge in 5.1s — loss is absorbed by retry |
+| D2 | A,B | B on `serial9600`; A sends 5 | ✅ Delivered in 0.5s. Slow-but-lossless is not a stall |
+| D3 | A,B,C,D | A broadband, B satellite, C `lora_fast`, D `serial9600`; each sends 1 | ✅ Converged in 125.8s — the slowest link sets the pace, nobody strands |
+| D4 | A,B | B on `flaky`, dropped offline mid-burst | ✅ Caught up all 10 in 23.6s |
+| D5 | A,B,C,D | All four on `lora_fast` | ✅ Converged in 7.1s. The documented "falls behind" case is real but recovers |
 
 ### E — Servers
 
 | ID | Peers | Actions | Expected result |
 |---|---|---|---|
-| E1 | A,B | A creates a server with 3 channels; invites B once | One invite admits B to the server and all 3 channels |
-| E2 | A,B,C,D | A grants `create_channel` to admin, promotes B; B creates a 4th channel | C and D receive channel 4 via the re-published server document; all four see 4 channels |
-| E3 | A,B | A edits server permissions | Mirrored into every child channel row on every peer; a per-channel override attempt returns 409 |
-| E4 | A,B,C | B leaves the server | B unsubscribed from every channel in it; A and C unaffected |
-| E5 | A,B,C,D | A kicks C from the server | C loses all channels in it at once; B and D rosters converge |
-| E6 | A,B | Server-level `full_sync` grant, then invite B with backlog in 2 channels | B backfills both channels — server-scoped tenure resolves per channel |
+| E1 | A,B | A creates a server with 3 channels; invites B once | ✅ One invite admits B to the server and all 3 channels; a send on the *third* proves it |
+| E2 | A,B,C | A grants `create_channel` to admin, promotes B; B creates a channel | ✅ Every member receives it via the re-published server document |
+| E3 | A,B | A edits server permissions | ✅ Mirrored into every child channel; a per-channel override returns 409 and the mirror survives |
+| E4 | A,B,C | B leaves the server | ✅ B unsubscribed from every channel in it; A and C unaffected |
+| E5 | A,B,C | A kicks C from the server | ✅ C loses every channel at once and its later send is rejected |
+| E6 | A,B | Server-level `full_sync` grant, then invite B with backlog in 2 channels | ✅ Both channels backfilled (1.0s, 0.0s) — server-scoped tenure resolves per channel |
 
 ### F — Reactions, emoji, presence, identity
 
 | ID | Peers | Actions | Expected result |
 |---|---|---|---|
-| F1 | A,B,C,D | Public channel, all joined; B reacts to A's message | A, C and D all show count 1. The owner is in the broadcast subscriber payload — the regression that previously left the owner blind to reactions |
-| F2 | A,B,C | B imports a custom emoji and reacts with it | C and D lack the image, request it from B on demand, and render it |
-| F3 | A,B,D | D offline; B reacts to A's message; D online | ⚠ Expected: D never sees the reaction. Reactions have no sync/backfill path — only chat messages do. Confirm, then decide whether it's a gap worth closing |
-| F4 | A,B,C,D | B goes offline via link drop; separately, B exits gracefully | Presence flips to offline on A, C, D — fast on the graceful goodbye announce, slower on the beacon timeout. Assert both paths |
-| F5 | A,B,C,D | A sets an avatar, then removes it | All three peers show, then drop it |
-| F6 | A,B,C,D | A changes display name | Propagates to all three; directory search finds the new name |
-| F7 | A,B,C | A adds B as a friend with a nickname | Local only — C sees nothing, B is not notified |
-| F8 | A,B,C | B replies to A's message; C reacts to the reply | Reply threading and reaction target resolve identically on all three |
+| F1 | A,B,C,D | Public channel, all joined; B reacts to A's message | ✅ A, C and D all show count 1, owner included |
+| F2 | A,B,C | B reacts, then removes the reaction | ✅ Clears on every peer |
+| F3 | A,B,D | D offline; B reacts to A's message; D online | ⚠️ **Prediction refuted.** D *does* recover the reaction, in 14.1s and 15.2s across runs — LXMF's own retry redelivers the broadcast. Reactions have no application-level backfill, but they do not need one for a peer whose path is known |
+| F4 | A,B,C | B goes offline via link drop | ✅ Presence flips on the beacon timeout, measured at 59.8s |
+| F5 | A,B,C | A sets an avatar, then removes it | ✅ Propagates to both peers; the removal waits out `SEND_RATE_LIMIT_SECS` (60s, answered 429 until it elapses) then clears |
+| F6 | A,B,C | A changes display name | ✅ Propagates; directory search finds the new name |
+| F7 | A,B,C | A adds B as a friend with a nickname | ✅ Local only — C sees nothing, B is not notified |
+| F8 | A,B,C | B replies to A's message; C reacts to the reply | ✅ `reply_to` and the reaction target resolve identically on all three |
 
 ### G — Restart, persistence, ordering
 
 | ID | Peers | Actions | Expected result |
 |---|---|---|---|
-| G1 | A,B,C,D | Public channel with B, C joined; **A restarts**; D joins | ⚠ Expected failure: `_subscriber_versions` is in-memory only. A's counter restarts at 0 and re-issues v1, while B and C still hold vN from before and reject anything not newer as replayed — so B and C never learn about D. Highest-value row here; if it reproduces, the version counter needs persisting |
-| G2 | A,B,C,D | Full history and roster built; all four killed and restarted | Messages, membership, roles and identities all survive; message sets identical to pre-restart |
-| G3 | A,B | A invites B with no path warm-up | Invite silently dropped (documented `_send_raw` quirk). Codifies why the harness warms up first — and measures how wide the window actually is |
-| G4 | A,B | A publishes a roster change and sends a chat message immediately after | Chat message may be dropped if the roster hasn't landed. Assert the settle requirement rather than leaving it to luck |
-| G5 | A,B,C | A single tester is reset (data wiped, same slot) | Returns as a **new identity**; old membership rows on B and C reference an identity that will never reappear. Assert the roster state that leaves behind |
+| G1 | A,B,C,D | Public channel with B, C joined; **A restarts**; D joins | ⚠️ **Confirmed.** A ends up holding `[B, C, D]` while B and C are stuck at `[A, B, C]`, and B's next send never reaches D. See below |
+| G2 | A,B,C,D | Full history and roster built; all four killed and restarted | ✅ Identities, messages and the invite-only roster all survive |
+| G3 | A,B | A invites B with no path warm-up | ⚠️ **Confirmed.** The first invite is dropped silently; 2 attempts needed |
+| G4 | A,B,C | A admits C and sends a chat message immediately after | ✅ Landed in 0.0s on this run — the race is real but did not bite. Kept as a probe |
+| G5 | A,B,C | A single tester is reset (data wiped, same slot) | ✅ Returns as a new identity holding nothing, and the owner keeps a subscriber row for an identity that will never reappear |
 
-## Suspected gaps
+## Findings
 
-Each has a concrete code-level reason to expect a failure or a surprise. Two
-are now confirmed by a run; two are still unbuilt.
+Everything the matrix turned up, across all seven families.
 
-| Gap | Status |
+### Fixed
+
+| Finding | Detail |
 |---|---|
+| **C11** — one `sync_progress` row written from both directions, collapsing the responder's trust-horizon floor and stranding history older than a requester's watermark | Root-caused and fixed by splitting the serve direction into `sync_served`. C11 now reconciles in 31.7s; regression test in `tests/test_sync_multipeer.py` |
+
+### Open
+
+| Finding | Detail |
+|---|---|
+| **C2** — a returning peer's sync requests are never answered; both responders sit at `pending`, `answered_peers: 0`, indefinitely | **Cause not established.** Survives the C11 fix. Not the deep-sync cooldown (that only records on allow) and not `_peer_may_participate` (open-join returns True unconditionally). Next step is instrumenting whether the request reaches the responder at all |
+| **G1** — `_subscriber_versions` is in-memory, so a restarted owner renumbers from 1 and surviving subscribers reject its lists as replays | **Confirmed.** A holds `[B, C, D]`, B and C stay at `[A, B, C]`, and B's next send never reaches D. Persisting the counter is the obvious fix |
+| **B11** — `kick` and `manage_roles` are grantable to any role, but a non-admin's member-list document is rejected by every recipient | **Confirmed.** The grant succeeds locally and does nothing on the network. Resolution is a product decision — see below |
+| **Subscribe/invite have no retry** — `_send_raw` in both `subscription.py` and `invite.py` drops the message when the path is unresolved, and nothing re-sends it | **Confirmed twice.** C4's setup hit it for `MT_SUBSCRIBE` (the owner never registered the joiner); G3 measured it for invites (first attempt dropped, 2 needed). Only re-issuing recovers |
 | **A5** — a public-channel join fires no sync request; backfill waits on the next peer announce | **Confirmed.** 0 messages at join, backfill at 1.0s / 9.1s tracking the 10s heartbeat. Up to 60s in the real client |
 | **A6** — `full_sync` has no effect on public channels; any subscriber can pull full history | **Confirmed.** Identical backfill with and without the grant. The UI offers the toggle regardless |
-| **C11 / C2** — a peer asking for history is never answered; a total partition loses the first message each peer sent | **Confirmed.** C11 fails every run, C2 intermittently. Details above |
-| **Subscribe has no retry** — `SubscriptionManager._send_raw` drops `MT_SUBSCRIBE` when the joiner's path to the owner is unresolved, and nothing re-sends it | **Confirmed.** Hit in C4's setup: the owner never registered the joiner, so it was silently absent from every send. Only re-joining recovers, which is what `flows._await_registration` now does |
-| **G1** — subscriber-list version counter is in-memory, so it resets on owner restart and surviving subscribers reject later lists as replays | Not yet built (family G) |
-| **F3** — reactions have no backfill path, so an offline peer misses them permanently | Not yet built (family F) |
+
+### Predictions the runs refuted
+
+Both were written to demonstrate a gap and demonstrated its absence instead.
+
+| Prediction | What actually happened |
+|---|---|
+| **F3** — reactions have no backfill path, so an offline peer misses them permanently | D recovered the reaction in 14.1s and 15.2s. LXMF's own retry redelivers the broadcast once the link returns; no application-level backfill is needed for a peer whose path is known |
+| **A10** — a subscriber that misses a subscriber-list broadcast is stranded | It recovered every time, by the same LXMF retry. The no-retry gap only bites when the path was *never* resolved — a cold-start race, not an offline-peer case |
 
 ### One suspected gap that turned out not to be
 
@@ -309,12 +391,16 @@ Built and running, in `devtools/testenv/scenarios/`:
 | `peer.py` | `Peer` (one tester's API) and `Orchestrator` (process/link lifecycle). One method per endpoint, no logic |
 | `asserts.py` | Polling assertions: `wait_until`, `settle`, `hold_for`, `all_hold`, `subscribers_converged`, `diff_report`, `subscriber_views` |
 | `scenario.py` | The `@scenario` registry and the strict/probe distinction |
-| `flows.py` | Shared setup: discovery, joining with owner registration, link up/down |
+| `flows.py` | Shared setup: discovery, joining with owner registration, invite/accept, link up/down |
 | `scen_public.py` | Family A |
+| `scen_invite.py` | Family B |
 | `scen_sync.py` | Family C |
+| `scen_links.py` | Family D |
+| `scen_servers.py` | Family E |
+| `scen_social.py` | Family F |
+| `scen_restart.py` | Family G |
 
-Families B and D–G are not written yet; each is one more `scen_*.py`
-registering against the same runner.
+All seven families are built: 57 scenarios, 43 strict and 14 probes.
 
 ```bash
 .venv/bin/python devtools/testenv/scenarios/runner.py                # everything
@@ -351,18 +437,32 @@ stays the merge gate.
 
 ## Status
 
+All seven families built and run: **57 scenarios, 43 strict and 14 probes.**
+
 | Family | Scenarios | Result |
 |---|---|---|
 | A — public channels | 10 (6 strict, 4 probes) | All passing, three consecutive clean runs |
-| C — offline and sync | 8 (7 strict, 1 probe) | **C11 fails** consistently, **C2** intermittently; the other six pass |
+| B — invite-only and membership | 13 (12 strict, 1 probe) | 11/12 — **B11 fails** on a confirmed permission gap |
+| C — offline and sync | 10 (9 strict, 1 probe) | 8/9 — **C2 fails**, cause open. C11 fixed |
+| D — degraded links | 5 (2 strict, 3 probes) | All passing |
+| E — servers | 6 (5 strict, 1 probe) | All passing |
+| F — reactions, presence, identity | 8 (7 strict, 1 probe) | All passing; F3's prediction refuted |
+| G — restart and ordering | 5 (2 strict, 3 probes) | All passing; G1 and G3 confirmed their predictions |
 
-Roughly 6–10 minutes a family, most of it environment resets between scenarios.
+**41 of 43 strict scenarios pass.** The two that don't — B11 and C2 — are real
+defects, left strict and failing on purpose, so `--family B` and `--family C`
+exit non-zero until they are resolved.
 
-Remaining:
+Roughly 5–10 minutes a family, most of it environment resets between scenarios.
+The whole matrix is around 45 minutes, which is why it belongs on a nightly or
+on-demand run rather than the per-PR gate.
 
-1. Root-cause C11 and C2 together — both are peers asking for history and never
-   being answered.
-2. G1 and F3, the two unconfirmed suspected gaps.
-3. Families B and E — membership and permissions across 4 peers, which also
-   unlocks the deferred C6/C8/C9.
-4. Families D, F, G.
+Remaining work:
+
+1. Root-cause C2 — a returning peer whose sync requests are never answered.
+2. Decide B11: stop offering `kick`/`manage_roles` below admin, or admit
+   permission-holders as trusted signers.
+3. Persist the subscriber-list version counter (G1).
+4. Give `subscription.py` and `invite.py`'s `_send_raw` a retry queue, or an
+   explicit failure the caller can act on.
+5. C6 and C12, which need control of the clock.
