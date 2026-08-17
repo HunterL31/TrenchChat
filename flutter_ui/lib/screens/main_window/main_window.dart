@@ -153,6 +153,7 @@ class _MainWindowState extends State<MainWindow> {
           onTapInvite: (invite) => showIncomingInviteDialog(context, state, invite),
           onCreateChannel: () =>
               showNewChannelDialog(context, state, serverHashHex: selectedServer),
+          onCreateDirectChannel: () => showNewChannelDialog(context, state),
           onJoinChannel: () => showJoinChannelDialog(context, state),
         );
 
