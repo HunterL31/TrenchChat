@@ -1,11 +1,16 @@
 # Feature Development Workflow
 
 New core functionality is prototyped in `devtools/testenv/` against a real
-two-peer network before it's wired into the Qt GUI. This catches protocol
+two-peer network before it's wired into a client UI. This catches protocol
 and manager-level bugs against real RNS Links, real path resolution, and
 real timing — the same class of bug the pytest suite's in-process
 `TestTransport` shim can mask by delivering messages instantly and
 synchronously.
+
+The active client is the Flutter app (`flutter_ui/`), which consumes
+`devtools/testenv/api.py` directly — so for it, "the endpoint" and "the
+client wiring" are the same layer, and step 3's Qt port only applies when
+deliberately maintaining the legacy Qt GUI.
 
 ## The required shape
 
@@ -50,7 +55,10 @@ means it hasn't been ported yet, not that a new design is needed.
    or, for a scripted check without the UI, extend/run
    `devtools/testenv/smoke_test.py`.
 3. Only after it works against real Reticulum Links between two
-   independent identities, port the same `actions.py` call into
+   independent identities, wire the feature into the Flutter client
+   (`lib/api/client.dart` + `lib/app_state.dart` + screen, with a widget
+   test) — and, only if the legacy Qt GUI is being kept current for this
+   feature, port the same `actions.py` call into
    `trenchchat/gui/main_window.py`'s `_on_*` handler — GUI-specific
    plumbing only, no reimplemented logic (see `.claude/rules/gui-conventions.md`).
 4. Add the pytest coverage required by

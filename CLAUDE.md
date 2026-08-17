@@ -10,6 +10,11 @@ There is no server: every client is a peer, addressed by a cryptographic identit
 unicast LXMF packets sent directly to each subscriber (no broadcast/multicast layer). It runs over
 whatever transport Reticulum supports (LoRa, packet radio, TCP/IP, serial, etc).
 
+**The active client UI is the Flutter app in `flutter_ui/`** (web + desktop), launched via
+`main_flutter.py`. The PyQt6 GUI (`trenchchat/gui/`, `main.py`) is **legacy** — kept working until
+the migration finishes, but new UI work targets `flutter_ui/`, and features reach it through the
+API layer (see "Flutter client" below), not through new Qt code.
+
 ## Commands
 
 ```bash
@@ -17,18 +22,26 @@ whatever transport Reticulum supports (LoRa, packet radio, TCP/IP, serial, etc).
 ./setup.sh          # Linux/macOS
 setup.bat           # Windows
 
-# Run the app
-.venv/bin/python main.py            # Linux/macOS
-.venv\Scripts\python main.py        # Windows
+# Run the app (Flutter client + backend, one command)
+.venv/bin/python main_flutter.py    # Linux/macOS
+.venv\Scripts\python main_flutter.py # Windows
+# Opens the built desktop binary if present, else the web client in a browser.
+# --port / --browser / --no-ui; needs flutter_ui/build/web (flutter build web) or a desktop build.
+
+# Run the legacy Qt app
+.venv/bin/python main.py
 # -v/--verbose enables TrenchChat debug logging; --rns-debug enables full RNS firehose logging
 
-# Run the full test suite (required after any change to trenchchat/)
+# Run the full Python test suite (required after any change to trenchchat/)
 .venv/bin/python -m pytest tests/ -v          # Linux/macOS
 .venv\Scripts\python -m pytest tests/ -v      # Windows
 
 # Run a single test file / test
 .venv/bin/python -m pytest tests/test_sync.py -v
 .venv/bin/python -m pytest tests/test_sync.py::test_missed_delivery_hint -v
+
+# Flutter client checks (required after any change to flutter_ui/)
+cd flutter_ui && flutter analyze && flutter test
 ```
 
 Packaging (PyInstaller + platform installers) lives under `packaging/` and `trenchchat.spec`; not
@@ -57,10 +70,29 @@ needed for normal development.
 `identity.py`, `channel.py`, `messaging.py`, `subscription.py`, `invite.py`, `sync.py`, `storage.py`
 (SQLite, optionally SQLCipher-encrypted), `permissions.py`, `presence.py`, `reaction.py`, `avatar.py`,
 `user_directory.py`, `lockbox.py` (PIN-based encryption gate), `link_quality.py`, `image.py`,
-`fileutils.py`. GUI code (`trenchchat/gui/`) must never construct LXMF messages or touch protocol
-fields directly — it reads `Storage` for display and delegates all mutations to the relevant core
-manager. RNS/LXMF callbacks fire on background threads; GUI code must marshal into Qt via signals,
-never call widget methods directly from a callback.
+`fileutils.py`. UI code — the Flutter client and the legacy Qt GUI (`trenchchat/gui/`) alike —
+must never construct LXMF messages or touch protocol fields directly: it reads `Storage`-backed
+state for display and delegates all mutations to the relevant core manager (the Flutter client via
+the HTTP/WS API, the Qt GUI directly). RNS/LXMF callbacks fire on background threads; Qt code must
+marshal into the main thread via signals, and the API layer marshals into asyncio via `EventBus`.
+
+### Flutter client (`flutter_ui/`) — the active UI
+
+- Dart/Flutter app; talks to a Python backend over HTTP + WebSocket. The backend is
+  `devtools/testenv/api.py` (`create_app(backend)`), whose endpoints call the same
+  `trenchchat/core/actions.py` functions and managers the Qt GUI calls — never reimplement logic
+  in an endpoint or a widget. New features reach the client as: core manager/action → api.py
+  endpoint → `lib/api/client.dart` + `lib/app_state.dart` → screen.
+- `main_flutter.py` bundles backend + client for real use; `devtools/testenv/serve_profile.py`
+  serves a real profile for browser testing; `devtools/testenv/remote_host.sh` hosts the stack
+  from a container over Tailscale.
+- Backend URL resolution lives in `lib/main.dart` (`resolveBaseUrl`): dart-define → web `?api=` →
+  web page origin → desktop `TC_API_URL` env var → tester-A default `127.0.0.1:8801`.
+- Tests: `flutter analyze && flutter test` after any `flutter_ui/` change. Widget tests inject
+  `AppState(baseUrl, httpClient: backend.client())` with `test/fake_backend.dart` (MockClient);
+  flutter_test stubs real HTTP. Golden baselines are Windows-rendered: 4 goldens permanently fail
+  on Linux from ~0.1% anti-aliasing drift (primitives ×3 + regions channel_header) — leave them
+  unless their content genuinely changed, and regenerate goldens on Windows when possible.
 
 ### Offline sync — three independent, complementary mechanisms
 

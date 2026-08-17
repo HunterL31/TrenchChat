@@ -4,7 +4,12 @@ globs: trenchchat/gui/**/*.py
 alwaysApply: false
 ---
 
-# GUI Conventions
+# GUI Conventions (legacy Qt client)
+
+> **The Qt GUI (`trenchchat/gui/`, `main.py`) is legacy.** The active client is the Flutter app
+> in `flutter_ui/` — new UI work goes there, wired through `devtools/testenv/api.py` endpoints
+> that call `trenchchat/core/actions.py` (see CLAUDE.md "Flutter client"). These conventions
+> still apply when maintaining the Qt code.
 
 ## Thread safety — always use Qt signals
 

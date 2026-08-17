@@ -9,7 +9,8 @@ A decentralized, encrypted group chat application built on the [Reticulum Networ
 - **Public and invite-only channels** — open channels anyone can join; invite-only channels with cryptographically-signed member lists
 - **Offline sync** — messages sent while you were offline are delivered when you reconnect; see [Offline Sync](docs/offline-sync.md)
 - **Propagation node support** — optionally designate a node as a store-and-forward relay
-- **Dark-themed Qt6 GUI**
+- **Terminal-styled Flutter client** — runs as a desktop app or in the browser; the previous
+  Qt6 GUI remains available as a legacy client
 
 ## Requirements
 
@@ -39,19 +40,33 @@ setup.bat
 
 Both scripts create a virtual environment and install all dependencies.
 
+The Flutter client additionally needs a one-time build (requires the
+[Flutter SDK](https://docs.flutter.dev/get-started/install)):
+
+```bash
+cd flutter_ui && flutter build web        # any platform
+cd flutter_ui && flutter build windows    # optional native desktop binary
+```
+
 ## Running
 
 ```bash
 # Linux / macOS
 source .venv/bin/activate
-python main.py
+python main_flutter.py
 
 # Windows
 .venv\Scripts\activate
-python main.py
+python main_flutter.py
 ```
 
-Pass `-v` / `--verbose` to enable detailed Reticulum and TrenchChat debug logging.
+One command starts the backend and the client: the native desktop binary when one is built,
+otherwise the web client in your default browser. `--port` moves the local port, `--browser`
+forces the browser, `--no-ui` runs the backend headless.
+
+The legacy Qt client still works via `python main.py`; pass `-v` / `--verbose` for detailed
+Reticulum and TrenchChat debug logging. Run one client at a time — both use the same identity
+and database.
 
 ## Development
 
@@ -107,9 +122,15 @@ In brief:
 ## Project Layout
 
 ```
-main.py                     Entry point
+main_flutter.py             Entry point: backend + Flutter client in one command
+main.py                     Legacy Qt entry point
 requirements.txt
 setup.sh / setup.bat
+flutter_ui/                 Flutter client (the active UI): desktop + web
+  lib/api/                  HTTP/WS client and models
+  lib/app_state.dart        Client-side state, fed by the WebSocket event stream
+  lib/screens/              Main window, tabs, and dialogs
+  test/                     Widget, layout, and golden tests (flutter test)
 trenchchat/
   config.py                 Configuration (data dir, propagation settings)
   core/
@@ -124,14 +145,10 @@ trenchchat/
     router.py               LXMFRouter lifecycle and propagation node
     announce.py             Reticulum announce handlers
     prop_filter.py          Propagation allowlist filter
-  gui/
-    main_window.py          Main Qt window
-    channel_view.py         Per-channel message display
-    compose.py              Message compose widget
-    invite_dialogs.py       Invite and member management dialogs
-    settings.py             Settings dialog
+  gui/                      Legacy Qt client
 devtools/
-  testenv/                  Two-process local dev/test environment (see its README)
+  testenv/                  Two-process local dev/test environment (see its README);
+                            also the FastAPI backend the Flutter client talks to
 docs/
   offline-sync.md           Offline sync design and implementation detail
   security-improvements.md  Application-layer security hardening notes
