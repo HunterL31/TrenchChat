@@ -96,6 +96,7 @@ def main():
     backend.router.sync_from_propagation_node()
     backend.start_heartbeat(interval=_REANNOUNCE_SECS)
     backend.start_presence_pruner()
+    backend.start_voice_ticker()
     threading.Timer(_STARTUP_SYNC_DELAY_SECS, backend.sync_mgr.request_sync_all).start()
 
     app = create_app(backend)
