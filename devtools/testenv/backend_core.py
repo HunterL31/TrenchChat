@@ -183,6 +183,7 @@ class Backend:
         self.reaction_mgr = ReactionManager(self.identity, self.storage, self.router)
         self.friends_mgr = FriendsManager(self.storage, self.identity.hash_hex, self.presence_mgr)
         self.presence_mgr.add_seen_callback(self.friends_mgr.record_seen)
+        self.presence_mgr.add_presence_callback(self.friends_mgr.record_presence)
 
         # Mirrors main.py's _on_user_announced: a trenchchat.user announce is
         # the strongest signal a peer is a TrenchChat client (not just any

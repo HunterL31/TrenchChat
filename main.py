@@ -113,6 +113,7 @@ def main():
     reaction_mgr = ReactionManager(identity, storage, router)
     friends_mgr = FriendsManager(storage, identity.hash_hex, presence_mgr)
     presence_mgr.add_seen_callback(friends_mgr.record_seen)
+    presence_mgr.add_presence_callback(friends_mgr.record_presence)
 
     # Register the user announce handler before any announces go out so we
     # never miss a trenchchat.user announce from a peer that is already online.

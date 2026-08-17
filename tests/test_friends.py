@@ -9,7 +9,7 @@ from unittest.mock import patch
 import pytest
 
 from trenchchat.core.friends import FRIEND_SEEN_WRITE_INTERVAL_SECS, FriendsManager
-from trenchchat.core.presence import PresenceManager
+from trenchchat.core.presence import PRESENCE_TIMEOUT_SECS, PresenceManager
 from trenchchat.core.storage import Storage
 
 SELF_HEX = "aa" * 16
@@ -33,6 +33,7 @@ def presence_mgr() -> PresenceManager:
 def mgr(storage, presence_mgr) -> FriendsManager:
     m = FriendsManager(storage, SELF_HEX, presence_mgr)
     presence_mgr.add_seen_callback(m.record_seen)
+    presence_mgr.add_presence_callback(m.record_presence)
     return m
 
 
@@ -247,3 +248,57 @@ def test_add_friends_callback_fires_on_add_update_remove(mgr):
     mgr.remove_friend(PEER_A)
 
     assert events == [PEER_A, PEER_A, PEER_A]
+
+
+def test_last_seen_does_not_jump_backwards_when_a_friend_goes_offline(mgr, presence_mgr):
+    """The throttled write lags the live sighting; presence discards its entry
+    on the offline transition, so without a flush the reported value regresses
+    by up to FRIEND_SEEN_WRITE_INTERVAL_SECS."""
+    mgr.add_friend(PEER_A, "Al", "")
+
+    presence_mgr.record_seen(PEER_A)          # writes through, seeds the throttle
+    later = time.time() + FRIEND_SEEN_WRITE_INTERVAL_SECS / 2
+    with patch("time.time", return_value=later):
+        presence_mgr.record_seen(PEER_A)      # inside the window -- no DB write
+        seen_while_online = mgr.get_friends()[0]["last_seen_at"]
+
+    presence_mgr.record_offline(PEER_A)       # graceful-shutdown goodbye
+
+    assert seen_while_online == pytest.approx(later, abs=0.001)
+    after = mgr.get_friends()[0]["last_seen_at"]
+    assert after == pytest.approx(later, abs=0.001), "last_seen jumped backwards"
+
+
+def test_offline_flush_survives_a_restart(mgr, storage, presence_mgr):
+    """The in-memory map is lost on restart, so the flush must reach the DB."""
+    mgr.add_friend(PEER_A, "Al", "")
+    presence_mgr.record_seen(PEER_A)
+    later = time.time() + FRIEND_SEEN_WRITE_INTERVAL_SECS / 2
+    with patch("time.time", return_value=later):
+        presence_mgr.record_seen(PEER_A)
+    presence_mgr.record_offline(PEER_A)
+
+    assert storage.get_friend(PEER_A)["last_seen_at"] == pytest.approx(later, abs=0.001)
+
+    restarted = FriendsManager(storage, SELF_HEX, PresenceManager(SELF_HEX))
+    assert restarted.get_friends()[0]["last_seen_at"] == pytest.approx(later, abs=0.001)
+
+
+def test_prune_also_flushes_the_last_sighting(mgr, storage, presence_mgr):
+    """prune() discards the entry too, so it must flush on the way out."""
+    mgr.add_friend(PEER_A, "Al", "")
+    presence_mgr.record_seen(PEER_A)
+    later = time.time() + FRIEND_SEEN_WRITE_INTERVAL_SECS / 2
+    with patch("time.time", return_value=later):
+        presence_mgr.record_seen(PEER_A)
+
+    with patch("time.time", return_value=later + PRESENCE_TIMEOUT_SECS + 1):
+        presence_mgr.prune()
+
+    assert storage.get_friend(PEER_A)["last_seen_at"] == pytest.approx(later, abs=0.001)
+
+
+def test_offline_transition_ignores_non_friends(mgr, storage, presence_mgr):
+    presence_mgr.record_seen(PEER_B)
+    presence_mgr.record_offline(PEER_B)
+    assert storage.get_friend(PEER_B) is None

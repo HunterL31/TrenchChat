@@ -35,6 +35,8 @@ class FriendsManager:
         self._lock = threading.Lock()
         self._friend_hashes: set[str] = storage.get_friend_hashes()
         self._last_write: dict[str, float] = {}
+        # Unthrottled, so the offline flush records the true last sighting.
+        self._last_seen: dict[str, float] = {}
         self._callbacks: list = []
 
     # --- public API ---
@@ -72,6 +74,7 @@ class FriendsManager:
         with self._lock:
             self._friend_hashes.discard(identity_hash_hex)
             self._last_write.pop(identity_hash_hex, None)
+            self._last_seen.pop(identity_hash_hex, None)
         self._fire_callbacks(identity_hash_hex)
         return True
 
@@ -93,7 +96,10 @@ class FriendsManager:
             is_online = False
             if self._presence_mgr is not None:
                 is_online = self._presence_mgr.is_online(identity_hash)
-                last_seen_at = max(last_seen_at, self._presence_mgr.last_seen_at(identity_hash))
+                last_seen_at = max(last_seen_at,
+                                   self._presence_mgr.last_seen_at(identity_hash))
+            with self._lock:
+                last_seen_at = max(last_seen_at, self._last_seen.get(identity_hash, 0.0))
             results.append({
                 "identity_hash": identity_hash,
                 "nickname": row["nickname"],
@@ -115,10 +121,31 @@ class FriendsManager:
             if peer_hex not in self._friend_hashes:
                 return
             now = time.time()
+            self._last_seen[peer_hex] = now
             if now - self._last_write.get(peer_hex, 0.0) < FRIEND_SEEN_WRITE_INTERVAL_SECS:
                 return
             self._last_write[peer_hex] = now
         self._storage.touch_friend_seen(peer_hex, now)
+
+    def record_presence(self, peer_hex: str, is_online: bool) -> None:
+        """PresenceManager presence-callback. On the offline transition, flush
+        the last sighting to storage.
+
+        Presence discards its entry when a peer goes offline -- via prune() or
+        a graceful-shutdown goodbye -- so without this the reported last_seen
+        falls back to the throttled write and jumps backwards by up to
+        FRIEND_SEEN_WRITE_INTERVAL_SECS.
+        """
+        if is_online:
+            return
+        with self._lock:
+            if peer_hex not in self._friend_hashes:
+                return
+            seen = self._last_seen.get(peer_hex, 0.0)
+            if seen <= 0.0 or seen <= self._last_write.get(peer_hex, 0.0):
+                return
+            self._last_write[peer_hex] = seen
+        self._storage.touch_friend_seen(peer_hex, seen)
 
     def add_friends_callback(self, cb) -> None:
         """Register a callback invoked with (identity_hash_hex: str) on add/update/remove.
