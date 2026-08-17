@@ -134,6 +134,27 @@ def identity_known(peer_hex: str) -> bool:
         return False
 
 
+def wait_for_roster(peer: TestPeer, channel_hash: str, identity_hex: str,
+                    timeout: float = 10.0) -> bool:
+    """Wait until an identity appears in a peer's voice roster for a channel."""
+    return wait_for(
+        lambda: any(e["identity_hash"] == identity_hex
+                    for e in peer.voice_mgr.get_roster(channel_hash)),
+        timeout=timeout,
+        msg=f"voice roster entry {identity_hex[:12]}… on {channel_hash[:12]}…",
+    )
+
+
+def wait_for_rx_frames(peer: TestPeer, sender_hex: str, count: int = 1,
+                       timeout: float = 10.0) -> bool:
+    """Wait until a peer has received at least count frames from a sender."""
+    return wait_for(
+        lambda: peer.voice_mgr.frame_stats()["rx_frames"].get(sender_hex, 0) >= count,
+        timeout=timeout,
+        msg=f"{count} voice frames from {sender_hex[:12]}…",
+    )
+
+
 def wait_for_path(peer_hex: str, timeout: float = 10.0) -> bool:
     """
     Wait until a peer's identity is locally known.

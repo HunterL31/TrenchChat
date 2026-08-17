@@ -17,6 +17,7 @@ import 'models/network_map.dart';
 import 'models/permissions.dart';
 import 'models/server.dart';
 import 'models/settings.dart';
+import 'models/voice.dart';
 
 /// Thrown for any non-2xx response. [message] prefers the backend's own
 /// `{"error": "..."}` body (used for expected failures like a permission
@@ -216,6 +217,39 @@ class ApiClient {
   Future<void> removeReaction(String channelHashHex, String messageId, String emojiHash) async {
     final res = await _http.delete(_u('/channels/$channelHashHex/messages/$messageId/reactions/$emojiHash'));
     _decode(res);
+  }
+
+  /// ok=false means the join was refused: no voice permission, already in
+  /// a session, or the room is full (the backend gives no reason).
+  Future<bool> joinVoice(String channelHashHex) async {
+    final res = await _http.post(_u('/channels/$channelHashHex/voice/join'));
+    return (_decode(res) as Map<String, dynamic>)['ok'] as bool? ?? false;
+  }
+
+  Future<bool> leaveVoice() async {
+    final res = await _http.post(_u('/voice/leave'));
+    return (_decode(res) as Map<String, dynamic>)['ok'] as bool? ?? false;
+  }
+
+  Future<void> setVoiceMuted(bool muted) async {
+    final res = await _http.post(
+      _u('/voice/mute'),
+      headers: _jsonHeaders,
+      body: jsonEncode({'muted': muted}),
+    );
+    _decode(res);
+  }
+
+  Future<List<VoiceParticipant>> getVoiceRoster(String channelHashHex) async {
+    final res = await _http.get(_u('/channels/$channelHashHex/voice/roster'));
+    return (_decode(res) as List<dynamic>)
+        .map((e) => VoiceParticipant.fromJson(e as Map<String, dynamic>))
+        .toList();
+  }
+
+  Future<VoiceStatus> getVoiceStatus() async {
+    final res = await _http.get(_u('/voice/status'));
+    return VoiceStatus.fromJson(_decode(res) as Map<String, dynamic>);
   }
 
   Future<List<Friend>> getFriends() async {

@@ -361,3 +361,26 @@ class TestChannelPermissionsDialog:
         perms = dlg.permissions
         assert FULL_SYNC in perms[ROLE_ADMIN]
         assert FULL_SYNC not in perms[ROLE_MEMBER]
+
+
+class TestVoiceChatPermission:
+    def test_voice_chat_in_all_permissions(self):
+        from trenchchat.core.permissions import VOICE_CHAT
+        assert VOICE_CHAT in ALL_PERMISSIONS
+
+    def test_presets_grant_voice_chat_to_member_and_admin(self):
+        from trenchchat.core.permissions import PRESET_SERVER, VOICE_CHAT
+        for perms in (PRESET_PRIVATE, PRESET_OPEN, PRESET_SERVER):
+            assert has_permission(perms, ROLE_MEMBER, VOICE_CHAT)
+            assert has_permission(perms, ROLE_ADMIN, VOICE_CHAT)
+            assert has_permission(perms, ROLE_OWNER, VOICE_CHAT)
+
+    def test_voice_chat_missing_from_legacy_blob_fails_closed(self):
+        """Channels created before this permission existed have no
+        voice_chat entry in their stored role lists -- members there must
+        be denied voice until an owner re-publishes permissions."""
+        from trenchchat.core.permissions import VOICE_CHAT
+        legacy = {ROLE_ADMIN: [SEND_MESSAGE], ROLE_MEMBER: [SEND_MESSAGE]}
+        assert not has_permission(legacy, ROLE_MEMBER, VOICE_CHAT)
+        assert not has_permission(legacy, ROLE_ADMIN, VOICE_CHAT)
+        assert has_permission(legacy, ROLE_OWNER, VOICE_CHAT)

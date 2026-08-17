@@ -38,6 +38,7 @@ def run(tag: str, data_dir: str, display_name: str, role: str, listen_port: int,
     backend.write_identity_file()
     backend.start_heartbeat(interval=10.0)
     backend.start_presence_pruner(interval=5.0)
+    backend.start_voice_ticker(interval=1.0)
     threading.Timer(_STARTUP_SYNC_DELAY_SECS, backend.sync_mgr.request_sync_all).start()
 
     app = create_app(backend)

@@ -184,7 +184,8 @@ void populateFixtureState(AppState state) {
   state.linkQualityByChannel[kGeneralHash] =
       const ChannelLinkQuality(level: LinkQualityLevel.excellent, hops: 2);
   state.permissionsByChannel[kGeneralHash] =
-      const ChannelPermissions(kick: false, manageRoles: false, manageChannel: false, sendMessage: true);
+      const ChannelPermissions(
+      kick: false, manageRoles: false, manageChannel: false, sendMessage: true, voiceChat: false);
   state.friends = fixtureFriends();
 
   // Seed every rendered identity as "no avatar" so building the tree never

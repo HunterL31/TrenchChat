@@ -2,6 +2,13 @@
 """
 PyInstaller spec for TrenchChat.
 
+Freezes main_flutter.py: the headless backend, the API server, and the
+Flutter client launcher. The release workflow builds the Flutter client
+first; the web build is collected here under flutter_web/, and the
+platform's desktop bundle is staged into the frozen output afterwards as
+flutter_client/ (see .github/workflows/release.yml). APP_VERSION in the
+environment sets the macOS bundle version.
+
 Build with:
     pyinstaller trenchchat.spec
 
@@ -9,8 +16,18 @@ Produces a onedir bundle in dist/TrenchChat/ that is then wrapped by the
 platform-specific installer (Inno Setup / dpkg-deb / create-dmg).
 """
 
+import os
 import sys
+from pathlib import Path
+
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules
+
+REPO = Path(SPECPATH).resolve()
+for p in (str(REPO), str(REPO / "devtools" / "testenv")):
+    if p not in sys.path:
+        sys.path.insert(0, p)
+
+APP_VERSION = os.environ.get("APP_VERSION", "0.0.0")
 
 # ---------------------------------------------------------------------------
 # Hidden imports
@@ -18,18 +35,29 @@ from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 # RNS uses `from RNS.Interfaces import *` on non-Android platforms, which
 # PyInstaller cannot statically analyse. collect_submodules() walks the
 # installed package tree and adds every submodule explicitly, which is the
-# correct fix for wildcard-import packages.
-#
-# The manual list below covers msgpack and stdlib modules that are
-# occasionally missed in frozen builds.
+# correct fix for wildcard-import packages. uvicorn and websockets select
+# protocol implementations dynamically and need the same treatment. The
+# audio stack (sounddevice/numpy/opuslib) is imported lazily behind runtime
+# probes, so it must be named explicitly too.
 # ---------------------------------------------------------------------------
 hidden_imports = (
     collect_submodules("RNS")
     + collect_submodules("LXMF")
+    + collect_submodules(
+        "trenchchat", filter=lambda name: not name.startswith("trenchchat.gui"))
+    + collect_submodules("uvicorn")
+    + collect_submodules("websockets")
     + [
+        # testenv backend modules main_flutter.py imports (via pathex)
+        "api",
+        "backend_core",
         # msgpack (may have C extension; include pure-Python fallback too)
         "msgpack",
         "msgpack.fallback",
+        # voice audio stack, imported lazily behind availability probes
+        "sounddevice",
+        "numpy",
+        "opuslib",
         # stdlib modules sometimes missed in frozen builds
         "sqlite3",
         "json",
@@ -49,6 +77,19 @@ datas = []
 datas += collect_data_files("RNS")
 datas += collect_data_files("LXMF")
 
+web_build = REPO / "flutter_ui" / "build" / "web"
+if web_build.is_dir():
+    datas += [(str(web_build), "flutter_web")]
+else:
+    print("WARNING: flutter_ui/build/web missing -- web client not bundled")
+
+# Voice libraries staged by CI (opus.dll / libopus.dylib); found at runtime
+# by packaging/hooks/rthook_voice_libs.py. Empty outside CI.
+binaries = []
+voicelibs = REPO / "packaging" / "voicelibs"
+if voicelibs.is_dir():
+    binaries += [(str(f), ".") for f in voicelibs.iterdir() if f.is_file()]
+
 # ---------------------------------------------------------------------------
 # Platform-specific settings
 # ---------------------------------------------------------------------------
@@ -64,35 +105,22 @@ no_console = is_windows or is_macos
 # Analysis
 # ---------------------------------------------------------------------------
 a = Analysis(
-    ["main.py"],
-    pathex=["."],
-    binaries=[],
+    ["main_flutter.py"],
+    pathex=[".", "devtools/testenv"],
+    binaries=binaries,
     datas=datas,
     hiddenimports=hidden_imports,
     hookspath=["packaging/hooks"],
-    hooksconfig={
-        "PyQt6": {
-            "include_plugins": [
-                "platforms",
-                "styles",
-                "imageformats",
-                "iconengines",
-                "platformthemes",
-                "xcbglintegrations",
-            ],
-        },
-    },
-    runtime_hooks=["packaging/hooks/rthook_rns_interfaces.py"],
+    runtime_hooks=[
+        "packaging/hooks/rthook_rns_interfaces.py",
+        "packaging/hooks/rthook_voice_libs.py",
+    ],
     excludes=[
         # Exclude heavy packages that are not used
         "tkinter",
-        "unittest",
-        "email",
-        "http",
-        "xmlrpc",
+        "PyQt6",
         "pydoc",
         "doctest",
-        "difflib",
         "ftplib",
         "imaplib",
         "poplib",
@@ -142,9 +170,11 @@ if is_macos:
         icon=icon_path,
         bundle_identifier="com.trenchchat.app",
         info_plist={
-            "CFBundleShortVersionString": "0.1.0",
-            "CFBundleVersion": "0.1.0",
+            "CFBundleShortVersionString": APP_VERSION,
+            "CFBundleVersion": APP_VERSION,
             "NSHighResolutionCapable": True,
             "NSRequiresAquaSystemAppearance": False,
+            "NSMicrophoneUsageDescription":
+                "TrenchChat uses the microphone for voice chat.",
         },
     )

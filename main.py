@@ -38,12 +38,15 @@ from trenchchat.core.presence import PresenceBeacon, PresenceManager
 from trenchchat.core.subscription import SubscriptionManager
 from trenchchat.core.invite import InviteManager
 from trenchchat.core.user_directory import UserDirectory
+from trenchchat.core.voice import VoiceManager
 from trenchchat.network.router import Router
+from trenchchat.network.voice_transport import RNSVoiceTransport
 from trenchchat.network.announce import UserAnnounceHandler
 from trenchchat.gui.main_window import MainWindow
 from trenchchat.gui.pin_dialog import UnlockDialog
 
 _REANNOUNCE_INTERVAL_MS = 60_000
+_VOICE_TICK_INTERVAL_MS = 1_000
 _INTERFACE_POLL_INTERVAL_MS = 500
 _INTERFACE_POLL_TIMEOUT_MS = 30_000
 _SIGNAL_POLL_INTERVAL_MS = 200
@@ -114,6 +117,9 @@ def main():
     friends_mgr = FriendsManager(storage, identity.hash_hex, presence_mgr)
     presence_mgr.add_seen_callback(friends_mgr.record_seen)
     presence_mgr.add_presence_callback(friends_mgr.record_presence)
+    voice_transport = RNSVoiceTransport(identity)
+    voice_mgr = VoiceManager(identity, storage, router, subscription_mgr,
+                             config, transport=voice_transport)
 
     # Register the user announce handler before any announces go out so we
     # never miss a trenchchat.user announce from a peer that is already online.
@@ -154,6 +160,10 @@ def main():
     reannounce_timer = QTimer()
     reannounce_timer.timeout.connect(_reannounce)
     reannounce_timer.start(_REANNOUNCE_INTERVAL_MS)
+
+    voice_tick_timer = QTimer()
+    voice_tick_timer.timeout.connect(voice_mgr.tick)
+    voice_tick_timer.start(_VOICE_TICK_INTERVAL_MS)
 
     # Poll for the first interface to come online, then re-announce on it
     # immediately.  This replaces blind startup timers: we announce as soon as
@@ -204,6 +214,7 @@ def main():
         avatar_mgr=avatar_mgr,
         reaction_mgr=reaction_mgr,
         presence_beacon=presence_beacon,
+        voice_mgr=voice_mgr,
     )
     window.show()
 

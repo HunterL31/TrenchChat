@@ -3,7 +3,7 @@ Version: 0.1.0
 Section: net
 Priority: optional
 Architecture: amd64
-Depends: libxcb-cursor0, libxcb1, libx11-6, libgl1
+Depends: libgtk-3-0, libgl1, libopus0, libportaudio2
 Replaces: trenchchat
 Conflicts: trenchchat
 Maintainer: TrenchChat <https://github.com/HunterL31/TrenchChat>

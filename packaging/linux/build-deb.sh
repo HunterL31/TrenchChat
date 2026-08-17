@@ -34,6 +34,11 @@ mkdir -p "${STAGING}${INSTALL_ROOT}"
 cp -r dist/TrenchChat/. "${STAGING}${INSTALL_ROOT}/"
 chmod +x "${STAGING}${INSTALL_ROOT}/TrenchChat"
 
+# The Flutter desktop client staged into the bundle must stay executable --
+# the app is installed root-owned under /opt, so it can't be fixed at runtime.
+FLUTTER_BIN="${STAGING}${INSTALL_ROOT}/_internal/flutter_client/flutter_ui"
+[ -f "${FLUTTER_BIN}" ] && chmod +x "${FLUTTER_BIN}"
+
 # Symlink -> /usr/local/bin/trenchchat
 mkdir -p "${STAGING}/usr/local/bin"
 ln -sf "${INSTALL_ROOT}/TrenchChat" "${STAGING}/usr/local/bin/trenchchat"

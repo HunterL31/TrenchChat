@@ -30,6 +30,9 @@ if ! command -v create-dmg > /dev/null 2>&1; then
     exit 1
 fi
 
+NESTED_FLUTTER_BIN="${APP_BUNDLE}/Contents/Frameworks/flutter_client/flutter_ui.app/Contents/MacOS/flutter_ui"
+[ -f "${NESTED_FLUTTER_BIN}" ] && chmod +x "${NESTED_FLUTTER_BIN}"
+
 echo "Building .dmg: ${DMG_OUT}"
 
 # Remove any previous attempt

@@ -27,6 +27,15 @@ for p in (str(_REPO_ROOT), str(_TESTENV_DIR)):
 _PORT = 41501
 _BASE = _TESTENV_DIR / "smoke_data"
 
+# How long both sides stream the test tone to sample quality metrics.
+_VOICE_MEASURE_SECS = 5.0
+# Discord-comparable quality floor for the measured tone stream: Discord
+# voice degrades noticeably past ~2% loss / ~30 ms jitter, so a loopback
+# run that can't stay inside those bounds indicates a transport regression
+# (e.g. accidental retransmission or pacing stalls), not a bad network.
+_VOICE_MAX_LOSS_PCT = 2.0
+_VOICE_MAX_JITTER_MS = 30.0
+
 
 def tester_a(base: Path):
     from backend_core import Backend
@@ -37,6 +46,7 @@ def tester_a(base: Path):
                       instance_name="trenchchat_smoke_a")
     backend.write_identity_file()
     backend.start_heartbeat()
+    backend.start_voice_ticker()
 
     from backend_core import wait_for_identity_file
     b_info = wait_for_identity_file(base / "B", timeout=30)
@@ -54,11 +64,13 @@ def tester_a(base: Path):
     from trenchchat.core import actions
     from trenchchat.core.permissions import (
         FULL_SYNC, PRESET_SERVER, ROLE_ADMIN, ROLE_MEMBER, SEND_MESSAGE,
+        VOICE_CHAT,
     )
     # full_sync lets a newly admitted member backfill history from before they
-    # joined, which is what the backlog below is here to exercise.
+    # joined, which is what the backlog below is here to exercise; voice_chat
+    # lets the voice phase at the end run over the same membership.
     perms = dict(PRESET_SERVER)
-    perms[ROLE_MEMBER] = [SEND_MESSAGE, FULL_SYNC]
+    perms[ROLE_MEMBER] = [SEND_MESSAGE, FULL_SYNC, VOICE_CHAT]
     perms[ROLE_ADMIN] = list(PRESET_SERVER[ROLE_ADMIN]) + [FULL_SYNC]
     server_hash = actions.create_server(
         backend.server_mgr, backend.invite_mgr, "smoke-server",
@@ -111,9 +123,67 @@ def tester_a(base: Path):
     result = {"joined": joined, "channel_hash": ch_hash,
               "server_hash": server_hash, "first_channel": first,
               "sent_content": sent_content, "backlog": backlog}
+
+    if joined:
+        result["voice"] = _run_voice_phase(backend, ch_hash, b_hash)
+
     (data_dir / "result.json").write_text(json.dumps(result))
     time.sleep(15)  # let B's backfill chain finish before the process exits
     backend.close()
+
+
+def _run_voice_phase(backend, ch_hash: str, peer_hash: str,
+                     timeout: float = 60.0) -> dict:
+    """Join the channel's voice session, stream the test tone, and report
+    whether a real link reached the peer and frames flowed both ways.
+
+    This is the frame plane's real-network proof: a trenchchat.voice
+    destination announce, a path request, an RNS Link with identify +
+    HELLO/ACCEPT, and unreliable audio packets over the TCP tester link.
+    """
+    from trenchchat.core import actions
+
+    joined = actions.join_voice_channel(
+        backend.storage, backend.voice_mgr, ch_hash, backend.identity.hash_hex,
+    )
+    if not joined:
+        return {"joined": False}
+    pipeline = backend.voice_mgr.audio_pipeline
+    if pipeline is not None and hasattr(pipeline, "set_tone_enabled"):
+        pipeline.set_tone_enabled(True)
+
+    streaming = False
+    rx_frames = 0
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        roster = backend.voice_mgr.get_roster(ch_hash)
+        entry = next((e for e in roster
+                      if e["identity_hash"] == peer_hash), None)
+        streaming = bool(entry and entry["link_state"] == "streaming")
+        rx_frames = backend.voice_mgr.frame_stats()["rx_frames"].get(
+            peer_hash, 0)
+        if streaming and rx_frames > 0:
+            break
+        time.sleep(0.5)
+
+    # Keep the tone running: this window is both the quality-measurement
+    # sample and a hold so the peer's own success check doesn't race this
+    # side's departure.
+    time.sleep(_VOICE_MEASURE_SECS)
+
+    stats = backend.voice_mgr.frame_stats()
+    quality = stats["rx_quality"].get(peer_hash, {})
+    result = {
+        "joined": True,
+        "peer_streaming": streaming,
+        "rx_frames": stats["rx_frames"].get(peer_hash, rx_frames),
+        "tx_packets": stats["tx_packets"],
+        "loss_pct": quality.get("loss_pct"),
+        "jitter_ms": quality.get("jitter_ms"),
+        "late": quality.get("late"),
+    }
+    backend.voice_mgr.leave_voice()
+    return result
 
 
 def tester_b(base: Path):
@@ -125,6 +195,7 @@ def tester_b(base: Path):
                       instance_name="trenchchat_smoke_b")
     backend.write_identity_file()
     backend.start_heartbeat()
+    backend.start_voice_ticker()
 
     # Backend itself doesn't auto-accept (a real GUI user clicks "Accept"
     # explicitly -- see api.py's /invites/{hash}/accept). This scripted
@@ -191,6 +262,11 @@ def tester_b(base: Path):
         received["sync_received_count"] = status["received_count"]
     received["sync_states"] = sync_states
 
+    received["voice"] = None
+    if chat_channel and received["content"] is not None:
+        a_hash = backend.storage.get_channel(chat_channel)["creator_hash"]
+        received["voice"] = _run_voice_phase(backend, chat_channel, a_hash)
+
     (data_dir / "result.json").write_text(json.dumps(received))
     backend.close()
 
@@ -211,8 +287,8 @@ def main() -> int:
     time.sleep(1.5)
     pb.start()
 
-    pa.join(timeout=90)
-    pb.join(timeout=90)
+    pa.join(timeout=180)
+    pb.join(timeout=180)
 
     if pa.is_alive() or pb.is_alive():
         print("SMOKE TEST: FAIL (process hung, killing)")
@@ -235,6 +311,17 @@ def main() -> int:
     # The backlog plus the one live message A sends after B joins.
     expected_messages = (a_result or {}).get("backlog", 0) + 1
 
+    a_voice = (a_result or {}).get("voice") or {}
+    b_voice = (b_result or {}).get("voice") or {}
+
+    def voice_quality_ok(voice: dict) -> bool:
+        return (
+            voice.get("loss_pct") is not None
+            and voice["loss_pct"] <= _VOICE_MAX_LOSS_PCT
+            and voice.get("jitter_ms") is not None
+            and voice["jitter_ms"] <= _VOICE_MAX_JITTER_MS
+        )
+
     ok = bool(
         a_result and b_result
         and a_result.get("joined")
@@ -246,6 +333,12 @@ def main() -> int:
         # truncated batch chained its own follow-up request.
         and b_result.get("synced_message_count") == expected_messages
         and b_result.get("sync_state") == "synced"
+        # Voice: real links established both ways and tone frames flowed.
+        and a_voice.get("peer_streaming") and a_voice.get("rx_frames", 0) > 0
+        and b_voice.get("peer_streaming") and b_voice.get("rx_frames", 0) > 0
+        # And the measured stream held Discord-comparable quality.
+        and voice_quality_ok(a_voice)
+        and voice_quality_ok(b_voice)
     )
     print("SMOKE TEST:", "PASS" if ok else "FAIL")
     return 0 if ok else 1

@@ -5,6 +5,8 @@ name: Build & Release
 # The build/bump_version/release jobs are gated to the push event so the
 # expensive multi-OS installer build only runs once per merge, not on every
 # PR push.
+# workflow_dispatch: dry run from any branch — tests + installer builds with
+# version 0.0.0, uploaded as workflow artifacts; no tag, no release.
 on:
   push:
     branches:
@@ -12,6 +14,7 @@ on:
   pull_request:
     branches:
       - main
+  workflow_dispatch:
 
 # Prevent concurrent runs on the same ref.
 concurrency:
@@ -34,7 +37,7 @@ jobs:
           python-version: "3.12"
           cache: "pip"
 
-      - name: Install Qt system dependencies
+      - name: Install Qt and voice system dependencies
         run: |
           sudo apt-get update -q
           sudo apt-get install -y --no-install-recommends \
@@ -42,7 +45,9 @@ jobs:
             libxcb-cursor0 \
             libxcb1 \
             libx11-6 \
-            libgl1
+            libgl1 \
+            libopus0 \
+            libportaudio2
 
       - name: Install dependencies
         run: pip install -r requirements.txt
@@ -149,10 +154,20 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # build — matrix across Windows / Ubuntu / macOS.
+  #
+  # Each leg builds the Flutter client (web + this platform's desktop bundle),
+  # freezes the backend with PyInstaller, stages the desktop bundle into the
+  # frozen output, then wraps it in the platform installer. Runs after a merge
+  # (real version from bump_version) or on workflow_dispatch (0.0.0 dry run).
   # ---------------------------------------------------------------------------
   build:
     name: Build (${{ matrix.os }})
-    needs: bump_version
+    needs: [test, bump_version]
+    if: >-
+      !cancelled() && needs.test.result == 'success' &&
+      (needs.bump_version.result == 'success' || github.event_name == 'workflow_dispatch')
+    env:
+      APP_VERSION: ${{ needs.bump_version.outputs.new_version || '0.0.0' }}
     strategy:
       fail-fast: false
       matrix:
@@ -172,7 +187,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.bump_version.outputs.tag }}
+          ref: ${{ needs.bump_version.outputs.tag || github.ref }}
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -180,17 +195,79 @@ jobs:
           python-version: "3.12"
           cache: "pip"
 
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y --no-install-recommends \
+            clang cmake ninja-build pkg-config libgtk-3-dev \
+            libopus0 libportaudio2
+
+      - name: Build Flutter client (web + desktop)
+        shell: bash
+        working-directory: flutter_ui
+        run: |
+          flutter build web --release
+          case "$RUNNER_OS" in
+            Windows) flutter build windows --release ;;
+            Linux)   flutter build linux --release ;;
+            macOS)   flutter build macos --release ;;
+          esac
+
+      - name: Stage libopus (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          vcpkg install opus:x64-windows
+          New-Item -ItemType Directory -Force packaging\voicelibs | Out-Null
+          Copy-Item "$env:VCPKG_INSTALLATION_ROOT\installed\x64-windows\bin\opus.dll" `
+            packaging\voicelibs\opus.dll
+
+      - name: Stage libopus (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install opus
+          mkdir -p packaging/voicelibs
+          cp "$(brew --prefix opus)/lib/libopus.dylib" packaging/voicelibs/libopus.dylib
+
       - name: Install Python dependencies
-        run: pip install -r requirements.txt pyinstaller>=6.0
+        shell: bash
+        run: |
+          pip install -r requirements.txt -r devtools/testenv/requirements.txt \
+            "pyinstaller>=6.0"
 
       - name: Freeze application (PyInstaller)
         run: pyinstaller trenchchat.spec
+
+      - name: Stage Flutter desktop client into the frozen app
+        shell: bash
+        run: |
+          case "$RUNNER_OS" in
+            Windows)
+              cp -r flutter_ui/build/windows/x64/runner/Release \
+                dist/TrenchChat/_internal/flutter_client
+              ;;
+            Linux)
+              cp -r flutter_ui/build/linux/x64/release/bundle \
+                dist/TrenchChat/_internal/flutter_client
+              ;;
+            macOS)
+              ditto flutter_ui/build/macos/Build/Products/Release/flutter_ui.app \
+                "dist/TrenchChat.app/Contents/Frameworks/flutter_client/flutter_ui.app"
+              ;;
+          esac
 
       - name: Build Windows installer (Inno Setup)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $version = "${{ needs.bump_version.outputs.new_version }}"
+          $version = $env:APP_VERSION
           $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
           & $iscc /DAppVersion="$version" packaging\windows\trenchchat.iss
           $exe = Get-ChildItem dist\installer\*.exe | Select-Object -First 1
@@ -198,9 +275,7 @@ jobs:
 
       - name: Build Debian package
         if: runner.os == 'Linux'
-        run: |
-          VERSION="${{ needs.bump_version.outputs.new_version }}"
-          bash packaging/linux/build-deb.sh "$VERSION"
+        run: bash packaging/linux/build-deb.sh "$APP_VERSION"
 
       - name: Install create-dmg
         if: runner.os == 'macOS'
@@ -208,9 +283,7 @@ jobs:
 
       - name: Build macOS disk image
         if: runner.os == 'macOS'
-        run: |
-          VERSION="${{ needs.bump_version.outputs.new_version }}"
-          bash packaging/macos/build-dmg.sh "$VERSION"
+        run: bash packaging/macos/build-dmg.sh "$APP_VERSION"
 
       - name: Locate built artifact
         id: find_artifact
@@ -235,10 +308,12 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # release — publish a GitHub Release from the three built installers.
+  # Push-to-main only: workflow_dispatch dry runs stop at the uploaded artifacts.
   # ---------------------------------------------------------------------------
   release:
     name: Publish GitHub Release
     needs: [bump_version, build]
+    if: github.event_name == 'push'
     runs-on: ubuntu-22.04
     permissions:
       contents: write

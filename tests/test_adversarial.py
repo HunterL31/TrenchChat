@@ -2036,6 +2036,9 @@ def _server_with_member(peer_factory, member_perms=None):
     alice.invite_mgr.send_invite(s, bob.identity.hash_hex)
     assert wait_for_member(alice.storage, s, bob.identity.hash_hex, timeout=5)
     assert wait_for(lambda: bob.storage.get_server(s) is not None, timeout=5)
+    # The server row lands with the invite; the member-list doc arrives in a
+    # separate message, and the tests below read its stored version.
+    assert wait_for(lambda: bob.storage.get_member_list_version(s) is not None, timeout=5)
     return alice, bob, s
 
 
@@ -2335,3 +2338,122 @@ class TestGoodbyeSpoofing:
 
         assert wait_for(lambda: presence.is_online(alice.identity.hash_hex),
                         timeout=3), "a goodbye left the sender stuck offline"
+
+
+# ---------------------------------------------------------------------------
+# VOICE_CHAT
+# ---------------------------------------------------------------------------
+
+from tests.test_voice import _craft_voice_message, _setup_invite_channel
+from tests.test_voice_transport import _join_both
+from trenchchat.core.permissions import VOICE_CHAT
+from trenchchat.core.protocol import (
+    F_VOICE_JOINED_AT, F_VOICE_MUTED, MT_VOICE_JOIN, MT_VOICE_STATE,
+)
+
+
+def _voice_join_fields(ch_hash: str, timestamp: float | None = None) -> dict:
+    now = timestamp if timestamp is not None else time.time()
+    return {
+        F_MSG_TYPE: MT_VOICE_JOIN,
+        F_CHANNEL_HASH: bytes.fromhex(ch_hash),
+        F_TIMESTAMP: now,
+        F_VOICE_MUTED: False,
+        F_VOICE_JOINED_AT: now,
+    }
+
+
+class TestAdversarialVoice:
+    def test_member_without_voice_chat_join_rejected(self, peer_factory):
+        """A member whose role lacks voice_chat can't inject a voice join."""
+        alice, bob, ch_hash = _setup_invite_channel(
+            peer_factory, member_perms=[SEND_MESSAGE])
+
+        _craft_voice_message(bob, alice, _voice_join_fields(ch_hash))
+        time.sleep(0.3)
+        assert alice.voice_mgr.get_roster(ch_hash) == [], \
+            "Alice accepted a voice join from a member without voice_chat"
+
+    def test_non_member_voice_join_rejected(self, peer_factory):
+        alice, bob, ch_hash = _setup_invite_channel(peer_factory)
+        mallory = peer_factory("mallory")
+
+        _craft_voice_message(mallory, alice, _voice_join_fields(ch_hash))
+        time.sleep(0.3)
+        assert alice.voice_mgr.get_roster(ch_hash) == [], \
+            "Alice accepted a voice join from a non-member"
+
+    def test_forged_voice_join_dropped(self, peer_factory):
+        """A join whose LXMF signature fails validation dies at the router."""
+        alice, bob, ch_hash = _setup_invite_channel(peer_factory)
+
+        delivery_hash = RNS.Destination.hash(
+            bytes.fromhex(alice.identity.hash_hex), "lxmf", "delivery")
+        dest = RNS.Destination(
+            RNS.Identity.recall(delivery_hash),
+            RNS.Destination.OUT, RNS.Destination.SINGLE, "lxmf", "delivery",
+        )
+        lxm = LXMF.LXMessage(dest, bob.router.delivery_destination, "",
+                             desired_method=LXMF.LXMessage.DIRECT)
+        lxm.fields = _voice_join_fields(ch_hash)
+        forge(lxm)
+        bob.router.send(lxm)
+
+        time.sleep(0.3)
+        assert alice.voice_mgr.get_roster(ch_hash) == [], \
+            "Alice accepted a forged voice join"
+
+    def test_voice_state_only_touches_the_sender_entry(self, peer_factory):
+        """Voice signalling asserts state about the sender only; no message
+        can create or modify a roster entry for anyone else."""
+        alice, bob, ch_hash = _setup_invite_channel(peer_factory)
+
+        fields = _voice_join_fields(ch_hash)
+        fields[F_MSG_TYPE] = MT_VOICE_STATE
+        _craft_voice_message(bob, alice, fields)
+
+        assert wait_for(
+            lambda: len(alice.voice_mgr.get_roster(ch_hash)) == 1,
+            msg="bob's own roster entry",
+        )
+        entries = {e["identity_hash"] for e in alice.voice_mgr.get_roster(ch_hash)}
+        assert entries == {bob.identity.hash_hex}
+
+    def test_unauthorized_link_hello_refused(self, peer_factory):
+        """A non-member driving the transport directly (bypassing join_voice
+        entirely) is refused at the link-authorization boundary."""
+        alice, bob, ch_hash = _setup_invite_channel(peer_factory)
+        mallory = peer_factory("mallory")
+
+        assert alice.voice_mgr.join_voice(ch_hash) is True
+        mallory.voice_transport.start(ch_hash)
+        mallory.voice_transport.connect(alice.identity.hash_hex)
+        time.sleep(1.2)  # past the initiator-wait fallback
+        mallory.voice_transport.connect(alice.identity.hash_hex)
+        time.sleep(0.3)
+
+        assert mallory.identity.hash_hex not in \
+            alice.voice_transport.connected_peers()
+        assert mallory.voice_transport.peer_state(
+            alice.identity.hash_hex) != "streaming"
+
+        mallory.voice_transport.send_frames(0, [b"\x01" * 40])
+        time.sleep(0.3)
+        assert alice.voice_mgr.frame_stats()["rx_frames"].get(
+            mallory.identity.hash_hex, 0) == 0
+
+    def test_revoked_member_link_torn_down_on_tick(self, peer_factory):
+        """Kicking voice_chat out from under a streaming participant cuts
+        their stream on the next re-authorization sweep."""
+        alice, bob, ch_hash = _setup_invite_channel(peer_factory)
+        _join_both(alice, bob, ch_hash)
+
+        revoked = dict(PRESET_PRIVATE)
+        revoked[ROLE_MEMBER] = [SEND_MESSAGE]
+        alice.storage.set_channel_permissions(ch_hash, revoked)
+
+        assert wait_for(
+            lambda: bob.identity.hash_hex not in
+            alice.voice_transport.connected_peers(),
+            msg="revoked member disconnected",
+        ), "Alice kept streaming to a member whose voice_chat was revoked"

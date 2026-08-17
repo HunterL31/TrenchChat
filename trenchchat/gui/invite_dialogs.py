@@ -18,7 +18,7 @@ from trenchchat.core.permissions import (
     ALL_PERMISSIONS, FLAG_DISCOVERABLE, FLAG_OPEN_JOIN,
     CREATE_CHANNEL, FULL_SYNC, INVITE, KICK, MANAGE_CHANNEL, MANAGE_ROLES,
     ROLE_ADMIN, ROLE_MEMBER, ROLE_OWNER,
-    SEND_MESSAGE,
+    SEND_MESSAGE, VOICE_CHAT,
 )
 from trenchchat.core.presence import resolve_display_name
 from trenchchat.core.storage import Storage
@@ -32,6 +32,7 @@ _PERMISSION_LABELS: dict[str, str] = {
     MANAGE_CHANNEL: "Manage channel settings",
     CREATE_CHANNEL: "Create channels in this server",
     FULL_SYNC:      "Full history sync (backfill messages sent before joining)",
+    VOICE_CHAT:     "Join voice chat",
 }
 
 

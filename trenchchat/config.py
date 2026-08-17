@@ -27,6 +27,13 @@ _DEFAULTS = {
         },
     },
     "outbound_propagation_node": None,
+    "voice": {
+        "input_device": None,
+        "output_device": None,
+        "mode": "vad",
+        "bitrate": 16000,
+        "vad_threshold_db": -45.0,
+    },
 }
 
 
@@ -166,6 +173,56 @@ class Config:
     def set_channel_filter_hashes(self, hashes: list[str]) -> None:
         """Replace the full set of channel filter hashes."""
         self._data["propagation_node"]["channel_filter"]["channel_hashes"] = hashes
+        self.save()
+
+    # --- voice ---
+
+    @property
+    def voice_input_device(self) -> str | int | None:
+        """sounddevice input device name/index; None means system default."""
+        return self._data["voice"]["input_device"]
+
+    @voice_input_device.setter
+    def voice_input_device(self, value: str | int | None):
+        self._data["voice"]["input_device"] = value
+        self.save()
+
+    @property
+    def voice_output_device(self) -> str | int | None:
+        return self._data["voice"]["output_device"]
+
+    @voice_output_device.setter
+    def voice_output_device(self, value: str | int | None):
+        self._data["voice"]["output_device"] = value
+        self.save()
+
+    @property
+    def voice_mode(self) -> str:
+        return self._data["voice"]["mode"]
+
+    @voice_mode.setter
+    def voice_mode(self, value: str):
+        if value not in ("vad", "ptt"):
+            raise ValueError(f"voice_mode must be 'vad' or 'ptt', got {value!r}")
+        self._data["voice"]["mode"] = value
+        self.save()
+
+    @property
+    def voice_bitrate(self) -> int:
+        return int(self._data["voice"]["bitrate"])
+
+    @voice_bitrate.setter
+    def voice_bitrate(self, value: int):
+        self._data["voice"]["bitrate"] = int(value)
+        self.save()
+
+    @property
+    def voice_vad_threshold_db(self) -> float:
+        return float(self._data["voice"]["vad_threshold_db"])
+
+    @voice_vad_threshold_db.setter
+    def voice_vad_threshold_db(self, value: float):
+        self._data["voice"]["vad_threshold_db"] = float(value)
         self.save()
 
     # --- outbound propagation node ---

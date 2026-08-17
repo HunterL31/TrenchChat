@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import '../../api/models/invite.dart';
 import '../../api/models/member.dart';
 import '../../api/models/server.dart';
+import '../../api/models/voice.dart';
 import '../../theme/effects.dart';
 import '../../theme/tokens.dart';
 import '../../widgets/status_dot.dart';
@@ -29,6 +30,8 @@ class ChannelColumn extends StatelessWidget {
     this.onJoinChannel,
     this.friendHashes = const {},
     this.onAddFriend,
+    this.voiceParticipants = const [],
+    this.onJoinVoice,
   });
 
   final String? serverName;
@@ -55,6 +58,13 @@ class ChannelColumn extends StatelessWidget {
   /// Fired with an online peer's identity hash when "Add/Edit friend…" is
   /// chosen from the roster row's right-click menu.
   final void Function(String identityHashHex)? onAddFriend;
+
+  /// The selected channel's voice roster. Plain data, like [friendHashes].
+  final List<VoiceParticipant> voiceParticipants;
+
+  /// Joins the selected channel's voice session; null hides the affordance
+  /// (no channel, no voice permission, or already in a call).
+  final VoidCallback? onJoinVoice;
 
   @override
   Widget build(BuildContext context) {
@@ -120,6 +130,30 @@ class ChannelColumn extends StatelessWidget {
                       channel: c,
                       selected: c.hash == selectedChannelHash,
                       onTap: () => onSelectChannel(c.hash),
+                    ),
+                ],
+                if (voiceParticipants.isNotEmpty || onJoinVoice != null) ...[
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(14, 12, 14, 6),
+                    child: Text(
+                      '▾ VOICE — ${voiceParticipants.length}',
+                      style: TextStyle(
+                        fontSize: TCType.textMicro,
+                        color: TCColors.textSecondary,
+                        letterSpacing:
+                            TCType.letterSpacingFor(TCType.textMicro, TCType.trackingWider),
+                      ),
+                    ),
+                  ),
+                  for (final p in voiceParticipants) _VoiceRow(participant: p),
+                  if (onJoinVoice != null)
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(14, 4, 14, 6),
+                      child: TcGhostButton(
+                        icon: TcIcons.headset,
+                        label: 'JOIN VOICE',
+                        onPressed: onJoinVoice,
+                      ),
                     ),
                 ],
               ],
@@ -238,6 +272,53 @@ class _SectionLabel extends StatelessWidget {
             onPressed: onAdd,
           ),
         ],
+      ),
+    );
+  }
+}
+
+class _VoiceRow extends StatelessWidget {
+  const _VoiceRow({required this.participant});
+
+  final VoiceParticipant participant;
+
+  @override
+  Widget build(BuildContext context) {
+    // The online dot already carries the green glow, giving the "lit while
+    // speaking" read without a new widget.
+    final degraded = switch (participant.linkState) {
+      VoiceLinkState.connecting ||
+      VoiceLinkState.unreachable ||
+      VoiceLinkState.signalled ||
+      VoiceLinkState.unknown =>
+        true,
+      VoiceLinkState.self || VoiceLinkState.streaming => false,
+    };
+    final name = participant.displayName.isNotEmpty
+        ? participant.displayName
+        : _shortHash(participant.identityHash);
+    return Opacity(
+      opacity: degraded ? 0.45 : 1.0,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(14, 3, 14, 3),
+        child: Row(
+          children: [
+            StatusDot(
+              status: participant.speaking ? PresenceStatus.online : PresenceStatus.offline,
+              size: 10,
+            ),
+            const SizedBox(width: 9),
+            Expanded(
+              child: Text(
+                name,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(fontSize: 12, color: TCColors.textSecondary),
+              ),
+            ),
+            if (participant.muted)
+              TcIcon(TcIcons.micMuted, size: 12, color: TCColors.textTertiary),
+          ],
+        ),
       ),
     );
   }
