@@ -1,3 +1,5 @@
+import 'dart:io' show Platform;
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
@@ -16,16 +18,21 @@ const String defaultBaseUrl = 'http://127.0.0.1:8801';
 /// 3. On web, the page origin -- covers serve_profile.py (and anything else)
 ///    hosting the client and the API on one port, which is what makes a
 ///    remotely tunnelled or LAN-served page work with no configuration.
-/// 4. The tester-A default.
-String resolveBaseUrl({Uri? pageUri, bool isWeb = kIsWeb}) {
-  const fromEnv = String.fromEnvironment('TC_API_URL');
-  if (fromEnv.isNotEmpty) return fromEnv;
+/// 4. On desktop, the TC_API_URL process environment variable -- how
+///    main_flutter.py points the window it spawns at its own backend.
+/// 5. The tester-A default.
+String resolveBaseUrl({Uri? pageUri, bool isWeb = kIsWeb,
+    Map<String, String>? environment}) {
+  const fromDefine = String.fromEnvironment('TC_API_URL');
+  if (fromDefine.isNotEmpty) return fromDefine;
   if (isWeb) {
     final uri = pageUri ?? Uri.base;
     final api = uri.queryParameters['api'];
     if (api != null && api.isNotEmpty) return api;
     return uri.origin;
   }
+  final fromEnv = (environment ?? Platform.environment)['TC_API_URL'];
+  if (fromEnv != null && fromEnv.isNotEmpty) return fromEnv;
   return defaultBaseUrl;
 }
 
