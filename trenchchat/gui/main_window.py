@@ -338,7 +338,8 @@ class MainWindow(QMainWindow):
             reaction_mgr.add_emoji_callback(self._emoji_received.emit)
 
         self._sync_mgr = SyncManager(
-            identity, storage, router, messaging, subscription_mgr, invite_mgr
+            identity, storage, router, messaging, subscription_mgr, invite_mgr,
+            reaction_mgr=reaction_mgr,
         )
         self._sync_status_changed.connect(self._on_sync_status_changed_main_thread)
         self._sync_mgr.status.add_status_callback(self._sync_status_changed.emit)
@@ -349,6 +350,8 @@ class MainWindow(QMainWindow):
             self._seed_user_directory(peer_hex)
             if self._avatar_mgr is not None:
                 self._avatar_mgr.flush_avatar(peer_hex)
+            if self._reaction_mgr is not None:
+                self._reaction_mgr.flush_pending_emoji(peer_hex)
             self._peer_announced.emit()
             self._reannounce_requested.emit(iface)
 
@@ -1371,6 +1374,8 @@ class MainWindow(QMainWindow):
         self._sync_mgr.status.prune()
         if self._presence_beacon is not None:
             self._presence_beacon.tick()
+        if self._reaction_mgr is not None:
+            self._reaction_mgr.retry_pending_emoji()
         self._refresh_online_panel()
 
     def _seed_user_directory(self, peer_hex: str) -> None:

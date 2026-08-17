@@ -31,6 +31,7 @@ from trenchchat.core.channel import ChannelManager
 from trenchchat.core.messaging import Messaging
 from trenchchat.core.subscription import SubscriptionManager
 from trenchchat.core.invite import InviteManager
+from trenchchat.core.reaction import ReactionManager
 from trenchchat.core.server import ServerManager
 from trenchchat.core.sync import SyncManager
 from trenchchat.core.voice import VoiceManager
@@ -155,6 +156,7 @@ class TestPeer:
     messaging: Messaging
     subscription_mgr: SubscriptionManager
     invite_mgr: InviteManager
+    reaction_mgr: ReactionManager
     sync_mgr: SyncManager
     voice_mgr: VoiceManager
     voice_transport: FakeVoiceTransport
@@ -248,8 +250,10 @@ def peer_factory(rns_instance, tmp_path):
         messaging = Messaging(identity, storage, router)
         subscription_mgr = SubscriptionManager(identity, storage, router)
         invite_mgr = InviteManager(identity, storage, router)
+        reaction_mgr = ReactionManager(identity, storage, router)
         sync_mgr = SyncManager(identity, storage, router, messaging,
-                               subscription_mgr, invite_mgr)
+                               subscription_mgr, invite_mgr,
+                               reaction_mgr=reaction_mgr)
         voice_transport = FakeVoiceTransport(identity.hash_hex, voice_registry)
         voice_mgr = VoiceManager(identity, storage, router, subscription_mgr,
                                  config, transport=voice_transport,
@@ -270,6 +274,7 @@ def peer_factory(rns_instance, tmp_path):
             messaging=messaging,
             subscription_mgr=subscription_mgr,
             invite_mgr=invite_mgr,
+            reaction_mgr=reaction_mgr,
             sync_mgr=sync_mgr,
             voice_mgr=voice_mgr,
             voice_transport=voice_transport,

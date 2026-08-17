@@ -1,22 +1,27 @@
 """
 Emoji reaction management for TrenchChat.
 
-Reactions attach a custom emoji (identified by its SHA-256 hash) to a channel
-message.  The protocol uses three control message types:
+A reaction attaches an emoji to a channel message.  The emoji is either a
+standard unicode character or a custom image identified by its SHA-256 hash;
+both are stored in the ``reactions`` table's ``emoji_hash`` column as the
+reaction key.  The protocol uses three control message types:
 
   MT_REACTION      -- broadcast: I added/removed emoji Y on message X
   MT_EMOJI_REQUEST -- unicast:   please send me the image for emoji hash H
   MT_EMOJI_RESPONSE -- unicast:  here is the image for emoji hash H
 
 Custom emoji images are stored in the local ``custom_emojis`` table.  When a
-peer reacts with an emoji whose hash is not in our local library, we
-automatically fire an ``MT_EMOJI_REQUEST`` to that peer.  In-flight requests
-are tracked to avoid duplicate requests for the same hash.
+peer reacts with an emoji whose hash is not in our local library, or sends a
+message containing a ``:name@hash:`` token we can't resolve, we automatically
+fire an ``MT_EMOJI_REQUEST`` to that peer.  In-flight requests are tracked to
+avoid spamming a peer, but they expire so a dropped request is retried rather
+than abandoning the emoji for the life of the process.
 
 Emoji images are capped at MAX_EMOJI_BYTES to keep them mesh-friendly.
 """
 
 import hashlib
+import re
 import threading
 import time
 
@@ -30,7 +35,7 @@ from trenchchat.core.permissions import (
 from trenchchat.core.protocol import (
     F_MSG_TYPE, F_CHANNEL_HASH,
     F_EMOJI_HASH, F_EMOJI_DATA, F_EMOJI_NAME,
-    F_REACTION_MSG_ID, F_REACTION_REMOVE,
+    F_REACTION_MSG_ID, F_REACTION_REMOVE, F_REACTION_UNICODE,
     MT_REACTION, MT_EMOJI_REQUEST, MT_EMOJI_RESPONSE,
 )
 from trenchchat.core.storage import Storage
@@ -43,10 +48,39 @@ MAX_EMOJI_BYTES = 65536   # 64 KB hard cap per emoji image
 EMOJI_REQUEST_WINDOW_SECS = 60.0
 EMOJI_REQUEST_BURST = 12
 
+# How long an unanswered emoji request blocks a retry for the same hash. A
+# responder drops requests silently (throttled, unknown hash, no shared
+# channel), so this has to clear on its own or the emoji is never fetched
+# again. Longer than EMOJI_REQUEST_WINDOW_SECS so a retry lands after the
+# responder's own throttle window has drained.
+EMOJI_REQUEST_RETRY_SECS = 90.0
+
+# Emoji asked for per flush. Kept well under EMOJI_REQUEST_BURST so a large
+# backlog drains over several flushes instead of re-tripping the responder's
+# throttle every time and never converging.
+EMOJI_FLUSH_BATCH = 6
+
+# Minimum gap between sweeps of one peer's unresolved emoji. Deliberately
+# shorter than EMOJI_REQUEST_RETRY_SECS: if the two matched, a sweep could keep
+# landing just before the in-flight markers expire, find every hash still
+# blocked, and send nothing for as long as the two stayed in step.
+EMOJI_FLUSH_COOLDOWN_SECS = 30.0
+
+# Matches :name@hexhash: (unambiguous) or :name: (legacy, name lookup only).
+# Group 1 = name, group 2 = 64-char SHA-256 hex, absent on legacy tokens.
+EMOJI_TOKEN_RE = re.compile(r":([a-zA-Z0-9_-]+)(?:@([0-9a-fA-F]{64}))?:")
+
+_SHA256_HEX_RE = re.compile(r"^[0-9a-f]{64}$")
+
 
 def compute_emoji_hash(image_data: bytes) -> str:
     """Return the hex SHA-256 hash of raw emoji image bytes."""
     return hashlib.sha256(image_data).hexdigest()
+
+
+def is_custom_emoji_hash(reaction_key: str) -> bool:
+    """True if a reaction key identifies a custom emoji rather than a unicode one."""
+    return bool(_SHA256_HEX_RE.match(reaction_key))
 
 
 class ReactionManager:
@@ -66,13 +100,18 @@ class ReactionManager:
         self._emoji_callbacks: list = []
         self._lock = threading.Lock()
 
-        # emoji_hash hex strings we have already sent a request for, to avoid
-        # spamming the same peer for the same asset.
-        self._pending_emoji_requests: set[str] = set()
+        # emoji_hash hex -> time we last requested it, to avoid spamming the
+        # same peer for the same asset. Entries older than
+        # EMOJI_REQUEST_RETRY_SECS no longer block a retry.
+        self._pending_emoji_requests: dict[str, float] = {}
 
         # requester identity hex -> recent request timestamps, for throttling
         # inbound emoji requests (see _allow_emoji_request).
         self._emoji_request_times: dict[str, list[float]] = {}
+
+        # peer identity hex -> time we last swept their unresolved emoji, so
+        # the periodic retry doesn't re-query on every tick.
+        self._last_flush_by_peer: dict[str, float] = {}
 
         router.add_delivery_callback(self._on_lxmf_message)
 
@@ -156,6 +195,56 @@ class ReactionManager:
         """
         self._request_emoji(peer_hex, emoji_hash, name=name)
 
+    def request_missing_from_content(self, sender_hex: str, content: str) -> None:
+        """Fetch any :name@hash: emoji in a message body we can't resolve locally.
+
+        Runs for every inbound chat message and for messages arriving via sync,
+        so an inline custom emoji reaches a client whose UI never triggers the
+        fetch itself.  Legacy :name: tokens carry no hash and cannot be
+        requested; they only resolve against an emoji already held.
+        """
+        if not sender_hex or ":" not in content:
+            return
+        for m in EMOJI_TOKEN_RE.finditer(content):
+            emoji_hash = m.group(2)
+            if not emoji_hash:
+                continue
+            emoji_hash = emoji_hash.lower()
+            if self._storage.emoji_exists(emoji_hash):
+                continue
+            self._request_emoji(sender_hex, emoji_hash, name=m.group(1))
+
+    def flush_pending_emoji(self, peer_hex: str) -> None:
+        """Re-request emoji this peer reacted with that we still don't hold.
+
+        Requests are dropped silently by a throttled or otherwise unwilling
+        responder, so this is what eventually gets the image across.
+        """
+        if not peer_hex:
+            return
+        now = time.time()
+        with self._lock:
+            last = self._last_flush_by_peer.get(peer_hex)
+            if last is not None and now - last < EMOJI_FLUSH_COOLDOWN_SECS:
+                return
+            self._last_flush_by_peer[peer_hex] = now
+
+        missing = [h for h in self._storage.get_unresolved_reaction_emoji(peer_hex)
+                   if is_custom_emoji_hash(h)]
+        for emoji_hash in missing[:EMOJI_FLUSH_BATCH]:
+            self._request_emoji(peer_hex, emoji_hash)
+
+    def retry_pending_emoji(self) -> None:
+        """Sweep every peer holding emoji we couldn't fetch and ask again.
+
+        Called from the same periodic maintenance tick that prunes presence.
+        A peer announce is too rare to rely on -- without a timer of its own,
+        an emoji dropped by the responder's throttle waits on incidental
+        traffic that may never come.
+        """
+        for peer_hex in self._storage.get_peers_with_unresolved_emoji():
+            self.flush_pending_emoji(peer_hex)
+
     # ------------------------------------------------------------------
     # LXMF inbound
     # ------------------------------------------------------------------
@@ -165,6 +254,7 @@ class ReactionManager:
         fields = message.fields or {}
         msg_type = fields.get(F_MSG_TYPE)
         if msg_type is None:
+            self._handle_chat_message(message)
             return
         if isinstance(msg_type, bytes):
             msg_type = msg_type.decode(errors="replace")
@@ -175,6 +265,15 @@ class ReactionManager:
             self._handle_emoji_request(message, fields)
         elif msg_type == MT_EMOJI_RESPONSE:
             self._handle_emoji_response(message, fields)
+
+    def _handle_chat_message(self, message: LXMF.LXMessage) -> None:
+        """Pull any inline custom emoji a chat message references but we lack."""
+        content = message.content or b""
+        if isinstance(content, bytes):
+            content = content.decode(errors="replace")
+        if ":" not in content:
+            return
+        self.request_missing_from_content(self._resolve_sender_hex(message), content)
 
     def _shares_any_channel(self, peer_hex: str) -> bool:
         """True if peer_hex is a member of, or subscriber to, any channel we hold."""
@@ -247,9 +346,7 @@ class ReactionManager:
         if not msg_id:
             return
 
-        emoji_hash = fields.get(F_EMOJI_HASH, b"")
-        if isinstance(emoji_hash, bytes):
-            emoji_hash = emoji_hash.hex()
+        emoji_hash = self._reaction_key_from_fields(fields)
         if not emoji_hash:
             return
 
@@ -265,10 +362,28 @@ class ReactionManager:
                 channel_hash=channel_hash_hex,
                 reacted_at=time.time(),
             )
-            if not self._storage.emoji_exists(emoji_hash):
+            if is_custom_emoji_hash(emoji_hash) and \
+                    not self._storage.emoji_exists(emoji_hash):
                 self._request_emoji(sender_hex, emoji_hash)
 
         self._fire_reaction_callbacks(channel_hash_hex, msg_id)
+
+    @staticmethod
+    def _reaction_key_from_fields(fields: dict) -> str:
+        """Recover a reaction key from an inbound MT_REACTION's fields.
+
+        A custom emoji rides in F_EMOJI_HASH as raw SHA-256 bytes; a unicode
+        emoji rides in F_REACTION_UNICODE as text. Reading the hash field first
+        keeps a peer that sets both from smuggling a mismatched pair through.
+        """
+        raw_hash = fields.get(F_EMOJI_HASH, b"")
+        if raw_hash:
+            return raw_hash.hex() if isinstance(raw_hash, bytes) else str(raw_hash)
+
+        raw_unicode = fields.get(F_REACTION_UNICODE, "")
+        if isinstance(raw_unicode, bytes):
+            raw_unicode = raw_unicode.decode(errors="replace")
+        return str(raw_unicode)
 
     def _handle_emoji_request(self, message: LXMF.LXMessage, fields: dict) -> None:
         """Respond to an MT_EMOJI_REQUEST by sending the emoji image if we have it.
@@ -353,7 +468,7 @@ class ReactionManager:
             return
 
         with self._lock:
-            self._pending_emoji_requests.discard(emoji_hash)
+            self._pending_emoji_requests.pop(emoji_hash, None)
 
         name_raw = fields.get(F_EMOJI_NAME, "")
         if isinstance(name_raw, bytes):
@@ -383,8 +498,12 @@ class ReactionManager:
                             remove: bool) -> None:
         """Send MT_REACTION to all reachable channel subscribers."""
         channel_hash_bytes = bytes.fromhex(channel_hash_hex)
-        emoji_hash_bytes = bytes.fromhex(emoji_hash)
         own_hex = self._identity.hash_hex
+
+        if is_custom_emoji_hash(emoji_hash):
+            emoji_field = {F_EMOJI_HASH: bytes.fromhex(emoji_hash)}
+        else:
+            emoji_field = {F_REACTION_UNICODE: emoji_hash}
 
         for peer_hex in subscriber_hashes:
             if peer_hex == own_hex:
@@ -414,8 +533,8 @@ class ReactionManager:
                     F_MSG_TYPE:          MT_REACTION,
                     F_CHANNEL_HASH:      channel_hash_bytes,
                     F_REACTION_MSG_ID:   message_id,
-                    F_EMOJI_HASH:        emoji_hash_bytes,
                     F_REACTION_REMOVE:   remove,
+                    **emoji_field,
                 }
                 self._router.send(lxm)
             except Exception as e:
@@ -431,18 +550,21 @@ class ReactionManager:
         *name* is included so the sender echoes it back in the response, letting
         the receiver store the emoji under the correct human-readable name.
         """
+        now = time.time()
         with self._lock:
-            if emoji_hash in self._pending_emoji_requests:
+            last = self._pending_emoji_requests.get(emoji_hash)
+            if last is not None and now - last < EMOJI_REQUEST_RETRY_SECS:
                 return
-            self._pending_emoji_requests.add(emoji_hash)
+            self._pending_emoji_requests[emoji_hash] = now
 
         try:
             identity_hash = bytes.fromhex(peer_hex)
             delivery_dest_hash = RNS.Destination.hash(identity_hash, "lxmf", "delivery")
             dest_identity = RNS.Identity.recall(delivery_dest_hash)
             if dest_identity is None:
+                RNS.Transport.request_path(delivery_dest_hash)
                 with self._lock:
-                    self._pending_emoji_requests.discard(emoji_hash)
+                    self._pending_emoji_requests.pop(emoji_hash, None)
                 return
 
             dest = RNS.Destination(
@@ -472,7 +594,7 @@ class ReactionManager:
             )
         except Exception as e:
             with self._lock:
-                self._pending_emoji_requests.discard(emoji_hash)
+                self._pending_emoji_requests.pop(emoji_hash, None)
             RNS.log(
                 f"TrenchChat [reaction]: emoji request error to {peer_hex[:12]}…: {e}",
                 RNS.LOG_WARNING,

@@ -15,6 +15,9 @@ LXMF fields layout:
     0x0D  image_data        bytes|None  — JPEG image attachment payload (max 320 KB)
     0x28  scope_kind        str         — "server" when a control message targets a
                                           server scope; absent means a single channel
+    0x43  reaction_unicode  str         — reaction key for a standard unicode emoji;
+                                          mutually exclusive with 0x0E emoji_hash,
+                                          which only carries a custom emoji (reaction)
     0x50  sync_truncated    bool        — responder capped this batch and holds more
                                           history (sync_response)
     0x51  sync_scan_cursor  float       — furthest timestamp the responder's sweep

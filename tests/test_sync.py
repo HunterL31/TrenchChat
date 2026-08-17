@@ -18,6 +18,7 @@ from tests.helpers import (
     wait_for_message,
 )
 from trenchchat.core.messaging import _compute_message_id
+from trenchchat.core.sync import MAX_REACTIONS_PER_MESSAGE
 
 
 # ---------------------------------------------------------------------------
@@ -1710,3 +1711,78 @@ class TestServerScopedTenure:
         contents = [m["content"] for m in bob.storage.get_messages(ch)]
         assert "before bob joined" not in contents, \
             "pre-join history leaked to a member without full_sync"
+
+
+class TestReactionSync:
+    """Reactions ride along with the messages they belong to.
+
+    Backfilled history used to arrive stripped of every reaction, so a peer
+    that synced a channel disagreed with the rest of it indefinitely.
+    """
+
+    def _seed_message(self, peer, ch_hash: str, msg_id: str, ts: float,
+                      content: str = "reacted message") -> None:
+        peer.storage.insert_message(
+            channel_hash=ch_hash,
+            sender_hash=peer.identity.hash_hex,
+            sender_name="Alice",
+            content=content,
+            timestamp=ts,
+            message_id=msg_id,
+            reply_to=None,
+            last_seen_id=None,
+            received_at=ts,
+        )
+
+    def test_synced_message_carries_its_reactions(self, peer_factory):
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+
+        ch_hash = alice.channel_mgr.create_channel("reaction-sync", "", "public")
+        _seed_channel_on_peer(bob, ch_hash, "reaction-sync", alice.identity.hash_hex)
+
+        ts = time.time()
+        self._seed_message(alice, ch_hash, "sync_rx_001", ts)
+        alice.storage.insert_reaction("sync_rx_001", "\U0001F44D",
+                                      alice.identity.hash_hex, ch_hash, ts)
+        alice.storage.insert_reaction("sync_rx_001", "e3" * 32,
+                                      alice.identity.hash_hex, ch_hash, ts)
+
+        bob.sync_mgr._send_sync_request(alice.identity.hash_hex, ch_hash, ts - 100)
+
+        assert wait_for_message(bob.storage, ch_hash, "sync_rx_001", timeout=5), \
+            "Bob did not receive the synced message"
+        assert wait_for(
+            lambda: len(bob.storage.get_reactions("sync_rx_001")) == 2, timeout=5
+        ), "Bob received the message but not its reactions"
+
+        keys = {r["emoji_hash"] for r in bob.storage.get_reactions("sync_rx_001")}
+        assert keys == {"\U0001F44D", "e3" * 32}
+        assert all(r["reactor_hash"] == alice.identity.hash_hex
+                   for r in bob.storage.get_reactions("sync_rx_001"))
+
+    def test_message_with_no_reactions_omits_the_key(self, peer_factory):
+        """The payload only grows for messages that actually carry reactions."""
+        alice = peer_factory("alice")
+        ch_hash = alice.channel_mgr.create_channel("no-reactions", "", "public")
+        ts = time.time()
+        self._seed_message(alice, ch_hash, "sync_rx_002", ts)
+
+        row = next(m for m in alice.storage.get_messages(ch_hash)
+                   if m["message_id"] == "sync_rx_002")
+        assert "reactions" not in alice.sync_mgr._row_to_payload(row)
+
+    def test_synced_reactions_are_capped_per_message(self, peer_factory):
+        alice = peer_factory("alice")
+        ch_hash = alice.channel_mgr.create_channel("many-reactions", "", "public")
+        ts = time.time()
+        self._seed_message(alice, ch_hash, "sync_rx_003", ts)
+        for i in range(MAX_REACTIONS_PER_MESSAGE + 8):
+            alice.storage.insert_reaction(
+                "sync_rx_003", f"{i:064x}", f"{i:032x}", ch_hash, ts,
+            )
+
+        row = next(m for m in alice.storage.get_messages(ch_hash)
+                   if m["message_id"] == "sync_rx_003")
+        payload = alice.sync_mgr._row_to_payload(row)
+        assert len(payload["reactions"]) == MAX_REACTIONS_PER_MESSAGE
