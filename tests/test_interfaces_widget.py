@@ -173,6 +173,17 @@ def test_build_config_dict_all_values_are_strings():
         assert isinstance(val, str), f"Value for '{key}' is not a string: {val!r}"
 
 
+def test_build_config_dict_zero_values_excluded():
+    """"0" and "0.0" are treated as unset, same as InterfaceDialog.build_config."""
+    type_vals = {"bitrate": "0", "airtime_limit_short": "0.0", "txpower": "14"}
+    cfg = build_interface_config_dict(
+        "Hub", "RNodeInterface", True, type_vals, {}
+    )
+    assert "bitrate" not in cfg
+    assert "airtime_limit_short" not in cfg
+    assert cfg["txpower"] == "14"
+
+
 # ---------------------------------------------------------------------------
 # Config write round-trip
 # ---------------------------------------------------------------------------

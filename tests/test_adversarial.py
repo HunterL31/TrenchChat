@@ -62,9 +62,10 @@ from trenchchat.core.protocol import (
     F_SUBSCRIBER_LIST, F_SUBSCRIBER_SIG, F_SUBSCRIBER_VERSION, MT_SUBSCRIBER_LIST,
     F_ADMIN_HASH, F_CHANNEL_HASH, F_DISPLAY_NAME, F_EXPIRY_TS, F_INVITE_TOKEN,
     F_INVITEE_HASH, F_MEMBER_LIST_DOC, F_MESSAGE_ID, F_MSG_TYPE, F_TIMESTAMP,
-    F_EMOJI_HASH, F_IMAGE_DATA, F_REACTION_MSG_ID, F_REACTION_REMOVE,
-    MT_JOIN_REQUEST, MT_MEMBER_LIST_UPDATE, MT_REACTION,
+    F_EMOJI_HASH, F_IMAGE_DATA, F_MISSED_FOR, F_REACTION_MSG_ID, F_REACTION_REMOVE,
+    MT_GOODBYE, MT_JOIN_REQUEST, MT_MEMBER_LIST_UPDATE, MT_REACTION,
 )
+from trenchchat.core.presence import PresenceManager
 from trenchchat.core.image import MAX_IMAGE_BYTES
 
 
@@ -2246,3 +2247,91 @@ class TestAdversarialServerBinding:
         )
         assert bob.invite_mgr._accept_document(doc, s) is False, \
             "a document for server A was accepted as an update for server B"
+
+
+class TestGoodbyeSpoofing:
+    """A graceful-shutdown notice must only ever sign off its own sender."""
+
+    def _presence_wired(self, peer):
+        presence = PresenceManager(peer.identity.hash_hex)
+        peer.router.add_delivery_callback(presence.record_inbound)
+        return presence
+
+    def test_forged_goodbye_signs_nobody_off(self, peer_factory):
+        """Carol claims to be Alice by setting source_hash to Alice's delivery
+        hash. LXMF flags that as SIGNATURE_INVALID, so the router must drop it
+        before presence ever sees it."""
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+        carol = peer_factory("carol")
+
+        presence = self._presence_wired(bob)
+        presence.record_seen(alice.identity.hash_hex)
+
+        dest = RNS.Destination(
+            bob.identity.rns_identity, RNS.Destination.OUT,
+            RNS.Destination.SINGLE, "lxmf", "delivery",
+        )
+        lxm = LXMF.LXMessage(dest, carol.router.delivery_destination, "",
+                             desired_method=LXMF.LXMessage.DIRECT)
+        lxm.fields = {F_MSG_TYPE: MT_GOODBYE}
+        lxm.source_hash = alice.router.delivery_destination.hash
+
+        bob.router._on_message_received(forge(lxm))
+        time.sleep(0.3)
+
+        assert presence.is_online(alice.identity.hash_hex), \
+            "an unauthenticated goodbye marked another peer offline"
+
+    def test_goodbye_cannot_carry_a_target(self, peer_factory):
+        """Extra fields must not let a sender sign anyone else off. The notice
+        applies to its authenticated sender and nobody else."""
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+
+        victim_hex = "dd" * 16
+        presence = self._presence_wired(bob)
+        presence.record_seen(alice.identity.hash_hex)
+        presence.record_seen(victim_hex)
+
+        dest = RNS.Destination(
+            bob.identity.rns_identity, RNS.Destination.OUT,
+            RNS.Destination.SINGLE, "lxmf", "delivery",
+        )
+        lxm = LXMF.LXMessage(dest, alice.router.delivery_destination, "",
+                             desired_method=LXMF.LXMessage.DIRECT)
+        # A hostile client bolting a victim onto the notice.
+        lxm.fields = {F_MSG_TYPE: MT_GOODBYE, F_MISSED_FOR: victim_hex}
+
+        alice.router.send(lxm)
+        assert wait_for(lambda: not presence.is_online(alice.identity.hash_hex),
+                        timeout=3), "the sender's own goodbye was not honoured"
+        assert presence.is_online(victim_hex), \
+            "a goodbye signed off a peer named in its fields, not its sender"
+
+    def test_goodbye_does_not_block_the_sender_returning(self, peer_factory):
+        """A signed-off peer must come straight back on their next message --
+        otherwise a cancelled shutdown would strand them offline."""
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+
+        presence = self._presence_wired(bob)
+        presence.record_seen(alice.identity.hash_hex)
+
+        dest = RNS.Destination(
+            bob.identity.rns_identity, RNS.Destination.OUT,
+            RNS.Destination.SINGLE, "lxmf", "delivery",
+        )
+        goodbye = LXMF.LXMessage(dest, alice.router.delivery_destination, "",
+                                 desired_method=LXMF.LXMessage.DIRECT)
+        goodbye.fields = {F_MSG_TYPE: MT_GOODBYE}
+        alice.router.send(goodbye)
+        assert wait_for(lambda: not presence.is_online(alice.identity.hash_hex),
+                        timeout=3)
+
+        back = LXMF.LXMessage(dest, alice.router.delivery_destination, "hi",
+                              desired_method=LXMF.LXMessage.DIRECT)
+        alice.router.send(back)
+
+        assert wait_for(lambda: presence.is_online(alice.identity.hash_hex),
+                        timeout=3), "a goodbye left the sender stuck offline"

@@ -18,7 +18,8 @@ from pathlib import Path
 
 import RNS
 
-from trenchchat.config import Config
+from trenchchat.config import DATA_DIR, Config
+from trenchchat.core import lockbox
 from trenchchat.core.identity import Identity
 from trenchchat.core.storage import Storage
 from trenchchat.core.channel import ChannelManager
@@ -117,7 +118,45 @@ class Backend:
         self.storage = Storage(db_path=data_dir / "storage.db")
         self.router = Router(self.config, self.identity,
                              storagepath=str(data_dir / "messagestore"))
+        self._wire_managers(
+            presence_timeout_secs=_PRESENCE_TIMEOUT_SECS,
+            presence_beacon_after_secs=_PRESENCE_BEACON_AFTER_SECS,
+        )
 
+    @classmethod
+    def for_real_profile(cls, rns_configdir: str | None = None) -> "Backend":
+        """Backend over the machine's real profile: ~/.trenchchat plus the
+        default Reticulum config (real interfaces, real mesh), constructed
+        exactly like main.py's wiring. Must not run alongside the desktop
+        client -- both would announce the same identity and contend for the
+        same database.
+
+        Raises RuntimeError for a PIN-locked profile: there is no headless
+        unlock path yet (see the migration board's unlock design question).
+        """
+        if lockbox.is_locked():
+            raise RuntimeError(
+                "This profile is PIN-locked and the headless backend has no "
+                "unlock path yet. Remove the PIN in the desktop client's "
+                "Settings to use it here."
+            )
+        self = cls.__new__(cls)
+        self.data_dir = DATA_DIR
+        self._link_callbacks = []
+        self.config = Config()
+        self.rns = RNS.Reticulum(configdir=rns_configdir, loglevel=RNS.LOG_NOTICE)
+        self.rns_config_path = str(Path(RNS.Reticulum.configdir) / "config")
+        self.identity = Identity(self.config)
+        self.storage = Storage()
+        self.router = Router(self.config, self.identity)
+        self._wire_managers()
+        return self
+
+    def _wire_managers(self, presence_timeout_secs: float | None = None,
+                       presence_beacon_after_secs: float | None = None) -> None:
+        """Managers and announce handlers shared by both constructors,
+        mirroring main.py. The presence overrides shorten the testenv's
+        observation windows; None keeps the production defaults."""
         self.channel_mgr = ChannelManager(self.identity, self.storage)
         self.server_mgr = ServerManager(self.identity, self.storage)
         self.messaging = Messaging(self.identity, self.storage, self.router)
@@ -125,11 +164,17 @@ class Backend:
         self.invite_mgr = InviteManager(self.identity, self.storage, self.router)
         self.sync_mgr = SyncManager(self.identity, self.storage, self.router,
                                     self.messaging, self.subscription_mgr, self.invite_mgr)
+        presence_kwargs = {}
+        if presence_timeout_secs is not None:
+            presence_kwargs["timeout_secs"] = presence_timeout_secs
         self.presence_mgr = PresenceManager(self.identity.hash_hex, self.config,
-                                            timeout_secs=_PRESENCE_TIMEOUT_SECS)
+                                            **presence_kwargs)
+        beacon_kwargs = {}
+        if presence_beacon_after_secs is not None:
+            beacon_kwargs["beacon_after_secs"] = presence_beacon_after_secs
         self.presence_beacon = PresenceBeacon(
             self.identity, self.storage, self.router, self.subscription_mgr,
-            self.presence_mgr, beacon_after_secs=_PRESENCE_BEACON_AFTER_SECS,
+            self.presence_mgr, **beacon_kwargs,
         )
         self.router.add_outbound_callback(self.presence_beacon.record_sent)
         self.user_directory = UserDirectory(self.identity.hash_hex)
@@ -161,17 +206,10 @@ class Backend:
             PeerAnnounceHandler(_on_peer_appeared)
         )
 
-        # Also mark a peer as seen on any inbound LXMF message, covering
-        # peers reached via a backchannel link without a prior announce
-        # (same rationale as main_window.py's _on_inbound_message).
-        def _on_inbound_message(message) -> None:
-            if not message.source_hash:
-                return
-            sender_identity = RNS.Identity.recall(message.source_hash)
-            if sender_identity is not None:
-                self.presence_mgr.record_seen(sender_identity.hash.hex())
-
-        self.router.add_delivery_callback(_on_inbound_message)
+        # Also update presence from any inbound LXMF message, covering peers
+        # reached via a backchannel link without a prior announce, and peers
+        # signing off (same rationale as main_window.py's _on_inbound_message).
+        self.router.add_delivery_callback(self.presence_mgr.record_inbound)
 
         self.channel_mgr.restore_owned_channels()
         self.server_mgr.restore_owned_servers()
@@ -237,7 +275,13 @@ class Backend:
             json.dumps({"hash_hex": self.hash_hex, "display_name": self.config.display_name})
         )
 
+    def announce_offline(self) -> int:
+        """Same notice main.py sends from aboutToQuit -- tell channel peers we
+        are shutting down so they drop us to offline now."""
+        return self.presence_beacon.announce_offline()
+
     def close(self):
+        self.router.stop()
         self.storage.close()
 
     def path_known(self, peer_hash_hex: str) -> bool:

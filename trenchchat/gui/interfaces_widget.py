@@ -23,10 +23,7 @@ Supported types for create/edit
 Interfaces of other types already in the config are displayed read-only.
 """
 
-import os
-
 import RNS
-from configobj import ConfigObj
 
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import (
@@ -36,21 +33,17 @@ from PyQt6.QtWidgets import (
     QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
+from trenchchat.core.interfaces_config import (
+    DuplicateInterfaceError, EDITABLE_TYPES, InterfaceConfigError,
+    build_interface_config_dict, delete_interface, load_interfaces_config,
+    missing_required_field, write_interface, write_interfaces_bulk,
+)
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
 _STATS_REFRESH_MS = 5_000
-
-# Interface types that can be created or edited through the GUI.
-EDITABLE_TYPES = [
-    "AutoInterface",
-    "TCPClientInterface",
-    "TCPServerInterface",
-    "UDPInterface",
-    "SerialInterface",
-    "RNodeInterface",
-]
 
 # Table column indices
 _COL_NAME    = 0
@@ -166,47 +159,6 @@ def _fmt_bytes(n: int) -> str:
     if n < 1024 * 1024:
         return f"{n / 1024:.1f} KB"
     return f"{n / (1024 * 1024):.1f} MB"
-
-
-def load_interfaces_config(config_path: str) -> dict[str, dict]:
-    """Read the [interfaces] section from the Reticulum config file.
-
-    Returns a dict mapping interface name to its config dict (including 'type').
-    Returns an empty dict if the file does not exist or has no [interfaces] section.
-    """
-    if not os.path.isfile(config_path):
-        return {}
-    try:
-        cfg = ConfigObj(config_path)
-    except Exception:
-        return {}
-    interfaces_section = cfg.get("interfaces", {})
-    result = {}
-    for name, section in interfaces_section.items():
-        if isinstance(section, dict):
-            result[name] = dict(section)
-    return result
-
-
-def build_interface_config_dict(
-    name: str,
-    iface_type: str,
-    enabled: bool,
-    type_values: dict[str, str],
-    common_values: dict[str, str],
-) -> dict[str, str]:
-    """Assemble a flat config dict for a single interface section.
-
-    All values are stored as strings (ConfigObj INI format).
-    """
-    cfg: dict[str, str] = {"type": iface_type, "enabled": "Yes" if enabled else "No"}
-    for key, value in type_values.items():
-        if value != "":
-            cfg[key] = str(value)
-    for key, value in common_values.items():
-        if value != "":
-            cfg[key] = str(value)
-    return cfg
 
 
 def get_missing_suggested_defaults(config_path: str) -> dict[str, dict[str, str]]:
@@ -398,27 +350,15 @@ class InterfaceDialog(QDialog):
             return
 
         iface_type = self._type_combo.currentText()
-
-        # Validate required fields per type
-        required_keys: dict[str, list[str]] = {
-            "TCPClientInterface": ["target_host"],
-            "TCPServerInterface": ["listen_ip", "listen_port"],
-            "SerialInterface":    ["port"],
-            "RNodeInterface":     ["port"],
-            "PipeInterface":      ["command"],
-        }
-        for key in required_keys.get(iface_type, []):
-            widget = self._type_widgets.get(key)
-            if widget is None:
-                continue
-            val = self._widget_value(widget)
-            if not val or val == "0":
-                label = next(
-                    (lbl for k, lbl, *_ in _TYPE_FIELDS.get(iface_type, []) if k == key),
-                    key,
-                )
-                QMessageBox.warning(self, "Validation", f"'{label}' is required.")
-                return
+        type_values = {key: self._widget_value(w) for key, w in self._type_widgets.items()}
+        missing_key = missing_required_field(iface_type, type_values)
+        if missing_key is not None:
+            label = next(
+                (lbl for k, lbl, *_ in _TYPE_FIELDS.get(iface_type, []) if k == missing_key),
+                missing_key,
+            )
+            QMessageBox.warning(self, "Validation", f"'{label}' is required.")
+            return
 
         self.accept()
 
@@ -430,23 +370,12 @@ class InterfaceDialog(QDialog):
 
     def build_config(self) -> dict[str, str]:
         """Return a flat config dict suitable for writing to ConfigObj."""
-        iface_type = self._type_combo.currentText()
-        enabled = "Yes" if self._enabled_check.isChecked() else "No"
-
-        cfg: dict[str, str] = {"type": iface_type, "enabled": enabled}
-
-        for key, widget in self._type_widgets.items():
-            val = self._widget_value(widget)
-            if val and val not in ("0", "0.0"):
-                cfg[key] = val
-
-        for key, widget in self._common_widgets.items():
-            val = self._widget_value(widget)
-            # Only write non-default / non-empty common fields
-            if val and val not in ("", "0", "0.0"):
-                cfg[key] = val
-
-        return cfg
+        type_values = {key: self._widget_value(w) for key, w in self._type_widgets.items()}
+        common_values = {key: self._widget_value(w) for key, w in self._common_widgets.items()}
+        return build_interface_config_dict(
+            self.interface_name(), self._type_combo.currentText(),
+            self._enabled_check.isChecked(), type_values, common_values,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -718,25 +647,9 @@ class InterfacesWidget(QWidget):
             return
 
         try:
-            file_cfg = ConfigObj(self._config_path)
-        except Exception as e:
-            QMessageBox.critical(self, "Error", f"Could not read config file:\n{e}")
-            return
-
-        if "interfaces" not in file_cfg:
-            file_cfg["interfaces"] = {}
-
-        for name, cfg in missing.items():
-            file_cfg["interfaces"][name] = cfg
-            RNS.log(
-                f"TrenchChat [interfaces]: added suggested default '{name}'",
-                RNS.LOG_NOTICE,
-            )
-
-        try:
-            file_cfg.write()
-        except Exception as e:
-            QMessageBox.critical(self, "Error", f"Could not write config file:\n{e}")
+            write_interfaces_bulk(self._config_path, missing)
+        except InterfaceConfigError as e:
+            QMessageBox.critical(self, "Error", str(e))
             return
 
         self.load_interfaces()
@@ -791,17 +704,12 @@ class InterfacesWidget(QWidget):
             return
 
         try:
-            cfg = ConfigObj(self._config_path)
-        except Exception as e:
-            QMessageBox.critical(self, "Error", f"Could not read config file:\n{e}")
+            deleted = delete_interface(self._config_path, name)
+        except InterfaceConfigError as e:
+            QMessageBox.critical(self, "Error", str(e))
             return
 
-        interfaces = cfg.get("interfaces", {})
-        if name in interfaces:
-            del interfaces[name]
-            cfg["interfaces"] = interfaces
-            cfg.write()
-            RNS.log(f"TrenchChat [interfaces]: deleted interface '{name}'", RNS.LOG_NOTICE)
+        if deleted:
             self.load_interfaces()
             self._show_restart_prompt()
 
@@ -830,33 +738,14 @@ class InterfacesWidget(QWidget):
                          is_new: bool) -> None:
         """Write a single interface section to the config file and refresh."""
         try:
-            file_cfg = ConfigObj(self._config_path)
-        except Exception as e:
-            QMessageBox.critical(self, "Error", f"Could not read config file:\n{e}")
+            write_interface(self._config_path, name, cfg_dict, is_new)
+        except DuplicateInterfaceError as e:
+            QMessageBox.warning(self, "Duplicate Name", str(e))
+            return
+        except InterfaceConfigError as e:
+            QMessageBox.critical(self, "Error", str(e))
             return
 
-        if "interfaces" not in file_cfg:
-            file_cfg["interfaces"] = {}
-
-        if is_new and name in file_cfg["interfaces"]:
-            QMessageBox.warning(
-                self, "Duplicate Name",
-                f"An interface named '{name}' already exists."
-            )
-            return
-
-        file_cfg["interfaces"][name] = cfg_dict
-        try:
-            file_cfg.write()
-        except Exception as e:
-            QMessageBox.critical(self, "Error", f"Could not write config file:\n{e}")
-            return
-
-        action = "Added" if is_new else "Updated"
-        RNS.log(
-            f"TrenchChat [interfaces]: {action.lower()} interface '{name}'",
-            RNS.LOG_NOTICE,
-        )
         self.load_interfaces()
         self._show_restart_prompt()
 

@@ -47,3 +47,15 @@ lock.verify
 *.db
 *.db-wal
 *.db-shm
+
+# flutter_ui: Flutter/Dart build output and ephemeral tooling files
+flutter_ui/build/
+flutter_ui/.dart_tool/
+flutter_ui/.flutter-plugins
+flutter_ui/.flutter-plugins-dependencies
+flutter_ui/.pub-cache/
+flutter_ui/.pub/
+flutter_ui/**/ephemeral/
+*.iml
+*.ipr
+*.iws

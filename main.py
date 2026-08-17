@@ -1,5 +1,6 @@
 """
-TrenchChat entry point.
+Legacy Qt entry point. The active client is the Flutter app -- launch it
+with main_flutter.py; this stays until the migration finishes.
 
 Startup order:
   1. Load config
@@ -44,6 +45,7 @@ from trenchchat.gui.pin_dialog import UnlockDialog
 _REANNOUNCE_INTERVAL_MS = 60_000
 _INTERFACE_POLL_INTERVAL_MS = 500
 _INTERFACE_POLL_TIMEOUT_MS = 30_000
+_SIGNAL_POLL_INTERVAL_MS = 200
 
 
 def main():
@@ -73,9 +75,6 @@ def main():
     # --- Qt app (must exist before any QDialog is shown) ---
     app = QApplication(sys.argv)
     app.setApplicationName("TrenchChat")
-
-    # Allow Ctrl+C to quit cleanly
-    signal.signal(signal.SIGINT, signal.SIG_DFL)
 
     # --- PIN gate ---
     encryption_key: bytes | None = None
@@ -204,8 +203,34 @@ def main():
     )
     window.show()
 
+    # --- shutdown ---
+    # aboutToQuit fires once the quit is irreversible, so a close the user backs
+    # out of never tells anyone we left.
+    app.aboutToQuit.connect(presence_beacon.announce_offline)
+
+    # Route Ctrl+C and SIGTERM through Qt so that notice still runs, rather than
+    # the process exiting out from under it. Two constraints on where this can
+    # live: RNS.Reticulum and LXMF.LXMRouter both install their own
+    # SIGINT/SIGTERM handlers in their constructors, so registering any earlier
+    # is silently overwritten; and Python cannot run a signal handler while the
+    # Qt event loop is blocked inside C++, so the idle timer exists purely to
+    # hand control back to the interpreter periodically.
+    def _quit_on_signal(signum, frame):
+        app.quit()
+
+    signal.signal(signal.SIGINT, _quit_on_signal)
+    signal.signal(signal.SIGTERM, _quit_on_signal)
+    signal_timer = QTimer()
+    signal_timer.timeout.connect(lambda: None)
+    signal_timer.start(_SIGNAL_POLL_INTERVAL_MS)
+
     exit_code = app.exec()
+    # Both libraries only register their teardown as atexit hooks, and those
+    # never run: RNS ends the process with os._exit. Now that the signals come
+    # through Qt, this is the only path that persists their state.
+    router.stop()
     storage.close()
+    RNS.Reticulum.exit_handler()
     sys.exit(exit_code)
 
 

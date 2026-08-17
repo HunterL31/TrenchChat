@@ -32,6 +32,11 @@ from pydantic import BaseModel
 from trenchchat.core import actions
 from trenchchat.core.image import MAX_IMAGE_BYTES, is_gif, prepare_image
 from trenchchat.core.avatar import compress_avatar
+from trenchchat.core.interfaces_config import (
+    DuplicateInterfaceError, EDITABLE_TYPES, InterfaceConfigError,
+    build_interface_config_dict, delete_interface, load_interfaces_config,
+    missing_required_field, write_interface,
+)
 from trenchchat.core.permissions import (
     ALL_PERMISSIONS, CREATE_CHANNEL, INVITE, KICK, MANAGE_CHANNEL, MANAGE_ROLES,
     ROLE_ADMIN, ROLE_MEMBER, PRESET_OPEN, PRESET_PRIVATE,
@@ -101,6 +106,30 @@ class UpdateRolesRequest(BaseModel):
     remove_members: list[str] = []
     add_admins: list[str] = []
     remove_admins: list[str] = []
+
+
+class SettingsUpdateRequest(BaseModel):
+    propagation_enabled: bool | None = None
+    propagation_node_name: str | None = None
+    propagation_storage_limit_mb: int | None = None
+    channel_filter_mode: str | None = None
+    channel_filter_hashes: list[str] | None = None
+    outbound_propagation_node: str | None = None
+
+
+class CreateInterfaceRequest(BaseModel):
+    name: str
+    type: str
+    enabled: bool = True
+    type_values: dict[str, str] = {}
+    common_values: dict[str, str] = {}
+
+
+class UpdateInterfaceRequest(BaseModel):
+    type: str
+    enabled: bool = True
+    type_values: dict[str, str] = {}
+    common_values: dict[str, str] = {}
 
 
 def _channel_to_dict(row) -> dict[str, Any]:
@@ -197,6 +226,14 @@ def create_app(backend: Backend) -> FastAPI:
     async def _on_startup():
         bus.bind_loop(asyncio.get_running_loop())
 
+    @app.on_event("shutdown")
+    async def _on_shutdown():
+        # uvicorn runs this on SIGINT/SIGTERM, so both entry points quit
+        # gracefully: orchestrator.py's "kill tester", and Ctrl+C on
+        # serve_profile.py, which is a real client and really is going away.
+        backend.announce_offline()
+        backend.close()
+
     # --- wire backend callbacks (RNS/LXMF background threads) to the bus ---
 
     def _on_message(channel_hash_hex: str, message_id: str):
@@ -291,6 +328,21 @@ def create_app(backend: Backend) -> FastAPI:
         backend.router.announce_user()
         return {"ok": True}
 
+    @app.get("/settings")
+    def get_settings():
+        return actions.read_settings(backend.config)
+
+    @app.post("/settings")
+    def update_settings(req: SettingsUpdateRequest):
+        # Same entry point the Settings dialog's _on_accept uses, minus
+        # display_name/avatar which have their own endpoints above.
+        updates = req.model_dump(exclude_unset=True)
+        try:
+            actions.apply_settings(backend.config, backend.router, updates)
+        except ValueError as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+        return {"ok": True, "settings": actions.read_settings(backend.config)}
+
     @app.get("/peers/{peer_hash}/presence")
     def get_peer_presence(peer_hash: str):
         return {
@@ -308,9 +360,6 @@ def create_app(backend: Backend) -> FastAPI:
     def get_interfaces():
         # Same data source InterfacesWidget.load_interfaces() merges: the
         # configured [interfaces] section plus live rns.get_interface_stats().
-        # Read-only -- live editing is a separate, bigger scope-add.
-        from trenchchat.gui.interfaces_widget import load_interfaces_config
-
         cfg_interfaces = load_interfaces_config(backend.rns_config_path)
         try:
             stats_result = backend.rns.get_interface_stats()
@@ -328,19 +377,139 @@ def create_app(backend: Backend) -> FastAPI:
         for name, cfg in cfg_interfaces.items():
             stats = stats_by_name.get(name, {})
             enabled_str = cfg.get("enabled", cfg.get("interface_enabled", "Yes"))
+            iface_type = cfg.get("type", "Unknown")
             result.append({
                 "name": name,
-                "type": cfg.get("type", "Unknown"),
+                "type": iface_type,
                 "enabled": enabled_str.lower() in ("yes", "true", "1"),
+                "editable": iface_type in EDITABLE_TYPES,
                 "status": stats.get("status"),
                 "rxb": stats.get("rxb"),
                 "txb": stats.get("txb"),
+                # The raw config section, so an edit dialog can show current
+                # values -- the Qt widget reads the config file directly, but
+                # a remote client can't. ConfigObj parses comma values into
+                # lists; flatten those back to the string form the editor
+                # writes.
+                "config": {
+                    k: (", ".join(str(x) for x in v) if isinstance(v, list) else str(v))
+                    for k, v in cfg.items()
+                },
             })
         return result
+
+    @app.post("/reticulum/interfaces")
+    def create_interface(req: CreateInterfaceRequest):
+        # Same write path InterfacesWidget._on_add -> _write_interface uses;
+        # see trenchchat/core/interfaces_config.py for the shared logic.
+        name = req.name.strip()
+        if not name:
+            return JSONResponse(
+                {"ok": False, "error": "interface name is required"}, status_code=400,
+            )
+        if req.type not in EDITABLE_TYPES:
+            return JSONResponse(
+                {"ok": False, "error": f"'{req.type}' is not an editable interface type"},
+                status_code=400,
+            )
+        missing = missing_required_field(req.type, req.type_values)
+        if missing is not None:
+            return JSONResponse(
+                {"ok": False, "error": f"'{missing}' is required"}, status_code=400,
+            )
+
+        cfg = build_interface_config_dict(
+            name, req.type, req.enabled, req.type_values, req.common_values,
+        )
+        try:
+            write_interface(backend.rns_config_path, name, cfg, is_new=True)
+        except DuplicateInterfaceError as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=409)
+        except InterfaceConfigError as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+        return {"ok": True, "name": name, "restart_required": True}
+
+    @app.put("/reticulum/interfaces/{name}")
+    def update_interface(name: str, req: UpdateInterfaceRequest):
+        # Same write path InterfacesWidget._on_edit -> _write_interface uses.
+        cfg_interfaces = load_interfaces_config(backend.rns_config_path)
+        existing = cfg_interfaces.get(name)
+        if existing is None:
+            return JSONResponse(
+                {"ok": False, "error": "no such interface"}, status_code=404,
+            )
+        existing_type = existing.get("type", "")
+        if existing_type not in EDITABLE_TYPES:
+            return JSONResponse(
+                {"ok": False, "error": f"interfaces of type '{existing_type}' "
+                                       "cannot be edited"},
+                status_code=403,
+            )
+        if req.type not in EDITABLE_TYPES:
+            return JSONResponse(
+                {"ok": False, "error": f"'{req.type}' is not an editable interface type"},
+                status_code=400,
+            )
+        missing = missing_required_field(req.type, req.type_values)
+        if missing is not None:
+            return JSONResponse(
+                {"ok": False, "error": f"'{missing}' is required"}, status_code=400,
+            )
+
+        cfg = build_interface_config_dict(
+            name, req.type, req.enabled, req.type_values, req.common_values,
+        )
+        try:
+            write_interface(backend.rns_config_path, name, cfg, is_new=False)
+        except InterfaceConfigError as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+        return {"ok": True, "name": name, "restart_required": True}
+
+    @app.delete("/reticulum/interfaces/{name}")
+    def remove_interface(name: str):
+        # Same write path InterfacesWidget._on_delete uses.
+        try:
+            deleted = delete_interface(backend.rns_config_path, name)
+        except InterfaceConfigError as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+        if not deleted:
+            return JSONResponse(
+                {"ok": False, "error": "no such interface"}, status_code=404,
+            )
+        return {"ok": True, "restart_required": True}
 
     @app.get("/directory")
     def search_directory(q: str = ""):
         results = backend.user_directory.search(q)
+        seen = {r["identity_hash"] for r in results}
+        # The announce-fed directory is in-memory, so it starts empty after a
+        # restart and transports suppress announce replays. Fall back to
+        # path-table peers with recallable identities -- the same peers the
+        # network map shows -- so invite lookup keeps working.
+        try:
+            path_table = backend.rns.get_path_table()
+        except Exception:
+            path_table = []
+        needle = q.strip().lower()
+        for entry in path_table:
+            dest = entry.get("hash")
+            if not isinstance(dest, bytes):
+                continue
+            identity = RNS.Identity.recall(dest)
+            if identity is None:
+                continue
+            if RNS.Destination.hash(identity.hash, "lxmf", "delivery") != dest:
+                continue
+            peer_hex = identity.hash.hex()
+            if peer_hex == backend.identity.hash_hex or peer_hex in seen:
+                continue
+            name = resolve_display_name(peer_hex, backend.identity.hash_hex,
+                                        backend.storage)
+            if needle and needle not in name.lower() and needle not in peer_hex:
+                continue
+            seen.add(peer_hex)
+            results.append({"identity_hash": peer_hex, "display_name": name})
+        results.sort(key=lambda r: (r["display_name"].lower(), r["identity_hash"]))
         for r in results:
             r["is_online"] = backend.presence_mgr.is_online(r["identity_hash"])
         return results
@@ -664,12 +833,26 @@ def create_app(backend: Backend) -> FastAPI:
                 if len(raw) <= MAX_IMAGE_BYTES:
                     image_data = raw
 
+        # Messaging fires its message callback only for inbound LXMF, so the
+        # sender's own message never reaches the WS bus by itself -- the Qt
+        # client refreshes its own view after sending instead. Detect the
+        # stored message by id and emit it here so browser clients update
+        # live too. This also catches the silent-drop case: send_message
+        # returns True but stores nothing when the recipient list is empty,
+        # which must not be reported to the client as a successful send.
+        before = backend.storage.get_latest_message_id(channel_hash)
         sent = actions.send_message(
             backend.storage, backend.subscription_mgr, backend.messaging,
             channel_hash, backend.identity.hash_hex, req.content,
             reply_to=req.reply_to, image_data=image_data,
         )
-        return {"ok": sent}
+        after = backend.storage.get_latest_message_id(channel_hash)
+        stored = sent and after is not None and after != before
+        if stored:
+            _on_message(channel_hash, after)
+            return {"ok": True}
+        return {"ok": False,
+                "reason": "no_send_permission" if not sent else "no_recipients"}
 
     # --- reactions and custom emoji ---
 

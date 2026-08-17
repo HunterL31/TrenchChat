@@ -105,8 +105,9 @@ class TestTransport:
             recipient_router = self._peers.get(dest_hash_hex)
             if recipient_router is None:
                 # Unknown destination — simulate delivery failure
-                if hasattr(lxm, "_failed_callback") and lxm._failed_callback:
-                    lxm._failed_callback(lxm)
+                lxm.state = LXMF.LXMessage.FAILED
+                if getattr(lxm, "failed_callback", None):
+                    lxm.failed_callback(lxm)
                 return
             # Model LXMF's signature verdict: authentic unless the test forged it.
             if getattr(lxm, "_tc_forged", False):
@@ -115,6 +116,11 @@ class TestTransport:
             else:
                 lxm.signature_validated = True
                 lxm.unverified_reason = None
+
+            # Model LXMF's send-state transition too: senders that wait for
+            # their messages to leave (PresenceBeacon.announce_offline) poll
+            # this, and would otherwise block for their full timeout.
+            lxm.state = LXMF.LXMessage.SENT
 
             # Deliver asynchronously (matches real LXMF behaviour)
             def _deliver():
