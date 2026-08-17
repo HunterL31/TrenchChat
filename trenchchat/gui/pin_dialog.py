@@ -1,19 +1,23 @@
 """
-PIN dialogs for the TrenchChat lock system.
+Passphrase dialogs for the TrenchChat lock system.
 
 Three dialogs are provided:
 
-* UnlockDialog  — shown at startup when a PIN lock is active.
-* SetPinDialog  — shown when the user sets a PIN for the first time.
-* ChangePinDialog — shown when the user changes or removes their PIN.
+* UnlockDialog  — shown at startup when a lock is active.
+* SetPinDialog  — shown when the user sets a passphrase for the first time.
+* ChangePinDialog — shown when the user changes or removes their passphrase.
+
+The length policy lives in validate_passphrase() and applies only when
+*setting* a passphrase.  Entering one is never length-checked: a lock created
+before passphrases were allowed still holds a short numeric PIN, and rejecting
+it here would lock its owner out of their own data.
 """
 
 import time
 
 from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtGui import QIntValidator
 from PyQt6.QtWidgets import (
-    QDialog, QDialogButtonBox, QLabel, QLineEdit,
+    QCheckBox, QDialog, QDialogButtonBox, QLabel, QLineEdit,
     QPushButton, QVBoxLayout, QHBoxLayout, QWidget,
 )
 
@@ -23,24 +27,54 @@ from trenchchat.core.lockbox import WrongPinError, unlock
 _MAX_ATTEMPTS = 5
 # Cooldown duration in seconds after exceeding _MAX_ATTEMPTS.
 _COOLDOWN_SECS = 30
-# Minimum and maximum accepted PIN lengths.
-_PIN_MIN_LEN = 4
-_PIN_MAX_LEN = 8
+# Accepted passphrase lengths when setting a new one.
+_MIN_PASSPHRASE_LEN = 12
+_MAX_PASSPHRASE_LEN = 256
+
+_FIELD_WIDTH = 300
 
 
-def _pin_field(placeholder: str = "Enter PIN") -> QLineEdit:
-    """Return a styled, numeric-only, masked QLineEdit."""
+def validate_passphrase(text: str) -> str | None:
+    """Return an error message for an unacceptable new passphrase, else None.
+
+    Length is the only property that meaningfully resists offline guessing,
+    so it is the only hard rule; composition requirements just push people
+    toward predictable substitutions.
+    """
+    if len(text) < _MIN_PASSPHRASE_LEN:
+        return f"Passphrase must be at least {_MIN_PASSPHRASE_LEN} characters."
+    if len(text) > _MAX_PASSPHRASE_LEN:
+        return f"Passphrase must be at most {_MAX_PASSPHRASE_LEN} characters."
+    if len(set(text)) == 1:
+        return "Passphrase must not be a single repeated character."
+    return None
+
+
+def _pin_field(placeholder: str = "Enter passphrase") -> QLineEdit:
+    """Return a styled, masked QLineEdit."""
     edit = QLineEdit()
     edit.setEchoMode(QLineEdit.EchoMode.Password)
     edit.setPlaceholderText(placeholder)
-    edit.setMaxLength(_PIN_MAX_LEN)
-    edit.setValidator(QIntValidator(0, 99_999_999))
-    edit.setFixedWidth(180)
+    edit.setMinimumWidth(_FIELD_WIDTH)
     return edit
 
 
+def _reveal_checkbox(*fields: QLineEdit) -> QCheckBox:
+    """Return a checkbox that unmasks the given passphrase fields."""
+    box = QCheckBox("Show passphrase")
+
+    def _toggle(checked: bool):
+        mode = (QLineEdit.EchoMode.Normal if checked
+                else QLineEdit.EchoMode.Password)
+        for field in fields:
+            field.setEchoMode(mode)
+
+    box.toggled.connect(_toggle)
+    return box
+
+
 class UnlockDialog(QDialog):
-    """Modal dialog asking the user to enter their PIN to unlock TrenchChat.
+    """Modal dialog asking the user to enter their passphrase to unlock.
 
     On success the derived raw key is available via the ``raw_key`` attribute.
     The dialog enforces a 5-attempt limit before imposing a 30-second cooldown.
@@ -63,7 +97,7 @@ class UnlockDialog(QDialog):
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(title)
 
-        subtitle = QLabel("Enter your PIN to unlock.")
+        subtitle = QLabel("Enter your passphrase to unlock.")
         subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(subtitle)
 
@@ -75,6 +109,12 @@ class UnlockDialog(QDialog):
         row.addWidget(self._pin_edit)
         row.addStretch()
         layout.addLayout(row)
+
+        reveal_row = QHBoxLayout()
+        reveal_row.addStretch()
+        reveal_row.addWidget(_reveal_checkbox(self._pin_edit))
+        reveal_row.addStretch()
+        layout.addLayout(reveal_row)
 
         self._error_label = QLabel("")
         self._error_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -103,11 +143,11 @@ class UnlockDialog(QDialog):
         if now < self._locked_until:
             return
 
+        # Deliberately not length-checked: an existing lock may hold a short
+        # numeric PIN from before passphrases were allowed, and its owner must
+        # still be able to enter it.
         pin = self._pin_edit.text().strip()
-        if len(pin) < _PIN_MIN_LEN:
-            self._error_label.setText(
-                f"PIN must be {_PIN_MIN_LEN}–{_PIN_MAX_LEN} digits."
-            )
+        if not pin:
             return
 
         try:
@@ -118,7 +158,7 @@ class UnlockDialog(QDialog):
             remaining = _MAX_ATTEMPTS - self._attempts
             if remaining > 0:
                 self._error_label.setText(
-                    f"Incorrect PIN. {remaining} attempt(s) remaining."
+                    f"Incorrect passphrase. {remaining} attempt(s) remaining."
                 )
             else:
                 self._attempts = 0
@@ -146,35 +186,47 @@ class UnlockDialog(QDialog):
 
 
 class SetPinDialog(QDialog):
-    """Dialog for setting a new PIN (enter + confirm).
+    """Dialog for setting a new passphrase (enter + confirm).
 
-    On acceptance the chosen PIN is available via the ``pin`` attribute.
+    On acceptance the chosen passphrase is available via the ``pin`` attribute.
     """
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.pin: str | None = None
 
-        self.setWindowTitle("Set PIN")
-        self.setMinimumWidth(320)
+        self.setWindowTitle("Set passphrase")
+        self.setMinimumWidth(380)
 
         layout = QVBoxLayout(self)
         layout.setSpacing(10)
 
-        layout.addWidget(QLabel(
-            f"Choose a {_PIN_MIN_LEN}–{_PIN_MAX_LEN} digit numeric PIN to lock "
-            "your identity and message database."
-        ))
+        intro = QLabel(
+            f"Choose a passphrase of at least {_MIN_PASSPHRASE_LEN} characters "
+            "to lock your identity and message database."
+        )
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
 
-        self._pin1 = _pin_field("New PIN")
-        self._pin2 = _pin_field("Confirm PIN")
+        caveat = QLabel(
+            "This encrypts your data on this computer. Anyone who copies those "
+            "files can try passphrases offline at their own pace — length is "
+            "what stops them."
+        )
+        caveat.setWordWrap(True)
+        caveat.setStyleSheet("color: #999;")
+        layout.addWidget(caveat)
+
+        self._pin1 = _pin_field("New passphrase")
+        self._pin2 = _pin_field("Confirm passphrase")
         self._pin1.returnPressed.connect(self._pin2.setFocus)
         self._pin2.returnPressed.connect(self._on_accept)
 
-        layout.addWidget(QLabel("New PIN:"))
+        layout.addWidget(QLabel("New passphrase:"))
         layout.addWidget(self._pin1)
-        layout.addWidget(QLabel("Confirm PIN:"))
+        layout.addWidget(QLabel("Confirm passphrase:"))
         layout.addWidget(self._pin2)
+        layout.addWidget(_reveal_checkbox(self._pin1, self._pin2))
 
         self._error_label = QLabel("")
         self._error_label.setStyleSheet("color: #e55;")
@@ -191,13 +243,12 @@ class SetPinDialog(QDialog):
     def _on_accept(self):
         p1 = self._pin1.text().strip()
         p2 = self._pin2.text().strip()
-        if len(p1) < _PIN_MIN_LEN:
-            self._error_label.setText(
-                f"PIN must be at least {_PIN_MIN_LEN} digits."
-            )
+        error = validate_passphrase(p1)
+        if error:
+            self._error_label.setText(error)
             return
         if p1 != p2:
-            self._error_label.setText("PINs do not match.")
+            self._error_label.setText("Passphrases do not match.")
             self._pin2.clear()
             self._pin2.setFocus()
             return
@@ -206,13 +257,13 @@ class SetPinDialog(QDialog):
 
 
 class ChangePinDialog(QDialog):
-    """Dialog for changing or removing the current PIN.
+    """Dialog for changing or removing the current passphrase.
 
     After acceptance:
-    * ``new_pin`` holds the new PIN string, or None if the user chose to
-      remove the PIN entirely.
-    * ``raw_key`` holds the derived key for the *current* (old) PIN so the
-      caller can verify it and use it for re-encryption.
+    * ``new_pin`` holds the new passphrase, or None if the user chose to
+      remove passphrase protection entirely.
+    * ``current_raw_key`` holds the derived key for the *current* (old)
+      passphrase so the caller can use it for re-encryption.
     """
 
     def __init__(self, parent=None):
@@ -220,29 +271,30 @@ class ChangePinDialog(QDialog):
         self.new_pin: str | None = None
         self.current_raw_key: bytes | None = None
 
-        self.setWindowTitle("Change PIN")
-        self.setMinimumWidth(340)
+        self.setWindowTitle("Change passphrase")
+        self.setMinimumWidth(380)
 
         layout = QVBoxLayout(self)
         layout.setSpacing(10)
 
-        layout.addWidget(QLabel("Enter your current PIN, then set a new one."))
         layout.addWidget(QLabel(
-            "Leave the new PIN fields empty to <b>remove</b> PIN protection."
+            "Enter your current passphrase, then set a new one."
+        ))
+        layout.addWidget(QLabel(
+            "Leave the new fields empty to <b>remove</b> passphrase protection."
         ))
 
-        self._current = _pin_field("Current PIN")
-        layout.addWidget(QLabel("Current PIN:"))
+        self._current = _pin_field("Current passphrase")
+        layout.addWidget(QLabel("Current passphrase:"))
         layout.addWidget(self._current)
 
-        self._new1 = _pin_field("New PIN (leave blank to remove)")
-        self._new2 = _pin_field("Confirm new PIN")
-        self._new1.setValidator(None)  # allow blank for removal
-        self._new2.setValidator(None)
-        layout.addWidget(QLabel("New PIN:"))
+        self._new1 = _pin_field("New passphrase (leave blank to remove)")
+        self._new2 = _pin_field("Confirm new passphrase")
+        layout.addWidget(QLabel("New passphrase:"))
         layout.addWidget(self._new1)
-        layout.addWidget(QLabel("Confirm new PIN:"))
+        layout.addWidget(QLabel("Confirm new passphrase:"))
         layout.addWidget(self._new2)
+        layout.addWidget(_reveal_checkbox(self._current, self._new1, self._new2))
 
         self._error_label = QLabel("")
         self._error_label.setStyleSheet("color: #e55;")
@@ -261,38 +313,32 @@ class ChangePinDialog(QDialog):
         new1 = self._new1.text().strip()
         new2 = self._new2.text().strip()
 
-        # Validate the current PIN first.
-        if len(current_pin) < _PIN_MIN_LEN:
-            self._error_label.setText("Enter your current PIN.")
+        # Validate the current passphrase first. Not length-checked -- an
+        # existing lock may still hold a short numeric PIN.
+        if not current_pin:
+            self._error_label.setText("Enter your current passphrase.")
             return
         try:
             self.current_raw_key = unlock(current_pin)
         except WrongPinError:
-            self._error_label.setText("Current PIN is incorrect.")
+            self._error_label.setText("Current passphrase is incorrect.")
             self._current.clear()
             self._current.setFocus()
             return
 
-        # Validate the new PIN (or removal path).
+        # Validate the new passphrase (or removal path).
         if new1 == "" and new2 == "":
-            # Removing PIN — no new value needed.
+            # Removing protection — no new value needed.
             self.new_pin = None
             self.accept()
             return
 
-        if len(new1) < _PIN_MIN_LEN:
-            self._error_label.setText(
-                f"New PIN must be at least {_PIN_MIN_LEN} digits (or leave blank to remove)."
-            )
-            return
-        if not new1.isdigit():
-            self._error_label.setText("New PIN must contain digits only.")
-            return
-        if len(new1) > _PIN_MAX_LEN:
-            self._error_label.setText(f"New PIN must be at most {_PIN_MAX_LEN} digits.")
+        error = validate_passphrase(new1)
+        if error:
+            self._error_label.setText(f"{error} Or leave blank to remove.")
             return
         if new1 != new2:
-            self._error_label.setText("New PINs do not match.")
+            self._error_label.setText("New passphrases do not match.")
             self._new2.clear()
             self._new2.setFocus()
             return

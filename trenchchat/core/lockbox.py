@@ -1,35 +1,45 @@
 """
-PIN-based lock for TrenchChat sensitive data.
+Passphrase-based lock for TrenchChat sensitive data.
 
-Provides key derivation from a PIN and symmetric encryption helpers used to
-protect the identity file and SQLite database at rest.  All cryptographic
-material (salt, verification token) is stored in the TrenchChat data directory.
+Provides key derivation from a passphrase and symmetric encryption helpers
+used to protect the identity file and SQLite database at rest.  All
+cryptographic material (salt, verification token) is stored in the TrenchChat
+data directory.
+
+What this protects, and what it does not
+----------------------------------------
+The lock protects data at rest on this computer.  Anyone who copies the files
+in the data directory can guess passphrases offline at their own pace, with no
+rate limit -- the stored verification token and the salt are enough on their
+own.  Passphrase length is what makes that guessing infeasible, which is why
+the dialogs require a real passphrase rather than a short numeric PIN.
 
 Usage pattern
 -------------
-First launch (no PIN set)::
+First launch (no passphrase set)::
 
     is_locked()  # -> False
-    # user chooses to set a PIN via the Settings dialog
-    key = create_lock(pin)
+    # user chooses to set a passphrase via the Settings dialog
+    key = create_lock(passphrase)
     # caller must then re-encrypt identity and re-key the database
 
 Subsequent launches::
 
     is_locked()  # -> True
-    key = unlock(pin)   # raises WrongPinError on bad PIN
+    key = unlock(passphrase)   # raises WrongPinError on a bad passphrase
     # caller passes key to Identity and Storage constructors
 
-Removing a PIN::
+Removing a passphrase::
 
-    key = unlock(current_pin)
-    remove_lock(current_pin)
+    key = unlock(current_passphrase)
+    remove_lock()
     # caller must decrypt identity and export the database to plaintext
 """
 
 import base64
 import hashlib
 import os
+import unicodedata
 from pathlib import Path
 
 from cryptography.fernet import Fernet, InvalidToken
@@ -57,12 +67,18 @@ class WrongPinError(Exception):
 
 
 def derive_key(pin: str, salt: bytes) -> bytes:
-    """Derive a 32-byte key from a PIN and salt using PBKDF2-HMAC-SHA256.
+    """Derive a 32-byte key from a passphrase and salt using PBKDF2-HMAC-SHA256.
 
     The returned bytes are suitable for use as a Fernet key after URL-safe
     base64 encoding, or as a raw hex key for SQLCipher.
+
+    The passphrase is NFKC-normalised so two Unicode spellings of the same
+    text derive the same key. ASCII is unaffected, so locks created before
+    passphrases were allowed still derive identically.
     """
-    return hashlib.pbkdf2_hmac("sha256", pin.encode(), salt, PBKDF2_ITERATIONS)
+    normalised = unicodedata.normalize("NFKC", pin)
+    return hashlib.pbkdf2_hmac("sha256", normalised.encode(), salt,
+                               PBKDF2_ITERATIONS)
 
 
 def _make_fernet(raw_key: bytes) -> Fernet:
