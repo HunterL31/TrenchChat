@@ -48,6 +48,12 @@
     border-radius: 4px; padding: 3px 9px; font-size: 11px; cursor: pointer;
   }
   .link-btn:hover { border-color: var(--accent); }
+  .tone-btn {
+    background: var(--panel2); color: var(--text); border: 1px solid var(--border);
+    border-radius: 4px; padding: 3px 9px; font-size: 11px; cursor: pointer;
+  }
+  .tone-btn:hover { border-color: var(--accent); }
+  .tone-btn.on { border-color: var(--accent); color: var(--accent); }
   .link-profile {
     background: var(--panel2); color: var(--text); border: 1px solid var(--border);
     border-radius: 4px; padding: 3px 4px; font-size: 11px; cursor: pointer; max-width: 150px;
@@ -510,6 +516,25 @@ async function api(tag, path, opts) {
   return res.json();
 }
 
+async function toggleTone(tag) {
+  const btn = document.getElementById(`tone-btn-${tag}`);
+  const enable = !btn.classList.contains('on');
+  const res = await fetch(apiBase(tag) + '/voice/test_tone', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({enabled: enable}),
+  });
+  if (res.status === 409) {
+    toast(`Tester ${tag}: join a voice session first`);
+    return;
+  }
+  if (!res.ok) {
+    toast(`Tester ${tag}: tone toggle failed (${res.status})`);
+    return;
+  }
+  btn.classList.toggle('on', enable);
+  btn.textContent = enable ? 'Tone on' : 'Tone';
+}
+
 function renderShell() {
   const panes = document.getElementById('panes');
   panes.innerHTML = TESTERS.map(tag => `
@@ -533,6 +558,8 @@ function renderShell() {
           <span class="restart-hint" id="restart-hint-${tag}"
                title="Shaping is live. Restart this tester to also apply the matching bitrate to its Reticulum config.">&#8635;</span>
           <button class="link-btn" id="link-btn-${tag}" onclick="toggleLink('${tag}')">Go offline</button>
+          <button class="tone-btn" id="tone-btn-${tag}" onclick="toggleTone('${tag}')"
+                 title="Stream the voice test tone (requires being in a voice session)">Tone</button>
           <button class="proc-btn kill" id="kill-btn-${tag}" onclick="killTester('${tag}')">Kill</button>
           <button class="proc-btn start" id="start-btn-${tag}" style="display:none"
                  onclick="startTester('${tag}')">Start</button>
