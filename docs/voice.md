@@ -142,10 +142,12 @@ Config keys (all under `"voice"` in `~/.trenchchat/config.json`):
   window, and verify both directions streamed with Discord-comparable
   measured quality (loss ≤ 2 %, jitter ≤ 30 ms).
 
-## Packaging follow-ups (not yet done)
+## Packaging
 
-- `trenchchat.spec` / `packaging/hooks/`: collect sounddevice's bundled
-  PortAudio binaries; ship libopus (`opus.dll` / `libopus.dylib`) for
-  opuslib on Windows/macOS.
-- Linux packages: add `libopus0, libportaudio2` to Depends.
-- `setup.sh`: hint at installing `libportaudio2`/`libopus0` when missing.
+Installers built by `.github/workflows/release.yml` ship voice ready to run:
+the workflow stages libopus for the frozen app on Windows/macOS
+(`packaging/voicelibs/`, found at runtime by
+`packaging/hooks/rthook_voice_libs.py`), sounddevice's bundled PortAudio is
+collected by its PyInstaller hook, and the `.deb` declares
+`libopus0, libportaudio2` in Depends. On source checkouts, `setup.sh` offers
+to install both libraries via the system package manager.

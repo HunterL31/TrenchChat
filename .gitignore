@@ -3,6 +3,9 @@
 
 # Flutter SDK downloaded by setup.sh
 .flutter-sdk/
+
+# Voice libraries staged by the release workflow for PyInstaller
+packaging/voicelibs/
 venv/
 env/
 

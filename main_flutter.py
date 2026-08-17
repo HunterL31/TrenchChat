@@ -27,12 +27,22 @@ import webbrowser
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parent
-_TESTENV_DIR = _REPO_ROOT / "devtools" / "testenv"
-for p in (str(_TESTENV_DIR), str(_REPO_ROOT)):
-    if p not in sys.path:
-        sys.path.insert(0, p)
+_FROZEN = getattr(sys, "frozen", False)
+if _FROZEN:
+    # PyInstaller bundle: the testenv backend modules are frozen in, the web
+    # build is collected by trenchchat.spec, and the desktop client is staged
+    # into the bundle by the release workflow.
+    _BUNDLE_ROOT = Path(getattr(sys, "_MEIPASS", _REPO_ROOT))
+    _WEB_DIR = _BUNDLE_ROOT / "flutter_web"
+    _DESKTOP_ROOT = _BUNDLE_ROOT / "flutter_client"
+else:
+    _TESTENV_DIR = _REPO_ROOT / "devtools" / "testenv"
+    for p in (str(_TESTENV_DIR), str(_REPO_ROOT)):
+        if p not in sys.path:
+            sys.path.insert(0, p)
+    _WEB_DIR = _REPO_ROOT / "flutter_ui" / "build" / "web"
+    _DESKTOP_ROOT = None
 
-_WEB_DIR = _REPO_ROOT / "flutter_ui" / "build" / "web"
 _DEFAULT_PORT = 8810
 
 # Mirrors main.py's minute reannounce and main_window.py's startup sync delay.
@@ -45,14 +55,23 @@ _DESKTOP_BINARIES = {
     "Darwin": "build/macos/Build/Products/Release/flutter_ui.app/Contents/MacOS/flutter_ui",
 }
 
+_FROZEN_DESKTOP_BINARIES = {
+    "Windows": "flutter_ui.exe",
+    "Linux": "flutter_ui",
+    "Darwin": "flutter_ui.app/Contents/MacOS/flutter_ui",
+}
+
 
 def find_desktop_binary() -> Path | None:
     """Path to this platform's built Flutter desktop binary, or None."""
-    rel = _DESKTOP_BINARIES.get(platform.system())
-    if rel is None:
-        return None
-    candidate = _REPO_ROOT / "flutter_ui" / rel
-    return candidate if candidate.is_file() else None
+    system = platform.system()
+    if _DESKTOP_ROOT is not None:
+        rel = _FROZEN_DESKTOP_BINARIES.get(system)
+        candidate = _DESKTOP_ROOT / rel if rel else None
+    else:
+        rel = _DESKTOP_BINARIES.get(system)
+        candidate = _REPO_ROOT / "flutter_ui" / rel if rel else None
+    return candidate if candidate is not None and candidate.is_file() else None
 
 
 def main():
