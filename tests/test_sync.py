@@ -13,6 +13,7 @@ import time
 import pytest
 
 from tests.helpers import (
+    sign_as,
     wait_for,
     wait_for_member,
     wait_for_message,
@@ -47,6 +48,7 @@ def _insert_message(storage, ch_hash, sender_hex, content, ts=None):
         reply_to=None,
         last_seen_id=None,
         received_at=ts,
+        author_sig=sign_as(sender_hex, ch_hash, msg_id, ts, content),
     )
     return msg_id
 
@@ -306,6 +308,8 @@ class TestSyncRequestResponse:
                         "message_id":   f"chain-{i}",
                         "reply_to":     None,
                         "last_seen_id": None,
+                        "author_sig":   sign_as(alice.identity.hash_hex, ch_hash,
+                                                f"chain-{i}", ts, f"chain {i}"),
                     }], use_bin_type=True),
                     F_SYNC_TRUNCATED: True,
                 },
@@ -707,6 +711,8 @@ class TestFlushPending:
             "reply_to":          None,
             "last_seen_id":      None,
             "subscriber_hashes": [bob.identity.hash_hex],
+            "author_sig":        sign_as(alice.identity.hash_hex, ch_hash,
+                                         msg_id, ts, content),
         }
         alice.messaging._pending[bob.identity.hash_hex] = [msg_params]
 
@@ -1198,6 +1204,8 @@ class TestTenureSyncFiltering:
             reply_to=None,
             last_seen_id=None,
             received_at=valid_ts,
+            author_sig=sign_as(bob.identity.hash_hex, ch_hash, valid_msg_id,
+                               valid_ts, valid_content),
         )
 
         # Kick Bob on Carol's side
@@ -1658,6 +1666,8 @@ class TestImageSync:
             last_seen_id=None,
             received_at=ts,
             image_data=_FAKE_JPEG,
+            author_sig=sign_as(alice.identity.hash_hex, ch_hash, "sync_img_001",
+                               ts, "synced image", image_data=_FAKE_JPEG),
         )
 
         bob.sync_mgr._send_sync_request(alice.identity.hash_hex, ch_hash, ts - 100)

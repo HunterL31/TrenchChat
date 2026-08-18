@@ -272,6 +272,42 @@ static assets stay public, bind defaults).
 - **Encrypting or decrypting the database removes the plaintext `-wal`/`-shm`
   sidecars**, which held recently written rows in the clear.
 
+## Fixed: synced messages are bound to their author
+
+A message reaching you through sync came from a peer who usually did not
+write it. LXMF authenticates that relay and nothing else, so the author, the
+text, the attachment and the threading fields were all just claims in the
+relay's payload -- a relay could rewrite the words of a genuine message and
+serve them under the original author and id.
+
+`message_id` did not help: it is `sha256(content:sender:timestamp)` but was
+never recomputed on receipt, and it is `UNIQUE`, so a tampered copy landing
+first took the id permanently and the genuine message was then discarded as a
+duplicate. First writer wins on a field anyone could forge.
+
+**Fix.** Authors sign a canonical digest (`protocol.author_digest`) covering
+channel, message id, timestamp, content, an image digest and the threading
+fields, carried in `F_AUTHOR_SIG` (0x70) and stored alongside the message.
+Both ingest paths verify before storing; the signature is checked against the
+payload exactly as it arrived, before any of it is stripped. `sender_name` is
+deliberately not covered -- it is mutable, and signing it would fail on
+rename.
+
+Verification needs the author's public key, not their hash. `core/authorship.py`
+keeps a local key cache, and every key is checked to hash back to the identity
+claiming it -- self-certifying, which is what makes a key safe to accept from
+any source. A key learned once keeps working after that peer goes quiet.
+
+Unsigned rows are refused, and a responder withholds them rather than serving
+rows the requester will reject: a rejected row advances nothing, so the
+requester would otherwise re-request the same window forever. Refusing an
+oversized or bomb image clears the signature with it, so the row stays
+readable locally and simply never relays.
+
+Covered by `tests/test_authorship.py` (digest pinned against a committed
+vector) and `TestAdversarialRelayTampering` (edit, re-thread, id-squat,
+invented message, each with a positive control).
+
 ## Still open
 
 ### 0. Tenure filtering is a channel-level switch, so a tenure-blind peer is a hole
@@ -300,28 +336,6 @@ from "this channel has no tenure history".
 Bounded by: it only affects peers with no tenure data for a channel, and any
 accepted member-list document opens tenure intervals, so the window closes as
 soon as one arrives.
-
-### 0b. Synced messages carry no author signature
-
-"Unsolicited history injection" above is fixed — a `MT_SYNC_RESPONSE` only
-applies against a request we issued. The *solicited* path still trusts the
-responder for authorship: `sender_hash`, `sender_name` and `content` come from
-the responder's own payload, and the original author's LXMF signature is not
-carried through sync, so it cannot be re-checked.
-
-What that costs depends on the channel. With tenure data, a forged author has
-to be someone who was a member at the claimed timestamp — a malicious member
-can attribute a message to a co-member, not to an outsider. On a public channel
-there is no tenure, so a peer we asked can attribute a message to any identity.
-The timestamp clamp above bounds *when* they can claim it was said.
-
-Closing this properly means propagating per-message author signatures through
-sync so a relayed message is verifiable independently of who relayed it. That
-is a protocol change (a new signed field, and a decision about what to do with
-pre-existing unsigned history), so it is recorded here rather than patched
-around. `docs/proposal-author-signatures.md` works the design through and lists
-the four policy decisions it needs. Until then, "a peer relayed this" and "this peer wrote this" are
-different claims, and only the former is authenticated on the sync path.
 
 ### 1. Encryption at rest is off by default, and the PIN is weak
 

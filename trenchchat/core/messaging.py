@@ -27,6 +27,8 @@ LXMF fields layout:
     0x61  voice_muted       bool        — sender's current mute state
     0x62  voice_joined_at   float       — when the sender joined the voice session
     0x63  voice_codec       str         — codec the sender transmits ("opus")
+    0x70  author_sig        bytes[64]   — author's Ed25519 signature binding the
+                                          message to its author (see authorship.py)
 """
 
 import hashlib
@@ -40,8 +42,9 @@ from trenchchat.core.protocol import (
     F_CHANNEL_HASH, F_DISPLAY_NAME, F_TIMESTAMP, F_MESSAGE_ID,
     F_REPLY_TO, F_LAST_SEEN_ID, F_SYNC_WINDOW_START, F_SYNC_MESSAGES,
     F_MISSED_FOR, F_MISSED_MSG_ID, F_MSG_TYPE, F_IMAGE_DATA,
-    wire_timestamp,
+    F_AUTHOR_SIG, wire_timestamp,
 )
+from trenchchat.core.authorship import sign_message, verify_message
 from trenchchat.core.image import MAX_IMAGE_BYTES, inbound_image_is_sane
 from trenchchat.core.storage import Storage
 from trenchchat.network.router import Router
@@ -106,6 +109,10 @@ class Messaging:
         ts = time.time()
         last_seen = self._storage.get_latest_message_id(channel_hash_hex)
         msg_id = _compute_message_id(content, self._identity.hash_hex, ts)
+        author_sig = sign_message(
+            self._identity.rns_identity, channel_hash_hex, msg_id, ts,
+            content, reply_to, last_seen, image_data,
+        )
 
         # Params stored for pending retry and failure callbacks.
         # subscriber_hashes is included so flush_pending can re-register the
@@ -120,6 +127,7 @@ class Messaging:
             "last_seen_id":      last_seen,
             "subscriber_hashes": list(subscriber_hashes),
             "image_data":        image_data,
+            "author_sig":        author_sig,
         }
 
         # Keep params so failed-delivery callbacks can re-queue the message.
@@ -163,6 +171,7 @@ class Messaging:
             last_seen_id=last_seen,
             received_at=ts,
             image_data=image_data,
+            author_sig=author_sig,
         )
 
     def cancel_pending_for_channel(self, channel_hash_hex: str):
@@ -257,6 +266,8 @@ class Messaging:
         }
         if params.get("image_data"):
             fields[F_IMAGE_DATA] = params["image_data"]
+        if params.get("author_sig"):
+            fields[F_AUTHOR_SIG] = params["author_sig"]
         lxm.fields = fields
         return lxm
 
@@ -342,10 +353,17 @@ class Messaging:
         if isinstance(sender_name, bytes):
             sender_name = sender_name.decode(errors="replace")
 
-        # A sender's own clock is the best evidence available for when they
-        # sent something, but an implausible value is not evidence of
-        # anything -- fall back to ours rather than storing it.
-        timestamp = wire_timestamp(fields.get(F_TIMESTAMP)) or time.time()
+        # The signature covers the timestamp, so a signed message cannot have
+        # its clock quietly corrected -- the author asserted that value and
+        # signed it. An implausible one is rejected outright.
+        timestamp = wire_timestamp(fields.get(F_TIMESTAMP))
+        if timestamp is None:
+            RNS.log(
+                f"TrenchChat: dropping message from {sender_hex[:12]}… — "
+                f"implausible timestamp {fields.get(F_TIMESTAMP)!r}",
+                RNS.LOG_WARNING,
+            )
+            return
         msg_id = fields.get(F_MESSAGE_ID, "")
         if isinstance(msg_id, bytes):
             msg_id = msg_id.decode(errors="replace")
@@ -367,23 +385,37 @@ class Messaging:
             image_data = image_data.encode()
         if not image_data:
             image_data = None
-        elif len(image_data) > MAX_IMAGE_BYTES:
-            RNS.log(
-                f"TrenchChat: dropping oversized image ({len(image_data)} bytes, "
-                f"max {MAX_IMAGE_BYTES}) from {sender_hex[:12]}…",
-                RNS.LOG_WARNING,
-            )
-            image_data = None
-        elif not inbound_image_is_sane(image_data):
-            RNS.log(
-                f"TrenchChat: dropping image from {sender_hex[:12]}… — header "
-                f"declares an implausible decode",
-                RNS.LOG_WARNING,
-            )
-            image_data = None
 
         if not msg_id:
             msg_id = _compute_message_id(content, sender_hex, timestamp)
+
+        # Checked against the payload exactly as it arrived, before any of it
+        # is stripped below -- the signature covers the image, so re-checking
+        # after would never match.
+        author_sig = fields.get(F_AUTHOR_SIG)
+        if not verify_message(self._storage, sender_hex, author_sig,
+                              channel_hash_hex, msg_id, timestamp, content,
+                              reply_to, last_seen_id, image_data):
+            RNS.log(
+                f"TrenchChat: dropping message {msg_id[:12]}… from "
+                f"{sender_hex[:12]}… — author signature missing or invalid",
+                RNS.LOG_WARNING,
+            )
+            return
+
+        if image_data is not None and (
+                len(image_data) > MAX_IMAGE_BYTES
+                or not inbound_image_is_sane(image_data)):
+            RNS.log(
+                f"TrenchChat: stripping image from {msg_id[:12]}… — oversized "
+                f"or an implausible decode",
+                RNS.LOG_WARNING,
+            )
+            # The signature covers the image we are refusing, so it no longer
+            # describes what we store. Clear it rather than keep one that
+            # cannot verify: the row stays readable and simply never relays.
+            image_data = None
+            author_sig = None
 
         inserted = self._storage.insert_message(
             channel_hash=channel_hash_hex,
@@ -396,6 +428,7 @@ class Messaging:
             last_seen_id=last_seen_id,
             received_at=time.time(),
             image_data=image_data,
+            author_sig=author_sig,
         )
 
         if inserted:

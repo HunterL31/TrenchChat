@@ -1,10 +1,19 @@
 # Proposal — per-message author signatures
 
-Status: **awaiting sign-off.** Four decisions in §5 need a call before
-implementation starts; everything else here is settled by the existing code.
+Status: **implemented.** Kept as the design record; what shipped is described
+in `docs/security-improvements.md`.
 
-Closes finding H in `docs/security-audit-2026-08.md`, recorded as open gap 0b in
-`docs/security-improvements.md`.
+Decisions taken: unsigned messages are rejected outright (nothing is released,
+so there is no legacy history to carry and no older peers to interoperate
+with); public channels are out of scope, as their sync is being removed
+separately; keys are resolved through a local self-certifying key cache
+(`core/authorship.py`) rather than the announce cache; refusing an image
+strips it and clears the signature, keeping the text readable locally.
+`F_AUTHOR_SIG` is 0x70 -- 0x60 went to voice on main.
+
+Still to do: the UI treatment (§5 D4), which trails the backend.
+
+Closes finding H in `docs/security-audit-2026-08.md`.
 
 ---
 

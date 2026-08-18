@@ -94,6 +94,7 @@ CREATE TABLE IF NOT EXISTS messages (
     last_seen_id TEXT,
     received_at  REAL NOT NULL,
     image_data   BLOB,
+    author_sig   BLOB,
     FOREIGN KEY (channel_hash) REFERENCES channels(hash)
 );
 
@@ -122,6 +123,12 @@ CREATE TABLE IF NOT EXISTS member_list_versions (
     published_at  REAL NOT NULL,
     document_blob BLOB NOT NULL,
     received_at   REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS identity_keys (
+    identity_hash TEXT PRIMARY KEY,
+    public_key    BLOB NOT NULL,
+    learned_at    REAL NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS subscriber_list_versions (
@@ -382,6 +389,7 @@ class Storage:
 
         self._migrate_tenure()
         self._migrate_image_data()
+        self._migrate_author_sig()
         self._migrate_reactions()
         self._migrate_servers()
         # _scope() reads channels.server_hash, so this must run after
@@ -485,6 +493,14 @@ class Storage:
         if not self._has_column("messages", "image_data"):
             self._conn.execute(
                 "ALTER TABLE messages ADD COLUMN image_data BLOB"
+            )
+            self._conn.commit()
+
+    def _migrate_author_sig(self):
+        """Add author_sig BLOB column to messages for existing databases."""
+        if not self._has_column("messages", "author_sig"):
+            self._conn.execute(
+                "ALTER TABLE messages ADD COLUMN author_sig BLOB"
             )
             self._conn.commit()
 
@@ -794,17 +810,20 @@ class Storage:
                        content: str, timestamp: float, message_id: str,
                        reply_to: str | None, last_seen_id: str | None,
                        received_at: float,
-                       image_data: bytes | None = None) -> bool:
+                       image_data: bytes | None = None,
+                       author_sig: bytes | None = None) -> bool:
         """Returns True if inserted, False if duplicate."""
         try:
             with self._tx():
                 self._conn.execute("""
                     INSERT INTO messages
                         (channel_hash, sender_hash, sender_name, content, timestamp,
-                         message_id, reply_to, last_seen_id, received_at, image_data)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         message_id, reply_to, last_seen_id, received_at, image_data,
+                         author_sig)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (channel_hash, sender_hash, sender_name, content, timestamp,
-                      message_id, reply_to, last_seen_id, received_at, image_data))
+                      message_id, reply_to, last_seen_id, received_at, image_data,
+                      author_sig))
             return True
         except sqlite3.IntegrityError:
             return False
@@ -1327,6 +1346,30 @@ class Storage:
                     document_blob=excluded.document_blob,
                     received_at=excluded.received_at
             """, (channel_hash, version, published_at, document_blob, time.time()))
+
+    def remember_identity_key(self, identity_hash: str, public_key: bytes) -> None:
+        """Cache a peer's public key so their messages stay verifiable.
+
+        Callers must have already checked the key hashes to identity_hash --
+        see authorship.remember_identity. Keys are kept after a peer leaves a
+        channel, because their messages stay in the transcript.
+        """
+        with self._tx():
+            self._conn.execute("""
+                INSERT INTO identity_keys (identity_hash, public_key, learned_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(identity_hash) DO NOTHING
+            """, (identity_hash, public_key, time.time()))
+
+    def get_identity_key(self, identity_hash: str) -> bytes | None:
+        """A cached public key for this identity, if we have ever learned one."""
+        if not identity_hash:
+            return None
+        row = self._fetchone(
+            "SELECT public_key FROM identity_keys WHERE identity_hash = ?",
+            (identity_hash,),
+        )
+        return bytes(row["public_key"]) if row else None
 
     def get_all_subscriber_list_versions(self) -> dict[str, int]:
         """Every channel's highest seen subscriber-list version.

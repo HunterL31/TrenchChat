@@ -14,7 +14,7 @@ import pytest
 import RNS
 import LXMF
 
-from tests.helpers import delivery_dest_hash_hex, wait_for, wait_for_message
+from tests.helpers import sign_as, delivery_dest_hash_hex, wait_for, wait_for_message
 from trenchchat.core import sync_status
 from trenchchat.core.image import MAX_IMAGE_BYTES
 from trenchchat.core.messaging import _compute_message_id
@@ -52,14 +52,37 @@ def _insert_message(storage, ch_hash, sender_hex, content, ts=None):
         reply_to=None,
         last_seen_id=None,
         received_at=ts,
+        author_sig=sign_as(sender_hex, ch_hash, msg_id, ts, content),
     )
     return msg_id
 
 
-def _sync_response_fields(messages: list[dict], truncated: bool = False) -> dict:
+def _sync_response_fields(messages: list[dict], truncated: bool = False,
+                          channel_hash_hex: str | None = None) -> dict:
+    """Build a sync response, signing rows that don't already carry one.
+
+    A real responder relays rows their author signed. A test row assembled by
+    hand has no signature, so unless one is supplied deliberately (to exercise
+    rejection) it is signed here as the peer it claims to come from.
+    """
+    signed = []
+    for m in messages:
+        row = dict(m)
+        if "author_sig" not in row:
+            ch = channel_hash_hex or row.get("channel_hash_hex")
+            sig = sign_as(
+                row.get("sender_hash", ""), ch, row.get("message_id", ""),
+                row.get("timestamp", 0.0), row.get("content", ""),
+                row.get("reply_to"), row.get("last_seen_id"),
+                row.get("image_data"),
+            ) if ch else None
+            if sig is not None:
+                row["author_sig"] = sig
+        row.pop("channel_hash_hex", None)
+        signed.append(row)
     return {
         F_MSG_TYPE:       MT_SYNC_RESPONSE,
-        F_SYNC_MESSAGES:  msgpack.packb(messages, use_bin_type=True),
+        F_SYNC_MESSAGES:  msgpack.packb(signed, use_bin_type=True),
         F_SYNC_TRUNCATED: truncated,
     }
 
@@ -330,7 +353,7 @@ class TestPendingRequestKeyCollision:
             "message_id":   "g1-msg-one",
             "reply_to":     None,
             "last_seen_id": None,
-        }])
+        }], channel_hash_hex=ch_hash)
         fields_1[F_CHANNEL_HASH] = bytes.fromhex(ch_hash)
 
         fields_2 = _sync_response_fields([{
@@ -341,7 +364,7 @@ class TestPendingRequestKeyCollision:
             "message_id":   "g1-msg-two",
             "reply_to":     None,
             "last_seen_id": None,
-        }])
+        }], channel_hash_hex=ch_hash)
         fields_2[F_CHANNEL_HASH] = bytes.fromhex(ch_hash)
 
         bob.sync_mgr._handle_sync_response(fields_1, ch_hash, carol.identity.hash_hex)
@@ -560,7 +583,7 @@ class TestOversizedImageViaSync:
             "reply_to":     None,
             "last_seen_id": None,
             "image_data":   oversized,
-        }])
+        }], channel_hash_hex=ch_hash)
         fields[F_CHANNEL_HASH] = bytes.fromhex(ch_hash)
 
         bob.sync_mgr._handle_sync_response(fields, ch_hash, carol.identity.hash_hex)

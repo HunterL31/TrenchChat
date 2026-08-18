@@ -52,6 +52,7 @@ import LXMF
 import msgpack
 
 from trenchchat.core.identity import Identity
+from trenchchat.core.authorship import verify_message
 from trenchchat.core.image import MAX_IMAGE_BYTES, inbound_image_is_sane
 from trenchchat.core.messaging import Messaging
 from trenchchat.core.permissions import (
@@ -650,9 +651,17 @@ class SyncManager:
 
     def _filter_rows_by_tenure(self, channel, channel_hash_hex: str,
                                requester_hex: str, rows: list) -> list:
-        """Drop rows neither the sender nor the requester was a member for.
+        """Drop rows we will not relay: unsigned ones, then tenure failures.
 
-        Only applied when tenure data exists for the channel (skips open-join
+        An unsigned row is withheld because the requester would reject it on
+        arrival, and a rejected row advances nothing -- they would re-request
+        the same window forever. Withholding lets the sweep scan past it and
+        report a scan cursor instead, which is exactly how tenure-withheld
+        rows already behave. Rows predating author signatures are the only
+        ones this affects.
+
+        The tenure checks below are only applied when tenure data exists for
+        the channel (skips open-join
         channels and channels bootstrapped before this feature). Two
         independent checks:
           - sender: the claimed author must actually have been a member at
@@ -667,6 +676,20 @@ class SyncManager:
             admin but not member.
         """
         perms = permissions_from_json(channel["permissions"]) if channel else {}
+
+        signed_rows = []
+        for r in rows:
+            has_sig = "author_sig" in r.keys() and r["author_sig"]
+            if not has_sig:
+                RNS.log(
+                    f"TrenchChat [sync]: withholding unsigned message "
+                    f"{r['message_id'][:12]}… — it cannot be verified by the "
+                    f"requester",
+                    RNS.LOG_DEBUG,
+                )
+                continue
+            signed_rows.append(r)
+        rows = signed_rows
 
         if not self._storage.has_any_tenure(channel_hash_hex):
             return rows
@@ -806,9 +829,30 @@ class SyncManager:
                     image_data = image_data.encode()
                 if not image_data:
                     image_data = None
-                elif (len(image_data) > MAX_IMAGE_BYTES
+
+                # Checked against the row exactly as the responder sent it,
+                # before anything is stripped. This is what makes a relayed
+                # message verifiable independently of who relayed it: the
+                # peer handing it over is almost never its author.
+                author_sig = m.get("author_sig")
+                if not verify_message(
+                        self._storage, sender_hash, author_sig,
+                        channel_hash_hex, m.get("message_id", ""), msg_ts,
+                        m.get("content", ""), m.get("reply_to"),
+                        m.get("last_seen_id"), image_data):
+                    RNS.log(
+                        f"TrenchChat [sync]: dropping synced message "
+                        f"{str(m.get('message_id', ''))[:12]}… — author "
+                        f"signature missing or invalid",
+                        RNS.LOG_WARNING,
+                    )
+                    continue
+
+                if image_data is not None and (
+                        len(image_data) > MAX_IMAGE_BYTES
                         or not inbound_image_is_sane(image_data)):
                     image_data = None
+                    author_sig = None
 
                 inserted = self._storage.insert_message(
                     channel_hash=channel_hash_hex,
@@ -821,6 +865,7 @@ class SyncManager:
                     last_seen_id=m.get("last_seen_id"),
                     received_at=time.time(),
                     image_data=image_data,
+                    author_sig=author_sig,
                 )
                 # A duplicate we already hold is still "accepted" -- the
                 # watermark should move past it. A failed insert for an id
@@ -988,6 +1033,9 @@ class SyncManager:
         image_data = row["image_data"] if "image_data" in row.keys() else None
         if image_data:
             d["image_data"] = bytes(image_data)
+        author_sig = row["author_sig"] if "author_sig" in row.keys() else None
+        if author_sig:
+            d["author_sig"] = bytes(author_sig)
         return d
 
     def _row_to_payload(self, row) -> dict:
