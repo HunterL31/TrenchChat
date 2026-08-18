@@ -53,6 +53,7 @@ def main():
 
     import uvicorn
     from fastapi.staticfiles import StaticFiles
+    from starlette.middleware.gzip import GZipMiddleware
 
     from api import create_app
     from backend_core import Backend
@@ -72,6 +73,9 @@ def main():
     threading.Timer(_STARTUP_SYNC_DELAY_SECS, backend.sync_mgr.request_sync_all).start()
 
     app = create_app(backend)
+    # The Flutter bundle is ~10 MB of JS and wasm. Served raw over a slow or
+    # relayed link the browser gives up mid-load, so compress it.
+    app.add_middleware(GZipMiddleware, minimum_size=1024)
 
     web_dir = Path(args.web_dir)
     if web_dir.is_dir():
