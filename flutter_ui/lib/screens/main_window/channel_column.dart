@@ -32,6 +32,7 @@ class ChannelColumn extends StatelessWidget {
     this.onAddFriend,
     this.voiceParticipants = const [],
     this.onJoinVoice,
+    this.syncStates = const {},
   });
 
   final String? serverName;
@@ -65,6 +66,10 @@ class ChannelColumn extends StatelessWidget {
   /// Joins the selected channel's voice session; null hides the affordance
   /// (no channel, no voice permission, or already in a call).
   final VoidCallback? onJoinVoice;
+
+  /// Channel hash -> sync state as reported by the backend. Only
+  /// `incomplete` draws anything; every other state is the quiet case.
+  final Map<String, String> syncStates;
 
   @override
   Widget build(BuildContext context) {
@@ -121,6 +126,7 @@ class ChannelColumn extends StatelessWidget {
                       channel: c,
                       selected: c.hash == selectedChannelHash,
                       onTap: () => onSelectChannel(c.hash),
+                      incomplete: syncStates[c.hash] == 'incomplete',
                     ),
                 ],
                 if (directChannels.isNotEmpty || onCreateDirectChannel != null) ...[
@@ -130,6 +136,7 @@ class ChannelColumn extends StatelessWidget {
                       channel: c,
                       selected: c.hash == selectedChannelHash,
                       onTap: () => onSelectChannel(c.hash),
+                      incomplete: syncStates[c.hash] == 'incomplete',
                     ),
                 ],
                 if (voiceParticipants.isNotEmpty || onJoinVoice != null) ...[
@@ -365,11 +372,17 @@ class _InviteRowState extends State<_InviteRow> {
 }
 
 class _ChannelRow extends StatefulWidget {
-  const _ChannelRow({required this.channel, required this.selected, required this.onTap});
+  const _ChannelRow({
+    required this.channel,
+    required this.selected,
+    required this.onTap,
+    this.incomplete = false,
+  });
 
   final Channel channel;
   final bool selected;
   final VoidCallback onTap;
+  final bool incomplete;
 
   @override
   State<_ChannelRow> createState() => _ChannelRowState();
@@ -414,6 +427,21 @@ class _ChannelRowState extends State<_ChannelRow> {
                   ),
                 ),
               ),
+              if (widget.incomplete) ...[
+                Tooltip(
+                  message: 'History incomplete \u2014 some messages could not be synced',
+                  child: Text(
+                    'INCOMPLETE',
+                    style: TextStyle(
+                      fontSize: TCType.textMicro,
+                      color: TCColors.accentSecondary,
+                      letterSpacing:
+                          TCType.letterSpacingFor(TCType.textMicro, TCType.trackingWide),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 4),
+              ],
               if (widget.channel.isInviteOnly)
                 TcIcon(TcIcons.lock, size: TCType.textMicro, color: TCColors.textTertiary),
             ],

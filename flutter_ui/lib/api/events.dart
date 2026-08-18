@@ -45,6 +45,13 @@ sealed class TcEvent {
           json['channel_hash'] as String,
           json['channel_name'] as String,
         );
+      case 'sync_status':
+        final status = json['status'] as Map<String, dynamic>?;
+        if (status == null) return null;
+        return SyncStatusEvent(
+          json['channel_hash'] as String,
+          status['state'] as String? ?? 'unknown',
+        );
       case 'emoji_received':
         return EmojiReceivedEvent(json['emoji_hash'] as String);
       case 'friend_updated':
@@ -146,5 +153,16 @@ class VoiceSpeakingEvent extends TcEvent {
 /// the client stays in the call, listening-only.
 class VoiceSessionEvent extends TcEvent {
   const VoiceSessionEvent(this.state);
+  final String state;
+}
+
+
+/// How caught up a channel is. INCOMPLETE means history is known to be
+/// missing -- a truncated batch, a hint naming us, or rows a peer served that
+/// we refused because they could not be verified.
+class SyncStatusEvent extends TcEvent {
+  const SyncStatusEvent(this.channelHash, this.state);
+
+  final String channelHash;
   final String state;
 }

@@ -9,7 +9,9 @@ import 'package:flutter_ui/format.dart';
 import 'package:flutter_ui/screens/main_window/message_list.dart';
 import 'package:flutter_ui/widgets/avatar.dart';
 
-Message _msg(String sender, double ts, String content) => Message(
+Message _msg(String sender, double ts, String content,
+        {bool imageStripped = false}) =>
+    Message(
       messageId: '$sender-$ts',
       senderHash: sender,
       senderName: sender,
@@ -18,6 +20,7 @@ Message _msg(String sender, double ts, String content) => Message(
       replyTo: null,
       hasImage: false,
       reactions: const [],
+      imageStripped: imageStripped,
     );
 
 Widget _harness(List<Message> messages) => MaterialApp(
@@ -107,5 +110,22 @@ void main() {
       (w) => w is Text && w.data != null && dateLabelPattern.hasMatch(w.data!),
     );
     expect(dateLabels, findsNothing);
+  });
+
+  testWidgets('a stripped attachment is marked, an intact message is not',
+      (tester) async {
+    const base = 1_700_000_000.0;
+    final messages = [
+      _msg('alice', base, 'plain'),
+      _msg('bob', base + 600, 'relayed', imageStripped: true),
+    ];
+
+    await tester.pumpWidget(_harness(messages));
+    await tester.pumpAndSettle();
+
+    expect(
+      find.text('Attachment removed \u2014 it could not be displayed safely'),
+      findsOneWidget,
+    );
   });
 }

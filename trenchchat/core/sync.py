@@ -854,11 +854,13 @@ class SyncManager:
                     rejected_count += 1
                     continue
 
+                image_stripped = False
                 if image_data is not None and (
                         len(image_data) > MAX_IMAGE_BYTES
                         or not inbound_image_is_sane(image_data)):
                     image_data = None
                     author_sig = None
+                    image_stripped = True
 
                 inserted = self._storage.insert_message(
                     channel_hash=channel_hash_hex,
@@ -872,6 +874,7 @@ class SyncManager:
                     received_at=time.time(),
                     image_data=image_data,
                     author_sig=author_sig,
+                    image_stripped=image_stripped,
                 )
                 # A duplicate we already hold is still "accepted" -- the
                 # watermark should move past it. A failed insert for an id

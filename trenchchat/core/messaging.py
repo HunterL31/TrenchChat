@@ -392,6 +392,7 @@ class Messaging:
         # Checked against the payload exactly as it arrived, before any of it
         # is stripped below -- the signature covers the image, so re-checking
         # after would never match.
+        image_stripped = False
         author_sig = fields.get(F_AUTHOR_SIG)
         if not verify_message(self._storage, sender_hex, author_sig,
                               channel_hash_hex, msg_id, timestamp, content,
@@ -416,6 +417,7 @@ class Messaging:
             # cannot verify: the row stays readable and simply never relays.
             image_data = None
             author_sig = None
+            image_stripped = True
 
         inserted = self._storage.insert_message(
             channel_hash=channel_hash_hex,
@@ -429,6 +431,7 @@ class Messaging:
             received_at=time.time(),
             image_data=image_data,
             author_sig=author_sig,
+            image_stripped=image_stripped,
         )
 
         if inserted:

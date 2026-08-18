@@ -208,6 +208,15 @@ class ApiClient {
     return ChannelPermissions.fromJson(_decode(res) as Map<String, dynamic>);
   }
 
+  /// The channel's overall sync state -- `synced`, `incomplete`, `syncing`,
+  /// `waiting` or `unknown`. WS `sync_status` events carry the same value;
+  /// this is the read for a client that just started.
+  Future<String> getSyncState(String channelHashHex) async {
+    final res = await _http.get(_u('/channels/$channelHashHex/sync_status'));
+    final body = _decode(res) as Map<String, dynamic>;
+    return body['state'] as String? ?? 'unknown';
+  }
+
   Future<PresenceEntry> getPeerPresence(String peerHashHex) async {
     final res = await _http.get(_u('/peers/$peerHashHex/presence'));
     return PresenceEntry.fromJson(_decode(res) as Map<String, dynamic>);

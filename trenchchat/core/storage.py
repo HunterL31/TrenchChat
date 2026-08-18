@@ -95,6 +95,7 @@ CREATE TABLE IF NOT EXISTS messages (
     received_at  REAL NOT NULL,
     image_data   BLOB,
     author_sig   BLOB,
+    image_stripped INTEGER NOT NULL DEFAULT 0,
     FOREIGN KEY (channel_hash) REFERENCES channels(hash)
 );
 
@@ -390,6 +391,7 @@ class Storage:
         self._migrate_tenure()
         self._migrate_image_data()
         self._migrate_author_sig()
+        self._migrate_image_stripped()
         self._migrate_reactions()
         self._migrate_servers()
         # _scope() reads channels.server_hash, so this must run after
@@ -493,6 +495,14 @@ class Storage:
         if not self._has_column("messages", "image_data"):
             self._conn.execute(
                 "ALTER TABLE messages ADD COLUMN image_data BLOB"
+            )
+            self._conn.commit()
+
+    def _migrate_image_stripped(self):
+        """Add image_stripped to messages for existing databases."""
+        if not self._has_column("messages", "image_stripped"):
+            self._conn.execute(
+                "ALTER TABLE messages ADD COLUMN image_stripped INTEGER NOT NULL DEFAULT 0"
             )
             self._conn.commit()
 
@@ -811,7 +821,8 @@ class Storage:
                        reply_to: str | None, last_seen_id: str | None,
                        received_at: float,
                        image_data: bytes | None = None,
-                       author_sig: bytes | None = None) -> bool:
+                       author_sig: bytes | None = None,
+                       image_stripped: bool = False) -> bool:
         """Returns True if inserted, False if duplicate."""
         try:
             with self._tx():
@@ -819,11 +830,11 @@ class Storage:
                     INSERT INTO messages
                         (channel_hash, sender_hash, sender_name, content, timestamp,
                          message_id, reply_to, last_seen_id, received_at, image_data,
-                         author_sig)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         author_sig, image_stripped)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (channel_hash, sender_hash, sender_name, content, timestamp,
                       message_id, reply_to, last_seen_id, received_at, image_data,
-                      author_sig))
+                      author_sig, 1 if image_stripped else 0))
             return True
         except sqlite3.IntegrityError:
             return False

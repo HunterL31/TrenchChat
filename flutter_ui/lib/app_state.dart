@@ -54,6 +54,11 @@ class AppState extends ChangeNotifier {
   final Map<String, List<PresenceEntry>> presenceByChannel = {};
   final Map<String, ChannelLinkQuality> linkQualityByChannel = {};
   final Map<String, ChannelPermissions> permissionsByChannel = {};
+
+  /// Per-channel sync state from the backend's SyncStatusTracker. "incomplete"
+  /// means history is known to be missing -- including rows a peer served that
+  /// we refused as unverifiable, which would otherwise be silent.
+  final Map<String, String> syncStateByChannel = {};
   final Map<String, Uint8List?> avatarCache = {};
 
   final Map<String, List<VoiceParticipant>> voiceRosterByChannel = {};
@@ -166,6 +171,7 @@ class AppState extends ChangeNotifier {
         api.getChannelLinkQuality(channelHashHex),
         api.getMyPermissions(channelHashHex),
         api.getVoiceRoster(channelHashHex),
+        api.getSyncState(channelHashHex),
       ]);
       membersByChannel[channelHashHex] = results[0] as List<Member>;
       messagesByChannel[channelHashHex] = results[1] as List<Message>;
@@ -173,6 +179,7 @@ class AppState extends ChangeNotifier {
       linkQualityByChannel[channelHashHex] = results[3] as ChannelLinkQuality;
       permissionsByChannel[channelHashHex] = results[4] as ChannelPermissions;
       voiceRosterByChannel[channelHashHex] = results[5] as List<VoiceParticipant>;
+      syncStateByChannel[channelHashHex] = results[6] as String;
       notifyListeners();
     } catch (e) {
       _reportActionError(e);
@@ -666,6 +673,9 @@ class AppState extends ChangeNotifier {
         unawaited(refreshDiscoveredChannels());
       case InviteReceivedEvent():
         unawaited(refreshInvites());
+      case SyncStatusEvent(:final channelHash, :final state):
+        syncStateByChannel[channelHash] = state;
+        notifyListeners();
       case EmojiReceivedEvent():
         unawaited(refreshEmoji());
       case FriendUpdatedEvent():

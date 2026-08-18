@@ -199,6 +199,7 @@ def _message_to_dict(row, reactions: list[dict[str, Any]] | None = None) -> dict
         "timestamp": row["timestamp"],
         "reply_to": row["reply_to"],
         "has_image": bool(row["image_data"]) if "image_data" in row.keys() else False,
+        "image_stripped": bool(row["image_stripped"]) if "image_stripped" in row.keys() else False,
         "reactions": reactions or [],
     }
 
