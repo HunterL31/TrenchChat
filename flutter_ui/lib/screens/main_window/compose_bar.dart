@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../../theme/tokens.dart';
+import '../../widgets/emoji_text.dart';
 import '../../widgets/tc_button.dart';
 import '../../widgets/tc_icon.dart';
 
@@ -28,8 +29,9 @@ class ComposeBar extends StatefulWidget {
   /// mobile keyboards have no Enter-to-send.
   final bool compact;
 
-  /// Opens the emoji picker; the returned compose token (a unicode char or
-  /// `:name@hash:`) is inserted at the cursor.
+  /// Opens the emoji picker. A unicode char is inserted as-is; a custom
+  /// emoji's `:name@hash:` is shown as just `:name:` and re-expanded on send,
+  /// so a 64-char hash never sits in the user's draft.
   final Future<String?> Function()? pickEmoji;
 
   @override
@@ -39,6 +41,10 @@ class ComposeBar extends StatefulWidget {
 class _ComposeBarState extends State<ComposeBar> {
   final TextEditingController _controller = TextEditingController();
   final FocusNode _focusNode = FocusNode();
+
+  /// Emoji name -> hash for customs picked into the current draft, so the
+  /// short `:name:` the user sees goes out as an unambiguous `:name@hash:`.
+  final Map<String, String> _draftEmoji = {};
 
   @override
   void initState() {
@@ -70,16 +76,32 @@ class _ComposeBarState extends State<ComposeBar> {
     final text = _controller.text;
     if (text.trim().isEmpty || !widget.enabled) return;
     _controller.clear();
-    final ok = await widget.onSend(text);
-    if (!ok && mounted && _controller.text.isEmpty) {
+    final ok = await widget.onSend(_expandDraftEmoji(text));
+    if (ok) {
+      _draftEmoji.clear();
+    } else if (mounted && _controller.text.isEmpty) {
+      // Restore the short form, and keep the mapping so a retry still expands.
       _controller.text = text;
       _controller.selection = TextSelection.collapsed(offset: text.length);
     }
   }
 
+  /// Rewrites each `:name:` picked this draft back to `:name@hash:`. Tokens
+  /// that already carry a hash, and names the user typed themselves, are left
+  /// exactly as they are.
+  String _expandDraftEmoji(String text) {
+    if (_draftEmoji.isEmpty) return text;
+    return text.replaceAllMapped(emojiTokenRe, (m) {
+      if (m.group(2) != null) return m[0]!;
+      final hash = _draftEmoji[m.group(1)!];
+      return hash == null ? m[0]! : ':${m.group(1)}@$hash:';
+    });
+  }
+
   Future<void> _insertEmoji() async {
-    final token = await widget.pickEmoji?.call();
-    if (token == null || !mounted) return;
+    final picked = await widget.pickEmoji?.call();
+    if (picked == null || !mounted) return;
+    final token = _shorten(picked);
     final text = _controller.text;
     final selection = _controller.selection;
     final start = selection.isValid ? selection.start : text.length;
@@ -87,6 +109,15 @@ class _ComposeBarState extends State<ComposeBar> {
     _controller.text = text.replaceRange(start, end, token);
     _controller.selection = TextSelection.collapsed(offset: start + token.length);
     _focusNode.requestFocus();
+  }
+
+  /// `:name@hash:` -> `:name:`, remembering the hash. Anything else (a unicode
+  /// emoji, an unrecognised string) is inserted unchanged.
+  String _shorten(String picked) {
+    final m = emojiTokenRe.matchAsPrefix(picked);
+    if (m == null || m.end != picked.length || m.group(2) == null) return picked;
+    _draftEmoji[m.group(1)!] = m.group(2)!;
+    return ':${m.group(1)}:';
   }
 
   @override
