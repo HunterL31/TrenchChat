@@ -27,8 +27,8 @@ from asserts import (
     wait_until, ScenarioFailure,
 )
 from flows import (
-    go_offline, go_online, invite_only_channel, public_channel,
-    DISCOVERY_TIMEOUT, NEGATIVE_HOLD_SECS,
+    go_offline, go_online, invite_only_channel, public_channel, set_link_profile,
+    BROADBAND, LORA_FAST, DISCOVERY_TIMEOUT, NEGATIVE_HOLD_SECS,
 )
 from scenario import PROBE, scenario
 
@@ -346,7 +346,7 @@ def h11(env):
     link_state, not a working call."""
     a, b = env.peers("A", "B")
     ch = public_channel(a, [b], "h11-voice")
-    env.orch.link_profile(b.tag, "lora_fast")
+    profile = set_link_profile(env, b, LORA_FAST)
 
     joined_a = a.join_voice(ch)
     joined_b = b.join_voice(ch)
@@ -376,6 +376,7 @@ def h11(env):
             p.set_test_tone(False)
 
     notes = {
+        "profile": profile,
         "both_joined": joined_a and joined_b,
         "link_state": state,
         "reached_streaming": streaming,
@@ -412,5 +413,5 @@ def h11(env):
 
     for p in (a, b):
         p.leave_voice()
-    env.orch.link_profile(b.tag, "broadband")
+    set_link_profile(env, b, BROADBAND)
     return notes

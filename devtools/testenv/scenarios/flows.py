@@ -141,6 +141,38 @@ def invite_only_channel(owner, invitees, name: str, permissions=None) -> str:
     return channel_hash
 
 
+# Real profile names from link_profiles.py. Getting one wrong used to leave
+# the link unshaped without failing, so scenarios import these rather than
+# writing the string.
+BROADBAND = "broadband"
+SATELLITE = "satellite"
+SERIAL = "serial"
+LORA_FAST = "lora_fast"
+LORA_LONG = "lora_long"
+PACKET_RADIO = "packet_radio"
+LOSSY = "lossy"
+CUSTOM = "custom"
+
+
+def set_link_profile(env, peer, profile: str, **overrides) -> str:
+    """Shape a tester's link and confirm the orchestrator applied it.
+
+    link_profile() already raises on a rejected name; this also reads the
+    shaping back, so a scenario can never claim to have run on a degraded
+    link that stayed at broadband. Returns the applied summary.
+    """
+    env.orch.link_profile(peer.tag, profile, **overrides)
+    status = env.orch.status()["testers"][peer.tag]
+    if status["link_profile"] != profile:
+        raise ScenarioFailure(
+            f"{peer.tag} reports profile {status['link_profile']!r} after being "
+            f"set to {profile!r}"
+        )
+    if profile != BROADBAND and status["link_summary"] == "unshaped":
+        raise ScenarioFailure(f"{peer.tag} is still unshaped on {profile!r}")
+    return status["link_summary"]
+
+
 def go_offline(peer) -> None:
     peer.go_offline()
     wait_until(lambda: not peer.net_status()["online"], f"{peer.tag}'s link to drop")

@@ -38,7 +38,7 @@ tester's API (8801+) or one orchestrator call (8800).
 | **Permissions** | edit channel perms (`send_message`, `invite`, `kick`, `manage_roles`, `manage_channel`, `create_channel`, `full_sync`), edit server perms |
 | **Messaging** | send message, reply to message, send image, add reaction, remove reaction, import custom emoji |
 | **Lifecycle** | go offline (link drop), go online, kill process, start process, restart, reset tester, kill/start hub |
-| **Link** | set profile: broadband, satellite, serial 9600, lora_fast (SF7), lora_slow (SF10), packet radio, flaky (15% loss), custom |
+| **Link** | set profile — the names `link_profiles.py` actually defines: `broadband`, `satellite`, `serial` (9600), `lora_fast` (SF7), `lora_long` (SF10), `packet_radio`, `lossy` (15% loss), `custom` (explicit bitrate/latency/jitter/loss) |
 
 ## Observable vocabulary
 
@@ -92,6 +92,12 @@ Getting these wrong produces phantom failures.
   `subscribers_converged()` waits for the third.
 - **A sync backfill is a chain, not an exchange.** Wait for sync state to leave
   `syncing` rather than sampling after a fixed sleep.
+- **Shaping a link can fail silently, so read it back.** An unknown profile name
+  answers 400 and leaves the link at broadband. Scenarios once passed `"flaky"`
+  and `"serial9600"` — neither exists — and three degraded-link scenarios ran
+  unshaped while reporting they had exercised a bad radio. `set_link_profile()`
+  now raises on rejection *and* reads `link_summary` back from the orchestrator,
+  and every scenario reports the shaping it actually ran under.
 
 ## Matrix
 
@@ -301,11 +307,16 @@ requests silently by design, so from the requester's side "refused", "lost" and
 
 | ID | Peers | Actions | Expected result |
 |---|---|---|---|
-| D1 | A,B,C,D | A on `flaky` (15% loss); A sends 10 | ✅ All three peers converge in 5.1s — loss is absorbed by retry |
-| D2 | A,B | B on `serial9600`; A sends 5 | ✅ Delivered in 0.5s. Slow-but-lossless is not a stall |
-| D3 | A,B,C,D | A broadband, B satellite, C `lora_fast`, D `serial9600`; each sends 1 | ✅ Converged in 125.8s — the slowest link sets the pace, nobody strands |
-| D4 | A,B | B on `flaky`, dropped offline mid-burst | ✅ Caught up all 10 in 23.6s |
-| D5 | A,B,C,D | All four on `lora_fast` | ✅ Converged in 7.1s. The documented "falls behind" case is real but recovers |
+| D1 | A,B,C,D | A on `lossy` (62.5 kbps, 250±150ms, 15% loss); A sends 10 | ✅ All three peers converge in **101.7s** |
+| D2 | A,B | B on `serial` (9.6 kbps, lossless); A sends 5 | ✅ Delivered in 3.0s. Slow-but-lossless is not a stall |
+| D3 | A,B,C,D | A broadband, B `satellite`, C `lora_fast`, D `serial`; each sends 1 | ✅ Converged in 4.5s across four differently-shaped links |
+| D4 | A,B | B on `lossy`, dropped offline mid-burst | ✅ Caught up all 10 in 28.2s |
+| D5 | A,B,C,D | All four on `lora_fast` (5.5 kbps) | ✅ Converged in 12.6s |
+| D6 | A,B,C | B on `lossy`; A sends 15 — **the link never drops** | ✅ Converged in 19.6s. The README's stated reason for the lossy profile: retry and hints reached the way a bad radio does, not by killing a link |
+| D7 | A,B | B on `packet_radio` (AX.25 1200 baud, 5% loss) | ✅ Three messages in 10.1s. The worst link the app claims to support for text |
+| D8 | A,B | B on `lora_long` (SF10, 1.0 kbps) | ✅ Three messages in 11.1s |
+| D9 | A,B | `custom` profile with explicit bitrate/latency/jitter/loss | ✅ Applied exactly as asked (32 kbps · 120±20ms · 8% loss); converged in 2.0s |
+| D10 | A,B | Retune B broadband → `serial` mid-run | ✅ Shaping applies live: 0.5s then 1.0s, no restart needed |
 
 ### E — Servers
 
@@ -473,7 +484,7 @@ Built and running, in `devtools/testenv/scenarios/`:
 | `scen_restart.py` | Family G |
 | `scen_voice.py` | Family H |
 
-All eight families are built: 68 scenarios, 52 strict and 16 probes.
+All eight families are built: 73 scenarios, 55 strict and 18 probes.
 
 ```bash
 .venv/bin/python devtools/testenv/scenarios/runner.py                # everything
@@ -510,20 +521,20 @@ stays the merge gate.
 
 ## Status
 
-All eight families built and run: **68 scenarios, 52 strict and 16 probes.**
+All eight families built and run: **73 scenarios, 55 strict and 18 probes.**
 
 | Family | Scenarios | Result |
 |---|---|---|
 | A — public channels | 10 (6 strict, 4 probes) | All passing, three consecutive clean runs |
 | B — invite-only and membership | 13 (12 strict, 1 probe) | 11/12 — **B11 fails** on a confirmed permission gap |
 | C — offline and sync | 10 (9 strict, 1 probe) | 8/9 — **C2 fails**, root-caused. C11 fixed |
-| D — degraded links | 5 (2 strict, 3 probes) | All passing |
+| D — degraded links | 10 (5 strict, 5 probes) | All passing, on genuinely shaped links |
 | E — servers | 6 (5 strict, 1 probe) | All passing |
 | F — reactions, presence, identity | 8 (7 strict, 1 probe) | All passing; F3's prediction refuted |
 | G — restart and ordering | 5 (3 strict, 2 probes) | All passing; G1 confirmed, then fixed; G3 confirmed |
 | H — live group voice | 11 (8 strict, 3 probes) | All passing; H4, H5 and H11 recorded gaps |
 
-**50 of 52 strict scenarios pass.** The two that do not — B11 and C2 — are real
+**53 of 55 strict scenarios pass.** The two that do not — B11 and C2 — are real
 defects, left strict and failing on purpose, so `--family B` and `--family C`
 exit non-zero until they are resolved.
 

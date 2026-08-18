@@ -338,7 +338,22 @@ class Orchestrator:
         return self._post(f"/testers/{tag}/reset")
 
     def link_profile(self, tag: str, profile: str, **overrides) -> dict:
-        return self._post(f"/testers/{tag}/link_profile", {"profile": profile, **overrides})
+        """Retune a tester's simulated link, raising if the shaper refused.
+
+        An unknown profile name answers 400 and leaves the link unshaped. That
+        used to pass silently, so scenarios named "flaky" and "serial9600" --
+        neither of which exists -- ran on broadband while reporting that they
+        had exercised a degraded link.
+        """
+        r = self._client.post(f"{self._base}/testers/{tag}/link_profile",
+                              json={"profile": profile, **overrides})
+        body = r.json() if r.content else {}
+        if r.status_code != 200 or not body.get("ok"):
+            raise RuntimeError(
+                f"link profile {profile!r} rejected for {tag}: "
+                f"HTTP {r.status_code} {body}"
+            )
+        return body
 
     def hub_kill(self) -> dict:
         return self._post("/hub/kill")
