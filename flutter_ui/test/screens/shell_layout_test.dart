@@ -127,4 +127,28 @@ void main() {
     expect(find.byType(ServerRail, skipOffstage: true), findsOneWidget);
     expect(find.byType(ChannelColumn, skipOffstage: true), findsOneWidget);
   });
+
+  testWidgets('every tab lays out on a phone viewport without overflowing', (tester) async {
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+
+    final backend = FakeBackend();
+    final state = AppState(baseUrl: backend.baseUrl, httpClient: backend.client());
+    addTearDown(state.dispose);
+    state.loading = false;
+
+    await tester.pumpWidget(MaterialApp(
+      home: Scaffold(body: MainWindow(state: state)),
+    ));
+    await tester.pump();
+
+    for (final icon in [TcIcons.map, TcIcons.iface, TcIcons.users, TcIcons.hash]) {
+      // The members button shares the users icon, so take the tab strip's own
+      // copy -- it is the last one in the header.
+      await tester.tap(find.byWidgetPredicate((w) => w is TcIcon && w.icon == icon).last);
+      await tester.pump(const Duration(milliseconds: 100));
+      expect(tester.takeException(), isNull, reason: 'tab $icon overflowed at 390px');
+    }
+  });
 }

@@ -96,16 +96,18 @@ class _IfaceTabState extends State<IfaceTab> {
         children: [
           Row(
             children: [
-              Text(
-                'RETICULUM INTERFACES',
-                style: TextStyle(
-                  fontSize: TCType.textCaption,
-                  color: TCColors.textSecondary,
-                  letterSpacing:
-                      TCType.letterSpacingFor(TCType.textCaption, TCType.trackingWider),
+              Expanded(
+                child: Text(
+                  'RETICULUM INTERFACES',
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: TCType.textCaption,
+                    color: TCColors.textSecondary,
+                    letterSpacing:
+                        TCType.letterSpacingFor(TCType.textCaption, TCType.trackingWider),
+                  ),
                 ),
               ),
-              const Spacer(),
               TcGhostButton(icon: TcIcons.plus, label: 'ADD', onPressed: _add),
               const SizedBox(width: 6),
               TcGhostButton(icon: TcIcons.sync, label: 'REFRESH', onPressed: _refresh),
@@ -138,28 +140,31 @@ class _IfaceTabState extends State<IfaceTab> {
             ),
           ],
           const SizedBox(height: 12),
-          _headerRow(),
-          Container(height: 1, color: TCColors.borderDefault),
           Expanded(
-            child: interfaces == null
-                ? Center(
-                    child: Text(
-                      'LOADING…',
-                      style:
-                          TextStyle(fontSize: TCType.textCaption, color: TCColors.textTertiary),
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                // Seven columns squeezed into a phone viewport ellipsize to
+                // nothing, so the table keeps its minimum width and pans
+                // sideways instead.
+                final width = constraints.maxWidth < _minTableWidth
+                    ? _minTableWidth
+                    : constraints.maxWidth;
+                return SingleChildScrollView(
+                  scrollDirection: Axis.horizontal,
+                  child: SizedBox(
+                    width: width,
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        _headerRow(),
+                        Container(height: 1, color: TCColors.borderDefault),
+                        Expanded(child: _tableBody(interfaces)),
+                      ],
                     ),
-                  )
-                : interfaces.isEmpty
-                    ? Center(
-                        child: Text(
-                          'No interfaces configured.',
-                          style: TextStyle(
-                              fontSize: TCType.textBodySm, color: TCColors.textTertiary),
-                        ),
-                      )
-                    : ListView(
-                        children: [for (final i in interfaces) _interfaceRow(i)],
-                      ),
+                  ),
+                );
+              },
+            ),
           ),
         ],
       ),
@@ -172,6 +177,27 @@ class _IfaceTabState extends State<IfaceTab> {
   static const _flexStatus = 2;
   static const _flexBytes = 2;
   static const _actionsWidth = 200.0;
+  static const _minTableWidth = 620.0;
+
+  Widget _tableBody(List<RetInterface>? interfaces) {
+    if (interfaces == null) {
+      return Center(
+        child: Text(
+          'LOADING…',
+          style: TextStyle(fontSize: TCType.textCaption, color: TCColors.textTertiary),
+        ),
+      );
+    }
+    if (interfaces.isEmpty) {
+      return Center(
+        child: Text(
+          'No interfaces configured.',
+          style: TextStyle(fontSize: TCType.textBodySm, color: TCColors.textTertiary),
+        ),
+      );
+    }
+    return ListView(children: [for (final i in interfaces) _interfaceRow(i)]);
+  }
 
   Widget _headerRow() {
     Widget cell(String label, int flex) => Expanded(

@@ -20,9 +20,13 @@ class TcContextMenuItem {
   final VoidCallback onTap;
 }
 
+/// Margin kept between the menu and the screen edge when it has to be nudged
+/// back on-screen.
+const double _edgeMargin = 8;
+
 /// Shows [items] as a themed popup anchored at the global [position] (e.g.
-/// from `onSecondaryTapDown`'s `details.globalPosition`). Dismisses on
-/// tap-outside, or after an item is chosen.
+/// from `onSecondaryTapDown`'s or `onLongPressStart`'s `details.globalPosition`).
+/// Dismisses on tap-outside, or after an item is chosen.
 Future<void> showTcContextMenu({
   required BuildContext context,
   required Offset position,
@@ -47,10 +51,11 @@ Future<void> showTcContextMenu({
             onSecondaryTap: dismiss,
           ),
         ),
-        Positioned(
-          left: position.dx,
-          top: position.dy,
-          child: _TcContextMenuPanel(items: items, onSelected: dismiss),
+        Positioned.fill(
+          child: CustomSingleChildLayout(
+            delegate: _TcContextMenuLayout(position),
+            child: _TcContextMenuPanel(items: items, onSelected: dismiss),
+          ),
         ),
       ],
     ),
@@ -58,6 +63,57 @@ Future<void> showTcContextMenu({
 
   overlay.insert(entry);
   return completer.future;
+}
+
+/// Wraps [child] so both a right-click and a long-press open the same menu.
+/// The long-press path is what makes these menus reachable on touch devices,
+/// which have no secondary tap at all. Renders [child] alone when [items] is
+/// empty, so a row with nothing to offer stays gesture-free.
+class TcContextMenuRegion extends StatelessWidget {
+  const TcContextMenuRegion({super.key, required this.items, required this.child});
+
+  final List<TcContextMenuItem> items;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    if (items.isEmpty) return child;
+    void show(Offset position) =>
+        showTcContextMenu(context: context, position: position, items: items);
+    return GestureDetector(
+      onSecondaryTapDown: (details) => show(details.globalPosition),
+      onLongPressStart: (details) => show(details.globalPosition),
+      child: child,
+    );
+  }
+}
+
+/// Anchors the panel at the tap point, pulling it back inside the screen when
+/// it would otherwise run off the right or bottom edge -- the common case on a
+/// phone, where the tap point is often close to both.
+class _TcContextMenuLayout extends SingleChildLayoutDelegate {
+  const _TcContextMenuLayout(this.position);
+
+  final Offset position;
+
+  @override
+  BoxConstraints getConstraintsForChild(BoxConstraints constraints) => constraints.loosen();
+
+  @override
+  Offset getPositionForChild(Size size, Size childSize) {
+    double axis(double wanted, double child, double available) {
+      if (child + _edgeMargin >= available) return 0;
+      return wanted.clamp(0, available - child - _edgeMargin).toDouble();
+    }
+
+    return Offset(
+      axis(position.dx, childSize.width, size.width),
+      axis(position.dy, childSize.height, size.height),
+    );
+  }
+
+  @override
+  bool shouldRelayout(_TcContextMenuLayout oldDelegate) => oldDelegate.position != position;
 }
 
 class _TcContextMenuPanel extends StatelessWidget {

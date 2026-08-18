@@ -326,16 +326,28 @@ class _MapTabState extends State<MapTab> {
                       TCType.letterSpacingFor(TCType.textCaption, TCType.trackingWider),
                 ),
               ),
-              const Spacer(),
-              if (data != null) ...[
-                _statChip('${data.nodeCount} NODES'),
-                const SizedBox(width: 6),
-                _statChip('${data.pathCount} PATHS'),
-                const SizedBox(width: 6),
-                _statChip('${data.interfaceCount} IFACES'),
-                const SizedBox(width: 8),
-              ],
-              TcGhostButton(icon: TcIcons.sync, label: 'REFRESH', onPressed: _refresh),
+              const SizedBox(width: 12),
+              // End-aligned Wrap rather than a Spacer: identical on a wide
+              // window, and the chips drop to a second line on a phone
+              // instead of overflowing the row.
+              Expanded(
+                child: Wrap(
+                  alignment: WrapAlignment.end,
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  runSpacing: 6,
+                  children: [
+                    if (data != null) ...[
+                      _statChip('${data.nodeCount} NODES'),
+                      const SizedBox(width: 6),
+                      _statChip('${data.pathCount} PATHS'),
+                      const SizedBox(width: 6),
+                      _statChip('${data.interfaceCount} IFACES'),
+                      const SizedBox(width: 8),
+                    ],
+                    TcGhostButton(icon: TcIcons.sync, label: 'REFRESH', onPressed: _refresh),
+                  ],
+                ),
+              ),
             ],
           ),
           if (_error != null) ...[
@@ -382,33 +394,49 @@ class _MapTabState extends State<MapTab> {
                 label: 'PEERS ONLY',
                 onChanged: (v) => setState(() => _peersOnly = v),
               ),
-              const Spacer(),
-              for (final (label, quality) in const [
-                ('EXCELLENT', 4),
-                ('GOOD', 3),
-                ('FAIR', 2),
-                ('POOR', 1),
-                ('UNKNOWN', 0),
-              ]) ...[
-                Container(width: 8, height: 8, color: mapQualityColor(quality)),
-                const SizedBox(width: 4),
-                Text(
-                  label,
-                  style: TextStyle(
-                    fontSize: TCType.textMicro,
-                    color: TCColors.textSecondary,
-                    letterSpacing:
-                        TCType.letterSpacingFor(TCType.textMicro, TCType.trackingWide),
-                  ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Wrap(
+                  alignment: WrapAlignment.end,
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  runSpacing: 6,
+                  children: [
+                    for (final (label, quality) in const [
+                      ('EXCELLENT', 4),
+                      ('GOOD', 3),
+                      ('FAIR', 2),
+                      ('POOR', 1),
+                      ('UNKNOWN', 0),
+                    ])
+                      _legendEntry(label, quality),
+                  ],
                 ),
-                const SizedBox(width: 10),
-              ],
+              ),
             ],
           ),
         ],
       ),
     );
   }
+
+  /// One legend swatch + label. The trailing gap rides inside the entry so an
+  /// end-aligned Wrap keeps the same right margin the old Row had.
+  Widget _legendEntry(String label, int quality) => Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(width: 8, height: 8, color: mapQualityColor(quality)),
+          const SizedBox(width: 4),
+          Text(
+            label,
+            style: TextStyle(
+              fontSize: TCType.textMicro,
+              color: TCColors.textSecondary,
+              letterSpacing: TCType.letterSpacingFor(TCType.textMicro, TCType.trackingWide),
+            ),
+          ),
+          const SizedBox(width: 10),
+        ],
+      );
 
   Widget _statChip(String label) => Container(
         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
