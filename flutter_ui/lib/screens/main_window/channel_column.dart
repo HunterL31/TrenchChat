@@ -181,21 +181,16 @@ class ChannelColumn extends StatelessWidget {
                 for (final p in online)
                   Padding(
                     padding: const EdgeInsets.symmetric(vertical: 3),
-                    child: GestureDetector(
-                      onSecondaryTapDown: onAddFriend == null
-                          ? null
-                          : (details) => showTcContextMenu(
-                                context: context,
-                                position: details.globalPosition,
-                                items: [
-                                  TcContextMenuItem(
-                                    label: friendHashes.contains(p.identityHash)
-                                        ? 'Edit friend…'
-                                        : 'Add friend…',
-                                    onTap: () => onAddFriend!(p.identityHash),
-                                  ),
-                                ],
-                              ),
+                    child: TcContextMenuRegion(
+                      items: [
+                        if (onAddFriend != null)
+                          TcContextMenuItem(
+                            label: friendHashes.contains(p.identityHash)
+                                ? 'Edit friend…'
+                                : 'Add friend…',
+                            onTap: () => onAddFriend!(p.identityHash),
+                          ),
+                      ],
                       child: Row(
                         children: [
                           const StatusDot(status: PresenceStatus.online, size: 10),

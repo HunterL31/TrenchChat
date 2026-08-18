@@ -82,6 +82,25 @@ void main() {
     expect(find.text('DEL'), findsNWidgets(2));
   });
 
+  testWidgets('the table keeps its minimum width and pans sideways on a phone viewport',
+      (tester) async {
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+
+    await tester.pumpWidget(_harness(state));
+    await settle(tester);
+
+    // Squeezed to 390 the seven columns would ellipsize away; the row keeps
+    // its full width behind a horizontal scroll instead.
+    expect(tester.getSize(find.text('NAME').hitTestable()).width, greaterThan(0));
+    final scroller = find.byWidgetPredicate(
+      (w) => w is SingleChildScrollView && w.scrollDirection == Axis.horizontal,
+    );
+    expect(scroller, findsOneWidget);
+    expect(tester.getSize(find.byType(SizedBox).at(0)).width, isNot(390));
+  });
+
   testWidgets('delete asks for inline confirmation before calling the API', (tester) async {
     backend.routes['DELETE /reticulum/interfaces/TrenchChat%20Hub'] = {'ok': true};
     await tester.pumpWidget(_harness(state));

@@ -368,24 +368,23 @@ class _MessageRowWidgetState extends State<_MessageRowWidget> {
       );
     }
 
-    final Widget withFriendMenu = onAddFriend == null
-        ? content
-        : GestureDetector(
-            onSecondaryTapDown: (details) => showTcContextMenu(
-              context: context,
-              position: details.globalPosition,
-              items: [
-                TcContextMenuItem(
-                  label:
-                      friendHashes.contains(message.senderHash) ? 'Edit friend…' : 'Add friend…',
-                  onTap: () => onAddFriend!(message.senderHash),
-                ),
-              ],
-            ),
-            child: content,
-          );
-
-    return _withReactButton(withFriendMenu);
+    return _withReactButton(TcContextMenuRegion(
+      items: [
+        // The hover-only react button above is unreachable without a mouse,
+        // so touch users get the same action from the long-press menu.
+        if (widget.onReact != null)
+          TcContextMenuItem(
+            label: 'React…',
+            onTap: () => widget.onReact!(message.messageId),
+          ),
+        if (onAddFriend != null)
+          TcContextMenuItem(
+            label: friendHashes.contains(message.senderHash) ? 'Edit friend…' : 'Add friend…',
+            onTap: () => onAddFriend!(message.senderHash),
+          ),
+      ],
+      child: content,
+    ));
   }
 }
 

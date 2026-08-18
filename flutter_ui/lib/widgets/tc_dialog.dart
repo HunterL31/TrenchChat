@@ -32,10 +32,20 @@ Future<T?> showTcDialog<T>({
     pageBuilder: (context, animation, secondaryAnimation) {
       // showGeneralDialog gives us no Material ancestor (unlike showDialog's
       // Dialog wrapper) -- TextField and other Material widgets need one.
-      return Center(
-        child: Material(
-          type: MaterialType.transparency,
-          child: builder(context),
+      return Material(
+        type: MaterialType.transparency,
+        child: SafeArea(
+          // viewInsets keeps the panel above an open soft keyboard; the scroll
+          // view keeps a modal taller than the viewport reachable instead of
+          // overflowing off a short phone screen.
+          child: Padding(
+            padding: EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom),
+            child: Center(
+              child: SingleChildScrollView(
+                child: builder(context),
+              ),
+            ),
+          ),
         ),
       );
     },

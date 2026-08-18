@@ -100,11 +100,7 @@ class _FriendRow extends StatefulWidget {
 class _FriendRowState extends State<_FriendRow> {
   bool _hover = false;
 
-  void _showMenu(BuildContext context, Offset position) {
-    showTcContextMenu(
-      context: context,
-      position: position,
-      items: [
+  List<TcContextMenuItem> _menuItems(BuildContext context) => [
         TcContextMenuItem(
           label: 'Edit friend…',
           onTap: () =>
@@ -114,9 +110,7 @@ class _FriendRowState extends State<_FriendRow> {
           label: 'Remove friend',
           onTap: () => widget.state.removeFriend(widget.friend.identityHash),
         ),
-      ],
-    );
-  }
+      ];
 
   @override
   Widget build(BuildContext context) {
@@ -125,8 +119,8 @@ class _FriendRowState extends State<_FriendRow> {
       cursor: SystemMouseCursors.click,
       onEnter: (_) => setState(() => _hover = true),
       onExit: (_) => setState(() => _hover = false),
-      child: GestureDetector(
-        onSecondaryTapDown: (details) => _showMenu(context, details.globalPosition),
+      child: TcContextMenuRegion(
+        items: _menuItems(context),
         child: Container(
           color: _hover ? TCColors.bgHover : Colors.transparent,
           padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
