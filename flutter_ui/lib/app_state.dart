@@ -21,6 +21,10 @@ import 'api/models/settings.dart';
 import 'api/models/voice.dart';
 import 'api/ws.dart';
 
+/// How long reaction events for one channel are coalesced before the
+/// channel's messages are re-fetched.
+const Duration _reactionRefreshWindow = Duration(milliseconds: 250);
+
 class AppState extends ChangeNotifier {
   /// [httpClient] lets tests inject a mock transport; the real app leaves it
   /// null and gets a standard IO client.
@@ -65,6 +69,11 @@ class AppState extends ChangeNotifier {
   /// capture/playback failed -- we stay in the call, listening-only.
   bool voiceAudioError = false;
   Timer? _voicePollTimer;
+
+  /// Per-channel debounce for reaction refreshes. A sync backfill or a burst
+  /// of reactions fires one event each; without coalescing that is one full
+  /// message re-fetch per reaction.
+  final Map<String, Timer> _reactionRefreshTimers = {};
 
   String? get voiceChannelHash => voiceStatus.channel;
   LinkQualityLevel get voiceQualityLevel => voiceOverallLevel(voiceStatus);
@@ -604,6 +613,11 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Applies a socket event directly, so tests can exercise event handling
+  /// without standing up a WebSocket.
+  @visibleForTesting
+  void applyEvent(TcEvent event) => _onEvent(event);
+
   void _onEvent(TcEvent event) {
     switch (event) {
       case MessageEvent(:final channelHash, :final message):
@@ -644,10 +658,8 @@ class AppState extends ChangeNotifier {
             notifyListeners();
           }));
         }
-      case ReactionUpdatedEvent():
-        // Reaction counts arrive on the next message re-fetch; the mockup's
-        // chips aren't latency-sensitive enough to warrant a per-reaction poll.
-        break;
+      case ReactionUpdatedEvent(:final channelHash):
+        _scheduleReactionRefresh(channelHash);
       case ChannelJoinedEvent():
         break;
       case ChannelDiscoveredEvent():
@@ -690,8 +702,23 @@ class AppState extends ChangeNotifier {
     }
   }
 
+  /// Re-fetch a channel's messages so updated reaction chips render, at most
+  /// once per [_reactionRefreshWindow] however many reactions land in it.
+  void _scheduleReactionRefresh(String channelHash) {
+    if (!messagesByChannel.containsKey(channelHash)) return;
+    if (_reactionRefreshTimers.containsKey(channelHash)) return;
+    _reactionRefreshTimers[channelHash] = Timer(_reactionRefreshWindow, () {
+      _reactionRefreshTimers.remove(channelHash);
+      unawaited(refreshMessages(channelHash));
+    });
+  }
+
   @override
   void dispose() {
+    for (final t in _reactionRefreshTimers.values) {
+      t.cancel();
+    }
+    _reactionRefreshTimers.clear();
     _voicePollTimer?.cancel();
     _sub?.cancel();
     _socket.close();
