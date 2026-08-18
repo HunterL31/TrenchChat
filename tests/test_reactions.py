@@ -613,7 +613,7 @@ class TestEmojiRequestResponse:
 
         # A response only applies to an emoji we asked for; this is the
         # state _request_emoji leaves behind.
-        mgr._pending_emoji_requests.add(emoji_hash)
+        mgr._pending_emoji_requests[emoji_hash] = time.time()
         lxm = _make_lxm({
             F_MSG_TYPE: MT_EMOJI_RESPONSE,
             F_EMOJI_HASH: bytes.fromhex(emoji_hash),
@@ -639,7 +639,7 @@ class TestEmojiRequestResponse:
 
         # A response only applies to an emoji we asked for; this is the
         # state _request_emoji leaves behind.
-        mgr._pending_emoji_requests.add(emoji_hash)
+        mgr._pending_emoji_requests[emoji_hash] = time.time()
         lxm = _make_lxm({
             F_MSG_TYPE:   MT_EMOJI_RESPONSE,
             F_EMOJI_HASH: bytes.fromhex(emoji_hash),
@@ -665,7 +665,7 @@ class TestEmojiRequestResponse:
 
         # A response only applies to an emoji we asked for; this is the
         # state _request_emoji leaves behind.
-        mgr._pending_emoji_requests.add(emoji_hash)
+        mgr._pending_emoji_requests[emoji_hash] = time.time()
         lxm = _make_lxm({
             F_MSG_TYPE:   MT_EMOJI_RESPONSE,
             F_EMOJI_HASH: bytes.fromhex(emoji_hash),
@@ -732,7 +732,7 @@ class TestEmojiRequestResponse:
 
         # A response only applies to an emoji we asked for; this is the
         # state _request_emoji leaves behind.
-        mgr._pending_emoji_requests.add(emoji_hash)
+        mgr._pending_emoji_requests[emoji_hash] = time.time()
         lxm = _make_lxm({
             F_MSG_TYPE: MT_EMOJI_RESPONSE,
             F_EMOJI_HASH: bytes.fromhex(emoji_hash),
@@ -822,7 +822,7 @@ class TestAdversarialReactions:
 
         # A response only applies to an emoji we asked for; this is the
         # state _request_emoji leaves behind.
-        mgr._pending_emoji_requests.add(emoji_hash)
+        mgr._pending_emoji_requests[emoji_hash] = time.time()
         lxm = _make_lxm({
             F_MSG_TYPE: MT_EMOJI_RESPONSE,
             F_EMOJI_HASH: bytes.fromhex(emoji_hash),

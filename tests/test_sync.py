@@ -1742,6 +1742,8 @@ class TestReactionSync:
             reply_to=None,
             last_seen_id=None,
             received_at=ts,
+            author_sig=sign_as(peer.identity.hash_hex, ch_hash, msg_id, ts,
+                               content),
         )
 
     def test_synced_message_carries_its_reactions(self, peer_factory):
