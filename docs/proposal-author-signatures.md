@@ -105,11 +105,12 @@ failures on rename. It stays unsigned and untrusted.
 ### 3.2 Protocol field
 
 ```
-F_AUTHOR_SIG = 0x60   # bytes[64] — Ed25519 signature over author_digest()
+F_AUTHOR_SIG = 0x70   # bytes[64] — Ed25519 signature over author_digest()
 ```
 
 `0x50–0x5F` is the sync-status range and an author signature is not sync
-status, so this opens a new `0x60–0x6F` "message integrity" range. Per
+status, and `0x60–0x6F` is now the voice block, so this opens a new
+`0x70–0x7F` "message integrity" range. Per
 `.claude/rules/protocol-constants.md` this needs an entry in the registry table
 and in the field-layout docstring at the top of `core/messaging.py`.
 

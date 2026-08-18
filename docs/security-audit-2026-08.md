@@ -12,12 +12,11 @@ noted briefly; the new material is the findings and the test plan below.
 > landed, and §6 below for what was deliberately left. The findings are kept
 > here as written, so the reasoning behind each fix stays on record.
 
-Baseline test run at audit time: `675 passed, 1 skipped` on the non-GUI suite
-(704 after this work, same pre-existing Qt failures).
-The 10 failures + 9 collection errors seen in this environment are all Qt/GUI
-tests that need `libEGL.so.1` and a display (legacy client) — environmental,
-not code defects. The core, sync, adversarial, and API-adjacent suites are all
-green.
+Baseline test run at audit time: `675 passed, 1 skipped` on the non-GUI suite.
+The Qt/GUI failures seen alongside it were environmental — a missing
+`libEGL.so.1` — and not code defects; with that library installed the whole
+suite runs. After this work, rebased onto main (voice, touch UI, link
+shaping): **879 passed, 1 skipped, no failures**, GUI tests included.
 
 ---
 
