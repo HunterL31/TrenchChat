@@ -176,6 +176,7 @@
   .msg { margin-bottom: 8px; }
   .msg .sender { font-weight: 700; margin-right: 6px; }
   .msg .content { color: var(--text); }
+  .inline-emoji { height: 18px; width: 18px; object-fit: contain; vertical-align: middle; }
   .msg .self .sender { color: #ffa057; }
   .msg-row { display: flex; align-items: flex-start; gap: 2px; }
   .msg-body { flex: 1; min-width: 0; }
@@ -1182,7 +1183,7 @@ async function renderMessages(tag) {
         <div class="msg-body">
           ${quoteHtml}
           <span class="sender">${escapeHtml(m.sender_name || m.sender_hash.slice(0, 8))}</span>
-          <span class="content">${escapeHtml(m.content)}</span>
+          <span class="content">${renderContent(tag, m.content)}</span>
           <button class="reply-btn" onclick='setReplyTarget("${tag}", ${JSON.stringify(m.message_id)}, ${JSON.stringify(m.sender_name || m.sender_hash.slice(0, 8))}, ${JSON.stringify(m.content || "(image)")})'>reply</button>
           <button class="react-btn" onclick="toggleEmojiPicker(event, '${tag}', '${m.message_id}')">+react</button>
           ${m.has_image ? `<img class="attached" src="${apiBase(tag)}/channels/${state[tag].activeChannel}/messages/${m.message_id}/image">` : ''}
@@ -1243,6 +1244,31 @@ function sniffImageMime(b64) {
   if (bytes.startsWith('\xff\xd8')) return 'image/jpeg';
   if (bytes.startsWith('GIF8')) return 'image/gif';
   return 'image/png';
+}
+
+// Mirrors emoji_text.dart's emojiSpans: :name@hexhash: resolves by hash,
+// legacy :name: by an exact name match. Unresolved tokens stay literal text.
+const EMOJI_TOKEN_RE = /:([a-zA-Z0-9_-]+)(?:@([0-9a-fA-F]{64}))?:/g;
+
+function renderContent(tag, content) {
+  const text = content || '';
+  const lib = emojiLibrary[tag] || [];
+  if (!text.includes(':') || lib.length === 0) return escapeHtml(text);
+
+  let out = '';
+  let last = 0;
+  for (const m of text.matchAll(EMOJI_TOKEN_RE)) {
+    const [name, hash] = [m[1], m[2]];
+    const entry = hash
+      ? lib.find(e => e.emoji_hash.toLowerCase() === hash.toLowerCase())
+      : lib.find(e => e.name === name);
+    if (!entry) continue;
+    out += escapeHtml(text.slice(last, m.index));
+    out += `<img class="inline-emoji" title=":${escapeHtml(entry.name)}"
+        src="data:${sniffImageMime(entry.image_data_b64)};base64,${entry.image_data_b64}">`;
+    last = m.index + m[0].length;
+  }
+  return out === '' ? escapeHtml(text) : out + escapeHtml(text.slice(last));
 }
 
 function reactionChipHtml(tag, messageId, r) {
