@@ -253,6 +253,32 @@ class Peer:
             f"/channels/{channel_hash}/messages/{message_id}/reactions/{emoji_hash}"
         )
 
+    # --- voice ---
+
+    def join_voice(self, channel_hash: str) -> bool:
+        return self._post(f"/channels/{channel_hash}/voice/join")["ok"]
+
+    def leave_voice(self) -> bool:
+        return self._post("/voice/leave")["ok"]
+
+    def set_voice_muted(self, muted: bool) -> dict:
+        return self._post("/voice/mute", {"muted": muted})
+
+    def voice_roster(self, channel_hash: str) -> list[dict]:
+        return self._get(f"/channels/{channel_hash}/voice/roster")
+
+    def voice_status(self) -> dict:
+        return self._get("/voice/status")
+
+    def set_test_tone(self, enabled: bool) -> tuple[int, dict]:
+        """Drive the headless TonePipeline. 409 when no pipeline is active."""
+        return self.post_status("/voice/test_tone", {"enabled": enabled})
+
+    def voice_link_states(self, channel_hash: str) -> dict[str, str]:
+        """{identity_hash: link_state} for a channel's voice roster."""
+        return {e["identity_hash"]: e["link_state"]
+                for e in self.voice_roster(channel_hash)}
+
     # --- link control ---
 
     def net_status(self) -> dict:

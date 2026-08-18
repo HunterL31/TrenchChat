@@ -41,6 +41,7 @@ import scen_links   # noqa: F401,E402  (registers family D)
 import scen_servers # noqa: F401,E402  (registers family E)
 import scen_social  # noqa: F401,E402  (registers family F)
 import scen_restart # noqa: F401,E402  (registers family G)
+import scen_voice   # noqa: F401,E402  (registers family H)
 
 _ORCHESTRATOR = _TESTENV_DIR / "orchestrator.py"
 _BOOT_TIMEOUT = 180.0

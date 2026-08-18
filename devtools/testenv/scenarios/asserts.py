@@ -144,6 +144,32 @@ def roster_views(peers, channel_hash: str) -> dict[str, dict[str, str]]:
     }
 
 
+def voice_rosters(peers, channel_hash: str) -> dict[str, dict[str, str]]:
+    """Each peer's voice roster as {tag: link_state}, for failure detail."""
+    by_hash = {p.hash: p.tag for p in peers}
+    return {
+        p.tag: {by_hash.get(h, h[:8]): state
+                for h, state in p.voice_link_states(channel_hash).items()}
+        for p in peers
+    }
+
+
+def voice_rosters_agree(peers, channel_hash: str, expected,
+                        timeout: float = DEFAULT_TIMEOUT) -> float:
+    """Every peer's voice roster names exactly the expected participants.
+
+    Roster convergence is eventually consistent by design: a joiner is learned
+    from its own voice_join, and existing occupants from the voice_state each
+    unicasts back. Asserting it needs polling, not a single read.
+    """
+    want = {p.hash for p in expected}
+    return wait_until(
+        lambda: all(set(p.voice_link_states(channel_hash)) == want for p in peers),
+        f"{[p.tag for p in peers]} voice rosters to name {[p.tag for p in expected]}",
+        timeout,
+    )
+
+
 def diff_report(peers, channel_hash: str, expected: set[str]) -> dict[str, dict]:
     """Per-peer missing/extra against an expected message set, for failure detail."""
     report = {}

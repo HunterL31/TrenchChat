@@ -341,6 +341,54 @@ requests silently by design, so from the requester's side "refused", "lost" and
 | G4 | A,B,C | A admits C and sends a chat message immediately after | ✅ Landed in 0.0s on this run — the race is real but did not bite. Kept as a probe |
 | G5 | A,B,C | A single tester is reset (data wiped, same slot) | ✅ Returns as a new identity holding nothing, and the owner keeps a subscriber row for an identity that will never reappear |
 
+### H — Live group voice
+
+Voice has two planes and the pytest suite only reaches one. Signalling is
+LXMF, but frames travel over a full mesh of real RNS Links — one per
+participant pair, each authorised on its own VP_HELLO/VP_ACCEPT handshake.
+`tests/fake_voice.py` doubles that transport; nothing under `tests/` dials a
+real link, and `smoke_test.py` covers exactly one pair. This family is the
+three- and four-peer cases, and the states `docs/voice.md` is explicit about.
+
+| ID | Peers | Actions | Expected result |
+|---|---|---|---|
+| H1 | A,B,C | All three join voice on a public channel | ✅ Full mesh in 2.0–3.0s; every peer `streaming` to every other |
+| H2 | A,B,C,D | Three in voice, then D joins | ✅ D learns all three occupants and they learn D — roster in 0.0s, mesh in 3.0s. Exercises the unicast `voice_state` reply path three times over |
+| H3 | A,B,C | C leaves voice cleanly | ✅ Dropped from every roster in 0.0s; C reports no session |
+| H4 | A,B,C | C is **killed** mid-call, sending no `voice_leave` | ⚠️ Expires only on the roster TTL: **27.6s** here, and the testenv shortens that TTL to 30s from the production **180s**. A crashed participant lingers up to 3 minutes in the real client |
+| H5 | A,B,C | C's link drops mid-call | ⚠️ Kept in the roster rather than hidden, as the doc requires — but downgrades to `connecting`, not `unreachable`, and was still `connecting` 15.1s later. A UI would show "connecting…" indefinitely for someone who is gone |
+| H6 | A,C | Member without `voice_chat` joins voice; then granted | ✅ Refused, then admitted. The mirror pair — a refusal only means something if the grant demonstrably works |
+| H7 | A,C | Channel whose permissions predate voice (no `voice_chat` key) | ✅ Fails closed for the member, owner always passes, re-saving permissions admits the member |
+| H8 | A,B,C | A revokes `voice_chat` from member while C is streaming | ✅ Cut off in **0.5s**, matching the doc's ~1s re-authorisation sweep. Same claim `test_adversarial.py` makes against the transport double, here over real links |
+| H9 | A,B,C | All three stream the test tone for 8s | ✅ Each peer receives from both others: **384 frames, 0.0% loss, ~2ms jitter**. The full-mesh version of the smoke test's single pair |
+| H10 | A,B,C | Five chat messages while the voice mesh streams | ✅ Text delivery unaffected (0.0s), despite sharing the interface |
+| H11 | A,B | Voice over a `lora_fast` link, with the tone measured | ⚠️ **Two findings**: the link reports `streaming` and `loss_pct` reports ~6% while only ~8% of frames arrive. See below |
+
+#### H11: the quality metric cannot see a starved link
+
+`docs/voice.md` says voice "is not viable over LoRa or packet radio" and that
+the UI should surface that rather than mask it. Both halves are worth checking,
+and the run says the first is right while the second does not currently work.
+
+Over `lora_fast` (SF7, 5.5 kbps) the mesh link **comes up and reports
+`streaming`**, then delivers 24–46 frames against ~384 expected across three
+runs — 6–12% of the audio — at 100–240ms jitter. Voice is indeed unusable, but
+nothing the UI is told says so:
+
+- `link_state` reads `streaming`, the same value a perfect link gets.
+- `loss_pct` reads **0.0–7.7%**, because it counts gaps between frames that
+  *arrived*. Frames that never reach the wire are not gaps, so a link
+  delivering 8% of the audio reports a loss figure implying 94% got through.
+
+`docs/voice.md` designates `rx_quality`'s `loss_pct` as "the backend signal for
+a per-peer connection-quality indicator in the UI". A UI built on it would show
+a healthy connection on an unusable call. The signal that does show it is
+delivery ratio — frames received against the ~48/s the codec produces — which
+`frame_stats()` has the raw numbers for but does not expose as a rate.
+
+Neither is a crash, so H11 stays a probe. Both are worth a decision before the
+voice UI ships a quality indicator.
+
 ## Findings
 
 Everything the matrix turned up, across all seven families.
@@ -359,6 +407,8 @@ Everything the matrix turned up, across all seven families.
 | **C2** — a node whose own link recovers has no resync trigger. `on_peer_appeared` fires only on a *received announce*, and RNS suppresses announce replays for a destination the transport has already propagated | **Root-caused, not fixed.** Fails ~half of runs (4/8, 4/6). The fix needs a local link-recovery signal the production client does not currently have — see below |
 | **B11** — `kick` and `manage_roles` are grantable to any role, but a non-admin's member-list document is rejected by every recipient | **Confirmed.** The grant succeeds locally and does nothing on the network. Resolution is a product decision — see below |
 | **Subscribe/invite have no retry** — `_send_raw` in both `subscription.py` and `invite.py` drops the message when the path is unresolved, and nothing re-sends it | **Confirmed twice.** C4's setup hit it for `MT_SUBSCRIBE` (the owner never registered the joiner); G3 measured it for invites (first attempt dropped, 2 needed). Only re-issuing recovers |
+| **H11** — `loss_pct`, the metric `docs/voice.md` designates for the UI's per-peer quality indicator, cannot see a starved link. It counts gaps between frames that arrived, so a link delivering 8% of the audio reports ~6% loss, and `link_state` still reads `streaming` | **Confirmed** across three runs. Delivery ratio (frames received against ~48/s) is the signal that shows it; `frame_stats()` has the raw counts but exposes no rate |
+| **H5 / H4** — a voice participant whose link drops shows `connecting` indefinitely rather than `unreachable`, and one whose process dies lingers for the roster TTL — 180s in production | **Confirmed.** Neither is wrong, but a UI showing "connecting…" for three minutes after someone crashed is not the honest state `docs/voice.md` asks for |
 | **A5** — a public-channel join fires no sync request; backfill waits on the next peer announce | **Confirmed.** 0 messages at join, backfill at 1.0s / 9.1s tracking the 10s heartbeat. Up to 60s in the real client |
 | **A6** — `full_sync` has no effect on public channels; any subscriber can pull full history | **Confirmed.** Identical backfill with and without the grant. The UI offers the toggle regardless |
 
@@ -421,8 +471,9 @@ Built and running, in `devtools/testenv/scenarios/`:
 | `scen_servers.py` | Family E |
 | `scen_social.py` | Family F |
 | `scen_restart.py` | Family G |
+| `scen_voice.py` | Family H |
 
-All seven families are built: 57 scenarios, 44 strict and 13 probes.
+All eight families are built: 68 scenarios, 52 strict and 16 probes.
 
 ```bash
 .venv/bin/python devtools/testenv/scenarios/runner.py                # everything
@@ -459,7 +510,7 @@ stays the merge gate.
 
 ## Status
 
-All seven families built and run: **57 scenarios, 44 strict and 13 probes.**
+All eight families built and run: **68 scenarios, 52 strict and 16 probes.**
 
 | Family | Scenarios | Result |
 |---|---|---|
@@ -470,8 +521,9 @@ All seven families built and run: **57 scenarios, 44 strict and 13 probes.**
 | E — servers | 6 (5 strict, 1 probe) | All passing |
 | F — reactions, presence, identity | 8 (7 strict, 1 probe) | All passing; F3's prediction refuted |
 | G — restart and ordering | 5 (3 strict, 2 probes) | All passing; G1 confirmed, then fixed; G3 confirmed |
+| H — live group voice | 11 (8 strict, 3 probes) | All passing; H4, H5 and H11 recorded gaps |
 
-**42 of 44 strict scenarios pass.** The two that do not — B11 and C2 — are real
+**50 of 52 strict scenarios pass.** The two that do not — B11 and C2 — are real
 defects, left strict and failing on purpose, so `--family B` and `--family C`
 exit non-zero until they are resolved.
 
