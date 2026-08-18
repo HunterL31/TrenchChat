@@ -2692,3 +2692,27 @@ class TestAdversarialRelayTampering:
         self._serve(bob, carol, ch_hash, [genuine])
         assert bob.storage.message_exists("relay-ok-1"), \
             "a genuine message relayed by a third peer was rejected"
+
+    def test_a_rejected_batch_does_not_report_the_channel_as_caught_up(
+            self, peer_factory):
+        """Silent rejection must not read as "up to date".
+
+        A relay that serves nothing but tampered rows would otherwise leave the
+        channel claiming SYNCED while the real history is still missing.
+        """
+        from trenchchat.core.sync_status import SyncState
+
+        alice, bob, carol, ch_hash = self._seed(peer_factory)
+        ts = time.time() - 60
+        genuine = self._row(alice.identity.hash_hex, ch_hash, "status-1", ts,
+                            "the real text")
+        tampered = dict(genuine)
+        tampered["content"] = "rewritten"
+
+        self._serve(bob, carol, ch_hash, [tampered])
+
+        assert not bob.storage.message_exists("status-1")
+        status = bob.sync_mgr.status.get_status(ch_hash)
+        assert status["state"] != SyncState.SYNCED.value, \
+            "a channel whose only answer was rejected reported itself synced"
+        assert status["peers"][0]["messages_rejected"] == 1

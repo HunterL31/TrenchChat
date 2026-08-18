@@ -304,9 +304,18 @@ requester would otherwise re-request the same window forever. Refusing an
 oversized or bomb image clears the signature with it, so the row stays
 readable locally and simply never relays.
 
+Rejection is also reported rather than silent. `SyncStatusTracker` counted a
+peer as having answered regardless of whether any of its rows survived, so a
+relay serving nothing but tampered history left the channel reading as
+SYNCED while the real messages were still missing. Rows refused for failing
+verification now mark the channel INCOMPLETE and are counted per peer
+(`messages_rejected`); rows withheld by our own tenure checks are not, since
+history we are not entitled to is not history we are missing.
+
 Covered by `tests/test_authorship.py` (digest pinned against a committed
-vector) and `TestAdversarialRelayTampering` (edit, re-thread, id-squat,
-invented message, each with a positive control).
+vector), `TestAdversarialRelayTampering` (edit, re-thread, id-squat, invented
+message, and the status claim, each with a positive control) and
+`TestRejectedRowsAreNotCaughtUp`.
 
 ## Still open
 

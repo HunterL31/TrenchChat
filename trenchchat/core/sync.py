@@ -778,6 +778,10 @@ class SyncManager:
             my_role = self._storage.get_role(channel_hash_hex, my_hex)
             full_sync = has_permission(perms, my_role, FULL_SYNC)
         inserted_count = 0
+        # Rows refused for failing verification -- as opposed to ones our own
+        # tenure checks withheld, which we are simply not entitled to. Only
+        # the former means history is missing.
+        rejected_count = 0
         accepted_ts: list[float] = []
         failed_ts: float | None = None
         for m in messages:
@@ -795,6 +799,7 @@ class SyncManager:
                         f"timestamp {m.get('timestamp')!r}",
                         RNS.LOG_WARNING,
                     )
+                    rejected_count += 1
                     continue
                 msg_ts = checked_ts
 
@@ -846,6 +851,7 @@ class SyncManager:
                         f"signature missing or invalid",
                         RNS.LOG_WARNING,
                     )
+                    rejected_count += 1
                     continue
 
                 if image_data is not None and (
@@ -928,6 +934,7 @@ class SyncManager:
         self._status.response_received(
             channel_hash_hex, peer_hex,
             received=len(messages), inserted=inserted_count, truncated=truncated,
+            rejected=rejected_count,
         )
 
         # A truncated response whose scan ran entirely through rows withheld

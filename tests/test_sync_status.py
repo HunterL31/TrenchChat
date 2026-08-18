@@ -336,3 +336,50 @@ class TestSyncManagerIntegration:
             lambda: bob.sync_mgr.status.get_state(ch_hash) == SyncState.INCOMPLETE,
             timeout=5,
         ), "a missed-delivery hint naming Bob did not mark his channel incomplete"
+
+
+class TestRejectedRowsAreNotCaughtUp:
+    """An answer we threw away is not an answer.
+
+    Verification refusals mean history is missing, so a batch we rejected in
+    full must not leave the channel reading as up to date.
+    """
+
+    def test_all_rejected_reports_incomplete_not_synced(self, tracker):
+        ch, peer = CHANNEL, PEER
+
+        tracker.request_sent(ch, peer)
+        tracker.response_received(ch, peer, received=50, inserted=0,
+                                  truncated=False, rejected=50)
+
+        assert tracker.get_state(ch) == SyncState.INCOMPLETE, \
+            "a batch we rejected in full reported the channel as caught up"
+
+    def test_a_clean_empty_answer_still_reports_synced(self, tracker):
+        """Positive control: nothing-to-send must still settle the channel."""
+        ch, peer = CHANNEL, PEER
+
+        tracker.request_sent(ch, peer)
+        tracker.response_received(ch, peer, received=0, inserted=0,
+                                  truncated=False)
+
+        assert tracker.get_state(ch) == SyncState.SYNCED
+
+    def test_partial_rejection_also_counts_as_a_gap(self, tracker):
+        ch, peer = CHANNEL, PEER
+
+        tracker.request_sent(ch, peer)
+        tracker.response_received(ch, peer, received=10, inserted=9,
+                                  truncated=False, rejected=1)
+
+        assert tracker.get_state(ch) == SyncState.INCOMPLETE
+
+    def test_rejected_count_is_reported_per_peer(self, tracker):
+        ch, peer = CHANNEL, PEER
+
+        tracker.request_sent(ch, peer)
+        tracker.response_received(ch, peer, received=3, inserted=1,
+                                  truncated=False, rejected=2)
+
+        status = tracker.get_status(ch)
+        assert status["peers"][0]["messages_rejected"] == 2
