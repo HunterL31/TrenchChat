@@ -486,6 +486,29 @@ F5 and F6 in particular may be latency rather than loss — neither scenario
 waits indefinitely, and both payloads are large relative to the link. Worth
 re-running at a higher scale before treating them as defects.
 
+### SF10 (1 kbps) finds a bandwidth floor, not more bugs
+
+A targeted `--link-profile lora_long` pass over the rows most likely to expose
+an ordering problem (A5, B3, C4, C11, G3, G4) was cut short after the first
+two, because both failed the same uninformative way:
+
+| | |
+|---|---|
+| A5 | timed out delivering **5 messages to two subscribers** in 600s — before the scenario's subject was reached |
+| B3 | timed out waiting for the owner to admit a member in 250s — the invite chain, not the `full_sync` question |
+
+Both failures are in *setup*, not in the behaviour under test, so they say
+"1 kbps cannot carry this workload" rather than anything about the logic. That
+is a real limit worth knowing — and it is consistent with D7/D8, where three
+short messages *do* cross `packet_radio` and `lora_long` in ~10s. The floor is
+not the link, it is the size of the control-plane operations: signed
+member-list documents and multi-message batches.
+
+Running the remaining four rows would have cost roughly another hour to
+re-confirm the same ceiling, so the pass was stopped. SF7 is the useful radio
+profile for this suite; SF10 belongs in family D, where the payloads are sized
+for it.
+
 ## Findings
 
 Everything the matrix turned up, across all seven families.
