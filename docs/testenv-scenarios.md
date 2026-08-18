@@ -400,6 +400,92 @@ delivery ratio — frames received against the ~48/s the codec produces — whic
 Neither is a crash, so H11 stays a probe. Both are worth a decision before the
 voice UI ships a quality indicator.
 
+## The LoRa pass
+
+Every family was re-run with `--link-profile lora_fast` (SF7, 5.5 kbps, 60±20ms,
+1% loss). Same scenario bodies, timeouts scaled 6×. This is where the suite
+earned its keep: five scenarios that pass on broadband fail on a radio, one
+fails on broadband and *passes* on a radio, and one probe turns from a latency
+footnote into an outright failure.
+
+| Family | Broadband | LoRa SF7 | New on LoRa |
+|---|---|---|---|
+| A — public channels | 6/6 | 6/6 | A5 probe now returns **nothing at all** |
+| B — invite-only | 11/12 | 10/12 | **B7** |
+| C — sync | 8/9 | 7/9 | **C8**, **C11**; C2 *inverts* |
+| D — degraded links | 5/5 | n/a (already shaped) | — |
+| E — servers | 5/5 | 5/5 | — |
+| F — social | 7/7 | 5/7 | **F5**, **F6** |
+| G — restart | 3/3 | 3/3 | — |
+
+Servers (E) and restart/persistence (G) are unaffected — including G1, the
+persisted subscriber-list counter. Everything that broke is a *propagation*
+path: sync, member-list documents, avatars, directory entries.
+
+### C11 regresses on a slow link, with the same fingerprint
+
+The four-way partition reconcile fails again at SF7, and the failure looks
+exactly like the one the `sync_served` fix cured:
+
+```
+A missing: B-alone-0, C-alone-0, D-alone-0
+B missing: A-alone-0
+C missing: A-alone-0
+D missing: A-alone-0, B-alone-0
+```
+
+Only the *first* message of each peer's pair, never the second. So the fix
+removed one path to that failure and a second one remains, reachable only when
+the reconcile takes long enough.
+
+The likely mechanism is a constant that does not scale:
+`PEER_TRUST_HORIZON_SECS = 300` widens a responder's sweep 300 seconds behind
+the requester's claimed watermark, which is what lets it serve history it
+acquired since the requester last asked. But how far back that needs to reach
+depends on how long the exchange takes, and that scales with link speed —
+broadband reconciles in **31.7s** (comfortably inside 300s), SF7 took **1141s**
+(far outside it). A wall-clock constant guarding a link-speed-dependent window
+is the shape of the bug. Unverified, but it is where to look.
+
+### C2 inverts — it passes on LoRa and fails on broadband
+
+The scenario that has failed on broadband since it was written passed at SF7 in
+**75s**, well inside the broadband budget it never met. That is not patience:
+it recovered faster in wall-clock on the slower link.
+
+That reframes C2 from "sync sometimes doesn't answer" to a **timing race** that
+a slow link happens to win. It is the strongest lead the open C2 investigation
+has had, and it argues the cause is in the reconnect/request cadence rather
+than in the responder's authorisation.
+
+### A5 escalates from latency to failure
+
+On broadband a late public-channel joiner backfills in 1–9s, riding the owner's
+next announce. At SF7 it received **nothing in 723 seconds**, with
+`sync_state: unknown` — meaning no sync request was ever issued, not that one
+went unanswered.
+
+The known gap (public join fires no sync request) was previously worth "up to
+60s of blindness in the real client". On a radio it looks closer to "may never
+backfill at all", which is a materially different bug.
+
+### The other three
+
+- **B7** — a promoted admin invites a fourth peer; the four rosters never
+  converge in 360s (broadband: 30s). Member-list documents are signed msgpack
+  blobs carrying the whole roster, and the invite → join-request → document
+  chain is four hops.
+- **C8** — granting `full_sync` mid-session does not re-open withheld history:
+  D still held 0 of 3 after 1375s (broadband: 3.0s). The re-ask depends on
+  noticing an entitlement change on the *next* request, which is announce-driven.
+- **F5 / F6** — an avatar removal never reaches a peer, and a display-name
+  change never reaches the directory within 360s. Both propagate as
+  announce/metadata rather than as retried messages.
+
+F5 and F6 in particular may be latency rather than loss — neither scenario
+waits indefinitely, and both payloads are large relative to the link. Worth
+re-running at a higher scale before treating them as defects.
+
 ## Findings
 
 Everything the matrix turned up, across all seven families.
@@ -496,6 +582,31 @@ All eight families are built: 73 scenarios, 55 strict and 18 probes.
 
 `--repeat` re-runs the selection to characterise a flake; `--attach` uses an
 orchestrator you already have running.
+
+### Link-profile passes
+
+`--link-profile` shapes every tester before each scenario, so the same
+scenario bodies run again on a radio instead of broadband:
+
+```bash
+.venv/bin/python devtools/testenv/scenarios/runner.py --family C --link-profile lora_fast
+.venv/bin/python devtools/testenv/scenarios/runner.py --scenario G3 G4 --link-profile lora_long
+```
+
+This is a matrix dimension rather than duplicated rows: one scenario body, two
+link conditions, so a difference between the passes is a real behavioural
+difference rather than two tests that drifted apart.
+
+Assertion timeouts scale automatically from the profile (`--timeout-scale`
+overrides), because every timeout in the suite is tuned for broadband and a
+radio pass should fail on behaviour, not on patience. The scale factors come
+from the measured family D timings — the same 10-message batch takes 5s on
+broadband and 102s on `lossy`.
+
+One caveat: shaping applies live, but the matching bitrate hint written into
+each tester's RNS config is only read at boot, so it stays stale for the run.
+The shaper still enforces the rate on the wire, which is what these passes are
+about; RNS's own announce pacing is the part that does not see it.
 
 Needs both `requirements.txt` and `devtools/testenv/requirements.txt` in the
 venv. Exits 0 if every strict scenario passed.

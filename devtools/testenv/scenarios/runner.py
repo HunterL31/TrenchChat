@@ -30,7 +30,7 @@ for _p in (str(_SCENARIOS_DIR), str(_TESTENV_DIR)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from asserts import ScenarioFailure  # noqa: E402
+from asserts import set_timeout_scale, ScenarioFailure  # noqa: E402
 from peer import Orchestrator, Peer  # noqa: E402
 from scenario import PROBE, REGISTRY, Result  # noqa: E402
 
@@ -135,6 +135,38 @@ def _wait_environment(orch: Orchestrator, testers: int) -> Env:
     return Env(peers, orch)
 
 
+# How much slower a profile makes everything the scenarios wait on. Chosen
+# from the measured family D timings (broadband 5s -> lossy 102s for the same
+# batch), rounded up so a pass fails on behaviour rather than on patience.
+_PROFILE_SCALE = {
+    "broadband": 1.0,
+    "satellite": 2.0,
+    "lossy": 6.0,
+    "serial": 4.0,
+    "lora_fast": 6.0,
+    "lora_long": 10.0,
+    "packet_radio": 10.0,
+}
+
+
+def _apply_link_profile(orch: Orchestrator, env: Env, profile: str) -> None:
+    """Shape every tester, verifying the shaping actually took.
+
+    Live shaping only: the matching bitrate hint written into each tester's RNS
+    config is read at boot, so it stays stale for the run. The shaper still
+    enforces the rate on the wire, which is the effect these passes are about.
+    """
+    status = orch.status()["testers"]
+    for tag in status:
+        orch.link_profile(tag, profile)
+    applied = orch.status()["testers"]
+    for tag, entry in applied.items():
+        if entry["link_profile"] != profile:
+            raise RuntimeError(f"{tag} did not take profile {profile!r}")
+        if profile != "broadband" and entry["link_summary"] == "unshaped":
+            raise RuntimeError(f"{tag} is still unshaped on {profile!r}")
+
+
 def _reset(orch: Orchestrator, env: Env) -> None:
     """Wipe every tester back to a fresh identity between scenarios."""
     orch.reset()
@@ -210,6 +242,13 @@ def main() -> int:
                         help="use an already-running orchestrator instead of spawning one")
     parser.add_argument("--repeat", type=int, default=1,
                         help="run the selection N times, to characterise a flake")
+    parser.add_argument("--link-profile",
+                        help="shape every tester to this profile before each scenario "
+                             "(broadband, satellite, serial, lora_fast, lora_long, "
+                             "packet_radio, lossy), re-running the same bodies on a radio")
+    parser.add_argument("--timeout-scale", type=float, default=None,
+                        help="multiply every assertion timeout; defaults to a value "
+                             "chosen from --link-profile")
     parser.add_argument("--json", help="write results to this path")
     parser.add_argument("--tester-log",
                         help="capture every tester's RNS output at debug level here")
@@ -228,6 +267,14 @@ def main() -> int:
                                  "stop it or pass --attach")
             proc = _boot(args.testers, args.tester_log)
         env = _wait_environment(orch, args.testers)
+        scale = args.timeout_scale
+        if scale is None:
+            scale = _PROFILE_SCALE.get(args.link_profile or "broadband", 1.0)
+        set_timeout_scale(scale)
+        if args.link_profile:
+            print(f"shaping every tester to {args.link_profile} "
+                  f"(timeouts x{scale:g})")
+            _apply_link_profile(orch, env, args.link_profile)
         print(f"environment ready; running {len(chosen)} scenario(s)\n")
 
         first = True
@@ -238,6 +285,8 @@ def main() -> int:
                 if not first:
                     print("  resetting environment...")
                     _reset(orch, env)
+                    if args.link_profile:
+                        _apply_link_profile(orch, env, args.link_profile)
                 first = False
                 print(f"-> {scen.id}  {scen.title}")
                 result = _run_one(scen, env)

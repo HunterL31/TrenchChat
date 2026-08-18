@@ -12,6 +12,20 @@ DEFAULT_TIMEOUT = 30.0
 SLOW_TIMEOUT = 90.0
 _INTERVAL = 0.5
 
+# Every scenario's timeouts are tuned for broadband. A run shaped to a radio
+# profile scales them rather than editing each one, so the same scenario body
+# means the same thing on both -- only the patience changes.
+_TIMEOUT_SCALE = 1.0
+
+
+def set_timeout_scale(scale: float) -> None:
+    global _TIMEOUT_SCALE
+    _TIMEOUT_SCALE = max(1.0, float(scale))
+
+
+def timeout_scale() -> float:
+    return _TIMEOUT_SCALE
+
 
 class ScenarioFailure(AssertionError):
     """A scenario's expected result did not hold."""
@@ -20,6 +34,7 @@ class ScenarioFailure(AssertionError):
 def wait_until(pred, what: str, timeout: float = DEFAULT_TIMEOUT,
                interval: float = _INTERVAL) -> float:
     """Poll until pred() is truthy. Returns seconds elapsed, raises on timeout."""
+    timeout *= _TIMEOUT_SCALE
     started = time.time()
     deadline = started + timeout
     last_error: Exception | None = None
