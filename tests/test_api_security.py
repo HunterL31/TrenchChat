@@ -13,6 +13,7 @@ by any web page the user happens to visit.
 """
 
 import sys
+import warnings
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -26,7 +27,14 @@ if str(_TESTENV_DIR) not in sys.path:
 # so the API tests skip on a bare install. The bind-address tests read source
 # and need none of them, so they still run.
 try:
-    from fastapi.testclient import TestClient
+    with warnings.catch_warnings():
+        # Starlette's TestClient prefers httpx2 and warns when it falls back
+        # to httpx. It still works, and pinning a new transport dependency to
+        # silence a warning is the worse trade. Suppressed here rather than in
+        # pytest.ini, which would have to name a class from a dev-only
+        # dependency and would break collection wherever it isn't installed.
+        warnings.simplefilter("ignore")
+        from fastapi.testclient import TestClient
 
     from api import TOKEN_HEADER, create_app, generate_token
     _HAVE_BACKEND_DEPS = True
