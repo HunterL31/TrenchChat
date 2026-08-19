@@ -51,15 +51,18 @@ import RNS
 import LXMF
 import msgpack
 
+from trenchchat.core.control_retry import ControlRetryQueue
 from trenchchat.core.identity import Identity
-from trenchchat.core.authorship import verify_message
+from trenchchat.core.authorship import (
+    public_key_for, remember_relayed_key, verify_message,
+)
 from trenchchat.core.image import MAX_IMAGE_BYTES, inbound_image_is_sane
 from trenchchat.core.messaging import Messaging
 from trenchchat.core.permissions import (
     FULL_SYNC, has_permission, is_open_join, permissions_from_json,
 )
 from trenchchat.core.protocol import (
-    F_CHANNEL_HASH, F_MSG_TYPE,
+    F_AUTHOR_KEYS, F_CHANNEL_HASH, F_MSG_TYPE,
     F_SYNC_WINDOW_START, F_SYNC_MESSAGES, F_SYNC_TRUNCATED, F_SYNC_SCAN_CURSOR,
     F_MISSED_FOR, F_MISSED_MSG_ID,
     MT_MISSED_DELIVERY, MT_SYNC_REQUEST, MT_SYNC_RESPONSE,
@@ -186,6 +189,9 @@ class SyncManager:
         # resets it, which is acceptable for a soft rate limit.
         self._deep_sync_last_served: dict[tuple[str, str], tuple[float, str]] = {}
         self._deep_sync_lock = threading.Lock()
+        # Held no longer than a requester will accept an answer for: past
+        # that they discard it as unsolicited and ask again anyway.
+        self._retry = ControlRetryQueue("sync", SYNC_RESPONSE_WINDOW_SECS)
 
         # (channel_hash_hex, peer_hex) -> continuation requests chained so far
         self._continuations: dict[tuple[str, str], int] = {}
@@ -303,6 +309,7 @@ class SyncManager:
         self._router.release_quarantined(peer_hex)
 
         self._messaging.flush_pending(peer_hex)
+        self._retry.flush(peer_hex, self._send_raw)
         self._flush_pending_hints(peer_hex)
 
         # Send sync requests for every channel we share with this peer, from
@@ -520,6 +527,9 @@ class SyncManager:
             F_SYNC_MESSAGES:  packed,
             F_SYNC_TRUNCATED: truncated,
         }
+        author_keys = self._author_keys_for(rows)
+        if author_keys:
+            response_fields[F_AUTHOR_KEYS] = author_keys
         # Lets the requester's next request resume past a run of rows it was
         # scanned but not entitled to, without touching its persisted
         # watermark -- see _handle_sync_response's resume_ts handling.
@@ -784,6 +794,7 @@ class SyncManager:
         if has_tenure and channel:
             my_role = self._storage.get_role(channel_hash_hex, my_hex)
             full_sync = has_permission(perms, my_role, FULL_SYNC)
+        self._learn_author_keys(fields.get(F_AUTHOR_KEYS))
         inserted_count = 0
         # Rows refused for failing verification -- as opposed to ones our own
         # tenure checks withheld, which we are simply not entitled to. Only
@@ -1045,6 +1056,38 @@ class SyncManager:
                     not self._storage.emoji_exists(emoji_key):
                 self._reaction_mgr.request_emoji(responder_hex, emoji_key)
 
+    def _author_keys_for(self, rows: list) -> dict:
+        """Public keys for the authors of a batch, one entry per author.
+
+        Sent with the batch because the requester usually cannot obtain them
+        any other way: resolving an author needs an announce, and an author who
+        has left the network will never send one again. Everything they wrote
+        would then be unverifiable -- and so silently dropped -- for every peer
+        who arrives after they go.
+
+        One map per response rather than a key per row: a batch is usually a
+        handful of authors and up to fifty messages, and on a 1 kbps radio the
+        difference is the whole response over again.
+        """
+        keys: dict[str, bytes] = {}
+        for row in rows:
+            author = row["sender_hash"]
+            if not author or author in keys:
+                continue
+            key = public_key_for(self._storage, author)
+            if key:
+                keys[author] = key
+        return keys
+
+    def _learn_author_keys(self, keys) -> None:
+        """Cache the keys a responder sent with its batch, checking each one."""
+        if not isinstance(keys, dict):
+            return
+        for author, key in keys.items():
+            if isinstance(author, bytes):
+                author = author.decode(errors="replace")
+            remember_relayed_key(self._storage, author, key)
+
     @staticmethod
     def _row_to_dict(row) -> dict:
         d = {
@@ -1266,6 +1309,13 @@ class SyncManager:
             delivery_dest_hash = RNS.Destination.hash(identity_hash, "lxmf", "delivery")
             dest_identity = RNS.Identity.recall(delivery_dest_hash)
             if dest_identity is None:
+                # A peer that just came back asks everyone for what it missed,
+                # and the answer dies here: the responder can read the request
+                # but cannot yet address a reply. The requester sees only
+                # silence, which it cannot tell from a refusal, and nothing
+                # ever re-sends the answer (C2 in docs/testenv-scenarios.md).
+                RNS.Transport.request_path(delivery_dest_hash)
+                self._retry.queue(dest_hex, fields)
                 return False
             dest = RNS.Destination(
                 dest_identity,

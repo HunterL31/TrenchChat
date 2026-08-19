@@ -24,6 +24,7 @@ import RNS
 import LXMF
 import msgpack
 
+from trenchchat.core.control_retry import ControlRetryQueue
 from trenchchat.core.identity import Identity
 from trenchchat.core.protocol import (
     F_CHANNEL_HASH, F_MSG_TYPE, F_SUBSCRIBER_LIST,
@@ -83,6 +84,10 @@ class SubscriptionManager:
             storage.get_all_subscriber_list_versions()
         )
         self._version_lock = threading.Lock()
+        # A dropped MT_SUBSCRIBE left the owner unaware of a subscriber for
+        # good: nothing else ever re-sends one, so the joiner was silently
+        # absent from every send until they joined again.
+        self._retry = ControlRetryQueue("subscription")
 
         router.add_delivery_callback(self._on_lxmf_message)
 
@@ -290,14 +295,20 @@ class SubscriptionManager:
             F_CHANNEL_HASH: bytes.fromhex(channel_hash_hex),
         })
 
-    def _send_raw(self, dest_hex: str, fields: dict):
+    def flush_pending(self, dest_hex: str) -> int:
+        """Re-send control messages held while this peer had no known path."""
+        return self._retry.flush(dest_hex, self._send_raw)
+
+    def _send_raw(self, dest_hex: str, fields: dict) -> bool:
+        """Send a control message. Returns False if it had to be queued instead."""
         try:
             identity_hash = bytes.fromhex(dest_hex)
             delivery_dest_hash = RNS.Destination.hash(identity_hash, "lxmf", "delivery")
             dest_identity = RNS.Identity.recall(delivery_dest_hash)
             if dest_identity is None:
                 RNS.Transport.request_path(delivery_dest_hash)
-                return
+                self._retry.queue(dest_hex, fields)
+                return False
             dest = RNS.Destination(
                 dest_identity,
                 RNS.Destination.OUT,
@@ -313,5 +324,7 @@ class SubscriptionManager:
             )
             lxm.fields = fields
             self._router.send(lxm)
+            return True
         except Exception as e:
             RNS.log(f"TrenchChat: subscription control send error: {e}", RNS.LOG_WARNING)
+            return False

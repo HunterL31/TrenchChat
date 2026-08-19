@@ -21,6 +21,7 @@ import RNS
 
 from trenchchat.config import DATA_DIR, Config
 from trenchchat.core import lockbox
+from trenchchat.core.connectivity import LinkWatcher
 from trenchchat.core.identity import Identity
 from trenchchat.core.storage import Storage
 from trenchchat.core.channel import ChannelManager
@@ -265,6 +266,8 @@ class Backend:
             self.presence_mgr.record_seen(peer_hex)
             self.avatar_mgr.flush_avatar(peer_hex)
             self.reaction_mgr.flush_pending_emoji(peer_hex)
+            self.subscription_mgr.flush_pending(peer_hex)
+            self.invite_mgr.flush_pending(peer_hex)
 
         RNS.Transport.register_announce_handler(
             PeerAnnounceHandler(_on_peer_appeared)
@@ -274,6 +277,11 @@ class Backend:
         # reached via a backchannel link without a prior announce, and peers
         # signing off (same rationale as main_window.py's _on_inbound_message).
         self.router.add_delivery_callback(self.presence_mgr.record_inbound)
+
+        # Nothing else notices *our own* link returning: every catch-up path
+        # is driven by hearing from a remote peer.
+        self.link_watcher = LinkWatcher(self.sync_mgr.request_sync_all)
+        self.link_watcher.start()
 
         self.channel_mgr.restore_owned_channels()
         self.server_mgr.restore_owned_servers()
@@ -360,6 +368,7 @@ class Backend:
         return self.presence_beacon.announce_offline()
 
     def close(self):
+        self.link_watcher.stop()
         self.router.stop()
         self.storage.close()
 

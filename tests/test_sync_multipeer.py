@@ -11,6 +11,8 @@ channel's history.
 
 import time
 
+import RNS
+
 from tests.helpers import sign_as, wait_for, wait_for_member, wait_for_message
 from trenchchat.core.messaging import _compute_message_id
 from trenchchat.core.sync_status import SyncState
@@ -803,4 +805,167 @@ class TestRejectedRowBoundsTheWatermark:
             "the watermark advanced past a refused message, so no future sweep "
             "will ever offer it again -- history is lost the moment its author's "
             "key turns up late"
+        )
+
+
+# ---------------------------------------------------------------------------
+# A9 -- history whose author is no longer reachable
+# ---------------------------------------------------------------------------
+
+class TestAuthorKeyTravelsWithTheBatch:
+    def test_relayed_history_stays_readable_after_its_author_leaves(
+        self, peer_factory, monkeypatch
+    ):
+        """
+        A responder sends the authors' public keys with the batch, so a
+        requester who has never met an author can still verify their messages.
+
+        Without this, a peer who leaves the network takes their history with
+        them: verifying needs their public key, the only route to one is an
+        announce they will never send again, and "cannot verify yet" is
+        dropped exactly like "forged". Every peer who joins afterwards sees a
+        transcript with that author's messages missing and nothing to say so
+        (J2 in docs/testenv-scenarios.md).
+
+        The relay is not trusted here -- a key is accepted only if it hashes
+        back to the identity claiming it, which is what makes passing one
+        through a third party safe.
+
+        RNS.Identity.recall is stubbed out for the newcomer's half of the
+        exchange because every peer in this suite shares one Reticulum
+        instance, so recall always succeeds here and the departure being
+        modelled -- an author whose announce can no longer be resolved --
+        cannot otherwise be reached in-process.
+        """
+        from trenchchat.core.authorship import sign_message
+        from trenchchat.core.protocol import (
+            F_CHANNEL_HASH, F_MSG_TYPE, F_SYNC_WINDOW_START, MT_SYNC_REQUEST,
+        )
+
+        author = peer_factory("author")
+        relay = peer_factory("relay")
+        newcomer = peer_factory("newcomer")
+
+        ch_hash = author.channel_mgr.create_channel("outlives-author", "", "public")
+        _seed_channel_on_peer(relay, ch_hash, "outlives-author", author.identity.hash_hex)
+        _seed_channel_on_peer(newcomer, ch_hash, "outlives-author",
+                              author.identity.hash_hex)
+
+        ts = time.time() - 30
+        author_hex = author.identity.hash_hex
+        content = "written before the author left"
+        msg_id = _compute_message_id(content, author_hex, ts)
+        signature = sign_message(author.identity.rns_identity, ch_hash, msg_id, ts,
+                                 content, None, None, None)
+        relay.storage.insert_message(
+            channel_hash=ch_hash, sender_hash=author_hex, sender_name="Author",
+            content=content, timestamp=ts, message_id=msg_id, reply_to=None,
+            last_seen_id=None, received_at=ts, author_sig=signature,
+        )
+        # The relay knows the author; the newcomer never has.
+        relay.storage.remember_identity_key(
+            author_hex, author.identity.rns_identity.get_public_key()
+        )
+        assert newcomer.storage.get_identity_key(author_hex) is None
+
+        responses = []
+        relay.sync_mgr._send_raw = (
+            lambda dest_hex, fields: responses.append(fields) or True
+        )
+        relay.sync_mgr._handle_sync_request(
+            {
+                F_MSG_TYPE:          MT_SYNC_REQUEST,
+                F_CHANNEL_HASH:      bytes.fromhex(ch_hash),
+                F_SYNC_WINDOW_START: ts - 60,
+            },
+            ch_hash, newcomer.identity.hash_hex,
+        )
+        assert len(responses) == 1, "the relay never answered"
+
+        monkeypatch.setattr(RNS.Identity, "recall", staticmethod(lambda *a, **k: None))
+        newcomer.sync_mgr._record_pending_request(ch_hash, relay.identity.hash_hex,
+                                                  ts - 60)
+        newcomer.sync_mgr._handle_sync_response(responses[0], ch_hash,
+                                                relay.identity.hash_hex)
+
+        assert newcomer.storage.message_exists(msg_id), (
+            "a peer that never met the author lost their history -- the key "
+            "did not travel with the batch"
+        )
+        assert newcomer.storage.get_identity_key(author_hex) is not None, (
+            "the author's key was used but not kept, so the next batch pays for "
+            "it again"
+        )
+
+    def test_a_key_that_is_not_the_authors_is_refused(self, peer_factory):
+        """A relay cannot substitute its own key for an author's.
+
+        The signature check would otherwise pass against whatever key the
+        relay supplied, which would let any relay rewrite any message it
+        passes on and sign it as someone else.
+        """
+        from trenchchat.core.authorship import remember_relayed_key
+
+        author = peer_factory("author")
+        impostor = peer_factory("impostor")
+        receiver = peer_factory("receiver")
+
+        accepted = remember_relayed_key(
+            receiver.storage, author.identity.hash_hex,
+            impostor.identity.rns_identity.get_public_key(),
+        )
+        assert accepted is False, "a key that is not the author's was cached as theirs"
+        assert receiver.storage.get_identity_key(author.identity.hash_hex) is None
+
+
+# ---------------------------------------------------------------------------
+# A10 -- the answer to a request from a peer we cannot yet address
+# ---------------------------------------------------------------------------
+
+class TestSyncAnswerSurvivesAnUnresolvedPath:
+    def test_a_response_is_held_and_re_sent_rather_than_dropped(self, peer_factory,
+                                                                monkeypatch):
+        """
+        A responder that cannot yet address the requester holds its answer.
+
+        This is the shape of a peer returning from an outage: it asks everyone
+        for what it missed, and each responder can read the request but cannot
+        resolve a path back yet. The answer used to be dropped on the floor --
+        without even requesting a path -- so the requester sat at `pending`
+        forever, unable to tell silence from a refusal, and nothing re-sent
+        anything (C2 in docs/testenv-scenarios.md).
+        """
+        from trenchchat.core.protocol import (
+            F_CHANNEL_HASH, F_MSG_TYPE, F_SYNC_WINDOW_START, MT_SYNC_REQUEST,
+        )
+
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+
+        ch_hash = alice.channel_mgr.create_channel("answer-held", "", "public")
+        _seed_channel_on_peer(bob, ch_hash, "answer-held", alice.identity.hash_hex)
+
+        ts = time.time() - 30
+        _insert_message(alice.storage, ch_hash, alice.identity.hash_hex,
+                        "sent while bob was away", ts)
+
+        monkeypatch.setattr(RNS.Identity, "recall", staticmethod(lambda *a, **k: None))
+        alice.sync_mgr._handle_sync_request(
+            {
+                F_MSG_TYPE:          MT_SYNC_REQUEST,
+                F_CHANNEL_HASH:      bytes.fromhex(ch_hash),
+                F_SYNC_WINDOW_START: ts - 60,
+            },
+            ch_hash, bob.identity.hash_hex,
+        )
+        assert alice.sync_mgr._retry.pending_for(bob.identity.hash_hex) == 1, (
+            "the answer was dropped instead of being held until bob is addressable"
+        )
+
+        monkeypatch.undo()
+        bob.sync_mgr._record_pending_request(ch_hash, alice.identity.hash_hex, ts - 60)
+        alice.sync_mgr.on_peer_appeared(bob.identity.hash_hex)
+
+        assert wait_for(lambda: bob.storage.get_messages(ch_hash), timeout=5), (
+            "the held answer never reached the requester once its path resolved"
         )

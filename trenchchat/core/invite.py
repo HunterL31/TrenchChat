@@ -34,6 +34,7 @@ import RNS
 import LXMF
 import msgpack
 
+from trenchchat.core.control_retry import ControlRetryQueue
 from trenchchat.core.identity import Identity
 from trenchchat.core.naming import channel_hash_for, server_hash_for
 from trenchchat.core.permissions import (
@@ -171,6 +172,9 @@ class InviteManager:
         # Serialises the read-compare-write in _accept_document; LXMF
         # delivers on background threads.
         self._accept_lock = threading.Lock()
+        # An invite or join request sent before the recipient's path
+        # resolved used to be dropped outright, and nothing re-sent it.
+        self._retry = ControlRetryQueue("invite")
         # scope_hex -> "server" | "channel", learned from an inbound invite.
         # Presentation only: trust anchoring is the accepted_invites table.
         self._invite_scope_kinds: dict[str, str] = {}
@@ -1543,7 +1547,12 @@ class InviteManager:
 
     # --- helpers ---
 
-    def _send_raw(self, dest_hex: str, fields: dict):
+    def flush_pending(self, dest_hex: str) -> int:
+        """Re-send control messages held while this peer had no known path."""
+        return self._retry.flush(dest_hex, self._send_raw)
+
+    def _send_raw(self, dest_hex: str, fields: dict) -> bool:
+        """Send a control message. Returns False if it had to be queued instead."""
         msg_type = fields.get(F_MSG_TYPE, "unknown")
         try:
             identity_hash = bytes.fromhex(dest_hex)
@@ -1556,10 +1565,11 @@ class InviteManager:
 
             if dest_identity is None:
                 RNS.Transport.request_path(delivery_dest_hash)
-                RNS.log(f"TrenchChat [invite]: cannot deliver {msg_type!r} to "
-                        f"{dest_hex[:12]}… — identity not known, path requested",
+                self._retry.queue(dest_hex, fields)
+                RNS.log(f"TrenchChat [invite]: {msg_type!r} to {dest_hex[:12]}… "
+                        f"held — identity not known, path requested",
                         RNS.LOG_WARNING)
-                return
+                return False
 
             dest = RNS.Destination(
                 dest_identity,
@@ -1578,5 +1588,7 @@ class InviteManager:
             RNS.log(f"TrenchChat [invite]: queuing {msg_type!r} → {dest_hex[:12]}…",
                     RNS.LOG_NOTICE)
             self._router.send(lxm)
+            return True
         except Exception as e:
             RNS.log(f"TrenchChat: invite send error ({msg_type}): {e}", RNS.LOG_WARNING)
+            return False

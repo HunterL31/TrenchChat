@@ -102,7 +102,7 @@ def j1(env):
     return {"backfill_secs": round(elapsed, 1), "messages": len(authored)}
 
 
-@scenario("J2", "A peer that never met the author still needs its key", kind=PROBE)
+@scenario("J2", "A peer that never met the author reads their history anyway")
 def j2(env):
     """The case J1 cannot reach: no shared history with the author at all.
 
@@ -110,11 +110,11 @@ def j2(env):
     A's announce and holds nothing of A in either its own key cache or RNS's.
     The channel stays discoverable because B owns it, not A.
 
-    Prediction: D backfills everything B authored and silently loses
-    everything A authored, because resolve_author() has no key to find and
-    verify_message() cannot distinguish "unverifiable" from "forged". If that
-    holds, an author leaving the mesh takes their history with it for every
-    peer who arrives afterwards.
+    This ran as a probe first and confirmed the gap it predicted: D backfilled
+    everything the live owner wrote and silently lost everything the departed
+    author wrote, because resolve_author() had no key to find and
+    verify_message() cannot tell "unverifiable" from "forged". Responders now
+    send each batch's author keys alongside it, so it is strict.
     """
     a, b, c, d = env.peers("A", "B", "C", "D")
     ch = public_channel(b, [a, c], "j2-public")
@@ -143,24 +143,22 @@ def j2(env):
                            "D to backfill what the departed peer authored",
                            BACKFILL_TIMEOUT)
 
-    notes = {
-        "live_author_backfilled": got_b,
+    if not got_b:
+        raise ScenarioFailure(
+            "D backfilled nothing at all, so this measures join and backfill "
+            "rather than author verification"
+        )
+    if not got_a:
+        raise ScenarioFailure(
+            f"D holds {sorted(d.contents(ch))} — a departed author's history "
+            f"was dropped as unverifiable, so it is unreadable to everyone who "
+            f"joins after they leave"
+        )
+    return {
         "live_author_secs": round(b_secs, 1),
-        "departed_author_backfilled": got_a,
         "departed_author_secs": round(a_secs, 1),
         "held": sorted(d.contents(ch)),
     }
-    if got_a:
-        notes["surprise"] = (
-            "a fresh identity verified a departed author's messages — the key "
-            "reached D from somewhere, so authorship survives the author"
-        )
-    elif not got_b:
-        notes["surprise"] = (
-            "D backfilled nothing at all, so this measures join/backfill, not "
-            "author verification"
-        )
-    return notes
 
 
 @scenario("J3", "An image attachment survives the trip and stays fetchable")

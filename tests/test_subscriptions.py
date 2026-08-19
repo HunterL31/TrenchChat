@@ -224,3 +224,46 @@ class TestSubscriberVersionSurvivesRestart:
             lambda: carol.identity.hash_hex in bob.subscription_mgr.get_subscribers(ch_hash),
             timeout=5,
         ), "Bob never learned about a peer that joined after the owner restarted"
+
+
+class TestSubscribeSurvivesAnUnresolvedPath:
+    def test_a_queued_subscribe_reaches_the_owner_once_the_path_resolves(
+        self, peer_factory, monkeypatch
+    ):
+        """
+        MT_SUBSCRIBE is held and re-sent, rather than dropped, when the
+        owner's path is not yet known.
+
+        A join is the very first thing a peer does on a channel, and it is
+        exactly when a path is least likely to be resolved. The message used
+        to be dropped outright -- no queue, no retry, no error -- so the owner
+        never learned of the subscriber, the subscriber was silently absent
+        from every send, and only joining a second time recovered (G3 in
+        docs/testenv-scenarios.md).
+        """
+        import RNS
+
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+
+        ch_hash = alice.channel_mgr.create_channel("cold-path", "", "public")
+        bob.storage.upsert_channel(ch_hash, "cold-path", "",
+                                   alice.identity.hash_hex, "public", time.time())
+
+        monkeypatch.setattr(RNS.Identity, "recall", staticmethod(lambda *a, **k: None))
+        bob.subscription_mgr.subscribe(ch_hash, owner_hash_hex=alice.identity.hash_hex)
+
+        assert bob.subscription_mgr._retry.pending_for(alice.identity.hash_hex) == 1, (
+            "the subscribe was dropped instead of being held for retry"
+        )
+        assert not wait_for(
+            lambda: bob.identity.hash_hex in alice.subscription_mgr.get_subscribers(ch_hash),
+            timeout=1,
+        ), "the owner registered a subscriber whose message could not be sent"
+
+        monkeypatch.undo()
+        assert bob.subscription_mgr.flush_pending(alice.identity.hash_hex) == 1
+
+        assert wait_for_subscriber(alice, ch_hash, bob.identity.hash_hex, timeout=5), (
+            "the owner never learned of a subscriber whose queued join was flushed"
+        )

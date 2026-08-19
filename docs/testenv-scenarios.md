@@ -303,9 +303,30 @@ Left strict rather than reclassified as a probe. The expectation is the sync
 design's own — any online member can serve any gap — so `--family C` exits
 non-zero until it is fixed, which is the correct signal for an open bug.
 
-#### C2, root-caused: a recovered link has no resync trigger
+#### C2, after two fixes: 2/5 to 4/5
 
-**Root-caused, not fixed.** C2 failed roughly half the time — 2 of 6 runs — with B holding 0 of 3
+The original root cause — nothing tells a node its *own* link came back — was
+real but not the whole story. `LinkWatcher` supplies that trigger now, and
+alone it moved C2 from failing most runs to **2 of 5 passing**. The failures
+that remained were more informative than the originals: the sync status showed
+all three peers at `pending` with a real `requested_at`, so the returning node
+*was* asking. Nobody was answering.
+
+`sync.py`'s `_send_raw` was the reason. A responder can read a request from a
+peer whose path it cannot yet resolve — the request arrived, after all — but
+addressing a reply needs `Identity.recall()`, and on failure it returned False
+and dropped the answer. Alone among the send paths it did not even call
+`request_path()`. Holding the answer and re-sending it on the peer's announce
+took C2 to **4 of 5**.
+
+It still fails sometimes. Both fixes are in and the remaining failure has the
+same outward shape, so the next step is to log, on the responder, every request
+it answers and every one it holds — and find out which of the two the missing
+answer was.
+
+#### C2, as originally root-caused: a recovered link has no resync trigger
+
+**Fixed, but it was only half of it — see above.** C2 failed roughly half the time — 2 of 6 runs — with B holding 0 of 3
 and both responders sitting at `pending`, `answered_peers: 0`, for the full
 206s.
 
@@ -476,19 +497,19 @@ loses honest history with nothing but a log line to show for it.
 | ID | Peers | Actions | Expected result |
 |---|---|---|---|
 | J1 | A,B,C,D | C offline; A sends 2; A's process killed; C online and backfills from B | ✅ C accepts and correctly attributes history whose author is gone, in 11.1s. A relay's own signature is not what C checks |
-| J2 | A,B,C,D | B owns the channel; A sends, then dies; D wiped to a **new identity**, joins and backfills | ⚠️ **Prediction confirmed.** D backfilled the live owner's message in 4.0s and never received the dead author's — 90s, nothing. See below |
+| J2 | A,B,C,D | B owns the channel; A sends, then dies; D wiped to a **new identity**, joins and backfills | ✅ **Was a confirmed gap, now fixed.** As a probe it measured 4.0s for the live owner's message and *never* for the dead author's. Responders now send each batch's author keys, and D holds both. Strict since |
 | J3 | A,B,C,D | A sends a real 64×64 JPEG | ✅ All three receivers hold it with `image_stripped: false` and can fetch the bytes. The signature covers the attachment, so the two travel together |
 | J4 | A,B,C,D | A sends a 68-byte PNG declaring 20000×20000 (400M pixels) | ✅ Delivered as text with no attachment on all four. The sender's own API is the gate: `prepare_image` fails closed rather than forwarding bytes it could not re-encode |
 
-#### J2: history does not outlive its author for anyone who arrives later
+#### J2: history used to die with its author — fixed
 
 J1 and J2 differ by one thing — whether the receiver ever shared the network
-with the author — and they land on opposite sides of it:
+with the author — and they used to land on opposite sides of it:
 
-| | Author reachable when written | Receiver's state | Result |
-|---|---|---|---|
-| J1 | yes, C was a subscriber throughout | knows A from before | accepted in 11.1s |
-| J2 | yes, but D did not exist yet | fresh identity, never saw A announce | never accepted, 90s |
+| | Author reachable when written | Receiver's state | Before | After |
+|---|---|---|---|---|
+| J1 | yes, C was a subscriber throughout | knows A from before | accepted in 11.1s | 2.0s |
+| J2 | yes, but D did not exist yet | fresh identity, never saw A announce | **never accepted, 90s** | 0.0s |
 
 `verify_message` returns False for "we cannot check yet" exactly as it does
 for "this is forged", and the caller drops the row either way.
@@ -498,14 +519,22 @@ readable by whoever was present to receive it directly, and progressively
 unreadable to everyone who joins afterwards — one author at a time, as people
 leave the mesh.
 
-This is a deliberate trade, not a bug in the audit's sense: accepting
-unverifiable rows would undo what the signatures are for. But the failure is
-silent, and the doc for the feature does not say history is mortal. Two things
-would make it honest without weakening it — relaying the author's public key
-alongside their messages, since the key is public and self-verifying (it is
-checked to hash back to the claimed identity, which is what makes it safe to
-accept from any source), and surfacing "N messages held back, author
-unverifiable" rather than a `LOG_WARNING`.
+**Fixed** by relaying the author's public key with their messages: a sync
+response now carries one deduplicated `{author: key}` map (`F_AUTHOR_KEYS`,
+0x71) alongside the batch, and the receiver caches each key only if it hashes
+back to the identity claiming it. That check is what makes accepting a key
+from a relay safe — an identity hash is derived from its public key, so a key
+that does not hash back simply is not that identity's. The relay is passing
+along public information it cannot forge, not vouching for anything.
+
+One map per response rather than a key per row: a batch is a handful of
+authors and up to fifty messages, and at 1 kbps the per-row form would cost
+roughly the whole response over again.
+
+Still open, and smaller: a receiver that *does* hold back a message says so
+only in a `LOG_WARNING`. `messages_rejected` already reaches the sync status,
+so surfacing "N held back, author unverifiable" is a UI change, not a
+protocol one.
 
 A related defect found while reading this path is **fixed** on this branch: a
 row rejected for an unverifiable signature did not bound the sync watermark,
@@ -632,6 +661,10 @@ Everything the matrix turned up, across all ten families.
 
 | Finding | Detail |
 |---|---|
+| **History died with its author** — a peer who joins after an author leaves could never read that author's messages, because verifying needs a key only the author's own announce could supply | Fixed: a sync response carries a deduplicated `{author: public key}` map, and a relayed key is cached only if it hashes back to the identity claiming it. J2 went from *never* to 0.0s; regression test in `tests/test_sync_multipeer.py` |
+| **Join and invite were sent once and never retried** — `_send_raw` in `subscription.py` and `invite.py` dropped the message outright when the recipient's path was unresolved, which is exactly when a first join or a first invite happens | Fixed: both hold the message in a bounded `ControlRetryQueue` and flush it when the peer announces. Regression tests in `tests/test_subscriptions.py` and `tests/test_invites.py` |
+| **A sync answer was dropped when the responder could not yet address the requester** — and unlike every other send path it did not even request a path. The requester sat at `pending`, unable to tell silence from refusal | Fixed: the answer is held (for no longer than the requester will accept one) and re-sent when the peer announces. This is most of C2 — see below |
+| **Nothing noticed our own link returning** — every catch-up path is driven by hearing *from* a peer, so the node that was itself away had no trigger | Fixed: `connectivity.py`'s `LinkWatcher` polls Reticulum's interface state and resyncs on the transition back to online, ignoring shared-instance client interfaces. Tests in `tests/test_connectivity.py` |
 | **A sync row rejected for an unverifiable author signature did not bound the watermark**, so a batch of `[rejected_old, accepted_new]` skipped past it and no future sweep would offer it again | Fixed on this branch: the signature-rejection path now sets `failed_ts` the same way a failed insert does. A row with an *implausible timestamp* deliberately does not, since it cannot be placed and would let one bad row freeze sync. Regression test in `tests/test_sync_multipeer.py` |
 | **One `sync_progress` row written from both directions**, collapsing the responder's trust-horizon floor and stranding history older than a requester's watermark | Root-caused and fixed by splitting the serve direction into a `sync_served` table; regression test in `tests/test_sync_multipeer.py`. Found through C11, but **it did not fix C11** — see below |
 | **G1** — `_subscriber_versions` lived only in memory, so a restarted owner renumbered from 1 and every later list was rejected as a replay | Fixed on `main` by the August security audit, which persists the counter in a `subscriber_list_versions` table and re-checks the version under the commit lock. This branch's own fix was dropped at the merge in favour of it; the end-to-end regression test in `tests/test_subscriptions.py` stays |
@@ -643,9 +676,8 @@ Everything the matrix turned up, across all ten families.
 | **J2** — a peer that joins after an author has left the mesh can never read that author's history. `verify_message` cannot tell "unverifiable" from "forged", and `resolve_author` needs an announce a departed peer will never send | **Confirmed.** A fresh identity backfilled the live owner's message in 4.0s and never received the dead author's. A deliberate trade, but a silent one — see family J |
 | **I4** — the dev environment shares one API token across every tester, and the orchestrator's unauthenticated `/config` serves it | **Confirmed** (probe). Fine for a dev box; it means port 8800 is the real trust boundary, not the tester ports |
 | **C11** — a four-way partition reconciles only sometimes: 1 pass in 5 runs, always losing the *first* message a peer wrote in isolation | **Partly root-caused.** The watermark collision above was one cause and is fixed. The deep-sync cooldown refusing a returning peer's request silently, once per pair per 60s, is the leading candidate for the rest |
-| **C2** — a node whose own link recovers has no resync trigger. `on_peer_appeared` fires only on a *received announce*, and RNS suppresses announce replays for a destination the transport has already propagated | **Root-caused, not fixed.** Fails ~half of runs (4/8, 4/6). The fix needs a local link-recovery signal the production client does not currently have — see below |
+| **C2** — a returning node sometimes still fails to recover history | **Two causes found and fixed** (no local link-recovery trigger; the responder's answer dropped on an unresolved path), taking it from 2/5 to **4/5** runs. It still fails occasionally, so it stays strict and failing. See below |
 | **B11** — `kick` and `manage_roles` are grantable to any role, but a non-admin's member-list document is rejected by every recipient | **Confirmed.** The grant succeeds locally and does nothing on the network. Resolution is a product decision — see below |
-| **Subscribe/invite have no retry** — `_send_raw` in both `subscription.py` and `invite.py` drops the message when the path is unresolved, and nothing re-sends it | **Confirmed twice.** C4's setup hit it for `MT_SUBSCRIBE` (the owner never registered the joiner); G3 measured it for invites (first attempt dropped, 2 needed). Only re-issuing recovers |
 | **H11** — `loss_pct`, the metric `docs/voice.md` designates for the UI's per-peer quality indicator, cannot see a starved link. It counts gaps between frames that arrived, so a link delivering 8% of the audio reports ~6% loss, and `link_state` still reads `streaming` | **Confirmed** across three runs. Delivery ratio (frames received against ~48/s) is the signal that shows it; `frame_stats()` has the raw counts but exposes no rate |
 | **H5 / H4** — a voice participant whose link drops shows `connecting` indefinitely rather than `unreachable`, and one whose process dies lingers for the roster TTL — 180s in production | **Confirmed.** Neither is wrong, but a UI showing "connecting…" for three minutes after someone crashed is not the honest state `docs/voice.md` asks for |
 | **A5** — a public-channel join fires no sync request; backfill waits on the next peer announce | **Confirmed.** 0 messages at join, backfill at 1.0s / 9.1s tracking the 10s heartbeat. Up to 60s in the real client |
@@ -714,7 +746,7 @@ Built and running, in `devtools/testenv/scenarios/`:
 | `scen_api.py` | Family I |
 | `scen_authorship.py` | Family J |
 
-All ten families are built: 81 scenarios, 61 strict and 20 probes.
+All ten families are built: 81 scenarios, 62 strict and 19 probes.
 
 ```bash
 .venv/bin/python devtools/testenv/scenarios/runner.py                # everything
@@ -776,7 +808,7 @@ stays the merge gate.
 
 ## Status
 
-All ten families built and run: **81 scenarios, 61 strict and 20 probes.**
+All ten families built and run: **81 scenarios, 62 strict and 19 probes.**
 
 | Family | Scenarios | Result |
 |---|---|---|
@@ -789,9 +821,9 @@ All ten families built and run: **81 scenarios, 61 strict and 20 probes.**
 | G — restart and ordering | 5 (3 strict, 2 probes) | All passing; G1 confirmed, then fixed; G3 confirmed |
 | H — live group voice | 11 (8 strict, 3 probes) | All passing; H4, H5 and H11 recorded gaps |
 | I — the API surface | 4 (3 strict, 1 probe) | All passing; I4 records the shared-token property |
-| J — message integrity | 4 (3 strict, 1 probe) | All passing; **J2 confirmed a real gap** |
+| J — message integrity | 4 (4 strict) | All passing; J2 found a real gap, now fixed and strict |
 
-**59 of 61 strict scenarios pass.** The failures are real defects, left strict
+**60 of 62 strict scenarios pass.** The failures are real defects, left strict
 and failing on purpose, so `--family B` and `--family C` exit non-zero until
 they are resolved. B11 fails every run. C2 and C11 are both intermittent and
 trade places: the pre-merge run lost C2, the post-merge run lost C11, and the
@@ -808,20 +840,15 @@ on-demand run rather than the per-PR gate.
 
 Remaining work:
 
-1. Decide J2: relay an author's public key alongside their messages, or
-   accept that history stops being readable once its author leaves — and
-   either way, surface held-back messages instead of logging them.
-2. Finish C11: confirm the deep-sync cooldown is what strands the remaining
+1. Finish C11: confirm the deep-sync cooldown is what strands the remaining
    `-alone-0` rows, then decide whether a refusal should answer with an
    explicit "throttled" rather than silence.
-3. Fix C2 by giving the client a resync trigger for its own link recovering.
-4. Decide B11: stop offering `kick`/`manage_roles` below admin, or admit
+2. Decide B11: stop offering `kick`/`manage_roles` below admin, or admit
    permission-holders as trusted signers.
-5. Give `subscription.py` and `invite.py`'s `_send_raw` a retry queue, or an
-   explicit failure the caller can act on. Both drop silently on an unresolved
-   path today, and only re-issuing recovers.
-6. Let `SyncStatusTracker` distinguish "refused" from "waiting" — today both
+3. Let `SyncStatusTracker` distinguish "refused" from "waiting" — today both
    read as `pending` forever.
-7. C6 and C12, which need control of the clock — and, now, a J5 for the
+4. Track down C2's remaining 1-in-5 failure, and surface held-back messages
+   in the UI rather than a log line.
+5. C6 and C12, which need control of the clock — and, now, a J5 for the
    audit's 300s clock-skew ceiling, which silently drops every message from a
    peer whose clock runs fast.

@@ -29,6 +29,7 @@ from PyQt6.QtGui import QAction, QColor, QFont
 
 from trenchchat.config import Config
 from trenchchat.core import actions
+from trenchchat.core.connectivity import LinkWatcher
 from trenchchat.core.identity import Identity
 from trenchchat.core.image import prepare_image, MAX_IMAGE_BYTES
 from trenchchat.core.permissions import (
@@ -352,6 +353,8 @@ class MainWindow(QMainWindow):
                 self._avatar_mgr.flush_avatar(peer_hex)
             if self._reaction_mgr is not None:
                 self._reaction_mgr.flush_pending_emoji(peer_hex)
+            self._subscription_mgr.flush_pending(peer_hex)
+            self._invite_mgr.flush_pending(peer_hex)
             self._peer_announced.emit()
             self._reannounce_requested.emit(iface)
 
@@ -397,6 +400,10 @@ class MainWindow(QMainWindow):
         router.add_delivery_callback(_on_inbound_message)
         # Defer sync requests briefly so the RNS stack is fully ready
         QTimer.singleShot(_STARTUP_SYNC_DELAY_MS, self._sync_mgr.request_sync_all)
+        # A peer announcing is what drives every other catch-up path, so
+        # nothing covers the case where we are the node that was away.
+        self._link_watcher = LinkWatcher(self._sync_mgr.request_sync_all)
+        self._link_watcher.start()
 
         # Periodically prune stale presence entries and refresh the online panel
         self._presence_timer = QTimer(self)

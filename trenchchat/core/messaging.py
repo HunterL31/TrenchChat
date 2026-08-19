@@ -29,6 +29,9 @@ LXMF fields layout:
     0x63  voice_codec       str         — codec the sender transmits ("opus")
     0x70  author_sig        bytes[64]   — author's Ed25519 signature binding the
                                           message to its author (see authorship.py)
+    0x71  author_keys       dict        — {author hex: public key} sent with a sync
+                                          batch, so a relayed message stays checkable
+                                          after its author leaves
 """
 
 import hashlib
