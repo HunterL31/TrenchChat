@@ -1,7 +1,7 @@
 # In-App Updater — Plan
 
 Delete this file once the work lands. What survives it: the trust model
-(section 2) and the manifest format (section 3) belong in the docstring of
+(section 2) and the manifest format (section 4) belong in the docstring of
 `trenchchat/core/updater.py`; everything else here is narration of work that
 will be visible in the diff.
 
@@ -83,9 +83,67 @@ installs, the only clearnet connection TrenchChat makes, and one that tells an
 observer that this IP runs TrenchChat. That is a real cost in a project whose
 premise is that the mesh is the network. It gets an explicit setting, it is
 never a blocking startup step, and it fails silently on air-gapped installs.
-Whether it defaults on is an open decision (section 10).
+Whether it defaults on is an open decision (section 11).
 
-## 3. The manifest
+## 3. Prior art in the Reticulum ecosystem
+
+Worth knowing before building this: **no Reticulum application ships a
+self-updater.** The ecosystem norm is to link out, or to let a package manager
+do it.
+
+| Project | Outbound update call | What it actually does |
+|---|---|---|
+| Reticulum (RNS) | none | installed and updated via `pip`/PyPI |
+| Nomad Network | none | same |
+| MeshChat | none | "Check for Updates" in About is an `<a href>` to the releases page; no `electron-updater`, builds `--publish=never` |
+| Sideband | four HTTP calls, all user-pressed | see below |
+| Sideband (Android) | — | distributed through F-Droid repos, so the store updates it |
+| `rnodeconf` (in RNS) | yes | fetches RNode **firmware**, not the app |
+
+Two of these are worth copying from, and one is worth copying *instead*.
+
+**`rnodeconf` validates the manifest approach.** Mark Qvist's own firmware
+updater fetches
+`https://github.com/markqvist/rnode_firmware/releases/latest/download/release.json`
+— the same `releases/latest/download/` trick proposed in section 4, chosen for
+the same reason: it is a stable URL that always resolves to the newest release,
+with no API schema to parse and no rate limit. It then downloads the firmware
+and checks it against a SHA-256 from that manifest, refusing to flash on a
+mismatch.
+
+Its trust anchor, though, is TLS and GitHub — `release.json` is not signed, so
+anyone who can serve that URL can name any hash they like. (`rnodeconf` does do
+RSA signature checking, but on RNode device provisioning, not on the
+download.) The Ed25519-signed manifest in section 2 is therefore a deliberate
+step above the ecosystem baseline, not a reinvention of it.
+
+**Sideband answers the problem a different way, and it is the more interesting
+answer.** Its entire outbound-HTTP surface is four `requests.get` calls, all
+inside one handler behind a button on the Repository screen. Pressing it pulls
+the latest RNode firmware and the latest Sideband APK from the GitHub API and
+drops them into a local directory that Sideband then serves over HTTPS to
+anyone who can reach the device. There is no automatic check, no version
+comparison, no hash verification, and nothing is installed — a user *with*
+internet stages the artifacts so users *without* it can fetch them.
+
+That is section 9's mesh distribution, and the flagship Reticulum app built it
+**instead of** a self-updater, not after one. It is a reasonable claim that
+this is the culturally correct answer for a network whose premise is that the
+clearnet is optional.
+
+The plan here does not follow it, for one reason: it solves a different
+problem. Sideband's repository helps the person standing next to you; it does
+nothing for the solo user who just wants to stop watching a releases page,
+which is what was asked for. Section 9 keeps the mesh path open, and the signed
+manifest is what makes it cheap when it comes — but the check-and-notify path
+lands first because it is the one that answers the question.
+
+**What this changes.** Not one of these apps makes an outbound call the user
+did not ask for. Sideband's four are all behind a button press. That is a
+consistent enough pattern across the ecosystem to read as a norm rather than an
+accident, and it is the basis for the revised recommendation in section 11.
+
+## 4. The manifest
 
 Two assets, attached to every release alongside the installers:
 
@@ -128,7 +186,7 @@ https://github.com/HunterL31/TrenchChat/releases/latest/download/manifest.json.s
 `releases/latest/download/...` redirects to whatever the newest release is, so
 the client hard-codes one URL and never parses GitHub's API schema.
 
-## 4. Release pipeline changes
+## 5. Release pipeline changes
 
 **Bake the version into the build.** New `trenchchat/version.py`:
 
@@ -159,7 +217,7 @@ one they installed by hand. Phase 1 shipping ahead of the client work (section
 9) means the manifest is already in place and proven by the time any client
 looks for it.
 
-## 5. Backend
+## 6. Backend
 
 ### `trenchchat/core/updater.py` — `UpdateManager`
 
@@ -252,7 +310,8 @@ existing style:
 
 ```json
 "updates": {
-  "enabled": true,
+  "enabled": false,
+  "prompted": false,
   "auto_download": false,
   "skipped_version": null,
   "last_check_ts": 0,
@@ -260,8 +319,10 @@ existing style:
 }
 ```
 
-`skipped_version` suppresses the prompt for one specific release without
-disabling checks. `last_seen_version` is the rollback guard from section 2.
+`prompted` records that the first-run question in section 11 has been asked, so
+it is asked once and never again. `skipped_version` suppresses the prompt for
+one specific release without disabling checks. `last_seen_version` is the
+rollback guard from section 2.
 
 ### API
 
@@ -281,7 +342,7 @@ The `updates` keys join `actions.read_settings` / `apply_settings` and
 `UpdateManager`'s state callback emits an `update_status` event over the
 `EventBus`, so the client tracks download progress without polling.
 
-## 6. Flutter client
+## 7. Flutter client
 
 - `lib/api/models/update.dart` — `UpdateStatus`, mirroring `/update/status`.
 - `lib/api/client.dart` + `lib/app_state.dart` — the five calls, and an
@@ -298,7 +359,7 @@ The `updates` keys join `actions.read_settings` / `apply_settings` and
 - `flutter analyze && flutter test`, with a widget test per screen against
   `test/fake_backend.dart`.
 
-## 7. Tests
+## 8. Tests
 
 `tests/test_updater.py`, no network, using a keypair generated in the fixture:
 
@@ -322,10 +383,12 @@ guards no channel permission, so the three-layer permission rule does not
 apply; the hash and signature checks are its equivalent, and they live in core
 where no client can skip them.
 
-## 8. Deferred: distribution over the mesh
+## 9. Deferred: distribution over the mesh
 
 The obvious question for this project is why an update has to come from the
-clearnet at all, and the manifest design already answers most of it: the
+clearnet at all — and, per section 3, it is the question Sideband answered by
+building a share-it-onward repository rather than an updater. The manifest
+design already covers most of what a mesh path needs: the
 manifest is self-authenticating, so **any** peer can serve it without being
 trusted, and the SHA-256 inside it authenticates the binary regardless of who
 supplied the bytes. Trust comes from the release key, never from the transport.
@@ -340,7 +403,7 @@ It is deferred because ~90 MB is not a LoRa payload, and because it wants
 resumable transfer, a fairness policy on who serves whom, and a rate limit — a
 feature in its own right, not a rider on this one.
 
-## 9. Order of work
+## 10. Order of work
 
 1. **Version identity and signed manifest.** `version.py`, CI baking, signing
    step, key setup, version shown in the UI. Lands alone, changes no runtime
@@ -350,16 +413,21 @@ feature in its own right, not a rider on this one.
    the repo", and carries none of the risk of writing to the install directory.
 3. **Download, verify, install.** Windows and macOS one-click, Linux
    download-and-hand-off, the `.iss` relaunch change.
-4. **Mesh distribution** (section 8), if and when it is wanted.
+4. **Mesh distribution** (section 9), if and when it is wanted.
 
-## 10. Open decisions
+## 11. Open decisions
 
-- **Does the update check default to on?** Recommendation: yes for the check,
-  no for automatic download, with a first-run notice saying plainly that it is
-  an HTTPS request to GitHub and where to turn it off. Defaulting it off means
-  the users most in need of an update are the least likely to get one; the
-  counter-argument — that a mesh app should make no clearnet connection it was
-  not asked to make — is a legitimate reading and is the user's call.
+- **Does the update check default to on?** Revised recommendation, after the
+  ecosystem survey in section 3: **ask on first run, default to off until
+  answered.** No Reticulum application makes an outbound call the user did not
+  ask for, and TrenchChat would be the first — silently, on a machine that may
+  have been chosen precisely because it does not talk to the clearnet. A
+  one-time prompt costs a single dialog and keeps the property that every
+  packet leaving the machine was asked for. The counter-argument stands and is
+  the user's call: default-off means the users most in need of an update are
+  the least likely to get one, and a prompt at first run is the moment a user
+  is least equipped to answer it. Automatic *download* should default off
+  either way.
 - **How far to go on Linux in phase 3?** Recommendation:
   `pkexec` with a clean fallback, and treat an apt repository or an AppImage as
   its own piece of work rather than blocking Windows and macOS on it.
