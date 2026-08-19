@@ -731,3 +731,76 @@ class TestResponderAcquiresOlderHistoryLater:
             "Carol's own sync progress *from* Bob suppressed the trust-horizon "
             "widening that should have covered it"
         )
+
+
+# ---------------------------------------------------------------------------
+# A8 -- a batch where one row is refused and a newer one is accepted
+# ---------------------------------------------------------------------------
+
+class TestRejectedRowBoundsTheWatermark:
+    def test_unverifiable_row_is_not_skipped_past(self, peer_factory):
+        """
+        A row dropped for an unverifiable author signature must hold the
+        watermark back, the same as a row whose insert failed.
+
+        "Unverifiable" and "forged" are the same answer from verify_message:
+        an author whose public key this peer has never learned fails the check
+        exactly like a tampered row does. The first is ordinary -- the author
+        may simply be offline -- and the key usually arrives later. But if the
+        watermark advances past the refused row in the meantime,
+        get_messages_after's strict `>` hides it from every future sweep, so
+        honest history is lost permanently on the strength of a key that was
+        merely late.
+        """
+        import msgpack
+
+        from trenchchat.core.authorship import sign_message
+        from trenchchat.core.protocol import (
+            F_CHANNEL_HASH, F_MSG_TYPE, F_SYNC_MESSAGES, MT_SYNC_RESPONSE,
+        )
+
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+        carol = peer_factory("carol")
+
+        ch_hash = alice.channel_mgr.create_channel("late-key", "", "public")
+        _seed_channel_on_peer(bob, ch_hash, "late-key", alice.identity.hash_hex)
+
+        base = time.time() - 60
+        alice_hex = alice.identity.hash_hex
+        bob.storage.remember_identity_key(
+            alice_hex, alice.identity.rns_identity.get_public_key()
+        )
+
+        def row(content, ts, signed):
+            msg_id = _compute_message_id(content, alice_hex, ts)
+            sig = sign_message(alice.identity.rns_identity, ch_hash, msg_id, ts,
+                               content, None, None, None) if signed else b"\x00" * 64
+            return {"message_id": msg_id, "sender_hash": alice_hex,
+                    "sender_name": "Alice", "content": content, "timestamp": ts,
+                    "reply_to": None, "last_seen_id": None, "author_sig": sig}
+
+        refused = row("author key not learned yet", base + 10, signed=False)
+        accepted = row("verifiable and newer", base + 20, signed=True)
+
+        bob.sync_mgr._record_pending_request(ch_hash, carol.identity.hash_hex, base)
+        bob.sync_mgr._handle_sync_response(
+            {
+                F_MSG_TYPE:      MT_SYNC_RESPONSE,
+                F_CHANNEL_HASH:  bytes.fromhex(ch_hash),
+                F_SYNC_MESSAGES: msgpack.packb([refused, accepted], use_bin_type=True),
+            },
+            ch_hash, carol.identity.hash_hex,
+        )
+
+        assert bob.storage.message_exists(accepted["message_id"]), (
+            "the verifiable message was not stored"
+        )
+        assert not bob.storage.message_exists(refused["message_id"]), (
+            "a message with an invalid author signature was stored"
+        )
+        assert bob.storage.get_last_sync(ch_hash) < refused["timestamp"], (
+            "the watermark advanced past a refused message, so no future sweep "
+            "will ever offer it again -- history is lost the moment its author's "
+            "key turns up late"
+        )

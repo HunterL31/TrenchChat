@@ -442,6 +442,74 @@ delivery ratio — frames received against the ~48/s the codec produces — whic
 Neither is a crash, so H11 stays a probe. Both are worth a decision before the
 voice UI ships a quality indicator.
 
+### I — The API surface
+
+Every other family drives the backend through `devtools/testenv/api.py` and
+takes its access control on trust. This family tests that control directly,
+because it is the only thing between a tester's identity and any process — or
+any web page — that can reach the port. Added after the August security audit
+(PR 52) gave the API a token; before it, this surface was unauthenticated with
+wildcard CORS. Nothing here touches the mesh, so the whole family runs in
+about four seconds.
+
+| ID | Peers | Actions | Expected result |
+|---|---|---|---|
+| I1 | A | Call four reads, one mutation and the event socket with no token | ✅ Every route 401; the socket refused with HTTP 403; the identity unchanged |
+| I2 | A | A wrong token, then the right one as a header, a bearer and `?token=` | ✅ Wrong token 401; all three routes 200; the socket opens on both the header and the query parameter |
+| I3 | A | Open the event socket with `Origin: http://evil.example`, then with its own | ✅ Foreign origin refused 403, own origin accepted. The socket checks this itself — a browser applies neither CORS nor same-origin policy to a WebSocket handshake |
+| I4 | A,B,C,D | Present each tester's token to a different tester's API | ⚠️ **One token for the whole environment**, as designed: B accepts A's, C's and D's (all 200), and the orchestrator's unauthenticated `/config` serves it. Recorded so the harness never claims per-identity isolation it does not have |
+
+### J — Message integrity: authorship and attachments
+
+A synced message reaches you from a peer who did not write it. LXMF
+authenticates the peer that handed it over and nothing else, so PR 52 gave
+every message its author's own signature — and a receiver that cannot verify
+one drops the message. That makes verification a *delivery* dependency, not
+only a security check: a receiver who cannot resolve an author's public key
+loses honest history with nothing but a log line to show for it.
+
+| ID | Peers | Actions | Expected result |
+|---|---|---|---|
+| J1 | A,B,C,D | C offline; A sends 2; A's process killed; C online and backfills from B | ✅ C accepts and correctly attributes history whose author is gone, in 11.1s. A relay's own signature is not what C checks |
+| J2 | A,B,C,D | B owns the channel; A sends, then dies; D wiped to a **new identity**, joins and backfills | ⚠️ **Prediction confirmed.** D backfilled the live owner's message in 4.0s and never received the dead author's — 90s, nothing. See below |
+| J3 | A,B,C,D | A sends a real 64×64 JPEG | ✅ All three receivers hold it with `image_stripped: false` and can fetch the bytes. The signature covers the attachment, so the two travel together |
+| J4 | A,B,C,D | A sends a 68-byte PNG declaring 20000×20000 (400M pixels) | ✅ Delivered as text with no attachment on all four. The sender's own API is the gate: `prepare_image` fails closed rather than forwarding bytes it could not re-encode |
+
+#### J2: history does not outlive its author for anyone who arrives later
+
+J1 and J2 differ by one thing — whether the receiver ever shared the network
+with the author — and they land on opposite sides of it:
+
+| | Author reachable when written | Receiver's state | Result |
+|---|---|---|---|
+| J1 | yes, C was a subscriber throughout | knows A from before | accepted in 11.1s |
+| J2 | yes, but D did not exist yet | fresh identity, never saw A announce | never accepted, 90s |
+
+`verify_message` returns False for "we cannot check yet" exactly as it does
+for "this is forged", and the caller drops the row either way.
+`resolve_author` can only fall back to `RNS.Identity.recall()`, which needs an
+announce the departed peer will never send again. So a channel's history is
+readable by whoever was present to receive it directly, and progressively
+unreadable to everyone who joins afterwards — one author at a time, as people
+leave the mesh.
+
+This is a deliberate trade, not a bug in the audit's sense: accepting
+unverifiable rows would undo what the signatures are for. But the failure is
+silent, and the doc for the feature does not say history is mortal. Two things
+would make it honest without weakening it — relaying the author's public key
+alongside their messages, since the key is public and self-verifying (it is
+checked to hash back to the claimed identity, which is what makes it safe to
+accept from any source), and surfacing "N messages held back, author
+unverifiable" rather than a `LOG_WARNING`.
+
+A related defect found while reading this path is **fixed** on this branch: a
+row rejected for an unverifiable signature did not bound the sync watermark,
+so a batch of `[rejected_old, accepted_new]` advanced past the rejected row and
+no future sweep would ever offer it again. An author's key arriving *late* was
+enough to lose their history permanently. Regression test in
+`tests/test_sync_multipeer.py::TestRejectedRowBoundsTheWatermark`, which fails
+without the one-line guard.
+
 ## The LoRa pass
 
 Every family was re-run with `--link-profile lora_fast` (SF7, 5.5 kbps, 60±20ms,
@@ -553,12 +621,13 @@ for it.
 
 ## Findings
 
-Everything the matrix turned up, across all seven families.
+Everything the matrix turned up, across all ten families.
 
 ### Fixed
 
 | Finding | Detail |
 |---|---|
+| **A sync row rejected for an unverifiable author signature did not bound the watermark**, so a batch of `[rejected_old, accepted_new]` skipped past it and no future sweep would offer it again | Fixed on this branch: the signature-rejection path now sets `failed_ts` the same way a failed insert does. A row with an *implausible timestamp* deliberately does not, since it cannot be placed and would let one bad row freeze sync. Regression test in `tests/test_sync_multipeer.py` |
 | **One `sync_progress` row written from both directions**, collapsing the responder's trust-horizon floor and stranding history older than a requester's watermark | Root-caused and fixed by splitting the serve direction into a `sync_served` table; regression test in `tests/test_sync_multipeer.py`. Found through C11, but **it did not fix C11** — see below |
 | **G1** — `_subscriber_versions` lived only in memory, so a restarted owner renumbered from 1 and every later list was rejected as a replay | Fixed on `main` by the August security audit, which persists the counter in a `subscriber_list_versions` table and re-checks the version under the commit lock. This branch's own fix was dropped at the merge in favour of it; the end-to-end regression test in `tests/test_subscriptions.py` stays |
 
@@ -566,6 +635,8 @@ Everything the matrix turned up, across all seven families.
 
 | Finding | Detail |
 |---|---|
+| **J2** — a peer that joins after an author has left the mesh can never read that author's history. `verify_message` cannot tell "unverifiable" from "forged", and `resolve_author` needs an announce a departed peer will never send | **Confirmed.** A fresh identity backfilled the live owner's message in 4.0s and never received the dead author's. A deliberate trade, but a silent one — see family J |
+| **I4** — the dev environment shares one API token across every tester, and the orchestrator's unauthenticated `/config` serves it | **Confirmed** (probe). Fine for a dev box; it means port 8800 is the real trust boundary, not the tester ports |
 | **C11** — a four-way partition reconciles only sometimes: 1 pass in 5 runs, always losing the *first* message a peer wrote in isolation | **Partly root-caused.** The watermark collision above was one cause and is fixed. The deep-sync cooldown refusing a returning peer's request silently, once per pair per 60s, is the leading candidate for the rest |
 | **C2** — a node whose own link recovers has no resync trigger. `on_peer_appeared` fires only on a *received announce*, and RNS suppresses announce replays for a destination the transport has already propagated | **Root-caused, not fixed.** Fails ~half of runs (4/8, 4/6). The fix needs a local link-recovery signal the production client does not currently have — see below |
 | **B11** — `kick` and `manage_roles` are grantable to any role, but a non-admin's member-list document is rejected by every recipient | **Confirmed.** The grant succeeds locally and does nothing on the network. Resolution is a product decision — see below |
@@ -635,8 +706,10 @@ Built and running, in `devtools/testenv/scenarios/`:
 | `scen_social.py` | Family F |
 | `scen_restart.py` | Family G |
 | `scen_voice.py` | Family H |
+| `scen_api.py` | Family I |
+| `scen_authorship.py` | Family J |
 
-All eight families are built: 73 scenarios, 55 strict and 18 probes.
+All ten families are built: 81 scenarios, 61 strict and 20 probes.
 
 ```bash
 .venv/bin/python devtools/testenv/scenarios/runner.py                # everything
@@ -698,7 +771,7 @@ stays the merge gate.
 
 ## Status
 
-All eight families built and run: **73 scenarios, 55 strict and 18 probes.**
+All ten families built and run: **81 scenarios, 61 strict and 20 probes.**
 
 | Family | Scenarios | Result |
 |---|---|---|
@@ -710,8 +783,10 @@ All eight families built and run: **73 scenarios, 55 strict and 18 probes.**
 | F — reactions, presence, identity | 8 (7 strict, 1 probe) | All passing; F3's prediction refuted |
 | G — restart and ordering | 5 (3 strict, 2 probes) | All passing; G1 confirmed, then fixed; G3 confirmed |
 | H — live group voice | 11 (8 strict, 3 probes) | All passing; H4, H5 and H11 recorded gaps |
+| I — the API surface | 4 (3 strict, 1 probe) | All passing; I4 records the shared-token property |
+| J — message integrity | 4 (3 strict, 1 probe) | All passing; **J2 confirmed a real gap** |
 
-**53 of 55 strict scenarios pass.** The failures are real defects, left strict
+**59 of 61 strict scenarios pass.** The failures are real defects, left strict
 and failing on purpose, so `--family B` and `--family C` exit non-zero until
 they are resolved. B11 fails every run. C2 and C11 are both intermittent and
 trade places: the pre-merge run lost C2, the post-merge run lost C11, and the
@@ -728,15 +803,20 @@ on-demand run rather than the per-PR gate.
 
 Remaining work:
 
-0. Finish C11: confirm the deep-sync cooldown is what strands the remaining
+1. Decide J2: relay an author's public key alongside their messages, or
+   accept that history stops being readable once its author leaves — and
+   either way, surface held-back messages instead of logging them.
+2. Finish C11: confirm the deep-sync cooldown is what strands the remaining
    `-alone-0` rows, then decide whether a refusal should answer with an
    explicit "throttled" rather than silence.
-1. Fix C2 by giving the client a resync trigger for its own link recovering.
-2. Decide B11: stop offering `kick`/`manage_roles` below admin, or admit
+3. Fix C2 by giving the client a resync trigger for its own link recovering.
+4. Decide B11: stop offering `kick`/`manage_roles` below admin, or admit
    permission-holders as trusted signers.
-3. Give `subscription.py` and `invite.py`'s `_send_raw` a retry queue, or an
+5. Give `subscription.py` and `invite.py`'s `_send_raw` a retry queue, or an
    explicit failure the caller can act on. Both drop silently on an unresolved
    path today, and only re-issuing recovers.
-4. Let `SyncStatusTracker` distinguish "refused" from "waiting" — today both
+6. Let `SyncStatusTracker` distinguish "refused" from "waiting" — today both
    read as `pending` forever.
-5. C6 and C12, which need control of the clock.
+7. C6 and C12, which need control of the clock — and, now, a J5 for the
+   audit's 300s clock-skew ceiling, which silently drops every message from a
+   peer whose clock runs fast.

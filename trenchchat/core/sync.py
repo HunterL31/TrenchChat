@@ -859,6 +859,15 @@ class SyncManager:
                         RNS.LOG_WARNING,
                     )
                     rejected_count += 1
+                    # Bounds the watermark, exactly like a failed insert: the
+                    # row is real history we could not verify *yet* -- an
+                    # author whose key we have never learned reads the same as
+                    # a forgery here -- and resuming past it would hide it from
+                    # every future sweep. A row with an implausible timestamp
+                    # above is different: it cannot be placed at all, so
+                    # letting it bound anything would let one bad row freeze
+                    # sync for good.
+                    failed_ts = msg_ts if failed_ts is None else min(failed_ts, msg_ts)
                     continue
 
                 image_stripped = False

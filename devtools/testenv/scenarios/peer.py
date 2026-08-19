@@ -11,6 +11,7 @@ import httpx
 _ORCH_PORT = 8800
 _TIMEOUT = 15.0
 _TOKEN_HEADER = "x-tc-token"
+TOKEN_QUERY_PARAM = "token"
 
 
 def _auth_headers(token: str) -> dict[str, str]:
@@ -35,6 +36,10 @@ class Peer:
 
     def __repr__(self) -> str:
         return f"<Peer {self.tag}>"
+
+    @property
+    def base_url(self) -> str:
+        return self._base
 
     def close(self) -> None:
         self._client.close()
@@ -68,6 +73,78 @@ class Peer:
             return r.status_code, r.json()
         except ValueError:
             return r.status_code, {}
+
+    def raw_get(self, path: str, *, token: str | None = "", headers: dict | None = None,
+                params: dict | None = None) -> int:
+        """GET without the client's own auth, returning just the status.
+
+        token="" sends none, token=None sends this peer's real one, and any
+        other value is sent verbatim. Used to prove the API refuses a caller
+        rather than to read what it returns.
+        """
+        sent = dict(headers or {})
+        if token is None:
+            sent.update(_auth_headers(self.token))
+        elif token:
+            sent[_TOKEN_HEADER] = token
+        with httpx.Client(timeout=_TIMEOUT) as bare:
+            return bare.get(self._base + path, headers=sent, params=params).status_code
+
+    def raw_post(self, path: str, body: dict | None = None, *,
+                 token: str | None = "", headers: dict | None = None) -> int:
+        """POST without the client's own auth, returning just the status."""
+        sent = dict(headers or {})
+        if token is None:
+            sent.update(_auth_headers(self.token))
+        elif token:
+            sent[_TOKEN_HEADER] = token
+        with httpx.Client(timeout=_TIMEOUT) as bare:
+            return bare.post(self._base + path, json=body or {},
+                             headers=sent).status_code
+
+    def ws_probe(self, *, token: str | None = "", origin: str | None = None,
+                 query_token: bool = False) -> str:
+        """Try to open the event socket. Returns "open", or "closed:<code>".
+
+        A browser sets no headers on a WebSocket handshake, so the query
+        parameter is the only way it can authenticate -- both routes are worth
+        proving. CORS does not apply to this handshake at all, which is why the
+        backend checks Origin here itself.
+        """
+        import asyncio
+
+        import websockets
+
+        url = self._base.replace("http://", "ws://") + "/ws"
+        real = self.token if token is None else token
+        headers = {}
+        if real and not query_token:
+            headers[_TOKEN_HEADER] = real
+        if real and query_token:
+            url += f"?{TOKEN_QUERY_PARAM}={real}"
+        if origin is not None:
+            headers["Origin"] = origin
+
+        async def attempt() -> str:
+            try:
+                async with websockets.connect(
+                    url, additional_headers=headers, open_timeout=10,
+                ) as ws:
+                    # The backend closes an unauthorised socket right after the
+                    # handshake, so an accepted handshake is not yet a pass.
+                    try:
+                        await asyncio.wait_for(ws.recv(), timeout=2.0)
+                    except asyncio.TimeoutError:
+                        return "open"
+                    except websockets.ConnectionClosed as closed:
+                        return f"closed:{closed.rcvd.code}"
+                    return "open"
+            except websockets.InvalidStatus as e:
+                return f"rejected:{e.response.status_code}"
+            except websockets.ConnectionClosed as e:
+                return f"closed:{e.rcvd.code if e.rcvd else 'unknown'}"
+
+        return asyncio.run(attempt())
 
     def alive(self) -> bool:
         """True if this tester's API is answering. False across a kill."""
@@ -244,9 +321,22 @@ class Peer:
     # --- messages ---
 
     def send(self, channel_hash: str, content: str,
-             reply_to: str | None = None) -> dict:
+             reply_to: str | None = None, image_data_b64: str | None = None) -> dict:
         return self._post(f"/channels/{channel_hash}/messages",
-                          {"content": content, "reply_to": reply_to})
+                          {"content": content, "reply_to": reply_to,
+                           "image_data_b64": image_data_b64})
+
+    def message_image_status(self, channel_hash: str, message_id: str) -> int:
+        """Status of fetching a message's attachment; 404 when none is stored."""
+        return self._client.get(
+            f"{self._base}/channels/{channel_hash}/messages/{message_id}/image"
+        ).status_code
+
+    def message_by_content(self, channel_hash: str, content: str) -> dict | None:
+        for m in self.messages(channel_hash):
+            if m["content"] == content:
+                return m
+        return None
 
     def messages(self, channel_hash: str) -> list[dict]:
         return self._get(f"/channels/{channel_hash}/messages")
