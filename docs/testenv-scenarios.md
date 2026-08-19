@@ -266,6 +266,11 @@ cooldown allows one round per pair per minute. Whether the scenario converges
 then depends on whether the useful round happens to fall inside a window that
 is open — which matches the variance measured above.
 
+One candidate is already ruled out: author-signature rejection is not involved.
+`messages_rejected` reads 0 for every peer in every observed run, and the debug
+capture holds no "signature missing or invalid" line — which J1 independently
+confirms, since relayed history from a *dead* author verifies fine.
+
 Not yet proven, and the next step: instrument one responder to log every
 refusal alongside what it *would* have served, and confirm the refused rows are
 the missing ones.
@@ -777,7 +782,7 @@ All ten families built and run: **81 scenarios, 61 strict and 20 probes.**
 |---|---|---|
 | A — public channels | 10 (6 strict, 4 probes) | All passing, three consecutive clean runs |
 | B — invite-only and membership | 13 (12 strict, 1 probe) | 11/12 — **B11 fails** on a confirmed permission gap |
-| C — offline and sync | 10 (9 strict, 1 probe) | 8/9 — **C11 fails** (1 pass in 5). **C2 fails ~half the time**; it passed the post-merge run |
+| C — offline and sync | 10 (9 strict, 1 probe) | 7/9 on the latest run — **C2 and C11 both fail**, intermittently and rarely together. C11 has passed 1 run in 6 |
 | D — degraded links | 10 (5 strict, 5 probes) | All passing, on genuinely shaped links |
 | E — servers | 6 (5 strict, 1 probe) | All passing |
 | F — reactions, presence, identity | 8 (7 strict, 1 probe) | All passing; F3's prediction refuted |
