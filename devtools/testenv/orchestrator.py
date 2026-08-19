@@ -84,6 +84,10 @@ _AUTH_HEADERS = {"x-tc-token": _API_TOKEN}
 # Localhost unless deliberately widened -- see main()'s --host.
 _BIND_HOST = "127.0.0.1"
 
+# Extra browser origins the tester APIs must accept, for hosts this process
+# cannot discover for itself -- see _page_origins.
+_EXTRA_PAGE_ORIGINS: list[str] = []
+
 
 def _tags(n: int) -> list[str]:
     return list(string.ascii_uppercase[:n])
@@ -165,10 +169,17 @@ def _page_origins() -> list[str]:
 
     The page and each tester API differ by port, so every call it makes is
     cross-origin and needs the tester's CORS policy to name it.
+
+    _lan_ip() only finds the address a default route goes out of, which is not
+    the address a user actually reaches this host on when it is served over a
+    tunnel or an overlay network -- remote_host.sh's tailnet being the case
+    that matters. Those callers pass the real ones with --page-origin;
+    without that every tester call from the page fails CORS.
     """
     origins = [f"http://127.0.0.1:{_ORCH_PORT}", f"http://localhost:{_ORCH_PORT}"]
     if _BIND_HOST not in ("127.0.0.1", "localhost"):
         origins.append(f"http://{_lan_ip()}:{_ORCH_PORT}")
+    origins.extend(o for o in _EXTRA_PAGE_ORIGINS if o not in origins)
     return origins
 
 
@@ -432,7 +443,7 @@ def restart_hub():
 
 
 def main():
-    global _TESTERS, _BIND_HOST
+    global _TESTERS, _BIND_HOST, _EXTRA_PAGE_ORIGINS
 
     parser = argparse.ArgumentParser(description="TrenchChat local N-tester test environment")
     parser.add_argument("--testers", type=int, default=_DEFAULT_TESTERS,
@@ -442,9 +453,15 @@ def main():
                         help="bind address for the orchestrator and every "
                              "tester API (default 127.0.0.1; pass 0.0.0.0 to "
                              "reach the environment from another host)")
+    parser.add_argument("--page-origin", action="append", metavar="ORIGIN",
+                        help="extra browser origin the tester APIs accept, e.g. "
+                             "http://100.64.0.1:8800 — repeatable. Needed when "
+                             "this host is reached on an address it cannot "
+                             "discover itself, such as a tailnet IP")
     args = parser.parse_args()
     n = max(1, min(args.testers, _MAX_TESTERS))
     _BIND_HOST = args.host
+    _EXTRA_PAGE_ORIGINS = list(args.page_origin or [])
     _TESTERS = _build_testers(n)
 
     _preflight_ports()

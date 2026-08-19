@@ -109,9 +109,25 @@ start_testenv() {
     # Both servers bind localhost by default; hosting for the tailnet is the
     # whole point of this script, so it opts in explicitly. The API token
     # printed in each log is what protects the exposed identities.
+    #
+    # The tailnet address has to be passed in: the orchestrator can only
+    # discover the address its default route uses, and every call the pages
+    # make to a tester is cross-origin, so an address missing from the
+    # allow-list shows up as every tester "failed to connect".
+    local origins=()
+    local ip
+    ip="$(ts_ip)"
+    if [ -n "$ip" ]; then
+        origins+=(--page-origin "http://$ip:8800" --page-origin "http://$ip:$CLIENT_PORT")
+    fi
     nohup "$VENV/bin/python" "$REPO_ROOT/devtools/testenv/orchestrator.py" \
-        --testers "$TESTERS" --host 0.0.0.0 >"$STATE_DIR/orchestrator.log" 2>&1 &
+        --testers "$TESTERS" --host 0.0.0.0 "${origins[@]}" \
+        >"$STATE_DIR/orchestrator.log" 2>&1 &
     echo $! >"$STATE_DIR/orchestrator.pid"
+}
+
+ts_ip() {
+    ts ip -4 2>/dev/null | head -1
 }
 
 start_client() {
@@ -129,9 +145,11 @@ cmd_start() {
     ensure_venv
     ensure_web_build
     ensure_tailscale
+    # Before the servers, so their CORS allow-list can name the tailnet
+    # address the user will actually reach them on.
+    start_tailscale || true
     start_testenv
     start_client
-    start_tailscale || true
     cmd_status
 }
 
