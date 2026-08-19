@@ -4,7 +4,11 @@ built Flutter web client on the same port, so the client can be tested from
 a browser against real channels and the real mesh.
 
     python devtools/testenv/serve_profile.py
-    # then open http://127.0.0.1:8810/  (or http://<host>:8810/ remotely)
+    # then open the printed http://127.0.0.1:8810/?token=... URL
+
+Binds to localhost by default. The API drives the served identity, so a wider
+bind puts that identity on the network with only the token in front of it --
+pass --host deliberately, not by habit.
 
 Uses ~/.trenchchat and the default Reticulum config, wired exactly like
 main.py. Close the desktop client first: both processes would announce the
@@ -38,8 +42,9 @@ _STARTUP_SYNC_DELAY_SECS = 3.0
 def main():
     parser = argparse.ArgumentParser(
         description="Serve the real TrenchChat profile + web client over HTTP")
-    parser.add_argument("--host", default="0.0.0.0",
-                        help="bind address (default 0.0.0.0)")
+    parser.add_argument("--host", default="127.0.0.1",
+                        help="bind address (default 127.0.0.1; binding wider "
+                             "exposes this identity to the whole network)")
     parser.add_argument("--port", type=int, default=_DEFAULT_PORT,
                         help=f"port for the API and web client (default {_DEFAULT_PORT}, "
                              "clear of the dev environment's 8800-8808)")
@@ -55,7 +60,7 @@ def main():
     from fastapi.staticfiles import StaticFiles
     from starlette.middleware.gzip import GZipMiddleware
 
-    from api import create_app
+    from api import create_app, generate_token
     from backend_core import Backend
 
     try:
@@ -72,7 +77,8 @@ def main():
     backend.start_voice_ticker()
     threading.Timer(_STARTUP_SYNC_DELAY_SECS, backend.sync_mgr.request_sync_all).start()
 
-    app = create_app(backend)
+    api_token = generate_token()
+    app = create_app(backend, token=api_token)
     # The Flutter bundle is ~10 MB of JS and wasm. Served raw over a slow or
     # relayed link the browser gives up mid-load, so compress it.
     app.add_middleware(GZipMiddleware, minimum_size=1024)
@@ -81,7 +87,7 @@ def main():
     if web_dir.is_dir():
         # Mounted last, so every API route declared above still wins.
         app.mount("/", StaticFiles(directory=str(web_dir), html=True), name="web-client")
-        web_note = f"web client:  http://127.0.0.1:{args.port}/"
+        web_note = (f"web client:  http://127.0.0.1:{args.port}/?token={api_token}")
     else:
         web_note = ("web client:  not found -- run `flutter build web` in "
                     "flutter_ui/ to serve it from this port too")
@@ -90,8 +96,13 @@ def main():
           f"({backend.config.display_name})")
     print(f"  api:         http://127.0.0.1:{args.port}")
     print(f"  {web_note}")
+    print(f"  token:       {api_token}")
     print("  NOTE: close the desktop client while this runs -- same identity, "
-          "same database.\n")
+          "same database.")
+    if args.host not in ("127.0.0.1", "localhost", "::1"):
+        print(f"  WARNING: bound to {args.host} -- this identity is reachable "
+              "from other hosts; the token is all that protects it.")
+    print()
 
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
 

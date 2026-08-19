@@ -98,6 +98,20 @@ therefore how many API and shaper ports are used above 8801 and 41101.
 
 ### Per-tester API (ports 8801+)
 
+Every endpoint requires the environment's API token, which the orchestrator
+generates and serves at `GET /config` (the page reads it from there). Send it
+as `X-TC-Token`, `Authorization: Bearer`, or `?token=`. Curling a tester
+directly needs it too:
+
+```bash
+TOKEN=$(curl -s localhost:8800/config | python3 -c 'import json,sys; print(json.load(sys.stdin)["api_token"])')
+curl -H "X-TC-Token: $TOKEN" localhost:8801/me
+```
+
+Both the orchestrator and the tester APIs bind localhost unless started with
+`--host` — these APIs drive real identities, so they are not left open by
+default.
+
 All the channel/message/invite/permission endpoints described in `api.py`,
 plus a link-control group with no `actions.py` counterpart (see the note at
 the top of `api.py` -- this is dev-harness process control, not app logic):

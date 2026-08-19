@@ -523,8 +523,16 @@ class InviteManager:
 
         try:
             old_doc = unpack_wire(existing["document_blob"], raw=True)
-        except Exception:
-            return True
+        except Exception as e:
+            # We wrote this blob, so it should always parse. If it doesn't,
+            # there is no stored state left to diff against and no way to
+            # judge the signer -- refuse rather than wave the document through.
+            RNS.log(
+                f"TrenchChat [invite]: refusing member list doc for "
+                f"{channel_hash_hex[:12]}… — stored document unreadable: {e}",
+                RNS.LOG_ERROR,
+            )
+            return False
 
         signer_hex = signer.hex()
         old_members = set(old_doc.get(b"members", []))
@@ -800,6 +808,22 @@ class InviteManager:
                             RNS.LOG_ERROR)
 
         return True
+
+    def _creator_binds(self, channel_hash_hex: str, creator_hex: str,
+                       name: str) -> bool:
+        """True if this creator could have minted this channel hash for *name*."""
+        try:
+            creator_bytes = bytes.fromhex(creator_hex)
+        except (TypeError, ValueError):
+            return False
+        if channel_hash_hex == channel_hash_for(creator_bytes, name):
+            return True
+        RNS.log(
+            f"TrenchChat [invite]: channel {channel_hash_hex[:12]}… does not bind "
+            f"to claimed creator {creator_hex[:12]}… and name {name!r} — ignored",
+            RNS.LOG_WARNING,
+        )
+        return False
 
     def _materialise_roster(self, server_hash_hex: str, doc: dict,
                             signer: bytes, existing) -> list[tuple[str, str]]:
@@ -1401,6 +1425,14 @@ class InviteManager:
                             if isinstance(perms_field, bytes):
                                 perms_field = perms_field.decode("utf-8", errors="replace")
                             created_at = fields.get(F_CHANNEL_CREATED_AT, time.time())
+                            # These fields are unsigned, and creator_hash goes
+                            # on to serve as a trusted-signer fallback for
+                            # later documents. Bind it the same way roster
+                            # entries and servers are bound, so the hash has
+                            # to be one this creator could have minted.
+                            if not self._creator_binds(channel_hash_hex, creator,
+                                                       channel_name):
+                                return
                             self._storage.upsert_channel(
                                 hash=channel_hash_hex,
                                 name=channel_name,

@@ -81,7 +81,8 @@ marshal into the main thread via signals, and the API layer marshals into asynci
 ### Flutter client (`flutter_ui/`) — the active UI
 
 - Dart/Flutter app; talks to a Python backend over HTTP + WebSocket. The backend is
-  `devtools/testenv/api.py` (`create_app(backend)`), whose endpoints call the same
+  `devtools/testenv/api.py` (`create_app(backend, token=...)` — every endpoint
+  requires that token; see `docs/security-improvements.md`), whose endpoints call the same
   `trenchchat/core/actions.py` functions and managers the Qt GUI calls — never reimplement logic
   in an endpoint or a widget. New features reach the client as: core manager/action → api.py
   endpoint → `lib/api/client.dart` + `lib/app_state.dart` → screen.
@@ -185,3 +186,6 @@ Full detail in `.claude/rules/code-standards.md`. Highlights not obvious from sk
   test; new permissions need an adversarial test) — see `.claude/rules/test-coverage-for-new-features.md`.
 - Never commit, push, merge, rebase, or tag without an explicit request, and never push directly to
   `main` (protected — always a feature branch + PR) — see `.claude/rules/git-safety.md`.
+- A new file in `docs/` needs reasoning that can't be recovered from the code — a trust model, a
+  rejected alternative, a deliberate non-fix. Plans, proposals and test plans get deleted once the
+  work lands — see `.claude/rules/docs-worth-committing.md`.

@@ -197,6 +197,126 @@ This closes the last path to unsolicited channel membership.
 
 ---
 
+## Fixed: the Flutter API bridge
+
+`devtools/testenv/api.py` is the backend the Flutter client talks to, and
+`main_flutter.py` ships it for real use. Every endpoint acts as the identity it
+serves, and none of them authenticated anything.
+
+- **Session token required.** `create_app(backend, token=...)` mints one per
+  process (`generate_token()`), accepted as `Authorization: Bearer`, an
+  `X-TC-Token` header, or a `?token=` query parameter — the last because a
+  browser can set headers on neither a WebSocket handshake nor an `<img>` src.
+  Paths served by a mount (the built web client) stay public; the client has to
+  load before it can present a token.
+- **CORS is an explicit allowlist**, never `*`. With no credentials to protect,
+  a wildcard let any page the user visited read every response — which defeated
+  the localhost bind entirely.
+- **The WebSocket checks token and Origin** before `accept()`. Browsers apply
+  neither CORS nor same-origin policy to a WS handshake, and that socket
+  streams every inbound message.
+- **Binds default to `127.0.0.1`** — `serve_profile.py` (which serves the *real*
+  profile) defaulted to `0.0.0.0`, as did the orchestrator and its workers.
+  `--host` still widens them deliberately; `remote_host.sh` passes it, since
+  tailnet hosting is its purpose.
+- **Image sanitisation fails closed** in the send endpoint. It forwarded the
+  original bytes when `prepare_image()` raised — precisely on the inputs the
+  re-encode exists to catch — while claiming to mirror the Qt handler, which
+  fails closed.
+
+Covered by `tests/test_api_security.py` (token required, CORS, WS origin,
+static assets stay public, bind defaults).
+
+## Fixed: replay, amplification and unbounded values
+
+- **Subscriber-list versions persist** (`subscriber_list_versions`). The
+  watermark was in-memory only, so a restart re-opened the replay it exists to
+  stop: a captured older list stays validly signed forever, and applying one
+  resurrects removed subscribers — who are exactly who delivery is aimed at.
+  The version check now also commits under the same lock it read, closing a
+  rollback race between two concurrent lists.
+- **`MT_SUBSCRIBE` only re-broadcasts on an actual change.** Re-subscribing
+  turned one inbound control message into one outbound per subscriber.
+- **Peer timestamps are bounded** (`protocol.wire_timestamp`). `F_TIMESTAMP` is
+  self-asserted; unbounded, a far-future value pinned a message to the top of
+  the transcript and, through sync, advanced the requester's persisted
+  watermark past history it never received — after which that peer was never
+  asked for anything older again. Direct delivery substitutes our own clock;
+  sync drops the row, because accepting it would move a watermark.
+- **A sync row that stored nothing no longer advances the watermark.**
+  `message_id` is globally unique, so a failed insert can mean the message
+  belongs to another channel entirely — `Storage.has_message` now decides.
+- **Response truncation never splits a timestamp group.** The resume point is a
+  bare float and `get_messages_after` filters on a strict `>`, so half a group
+  past the cut was skipped by every later sweep.
+- **Quarantine path requests are throttled.** They fire before authentication
+  on an attacker-chosen `source_hash`, so each unsigned packet became a
+  broadcast on the shared mesh. Released messages now also pass the control
+  throttle instead of arriving as one burst.
+- **Emoji responses must answer a request we made**, and the shared-channel
+  check names the requester on open-join channels — it previously returned true
+  for anyone whenever we were in any public channel, which made it vacuous.
+- **Per-identity throttle maps are capped.** Identities are free to mint, so
+  these cannot be bounded by how many peers talk to us.
+- **Chat messages fail closed on a missing channel row**, matching
+  `reaction.py`'s `_may_react`; there is nothing to authorise against without one.
+- **Inbound images are checked against a decode bound**
+  (`image.inbound_image_is_sane`). The byte cap bounds the payload, not the
+  raster: a file well under it can declare enormous dimensions or thousands of
+  frames, and those bytes go to the client's own decoder. Header only — no
+  pixel data is decoded. Applies to message images, sync images and avatars.
+- **`_signer_may_apply` fails closed** when the stored document will not parse,
+  and **standalone channel metadata is creator-bound** the way servers and
+  roster entries already were — `creator_hash` arrives unsigned and then serves
+  as a trusted-signer fallback.
+- **Encrypting or decrypting the database removes the plaintext `-wal`/`-shm`
+  sidecars**, which held recently written rows in the clear.
+
+## Fixed: synced messages are bound to their author
+
+A message reaching you through sync came from a peer who usually did not
+write it. LXMF authenticates that relay and nothing else, so the author, the
+text, the attachment and the threading fields were all just claims in the
+relay's payload -- a relay could rewrite the words of a genuine message and
+serve them under the original author and id.
+
+`message_id` did not help: it is `sha256(content:sender:timestamp)` but was
+never recomputed on receipt, and it is `UNIQUE`, so a tampered copy landing
+first took the id permanently and the genuine message was then discarded as a
+duplicate. First writer wins on a field anyone could forge.
+
+**Fix.** Authors sign a canonical digest (`protocol.author_digest`) covering
+channel, message id, timestamp, content, an image digest and the threading
+fields, carried in `F_AUTHOR_SIG` (0x70) and stored alongside the message.
+Both ingest paths verify before storing; the signature is checked against the
+payload exactly as it arrived, before any of it is stripped. `sender_name` is
+deliberately not covered -- it is mutable, and signing it would fail on
+rename.
+
+Verification needs the author's public key, not their hash. `core/authorship.py`
+keeps a local key cache, and every key is checked to hash back to the identity
+claiming it -- self-certifying, which is what makes a key safe to accept from
+any source. A key learned once keeps working after that peer goes quiet.
+
+Unsigned rows are refused, and a responder withholds them rather than serving
+rows the requester will reject: a rejected row advances nothing, so the
+requester would otherwise re-request the same window forever. Refusing an
+oversized or bomb image clears the signature with it, so the row stays
+readable locally and simply never relays.
+
+Rejection is also reported rather than silent. `SyncStatusTracker` counted a
+peer as having answered regardless of whether any of its rows survived, so a
+relay serving nothing but tampered history left the channel reading as
+SYNCED while the real messages were still missing. Rows refused for failing
+verification now mark the channel INCOMPLETE and are counted per peer
+(`messages_rejected`); rows withheld by our own tenure checks are not, since
+history we are not entitled to is not history we are missing.
+
+Covered by `tests/test_authorship.py` (digest pinned against a committed
+vector), `TestAdversarialRelayTampering` (edit, re-thread, id-squat, invented
+message, and the status claim, each with a positive control) and
+`TestRejectedRowsAreNotCaughtUp`.
+
 ## Still open
 
 ### 0. Tenure filtering is a channel-level switch, so a tenure-blind peer is a hole
@@ -273,6 +393,21 @@ rediscovered as findings.
   is indistinguishable from a single malformed message.
 - macOS builds are unsigned (`trenchchat.spec` sets `codesign_identity=None`) —
   a distribution-trust matter rather than an application one.
+- Inbound image bytes that do not parse as an image are stored as-is. They
+  cannot be shown to be hostile and are opaque blobs either way, but the
+  client's decoder is still what eventually reads them. Re-encoding every
+  inbound image through one bounded library would normalise them; it is lossy
+  and costs CPU on the low-power hardware Reticulum targets, so it is a product
+  call rather than a straight win. `inbound_image_is_sane` covers the
+  resource-exhaustion half of this today.
+- `INVITE` is not enforced on direct member *additions* in a member-list
+  document, only on the token/join-request path — so it does not restrain a
+  modified admin client. `tests/test_adversarial.py::
+  test_member_without_invite_cannot_approve_join` pins this as intended;
+  revisit if a deployment ever relies on withholding `INVITE` from an admin.
+- Storage imposes no length cap on message `content` and no retention limit,
+  and chat messages are exempt from the control throttle by design, so a member
+  can grow the database steadily. Bounded by membership, not by rate.
 
 ---
 

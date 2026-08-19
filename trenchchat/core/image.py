@@ -13,6 +13,7 @@ exceed the limit so animation frames are preserved.
 """
 
 import io
+import warnings
 
 from PIL import Image
 
@@ -32,6 +33,45 @@ MAX_GIF_FRAMES = 300
 # Scale factors tried in order when a GIF is too large.
 # Each step reduces both dimensions by the given factor until one fits.
 _GIF_SCALE_STEPS = (0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3)
+
+# Ceiling on the total raster an inbound image may expand to across all
+# frames. MAX_IMAGE_PIXELS bounds one frame; an animation multiplies it.
+MAX_INBOUND_DECODED_PIXELS = MAX_IMAGE_PIXELS
+
+
+def inbound_image_is_sane(image_bytes: bytes) -> bool:
+    """False if an inbound image's header declares an implausible decode.
+
+    The byte cap bounds the payload, not what it expands to: a file well
+    under it can declare enormous dimensions or thousands of frames, and
+    those bytes are handed to the client's own image decoder. Only the
+    header is read here -- no pixel data is decoded.
+
+    Bytes that do not parse as an image at all are left alone. They cannot be
+    shown to be hostile, they are stored as opaque blobs either way, and
+    re-encoding every inbound image to normalise them would be lossy and
+    costly on the low-power hardware Reticulum targets.
+    """
+    try:
+        with warnings.catch_warnings():
+            # Pillow only raises above twice MAX_IMAGE_PIXELS and merely warns
+            # below that; both are rejections here.
+            warnings.simplefilter("error", Image.DecompressionBombWarning)
+            with Image.open(io.BytesIO(image_bytes)) as img:
+                width, height = img.size
+                frames = getattr(img, "n_frames", 1)
+    except (Image.DecompressionBombError, Image.DecompressionBombWarning):
+        return False
+    except Exception:
+        return True
+
+    if width <= 0 or height <= 0:
+        return False
+    if not isinstance(frames, int) or frames < 1:
+        return False
+    if frames > MAX_GIF_FRAMES:
+        return False
+    return width * height * frames <= MAX_INBOUND_DECODED_PIXELS
 
 
 def compress_image(image_bytes: bytes) -> bytes:

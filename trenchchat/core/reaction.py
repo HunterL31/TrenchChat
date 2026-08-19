@@ -72,6 +72,9 @@ EMOJI_TOKEN_RE = re.compile(r":([a-zA-Z0-9_-]+)(?:@([0-9a-fA-F]{64}))?:")
 
 _SHA256_HEX_RE = re.compile(r"^[0-9a-f]{64}$")
 
+# Ceiling on how many requesters the throttle map tracks at once.
+MAX_TRACKED_REQUESTERS = 512
+
 
 def compute_emoji_hash(image_data: bytes) -> str:
     """Return the hex SHA-256 hash of raw emoji image bytes."""
@@ -276,14 +279,24 @@ class ReactionManager:
         self.request_missing_from_content(self._resolve_sender_hex(message), content)
 
     def _shares_any_channel(self, peer_hex: str) -> bool:
-        """True if peer_hex is a member of, or subscriber to, any channel we hold."""
+        """True if peer_hex is a member of, or subscriber to, any channel we hold.
+
+        An open-join channel still has to name the peer: answering for anyone
+        merely because we are in some public channel makes the whole check
+        vacuous, and lets an unrelated node enumerate the emoji library.
+        """
+        if not peer_hex:
+            return False
         for sub in self._storage.get_subscriptions():
             ch = sub["channel_hash"]
             channel = self._storage.get_channel(ch)
             if channel is None:
                 continue
             if is_open_join(permissions_from_json(channel["permissions"])):
-                return True
+                if (self._storage.is_channel_subscriber(ch, peer_hex)
+                        or channel["creator_hash"] == peer_hex):
+                    return True
+                continue
             if self._storage.is_member(ch, peer_hex):
                 return True
         return False
@@ -297,6 +310,11 @@ class ReactionManager:
             if len(times) >= EMOJI_REQUEST_BURST:
                 return False
             times.append(now)
+            if len(self._emoji_request_times) > MAX_TRACKED_REQUESTERS:
+                # Bounded by design, not by how many identities exist.
+                for stale in [h for h, ts in self._emoji_request_times.items()
+                              if not ts or now - ts[-1] > EMOJI_REQUEST_WINDOW_SECS]:
+                    del self._emoji_request_times[stale]
             return True
 
     def _may_react(self, channel_hash_hex: str, sender_hex: str) -> bool:
@@ -467,7 +485,17 @@ class ReactionManager:
             )
             return
 
+        # Only in answer to a request we made. Storing unsolicited emoji lets
+        # any authenticated peer write into the local library at will, and a
+        # fresh hash per push defeats the emoji_exists de-duplication below.
         with self._lock:
+            if emoji_hash not in self._pending_emoji_requests:
+                RNS.log(
+                    f"TrenchChat [reaction]: discarded unsolicited emoji "
+                    f"{emoji_hash[:12]}…",
+                    RNS.LOG_WARNING,
+                )
+                return
             self._pending_emoji_requests.pop(emoji_hash, None)
 
         name_raw = fields.get(F_EMOJI_NAME, "")

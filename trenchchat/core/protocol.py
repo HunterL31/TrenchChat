@@ -14,6 +14,7 @@ Field key registry
 0x40–0x4F  Reaction fields
 0x50–0x5F  Sync status fields
 0x60–0x6F  Voice fields
+0x70–0x7F  Message integrity fields
 """
 
 # --- Common / messaging fields ---
@@ -80,6 +81,9 @@ F_VOICE_MUTED       = 0x61   # bool  — sender's current mute state
 F_VOICE_JOINED_AT   = 0x62   # float — Unix timestamp when the sender joined the voice session
 F_VOICE_CODEC       = 0x63   # str   — codec the sender transmits ("opus")
 
+# --- Message integrity fields ---
+F_AUTHOR_SIG        = 0x70   # bytes[64] — author's Ed25519 signature over author_digest()
+
 # --- Message type strings ---
 MT_SUBSCRIBE        = "subscribe"
 MT_UNSUBSCRIBE      = "unsubscribe"
@@ -122,6 +126,83 @@ MAX_WIRE_ARRAY    = 4096
 MAX_WIRE_MAP      = 4096
 MAX_WIRE_STR      = 1 * 1024 * 1024
 MAX_WIRE_BIN      = 2 * 1024 * 1024
+
+
+import math  # noqa: E402
+import time  # noqa: E402
+
+# How far ahead of our own clock a peer's timestamp may sit before it stops
+# being explainable as clock skew.
+MAX_CLOCK_SKEW_SECS = 300.0
+
+
+def wire_timestamp(value, now: float | None = None) -> float | None:
+    """A peer-supplied timestamp, or None if it isn't plausible.
+
+    F_TIMESTAMP is self-asserted and unverifiable. Unbounded, a far-future
+    value pins a message to the top of the transcript permanently, and on the
+    sync path it advances the requester's persisted watermark past history it
+    never received -- after which that peer is never asked for anything older
+    again. Callers decide the policy: substitute their own clock (direct
+    delivery, where the message is still worth keeping) or drop the row
+    (sync, where accepting it would move a watermark).
+    """
+    now = time.time() if now is None else now
+    try:
+        ts = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(ts) or ts < 0 or ts > now + MAX_CLOCK_SKEW_SECS:
+        return None
+    return ts
+
+
+import hashlib  # noqa: E402
+import struct  # noqa: E402
+
+# Domain tag, so an author signature can never be replayed as one of the other
+# structures the same Ed25519 key signs (invite tokens, member lists,
+# subscriber lists).
+AUTHOR_SIG_DOMAIN = b"trenchchat-author-v1"
+
+
+def _length_prefixed(*parts: bytes) -> bytes:
+    """Join byte strings so no field's contents can impersonate a boundary.
+
+    content is arbitrary user text and may contain any byte, so a separator
+    scheme would let a crafted message shift the field boundaries and produce
+    a colliding digest.
+    """
+    return b"".join(struct.pack(">I", len(p)) + p for p in parts)
+
+
+def author_digest(channel_hash_hex: str, message_id: str, timestamp: float,
+                  content: str, reply_to: str | None,
+                  last_seen_id: str | None,
+                  image_data: bytes | None) -> bytes:
+    """The bytes an author signs to bind a message to their identity.
+
+    Covers everything a relay could otherwise alter while passing every other
+    check: the text, the attachment, and the threading fields -- rewriting
+    reply_to alone would graft real words onto a different conversation.
+    message_id is covered too, which is what stops a tampered copy being
+    stored under a genuine message's id.
+
+    sender_name is deliberately absent: a display name is self-asserted and
+    mutable, so signing it would freeze it at send time and fail on rename.
+    The timestamp is formatted, not packed, so peers agree on it without
+    depending on float encoding.
+    """
+    return hashlib.sha256(_length_prefixed(
+        AUTHOR_SIG_DOMAIN,
+        bytes.fromhex(channel_hash_hex),
+        message_id.encode(),
+        f"{timestamp:.6f}".encode(),
+        (reply_to or "").encode(),
+        (last_seen_id or "").encode(),
+        hashlib.sha256(image_data or b"").digest(),
+        content.encode("utf-8"),
+    )).digest()
 
 
 def unpack_wire(payload: bytes, *, raw: bool = False):

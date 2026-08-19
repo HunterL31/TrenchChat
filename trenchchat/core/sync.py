@@ -52,7 +52,8 @@ import LXMF
 import msgpack
 
 from trenchchat.core.identity import Identity
-from trenchchat.core.image import MAX_IMAGE_BYTES
+from trenchchat.core.authorship import verify_message
+from trenchchat.core.image import MAX_IMAGE_BYTES, inbound_image_is_sane
 from trenchchat.core.messaging import Messaging
 from trenchchat.core.permissions import (
     FULL_SYNC, has_permission, is_open_join, permissions_from_json,
@@ -63,7 +64,7 @@ from trenchchat.core.protocol import (
     F_MISSED_FOR, F_MISSED_MSG_ID,
     MT_MISSED_DELIVERY, MT_SYNC_REQUEST, MT_SYNC_RESPONSE,
     SYNC_WINDOW_SECS,
-    unpack_wire,
+    unpack_wire, wire_timestamp,
 )
 from trenchchat.core.reaction import is_custom_emoji_hash
 from trenchchat.core.storage import Storage
@@ -125,6 +126,29 @@ def _coerce_str(value) -> str:
     if isinstance(value, bytes):
         return value.decode(errors="replace")
     return str(value) if value is not None else ""
+
+
+def _truncate_at_group_boundary(rows: list) -> tuple[list, bool]:
+    """Cut a batch to the response cap without splitting a timestamp group.
+
+    Returns (rows, dropped_any). F_SYNC_WINDOW_START is a bare float and
+    Storage.get_messages_after filters on a strict timestamp >, so messages
+    sharing one timestamp have to travel together: whichever half landed on
+    the far side of a cut would be skipped by every future sweep. A single
+    group larger than the cap ships whole rather than stalling forever --
+    the same rule _collect_permitted_rows applies while sweeping.
+    """
+    if len(rows) <= MAX_RESPONSE_MESSAGES:
+        return rows, False
+
+    boundary_ts = rows[MAX_RESPONSE_MESSAGES]["timestamp"]
+    cut = MAX_RESPONSE_MESSAGES
+    while cut > 0 and rows[cut - 1]["timestamp"] == boundary_ts:
+        cut -= 1
+    if cut == 0:
+        while cut < len(rows) and rows[cut]["timestamp"] == boundary_ts:
+            cut += 1
+    return rows[:cut], cut < len(rows)
 
 
 class SyncManager:
@@ -476,9 +500,8 @@ class SyncManager:
         rows = self._merge_rows(
             [r for r in hinted_rows if r["timestamp"] <= frontier], swept_rows
         )
-        if len(rows) > MAX_RESPONSE_MESSAGES:
-            rows = rows[:MAX_RESPONSE_MESSAGES]
-            truncated = True
+        rows, capped = _truncate_at_group_boundary(rows)
+        truncated = truncated or capped
 
         packed = msgpack.packb(
             [self._row_to_payload(r) for r in rows],
@@ -628,9 +651,17 @@ class SyncManager:
 
     def _filter_rows_by_tenure(self, channel, channel_hash_hex: str,
                                requester_hex: str, rows: list) -> list:
-        """Drop rows neither the sender nor the requester was a member for.
+        """Drop rows we will not relay: unsigned ones, then tenure failures.
 
-        Only applied when tenure data exists for the channel (skips open-join
+        An unsigned row is withheld because the requester would reject it on
+        arrival, and a rejected row advances nothing -- they would re-request
+        the same window forever. Withholding lets the sweep scan past it and
+        report a scan cursor instead, which is exactly how tenure-withheld
+        rows already behave. Rows predating author signatures are the only
+        ones this affects.
+
+        The tenure checks below are only applied when tenure data exists for
+        the channel (skips open-join
         channels and channels bootstrapped before this feature). Two
         independent checks:
           - sender: the claimed author must actually have been a member at
@@ -645,6 +676,20 @@ class SyncManager:
             admin but not member.
         """
         perms = permissions_from_json(channel["permissions"]) if channel else {}
+
+        signed_rows = []
+        for r in rows:
+            has_sig = "author_sig" in r.keys() and r["author_sig"]
+            if not has_sig:
+                RNS.log(
+                    f"TrenchChat [sync]: withholding unsigned message "
+                    f"{r['message_id'][:12]}… — it cannot be verified by the "
+                    f"requester",
+                    RNS.LOG_DEBUG,
+                )
+                continue
+            signed_rows.append(r)
+        rows = signed_rows
 
         if not self._storage.has_any_tenure(channel_hash_hex):
             return rows
@@ -733,12 +778,30 @@ class SyncManager:
             my_role = self._storage.get_role(channel_hash_hex, my_hex)
             full_sync = has_permission(perms, my_role, FULL_SYNC)
         inserted_count = 0
+        # Rows refused for failing verification -- as opposed to ones our own
+        # tenure checks withheld, which we are simply not entitled to. Only
+        # the former means history is missing.
+        rejected_count = 0
         accepted_ts: list[float] = []
         failed_ts: float | None = None
         for m in messages:
             try:
                 sender_hash = m.get("sender_hash", "")
-                msg_ts = float(m.get("timestamp", time.time()))
+                # Dropped rather than clamped, unlike direct delivery: an
+                # accepted row advances our persisted watermark, so taking a
+                # far-future timestamp here would stop us ever asking this
+                # peer for older history again.
+                checked_ts = wire_timestamp(m.get("timestamp"))
+                if checked_ts is None:
+                    RNS.log(
+                        f"TrenchChat [sync]: dropping synced message "
+                        f"{str(m.get('message_id', ''))[:12]}… — implausible "
+                        f"timestamp {m.get('timestamp')!r}",
+                        RNS.LOG_WARNING,
+                    )
+                    rejected_count += 1
+                    continue
+                msg_ts = checked_ts
 
                 # Validate tenure for invite-only channels with tenure data.
                 # Mirrors _handle_sync_request's two checks -- applied again
@@ -771,8 +834,33 @@ class SyncManager:
                     image_data = image_data.encode()
                 if not image_data:
                     image_data = None
-                elif len(image_data) > MAX_IMAGE_BYTES:
+
+                # Checked against the row exactly as the responder sent it,
+                # before anything is stripped. This is what makes a relayed
+                # message verifiable independently of who relayed it: the
+                # peer handing it over is almost never its author.
+                author_sig = m.get("author_sig")
+                if not verify_message(
+                        self._storage, sender_hash, author_sig,
+                        channel_hash_hex, m.get("message_id", ""), msg_ts,
+                        m.get("content", ""), m.get("reply_to"),
+                        m.get("last_seen_id"), image_data):
+                    RNS.log(
+                        f"TrenchChat [sync]: dropping synced message "
+                        f"{str(m.get('message_id', ''))[:12]}… — author "
+                        f"signature missing or invalid",
+                        RNS.LOG_WARNING,
+                    )
+                    rejected_count += 1
+                    continue
+
+                image_stripped = False
+                if image_data is not None and (
+                        len(image_data) > MAX_IMAGE_BYTES
+                        or not inbound_image_is_sane(image_data)):
                     image_data = None
+                    author_sig = None
+                    image_stripped = True
 
                 inserted = self._storage.insert_message(
                     channel_hash=channel_hash_hex,
@@ -785,11 +873,20 @@ class SyncManager:
                     last_seen_id=m.get("last_seen_id"),
                     received_at=time.time(),
                     image_data=image_data,
+                    author_sig=author_sig,
+                    image_stripped=image_stripped,
                 )
-                accepted_ts.append(msg_ts)
-                self._apply_synced_reactions(
-                    channel_hash_hex, m, responder_hex
-                )
+                # A duplicate we already hold is still "accepted" -- the
+                # watermark should move past it. A failed insert for an id
+                # that lives in another channel is not: nothing landed here,
+                # so advancing would skip history we never received.
+                if inserted or self._storage.has_message(
+                    channel_hash_hex, m.get("message_id", "")
+                ):
+                    accepted_ts.append(msg_ts)
+                    self._apply_synced_reactions(
+                        channel_hash_hex, m, responder_hex
+                    )
 
                 if inserted:
                     inserted_count += 1
@@ -840,6 +937,7 @@ class SyncManager:
         self._status.response_received(
             channel_hash_hex, peer_hex,
             received=len(messages), inserted=inserted_count, truncated=truncated,
+            rejected=rejected_count,
         )
 
         # A truncated response whose scan ran entirely through rows withheld
@@ -945,6 +1043,9 @@ class SyncManager:
         image_data = row["image_data"] if "image_data" in row.keys() else None
         if image_data:
             d["image_data"] = bytes(image_data)
+        author_sig = row["author_sig"] if "author_sig" in row.keys() else None
+        if author_sig:
+            d["author_sig"] = bytes(author_sig)
         return d
 
     def _row_to_payload(self, row) -> dict:

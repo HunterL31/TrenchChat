@@ -5,7 +5,8 @@ Shared test utilities for TrenchChat integration tests.
 import time
 import RNS
 
-from tests.conftest import TestPeer
+from tests.conftest import TestPeer, signing_identity
+from trenchchat.core.authorship import sign_message
 from trenchchat.core.permissions import is_open_join, permissions_from_json
 from trenchchat.core.storage import Storage
 
@@ -167,3 +168,23 @@ def wait_for_path(peer_hex: str, timeout: float = 10.0) -> bool:
         timeout=timeout,
         msg=f"identity {peer_hex[:12]}…",
     )
+
+
+def sign_as(sender_hex: str, channel_hash_hex: str, message_id: str,
+            timestamp: float, content: str, reply_to: str | None = None,
+            last_seen_id: str | None = None,
+            image_data: bytes | None = None) -> bytes | None:
+    """Sign fabricated history as the peer who supposedly authored it.
+
+    Tests seed transcripts by writing straight to storage or by hand-building
+    sync rows, which skips the signing that Messaging.send_message does. A row
+    without a signature is unverifiable and is correctly withheld and rejected,
+    so fixtures have to produce what a real client produces. Returns None for
+    an identity no peer_factory peer owns, which is what an unsigned row is
+    meant to look like.
+    """
+    identity = signing_identity(sender_hex)
+    if identity is None:
+        return None
+    return sign_message(identity, channel_hash_hex, message_id, timestamp,
+                        content, reply_to, last_seen_id, image_data)

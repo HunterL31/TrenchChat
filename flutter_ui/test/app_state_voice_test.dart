@@ -127,6 +127,7 @@ void main() {
         'link_state': 'signalled',
       },
     ];
+    backend.routes['GET /channels/$_channelHash/sync_status'] = {'state': 'synced'};
 
     await state.loadChannel(_channelHash);
 

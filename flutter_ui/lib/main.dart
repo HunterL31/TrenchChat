@@ -36,14 +36,35 @@ String resolveBaseUrl({Uri? pageUri, bool isWeb = kIsWeb,
   return defaultBaseUrl;
 }
 
+/// API token resolution, mirroring [resolveBaseUrl]'s priority order:
+/// 1. `--dart-define=TC_API_TOKEN=...` baked in at build time.
+/// 2. On web, the page's `?token=` query parameter -- how main_flutter.py and
+///    serve_profile.py hand the browser the token they generated.
+/// 3. On desktop, the TC_API_TOKEN process environment variable, set on the
+///    window main_flutter.py spawns.
+///
+/// Empty means "send no token", which every backend now rejects; that is the
+/// correct outcome for a client pointed at a backend it was not given access
+/// to, rather than silently talking to one.
+String resolveToken({Uri? pageUri, bool isWeb = kIsWeb,
+    Map<String, String>? environment}) {
+  const fromDefine = String.fromEnvironment('TC_API_TOKEN');
+  if (fromDefine.isNotEmpty) return fromDefine;
+  if (isWeb) {
+    return (pageUri ?? Uri.base).queryParameters['token'] ?? '';
+  }
+  return (environment ?? Platform.environment)['TC_API_TOKEN'] ?? '';
+}
+
 void main() {
-  runApp(TrenchChatApp(baseUrl: resolveBaseUrl()));
+  runApp(TrenchChatApp(baseUrl: resolveBaseUrl(), token: resolveToken()));
 }
 
 class TrenchChatApp extends StatefulWidget {
-  const TrenchChatApp({super.key, this.baseUrl = defaultBaseUrl});
+  const TrenchChatApp({super.key, this.baseUrl = defaultBaseUrl, this.token = ''});
 
   final String baseUrl;
+  final String token;
 
   @override
   State<TrenchChatApp> createState() => _TrenchChatAppState();
@@ -55,7 +76,7 @@ class _TrenchChatAppState extends State<TrenchChatApp> {
   @override
   void initState() {
     super.initState();
-    _state = AppState(baseUrl: widget.baseUrl);
+    _state = AppState(baseUrl: widget.baseUrl, token: widget.token);
     _state.init();
   }
 

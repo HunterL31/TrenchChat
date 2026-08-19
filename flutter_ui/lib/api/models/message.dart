@@ -23,6 +23,7 @@ class Message {
     required this.hasImage,
     required this.reactions,
     this.receivedAt,
+    this.imageStripped = false,
   });
 
   final String messageId;
@@ -32,6 +33,12 @@ class Message {
   final double timestamp;
   final String? replyTo;
   final bool hasImage;
+
+  /// The message arrived with an attachment we refused -- over the size cap,
+  /// or a header declaring an implausible decode. The text is kept; saying so
+  /// is better than a message that silently looks like it never had one.
+  final bool imageStripped;
+
   final List<Reaction> reactions;
 
   /// Not yet served by the backend (Phase B seam). Always null today, so
@@ -46,6 +53,7 @@ class Message {
         timestamp: (json['timestamp'] as num).toDouble(),
         replyTo: json['reply_to'] as String?,
         hasImage: json['has_image'] as bool? ?? false,
+        imageStripped: json['image_stripped'] as bool? ?? false,
         reactions: (json['reactions'] as List<dynamic>? ?? [])
             .map((r) => Reaction.fromJson(r as Map<String, dynamic>))
             .toList(),

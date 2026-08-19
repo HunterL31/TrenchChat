@@ -13,6 +13,7 @@ import time
 import pytest
 
 from tests.helpers import (
+    sign_as,
     wait_for,
     wait_for_member,
     wait_for_message,
@@ -47,6 +48,7 @@ def _insert_message(storage, ch_hash, sender_hex, content, ts=None):
         reply_to=None,
         last_seen_id=None,
         received_at=ts,
+        author_sig=sign_as(sender_hex, ch_hash, msg_id, ts, content),
     )
     return msg_id
 
@@ -306,6 +308,8 @@ class TestSyncRequestResponse:
                         "message_id":   f"chain-{i}",
                         "reply_to":     None,
                         "last_seen_id": None,
+                        "author_sig":   sign_as(alice.identity.hash_hex, ch_hash,
+                                                f"chain-{i}", ts, f"chain {i}"),
                     }], use_bin_type=True),
                     F_SYNC_TRUNCATED: True,
                 },
@@ -707,6 +711,8 @@ class TestFlushPending:
             "reply_to":          None,
             "last_seen_id":      None,
             "subscriber_hashes": [bob.identity.hash_hex],
+            "author_sig":        sign_as(alice.identity.hash_hex, ch_hash,
+                                         msg_id, ts, content),
         }
         alice.messaging._pending[bob.identity.hash_hex] = [msg_params]
 
@@ -1198,6 +1204,8 @@ class TestTenureSyncFiltering:
             reply_to=None,
             last_seen_id=None,
             received_at=valid_ts,
+            author_sig=sign_as(bob.identity.hash_hex, ch_hash, valid_msg_id,
+                               valid_ts, valid_content),
         )
 
         # Kick Bob on Carol's side
@@ -1658,6 +1666,8 @@ class TestImageSync:
             last_seen_id=None,
             received_at=ts,
             image_data=_FAKE_JPEG,
+            author_sig=sign_as(alice.identity.hash_hex, ch_hash, "sync_img_001",
+                               ts, "synced image", image_data=_FAKE_JPEG),
         )
 
         bob.sync_mgr._send_sync_request(alice.identity.hash_hex, ch_hash, ts - 100)
@@ -1732,6 +1742,8 @@ class TestReactionSync:
             reply_to=None,
             last_seen_id=None,
             received_at=ts,
+            author_sig=sign_as(peer.identity.hash_hex, ch_hash, msg_id, ts,
+                               content),
         )
 
     def test_synced_message_carries_its_reactions(self, peer_factory):
@@ -1786,3 +1798,61 @@ class TestReactionSync:
                    if m["message_id"] == "sync_rx_003")
         payload = alice.sync_mgr._row_to_payload(row)
         assert len(payload["reactions"]) == MAX_REACTIONS_PER_MESSAGE
+
+
+# ---------------------------------------------------------------------------
+# Response truncation
+# ---------------------------------------------------------------------------
+
+from trenchchat.core.sync import (  # noqa: E402
+    MAX_RESPONSE_MESSAGES, _truncate_at_group_boundary,
+)
+
+
+class TestTruncationKeepsTimestampGroupsWhole:
+    """A batch may not be cut through a run of equal timestamps.
+
+    The resume point is a bare float and get_messages_after filters on a
+    strict timestamp >, so whichever half of a group landed past the cut
+    would be skipped by every later sweep.
+    """
+
+    def _rows(self, timestamps):
+        return [{"timestamp": ts, "message_id": f"m{i}"}
+                for i, ts in enumerate(timestamps)]
+
+    def test_short_batch_is_untouched(self):
+        rows = self._rows([1.0, 2.0, 3.0])
+        out, dropped = _truncate_at_group_boundary(rows)
+        assert out == rows and dropped is False
+
+    def test_cut_backs_off_to_the_group_start(self):
+        # The cap lands mid-group: every row sharing that timestamp is held
+        # back together for the next batch.
+        tied = 500.0
+        timestamps = list(range(MAX_RESPONSE_MESSAGES - 2))
+        timestamps = [float(t) for t in timestamps] + [tied, tied, tied]
+        rows = self._rows(timestamps)
+        out, dropped = _truncate_at_group_boundary(rows)
+
+        assert dropped is True
+        assert len(out) == MAX_RESPONSE_MESSAGES - 2
+        assert all(r["timestamp"] != tied for r in out), \
+            "a tied-timestamp group was split across the response cap"
+
+    def test_single_group_over_the_cap_ships_whole(self):
+        # Backing off would leave nothing to send and stall forever, so an
+        # oversized single group goes out intact.
+        rows = self._rows([7.0] * (MAX_RESPONSE_MESSAGES + 5))
+        out, dropped = _truncate_at_group_boundary(rows)
+
+        assert len(out) == MAX_RESPONSE_MESSAGES + 5
+        assert dropped is False
+
+    def test_group_boundary_exactly_at_the_cap_is_kept(self):
+        timestamps = [float(t) for t in range(MAX_RESPONSE_MESSAGES)] + [999.0]
+        rows = self._rows(timestamps)
+        out, dropped = _truncate_at_group_boundary(rows)
+
+        assert len(out) == MAX_RESPONSE_MESSAGES
+        assert dropped is True

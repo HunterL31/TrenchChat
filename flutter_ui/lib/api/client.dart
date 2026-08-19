@@ -33,8 +33,32 @@ class ApiException implements Exception {
   String toString() => 'ApiException($statusCode): $message';
 }
 
+const String tokenHeader = 'x-tc-token';
+
+/// Adds the backend's API token to every request. The backend rejects
+/// unauthenticated calls -- without a token it would be a remote control for
+/// this identity, reachable by any process or web page that can hit the port.
+class _TokenClient extends http.BaseClient {
+  _TokenClient(this._inner, this._token);
+
+  final http.Client _inner;
+  final String _token;
+
+  @override
+  Future<http.StreamedResponse> send(http.BaseRequest request) {
+    request.headers[tokenHeader] = _token;
+    return _inner.send(request);
+  }
+
+  @override
+  void close() => _inner.close();
+}
+
 class ApiClient {
-  ApiClient({required this.baseUrl, http.Client? client}) : _http = client ?? http.Client();
+  ApiClient({required this.baseUrl, http.Client? client, String token = ''})
+      : _http = token.isEmpty
+            ? (client ?? http.Client())
+            : _TokenClient(client ?? http.Client(), token);
 
   final String baseUrl;
   final http.Client _http;
@@ -182,6 +206,15 @@ class ApiClient {
   Future<ChannelPermissions> getMyPermissions(String channelHashHex) async {
     final res = await _http.get(_u('/channels/$channelHashHex/my_permissions'));
     return ChannelPermissions.fromJson(_decode(res) as Map<String, dynamic>);
+  }
+
+  /// The channel's overall sync state -- `synced`, `incomplete`, `syncing`,
+  /// `waiting` or `unknown`. WS `sync_status` events carry the same value;
+  /// this is the read for a client that just started.
+  Future<String> getSyncState(String channelHashHex) async {
+    final res = await _http.get(_u('/channels/$channelHashHex/sync_status'));
+    final body = _decode(res) as Map<String, dynamic>;
+    return body['state'] as String? ?? 'unknown';
   }
 
   Future<PresenceEntry> getPeerPresence(String peerHashHex) async {

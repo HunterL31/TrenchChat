@@ -31,6 +31,7 @@ Ports (fixed, all on this machine):
 
 import argparse
 import asyncio
+import secrets
 import shutil
 import socket
 import string
@@ -72,6 +73,16 @@ _TESTERS: dict[str, dict] = {}
 _processes: dict[str, subprocess.Popen] = {}
 _hub_process: subprocess.Popen | None = None
 _shapers = ShaperPool("127.0.0.1", _LINK_PORT)
+
+# One token for the whole environment: every tester API accepts it, and the
+# page gets it from /config. The testers' APIs drive real identities, so they
+# are not left open even on a dev box.
+_API_TOKEN = secrets.token_urlsafe(32)
+_AUTH_HEADERS = {"x-tc-token": _API_TOKEN}
+
+# Bind address for the orchestrator and the tester APIs it launches.
+# Localhost unless deliberately widened -- see main()'s --host.
+_BIND_HOST = "127.0.0.1"
 
 
 def _tags(n: int) -> list[str]:
@@ -144,8 +155,21 @@ def _launch(tag: str) -> subprocess.Popen:
         t["role"], str(t["listen_port"]), t["peer_host"], str(t["peer_port"]),
         str(t["api_port"]), t["instance_name"], str(t["enable_transport"]),
         str(t["launched_bitrate"]),
+        _API_TOKEN, _BIND_HOST, ",".join(_page_origins()),
     ]
     return subprocess.Popen(args)
+
+
+def _page_origins() -> list[str]:
+    """Origins the orchestrator's own page can be loaded from.
+
+    The page and each tester API differ by port, so every call it makes is
+    cross-origin and needs the tester's CORS policy to name it.
+    """
+    origins = [f"http://127.0.0.1:{_ORCH_PORT}", f"http://localhost:{_ORCH_PORT}"]
+    if _BIND_HOST not in ("127.0.0.1", "localhost"):
+        origins.append(f"http://{_lan_ip()}:{_ORCH_PORT}")
+    return origins
 
 
 def _launch_hub() -> subprocess.Popen:
@@ -227,7 +251,8 @@ def _wait_ready() -> dict[str, bool]:
             if ready[tag]:
                 continue
             try:
-                r = httpx.get(f"http://127.0.0.1:{t['api_port']}/me", timeout=1.0)
+                r = httpx.get(f"http://127.0.0.1:{t['api_port']}/me", timeout=1.0,
+                              headers=_AUTH_HEADERS)
                 if r.status_code == 200:
                     ready[tag] = True
             except httpx.HTTPError:
@@ -255,13 +280,15 @@ def config():
         ],
         "hub_port": _LINK_PORT,
         "link_profiles": [p.as_dict() for p in LINK_PROFILES.values()],
+        "api_token": _API_TOKEN,
     }
 
 
 async def _tester_link_online(client: httpx.AsyncClient, tag: str, api_port: int) -> bool | None:
     """Query a tester's own /net/status. None means dead or unreachable."""
     try:
-        r = await client.get(f"http://127.0.0.1:{api_port}/net/status")
+        r = await client.get(f"http://127.0.0.1:{api_port}/net/status",
+                             headers=_AUTH_HEADERS)
         if r.status_code == 200:
             return bool(r.json().get("online"))
     except httpx.HTTPError:
@@ -405,23 +432,29 @@ def restart_hub():
 
 
 def main():
-    global _TESTERS
+    global _TESTERS, _BIND_HOST
 
     parser = argparse.ArgumentParser(description="TrenchChat local N-tester test environment")
     parser.add_argument("--testers", type=int, default=_DEFAULT_TESTERS,
                         help=f"number of testers to launch (default {_DEFAULT_TESTERS}, "
                              f"capped at {_MAX_TESTERS})")
+    parser.add_argument("--host", default="127.0.0.1",
+                        help="bind address for the orchestrator and every "
+                             "tester API (default 127.0.0.1; pass 0.0.0.0 to "
+                             "reach the environment from another host)")
     args = parser.parse_args()
     n = max(1, min(args.testers, _MAX_TESTERS))
+    _BIND_HOST = args.host
     _TESTERS = _build_testers(n)
 
     _preflight_ports()
     _wipe_data()
     _start_all()
-    ip = _lan_ip()
     print(f"\nTrenchChat test environment starting ({n} testers)...")
     print(f"  Local:   http://127.0.0.1:{_ORCH_PORT}/")
-    print(f"  Network: http://{ip}:{_ORCH_PORT}/\n")
+    if _BIND_HOST not in ("127.0.0.1", "localhost"):
+        print(f"  Network: http://{_lan_ip()}:{_ORCH_PORT}/")
+    print()
     ready = _wait_ready()
     if all(ready.values()):
         print("All testers are up.\n")
@@ -429,7 +462,7 @@ def main():
         print(f"WARNING: not all testers came up in time: {ready}\n")
 
     try:
-        uvicorn.run(app, host="0.0.0.0", port=_ORCH_PORT, log_level="warning")
+        uvicorn.run(app, host=_BIND_HOST, port=_ORCH_PORT, log_level="warning")
     finally:
         _stop_all()
         _shapers.stop()

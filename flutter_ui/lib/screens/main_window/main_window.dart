@@ -176,6 +176,7 @@ class _MainWindowState extends State<MainWindow> {
           onAddFriend: (hash) => showAddFriendDialog(context, state, identityHash: hash),
           voiceParticipants: voiceRoster,
           onJoinVoice: canJoinVoice ? () => state.joinVoice(channelHash) : null,
+          syncStates: state.syncStateByChannel,
         );
 
         final voicePanel = inVoice

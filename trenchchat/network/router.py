@@ -35,6 +35,14 @@ CONTROL_RATE_WINDOW_SECS = 60.0
 CONTROL_RATE_BURST = 60
 CONTROL_RATE_MAX_SENDERS = 512
 
+# Ceiling on path requests issued for unknown quarantine sources. These fire
+# before authentication -- source_hash is attacker-chosen wire data -- so
+# without a bound each unsigned packet turns into a broadcast on the shared
+# mesh, one for one.
+PATH_REQUEST_WINDOW_SECS = 60.0
+PATH_REQUEST_BURST = 12
+PATH_REQUEST_MAX_SOURCES = 256
+
 
 def delivery_hash_for_identity(identity_hash: bytes) -> bytes:
     """Return the LXMF delivery destination hash for an identity hash."""
@@ -59,6 +67,9 @@ class Router:
         # source_hash hex -> recent control-message timestamps
         self._control_rate: dict[str, list] = {}
         self._control_rate_lock = threading.Lock()
+        # source_hash hex -> recent quarantine path-request timestamps
+        self._path_request_rate: dict[str, list] = {}
+        self._path_request_lock = threading.Lock()
 
         self._router = LXMF.LXMRouter(
             storagepath=storagepath or _MESSAGE_STORE_PATH,
@@ -128,22 +139,31 @@ class Router:
             return True
 
         sender = message.source_hash.hex()
+        if not self._allow_rate(self._control_rate, self._control_rate_lock, sender,
+                                CONTROL_RATE_WINDOW_SECS, CONTROL_RATE_BURST,
+                                CONTROL_RATE_MAX_SENDERS):
+            RNS.log(
+                f"TrenchChat: rate-limited control messages from {sender[:16]}…",
+                RNS.LOG_WARNING,
+            )
+            return False
+        return True
+
+    @staticmethod
+    def _allow_rate(bucket: dict[str, list], lock: threading.Lock, key: str,
+                    window_secs: float, burst: int, max_keys: int) -> bool:
+        """Sliding-window rate limit, bounded in the number of keys it tracks."""
         now = time.time()
-        with self._control_rate_lock:
-            times = self._control_rate.setdefault(sender, [])
-            times[:] = [t for t in times if now - t < CONTROL_RATE_WINDOW_SECS]
-            if len(times) >= CONTROL_RATE_BURST:
-                RNS.log(
-                    f"TrenchChat: rate-limited control messages from "
-                    f"{sender[:16]}…",
-                    RNS.LOG_WARNING,
-                )
+        with lock:
+            times = bucket.setdefault(key, [])
+            times[:] = [t for t in times if now - t < window_secs]
+            if len(times) >= burst:
                 return False
             times.append(now)
-            if len(self._control_rate) > CONTROL_RATE_MAX_SENDERS:
-                for stale, stamps in list(self._control_rate.items()):
-                    if not stamps or now - stamps[-1] > CONTROL_RATE_WINDOW_SECS:
-                        del self._control_rate[stale]
+            if len(bucket) > max_keys:
+                for stale, stamps in list(bucket.items()):
+                    if not stamps or now - stamps[-1] > window_secs:
+                        del bucket[stale]
         return True
 
     def _addressed_to_us(self, message: LXMF.LXMessage) -> bool:
@@ -219,6 +239,10 @@ class Router:
             f"{source_hex[:16]}… pending identity resolution",
             RNS.LOG_DEBUG,
         )
+        if not self._allow_rate(self._path_request_rate, self._path_request_lock,
+                                source_hex, PATH_REQUEST_WINDOW_SECS,
+                                PATH_REQUEST_BURST, PATH_REQUEST_MAX_SOURCES):
+            return
         try:
             RNS.Transport.request_path(message.source_hash)
         except Exception as e:
@@ -263,6 +287,11 @@ class Router:
                     f"— signature still invalid after identity resolution",
                     RNS.LOG_WARNING,
                 )
+                continue
+            # Released messages count against the same throttle as any other
+            # inbound control message; otherwise a peer can park a burst while
+            # unknown and have it all delivered at once on announce.
+            if not self._allow_control_message(revalidated):
                 continue
             self._dispatch(revalidated)
 

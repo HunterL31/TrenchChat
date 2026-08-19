@@ -30,6 +30,22 @@ def _connect_plain(path: str) -> sqlite3.Connection:
     return conn
 
 
+def _remove_wal_sidecars(db_path: Path) -> None:
+    """Delete a database's -wal/-shm files.
+
+    WAL mode keeps recently written rows in these sidecars. Swapping the main
+    file for an encrypted copy leaves them behind in plaintext, holding the
+    very messages the re-key was meant to protect.
+    """
+    for suffix in ("-wal", "-shm"):
+        sidecar = Path(str(db_path) + suffix)
+        try:
+            sidecar.unlink(missing_ok=True)
+        except OSError as e:
+            RNS.log(f"TrenchChat [storage]: could not remove {sidecar.name}: {e}",
+                    RNS.LOG_WARNING)
+
+
 def _connect_encrypted(path: str, raw_key: bytes) -> sqlite3.Connection:
     """Open a SQLCipher-encrypted connection with the given 32-byte raw key.
 
@@ -78,6 +94,8 @@ CREATE TABLE IF NOT EXISTS messages (
     last_seen_id TEXT,
     received_at  REAL NOT NULL,
     image_data   BLOB,
+    author_sig   BLOB,
+    image_stripped INTEGER NOT NULL DEFAULT 0,
     FOREIGN KEY (channel_hash) REFERENCES channels(hash)
 );
 
@@ -106,6 +124,18 @@ CREATE TABLE IF NOT EXISTS member_list_versions (
     published_at  REAL NOT NULL,
     document_blob BLOB NOT NULL,
     received_at   REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS identity_keys (
+    identity_hash TEXT PRIMARY KEY,
+    public_key    BLOB NOT NULL,
+    learned_at    REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS subscriber_list_versions (
+    channel_hash TEXT PRIMARY KEY,
+    version      INTEGER NOT NULL,
+    updated_at   REAL NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS missed_deliveries (
@@ -360,6 +390,8 @@ class Storage:
 
         self._migrate_tenure()
         self._migrate_image_data()
+        self._migrate_author_sig()
+        self._migrate_image_stripped()
         self._migrate_reactions()
         self._migrate_servers()
         # _scope() reads channels.server_hash, so this must run after
@@ -466,6 +498,22 @@ class Storage:
             )
             self._conn.commit()
 
+    def _migrate_image_stripped(self):
+        """Add image_stripped to messages for existing databases."""
+        if not self._has_column("messages", "image_stripped"):
+            self._conn.execute(
+                "ALTER TABLE messages ADD COLUMN image_stripped INTEGER NOT NULL DEFAULT 0"
+            )
+            self._conn.commit()
+
+    def _migrate_author_sig(self):
+        """Add author_sig BLOB column to messages for existing databases."""
+        if not self._has_column("messages", "author_sig"):
+            self._conn.execute(
+                "ALTER TABLE messages ADD COLUMN author_sig BLOB"
+            )
+            self._conn.commit()
+
     def _migrate_reactions(self):
         """Create custom_emojis and reactions tables for existing databases."""
         tables = {r[0] for r in self._conn.execute(
@@ -558,6 +606,7 @@ class Storage:
 
         shutil.move(enc_path, str(db_path))
         secure_file(db_path)
+        _remove_wal_sidecars(db_path)
         RNS.log("TrenchChat [storage]: database encrypted with PIN key", RNS.LOG_NOTICE)
 
     def decrypt_database(self, current_key: bytes, db_path: Path = DB_PATH) -> None:
@@ -585,6 +634,7 @@ class Storage:
 
         shutil.move(plain_path, str(db_path))
         secure_file(db_path)
+        _remove_wal_sidecars(db_path)
         RNS.log("TrenchChat [storage]: database decrypted (PIN removed)", RNS.LOG_NOTICE)
 
     def rekey_database(self, old_key: bytes, new_key: bytes,
@@ -770,20 +820,37 @@ class Storage:
                        content: str, timestamp: float, message_id: str,
                        reply_to: str | None, last_seen_id: str | None,
                        received_at: float,
-                       image_data: bytes | None = None) -> bool:
+                       image_data: bytes | None = None,
+                       author_sig: bytes | None = None,
+                       image_stripped: bool = False) -> bool:
         """Returns True if inserted, False if duplicate."""
         try:
             with self._tx():
                 self._conn.execute("""
                     INSERT INTO messages
                         (channel_hash, sender_hash, sender_name, content, timestamp,
-                         message_id, reply_to, last_seen_id, received_at, image_data)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         message_id, reply_to, last_seen_id, received_at, image_data,
+                         author_sig, image_stripped)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (channel_hash, sender_hash, sender_name, content, timestamp,
-                      message_id, reply_to, last_seen_id, received_at, image_data))
+                      message_id, reply_to, last_seen_id, received_at, image_data,
+                      author_sig, 1 if image_stripped else 0))
             return True
         except sqlite3.IntegrityError:
             return False
+
+    def has_message(self, channel_hash: str, message_id: str) -> bool:
+        """True if this channel already holds that message.
+
+        message_id is globally unique, so a failed insert does not mean the
+        message is here -- it may belong to another channel entirely.
+        """
+        if not message_id:
+            return False
+        return self._fetchone(
+            "SELECT 1 FROM messages WHERE channel_hash = ? AND message_id = ?",
+            (channel_hash, message_id),
+        ) is not None
 
     def get_messages(self, channel_hash: str, limit: int = 200,
                      before_ts: float | None = None) -> list[sqlite3.Row]:
@@ -883,6 +950,16 @@ class Storage:
                 INSERT INTO channel_subscribers (channel_hash, identity_hash, added_at)
                 VALUES (?, ?, ?)
             """, [(channel_hash, ih, now) for ih in identity_hashes])
+
+    def is_channel_subscriber(self, channel_hash: str, identity_hash: str) -> bool:
+        """True if this identity is in the channel's known subscriber set."""
+        if not identity_hash:
+            return False
+        return self._fetchone(
+            "SELECT 1 FROM channel_subscribers "
+            "WHERE channel_hash = ? AND identity_hash = ?",
+            (channel_hash, identity_hash),
+        ) is not None
 
     def get_all_channel_subscribers(self) -> dict[str, set[str]]:
         """Return every channel's persisted subscriber set, keyed by channel hash.
@@ -1280,6 +1357,56 @@ class Storage:
                     document_blob=excluded.document_blob,
                     received_at=excluded.received_at
             """, (channel_hash, version, published_at, document_blob, time.time()))
+
+    def remember_identity_key(self, identity_hash: str, public_key: bytes) -> None:
+        """Cache a peer's public key so their messages stay verifiable.
+
+        Callers must have already checked the key hashes to identity_hash --
+        see authorship.remember_identity. Keys are kept after a peer leaves a
+        channel, because their messages stay in the transcript.
+        """
+        with self._tx():
+            self._conn.execute("""
+                INSERT INTO identity_keys (identity_hash, public_key, learned_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(identity_hash) DO NOTHING
+            """, (identity_hash, public_key, time.time()))
+
+    def get_identity_key(self, identity_hash: str) -> bytes | None:
+        """A cached public key for this identity, if we have ever learned one."""
+        if not identity_hash:
+            return None
+        row = self._fetchone(
+            "SELECT public_key FROM identity_keys WHERE identity_hash = ?",
+            (identity_hash,),
+        )
+        return bytes(row["public_key"]) if row else None
+
+    def get_all_subscriber_list_versions(self) -> dict[str, int]:
+        """Every channel's highest seen subscriber-list version.
+
+        Persisted because the version is the only replay defence on a signed
+        subscriber list: a counter that resets on restart lets a captured
+        older list -- still validly signed -- be replayed to resurrect removed
+        subscribers, and the subscriber set is what drives outbound delivery.
+        """
+        rows = self._fetchall("SELECT channel_hash, version FROM subscriber_list_versions")
+        return {row["channel_hash"]: row["version"] for row in rows}
+
+    def set_subscriber_list_version(self, channel_hash: str, version: int) -> None:
+        """Record a channel's subscriber-list version, never moving backwards.
+
+        Keyed by the raw channel hash, like the subscriber set itself: a
+        subscriber list is per-channel and is not shared with a server scope.
+        """
+        with self._tx():
+            self._conn.execute("""
+                INSERT INTO subscriber_list_versions (channel_hash, version, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(channel_hash) DO UPDATE SET
+                    version=MAX(version, excluded.version),
+                    updated_at=excluded.updated_at
+            """, (channel_hash, version, time.time()))
 
     # --- message sync helpers ---
 

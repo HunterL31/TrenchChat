@@ -214,6 +214,18 @@ def rns_instance(tmp_path_factory):
 # Per-test peer factory
 # ---------------------------------------------------------------------------
 
+# identity hash hex -> RNS.Identity, so test fixtures can sign fabricated
+# history the way a real client would. Real messages carry an author
+# signature (core/authorship.py); history poked straight into storage has to
+# carry one too, or it is correctly treated as unverifiable.
+_IDENTITY_REGISTRY: dict = {}
+
+
+def signing_identity(identity_hash_hex: str):
+    """The RNS identity for a peer built by peer_factory, if known."""
+    return _IDENTITY_REGISTRY.get(identity_hash_hex)
+
+
 @pytest.fixture
 def peer_factory(rns_instance, tmp_path):
     """
@@ -346,6 +358,7 @@ def peer_factory(rns_instance, tmp_path):
         peer._teardown_callbacks.append(_stop_router)
         peer._teardown_callbacks.append(storage.close)
         created_peers.append(peer)
+        _IDENTITY_REGISTRY[identity.hash_hex] = identity.rns_identity
 
         # Register with the shared transport so messages are delivered in-process
         transport.register(peer)

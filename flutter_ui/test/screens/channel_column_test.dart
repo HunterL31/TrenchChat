@@ -68,4 +68,45 @@ void main() {
 
     expect(find.text('DIRECT CHANNELS'), findsNothing);
   });
+
+  testWidgets('only a channel with an incomplete sync is flagged', (tester) async {
+    await tester.pumpWidget(MaterialApp(
+      home: Scaffold(
+        body: ChannelColumn(
+          serverName: 'mesh-crew',
+          serverMemberCount: 2,
+          channels: [_channel('general'), _channel('ops')],
+          directChannels: const [],
+          selectedChannelHash: null,
+          onSelectChannel: (_) {},
+          onlinePresence: const [],
+          syncStates: const {
+            'hash-general': 'incomplete',
+            'hash-ops': 'synced',
+          },
+        ),
+      ),
+    ));
+
+    expect(find.text('INCOMPLETE'), findsOneWidget);
+  });
+
+  testWidgets('a fully synced column shows no indicator', (tester) async {
+    await tester.pumpWidget(MaterialApp(
+      home: Scaffold(
+        body: ChannelColumn(
+          serverName: 'mesh-crew',
+          serverMemberCount: 2,
+          channels: [_channel('general')],
+          directChannels: const [],
+          selectedChannelHash: null,
+          onSelectChannel: (_) {},
+          onlinePresence: const [],
+          syncStates: const {'hash-general': 'synced'},
+        ),
+      ),
+    ));
+
+    expect(find.text('INCOMPLETE'), findsNothing);
+  });
 }

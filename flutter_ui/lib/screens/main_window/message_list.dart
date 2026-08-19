@@ -254,7 +254,7 @@ class _MessageRowWidgetState extends State<_MessageRowWidget> {
       ensureAvatarLoaded?.call(message.senderHash);
     }
     final bg = isOwn ? const Color.fromRGBO(255, 255, 255, 0.02) : Colors.transparent;
-    final body = Text.rich(
+    final bodyText = Text.rich(
       TextSpan(
         children: emojiSpans(
           message.content,
@@ -267,6 +267,25 @@ class _MessageRowWidgetState extends State<_MessageRowWidget> {
         ),
       ),
     );
+
+    // An attachment we refused leaves the text intact, so without this the
+    // message reads as though it never had one.
+    final body = message.imageStripped
+        ? Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              bodyText,
+              const SizedBox(height: 4),
+              Text(
+                'Attachment removed \u2014 it could not be displayed safely',
+                style: TextStyle(
+                  fontSize: TCType.textMicro,
+                  color: TCColors.accentSecondary,
+                ),
+              ),
+            ],
+          )
+        : bodyText;
 
     // TODO(phase-b): message.receivedAt is always null until `received_at`
     // ships on _message_to_dict, so this marker never fires today.

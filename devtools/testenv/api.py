@@ -21,6 +21,8 @@ link so the UI can simulate going offline), so it calls Backend.go_offline
 import asyncio
 import base64
 import json
+import secrets
+from contextlib import asynccontextmanager
 from typing import Any
 
 import RNS
@@ -28,9 +30,10 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
+from starlette.routing import Match, Mount
 
 from trenchchat.core import actions
-from trenchchat.core.image import MAX_IMAGE_BYTES, is_gif, prepare_image
+from trenchchat.core.image import is_gif, prepare_image
 from trenchchat.core.avatar import compress_avatar
 from trenchchat.core.interfaces_config import (
     DuplicateInterfaceError, EDITABLE_TYPES, InterfaceConfigError,
@@ -196,6 +199,7 @@ def _message_to_dict(row, reactions: list[dict[str, Any]] | None = None) -> dict
         "timestamp": row["timestamp"],
         "reply_to": row["reply_to"],
         "has_image": bool(row["image_data"]) if "image_data" in row.keys() else False,
+        "image_stripped": bool(row["image_stripped"]) if "image_stripped" in row.keys() else False,
         "reactions": reactions or [],
     }
 
@@ -234,24 +238,107 @@ class EventBus:
             self._clients.discard(ws)
 
 
-def create_app(backend: Backend) -> FastAPI:
-    app = FastAPI(title=f"TrenchChat tester: {backend.config.display_name}")
-    app.add_middleware(
-        CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"],
-    )
+TOKEN_HEADER = "x-tc-token"
+TOKEN_QUERY_PARAM = "token"
+
+
+def generate_token() -> str:
+    """A fresh API token for one backend process."""
+    return secrets.token_urlsafe(32)
+
+
+def _presented_token(headers, query_params) -> str:
+    """The token a request carries, from any of the three accepted places.
+
+    The query parameter exists because a browser can set headers on neither a
+    WebSocket handshake nor an <img> src, and both need to authenticate.
+    """
+    authorization = headers.get("authorization", "")
+    if authorization.lower().startswith("bearer "):
+        return authorization[len("bearer "):].strip()
+    return headers.get(TOKEN_HEADER) or query_params.get(TOKEN_QUERY_PARAM) or ""
+
+
+def _token_ok(expected: str, presented: str) -> bool:
+    return bool(presented) and secrets.compare_digest(expected, presented)
+
+
+def _origin_allowed(origin: str, host: str, allowed_origins: list[str]) -> bool:
+    """True if a browser Origin may open a socket to this backend.
+
+    Non-browser clients send no Origin at all; the token is their only gate.
+    """
+    if not origin:
+        return True
+    if origin in allowed_origins:
+        return True
+    return host != "" and origin in (f"http://{host}", f"https://{host}")
+
+
+def create_app(backend: Backend, *, token: str | None = None,
+               allowed_origins: list[str] | None = None) -> FastAPI:
+    """Build the API app.
+
+    Every API route requires the token, presented as an `Authorization:
+    Bearer` header, an `X-TC-Token` header, or a `?token=` query parameter.
+    Without it this surface would be an unauthenticated remote control for
+    the identity it serves: any process that can reach the port -- or any web
+    page the user visits, since it is reachable cross-origin -- could send
+    messages as them and read their whole history.
+
+    Paths served by a mount (the built web client, added by the caller) are
+    public: they are static assets, and the client has to load before it can
+    present a token.
+
+    allowed_origins lists extra browser origins permitted to call this
+    backend cross-origin; same-origin callers always pass. The dev
+    orchestrator needs it because its page and the tester APIs differ by port.
+    """
+    api_token = token or generate_token()
+    origins = list(allowed_origins or [])
     bus = EventBus()
 
-    @app.on_event("startup")
-    async def _on_startup():
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
         bus.bind_loop(asyncio.get_running_loop())
-
-    @app.on_event("shutdown")
-    async def _on_shutdown():
+        yield
         # uvicorn runs this on SIGINT/SIGTERM, so both entry points quit
         # gracefully: orchestrator.py's "kill tester", and Ctrl+C on
         # serve_profile.py, which is a real client and really is going away.
         backend.announce_offline()
         backend.close()
+
+    app = FastAPI(title=f"TrenchChat tester: {backend.config.display_name}",
+                  lifespan=lifespan)
+    app.state.api_token = api_token
+
+    def _is_api_request(request) -> bool:
+        for route in app.router.routes:
+            if isinstance(route, Mount):
+                continue
+            if route.matches(request.scope)[0] is not Match.NONE:
+                return True
+        return False
+
+    @app.middleware("http")
+    async def _require_token(request, call_next):
+        if request.method == "OPTIONS" or not _is_api_request(request):
+            return await call_next(request)
+        presented = _presented_token(request.headers, request.query_params)
+        if not _token_ok(api_token, presented):
+            return JSONResponse({"error": "invalid or missing API token"},
+                                status_code=401)
+        return await call_next(request)
+
+    # Added after the token middleware so it wraps it: a preflight must be
+    # answerable without credentials, or the browser never sends the real
+    # request. allow_origins is an explicit list, never "*" -- with no
+    # credentials to protect, a wildcard would let any page read every
+    # response.
+    app.add_middleware(
+        CORSMiddleware, allow_origins=origins, allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
     # --- wire backend callbacks (RNS/LXMF background threads) to the bus ---
 
@@ -888,14 +975,15 @@ def create_app(backend: Backend) -> FastAPI:
         image_data = None
         if req.image_data_b64:
             raw = base64.b64decode(req.image_data_b64)
-            # Same compress-or-fall-back-to-raw pattern main_window.py's
-            # _on_send_message uses.
+            # Fails closed, like main_window.py's _on_send_message: the
+            # re-encode is the only sanitisation in the pipeline, and it
+            # rejects precisely the inputs it exists to catch, so forwarding
+            # the original bytes would bypass it on exactly those.
             try:
                 image_data, _ = prepare_image(raw)
             except Exception as exc:
                 RNS.log(f"TrenchChat testenv: image preparation failed: {exc}", RNS.LOG_WARNING)
-                if len(raw) <= MAX_IMAGE_BYTES:
-                    image_data = raw
+                image_data = None
 
         # Messaging fires its message callback only for inbound LXMF, so the
         # sender's own message never reaches the WS bus by itself -- the Qt
@@ -1046,6 +1134,16 @@ def create_app(backend: Backend) -> FastAPI:
 
     @app.websocket("/ws")
     async def ws_endpoint(ws: WebSocket):
+        # Browsers apply neither CORS nor same-origin policy to a WebSocket
+        # handshake, so this socket -- which streams every inbound message --
+        # is checked here or nowhere.
+        if not _token_ok(api_token, _presented_token(ws.headers, ws.query_params)):
+            await ws.close(code=1008)
+            return
+        if not _origin_allowed(ws.headers.get("origin", ""),
+                               ws.headers.get("host", ""), origins):
+            await ws.close(code=1008)
+            return
         await ws.accept()
         await bus.register(ws)
         try:

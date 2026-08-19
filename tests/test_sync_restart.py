@@ -13,7 +13,7 @@ import time
 
 import msgpack
 
-from tests.helpers import wait_for, wait_for_message, wait_for_subscriber
+from tests.helpers import sign_as, wait_for, wait_for_message, wait_for_subscriber
 from trenchchat.core.messaging import _compute_message_id
 from trenchchat.core.permissions import PRESET_PRIVATE, ROLE_MEMBER, ROLE_OWNER, SEND_MESSAGE
 from trenchchat.core.protocol import (
@@ -52,6 +52,7 @@ def _insert_message(storage, ch_hash, sender_hex, content, ts=None):
         reply_to=None,
         last_seen_id=None,
         received_at=ts,
+        author_sig=sign_as(sender_hex, ch_hash, msg_id, ts, content),
     )
     return msg_id
 
@@ -190,12 +191,14 @@ class TestRestartLosesPendingQueue:
             channel_hash=ch_hash, sender_hash=alice.identity.hash_hex,
             sender_name="Alice", content=content, timestamp=ts, message_id=msg_id,
             reply_to=None, last_seen_id=None, received_at=ts,
+            author_sig=sign_as(alice.identity.hash_hex, ch_hash, msg_id, ts, content),
         )
         # Carol was online and already has her own copy.
         carol.storage.insert_message(
             channel_hash=ch_hash, sender_hash=alice.identity.hash_hex,
             sender_name="Alice", content=content, timestamp=ts, message_id=msg_id,
             reply_to=None, last_seen_id=None, received_at=ts,
+            author_sig=sign_as(alice.identity.hash_hex, ch_hash, msg_id, ts, content),
         )
 
         alice = _restart_peer(peer_factory, alice)
@@ -240,6 +243,7 @@ class TestRestartLosesPendingQueue:
             channel_hash=ch_hash, sender_hash=alice.identity.hash_hex,
             sender_name="Alice", content=content, timestamp=ts, message_id=msg_id,
             reply_to=None, last_seen_id=None, received_at=ts,
+            author_sig=sign_as(alice.identity.hash_hex, ch_hash, msg_id, ts, content),
         )
 
         alice = _restart_peer(peer_factory, alice)
@@ -667,6 +671,8 @@ class TestContinuationBudgetResetByStrayRequest:
                     "message_id":   msg_id,
                     "reply_to":     None,
                     "last_seen_id": None,
+                    "author_sig":   sign_as(carol.identity.hash_hex, ch_hash,
+                                            msg_id, ts, msg_id),
                 }], use_bin_type=True),
                 F_SYNC_TRUNCATED: True,
             }
@@ -841,16 +847,17 @@ class TestWatermarkAdvancesPastFailedInsert:
 
         bob.sync_mgr._send_sync_request(carol.identity.hash_hex, ch_hash, ts)
 
+        def _row(content, offset, mid):
+            return {"sender_hash": alice.identity.hash_hex, "sender_name": "Alice",
+                    "content": content, "timestamp": ts + offset,
+                    "message_id": mid, "reply_to": None, "last_seen_id": None,
+                    "author_sig": sign_as(alice.identity.hash_hex, ch_hash, mid,
+                                          ts + offset, content)}
+
         payload = msgpack.packb([
-            {"sender_hash": alice.identity.hash_hex, "sender_name": "Alice",
-             "content": "ok 1", "timestamp": ts + 1, "message_id": ok_id_1,
-             "reply_to": None, "last_seen_id": None},
-            {"sender_hash": alice.identity.hash_hex, "sender_name": "Alice",
-             "content": "boom", "timestamp": ts + 2, "message_id": boom_id,
-             "reply_to": None, "last_seen_id": None},
-            {"sender_hash": alice.identity.hash_hex, "sender_name": "Alice",
-             "content": "ok 2", "timestamp": ts + 3, "message_id": ok_id_2,
-             "reply_to": None, "last_seen_id": None},
+            _row("ok 1", 1, ok_id_1),
+            _row("boom", 2, boom_id),
+            _row("ok 2", 3, ok_id_2),
         ], use_bin_type=True)
 
         bob.sync_mgr._handle_sync_response(

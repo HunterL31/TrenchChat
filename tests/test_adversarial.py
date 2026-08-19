@@ -49,7 +49,7 @@ import LXMF
 import RNS
 
 from tests.conftest import forge
-from tests.helpers import wait_for, wait_for_member
+from tests.helpers import sign_as, wait_for, wait_for_member
 from trenchchat.network.router import QUARANTINE_MAX_PER_SENDER
 from trenchchat.core import actions
 from trenchchat.core.invite import _sign, _signed_payload
@@ -57,14 +57,15 @@ from trenchchat.core.permissions import (
     ALL_PERMISSIONS, FULL_SYNC, INVITE, KICK, MANAGE_CHANNEL, MANAGE_ROLES,
     PRESET_OPEN, PRESET_PRIVATE, ROLE_ADMIN, ROLE_MEMBER, ROLE_OWNER, SEND_MESSAGE,
 )
-from trenchchat.core.subscription import _subscriber_payload
+from trenchchat.core.subscription import SubscriptionManager, _subscriber_payload
 from trenchchat.core.protocol import (
     F_SUBSCRIBER_LIST, F_SUBSCRIBER_SIG, F_SUBSCRIBER_VERSION, MT_SUBSCRIBER_LIST,
     F_ADMIN_HASH, F_CHANNEL_HASH, F_DISPLAY_NAME, F_EXPIRY_TS, F_INVITE_TOKEN,
     F_INVITEE_HASH, F_MEMBER_LIST_DOC, F_MESSAGE_ID, F_MSG_TYPE, F_TIMESTAMP,
     F_EMOJI_HASH, F_IMAGE_DATA, F_MISSED_FOR, F_REACTION_MSG_ID, F_REACTION_REMOVE,
-    F_REACTION_UNICODE,
+    F_REACTION_UNICODE, F_AUTHOR_SIG,
     MT_GOODBYE, MT_JOIN_REQUEST, MT_MEMBER_LIST_UPDATE, MT_REACTION,
+    MT_SYNC_RESPONSE, F_SYNC_MESSAGES,
 )
 from trenchchat.core.presence import PresenceManager
 from trenchchat.core.image import MAX_IMAGE_BYTES
@@ -1039,6 +1040,8 @@ class TestAdversarialTenure:
                 "message_id":   valid_msg_id,
                 "reply_to":     None,
                 "last_seen_id": None,
+                "author_sig":   sign_as(bob.identity.hash_hex, ch_hash,
+                                        valid_msg_id, valid_ts, valid_content),
             }], use_bin_type=True)},
             ch_hash,
             bob.identity.hash_hex,
@@ -1113,11 +1116,17 @@ class TestAdversarialUnauthenticatedDelivery:
         )
         lxm = LXMF.LXMessage(dest, sender.router.delivery_destination, content,
                              desired_method=LXMF.LXMessage.DIRECT)
+        ts = time.time()
         lxm.fields = {
             F_CHANNEL_HASH: bytes.fromhex(ch_hash),
             F_DISPLAY_NAME: "Alice",
-            F_TIMESTAMP:    time.time(),
+            F_TIMESTAMP:    ts,
             F_MESSAGE_ID:   msg_id,
+            # Signed as the real sender: a genuine client's message carries
+            # one, so the forgery tests below must differ only in the LXMF
+            # signature they are actually about.
+            F_AUTHOR_SIG:   sign_as(sender.identity.hash_hex, ch_hash, msg_id,
+                                    ts, content),
         }
         return lxm
 
@@ -1271,8 +1280,13 @@ class TestAdversarialSyncInjection:
     history from any author.
     """
 
-    def _payload(self, sender_hex, content, ts, msg_id):
-        return {0x08: msgpack.packb([{
+    def _payload(self, sender_hex, content, ts, msg_id, ch_hash=None):
+        """A sync payload, signed as its claimed author when ch_hash is given.
+
+        Tests that expect the response to be refused earlier (unsolicited,
+        replayed) can leave it unsigned -- the gate under test fires first.
+        """
+        row = {
             "sender_hash":  sender_hex,
             "sender_name":  "Alice",
             "content":      content,
@@ -1280,7 +1294,10 @@ class TestAdversarialSyncInjection:
             "message_id":   msg_id,
             "reply_to":     None,
             "last_seen_id": None,
-        }], use_bin_type=True)}
+        }
+        if ch_hash:
+            row["author_sig"] = sign_as(sender_hex, ch_hash, msg_id, ts, content)
+        return {0x08: msgpack.packb([row], use_bin_type=True)}
 
     def test_unsolicited_sync_response_is_rejected(self, peer_factory):
         """Carol pushes history for a channel nobody asked her for."""
@@ -1311,11 +1328,11 @@ class TestAdversarialSyncInjection:
 
         bob.sync_mgr._record_pending_request(ch_hash, alice.identity.hash_hex)
         bob.sync_mgr._handle_sync_response(
-            self._payload(alice.identity.hash_hex, "first", ts, "replay-1"),
+            self._payload(alice.identity.hash_hex, "first", ts, "replay-1", ch_hash),
             ch_hash, alice.identity.hash_hex,
         )
         bob.sync_mgr._handle_sync_response(
-            self._payload(alice.identity.hash_hex, "second", ts, "replay-2"),
+            self._payload(alice.identity.hash_hex, "second", ts, "replay-2", ch_hash),
             ch_hash, alice.identity.hash_hex,
         )
 
@@ -1563,12 +1580,17 @@ class TestAdversarialPayloadLimits:
         )
         lxm = LXMF.LXMessage(dest, alice.router.delivery_destination, "huge",
                              desired_method=LXMF.LXMessage.DIRECT)
+        ts = time.time()
+        oversized = b"\x00" * (MAX_IMAGE_BYTES + 1)
         lxm.fields = {
             F_CHANNEL_HASH: bytes.fromhex(ch_hash),
             F_DISPLAY_NAME: "Alice",
-            F_TIMESTAMP:    time.time(),
+            F_TIMESTAMP:    ts,
             F_MESSAGE_ID:   "oversized-img-1",
-            F_IMAGE_DATA:   b"\x00" * (MAX_IMAGE_BYTES + 1),
+            F_IMAGE_DATA:   oversized,
+            F_AUTHOR_SIG:   sign_as(alice.identity.hash_hex, ch_hash,
+                                    "oversized-img-1", ts, "huge",
+                                    image_data=oversized),
         }
         lxm.signature_validated = True
 
@@ -2047,6 +2069,45 @@ class TestAdversarialSubscriberList:
         assert "dd" * 16 not in bob.subscription_mgr.get_subscribers(ch_hash), \
             "An older signed subscriber list was replayed successfully"
 
+    def test_replay_is_still_rejected_after_a_restart(self, peer_factory):
+        """The version watermark has to outlive the process.
+
+        A captured older list stays validly signed forever, so if the
+        watermark only lives in memory a restart re-opens the replay --
+        resurrecting a removed subscriber, which is who delivery goes to.
+        """
+        alice, bob, ch_hash = self._setup(peer_factory)
+
+        def signed(members, version):
+            packed = msgpack.packb(members, use_bin_type=True)
+            sig = _sign(alice.identity.rns_identity,
+                        _subscriber_payload(ch_hash, version, packed))
+            return packed, version, sig
+
+        current = ["aa" * 16, "bb" * 16]
+        self._send(alice, bob, ch_hash, *signed(current, 5))
+
+        # Bob restarts: a fresh manager over the same storage, exactly as the
+        # app rebuilds it. The roster is persisted, so the watermark must be.
+        restarted = SubscriptionManager(bob.identity, bob.storage, bob.router)
+        assert set(restarted.get_subscribers(ch_hash)) == set(current)
+
+        restarted._handle_subscriber_list(
+            {
+                F_MSG_TYPE:           MT_SUBSCRIBER_LIST,
+                F_CHANNEL_HASH:       bytes.fromhex(ch_hash),
+                F_SUBSCRIBER_LIST:    signed(["aa" * 16, "dd" * 16], 3)[0],
+                F_SUBSCRIBER_VERSION: 3,
+                F_SUBSCRIBER_SIG:     signed(["aa" * 16, "dd" * 16], 3)[2],
+            },
+            ch_hash,
+            alice.identity.hash_hex,
+        )
+
+        assert "dd" * 16 not in restarted.get_subscribers(ch_hash), \
+            "An older signed subscriber list was replayed across a restart"
+        assert set(restarted.get_subscribers(ch_hash)) == set(current)
+
 
 # ---------------------------------------------------------------------------
 # SERVERS
@@ -2281,6 +2342,25 @@ class TestAdversarialServerBinding:
         }, real)
         assert bob.storage.get_server(real) is not None
 
+    def test_standalone_channel_creator_must_bind_to_the_hash(self, peer_factory):
+        """The same binding servers get, for a standalone channel's metadata.
+
+        creator_hash arrives unsigned and then serves as a trusted-signer
+        fallback for later documents, so an unbindable claim must not become a
+        local channel row.
+        """
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+
+        assert bob.invite_mgr._creator_binds(
+            channel_hash_for(alice.identity.hash, "real-ch"),
+            alice.identity.hash_hex, "real-ch",
+        ), "a correctly minted channel hash failed to bind"
+
+        assert not bob.invite_mgr._creator_binds(
+            "cd" * 16, alice.identity.hash_hex, "real-ch",
+        ), "a channel hash unrelated to its claimed creator was accepted"
+
     def test_server_doc_for_another_server_is_rejected(self, peer_factory):
         alice, bob, s = _server_with_member(peer_factory)
         other = server_hash_for(alice.identity.hash, "Other")
@@ -2501,3 +2581,138 @@ class TestAdversarialVoice:
             alice.voice_transport.connected_peers(),
             msg="revoked member disconnected",
         ), "Alice kept streaming to a member whose voice_chat was revoked"
+
+
+class TestAdversarialRelayTampering:
+    """A relay serves history it did not write, so it must not be able to edit it.
+
+    Every other sync gate answers "may this message be here" -- membership,
+    tenure, timestamp. None of them answers "did the named author write this",
+    which is what these cover.
+    """
+
+    def _seed(self, peer_factory):
+        alice, bob, ch_hash = _setup_channel_with_member(
+            peer_factory, member_perms=[SEND_MESSAGE]
+        )
+        carol = peer_factory("carol")
+        carol.storage.upsert_channel(ch_hash, "test-ch", "", alice.identity.hash_hex,
+                                     PRESET_PRIVATE, time.time())
+        carol.storage.subscribe(ch_hash)
+        return alice, bob, carol, ch_hash
+
+    def _row(self, author_hex, ch_hash, msg_id, ts, content, sig=None):
+        return {
+            "sender_hash":  author_hex,
+            "sender_name":  "Alice",
+            "content":      content,
+            "timestamp":    ts,
+            "message_id":   msg_id,
+            "reply_to":     None,
+            "last_seen_id": None,
+            "author_sig":   sig if sig is not None else sign_as(
+                author_hex, ch_hash, msg_id, ts, content),
+        }
+
+    def _serve(self, to_peer, from_peer, ch_hash, rows):
+        to_peer.sync_mgr._record_pending_request(ch_hash, from_peer.identity.hash_hex)
+        to_peer.sync_mgr._handle_sync_response(
+            {F_MSG_TYPE:      MT_SYNC_RESPONSE,
+             F_CHANNEL_HASH:  bytes.fromhex(ch_hash),
+             F_SYNC_MESSAGES: msgpack.packb(rows, use_bin_type=True)},
+            ch_hash, from_peer.identity.hash_hex,
+        )
+
+    def test_relay_cannot_edit_the_text_of_a_message_it_relays(self, peer_factory):
+        alice, bob, carol, ch_hash = self._seed(peer_factory)
+        ts = time.time() - 60
+        genuine = self._row(alice.identity.hash_hex, ch_hash, "tamper-1", ts,
+                            "transfer approved")
+
+        # Carol relays Alice's message with the text changed but everything
+        # else -- author, id, timestamp -- left intact.
+        tampered = dict(genuine)
+        tampered["content"] = "transfer denied"
+        self._serve(bob, carol, ch_hash, [tampered])
+
+        assert not bob.storage.message_exists("tamper-1"), \
+            "a relay edited the text of a message it was only relaying"
+
+    def test_tampered_copy_cannot_squat_a_genuine_message_id(self, peer_factory):
+        """The damaging half: message_id is UNIQUE and first writer wins.
+
+        If a tampered copy could land first, the genuine message would be
+        silently discarded as a duplicate and could never replace it.
+        """
+        alice, bob, carol, ch_hash = self._seed(peer_factory)
+        ts = time.time() - 60
+        genuine = self._row(alice.identity.hash_hex, ch_hash, "squat-1", ts,
+                            "the real text")
+
+        tampered = dict(genuine)
+        tampered["content"] = "the substituted text"
+        self._serve(bob, carol, ch_hash, [tampered])
+        assert not bob.storage.message_exists("squat-1")
+
+        # The genuine message still lands afterwards, with its real text.
+        self._serve(bob, alice, ch_hash, [genuine])
+        rows = [m for m in bob.storage.get_messages(ch_hash)
+                if m["message_id"] == "squat-1"]
+        assert rows, "the genuine message was blocked by the tampered copy"
+        assert rows[0]["content"] == "the real text"
+
+    def test_relay_cannot_rethread_a_message(self, peer_factory):
+        """Re-pointing reply_to grafts real words onto another conversation."""
+        alice, bob, carol, ch_hash = self._seed(peer_factory)
+        ts = time.time() - 60
+        row = self._row(alice.identity.hash_hex, ch_hash, "thread-1", ts, "agreed")
+        row["reply_to"] = "some-other-message"
+
+        self._serve(bob, carol, ch_hash, [row])
+        assert not bob.storage.message_exists("thread-1"), \
+            "a relay re-pointed a message at a different conversation"
+
+    def test_relay_cannot_invent_a_message_from_another_member(self, peer_factory):
+        alice, bob, carol, ch_hash = self._seed(peer_factory)
+        ts = time.time() - 60
+        forged = self._row(alice.identity.hash_hex, ch_hash, "forge-1", ts,
+                           "I never said this", sig=b"\x00" * 64)
+
+        self._serve(bob, carol, ch_hash, [forged])
+        assert not bob.storage.message_exists("forge-1"), \
+            "a relay invented a message attributed to another member"
+
+    def test_a_genuine_relayed_message_is_still_accepted(self, peer_factory):
+        """Positive control: a handler that rejected everything would pass above."""
+        alice, bob, carol, ch_hash = self._seed(peer_factory)
+        ts = time.time() - 60
+        genuine = self._row(alice.identity.hash_hex, ch_hash, "relay-ok-1", ts,
+                            "relayed intact")
+
+        self._serve(bob, carol, ch_hash, [genuine])
+        assert bob.storage.message_exists("relay-ok-1"), \
+            "a genuine message relayed by a third peer was rejected"
+
+    def test_a_rejected_batch_does_not_report_the_channel_as_caught_up(
+            self, peer_factory):
+        """Silent rejection must not read as "up to date".
+
+        A relay that serves nothing but tampered rows would otherwise leave the
+        channel claiming SYNCED while the real history is still missing.
+        """
+        from trenchchat.core.sync_status import SyncState
+
+        alice, bob, carol, ch_hash = self._seed(peer_factory)
+        ts = time.time() - 60
+        genuine = self._row(alice.identity.hash_hex, ch_hash, "status-1", ts,
+                            "the real text")
+        tampered = dict(genuine)
+        tampered["content"] = "rewritten"
+
+        self._serve(bob, carol, ch_hash, [tampered])
+
+        assert not bob.storage.message_exists("status-1")
+        status = bob.sync_mgr.status.get_status(ch_hash)
+        assert status["state"] != SyncState.SYNCED.value, \
+            "a channel whose only answer was rejected reported itself synced"
+        assert status["peers"][0]["messages_rejected"] == 1

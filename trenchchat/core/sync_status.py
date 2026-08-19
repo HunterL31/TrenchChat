@@ -20,6 +20,12 @@ SYNCED requires a peer to have actually answered.  A peer with nothing to send
 replies with an empty sync response for exactly this reason: without it,
 "caught up" and "never answered" are the same silence.
 
+An answer whose rows we refused is not an answer either.  Rows dropped for
+failing verification are history we know we are missing, so they mark the
+channel INCOMPLETE rather than letting an all-rejected batch read as SYNCED.
+Rows withheld by our own tenure or permission checks are not counted: those we
+are not entitled to, which is not the same as missing them.
+
 SYNCED is scoped to peers we know about.  A peer whose announce never reached
 us is never asked and can't be accounted for -- on a partition-tolerant mesh
 there is no way to enumerate everyone who might hold history, so SYNCED means
@@ -58,12 +64,14 @@ class PeerSyncState(str, Enum):
 
 
 class _PeerRecord:
-    __slots__ = ("state", "requested_at", "messages_received", "truncated")
+    __slots__ = ("state", "requested_at", "messages_received", "truncated",
+                 "messages_rejected")
 
     def __init__(self):
         self.state = PeerSyncState.PENDING
         self.requested_at = 0.0
         self.messages_received = 0
+        self.messages_rejected = 0
         self.truncated = False
 
 
@@ -148,10 +156,14 @@ class SyncStatusTracker:
             self._fire(channel_hash_hex)
 
     def response_received(self, channel_hash_hex: str, peer_hex: str, *,
-                          received: int, inserted: int, truncated: bool) -> None:
+                          received: int, inserted: int, truncated: bool,
+                          rejected: int = 0) -> None:
         """A peer answered with *received* messages, *inserted* of them new.
 
         *truncated* means the responder hit its per-response cap and holds more.
+        *rejected* counts rows refused for failing verification -- history we
+        know we are missing, so it marks the channel INCOMPLETE instead of
+        letting a batch we threw away read as caught up.
         """
         with self._lock:
             before = self._snapshot_locked(channel_hash_hex)
@@ -159,8 +171,11 @@ class SyncStatusTracker:
             peer = rec.peers.setdefault(peer_hex, _PeerRecord())
             peer.state = PeerSyncState.ANSWERED
             peer.messages_received += received
+            peer.messages_rejected += rejected
             peer.truncated = truncated
             rec.received_count += inserted
+            if rejected:
+                rec.gap = True
             changed = before != self._snapshot_locked(channel_hash_hex)
         if changed:
             self._fire(channel_hash_hex)
@@ -225,6 +240,7 @@ class SyncStatusTracker:
                     "identity_hash":     peer_hex,
                     "state":             peer.state.value,
                     "messages_received": peer.messages_received,
+                    "messages_rejected": peer.messages_rejected,
                     "requested_at":      peer.requested_at,
                 }
                 for peer_hex, peer in sorted(rec.peers.items())

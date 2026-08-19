@@ -11,7 +11,7 @@ channel's history.
 
 import time
 
-from tests.helpers import wait_for, wait_for_member, wait_for_message
+from tests.helpers import sign_as, wait_for, wait_for_member, wait_for_message
 from trenchchat.core.messaging import _compute_message_id
 from trenchchat.core.sync_status import SyncState
 
@@ -42,6 +42,7 @@ def _insert_message(storage, ch_hash, sender_hex, content, ts=None):
         reply_to=None,
         last_seen_id=None,
         received_at=ts,
+        author_sig=sign_as(sender_hex, ch_hash, msg_id, ts, content),
     )
     return msg_id
 
