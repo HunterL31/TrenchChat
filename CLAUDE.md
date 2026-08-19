@@ -184,6 +184,9 @@ Full detail in `.claude/rules/code-standards.md`. Highlights not obvious from sk
   passes — see `.claude/rules/run-tests-after-changes.md`.
 - New functionality needs a test in the matching `tests/test_*.py` file (bug fixes need a regression
   test; new permissions need an adversarial test) — see `.claude/rules/test-coverage-for-new-features.md`.
+- Behaviour that depends on real timing, real paths or more than two peers also needs a scenario in
+  `devtools/testenv/scenarios/` — see `.claude/rules/scenario-testing.md`. pytest is the fast
+  specification; the scenario suite is the honest one, and a fix is not proven by a single pass.
 - Never commit, push, merge, rebase, or tag without an explicit request, and never push directly to
   `main` (protected — always a feature branch + PR) — see `.claude/rules/git-safety.md`.
 - A new file in `docs/` needs reasoning that can't be recovered from the code — a trust model, a
