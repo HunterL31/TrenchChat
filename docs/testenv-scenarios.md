@@ -176,7 +176,7 @@ need control of the clock and stay deferred.
 | ID | Peers | Actions | Expected result |
 |---|---|---|---|
 | sync1 | A,B,C | B goes offline (link drop); A sends 3; B goes online | ✅ B receives all 3, in 1.0–5.0s |
-| sync2 | A,B,C,D | B offline; A sends 3; A offline; B online (only C, D reachable) | ❌ **Fails ~half of runs**, root cause established. B holds 0/3 with both responders at `pending` for the full timeout. See below |
+| sync2 | A,B,C,D | B offline; A sends 3; A offline; B online (only C, D reachable) | ✅ **Fixed**, after three causes. 12/12 after the last one; recovery is 26–41s when the first ask is served and ~120s when it takes a retry. Was failing half of all runs. See below |
 | sync3 | A,B,C | Same as sync1 but B is **killed and restarted** instead of link-dropped | ✅ B ends with its own history plus what it missed, in 3.5s, via the cold path |
 | sync4 | A,D | D offline; A sends 60 (> `MAX_RESPONSE_MESSAGES` = 50); D online | ✅ D ends with all 60 and `state == synced`, in 18.1s — the truncated batch does chain its follow-up |
 | sync5 | A,B,C | B offline for messages 1–5; B online, C offline for 6–10; C online | ✅ Both end with all 10, in 10.6s — per-(channel, peer) watermarks hold up |
@@ -302,6 +302,43 @@ served" is what an over-advanced watermark would produce.
 Left strict rather than reclassified as a probe. The expectation is the sync
 design's own — any online member can serve any gap — so `--family sync` exits
 non-zero until it is fixed, which is the correct signal for an open bug.
+
+#### sync2, the third cause: a silent refusal meeting a burst-only trigger
+
+**Fixed.** The last 1-in-10 failure needed attribution to see at all. The
+failure message now names the returning peer's identity, and with that the
+tester log says the same thing in all three captured failures:
+
+```
+answered   <B>  — 0 row(s)      x2   (during setup, before anything was sent)
+throttled  <B>                  x8   (21:25:32 – 21:25:53)
+...then B never appears again, for the remaining ~170s
+```
+
+Two behaviours, each defensible alone, deadlock together:
+
+- A responder's deep-sync cooldown refuses **silently** for 60 seconds. The
+  requester cannot tell a refusal from a lost packet.
+- Every trigger to ask is an *event* — a peer announcing, or this node's own
+  link returning. Both fire in a burst and stop. Reticulum suppresses announce
+  replays for a destination it has already propagated, so no further announce
+  arrives to prompt another try.
+
+B asked eight times in 31 seconds, every attempt landing inside one cooldown
+window, and then had nothing left to make it ask again. The window expired 30
+seconds later with nobody there to use it.
+
+The fix is `SyncManager.tick()`: any request unanswered for `SYNC_RETRY_SECS`
+(90s, deliberately longer than the 60s cooldown so the retry lands in a window
+that will serve it) is asked again. Driven by the backend's ticker and a
+`QTimer` in the Qt client. The ~120s runs in the verification series are that
+retry working — those are the runs that used to fail.
+
+Regression tests in `tests/test_sync_multipeer.py`
+(`TestUnansweredRequestIsAskedAgain`), both confirmed to fail with the tick
+removed. The first attempt at that test did *not* fail without the fix — it
+leaned on a `wait_for` that ordinary network timing satisfied — which is the
+"distrust a green run that proves nothing" rule earning its place.
 
 #### sync2, after two fixes: 2/5 to 4/5
 
