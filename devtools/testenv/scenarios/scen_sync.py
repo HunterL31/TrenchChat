@@ -82,9 +82,12 @@ def c2(env):
                               CONVERGE_TIMEOUT)
     status = b.sync_status(ch)
     if not arrived:
+        # Name B: the tester log merges every peer and every repeat, so a
+        # failure that does not say which identity was asking cannot be
+        # traced to the requests and refusals that belong to it.
         raise ScenarioFailure(
-            f"B did not recover from its peers: {diff_report([b], ch, missed)} | "
-            f"sync status: {status}"
+            f"B ({b.hash}) did not recover from its peers: "
+            f"{diff_report([b], ch, missed)} | sync status: {status}"
         )
     answered = [p.get("identity_hash", "")[:8] for p in status.get("peers", [])
                 if p.get("state") == "answered"]
