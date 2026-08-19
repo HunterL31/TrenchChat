@@ -11,8 +11,11 @@ Two kinds:
                the run; a surprise here is a finding, not a regression.
 """
 
+import re
 from dataclasses import dataclass, field
 from typing import Callable
+
+_FAMILY_RE = re.compile(r"[a-z]+")
 
 STRICT = "strict"
 PROBE = "probe"
@@ -28,7 +31,12 @@ class Scenario:
 
     @property
     def family(self) -> str:
-        return self.id[0]
+        """The name before the number: "sync" in "sync11"."""
+        return _FAMILY_RE.match(self.id).group(0)
+
+    @property
+    def number(self) -> int:
+        return int(self.id[len(self.family):])
 
 
 REGISTRY: dict[str, Scenario] = {}

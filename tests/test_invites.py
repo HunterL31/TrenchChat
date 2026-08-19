@@ -502,7 +502,7 @@ class TestInviteSurvivesAnUnresolvedPath:
         exactly when their path is least likely to be resolved. The invite
         used to be dropped with a warning and nothing ever re-sent it, so the
         invitee simply never heard -- the sender saw no error either
-        (G3 in docs/testenv-scenarios.md).
+        (restart3 in docs/testenv-scenarios.md).
         """
         import RNS
 

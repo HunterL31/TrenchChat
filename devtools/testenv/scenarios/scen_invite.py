@@ -1,5 +1,5 @@
 """
-Family B -- invite-only channels, membership and permissions.
+Family invite -- invite-only channels, membership and permissions.
 
 Membership here is a signed member-list document, not a subscription: roles
 exist, tenure is recorded, and every permission is enforced at the core
@@ -30,7 +30,7 @@ ADMIN_DEFAULT = [SEND_MESSAGE, INVITE, KICK, MANAGE_ROLES]
 MEMBER_DEFAULT = [SEND_MESSAGE]
 
 
-@scenario("B1", "An invite-only channel is never announced")
+@scenario("invite1", "An invite-only channel is never announced")
 def b1(env):
     a, b, c, d = env.peers("A", "B", "C", "D")
     ch = a.create_channel("b1-private", "invite")
@@ -43,7 +43,7 @@ def b1(env):
     return {}
 
 
-@scenario("B2", "An accepted invite produces one agreed roster")
+@scenario("invite2", "An accepted invite produces one agreed roster")
 def b2(env):
     a, b = env.peers("A", "B")
     ch = invite_only_channel(a, [b], "b2-private")
@@ -57,10 +57,10 @@ def b2(env):
     return {"members": len(agreed)}
 
 
-@scenario("B3", "full_sync decides whether a new member sees history")
+@scenario("invite3", "full_sync decides whether a new member sees history")
 def b3(env):
     """The real full_sync test. Tenure filtering only engages on a channel that
-    records tenure, which public channels never do (see A6), so this is the
+    records tenure, which public channels never do (see public6), so this is the
     only place the permission actually changes an outcome."""
     a, b, c = env.peers("A", "B", "C")
 
@@ -99,7 +99,7 @@ def b3(env):
     return notes
 
 
-@scenario("B4", "Four members converge on one roster")
+@scenario("invite4", "Four members converge on one roster")
 def b4(env):
     a, b, c, d = env.peers("A", "B", "C", "D")
     ch = invite_only_channel(a, [b, c, d], "b4-private")
@@ -113,7 +113,7 @@ def b4(env):
     return {"members": len(agreed), "roles": sorted(set(agreed.values()))}
 
 
-@scenario("B5", "A declined invite admits nobody")
+@scenario("invite5", "A declined invite admits nobody")
 def b5(env):
     a, b, c = env.peers("A", "B", "C")
     ch = invite_only_channel(a, [b], "b5-private")
@@ -130,7 +130,7 @@ def b5(env):
     return {}
 
 
-@scenario("B6", "A kicked member is dropped everywhere and can no longer send")
+@scenario("invite6", "A kicked member is dropped everywhere and can no longer send")
 def b6(env):
     a, b, c, d = env.peers("A", "B", "C", "D")
     ch = invite_only_channel(a, [b, c, d], "b6-private")
@@ -150,7 +150,7 @@ def b6(env):
     return {"remaining": len(roster(a, ch))}
 
 
-@scenario("B7", "A promoted admin can invite")
+@scenario("invite7", "A promoted admin can invite")
 def b7(env):
     a, b, c, d = env.peers("A", "B", "C", "D")
     ch = invite_only_channel(a, [b, c], "b7-private")
@@ -169,7 +169,7 @@ def b7(env):
     return {"members": len(agreed)}
 
 
-@scenario("B8", "A demoted member cannot invite")
+@scenario("invite8", "A demoted member cannot invite")
 def b8(env):
     a, b, d = env.peers("A", "B", "D")
     ch = invite_only_channel(a, [b], "b8-private")
@@ -193,7 +193,7 @@ def b8(env):
     return {"members": len(roster(a, ch))}
 
 
-@scenario("B9", "Revoking send_message silences members but not admins")
+@scenario("invite9", "Revoking send_message silences members but not admins")
 def b9(env):
     a, b, c = env.peers("A", "B", "C")
     ch = invite_only_channel(a, [b, c], "b9-private")
@@ -214,7 +214,7 @@ def b9(env):
     return {}
 
 
-@scenario("B10", "A member cannot kick the owner")
+@scenario("invite10", "A member cannot kick the owner")
 def b10(env):
     """Adversarial: calls the roles endpoint directly, which is the same core
     path a malicious client would reach. The UI gate is not involved."""
@@ -230,9 +230,9 @@ def b10(env):
     return {"rejected": True}
 
 
-@scenario("B11", "A granted kick permission actually takes effect")
+@scenario("invite11", "A granted kick permission actually takes effect")
 def b11(env):
-    """The mirror of B10: proves the rejection there is the permission working,
+    """The mirror of invite10: proves the rejection there is the permission working,
     not the endpoint refusing everything."""
     a, b, c = env.peers("A", "B", "C")
     ch = invite_only_channel(a, [b, c], "b11-private")
@@ -248,7 +248,7 @@ def b11(env):
     return {"remaining": len(roster(a, ch))}
 
 
-@scenario("B12", "Two roster changes at once still converge", kind=PROBE)
+@scenario("invite12", "Two roster changes at once still converge", kind=PROBE)
 def b12(env):
     """Both documents validate against stored state, so the question is only
     whether the peers agree on the result rather than splitting."""
@@ -271,7 +271,7 @@ def b12(env):
     return notes
 
 
-@scenario("B13", "A member cannot edit channel permissions")
+@scenario("invite13", "A member cannot edit channel permissions")
 def b13(env):
     a, b, c = env.peers("A", "B", "C")
     ch = invite_only_channel(a, [b, c], "b13-private")

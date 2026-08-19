@@ -1,5 +1,5 @@
 """
-Family J -- message integrity: author signatures and attachments.
+Family integrity -- message integrity: author signatures and attachments.
 
 A synced message reaches you from a peer who usually did not write it. LXMF
 authenticates the peer that handed it over and nothing else, so every relayed
@@ -58,7 +58,7 @@ def small_jpeg() -> str:
     return base64.b64encode(buf.getvalue()).decode()
 
 
-@scenario("J1", "History outlives its author: a relay serves a dead peer's messages")
+@scenario("integrity1", "History outlives its author: a relay serves a dead peer's messages")
 def j1(env):
     """The author is gone by the time the message is verified.
 
@@ -102,9 +102,9 @@ def j1(env):
     return {"backfill_secs": round(elapsed, 1), "messages": len(authored)}
 
 
-@scenario("J2", "A peer that never met the author reads their history anyway")
+@scenario("integrity2", "A peer that never met the author reads their history anyway")
 def j2(env):
-    """The case J1 cannot reach: no shared history with the author at all.
+    """The case integrity1 cannot reach: no shared history with the author at all.
 
     D is wiped to a brand-new identity after A is dead, so it has never seen
     A's announce and holds nothing of A in either its own key cache or RNS's.
@@ -161,7 +161,7 @@ def j2(env):
     }
 
 
-@scenario("J3", "An image attachment survives the trip and stays fetchable")
+@scenario("integrity3", "An image attachment survives the trip and stays fetchable")
 def j3(env):
     """The signature covers the attachment, so the two travel together.
 
@@ -189,7 +189,7 @@ def j3(env):
     return {"receivers": 3}
 
 
-@scenario("J4", "A decompression-bomb image never reaches the wire")
+@scenario("integrity4", "A decompression-bomb image never reaches the wire")
 def j4(env):
     """68 bytes declaring 400 million pixels.
 

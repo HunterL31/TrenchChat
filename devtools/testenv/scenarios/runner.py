@@ -6,8 +6,8 @@ against real Backends in separate OS processes over real RNS Links. Each
 scenario starts from a wiped environment.
 
     python devtools/testenv/scenarios/runner.py                 # every scenario
-    python devtools/testenv/scenarios/runner.py --family A
-    python devtools/testenv/scenarios/runner.py --scenario A5 A6
+    python devtools/testenv/scenarios/runner.py --family public
+    python devtools/testenv/scenarios/runner.py --scenario public5 public6
     python devtools/testenv/scenarios/runner.py --attach        # use a running orchestrator
     python devtools/testenv/scenarios/runner.py --json out.json
 
@@ -34,16 +34,16 @@ from asserts import set_timeout_scale, ScenarioFailure  # noqa: E402
 from peer import Orchestrator, Peer  # noqa: E402
 from scenario import PROBE, REGISTRY, Result  # noqa: E402
 
-import scen_public  # noqa: F401,E402  (registers family A)
-import scen_sync    # noqa: F401,E402  (registers family C)
-import scen_invite  # noqa: F401,E402  (registers family B)
-import scen_links   # noqa: F401,E402  (registers family D)
-import scen_servers # noqa: F401,E402  (registers family E)
-import scen_social  # noqa: F401,E402  (registers family F)
-import scen_restart # noqa: F401,E402  (registers family G)
-import scen_voice   # noqa: F401,E402  (registers family H)
-import scen_api     # noqa: F401,E402  (registers family I)
-import scen_authorship  # noqa: F401,E402  (registers family J)
+import scen_public  # noqa: F401,E402  (registers family public)
+import scen_sync    # noqa: F401,E402  (registers family sync)
+import scen_invite  # noqa: F401,E402  (registers family invite)
+import scen_links   # noqa: F401,E402  (registers family links)
+import scen_servers # noqa: F401,E402  (registers family servers)
+import scen_social  # noqa: F401,E402  (registers family social)
+import scen_restart # noqa: F401,E402  (registers family restart)
+import scen_voice   # noqa: F401,E402  (registers family voice)
+import scen_api     # noqa: F401,E402  (registers family api)
+import scen_authorship  # noqa: F401,E402  (registers family integrity)
 
 _ORCHESTRATOR = _TESTENV_DIR / "orchestrator.py"
 _BOOT_TIMEOUT = 180.0
@@ -139,7 +139,7 @@ def _wait_environment(orch: Orchestrator, testers: int) -> Env:
 
 
 # How much slower a profile makes everything the scenarios wait on. Chosen
-# from the measured family D timings (broadband 5s -> lossy 102s for the same
+# from the measured links-family timings (broadband 5s -> lossy 102s for the same
 # batch), rounded up so a pass fails on behaviour rather than on patience.
 _PROFILE_SCALE = {
     "broadband": 1.0,
@@ -183,17 +183,17 @@ def _reset(orch: Orchestrator, env: Env) -> None:
 def _select(family: str | None, ids: list[str] | None) -> list:
     chosen = list(REGISTRY.values())
     if family:
-        chosen = [s for s in chosen if s.family == family.upper()]
+        chosen = [s for s in chosen if s.family == family.lower()]
     if ids:
-        wanted = {i.upper() for i in ids}
+        wanted = {i.lower() for i in ids}
         unknown = wanted - set(REGISTRY)
         if unknown:
             raise SystemExit(f"unknown scenario id(s): {sorted(unknown)}")
         chosen = [s for s in chosen if s.id in wanted]
     if not chosen:
         raise SystemExit("no scenarios matched")
-    # Natural order, so A10 follows A9 rather than A1.
-    return sorted(chosen, key=lambda s: (s.family, int(s.id[1:])))
+    # Natural order, so public10 follows public9 rather than public1.
+    return sorted(chosen, key=lambda s: (s.family, s.number))
 
 
 def _run_one(scen, env: Env) -> Result:
@@ -239,7 +239,7 @@ def _report(results: list[Result]) -> bool:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run testenv multi-peer scenarios")
     parser.add_argument("--testers", type=int, default=4)
-    parser.add_argument("--family", help="run one family, e.g. A")
+    parser.add_argument("--family", help="run one family, e.g. sync")
     parser.add_argument("--scenario", nargs="+", help="run specific matrix IDs")
     parser.add_argument("--attach", action="store_true",
                         help="use an already-running orchestrator instead of spawning one")

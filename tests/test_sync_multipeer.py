@@ -676,7 +676,7 @@ class TestResponderAcquiresOlderHistoryLater:
         watermark is stranded on both sides for good.
 
         Reproduces the four-way partition case in
-        docs/testenv-scenarios.md (C11), where every peer ends up missing
+        docs/testenv-scenarios.md (sync11), where every peer ends up missing
         precisely the oldest message each other peer wrote while partitioned.
         """
         from trenchchat.core.protocol import F_CHANNEL_HASH, F_MSG_TYPE, F_SYNC_WINDOW_START
@@ -825,7 +825,7 @@ class TestAuthorKeyTravelsWithTheBatch:
         announce they will never send again, and "cannot verify yet" is
         dropped exactly like "forged". Every peer who joins afterwards sees a
         transcript with that author's messages missing and nothing to say so
-        (J2 in docs/testenv-scenarios.md).
+        (integrity2 in docs/testenv-scenarios.md).
 
         The relay is not trusted here -- a key is accepted only if it hashes
         back to the identity claiming it, which is what makes passing one
@@ -933,7 +933,7 @@ class TestSyncAnswerSurvivesAnUnresolvedPath:
         resolve a path back yet. The answer used to be dropped on the floor --
         without even requesting a path -- so the requester sat at `pending`
         forever, unable to tell silence from a refusal, and nothing re-sent
-        anything (C2 in docs/testenv-scenarios.md).
+        anything (sync2 in docs/testenv-scenarios.md).
         """
         from trenchchat.core.protocol import (
             F_CHANNEL_HASH, F_MSG_TYPE, F_SYNC_WINDOW_START, MT_SYNC_REQUEST,

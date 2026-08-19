@@ -187,7 +187,7 @@ class TestSubscriberVersionSurvivesRestart:
         Receivers reject anything not newer than what they hold, so every list
         published after the restart was discarded as a replay -- leaving
         existing subscribers permanently unaware of anyone who joined
-        afterwards (G1 in docs/testenv-scenarios.md).
+        afterwards (restart1 in docs/testenv-scenarios.md).
         """
         alice = peer_factory("alice")
         bob = peer_factory("bob")
@@ -238,7 +238,7 @@ class TestSubscribeSurvivesAnUnresolvedPath:
         exactly when a path is least likely to be resolved. The message used
         to be dropped outright -- no queue, no retry, no error -- so the owner
         never learned of the subscriber, the subscriber was silently absent
-        from every send, and only joining a second time recovered (G3 in
+        from every send, and only joining a second time recovered (restart3 in
         docs/testenv-scenarios.md).
         """
         import RNS

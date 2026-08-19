@@ -1,5 +1,5 @@
 """
-Family G -- restart, persistence and ordering.
+Family restart -- restart, persistence and ordering.
 
 A link drop keeps everything in memory; a process restart keeps only what
 reached SQLite and the identity file. Anything a manager holds in a plain
@@ -20,7 +20,7 @@ from scenario import PROBE, scenario
 RESTART_SETTLE = 120.0
 
 
-@scenario("G1", "A restarted owner keeps numbering subscriber lists upward")
+@scenario("restart1", "A restarted owner keeps numbering subscriber lists upward")
 def g1(env):
     """Regression guard for a fixed bug.
 
@@ -71,7 +71,7 @@ def g1(env):
     return notes
 
 
-@scenario("G2", "Every peer's state survives a full restart")
+@scenario("restart2", "Every peer's state survives a full restart")
 def g2(env):
     a, b, c, d = env.peers("A", "B", "C", "D")
     public = public_channel(a, [b, c, d], "g2-public")
@@ -102,7 +102,7 @@ def g2(env):
     return {"messages": len(messages), "private_members": len(private_roster)}
 
 
-@scenario("G3", "An invite sent before a path resolves is dropped", kind=PROBE)
+@scenario("restart3", "An invite sent before a path resolves is dropped", kind=PROBE)
 def g3(env):
     """invite.py's _send_raw has no retry queue, so an invite issued the
     instant a channel is created -- before the invitee's path is known -- is
@@ -127,7 +127,7 @@ def g3(env):
     return notes
 
 
-@scenario("G4", "A send immediately after a roster change", kind=PROBE)
+@scenario("restart4", "A send immediately after a roster change", kind=PROBE)
 def g4(env):
     """Two independent LXMF sends with no ordering guarantee: messaging.py
     drops an inbound chat message if the receiver is not yet marked a member.
@@ -148,7 +148,7 @@ def g4(env):
     return notes
 
 
-@scenario("G5", "A wiped tester returns as a different identity")
+@scenario("restart5", "A wiped tester returns as a different identity")
 def g5(env):
     a, b, c = env.peers("A", "B", "C")
     ch = public_channel(a, [b, c], "g5-public")

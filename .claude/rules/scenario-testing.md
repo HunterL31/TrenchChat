@@ -13,10 +13,10 @@ and every defect the scenarios have found so far was invisible to pytest
 precisely because pytest's transport never loses a race.
 
 ```bash
-.venv/bin/python devtools/testenv/scenarios/runner.py --family C
-.venv/bin/python devtools/testenv/scenarios/runner.py --scenario C2 --repeat 10
+.venv/bin/python devtools/testenv/scenarios/runner.py --family sync
+.venv/bin/python devtools/testenv/scenarios/runner.py --scenario sync2 --repeat 10
 .venv/bin/python devtools/testenv/scenarios/runner.py --link-profile lora_fast
-.venv/bin/python devtools/testenv/scenarios/runner.py --scenario C2 --tester-log /tmp/c2.log
+.venv/bin/python devtools/testenv/scenarios/runner.py --scenario sync2 --tester-log /tmp/c2.log
 ```
 
 ## When a scenario is the right tool
@@ -32,7 +32,7 @@ Add one when the behaviour depends on something pytest's shim cannot produce:
   has not resolved yet. Several real defects live only here.
 - **Degraded links** — `--link-profile` shapes bitrate, latency and loss. A
   constant that is comfortable at 100 Mbps can be badly wrong at 1 kbps.
-- **The API surface** (family I) — the token, CORS, the event socket.
+- **The API surface** (the `api` family) — the token, CORS, the event socket.
 
 Do **not** add one for logic pytest already covers well: permission
 enforcement (that is `tests/test_adversarial.py`), storage behaviour, digest
@@ -41,14 +41,15 @@ seconds and a full environment reset; a pytest test costs milliseconds.
 
 ## Adding one
 
-1. **Pick a family and the next free ID** — A public, B invite-only, C sync,
-   D degraded links, E servers, F social, G restart, H voice, I API, J message
-   integrity. A genuinely new area gets a new family and a new `scen_*.py`.
+1. **Pick a family and the next free number** — `public`, `invite`, `sync`,
+   `links`, `servers`, `social`, `restart`, `voice`, `api`, `integrity`. An ID
+   is the family name plus a number: `sync11`, `api4`. A genuinely new area
+   gets a new family and a new `scen_*.py`.
 2. **Decide strict or probe.** `STRICT` means the expected result is settled
    behaviour and failing is a bug. `PROBE` means it is a *prediction* about
    behaviour nothing covers yet: it records what happened and never fails the
    run. Write a probe when you are documenting a suspected gap, and promote it
-   to strict once the behaviour is settled — J2 was a probe that confirmed a
+   to strict once the behaviour is settled — integrity2 was a probe that confirmed a
    real gap, then became strict when the gap was fixed.
 3. **Write the body in the matching `scen_*.py`**, using `flows.py` for setup
    and `asserts.py` for every check. Register the module's import in
@@ -70,15 +71,15 @@ for "record whether it happened", `hold_for` for "this must *not* arrive".
 A fixed sleep either flakes or wastes the run.
 
 **A single pass is not a fix.** This is the mistake that cost the most here:
-C11 was recorded as fixed on one 31.7s pass and was still failing four runs
+sync11 was recorded as fixed on one 31.7s pass and was still failing four runs
 in five. Before claiming a fix, `--repeat` it — five runs minimum for
 something that was intermittent, and say the ratio rather than "it passes".
 The same applies in reverse: one failure of a passing scenario is a flake
 report, not a regression, until it repeats.
 
 **Record refuted predictions.** A probe that disproves its own hypothesis is a
-result worth keeping — it stops the same theory being re-proposed. Both A10
-and F3 predicted a gap and found working recovery.
+result worth keeping — it stops the same theory being re-proposed. Both public10
+and social3 predicted a gap and found working recovery.
 
 **Distrust a green run that proves nothing.** A scenario that passes because
 its assertion is unreachable is worse than no scenario. If a fix is meant to

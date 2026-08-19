@@ -1,5 +1,5 @@
 """
-Family I -- the API surface itself.
+Family api -- the API surface itself.
 
 Every other family drives the backend through its API and takes the API's own
 access control on trust. This one tests that control directly, because it is
@@ -23,7 +23,7 @@ FOREIGN_ORIGIN = "http://evil.example"
 GUARDED_GETS = ["/me", "/channels", "/friends", "/directory"]
 
 
-@scenario("I1", "An unauthenticated caller is refused on every route", peers="A")
+@scenario("api1", "An unauthenticated caller is refused on every route", peers="A")
 def i1(env):
     """No token means no API, including the event socket.
 
@@ -52,7 +52,7 @@ def i1(env):
     return {"http_refusals": sorted(set(refused.values())), "socket": socket}
 
 
-@scenario("I2", "A wrong token is refused and a right one works three ways", peers="A")
+@scenario("api2", "A wrong token is refused and a right one works three ways", peers="A")
 def i2(env):
     """Header, bearer and query parameter all authenticate the same token.
 
@@ -88,7 +88,7 @@ def i2(env):
     return {"socket_header": socket_header, "socket_query": socket_query}
 
 
-@scenario("I3", "A foreign browser origin cannot open the event socket", peers="A")
+@scenario("api3", "A foreign browser origin cannot open the event socket", peers="A")
 def i3(env):
     """The socket checks Origin itself, because nothing else does.
 
@@ -114,7 +114,7 @@ def i3(env):
     return {"foreign_origin": foreign, "same_origin": same_origin}
 
 
-@scenario("I4", "One token opens every tester in the environment", kind=PROBE)
+@scenario("api4", "One token opens every tester in the environment", kind=PROBE)
 def i4(env):
     """Recording a property of the dev environment, not asserting one.
 

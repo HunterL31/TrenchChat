@@ -1332,7 +1332,7 @@ class SyncManager:
                 # and the answer dies here: the responder can read the request
                 # but cannot yet address a reply. The requester sees only
                 # silence, which it cannot tell from a refusal, and nothing
-                # ever re-sends the answer (C2 in docs/testenv-scenarios.md).
+                # ever re-sends the answer (sync2 in docs/testenv-scenarios.md).
                 RNS.Transport.request_path(delivery_dest_hash)
                 self._retry.queue(dest_hex, fields)
                 return False

@@ -1,5 +1,5 @@
 """
-Family E -- servers.
+Family servers -- servers.
 
 A server is one membership and one role assignment shared by many channels.
 The interesting property is that a single invite admits a peer to every
@@ -33,7 +33,7 @@ def _server_with_channels(owner, name: str, channel_names: list[str]) -> tuple[s
     return server_hash, hashes
 
 
-@scenario("E1", "One invite admits a peer to every channel in a server")
+@scenario("servers1", "One invite admits a peer to every channel in a server")
 def e1(env):
     a, b = env.peers("A", "B")
     server, channels = _server_with_channels(a, "e1-server", ["general", "second", "third"])
@@ -52,7 +52,7 @@ def e1(env):
     return {"channels": len(b.server_channels(server))}
 
 
-@scenario("E2", "An admin with create_channel adds a channel everyone receives")
+@scenario("servers2", "An admin with create_channel adds a channel everyone receives")
 def e2(env):
     a, b, c = env.peers("A", "B", "C")
     server, channels = _server_with_channels(a, "e2-server", ["general"])
@@ -77,7 +77,7 @@ def e2(env):
     return {"channels": expected}
 
 
-@scenario("E3", "Server permissions mirror into channels and cannot be overridden")
+@scenario("servers3", "Server permissions mirror into channels and cannot be overridden")
 def e3(env):
     a, b = env.peers("A", "B")
     server, channels = _server_with_channels(a, "e3-server", ["general", "second"])
@@ -101,7 +101,7 @@ def e3(env):
     return {"mirrored_to": len(channels)}
 
 
-@scenario("E4", "Leaving a server drops every one of its channels")
+@scenario("servers4", "Leaving a server drops every one of its channels")
 def e4(env):
     a, b, c = env.peers("A", "B", "C")
     server, channels = _server_with_channels(a, "e4-server", ["general", "second"])
@@ -124,7 +124,7 @@ def e4(env):
     return {}
 
 
-@scenario("E5", "Kicking from a server removes a peer from all its channels")
+@scenario("servers5", "Kicking from a server removes a peer from all its channels")
 def e5(env):
     a, b, c = env.peers("A", "B", "C")
     server, channels = _server_with_channels(a, "e5-server", ["general", "second"])
@@ -145,10 +145,10 @@ def e5(env):
     return {"remaining": len(roster(a, server))}
 
 
-@scenario("E6", "A server-level full_sync grant backfills every channel", kind=PROBE)
+@scenario("servers6", "A server-level full_sync grant backfills every channel", kind=PROBE)
 def e6(env):
     """Server-scoped tenure has to resolve per channel for this to work, so it
-    is worth checking separately from B3's single-channel case."""
+    is worth checking separately from invite3's single-channel case."""
     a, b = env.peers("A", "B")
     server, channels = _server_with_channels(a, "e6-server", ["general", "second"])
     a.set_server_permissions(server, admin=ADMIN_DEFAULT + [FULL_SYNC],

@@ -1,11 +1,11 @@
 """
-Family D -- degraded links.
+Family links -- degraded links.
 
 Each tester dials its own shaper, so one peer's link can be made to behave
 like a radio while the others stay fast. Frame loss is the point: as
 devtools/testenv/README.md puts it, pending retry, missed-delivery hints and
 timestamp-fallback sync "only run on a degraded link, and dropping frames is
-the only way to exercise them without killing a process". Family C reaches
+the only way to exercise them without killing a process". The sync family reaches
 those mechanisms by dropping links and killing processes; this family is the
 lossy-wire half of the same coverage.
 
@@ -42,7 +42,7 @@ def _send_batch(peer, channel_hash: str, prefix: str, count: int) -> set[str]:
     return contents
 
 
-@scenario("D1", "A lossy sender still reaches every peer")
+@scenario("links1", "A lossy sender still reaches every peer")
 def d1(env):
     a, b, c, d = env.peers("A", "B", "C", "D")
     ch = public_channel(a, [b, c, d], "d1-public")
@@ -61,7 +61,7 @@ def d1(env):
             "messages": len(expected)}
 
 
-@scenario("D2", "A slow but lossless link delivers, just slowly", kind=PROBE)
+@scenario("links2", "A slow but lossless link delivers, just slowly", kind=PROBE)
 def d2(env):
     """Serial 9600: slow enough to be a real constraint, bounded enough that a
     stall is distinguishable from the simulation working."""
@@ -82,7 +82,7 @@ def d2(env):
     return notes
 
 
-@scenario("D3", "Peers on four different links still converge")
+@scenario("links3", "Peers on four different links still converge")
 def d3(env):
     a, b, c, d = env.peers("A", "B", "C", "D")
     ch = public_channel(a, [b, c, d], "d3-public")
@@ -106,7 +106,7 @@ def d3(env):
             "messages": len(expected)}
 
 
-@scenario("D4", "A lossy peer toggling offline still catches up", kind=PROBE)
+@scenario("links4", "A lossy peer toggling offline still catches up", kind=PROBE)
 def d4(env):
     """The combination the offline mechanisms are actually for: a bad link and
     an intermittent one at the same time."""
@@ -130,7 +130,7 @@ def d4(env):
     return notes
 
 
-@scenario("D5", "Every peer on a constrained link still converges", kind=PROBE)
+@scenario("links5", "Every peer on a constrained link still converges", kind=PROBE)
 def d5(env):
     """The documented "a tester on a slow profile falls behind" case, asserted
     rather than assumed. Announces and beacons compete with the payload here."""
@@ -153,9 +153,9 @@ def d5(env):
     return notes
 
 
-@scenario("D6", "Sync recovers a lossy peer without the link ever dropping")
+@scenario("links6", "Sync recovers a lossy peer without the link ever dropping")
 def d6(env):
-    """The README's stated reason for the lossy profile. Family C reaches the
+    """The README's stated reason for the lossy profile. The sync family reaches the
     retry and hint paths by dropping links and killing processes; this reaches
     them the way a real bad radio does -- the link stays nominally up the whole
     time and simply loses 15% of frames."""
@@ -182,7 +182,7 @@ def d6(env):
             "messages": len(expected), "sync_state": b.sync_status(ch).get("state")}
 
 
-@scenario("D7", "Packet radio, the slowest profile, still converges", kind=PROBE)
+@scenario("links7", "Packet radio, the slowest profile, still converges", kind=PROBE)
 def d7(env):
     """AX.25 1200 baud with 5% loss -- the worst link TrenchChat claims to
     support for text. Nothing else in the suite touches it."""
@@ -202,10 +202,10 @@ def d7(env):
     return notes
 
 
-@scenario("D8", "LoRa SF10 carries text at 1 kbps", kind=PROBE)
+@scenario("links8", "LoRa SF10 carries text at 1 kbps", kind=PROBE)
 def d8(env):
     """The slowest LoRa profile, and the one the README warns a tester falls
-    behind on. D5 uses SF7; this is the order-of-magnitude slower case."""
+    behind on. links5 uses SF7; this is the order-of-magnitude slower case."""
     a, b = env.peers("A", "B")
     ch = public_channel(a, [b], "d8-public")
     summary = set_link_profile(env, b, LORA_LONG)
@@ -222,7 +222,7 @@ def d8(env):
     return notes
 
 
-@scenario("D9", "A custom profile applies exactly the shaping asked for")
+@scenario("links9", "A custom profile applies exactly the shaping asked for")
 def d9(env):
     """The custom profile takes explicit bitrate/latency/jitter/loss overrides.
     Nothing else exercises that path, and a silently-ignored override would
@@ -249,7 +249,7 @@ def d9(env):
     return {"profile": summary, "converge_secs": round(elapsed, 1)}
 
 
-@scenario("D10", "Retuning a link mid-run takes effect immediately")
+@scenario("links10", "Retuning a link mid-run takes effect immediately")
 def d10(env):
     """Shaping applies live; only the bitrate hint written into the tester's
     RNS config waits for a restart. A scenario that changes a profile part-way

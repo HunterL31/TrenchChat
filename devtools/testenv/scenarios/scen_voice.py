@@ -1,5 +1,5 @@
 """
-Family H -- live group voice.
+Family voice -- live group voice.
 
 Voice runs on two planes and only the first is reachable from the pytest
 suite: signalling is LXMF, but frames travel over a full mesh of real RNS
@@ -14,7 +14,7 @@ peers that learn of each other indirectly, and the states the design
 document is explicit about — "unreachable" being shown rather than hidden,
 a demoted participant being cut off by the re-authorisation sweep.
 
-Voice needs a fast link. These run on broadband profiles; H11 is the one
+Voice needs a fast link. These run on broadband profiles; voice11 is the one
 deliberate exception.
 
 See docs/voice.md and docs/testenv-scenarios.md.
@@ -54,7 +54,7 @@ ROSTER_TTL_TIMEOUT = 120.0
 TONE_WINDOW_SECS = 8.0
 
 # 20 ms Opus frames, so ~50 a second. Measured at 384 over an 8 s window on a
-# broadband mesh (H9); used as the denominator for a delivery ratio, since
+# broadband mesh (voice9); used as the denominator for a delivery ratio, since
 # loss_pct only counts gaps between frames that actually arrived.
 EXPECTED_FRAMES = TONE_WINDOW_SECS * 48
 
@@ -90,7 +90,7 @@ def _await_mesh(peers, channel_hash: str, timeout: float = MESH_TIMEOUT) -> floa
                       timeout)
 
 
-@scenario("H1", "Three participants form a full voice mesh")
+@scenario("voice1", "Three participants form a full voice mesh")
 def h1(env):
     a, b, c = env.peers("A", "B", "C")
     ch = public_channel(a, [b, c], "h1-voice")
@@ -101,7 +101,7 @@ def h1(env):
     return {"mesh_secs": round(elapsed, 1), "participants": 3}
 
 
-@scenario("H2", "A late joiner learns the occupants and they learn it")
+@scenario("voice2", "A late joiner learns the occupants and they learn it")
 def h2(env):
     """The joiner is announced by its own voice_join; it learns who is already
     there only because each occupant unicasts one voice_state back. With three
@@ -120,7 +120,7 @@ def h2(env):
             "participants": 4}
 
 
-@scenario("H3", "Leaving voice drops the peer from every roster")
+@scenario("voice3", "Leaving voice drops the peer from every roster")
 def h3(env):
     a, b, c = env.peers("A", "B", "C")
     ch = public_channel(a, [b, c], "h3-voice")
@@ -137,7 +137,7 @@ def h3(env):
     return {"drop_secs": round(elapsed, 1)}
 
 
-@scenario("H4", "A participant killed mid-call expires from the roster", kind=PROBE)
+@scenario("voice4", "A participant killed mid-call expires from the roster", kind=PROBE)
 def h4(env):
     """A clean leave sends voice_leave; a killed process sends nothing, so the
     only thing that removes it is the roster TTL. Measures how long the other
@@ -165,7 +165,7 @@ def h4(env):
     return notes
 
 
-@scenario("H5", "A link-dropped participant is shown unreachable, not hidden")
+@scenario("voice5", "A link-dropped participant is shown unreachable, not hidden")
 def h5(env):
     """docs/voice.md is explicit that "in voice but unreachable" is an honest
     state to surface rather than hide, so the roster must keep the entry and
@@ -198,9 +198,9 @@ def h5(env):
     return {"downgraded_to": state, "downgrade_secs": round(elapsed, 1)}
 
 
-@scenario("H6", "voice_chat denied blocks a join, granted allows it")
+@scenario("voice6", "voice_chat denied blocks a join, granted allows it")
 def h6(env):
-    """The mirror pair, like B10/B11: a refusal only means something if the
+    """The mirror pair, like invite10/invite11: a refusal only means something if the
     grant demonstrably works. Invite-only, since open-join needs no row."""
     a, c = env.peers("A", "C")
     ch = invite_only_channel(a, [c], "h6-voice",
@@ -224,7 +224,7 @@ def h6(env):
     return {"refused_then_allowed": True}
 
 
-@scenario("H7", "A channel predating voice fails closed until permissions are re-saved")
+@scenario("voice7", "A channel predating voice fails closed until permissions are re-saved")
 def h7(env):
     """docs/voice.md: channels created before the feature have no voice_chat
     entry, so non-owner members are denied until an owner re-saves. Modelled by
@@ -248,7 +248,7 @@ def h7(env):
     return {"owner_always_passes": True}
 
 
-@scenario("H8", "Revoking voice_chat mid-call cuts the participant off")
+@scenario("voice8", "Revoking voice_chat mid-call cuts the participant off")
 def h8(env):
     """docs/voice.md promises the re-authorisation sweep cuts a demoted
     participant off in about a second. tests/test_adversarial.py checks this
@@ -274,7 +274,7 @@ def h8(env):
             "b_still_streaming": b.voice_link_states(ch).get(a.hash) == STREAMING}
 
 
-@scenario("H9", "Three-way tone streaming reports real receive quality", kind=PROBE)
+@scenario("voice9", "Three-way tone streaming reports real receive quality", kind=PROBE)
 def h9(env):
     """smoke_test.py measures loss and jitter for one pair. A full mesh is the
     case the bandwidth budget in docs/voice.md is actually about: each speaker
@@ -314,7 +314,7 @@ def h9(env):
     return notes
 
 
-@scenario("H10", "Voice traffic does not disturb text delivery")
+@scenario("voice10", "Voice traffic does not disturb text delivery")
 def h10(env):
     """Voice frames are unreliable link packets on a separate destination, so
     chat should be unaffected while a mesh is streaming. Worth pinning: they
@@ -338,7 +338,7 @@ def h10(env):
     return {"delivery_secs": {k: round(v, 1) for k, v in latency.items()}}
 
 
-@scenario("H11", "Voice over a link too slow for it degrades honestly", kind=PROBE)
+@scenario("voice11", "Voice over a link too slow for it degrades honestly", kind=PROBE)
 def h11(env):
     """docs/voice.md says voice is not viable over LoRa or packet radio and
     that the UI should surface that rather than mask it. Records what actually

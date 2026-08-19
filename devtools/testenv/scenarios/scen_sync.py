@@ -1,5 +1,5 @@
 """
-Family C -- offline behaviour and sync.
+Family sync -- offline behaviour and sync.
 
 The reason this environment exists. All three offline mechanisms only run on
 an interrupted link, and none of them is reachable from the pytest suite,
@@ -47,7 +47,7 @@ def _send_batch(peer, channel_hash: str, prefix: str, count: int) -> set[str]:
     return contents
 
 
-@scenario("C1", "A link-dropped peer receives what it missed")
+@scenario("sync1", "A link-dropped peer receives what it missed")
 def c1(env):
     a, b, c = env.peers("A", "B", "C")
     ch = public_channel(a, [b, c], "c1-public")
@@ -63,7 +63,7 @@ def c1(env):
     return {"recovery_secs": round(elapsed, 1)}
 
 
-@scenario("C2", "A third party serves history the sender never delivered")
+@scenario("sync2", "A third party serves history the sender never delivered")
 def c2(env):
     """Mechanism 2. B misses three messages, then A goes offline before B
     returns -- so whatever B ends up with came from C or D, not the sender."""
@@ -92,9 +92,9 @@ def c2(env):
             "sync_state": status.get("state")}
 
 
-@scenario("C3", "A killed and restarted peer recovers from disk plus sync")
+@scenario("sync3", "A killed and restarted peer recovers from disk plus sync")
 def c3(env):
-    """Mechanism 3 from a cold start. Unlike C1's link drop, nothing survives
+    """Mechanism 3 from a cold start. Unlike sync1's link drop, nothing survives
     in memory -- no pending queue, no sync status, no subscriber cache."""
     a, b, c = env.peers("A", "B", "C")
     ch = public_channel(a, [b, c], "c3-public")
@@ -118,7 +118,7 @@ def c3(env):
     return {"recovery_secs": round(elapsed, 1), "messages": len(expected)}
 
 
-@scenario("C4", "A backlog larger than one sync response completes")
+@scenario("sync4", "A backlog larger than one sync response completes")
 def c4(env):
     """A response capped at MAX_RESPONSE_MESSAGES carries F_SYNC_TRUNCATED and
     the requester must chain its own follow-up. Without that chaining D stops
@@ -144,7 +144,7 @@ def c4(env):
             "sync_state": d.sync_status(ch).get("state")}
 
 
-@scenario("C5", "Two peers offline for different windows both catch up")
+@scenario("sync5", "Two peers offline for different windows both catch up")
 def c5(env):
     """Disjoint history: nobody holds everything B and C each need, so a
     channel-wide watermark would strand one of them."""
@@ -172,7 +172,7 @@ def c5(env):
     return {"recovery_secs": round(elapsed, 1), "messages": len(expected)}
 
 
-@scenario("C7", "Sync status reports a channel as settled", kind=PROBE)
+@scenario("sync7", "Sync status reports a channel as settled", kind=PROBE)
 def c7(env):
     """SyncStatusTracker is what a client shows the user. Records the state a
     channel lands in after a normal offline round trip."""
@@ -199,7 +199,7 @@ def c7(env):
     return notes
 
 
-@scenario("C8", "Granting full_sync re-asks for history already withheld")
+@scenario("sync8", "Granting full_sync re-asks for history already withheld")
 def c8(env):
     """Entitlement changed, so the next request must re-ask from the start
     rather than resuming from a watermark that already ran past the withheld
@@ -228,7 +228,7 @@ def c8(env):
     return {"backfill_secs": round(elapsed, 1), "messages": len(backlog)}
 
 
-@scenario("C9", "A kicked member's sync request is refused")
+@scenario("sync9", "A kicked member's sync request is refused")
 def c9(env):
     a, b, c = env.peers("A", "B", "C")
     ch = invite_only_channel(a, [b, c], "c9-private",
@@ -250,7 +250,7 @@ def c9(env):
     return {"frozen_at": len(before)}
 
 
-@scenario("C10", "A total partition heals when the hub returns")
+@scenario("sync10", "A total partition heals when the hub returns")
 def c10(env):
     """The hub is the only transport between testers, so killing it isolates
     all four at once -- every peer keeps writing locally with nothing
@@ -283,7 +283,7 @@ def c10(env):
     return {"heal_secs": round(elapsed, 1), "messages": len(expected)}
 
 
-@scenario("C11", "Four peers offline at once reconcile four histories")
+@scenario("sync11", "Four peers offline at once reconcile four histories")
 def c11(env):
     """The hardest sync case: every peer writes in isolation, so on return
     each of them is both a requester and the only source of its own history.

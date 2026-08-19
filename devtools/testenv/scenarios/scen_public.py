@@ -1,5 +1,5 @@
 """
-Family A -- public (open-join) channels.
+Family public -- public (open-join) channels.
 
 Membership on a public channel is a subscription, not a member-list
 document: SubscriptionManager tracks who is subscribed, no tenure is
@@ -21,7 +21,7 @@ from flows import (
 from scenario import PROBE, scenario
 
 
-@scenario("A1", "A creates a public channel; B, C, D discover it unjoined")
+@scenario("public1", "A creates a public channel; B, C, D discover it unjoined")
 def a1(env):
     a, b, c, d = env.peers("A", "B", "C", "D")
     ch = a.create_channel("a1-public", "public")
@@ -35,7 +35,7 @@ def a1(env):
     return {"channel": ch[:12]}
 
 
-@scenario("A2", "B joins; A's subscriber set updates so A's next send reaches B")
+@scenario("public2", "B joins; A's subscriber set updates so A's next send reaches B")
 def a2(env):
     a, b = env.peers("A", "B")
     ch = a.create_channel("a2-public", "public")
@@ -50,7 +50,7 @@ def a2(env):
     return {"delivery_secs": round(elapsed, 1)}
 
 
-@scenario("A3", "A sends to two subscribers; a non-subscriber gets nothing")
+@scenario("public3", "A sends to two subscribers; a non-subscriber gets nothing")
 def a3(env):
     a, b, c, d = env.peers("A", "B", "C", "D")
     ch = a.create_channel("a3-public", "public")
@@ -65,7 +65,7 @@ def a3(env):
     return {"delivery_secs": {k: round(v, 1) for k, v in latency.items()}}
 
 
-@scenario("A4", "A subscriber's send reaches the owner and other subscribers")
+@scenario("public4", "A subscriber's send reaches the owner and other subscribers")
 def a4(env):
     a, b, c, d = env.peers("A", "B", "C", "D")
     ch = a.create_channel("a4-public", "public")
@@ -85,9 +85,9 @@ def a4(env):
     return {}
 
 
-@scenario("A5", "A late public-channel joiner has no sync trigger", kind=PROBE)
+@scenario("public5", "A late public-channel joiner has no sync trigger", kind=PROBE)
 def a5(env):
-    """Matrix row A5. join_public_channel() only subscribes -- no
+    """Matrix row public5. join_public_channel() only subscribes -- no
     channel_joined callback fires, so nothing requests history. Measures how
     long backfill actually takes and what triggers it."""
     a, b, c, d = env.peers("A", "B", "C", "D")
@@ -117,9 +117,9 @@ def a5(env):
     return notes
 
 
-@scenario("A6", "full_sync makes no difference on a public channel", kind=PROBE)
+@scenario("public6", "full_sync makes no difference on a public channel", kind=PROBE)
 def a6(env):
-    """Matrix row A6. Public channels never open tenure, so the tenure filter
+    """Matrix row public6. Public channels never open tenure, so the tenure filter
     full_sync gates never engages. Runs both channels side by side; the
     finding is whether they differ."""
     a, d = env.peers("A", "D")
@@ -157,7 +157,7 @@ def a6(env):
     return notes
 
 
-@scenario("A7", "Leaving stops delivery without erasing received history")
+@scenario("public7", "Leaving stops delivery without erasing received history")
 def a7(env):
     a, b, c = env.peers("A", "B", "C")
     ch = a.create_channel("a7-public", "public")
@@ -178,7 +178,7 @@ def a7(env):
     return {}
 
 
-@scenario("A8", "All four subscribers converge on every message")
+@scenario("public8", "All four subscribers converge on every message")
 def a8(env):
     a, b, c, d = env.peers("A", "B", "C", "D")
     ch = a.create_channel("a8-public", "public")
@@ -208,7 +208,7 @@ def a8(env):
     return {"messages": len(expected), "roster_settle_secs": round(roster_secs, 1)}
 
 
-@scenario("A10", "A subscriber offline across a roster change catches up", kind=PROBE)
+@scenario("public10", "A subscriber offline across a roster change catches up", kind=PROBE)
 def a10(env):
     """Written to prove SubscriptionManager._send_raw's missing retry queue
     strands a subscriber that misses a broadcast. It does not: _send_raw only
@@ -255,9 +255,9 @@ def a10(env):
     return notes
 
 
-@scenario("A9", "The owner leaving its own public channel", kind=PROBE)
+@scenario("public9", "The owner leaving its own public channel", kind=PROBE)
 def a9(env):
-    """Matrix row A9. Undefined behavior: the owner still holds the
+    """Matrix row public9. Undefined behavior: the owner still holds the
     authoritative subscriber list but is no longer subscribed itself.
     Records what the remaining subscribers see."""
     a, b, c, d = env.peers("A", "B", "C", "D")

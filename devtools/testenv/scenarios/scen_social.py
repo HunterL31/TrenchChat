@@ -1,5 +1,5 @@
 """
-Family F -- reactions, emoji, presence and identity.
+Family social -- reactions, emoji, presence and identity.
 
 Everything here rides on top of a channel rather than being one: a reaction
 targets a message, an avatar and a display name travel with an identity, and
@@ -52,7 +52,7 @@ def _first_message_id(peer, channel_hash: str) -> str:
     return messages[0]["message_id"]
 
 
-@scenario("F1", "A reaction reaches every subscriber including the owner")
+@scenario("social1", "A reaction reaches every subscriber including the owner")
 def f1(env):
     """The owner is in the broadcast subscriber payload; before it was, the
     owner alone never saw reactions, since reactions have no sync fallback."""
@@ -70,7 +70,7 @@ def f1(env):
     return {}
 
 
-@scenario("F2", "Removing a reaction clears it everywhere")
+@scenario("social2", "Removing a reaction clears it everywhere")
 def f2(env):
     a, b, c = env.peers("A", "B", "C")
     ch = public_channel(a, [b, c], "f2-public")
@@ -92,9 +92,9 @@ def f2(env):
     return {}
 
 
-@scenario("F3", "A reaction sent while a peer is offline is never backfilled", kind=PROBE)
+@scenario("social3", "A reaction sent while a peer is offline is never backfilled", kind=PROBE)
 def f3(env):
-    """Matrix row F3. Chat messages have three recovery mechanisms; reactions
+    """Matrix row social3. Chat messages have three recovery mechanisms; reactions
     have none, so an offline peer should miss one permanently."""
     a, b, d = env.peers("A", "B", "D")
     ch = public_channel(a, [b, d], "f3-public")
@@ -118,7 +118,7 @@ def f3(env):
     return notes
 
 
-@scenario("F4", "Presence flips to offline when a peer drops")
+@scenario("social4", "Presence flips to offline when a peer drops")
 def f4(env):
     a, b, c = env.peers("A", "B", "C")
     public_channel(a, [b, c], "f4-public")
@@ -132,7 +132,7 @@ def f4(env):
     return {"detected_secs": round(elapsed, 1)}
 
 
-@scenario("F5", "An avatar propagates and can be removed")
+@scenario("social5", "An avatar propagates and can be removed")
 def f5(env):
     a, b, c = env.peers("A", "B", "C")
     public_channel(a, [b, c], "f5-public")
@@ -157,7 +157,7 @@ def f5(env):
     return {"removal_secs": round(secs, 1)}
 
 
-@scenario("F6", "A display-name change propagates to the directory")
+@scenario("social6", "A display-name change propagates to the directory")
 def f6(env):
     a, b, c = env.peers("A", "B", "C")
     public_channel(a, [b, c], "f6-public")
@@ -174,7 +174,7 @@ def f6(env):
     return {}
 
 
-@scenario("F7", "A friend entry stays on the device that made it")
+@scenario("social7", "A friend entry stays on the device that made it")
 def f7(env):
     a, b, c = env.peers("A", "B", "C")
     public_channel(a, [b, c], "f7-public")
@@ -190,7 +190,7 @@ def f7(env):
     return {}
 
 
-@scenario("F8", "A reply and a reaction on it resolve the same way everywhere")
+@scenario("social8", "A reply and a reaction on it resolve the same way everywhere")
 def f8(env):
     a, b, c = env.peers("A", "B", "C")
     ch = public_channel(a, [b, c], "f8-public")
