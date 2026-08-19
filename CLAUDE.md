@@ -186,3 +186,6 @@ Full detail in `.claude/rules/code-standards.md`. Highlights not obvious from sk
   test; new permissions need an adversarial test) — see `.claude/rules/test-coverage-for-new-features.md`.
 - Never commit, push, merge, rebase, or tag without an explicit request, and never push directly to
   `main` (protected — always a feature branch + PR) — see `.claude/rules/git-safety.md`.
+- A new file in `docs/` needs reasoning that can't be recovered from the code — a trust model, a
+  rejected alternative, a deliberate non-fix. Plans, proposals and test plans get deleted once the
+  work lands — see `.claude/rules/docs-worth-committing.md`.
