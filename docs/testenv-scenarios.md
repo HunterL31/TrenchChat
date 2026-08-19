@@ -184,12 +184,19 @@ need control of the clock and stay deferred.
 | C10 | A,B,C,D | Hub killed (total partition); each peer sends 1; hub restarted | ✅ All four reconcile in 12.1s once the hub returns |
 | C8 | A,D | D joins without `full_sync`; A grants `full_sync` to member | ✅ The backlog arrives 3.0s after the grant, without D restarting |
 | C9 | A,B,C | A kicks C; C requests sync | ✅ C's transcript stays frozen at the kick |
-| C11 | A,B,C,D | All 4 offline simultaneously, each sends 2 locally, all come online | ✅ **Fixed.** Reconciled all 9 messages in 31.7s. Failed on every run before the fix below |
+| C11 | A,B,C,D | All 4 offline simultaneously, each sends 2 locally, all come online | ❌ **Still fails.** One watermark defect found and fixed (below); the scenario itself reconciles only sometimes. 1 pass in 5 runs |
 | C12 | A,B | B offline past `SYNC_WINDOW_SECS` (7 days, clock-shifted); B online | Deferred — needs clock control |
 
-#### C11 and C2, root-caused: one watermark row, two directions
+#### One defect inside C11, root-caused and fixed: one watermark row, two directions
 
-**Fixed.** The `sync_progress` table was being written from both directions
+**The defect is fixed; C11 is not.** A single 31.7s pass was recorded when this
+landed and read as a fix. It was not: re-running C11 five times — twice at the
+commit that recorded the pass, three times after merging `main` — fails four
+times out of five, always on the same `-alone-0` rows. The watermark collision
+below is real, is fixed, and is pinned by a pytest regression test; it was one
+cause among more than one. See "What still fails in C11" below.
+
+The `sync_progress` table was being written from both directions
 against the same `(channel_hash, peer_hash)` key:
 
 - `_handle_sync_response` advances `(channel, responder)` to the newest
@@ -228,7 +235,42 @@ Covered by `TestResponderAcquiresOlderHistoryLater` in
 `tests/test_sync_multipeer.py`, which reproduces it in 0.3s in-process — the
 scenario found it, but the pytest suite is where it is pinned.
 
-#### C11 before the fix: the first message of a partition is lost
+#### What still fails in C11
+
+The measured runs, all of the same scenario body:
+
+| Commit | Runs | Result |
+|---|---|---|
+| `b18ca9b` (pre-merge, with the `sync_served` fix) | 1 | Passed, 31.7s — the run that was mistaken for a fix |
+| `b18ca9b` | 2 | Both failed, 220s and 228s |
+| Post-merge with `main` | 2 | Both failed, 269s and 272s, byte-identical missing sets |
+
+Missing rows are always `-alone-0` and never `-alone-1`, but *which* peers lose
+which rows moves between runs — in one pre-merge run A and B converged fully
+and only C and D lost a row. A deterministic defect would not vary that way.
+
+The debug capture points at the deep-sync cooldown as at least part of what
+remains. Nine deep requests were refused in a single run:
+
+```
+TrenchChat [sync]: deep sync request from 0e5d8023e94b… for e0676b7fd873… throttled — cooldown active
+```
+
+A peer returning from a partition has no `last_sync_at`, so it asks from 0,
+which classifies as deep. `_deep_sync_allowed` serves the first such request per
+`(channel, requester)` and then refuses for `DEEP_SYNC_COOLDOWN_SECS` (60) —
+silently, with no response at all, so the requester cannot tell refusal from
+loss (the same gap as finding 4). A four-way reconcile needs several rounds,
+because a peer can only relay what it has itself already received, and the
+cooldown allows one round per pair per minute. Whether the scenario converges
+then depends on whether the useful round happens to fall inside a window that
+is open — which matches the variance measured above.
+
+Not yet proven, and the next step: instrument one responder to log every
+refusal alongside what it *would* have served, and confirm the refused rows are
+the missing ones.
+
+#### C11's failure shape: the first message of a partition is lost
 
 Seven of the eight built rows pass, several on the first attempt. C11 does not,
 and the shape of its failure is specific enough to be worth acting on:
@@ -258,7 +300,7 @@ non-zero until it is fixed, which is the correct signal for an open bug.
 
 #### C2, root-caused: a recovered link has no resync trigger
 
-**Fixed.** C2 failed roughly half the time — 2 of 6 runs — with B holding 0 of 3
+**Root-caused, not fixed.** C2 failed roughly half the time — 2 of 6 runs — with B holding 0 of 3
 and both responders sitting at `pending`, `answered_peers: 0`, for the full
 206s.
 
@@ -517,13 +559,14 @@ Everything the matrix turned up, across all seven families.
 
 | Finding | Detail |
 |---|---|
-| **C11** — one `sync_progress` row written from both directions, collapsing the responder's trust-horizon floor and stranding history older than a requester's watermark | Root-caused and fixed by splitting the serve direction into `sync_served`. C11 now reconciles in 31.7s; regression test in `tests/test_sync_multipeer.py` |
+| **One `sync_progress` row written from both directions**, collapsing the responder's trust-horizon floor and stranding history older than a requester's watermark | Root-caused and fixed by splitting the serve direction into a `sync_served` table; regression test in `tests/test_sync_multipeer.py`. Found through C11, but **it did not fix C11** — see below |
 | **G1** — `_subscriber_versions` lived only in memory, so a restarted owner renumbered from 1 and every later list was rejected as a replay | Fixed on `main` by the August security audit, which persists the counter in a `subscriber_list_versions` table and re-checks the version under the commit lock. This branch's own fix was dropped at the merge in favour of it; the end-to-end regression test in `tests/test_subscriptions.py` stays |
 
 ### Open
 
 | Finding | Detail |
 |---|---|
+| **C11** — a four-way partition reconciles only sometimes: 1 pass in 5 runs, always losing the *first* message a peer wrote in isolation | **Partly root-caused.** The watermark collision above was one cause and is fixed. The deep-sync cooldown refusing a returning peer's request silently, once per pair per 60s, is the leading candidate for the rest |
 | **C2** — a node whose own link recovers has no resync trigger. `on_peer_appeared` fires only on a *received announce*, and RNS suppresses announce replays for a destination the transport has already propagated | **Root-caused, not fixed.** Fails ~half of runs (4/8, 4/6). The fix needs a local link-recovery signal the production client does not currently have — see below |
 | **B11** — `kick` and `manage_roles` are grantable to any role, but a non-admin's member-list document is rejected by every recipient | **Confirmed.** The grant succeeds locally and does nothing on the network. Resolution is a product decision — see below |
 | **Subscribe/invite have no retry** — `_send_raw` in both `subscription.py` and `invite.py` drops the message when the path is unresolved, and nothing re-sends it | **Confirmed twice.** C4's setup hit it for `MT_SUBSCRIBE` (the owner never registered the joiner); G3 measured it for invites (first attempt dropped, 2 needed). Only re-issuing recovers |
@@ -661,16 +704,23 @@ All eight families built and run: **73 scenarios, 55 strict and 18 probes.**
 |---|---|---|
 | A — public channels | 10 (6 strict, 4 probes) | All passing, three consecutive clean runs |
 | B — invite-only and membership | 13 (12 strict, 1 probe) | 11/12 — **B11 fails** on a confirmed permission gap |
-| C — offline and sync | 10 (9 strict, 1 probe) | 8/9 — **C2 fails**, root-caused. C11 fixed |
+| C — offline and sync | 10 (9 strict, 1 probe) | 8/9 — **C11 fails** (1 pass in 5). **C2 fails ~half the time**; it passed the post-merge run |
 | D — degraded links | 10 (5 strict, 5 probes) | All passing, on genuinely shaped links |
 | E — servers | 6 (5 strict, 1 probe) | All passing |
 | F — reactions, presence, identity | 8 (7 strict, 1 probe) | All passing; F3's prediction refuted |
 | G — restart and ordering | 5 (3 strict, 2 probes) | All passing; G1 confirmed, then fixed; G3 confirmed |
 | H — live group voice | 11 (8 strict, 3 probes) | All passing; H4, H5 and H11 recorded gaps |
 
-**53 of 55 strict scenarios pass.** The two that do not — B11 and C2 — are real
-defects, left strict and failing on purpose, so `--family B` and `--family C`
-exit non-zero until they are resolved.
+**53 of 55 strict scenarios pass.** The failures are real defects, left strict
+and failing on purpose, so `--family B` and `--family C` exit non-zero until
+they are resolved. B11 fails every run. C2 and C11 are both intermittent and
+trade places: the pre-merge run lost C2, the post-merge run lost C11, and the
+count landed at 53/55 either way.
+
+Re-run against `main` after the August security audit merged (PR 52): the suite
+is unchanged at 53/55, so the audit regressed nothing here. Its one effect on
+the harness is that every tester API now requires a token, which `peer.py`
+reads from the orchestrator's `/config`.
 
 Roughly 5–10 minutes a family, most of it environment resets between scenarios.
 The whole matrix is around 45 minutes, which is why it belongs on a nightly or
@@ -678,6 +728,9 @@ on-demand run rather than the per-PR gate.
 
 Remaining work:
 
+0. Finish C11: confirm the deep-sync cooldown is what strands the remaining
+   `-alone-0` rows, then decide whether a refusal should answer with an
+   explicit "throttled" rather than silence.
 1. Fix C2 by giving the client a resync trigger for its own link recovering.
 2. Decide B11: stop offering `kick`/`manage_roles` below admin, or admit
    permission-holders as trusted signers.
