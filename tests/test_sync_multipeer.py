@@ -969,3 +969,74 @@ class TestSyncAnswerSurvivesAnUnresolvedPath:
         assert wait_for(lambda: bob.storage.get_messages(ch_hash), timeout=5), (
             "the held answer never reached the requester once its path resolved"
         )
+
+
+# ---------------------------------------------------------------------------
+# A11 -- a request that nothing will ever ask again
+# ---------------------------------------------------------------------------
+
+class TestUnansweredRequestIsAskedAgain:
+    def test_a_request_nobody_answered_is_asked_again(self, peer_factory, monkeypatch):
+        """
+        A sync request that goes unanswered is asked again.
+
+        Every trigger in the app is an event -- a peer announcing, or this
+        node's own link returning -- and both fire in a burst and then stop,
+        because Reticulum suppresses announce replays for a destination it has
+        already propagated. A responder's deep-sync cooldown refuses silently
+        and lasts a minute, which is long enough to swallow an entire burst.
+        The requester then waits forever on an answer nobody will send: in
+        sync2 the returning peer asked eight times in thirty seconds, was
+        refused every time, and never asked again in the three minutes left.
+        """
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+
+        ch_hash = alice.channel_mgr.create_channel("silent-refusal", "", "public")
+        _seed_channel_on_peer(bob, ch_hash, "silent-refusal", alice.identity.hash_hex)
+
+        asked = []
+        real_send = bob.sync_mgr._send_sync_request
+
+        def record(dest_hex, channel_hash_hex, since_ts, continuation=False):
+            asked.append((dest_hex, channel_hash_hex))
+            return real_send(dest_hex, channel_hash_hex, since_ts, continuation)
+
+        monkeypatch.setattr(bob.sync_mgr, "_send_sync_request", record)
+
+        bob.sync_mgr._record_pending_request(ch_hash, alice.identity.hash_hex, 0.0)
+
+        bob.sync_mgr.tick()
+        assert asked == [], "a request was re-asked before it was old enough"
+
+        # Age it out by shortening the window rather than moving the clock,
+        # which every other manager in this process also reads.
+        monkeypatch.setattr("trenchchat.core.sync.SYNC_RETRY_SECS", 0.0)
+        bob.sync_mgr.tick()
+
+        assert [c for _, c in asked] == [ch_hash], (
+            "an unanswered request was never asked again, so a peer refused "
+            "once waits forever"
+        )
+        assert asked[0][0] == alice.identity.hash_hex
+
+    def test_the_retry_actually_recovers_the_history(self, peer_factory, monkeypatch):
+        """End to end: the retry is what delivers, with nothing else running."""
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+
+        ch_hash = alice.channel_mgr.create_channel("silent-refusal-e2e", "", "public")
+        _seed_channel_on_peer(bob, ch_hash, "silent-refusal-e2e",
+                              alice.identity.hash_hex)
+        _insert_message(alice.storage, ch_hash, alice.identity.hash_hex,
+                        "sent while bob was away", time.time() - 30)
+
+        bob.sync_mgr._record_pending_request(ch_hash, alice.identity.hash_hex, 0.0)
+        assert not bob.storage.get_messages(ch_hash)
+
+        monkeypatch.setattr("trenchchat.core.sync.SYNC_RETRY_SECS", 0.0)
+        bob.sync_mgr.tick()
+
+        assert wait_for(lambda: bob.storage.get_messages(ch_hash), timeout=5), (
+            "the retry never reached the responder"
+        )

@@ -22,6 +22,7 @@ import RNS
 from trenchchat.config import DATA_DIR, Config
 from trenchchat.core import lockbox
 from trenchchat.core.connectivity import LinkWatcher
+from trenchchat.core.sync import SYNC_RETRY_SECS
 from trenchchat.core.identity import Identity
 from trenchchat.core.storage import Storage
 from trenchchat.core.channel import ChannelManager
@@ -132,6 +133,11 @@ def _write_reticulum_config(rns_dir: Path, instance_name: str, role: str,
         iface_body=iface_body,
     )
     (rns_dir / "config").write_text(config_text)
+
+
+# Checked more often than SYNC_RETRY_SECS so a request that ages out is
+# re-asked promptly rather than up to a full interval late.
+SYNC_TICK_SECS = SYNC_RETRY_SECS / 3
 
 
 class Backend:
@@ -320,14 +326,27 @@ class Backend:
 
     def start_voice_ticker(self, interval: float = 1.0) -> None:
         """Drive VoiceManager.tick, mirroring main.py's voice tick QTimer.
+
+        Also drives SyncManager.tick on its own slower cadence: an unanswered
+        sync request has nothing else to re-trigger it once the announce burst
+        that prompted it has passed.
+
         Runs as a daemon thread so it never blocks process exit."""
         def _loop():
+            last_sync_tick = 0.0
             while True:
                 time.sleep(interval)
                 try:
                     self.voice_mgr.tick()
                 except Exception as e:
                     RNS.log(f"TesterBackend: voice tick failed: {e}", RNS.LOG_WARNING)
+                now = time.time()
+                if now - last_sync_tick >= SYNC_TICK_SECS:
+                    last_sync_tick = now
+                    try:
+                        self.sync_mgr.tick()
+                    except Exception as e:
+                        RNS.log(f"TesterBackend: sync tick failed: {e}", RNS.LOG_WARNING)
 
         t = threading.Thread(target=_loop, daemon=True, name="voice-ticker")
         t.start()

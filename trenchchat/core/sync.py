@@ -102,6 +102,11 @@ PEER_TRUST_HORIZON_SECS = 300
 # only paces how fast they can pull it.
 DEEP_SYNC_COOLDOWN_SECS = 60
 
+# How long an unanswered sync request waits before it is asked again. Longer
+# than the responder's deep-sync cooldown, so a retry lands in the next window
+# that cooldown will actually serve rather than inside the one that refused.
+SYNC_RETRY_SECS = 90.0
+
 # How long an idle (channel, peer) cooldown entry is kept before being
 # pruned, so the cooldown map doesn't grow unbounded over a long session
 # with many distinct peers.
@@ -1207,6 +1212,51 @@ class SyncManager:
         except (ValueError, TypeError):
             pass
         return forms
+
+    def tick(self) -> None:
+        """Re-ask peers whose answer never came.
+
+        Every other trigger is an event: a peer announcing, or this node's own
+        link returning. Both fire in a burst and then stop -- Reticulum
+        suppresses announce replays for a destination it has already
+        propagated -- so a request refused during that burst is never made
+        again. A responder's deep-sync cooldown refuses silently and lasts a
+        minute, which is long enough to swallow an entire burst, leaving a
+        returning peer waiting forever on an answer nobody is going to send
+        (sync2 in docs/testenv-scenarios.md).
+        """
+        now = time.time()
+        stale: dict[str, set[str]] = {}
+        with self._pending_requests_lock:
+            for (channel_hash_hex, _form), entries in self._pending_requests.items():
+                for asked_at, _since, dest_hex, _req_id in entries:
+                    if now - asked_at >= SYNC_RETRY_SECS:
+                        stale.setdefault(channel_hash_hex, set()).add(dest_hex)
+
+        for channel_hash_hex, peers in stale.items():
+            if not self._storage.is_subscribed(channel_hash_hex):
+                continue
+            for peer_hex in peers:
+                self._expire_pending_requests(channel_hash_hex, peer_hex, now)
+                since_ts = self._storage.get_peer_sync_progress(channel_hash_hex, peer_hex)
+                RNS.log(
+                    f"TrenchChat [sync]: re-asking {peer_hex[:12]}… for "
+                    f"{channel_hash_hex[:12]}… — no answer to the last request",
+                    RNS.LOG_DEBUG,
+                )
+                self._send_sync_request(peer_hex, channel_hash_hex, since_ts)
+
+    def _expire_pending_requests(self, channel_hash_hex: str, dest_hex: str,
+                                 now: float) -> None:
+        """Drop this peer's timed-out entries, so a retry is not itself stale."""
+        with self._pending_requests_lock:
+            for form in self._peer_key_forms(dest_hex):
+                entries = self._pending_requests.get((channel_hash_hex, form))
+                if not entries:
+                    continue
+                entries[:] = [e for e in entries if now - e[0] < SYNC_RETRY_SECS]
+                if not entries:
+                    del self._pending_requests[(channel_hash_hex, form)]
 
     def _record_pending_request(self, channel_hash_hex: str, dest_hex: str,
                                 since_ts: float = 0.0) -> int:

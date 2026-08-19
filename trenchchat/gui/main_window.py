@@ -30,6 +30,7 @@ from PyQt6.QtGui import QAction, QColor, QFont
 from trenchchat.config import Config
 from trenchchat.core import actions
 from trenchchat.core.connectivity import LinkWatcher
+from trenchchat.core.sync import SYNC_RETRY_SECS
 from trenchchat.core.identity import Identity
 from trenchchat.core.image import prepare_image, MAX_IMAGE_BYTES
 from trenchchat.core.permissions import (
@@ -57,6 +58,9 @@ from trenchchat.gui.invite_dialogs import ChannelPermissionsDialog, InviteDialog
 from trenchchat.gui.interfaces_widget import InterfacesWidget
 
 _STARTUP_SYNC_DELAY_MS = 3_000
+# Checked more often than SYNC_RETRY_SECS, so a request that ages out is
+# re-asked promptly rather than up to a full interval late.
+_SYNC_TICK_INTERVAL_MS = int(SYNC_RETRY_SECS * 1000 / 3)
 _PRESENCE_PRUNE_INTERVAL_MS = 30_000
 _ANNOUNCE_DEBOUNCE_MS = 2_000
 
@@ -404,6 +408,13 @@ class MainWindow(QMainWindow):
         # nothing covers the case where we are the node that was away.
         self._link_watcher = LinkWatcher(self._sync_mgr.request_sync_all)
         self._link_watcher.start()
+
+        # Re-ask peers that never answered a sync request. Announces arrive in
+        # a burst and then stop, so a request refused during one has nothing
+        # else to trigger it again.
+        self._sync_retry_timer = QTimer(self)
+        self._sync_retry_timer.timeout.connect(self._sync_mgr.tick)
+        self._sync_retry_timer.start(_SYNC_TICK_INTERVAL_MS)
 
         # Periodically prune stale presence entries and refresh the online panel
         self._presence_timer = QTimer(self)
