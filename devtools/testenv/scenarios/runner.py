@@ -125,10 +125,11 @@ def _wait_environment(orch: Orchestrator, testers: int) -> Env:
     _wait(lambda: all(t["alive"] for t in orch.status()["testers"].values()),
           "every tester process to be alive", _BOOT_TIMEOUT)
 
+    token = orch.api_token()
     config = orch.config()["testers"]
     if len(config) != testers:
         raise RuntimeError(f"orchestrator launched {len(config)} testers, expected {testers}")
-    peers = {t["tag"]: Peer(t["tag"], t["api_port"]) for t in config}
+    peers = {t["tag"]: Peer(t["tag"], t["api_port"], token) for t in config}
     for p in peers.values():
         _wait(p.alive, f"{p.tag}'s API", _BOOT_TIMEOUT)
         p.forget_hash()

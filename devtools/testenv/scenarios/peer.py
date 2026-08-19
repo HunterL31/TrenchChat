@@ -10,16 +10,27 @@ import httpx
 
 _ORCH_PORT = 8800
 _TIMEOUT = 15.0
+_TOKEN_HEADER = "x-tc-token"
+
+
+def _auth_headers(token: str) -> dict[str, str]:
+    return {_TOKEN_HEADER: token} if token else {}
 
 
 class Peer:
-    """One tester, addressed by its API port."""
+    """One tester, addressed by its API port.
 
-    def __init__(self, tag: str, api_port: int):
+    Every route on a tester's API requires the environment's token; without
+    it each call answers 401. The orchestrator mints one for all of them and
+    hands it out through its own /config.
+    """
+
+    def __init__(self, tag: str, api_port: int, token: str = ""):
         self.tag = tag
         self.api_port = api_port
+        self.token = token
         self._base = f"http://127.0.0.1:{api_port}"
-        self._client = httpx.Client(timeout=_TIMEOUT)
+        self._client = httpx.Client(timeout=_TIMEOUT, headers=_auth_headers(token))
         self._hash: str | None = None
 
     def __repr__(self) -> str:
@@ -304,6 +315,10 @@ class Orchestrator:
     def _post(self, path: str, body: dict | None = None):
         r = self._client.post(self._base + path, json=body if body is not None else {})
         return r.json()
+
+    def api_token(self) -> str:
+        """The token every tester API requires, minted by the orchestrator."""
+        return self.config().get("api_token", "")
 
     def config(self) -> dict:
         r = self._client.get(self._base + "/config", timeout=5.0)

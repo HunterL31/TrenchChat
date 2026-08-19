@@ -518,7 +518,7 @@ Everything the matrix turned up, across all seven families.
 | Finding | Detail |
 |---|---|
 | **C11** — one `sync_progress` row written from both directions, collapsing the responder's trust-horizon floor and stranding history older than a requester's watermark | Root-caused and fixed by splitting the serve direction into `sync_served`. C11 now reconciles in 31.7s; regression test in `tests/test_sync_multipeer.py` |
-| **G1** — `_subscriber_versions` lived only in memory, so a restarted owner renumbered from 1 and every later list was rejected as a replay | Fixed by persisting the counter in a `subscriber_versions` table, loaded on construction and written through on both issue and accept. Regression test in `tests/test_subscriptions.py` |
+| **G1** — `_subscriber_versions` lived only in memory, so a restarted owner renumbered from 1 and every later list was rejected as a replay | Fixed on `main` by the August security audit, which persists the counter in a `subscriber_list_versions` table and re-checks the version under the commit lock. This branch's own fix was dropped at the merge in favour of it; the end-to-end regression test in `tests/test_subscriptions.py` stays |
 
 ### Open
 
@@ -580,7 +580,7 @@ Built and running, in `devtools/testenv/scenarios/`:
 | File | Purpose |
 |---|---|
 | `runner.py` | Spawns `orchestrator.py --testers N`, waits for every API, runs the selection, resets between scenarios, reports |
-| `peer.py` | `Peer` (one tester's API) and `Orchestrator` (process/link lifecycle). One method per endpoint, no logic |
+| `peer.py` | `Peer` (one tester's API) and `Orchestrator` (process/link lifecycle). One method per endpoint, no logic. Every tester call carries the environment's API token, read from the orchestrator's `/config` |
 | `asserts.py` | Polling assertions: `wait_until`, `settle`, `hold_for`, `all_hold`, `subscribers_converged`, `diff_report`, `subscriber_views` |
 | `scenario.py` | The `@scenario` registry and the strict/probe distinction |
 | `flows.py` | Shared setup: discovery, joining with owner registration, invite/accept, link up/down |
