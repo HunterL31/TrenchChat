@@ -445,11 +445,24 @@ class SyncManager:
 
     def _handle_sync_request(self, fields: dict, channel_hash_hex: str,
                               requester_hex: str):
+        # Every refusal below is silent on the wire -- the requester cannot
+        # tell one from a lost packet -- so each says why in the log. Without
+        # that, "nobody answered" is indistinguishable from "nobody heard".
         if not self._storage.is_subscribed(channel_hash_hex):
+            RNS.log(
+                f"TrenchChat [sync]: ignoring request from {requester_hex[:12]}… "
+                f"for {channel_hash_hex[:12]}… — we are not subscribed to it",
+                RNS.LOG_DEBUG,
+            )
             return
 
         # Fails closed on an unknown channel.
         if not self._peer_may_participate(channel_hash_hex, requester_hex):
+            RNS.log(
+                f"TrenchChat [sync]: refusing request from {requester_hex[:12]}… "
+                f"for {channel_hash_hex[:12]}… — not a participant",
+                RNS.LOG_DEBUG,
+            )
             return
         channel = self._storage.get_channel(channel_hash_hex)
 
@@ -536,6 +549,12 @@ class SyncManager:
         if truncated:
             response_fields[F_SYNC_SCAN_CURSOR] = scan_cursor
         sent = self._send_raw(requester_hex, response_fields)
+        RNS.log(
+            f"TrenchChat [sync]: {'answered' if sent else 'held answer for'} "
+            f"{requester_hex[:12]}… on {channel_hash_hex[:12]}… — {len(rows)} row(s), "
+            f"truncated={truncated}",
+            RNS.LOG_DEBUG,
+        )
 
         # Remember how far we've actually scanned for this peer, so a later
         # request from them resumes from real, confirmed progress instead of
