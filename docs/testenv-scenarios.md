@@ -187,226 +187,59 @@ need control of the clock and stay deferred.
 | sync11 | A,B,C,D | All 4 offline simultaneously, each sends 2 locally, all come online | ❌ **Still fails.** One watermark defect found and fixed (below); the scenario itself reconciles only sometimes. 1 pass in 5 runs |
 | C12 | A,B | B offline past `SYNC_WINDOW_SECS` (7 days, clock-shifted); B online | Deferred — needs clock control |
 
-#### One defect inside sync11, root-caused and fixed: one watermark row, two directions
+#### sync11 — still open
 
-**The defect is fixed; sync11 is not.** A single 31.7s pass was recorded when this
-landed and read as a fix. It was not: re-running sync11 five times — twice at the
-commit that recorded the pass, three times after merging `main` — fails four
-times out of five, always on the same `-alone-0` rows. The watermark collision
-below is real, is fixed, and is pinned by a pytest regression test; it was one
-cause among more than one. See "What still fails in sync11" below.
+A four-way partition reconciles only sometimes: **2 passes in 7 runs**, and the
+missing rows are always the *first* message each peer wrote in isolation, never
+the second. Which peers lose which rows moves between runs, so it is not a
+deterministic defect.
 
-The `sync_progress` table was being written from both directions
-against the same `(channel_hash, peer_hash)` key:
+One cause was found here and is fixed: `sync_progress` was written from both
+directions against the same key, collapsing the responder's trust-horizon floor
+so history older than a requester's watermark was stranded on both sides.
+Pinned by `TestResponderAcquiresOlderHistoryLater` in
+`tests/test_sync_multipeer.py`. It was **not** the whole story — one passing run
+was recorded as a fix while the scenario still failed four runs in five, which
+is where the "a single pass is not a fix" rule came from.
 
-- `_handle_sync_response` advances `(channel, responder)` to the newest
-  timestamp we **received** from that peer.
-- `_handle_sync_request` advances `(channel, requester)` to how far we have
-  **served** that peer.
+Ruled out: author-signature rejection. `messages_rejected` reads 0 for every
+peer in every observed run, and integrity1 independently shows that relayed
+history from a departed author verifies fine.
 
-For a pair that only ever consumes or only ever serves, the two never meet. For
-a pair that does both — which is every peer in a four-way partition recovery —
-they collide, and the more recent write wins.
+Leading hypothesis: the deep-sync cooldown. A four-way reconcile needs several
+rounds — a peer can only relay what it has itself received — and the cooldown
+serves one deep request per pair per 60s. sync2 turned out to be exactly that
+shape, so the retry tick added for it may help here too; unmeasured so far.
 
-The damage lands in the responder's floor:
+On a slow link it fails with the same fingerprint, pointing at a second
+mechanism: `PEER_TRUST_HORIZON_SECS = 300` widens a responder's sweep by a
+wall-clock constant, but how far back that must reach scales with how long the
+exchange takes — 31.7s on broadband, 1141s at SF7. A fixed constant guarding a
+link-speed-dependent window is the shape of the bug. Unverified.
 
-```python
-own_progress = get_peer_sync_progress(channel, requester_hex)
-trust_floor  = max(own_progress, window_start - PEER_TRUST_HORIZON_SECS, 0.0)
-sweep_start  = min(window_start, trust_floor)
-```
+#### sync2 — fixed, after three causes
 
-That widening exists so a responder still serves history older than the
-requester's claimed watermark — history the requester cannot know to ask for.
-But when `own_progress` is polluted by the *receive* direction it reads as
-recent, `trust_floor` rises to meet `window_start`, and `sweep_start` collapses
-back to a strict sweep. Combined with `get_messages_after`'s strict `>`, any
-message the responder acquired after the requester's watermark was set, but
-whose timestamp predates it, is invisible forever.
+Kept for the last one, which is a design lesson rather than a bug fix: **a
+silent refusal and a burst-only trigger deadlock each other.**
 
-That is exactly the `-alone-0` signature: the older message of each pair sits
-behind a watermark that a later, newer message had already pushed past.
+A responder's deep-sync cooldown refuses for 60 seconds without sending
+anything, so the requester cannot tell refusal from a lost packet. Every
+trigger to ask is an event — a peer announcing, or this node's own link
+returning — and both fire in a burst and then stop, because Reticulum
+suppresses announce replays for a destination it has already propagated. The
+returning peer asked eight times in 31 seconds, every attempt landing inside
+one cooldown window, then had nothing left to make it ask again; the window
+expired 30 seconds later with nobody there to use it.
 
-The fix separates the directions into a new `sync_served` table, restoring the
-original intent of the floor. `_handle_sync_request` now reads and writes served
-progress; `sync_progress` keeps its single receive-direction meaning.
+Neither behaviour is wrong alone. Anything added later that refuses silently
+has to answer the same question: what will make the other side try again?
 
-Covered by `TestResponderAcquiresOlderHistoryLater` in
-`tests/test_sync_multipeer.py`, which reproduces it in 0.3s in-process — the
-scenario found it, but the pytest suite is where it is pinned.
-
-#### What still fails in sync11
-
-The measured runs, all of the same scenario body:
-
-| Commit | Runs | Result |
-|---|---|---|
-| `b18ca9b` (pre-merge, with the `sync_served` fix) | 1 | Passed, 31.7s — the run that was mistaken for a fix |
-| `b18ca9b` | 2 | Both failed, 220s and 228s |
-| Post-merge with `main` | 2 | Both failed, 269s and 272s, byte-identical missing sets |
-
-Missing rows are always `-alone-0` and never `-alone-1`, but *which* peers lose
-which rows moves between runs — in one pre-merge run A and B converged fully
-and only C and D lost a row. A deterministic defect would not vary that way.
-
-The debug capture points at the deep-sync cooldown as at least part of what
-remains. Nine deep requests were refused in a single run:
-
-```
-TrenchChat [sync]: deep sync request from 0e5d8023e94b… for e0676b7fd873… throttled — cooldown active
-```
-
-A peer returning from a partition has no `last_sync_at`, so it asks from 0,
-which classifies as deep. `_deep_sync_allowed` serves the first such request per
-`(channel, requester)` and then refuses for `DEEP_SYNC_COOLDOWN_SECS` (60) —
-silently, with no response at all, so the requester cannot tell refusal from
-loss (the same gap as finding 4). A four-way reconcile needs several rounds,
-because a peer can only relay what it has itself already received, and the
-cooldown allows one round per pair per minute. Whether the scenario converges
-then depends on whether the useful round happens to fall inside a window that
-is open — which matches the variance measured above.
-
-One candidate is already ruled out: author-signature rejection is not involved.
-`messages_rejected` reads 0 for every peer in every observed run, and the debug
-capture holds no "signature missing or invalid" line — which integrity1 independently
-confirms, since relayed history from a *dead* author verifies fine.
-
-Not yet proven, and the next step: instrument one responder to log every
-refusal alongside what it *would* have served, and confirm the refused rows are
-the missing ones.
-
-#### sync11's failure shape: the first message of a partition is lost
-
-Seven of the eight built rows pass, several on the first attempt. sync11 does not,
-and the shape of its failure is specific enough to be worth acting on:
-
-```
-A missing: B-alone-0, C-alone-0, D-alone-0
-B missing:            C-alone-0, D-alone-0
-C missing: A-alone-0,            D-alone-0
-D missing: A-alone-0, B-alone-0, C-alone-0
-```
-
-Each peer sent two messages while every peer was offline. The second of each
-pair propagated to everyone; the first reached nobody. Reproduced across three
-runs, and still incomplete after 420s, so it is not slow convergence.
-
-Everything around it works: sync1 shows pending-retry flushing, sync2 shows a third
-party serving what the sender never delivered, sync5 shows disjoint histories
-reconciling, sync10 shows a full partition healing once the hub returns. The
-difference in sync11 is that *every* peer is both a requester and the sole source
-of its own history at the same moment. Not yet root-caused; the sync watermark
-is the obvious first place to look, since "first message skipped, later ones
-served" is what an over-advanced watermark would produce.
-
-Left strict rather than reclassified as a probe. The expectation is the sync
-design's own — any online member can serve any gap — so `--family sync` exits
-non-zero until it is fixed, which is the correct signal for an open bug.
-
-#### sync2, the third cause: a silent refusal meeting a burst-only trigger
-
-**Fixed.** The last 1-in-10 failure needed attribution to see at all. The
-failure message now names the returning peer's identity, and with that the
-tester log says the same thing in all three captured failures:
-
-```
-answered   <B>  — 0 row(s)      x2   (during setup, before anything was sent)
-throttled  <B>                  x8   (21:25:32 – 21:25:53)
-...then B never appears again, for the remaining ~170s
-```
-
-Two behaviours, each defensible alone, deadlock together:
-
-- A responder's deep-sync cooldown refuses **silently** for 60 seconds. The
-  requester cannot tell a refusal from a lost packet.
-- Every trigger to ask is an *event* — a peer announcing, or this node's own
-  link returning. Both fire in a burst and stop. Reticulum suppresses announce
-  replays for a destination it has already propagated, so no further announce
-  arrives to prompt another try.
-
-B asked eight times in 31 seconds, every attempt landing inside one cooldown
-window, and then had nothing left to make it ask again. The window expired 30
-seconds later with nobody there to use it.
-
-The fix is `SyncManager.tick()`: any request unanswered for `SYNC_RETRY_SECS`
-(90s, deliberately longer than the 60s cooldown so the retry lands in a window
-that will serve it) is asked again. Driven by the backend's ticker and a
-`QTimer` in the Qt client. The ~120s runs in the verification series are that
-retry working — those are the runs that used to fail.
-
-Regression tests in `tests/test_sync_multipeer.py`
-(`TestUnansweredRequestIsAskedAgain`), both confirmed to fail with the tick
-removed. The first attempt at that test did *not* fail without the fix — it
-leaned on a `wait_for` that ordinary network timing satisfied — which is the
-"distrust a green run that proves nothing" rule earning its place.
-
-#### sync2, after two fixes: 2/5 to 4/5
-
-The original root cause — nothing tells a node its *own* link came back — was
-real but not the whole story. `LinkWatcher` supplies that trigger now, and
-alone it moved sync2 from failing most runs to **2 of 5 passing**. The failures
-that remained were more informative than the originals: the sync status showed
-all three peers at `pending` with a real `requested_at`, so the returning node
-*was* asking. Nobody was answering.
-
-`sync.py`'s `_send_raw` was the reason. A responder can read a request from a
-peer whose path it cannot yet resolve — the request arrived, after all — but
-addressing a reply needs `Identity.recall()`, and on failure it returned False
-and dropped the answer. Alone among the send paths it did not even call
-`request_path()`. Holding the answer and re-sending it on the peer's announce
-took sync2 to **4 of 5**.
-
-It still fails sometimes. Both fixes are in and the remaining failure has the
-same outward shape, so the next step is to log, on the responder, every request
-it answers and every one it holds — and find out which of the two the missing
-answer was.
-
-#### sync2, as originally root-caused: a recovered link has no resync trigger
-
-**Fixed, but it was only half of it — see above.** sync2 failed roughly half the time — 2 of 6 runs — with B holding 0 of 3
-and both responders sitting at `pending`, `answered_peers: 0`, for the full
-206s.
-
-My first two hypotheses were both wrong, and worth recording as such: it is
-not the deep-sync cooldown (`_deep_sync_allowed` only records the timestamp
-when it *allows*, so refusals do not extend it), and not `_peer_may_participate`
-(open-join returns True unconditionally). Reading the code could not settle it;
-capturing the testers' debug output could, which is what `--tester-log` is for.
-
-The logs showed it plainly. In a failing run every sync request stops at
-22:54:50, and the scenario ran to 22:58:17 — three and a half minutes of total
-silence — while presence beacons kept flowing in both directions the whole
-time. The network was fine. Nothing was being refused. B simply stopped asking.
-
-`SyncManager.on_peer_appeared` was the only resync trigger after startup, and it
-fires solely from `PeerAnnounceHandler` — a *received announce*. RNS suppresses
-announce replays for a destination the transport has already propagated, so a
-peer whose link drops and recovers can go on exchanging traffic for the rest of
-the session without ever seeing a fresh announce from its peers. It then never
-asks for what it missed. `request_sync_all()` covers this only at process
-start, which is why sync3 (kill and restart) always passed while sync2 (drop and
-recover) did not.
-
-**The fix is not in yet, and one attempt has already been ruled out.** Making a
-presence transition to online a second trigger looked right — presence is
-maintained from inbound LXMF traffic, so it keeps working exactly where
-announces do not. It does not fix this: presence transitions fire when a
-*remote peer* returns, and in sync2 it is the local node whose link recovered.
-Its peers never went offline in its own presence table, so no transition
-occurs. Measured 4/8 after the change against 4/6 before — no improvement — and
-the change was reverted rather than left in as a speculative core edit.
-
-What the fix actually needs is a trigger on *our own* link recovering, calling
-`request_sync_all()` the way process startup does 3s in. The production client
-has no such signal today: `main.py` polls interfaces for display, and nothing
-tells `SyncManager` the node is reachable again. Adding one to the harness
-alone would hide the gap rather than close it, since the real client has the
-same hole.
-
-One reporting gap this exposed is worth noting separately: `sync.py` refuses
-requests silently by design, so from the requester's side "refused", "lost" and
-"still in flight" are indistinguishable — all three read as `pending` forever.
-`SyncStatusTracker` cannot currently tell a user which of those is happening.
+The three causes, all fixed and all covered by regression tests: nothing
+noticed this node's *own* link returning (`connectivity.py`); the responder's
+answer was dropped when it could not yet address the requester (`sync.py`'s
+`_send_raw`, alone among the send paths in not even requesting a path); and
+this one (`SyncManager.tick`). 12/12 after the last, recovering in 26–41s when
+the first ask is served and ~120s when it takes a retry.
 
 ### `links` — Degraded links
 
@@ -538,48 +371,35 @@ loses honest history with nothing but a log line to show for it.
 | integrity3 | A,B,C,D | A sends a real 64×64 JPEG | ✅ All three receivers hold it with `image_stripped: false` and can fetch the bytes. The signature covers the attachment, so the two travel together |
 | integrity4 | A,B,C,D | A sends a 68-byte PNG declaring 20000×20000 (400M pixels) | ✅ Delivered as text with no attachment on all four. The sender's own API is the gate: `prepare_image` fails closed rather than forwarding bytes it could not re-encode |
 
-#### integrity2: history used to die with its author — fixed
+#### Why author keys travel with a synced batch
 
-integrity1 and integrity2 differ by one thing — whether the receiver ever shared the network
-with the author — and they used to land on opposite sides of it:
+`verify_message` returns False for "we cannot check yet" exactly as it does for
+"this is forged", and the caller drops the row either way. `resolve_author` can
+only fall back to `RNS.Identity.recall()`, which needs an announce a departed
+peer will never send again — so a channel's history was readable by whoever
+was present to receive it directly, and progressively unreadable to everyone
+who joined afterwards, one author at a time as people left the mesh.
 
-| | Author reachable when written | Receiver's state | Before | After |
-|---|---|---|---|---|
-| integrity1 | yes, C was a subscriber throughout | knows A from before | accepted in 11.1s | 2.0s |
-| integrity2 | yes, but D did not exist yet | fresh identity, never saw A announce | **never accepted, 90s** | 0.0s |
+A sync response therefore carries one deduplicated `{author: key}` map
+(`F_AUTHOR_KEYS`, 0x71) alongside the batch, and a receiver caches a relayed
+key only if it hashes back to the identity claiming it. That check is what
+makes accepting a key from a relay safe: an identity hash is derived from its
+public key, so a key that does not hash back simply is not that identity's.
+The relay passes along public information it cannot forge; it vouches for
+nothing.
 
-`verify_message` returns False for "we cannot check yet" exactly as it does
-for "this is forged", and the caller drops the row either way.
-`resolve_author` can only fall back to `RNS.Identity.recall()`, which needs an
-announce the departed peer will never send again. So a channel's history is
-readable by whoever was present to receive it directly, and progressively
-unreadable to everyone who joins afterwards — one author at a time, as people
-leave the mesh.
-
-**Fixed** by relaying the author's public key with their messages: a sync
-response now carries one deduplicated `{author: key}` map (`F_AUTHOR_KEYS`,
-0x71) alongside the batch, and the receiver caches each key only if it hashes
-back to the identity claiming it. That check is what makes accepting a key
-from a relay safe — an identity hash is derived from its public key, so a key
-that does not hash back simply is not that identity's. The relay is passing
-along public information it cannot forge, not vouching for anything.
-
-One map per response rather than a key per row: a batch is a handful of
+One map per response rather than a key per row — a batch is a handful of
 authors and up to fifty messages, and at 1 kbps the per-row form would cost
-roughly the whole response over again.
+roughly the whole response over again. Storing keys in the roster was
+considered and rejected: a roster lists *current* members, so a departing
+author's key would be removed exactly when it became necessary, public
+channels have no roster at all, and a whole-roster document is re-broadcast on
+every membership change.
 
-Still open, and smaller: a receiver that *does* hold back a message says so
-only in a `LOG_WARNING`. `messages_rejected` already reaches the sync status,
-so surfacing "N held back, author unverifiable" is a UI change, not a
-protocol one.
-
-A related defect found while reading this path is **fixed** on this branch: a
-row rejected for an unverifiable signature did not bound the sync watermark,
-so a batch of `[rejected_old, accepted_new]` advanced past the rejected row and
-no future sweep would ever offer it again. An author's key arriving *late* was
-enough to lose their history permanently. Regression test in
-`tests/test_sync_multipeer.py::TestRejectedRowBoundsTheWatermark`, which fails
-without the one-line guard.
+Still open, and smaller: a receiver that holds a message back says so only in
+a `LOG_WARNING`. `messages_rejected` already reaches the sync status, so
+surfacing "N held back, author unverifiable" is a UI change, not a protocol
+one.
 
 ## The LoRa pass
 
@@ -762,85 +582,13 @@ until you check what the layer underneath does.
 
 ## Harness
 
-Built and running, in `devtools/testenv/scenarios/`:
+`devtools/testenv/scenarios/`: `runner.py` (process lifecycle and selection),
+`peer.py` (one method per API endpoint), `asserts.py` (polling assertions),
+`flows.py` (shared setup), `scenario.py` (the registry and the strict/probe
+distinction), and one `scen_*.py` per family.
 
-| File | Purpose |
-|---|---|
-| `runner.py` | Spawns `orchestrator.py --testers N`, waits for every API, runs the selection, resets between scenarios, reports |
-| `peer.py` | `Peer` (one tester's API) and `Orchestrator` (process/link lifecycle). One method per endpoint, no logic. Every tester call carries the environment's API token, read from the orchestrator's `/config` |
-| `asserts.py` | Polling assertions: `wait_until`, `settle`, `hold_for`, `all_hold`, `subscribers_converged`, `diff_report`, `subscriber_views` |
-| `scenario.py` | The `@scenario` registry and the strict/probe distinction |
-| `flows.py` | Shared setup: discovery, joining with owner registration, invite/accept, link up/down |
-| `scen_public.py` | Family `public` |
-| `scen_invite.py` | Family `invite` |
-| `scen_sync.py` | Family `sync` |
-| `scen_links.py` | Family `links` |
-| `scen_servers.py` | Family `servers` |
-| `scen_social.py` | Family `social` |
-| `scen_restart.py` | Family `restart` |
-| `scen_voice.py` | Family `voice` |
-| `scen_api.py` | Family `api` |
-| `scen_authorship.py` | Family `integrity` |
-
-All ten families are built: 81 scenarios, 62 strict and 19 probes.
-
-```bash
-.venv/bin/python devtools/testenv/scenarios/runner.py                # everything
-.venv/bin/python devtools/testenv/scenarios/runner.py --family public
-.venv/bin/python devtools/testenv/scenarios/runner.py --scenario public5 public6
-.venv/bin/python devtools/testenv/scenarios/runner.py --scenario public8 --repeat 6
-.venv/bin/python devtools/testenv/scenarios/runner.py --json out.json
-```
-
-`--repeat` re-runs the selection to characterise a flake; `--attach` uses an
-orchestrator you already have running.
-
-### Link-profile passes
-
-`--link-profile` shapes every tester before each scenario, so the same
-scenario bodies run again on a radio instead of broadband:
-
-```bash
-.venv/bin/python devtools/testenv/scenarios/runner.py --family sync --link-profile lora_fast
-.venv/bin/python devtools/testenv/scenarios/runner.py --scenario restart3 restart4 --link-profile lora_long
-```
-
-This is a matrix dimension rather than duplicated rows: one scenario body, two
-link conditions, so a difference between the passes is a real behavioural
-difference rather than two tests that drifted apart.
-
-Assertion timeouts scale automatically from the profile (`--timeout-scale`
-overrides), because every timeout in the suite is tuned for broadband and a
-radio pass should fail on behaviour, not on patience. The scale factors come
-from the measured the links family timings — the same 10-message batch takes 5s on
-broadband and 102s on `lossy`.
-
-One caveat: shaping applies live, but the matching bitrate hint written into
-each tester's RNS config is only read at boot, so it stays stale for the run.
-The shaper still enforces the rate on the wire, which is what these passes are
-about; RNS's own announce pacing is the part that does not see it.
-
-Needs both `requirements.txt` and `devtools/testenv/requirements.txt` in the
-venv. Exits 0 if every strict scenario passed.
-
-**Strict vs probe.** A strict scenario asserts settled behavior — failing is a
-bug. A probe tests a prediction about behavior nothing covers yet: it records
-what actually happened and never fails the run. That keeps a known gap from
-sitting permanently red while still reporting it every time.
-
-**Teardown owns the process group.** The orchestrator does not reap its hub and
-workers when it is terminated, and the survivors hold the ports the next run
-preflights against. `runner.py` starts it via `start_new_session=True` and kills
-the whole group.
-
-Every assertion polls — `wait_until` defaults to 30s, 90s for backfill and
-anything on a degraded profile. Each scenario emits a JSON record with
-pass/fail, duration and whatever it measured, so timing regressions show up as
-data rather than just red.
-
-Slow by design: the public family alone is ~6 minutes, most of it environment resets. It
-belongs on a nightly or on-demand run, not the per-PR gate — `pytest tests/`
-stays the merge gate.
+How to run it, when a scenario is the right tool, and how to add one live in
+`.claude/rules/scenario-testing.md`.
 
 ## Status
 
