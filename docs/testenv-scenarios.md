@@ -673,7 +673,6 @@ Everything the matrix turned up, across all ten families.
 
 | Finding | Detail |
 |---|---|
-| **J2** — a peer that joins after an author has left the mesh can never read that author's history. `verify_message` cannot tell "unverifiable" from "forged", and `resolve_author` needs an announce a departed peer will never send | **Confirmed.** A fresh identity backfilled the live owner's message in 4.0s and never received the dead author's. A deliberate trade, but a silent one — see family J |
 | **I4** — the dev environment shares one API token across every tester, and the orchestrator's unauthenticated `/config` serves it | **Confirmed** (probe). Fine for a dev box; it means port 8800 is the real trust boundary, not the tester ports |
 | **C11** — a four-way partition reconciles only sometimes: 1 pass in 5 runs, always losing the *first* message a peer wrote in isolation | **Partly root-caused.** The watermark collision above was one cause and is fixed. The deep-sync cooldown refusing a returning peer's request silently, once per pair per 60s, is the leading candidate for the rest |
 | **C2** — a returning node sometimes still fails to recover history | **Two causes found and fixed** (no local link-recovery trigger; the responder's answer dropped on an unresolved path), taking it from 2/5 to **4/5** runs. It still fails occasionally, so it stays strict and failing. See below |
