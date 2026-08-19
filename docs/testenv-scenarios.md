@@ -403,112 +403,45 @@ one.
 
 ## The LoRa pass
 
-Every family was re-run with `--link-profile lora_fast` (SF7, 5.5 kbps, 60±20ms,
-1% loss). Same scenario bodies, timeouts scaled 6×. This is where the suite
-earned its keep: five scenarios that pass on broadband fail on a radio, one
-fails on broadband and *passes* on a radio, and one probe turns from a latency
-footnote into an outright failure.
+Every family re-run with `--link-profile lora_fast` (SF7, 5.5 kbps, 60±20ms, 1%
+loss), same scenario bodies, timeouts scaled 6×. This is where the suite earned
+its keep: five scenarios that pass on broadband fail on a radio.
 
 | Family | Broadband | LoRa SF7 | New on LoRa |
 |---|---|---|---|
-| `public` — public channels | 6/6 | 6/6 | public5 probe now returns **nothing at all** |
-| `invite` — invite-only | 11/12 | 10/12 | **invite7** |
-| `sync` — sync | 8/9 | 7/9 | **sync8**, **sync11**; sync2 *inverts* |
-| `links` — degraded links | 5/5 | n/a (already shaped) | — |
-| `servers` — servers | 5/5 | 5/5 | — |
-| `social` — social | 7/7 | 5/7 | **social5**, **social6** |
-| `restart` — restart | 3/3 | 3/3 | — |
+| `public` | 6/6 | 6/6 | public5 probe returns **nothing at all** |
+| `invite` | 11/12 | 10/12 | **invite7** |
+| `sync` | 8/9 | 7/9 | **sync8**, **sync11** |
+| `links` | 5/5 | n/a (already shaped) | — |
+| `servers` | 5/5 | 5/5 | — |
+| `social` | 7/7 | 5/7 | **social5**, **social6** |
+| `restart` | 3/3 | 3/3 | — |
 
-Servers (E) and restart/persistence (G) are unaffected — including restart1, the
-persisted subscriber-list counter. Everything that broke is a *propagation*
-path: sync, member-list documents, avatars, directory entries.
+Servers and restart/persistence are unaffected. Everything that breaks is a
+*propagation* path: sync, member-list documents, avatars, directory entries.
+What the radio changes is the size of the gap, not usually its nature — the
+exception being public5, which escalates from a latency footnote to an outright
+failure.
 
-### sync11 regresses on a slow link, with the same fingerprint
+- **public5** — a late joiner received nothing in **723s** with
+  `sync_state: unknown`, meaning no request was ever issued. On broadband the
+  same gap is 1–9s of blindness. Deferred by decision along with public6.
+- **invite7** — four rosters never converge in 360s (broadband: 30s). A
+  member-list document is a signed blob carrying the whole roster, and
+  invite → join-request → document is four hops.
+- **sync8** — granting `full_sync` mid-session did not re-open withheld history
+  after 1375s (broadband: 3.0s). The re-ask waits on the next announce-driven
+  request.
+- **social5 / social6** — an avatar removal and a display-name change never
+  arrived within 360s. Both propagate as announce metadata rather than as
+  retried messages, and both payloads are large relative to the link, so these
+  may be latency rather than loss; re-run at a higher timeout scale before
+  treating them as defects.
 
-The four-way partition reconcile fails again at SF7, and the failure looks
-exactly like the one the `sync_served` fix cured:
-
-```
-A missing: B-alone-0, C-alone-0, D-alone-0
-B missing: A-alone-0
-C missing: A-alone-0
-D missing: A-alone-0, B-alone-0
-```
-
-Only the *first* message of each peer's pair, never the second. So the fix
-removed one path to that failure and a second one remains, reachable only when
-the reconcile takes long enough.
-
-The likely mechanism is a constant that does not scale:
-`PEER_TRUST_HORIZON_SECS = 300` widens a responder's sweep 300 seconds behind
-the requester's claimed watermark, which is what lets it serve history it
-acquired since the requester last asked. But how far back that needs to reach
-depends on how long the exchange takes, and that scales with link speed —
-broadband reconciles in **31.7s** (comfortably inside 300s), SF7 took **1141s**
-(far outside it). A wall-clock constant guarding a link-speed-dependent window
-is the shape of the bug. Unverified, but it is where to look.
-
-### sync2 inverts — it passes on LoRa and fails on broadband
-
-The scenario that has failed on broadband since it was written passed at SF7 in
-**75s**, well inside the broadband budget it never met. That is not patience:
-it recovered faster in wall-clock on the slower link.
-
-That reframes sync2 from "sync sometimes doesn't answer" to a **timing race** that
-a slow link happens to win. It is the strongest lead the open sync2 investigation
-has had, and it argues the cause is in the reconnect/request cadence rather
-than in the responder's authorisation.
-
-### public5 escalates from latency to failure
-
-On broadband a late public-channel joiner backfills in 1–9s, riding the owner's
-next announce. At SF7 it received **nothing in 723 seconds**, with
-`sync_state: unknown` — meaning no sync request was ever issued, not that one
-went unanswered.
-
-The known gap (public join fires no sync request) was previously worth "up to
-60s of blindness in the real client". On a radio it looks closer to "may never
-backfill at all", which is a materially different bug.
-
-### The other three
-
-- **invite7** — a promoted admin invites a fourth peer; the four rosters never
-  converge in 360s (broadband: 30s). Member-list documents are signed msgpack
-  blobs carrying the whole roster, and the invite → join-request → document
-  chain is four hops.
-- **sync8** — granting `full_sync` mid-session does not re-open withheld history:
-  D still held 0 of 3 after 1375s (broadband: 3.0s). The re-ask depends on
-  noticing an entitlement change on the *next* request, which is announce-driven.
-- **social5 / social6** — an avatar removal never reaches a peer, and a display-name
-  change never reaches the directory within 360s. Both propagate as
-  announce/metadata rather than as retried messages.
-
-social5 and social6 in particular may be latency rather than loss — neither scenario
-waits indefinitely, and both payloads are large relative to the link. Worth
-re-running at a higher scale before treating them as defects.
-
-### SF10 (1 kbps) finds a bandwidth floor, not more bugs
-
-A targeted `--link-profile lora_long` pass over the rows most likely to expose
-an ordering problem (public5, invite3, sync4, sync11, restart3, restart4) was cut short after the first
-two, because both failed the same uninformative way:
-
-| | |
-|---|---|
-| public5 | timed out delivering **5 messages to two subscribers** in 600s — before the scenario's subject was reached |
-| invite3 | timed out waiting for the owner to admit a member in 250s — the invite chain, not the `full_sync` question |
-
-Both failures are in *setup*, not in the behaviour under test, so they say
-"1 kbps cannot carry this workload" rather than anything about the logic. That
-is a real limit worth knowing — and it is consistent with links7/links8, where three
-short messages *do* cross `packet_radio` and `lora_long` in ~10s. The floor is
-not the link, it is the size of the control-plane operations: signed
-member-list documents and multi-message batches.
-
-Running the remaining four rows would have cost roughly another hour to
-re-confirm the same ceiling, so the pass was stopped. SF7 is the useful radio
-profile for this suite; SF10 belongs in the links family, where the payloads are sized
-for it.
+At SF10 (1 kbps) the suite stops being informative: a five-message fan-out to
+two subscribers exceeded 600s before reaching the scenario's actual subject.
+That is a bandwidth floor, not a defect — shape to SF7 for behaviour, and treat
+SF10 as a question about payload sizes instead.
 
 ## Findings
 
@@ -521,6 +454,7 @@ Everything the matrix turned up, across all ten families.
 | **History died with its author** — a peer who joins after an author leaves could never read that author's messages, because verifying needs a key only the author's own announce could supply | Fixed: a sync response carries a deduplicated `{author: public key}` map, and a relayed key is cached only if it hashes back to the identity claiming it. integrity2 went from *never* to 0.0s; regression test in `tests/test_sync_multipeer.py` |
 | **Join and invite were sent once and never retried** — `_send_raw` in `subscription.py` and `invite.py` dropped the message outright when the recipient's path was unresolved, which is exactly when a first join or a first invite happens | Fixed: both hold the message in a bounded `ControlRetryQueue` and flush it when the peer announces. Regression tests in `tests/test_subscriptions.py` and `tests/test_invites.py` |
 | **A sync answer was dropped when the responder could not yet address the requester** — and unlike every other send path it did not even request a path. The requester sat at `pending`, unable to tell silence from refusal | Fixed: the answer is held (for no longer than the requester will accept one) and re-sent when the peer announces. This is most of sync2 — see below |
+| **sync2** — a returning peer recovered nothing, in half of all runs | **Fixed**, after three causes: no trigger for this node's own link returning, the responder's answer dropped on an unresolved path, and a silent refusal with nothing left to re-ask. 12/12 after the last. Regression tests in `tests/test_sync_multipeer.py` |
 | **Nothing noticed our own link returning** — every catch-up path is driven by hearing *from* a peer, so the node that was itself away had no trigger | Fixed: `connectivity.py`'s `LinkWatcher` polls Reticulum's interface state and resyncs on the transition back to online, ignoring shared-instance client interfaces. Tests in `tests/test_connectivity.py` |
 | **A sync row rejected for an unverifiable author signature did not bound the watermark**, so a batch of `[rejected_old, accepted_new]` skipped past it and no future sweep would offer it again | Fixed on this branch: the signature-rejection path now sets `failed_ts` the same way a failed insert does. A row with an *implausible timestamp* deliberately does not, since it cannot be placed and would let one bad row freeze sync. Regression test in `tests/test_sync_multipeer.py` |
 | **One `sync_progress` row written from both directions**, collapsing the responder's trust-horizon floor and stranding history older than a requester's watermark | Root-caused and fixed by splitting the serve direction into a `sync_served` table; regression test in `tests/test_sync_multipeer.py`. Found through sync11, but **it did not fix sync11** — see below |
@@ -531,8 +465,7 @@ Everything the matrix turned up, across all ten families.
 | Finding | Detail |
 |---|---|
 | **api4** — the dev environment shares one API token across every tester, and the orchestrator's unauthenticated `/config` serves it | **Confirmed** (probe). Fine for a dev box; it means port 8800 is the real trust boundary, not the tester ports |
-| **sync11** — a four-way partition reconciles only sometimes: 1 pass in 5 runs, always losing the *first* message a peer wrote in isolation | **Partly root-caused.** The watermark collision above was one cause and is fixed. The deep-sync cooldown refusing a returning peer's request silently, once per pair per 60s, is the leading candidate for the rest |
-| **sync2** — a returning node sometimes still fails to recover history | **Two causes found and fixed** (no local link-recovery trigger; the responder's answer dropped on an unresolved path), taking it from 2/5 to **4/5** runs. It still fails occasionally, so it stays strict and failing. See below |
+| **sync11** — a four-way partition reconciles only sometimes: 2 passes in 7 runs, always losing the *first* message a peer wrote in isolation | **Partly root-caused.** The watermark collision above was one cause and is fixed. The deep-sync cooldown refusing a returning peer's request silently, once per pair per 60s, is the leading candidate for the rest |
 | **invite11** — `kick` and `manage_roles` are grantable to any role, but a non-admin's member-list document is rejected by every recipient | **Confirmed.** The grant succeeds locally and does nothing on the network. Resolution is a product decision — see below |
 | **voice11** — `loss_pct`, the metric `docs/voice.md` designates for the UI's per-peer quality indicator, cannot see a starved link. It counts gaps between frames that arrived, so a link delivering 8% of the audio reports ~6% loss, and `link_state` still reads `streaming` | **Confirmed** across three runs. Delivery ratio (frames received against ~48/s) is the signal that shows it; `frame_stats()` has the raw counts but exposes no rate |
 | **voice5 / voice4** — a voice participant whose link drops shows `connecting` indefinitely rather than `unreachable`, and one whose process dies lingers for the roster TTL — 180s in production | **Confirmed.** Neither is wrong, but a UI showing "connecting…" for three minutes after someone crashed is not the honest state `docs/voice.md` asks for |
@@ -598,7 +531,7 @@ All ten families built and run: **81 scenarios, 62 strict and 19 probes.**
 |---|---|---|
 | `public` — public channels | 10 (6 strict, 4 probes) | All passing, three consecutive clean runs |
 | `invite` — invite-only and membership | 13 (12 strict, 1 probe) | 11/12 — **invite11 fails** on a confirmed permission gap |
-| `sync` — offline and sync | 10 (9 strict, 1 probe) | 7/9 on the latest run — **sync2 and sync11 both fail**, intermittently and rarely together. sync11 has passed 1 run in 6 |
+| `sync` — offline and sync | 10 (9 strict, 1 probe) | 8/9 — **sync11 fails**, 2 passes in 7 runs. sync2 fixed, 12/12 |
 | `links` — degraded links | 10 (5 strict, 5 probes) | All passing, on genuinely shaped links |
 | `servers` — servers | 6 (5 strict, 1 probe) | All passing |
 | `social` — reactions, presence, identity | 8 (7 strict, 1 probe) | All passing; social3's prediction refuted |
@@ -607,11 +540,10 @@ All ten families built and run: **81 scenarios, 62 strict and 19 probes.**
 | `api` — the API surface | 4 (3 strict, 1 probe) | All passing; api4 records the shared-token property |
 | `integrity` — message integrity | 4 (4 strict) | All passing; integrity2 found a real gap, now fixed and strict |
 
-**60 of 62 strict scenarios pass.** The failures are real defects, left strict
-and failing on purpose, so `--family invite` and `--family sync` exit non-zero until
-they are resolved. invite11 fails every run. sync2 and sync11 are both intermittent and
-trade places: the pre-merge run lost sync2, the post-merge run lost sync11, and the
-count landed at 53/55 either way.
+**60 of 62 strict scenarios pass.** Both failures are real defects, left strict
+and failing on purpose, so `--family invite` and `--family sync` exit non-zero
+until they are resolved: invite11 every run, sync11 intermittently (2 passes in
+7).
 
 Re-run against `main` after the August security audit merged (PR 52): the suite
 is unchanged at 53/55, so the audit regressed nothing here. Its one effect on
@@ -631,8 +563,9 @@ Remaining work:
    permission-holders as trusted signers.
 3. Let `SyncStatusTracker` distinguish "refused" from "waiting" — today both
    read as `pending` forever.
-4. Track down sync2's remaining 1-in-5 failure, and surface held-back messages
-   in the UI rather than a log line.
-5. C6 and C12, which need control of the clock — and, now, a J5 for the
-   audit's 300s clock-skew ceiling, which silently drops every message from a
-   peer whose clock runs fast.
+4. Surface held-back messages in the UI rather than in a log line.
+5. The two deferred sync rows and a clock-skew scenario, all of which need
+   control of a tester's clock — the audit's 300s ceiling silently drops every
+   message from a peer whose clock runs fast, and nothing tests it.
+6. Re-run the LoRa pass: it predates the `api` and `integrity` families and all
+   five fixes, several of which are timing-sensitive by construction.
