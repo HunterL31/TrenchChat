@@ -38,6 +38,25 @@ _GIF_SCALE_STEPS = (0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3)
 # frames. MAX_IMAGE_PIXELS bounds one frame; an animation multiplies it.
 MAX_INBOUND_DECODED_PIXELS = MAX_IMAGE_PIXELS
 
+# Formats an inbound image may declare, by magic bytes. Checked before Pillow
+# is handed the payload at all, because Image.open() is only header-only for
+# some formats: TIFF walks its whole IFD chain to count frames, and ICO fully
+# decodes its largest frame inside open() -- both inside the very function
+# meant to avoid decoding. prepare_image only ever emits JPEG or GIF, so
+# nothing legitimate is outside this set.
+_INBOUND_MAGIC = (
+    b"\xff\xd8\xff",       # JPEG
+    b"\x89PNG\r\n\x1a\n",  # PNG
+    b"GIF87a",
+    b"GIF89a",
+)
+
+
+def _declared_format_is_allowed(image_bytes: bytes) -> bool:
+    if image_bytes[:4] == b"RIFF" and image_bytes[8:12] == b"WEBP":
+        return True
+    return any(image_bytes.startswith(magic) for magic in _INBOUND_MAGIC)
+
 
 def inbound_image_is_sane(image_bytes: bytes) -> bool:
     """False if an inbound image's header declares an implausible decode.
@@ -47,11 +66,21 @@ def inbound_image_is_sane(image_bytes: bytes) -> bool:
     those bytes are handed to the client's own image decoder. Only the
     header is read here -- no pixel data is decoded.
 
-    Bytes that do not parse as an image at all are left alone. They cannot be
-    shown to be hostile, they are stored as opaque blobs either way, and
-    re-encoding every inbound image to normalise them would be lossy and
-    costly on the low-power hardware Reticulum targets.
+    The format is checked by magic bytes first: Image.open() is not
+    header-only for every format Pillow supports, so handing it arbitrary
+    bytes makes this function its own denial of service. Anything outside the
+    formats a client actually sends is refused rather than parsed -- which
+    also closes the fail-open case below for a format Pillow cannot read but a
+    browser can.
+
+    Bytes that get past the magic check and still do not parse are left alone.
+    They cannot be shown to be hostile, they are stored as opaque blobs either
+    way, and re-encoding every inbound image to normalise them would be lossy
+    and costly on the low-power hardware Reticulum targets.
     """
+    if not _declared_format_is_allowed(image_bytes):
+        return False
+
     try:
         with warnings.catch_warnings():
             # Pillow only raises above twice MAX_IMAGE_PIXELS and merely warns

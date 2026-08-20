@@ -1355,6 +1355,29 @@ class Storage:
         """, (channel_hash, identity_hash))
         return row["last_left"] if row and row["last_left"] is not None else None
 
+    def shares_any_channel(self, peer_hex: str) -> bool:
+        """True if peer_hex is a member of, or subscriber to, any channel we hold.
+
+        An open-join channel still has to name the peer: treating anyone as
+        known merely because we are in some public channel makes the check
+        vacuous.
+        """
+        if not peer_hex:
+            return False
+        for sub in self.get_subscriptions():
+            ch = sub["channel_hash"]
+            channel = self.get_channel(ch)
+            if channel is None:
+                continue
+            if is_open_join(permissions_from_json(channel["permissions"])):
+                if (self.is_channel_subscriber(ch, peer_hex)
+                        or channel["creator_hash"] == peer_hex):
+                    return True
+                continue
+            if self.is_member(ch, peer_hex):
+                return True
+        return False
+
     def has_any_tenure(self, channel_hash: str) -> bool:
         """Return True if the membership_tenure table has any rows for this channel.
 
@@ -1763,6 +1786,16 @@ class Storage:
                     avatar_version=excluded.avatar_version,
                     updated_at=excluded.updated_at
             """, (identity_hash, avatar_data, avatar_version, time.time()))
+
+    def prune_peer_avatars(self, keep: int) -> None:
+        """Evict the least recently updated cached avatars past *keep*."""
+        with self._tx():
+            self._conn.execute("""
+                DELETE FROM peer_avatars WHERE identity_hash IN (
+                    SELECT identity_hash FROM peer_avatars
+                    ORDER BY updated_at DESC LIMIT -1 OFFSET ?
+                )
+            """, (keep,))
 
     def get_peer_avatar(self, identity_hash: str) -> dict | None:
         """Return cached avatar info for a peer, or None if not stored.

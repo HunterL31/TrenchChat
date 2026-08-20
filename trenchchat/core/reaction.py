@@ -327,27 +327,13 @@ class ReactionManager:
         self.request_missing_from_content(self._resolve_sender_hex(message), content)
 
     def _shares_any_channel(self, peer_hex: str) -> bool:
-        """True if peer_hex is a member of, or subscriber to, any channel we hold.
+        """True if peer_hex shares any channel with us.
 
-        An open-join channel still has to name the peer: answering for anyone
-        merely because we are in some public channel makes the whole check
-        vacuous, and lets an unrelated node enumerate the emoji library.
+        Gates both answering an emoji request and acting on the references in
+        an inbound message, so an unrelated node can neither enumerate the
+        library nor drive outbound requests.
         """
-        if not peer_hex:
-            return False
-        for sub in self._storage.get_subscriptions():
-            ch = sub["channel_hash"]
-            channel = self._storage.get_channel(ch)
-            if channel is None:
-                continue
-            if is_open_join(permissions_from_json(channel["permissions"])):
-                if (self._storage.is_channel_subscriber(ch, peer_hex)
-                        or channel["creator_hash"] == peer_hex):
-                    return True
-                continue
-            if self._storage.is_member(ch, peer_hex):
-                return True
-        return False
+        return self._storage.shares_any_channel(peer_hex)
 
     def _allow_emoji_request(self, requester_hex: str) -> bool:
         """Token-bucket style throttle: EMOJI_REQUEST_BURST per window per peer."""
