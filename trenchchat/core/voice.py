@@ -36,6 +36,7 @@ from trenchchat.core.protocol import (
 from trenchchat.core.storage import Storage
 from trenchchat.core.subscription import SubscriptionManager
 from trenchchat.network.router import Router
+from trenchchat.network.voice_transport import PEER_STREAMING
 from trenchchat.network.voice_wire import (
     SEQ_MODULUS, VOICE_FRAME_MS, seq_distance,
 )
@@ -172,11 +173,16 @@ class VoiceManager:
         if channel_hash_hex is None:
             return
         self._broadcast(MT_VOICE_LEAVE, channel_hash_hex)
+        # Cleared before the transport stops: _authorize_link compares against
+        # it, so a VP_HELLO arriving in between would be authorised against
+        # the session we are leaving and repopulate the connection table after
+        # stop() had emptied it.
+        with self._lock:
+            self._session_channel = None
         self._stop_audio()
         if self._transport is not None:
             self._transport.stop()
         with self._lock:
-            self._session_channel = None
             roster = self._rosters.get(channel_hash_hex, {})
             roster.pop(self._identity.hash_hex, None)
             self._rx_frames.clear()
@@ -538,6 +544,21 @@ class VoiceManager:
         self._notify_speaking(channel_hash_hex, self_hex, speaking)
 
     def _on_peer_link_state(self, peer_hex: str, state: str):
+        # A jitter buffer and a native Opus decoder are allocated per sender
+        # and were released only on a polite voice_leave, so a peer whose link
+        # simply dropped, or who was disconnected for losing the permission,
+        # left both behind for the rest of the session.
+        if state != PEER_STREAMING and self._audio_pipeline is not None:
+            try:
+                self._audio_pipeline.drop_peer(peer_hex)
+            except Exception as e:
+                RNS.log(f"TrenchChat [voice]: releasing {peer_hex[:12]}… failed: {e}",
+                        RNS.LOG_DEBUG)
+            with self._lock:
+                self._rx_frames.pop(peer_hex, None)
+                self._rx_quality.pop(peer_hex, None)
+                self._last_frame_at.pop(peer_hex, None)
+                self._speaking.pop(peer_hex, None)
         channel_hash_hex = self._session_channel
         if channel_hash_hex is not None:
             self._notify_roster(channel_hash_hex)
@@ -601,6 +622,7 @@ class VoiceManager:
 
     def _prune_rosters(self, now: float):
         changed: list[str] = []
+        stale_conns: list[str] = []
         with self._lock:
             for channel_hash_hex, roster in self._rosters.items():
                 expired = [
@@ -611,8 +633,18 @@ class VoiceManager:
                 ]
                 for peer_hex in expired:
                     del roster[peer_hex]
+                    stale_conns.append(peer_hex)
                 if expired:
                     changed.append(channel_hash_hex)
+        # An expired roster entry with no live link is a peer we have stopped
+        # hearing from: without this the connection stays, and every re-dial
+        # of it is another mesh-wide path request.
+        for peer_hex in stale_conns:
+            try:
+                self._transport.disconnect(peer_hex)
+            except Exception as e:
+                RNS.log(f"TrenchChat [voice]: disconnecting {peer_hex[:12]}… failed: {e}",
+                        RNS.LOG_DEBUG)
         for channel_hash_hex in changed:
             self._notify_roster(channel_hash_hex)
 
