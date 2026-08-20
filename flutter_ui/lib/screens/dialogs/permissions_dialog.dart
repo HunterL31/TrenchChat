@@ -54,6 +54,8 @@ class _PermissionsDialogContentState extends State<_PermissionsDialogContent> {
   List<String> _allPermissions = [];
   final Set<String> _admin = {};
   final Set<String> _member = {};
+  List<String> _adminGrantable = const [];
+  List<String> _memberGrantable = const [];
 
   bool _loading = true;
   bool _busy = false;
@@ -71,6 +73,8 @@ class _PermissionsDialogContentState extends State<_PermissionsDialogContent> {
       if (!mounted) return;
       setState(() {
         _allPermissions = perms.allPermissions;
+        _adminGrantable = perms.grantableFor('admin');
+        _memberGrantable = perms.grantableFor('member');
         _admin.addAll(perms.admin);
         _member.addAll(perms.member);
         _loading = false;
@@ -89,8 +93,12 @@ class _PermissionsDialogContentState extends State<_PermissionsDialogContent> {
       _busy = true;
       _error = null;
     });
+    // Send only what each role may hold: the core drops the rest anyway, and
+    // submitting a grant it will discard makes the dialog look like it worked.
     final ok = await widget.state.updateChannelPermissions(
-        widget.channelHashHex, _admin.toList(), _member.toList());
+        widget.channelHashHex,
+        _admin.where(_adminGrantable.contains).toList(),
+        _member.where(_memberGrantable.contains).toList());
     if (!mounted) return;
     if (!ok) {
       setState(() {
@@ -144,7 +152,7 @@ class _PermissionsDialogContentState extends State<_PermissionsDialogContent> {
                 const SizedBox(height: 12),
                 _roleLabel('ADMIN'),
                 const SizedBox(height: 6),
-                for (final perm in _allPermissions)
+                for (final perm in _adminGrantable)
                   Padding(
                     padding: const EdgeInsets.symmetric(vertical: 3),
                     child: TcCheckbox(
@@ -157,7 +165,7 @@ class _PermissionsDialogContentState extends State<_PermissionsDialogContent> {
                 const SizedBox(height: 12),
                 _roleLabel('MEMBER'),
                 const SizedBox(height: 6),
-                for (final perm in _allPermissions)
+                for (final perm in _memberGrantable)
                   Padding(
                     padding: const EdgeInsets.symmetric(vertical: 3),
                     child: TcCheckbox(

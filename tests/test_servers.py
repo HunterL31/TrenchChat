@@ -17,8 +17,8 @@ from tests.helpers import wait_for, wait_for_member
 from trenchchat.core import actions
 from trenchchat.core.naming import server_hash_for
 from trenchchat.core.permissions import (
-    CREATE_CHANNEL, PRESET_PRIVATE, PRESET_SERVER, ROLE_ADMIN, ROLE_MEMBER,
-    ROLE_OWNER, SEND_MESSAGE, is_open_join, permissions_from_json,
+    CREATE_CHANNEL, INVITE, PRESET_PRIVATE, PRESET_SERVER, ROLE_ADMIN,
+    ROLE_MEMBER, ROLE_OWNER, SEND_MESSAGE, is_open_join, permissions_from_json,
 )
 
 
@@ -312,15 +312,17 @@ class TestGuiPermissionScope:
             alice.storage, alice.channel_mgr, alice.invite_mgr,
             s, alice.identity.hash_hex, "general")
 
+        # Any grant a member may legitimately hold: this is about which scope
+        # the edit lands in, not about which permission was edited.
         new_perms = dict(PRESET_SERVER)
-        new_perms[ROLE_MEMBER] = [SEND_MESSAGE, "kick"]
+        new_perms[ROLE_MEMBER] = [SEND_MESSAGE, INVITE]
         assert actions.edit_server_permissions(
             alice.storage, alice.invite_mgr, s, alice.identity.hash_hex, new_perms,
         ) is True
 
-        assert alice.storage.get_server_permissions(s)[ROLE_MEMBER] == [SEND_MESSAGE, "kick"]
+        assert alice.storage.get_server_permissions(s)[ROLE_MEMBER] == [SEND_MESSAGE, INVITE]
         mirrored = permissions_from_json(alice.storage.get_channel(ch)["permissions"])
-        assert mirrored[ROLE_MEMBER] == [SEND_MESSAGE, "kick"]
+        assert mirrored[ROLE_MEMBER] == [SEND_MESSAGE, INVITE]
         assert is_open_join(mirrored) is False
 
 

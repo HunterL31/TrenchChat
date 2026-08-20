@@ -15,7 +15,7 @@ from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QFont
 
 from trenchchat.core.permissions import (
-    ALL_PERMISSIONS, FLAG_DISCOVERABLE, FLAG_OPEN_JOIN,
+    ALL_PERMISSIONS, FLAG_DISCOVERABLE, FLAG_OPEN_JOIN, offered_permissions,
     CREATE_CHANNEL, FULL_SYNC, INVITE, KICK, MANAGE_CHANNEL, MANAGE_ROLES,
     ROLE_ADMIN, ROLE_MEMBER, ROLE_OWNER,
     SEND_MESSAGE, VOICE_CHAT,
@@ -451,7 +451,10 @@ class ChannelPermissionsDialog(QDialog):
             group_layout = QVBoxLayout(group)
             role_checks: dict[str, QCheckBox] = {}
             current_role_perms: list[str] = self._perms.get(role, [])
-            for perm in ALL_PERMISSIONS:
+            # Grants a role may never hold are not offered: the core strips
+            # them on read and on write, so a ticked box would silently do
+            # nothing (see permissions.ADMIN_ONLY_PERMISSIONS).
+            for perm in offered_permissions(self._perms, role):
                 cb = QCheckBox(_PERMISSION_LABELS[perm])
                 cb.setChecked(perm in current_role_perms)
                 group_layout.addWidget(cb)

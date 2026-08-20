@@ -10,6 +10,7 @@ Covers:
 - ChannelPermissionsDialog UI: initial state and updated permissions property
 """
 
+import json
 import os
 import time
 
@@ -19,9 +20,10 @@ from trenchchat.core.storage import Storage
 from trenchchat.core.permissions import (
     ALL_PERMISSIONS, FLAG_DISCOVERABLE, FLAG_OPEN_JOIN,
     FULL_SYNC, INVITE, KICK, MANAGE_CHANNEL, MANAGE_ROLES,
-    PRESET_OPEN, PRESET_PRIVATE, ROLE_ADMIN, ROLE_MEMBER, ROLE_OWNER,
-    SEND_MESSAGE, has_permission, is_discoverable,
-    is_open_join, permissions_from_json, permissions_to_json, role_rank,
+    PRESET_OPEN, PRESET_PRIVATE, PRESET_SERVER, ROLE_ADMIN, ROLE_MEMBER,
+    ROLE_OWNER, SEND_MESSAGE, has_permission, is_discoverable,
+    is_open_join, offered_permissions, permissions_from_json,
+    permissions_to_json, role_rank,
 )
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -384,3 +386,63 @@ class TestVoiceChatPermission:
         assert not has_permission(legacy, ROLE_MEMBER, VOICE_CHAT)
         assert not has_permission(legacy, ROLE_ADMIN, VOICE_CHAT)
         assert has_permission(legacy, ROLE_OWNER, VOICE_CHAT)
+
+
+# ---------------------------------------------------------------------------
+# Some permissions are not the base role's to hold
+# ---------------------------------------------------------------------------
+
+class TestAdminOnlyPermissions:
+    """Removing someone from the member list strips every permission they had,
+    so kick is the authority to unmake other people's. manage_roles is
+    restricted with it because it is the route to granting yourself kick.
+    """
+
+    def test_a_member_grant_is_dropped_on_read(self):
+        blob = json.dumps({ROLE_MEMBER: [SEND_MESSAGE, KICK, MANAGE_ROLES]})
+        perms = permissions_from_json(blob)
+        assert perms[ROLE_MEMBER] == [SEND_MESSAGE]
+
+    def test_a_member_grant_is_dropped_on_write(self):
+        blob = permissions_to_json({ROLE_MEMBER: [SEND_MESSAGE, KICK]})
+        assert KICK not in json.loads(blob)[ROLE_MEMBER]
+
+    def test_admins_keep_both(self):
+        perms = permissions_from_json(
+            json.dumps({ROLE_ADMIN: [KICK, MANAGE_ROLES]}))
+        assert perms[ROLE_ADMIN] == [KICK, MANAGE_ROLES]
+
+    def test_has_permission_refuses_a_smuggled_member_grant(self):
+        """The check every core enforcement point runs."""
+        perms = permissions_from_json(json.dumps({ROLE_MEMBER: [KICK]}))
+        assert has_permission(perms, ROLE_MEMBER, KICK) is False
+        assert has_permission(perms, ROLE_OWNER, KICK) is True
+
+    def test_a_signed_document_cannot_grant_it_either(self, peer_factory):
+        """A signature proves who wrote a blob, not that what it says is
+        allowed -- so the drop has to happen on the read path, not only where
+        permissions are edited locally."""
+        alice = peer_factory("alice")
+        ch_hash = alice.channel_mgr.create_channel("c", "", permissions=PRESET_PRIVATE)
+
+        smuggled = dict(PRESET_PRIVATE)
+        smuggled[ROLE_MEMBER] = [SEND_MESSAGE, KICK]
+        alice.storage.set_channel_permissions(ch_hash, smuggled)
+
+        stored = permissions_from_json(
+            alice.storage.get_channel(ch_hash)["permissions"])
+        assert KICK not in stored[ROLE_MEMBER]
+
+    def test_full_sync_is_not_offered_on_an_open_channel(self):
+        """It decides how much history a member may pull, and an open-join
+        channel serves history to any subscriber -- so the toggle would be a
+        privacy control that is not one."""
+        assert FULL_SYNC not in offered_permissions(PRESET_OPEN, ROLE_MEMBER)
+        assert FULL_SYNC in offered_permissions(PRESET_PRIVATE, ROLE_MEMBER)
+
+    def test_kick_is_never_offered_to_a_member(self):
+        for preset in (PRESET_OPEN, PRESET_PRIVATE, PRESET_SERVER):
+            offered = offered_permissions(preset, ROLE_MEMBER)
+            assert KICK not in offered
+            assert MANAGE_ROLES not in offered
+            assert SEND_MESSAGE in offered
