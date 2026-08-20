@@ -1,4 +1,5 @@
 import json
+import os
 import re
 import sqlite3
 import shutil
@@ -650,17 +651,31 @@ class Storage:
         plain_path = str(db_path) + ".plain"
         hex_key = sqlcipher_hex_key(current_key)
 
-        enc_conn = _sqlcipher.connect(str(db_path))
+        # The export is the whole message store in the clear. SQLite would
+        # create it at the process umask, so create it here at 0600 first and
+        # let ATTACH open what already exists -- otherwise it is world-readable
+        # for the length of the export.
+        Path(plain_path).unlink(missing_ok=True)
+        os.close(os.open(plain_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
+
         try:
-            enc_conn.execute(f"PRAGMA key = \"x'{hex_key}'\"")
-            enc_conn.execute(
-                "ATTACH DATABASE ? AS plaintext KEY ''",
-                (plain_path,),
-            )
-            enc_conn.execute("SELECT sqlcipher_export('plaintext')")
-            enc_conn.execute("DETACH DATABASE plaintext")
-        finally:
-            enc_conn.close()
+            enc_conn = _sqlcipher.connect(str(db_path))
+            try:
+                enc_conn.execute(f"PRAGMA key = \"x'{hex_key}'\"")
+                enc_conn.execute(
+                    "ATTACH DATABASE ? AS plaintext KEY ''",
+                    (plain_path,),
+                )
+                enc_conn.execute("SELECT sqlcipher_export('plaintext')")
+                enc_conn.execute("DETACH DATABASE plaintext")
+            finally:
+                enc_conn.close()
+        except Exception:
+            # A partial export left behind is a plaintext copy of everything,
+            # sitting next to the encrypted database it was meant to replace.
+            Path(plain_path).unlink(missing_ok=True)
+            _remove_wal_sidecars(Path(plain_path))
+            raise
 
         shutil.move(plain_path, str(db_path))
         secure_file(db_path)

@@ -14,6 +14,7 @@ from trenchchat.core import actions
 from trenchchat.core.permissions import (
     FLAG_DISCOVERABLE, FLAG_OPEN_JOIN, PRESET_OPEN, PRESET_PRIVATE, ROLE_MEMBER, ROLE_OWNER,
 )
+from trenchchat.core.protocol import F_CHANNEL_HASH
 
 
 def _setup_channel_with_member(peer_factory, *, member_perms=None):
@@ -273,3 +274,63 @@ class TestVoiceActions:
         )
         actions.set_voice_muted(bob.voice_mgr, True)
         assert bob.voice_mgr.is_muted is True
+
+
+# ---------------------------------------------------------------------------
+# The channel filter has to act where messages enter the propagation store
+# ---------------------------------------------------------------------------
+
+class TestPropagationFilterIsApplied:
+    """Settings presents this as controlling what the node relays for other
+    people. Its verdict used to be returned from the delivery callback, whose
+    return value LXMF ignores, so it controlled nothing.
+    """
+
+    def _filter(self, mode, hashes):
+        from trenchchat.network.prop_filter import PropagationFilter
+
+        class _Cfg:
+            channel_filter_mode = mode
+            channel_filter_hashes = hashes
+
+        return PropagationFilter(_Cfg())
+
+    def test_allow_all_mode_passes_anything(self):
+        assert self._filter("all", []).allows_packed(b"not even a message")
+
+    def test_allowlist_refuses_unreadable_bytes(self):
+        """Allowlist means "relay these channels"; bytes we cannot read are
+        not one of them."""
+        assert not self._filter("allowlist", ["aa" * 16]).allows_packed(b"\x00" * 8)
+
+    def test_allowlist_admits_a_named_channel(self):
+        allowed = "aa" * 16
+
+        class _Msg:
+            fields = {F_CHANNEL_HASH: bytes.fromhex(allowed)}
+
+        assert self._filter("allowlist", [allowed]).allows(_Msg())
+
+    def test_allowlist_refuses_an_unnamed_channel(self):
+        class _Msg:
+            fields = {F_CHANNEL_HASH: bytes.fromhex("bb" * 16)}
+
+        assert not self._filter("allowlist", ["aa" * 16]).allows(_Msg())
+
+    def test_the_filter_is_wired_into_the_propagation_ingest(self, peer_factory):
+        """The point of the fix: refusing has to keep a message out of the
+        store, which only the ingest LXMF actually calls can do."""
+        alice = peer_factory("alice")
+        alice.config.channel_filter_mode = "allowlist"
+        alice.config.set_channel_filter_hashes([])
+
+        calls = []
+        alice.router._router.lxmf_propagation = lambda data, *a, **k: calls.append(data)
+        alice.router._install_propagation_filter()
+
+        alice.router._router.lxmf_propagation(b"\x00" * 8)
+        assert calls == [], "a refused message still reached the propagation store"
+
+        alice.config.channel_filter_mode = "all"
+        alice.router._router.lxmf_propagation(b"\x00" * 8)
+        assert len(calls) == 1, "an allowed message was not stored"

@@ -241,6 +241,17 @@ class EventBus:
 TOKEN_HEADER = "x-tc-token"
 TOKEN_QUERY_PARAM = "token"
 
+# Largest request body accepted. Every upload endpoint takes base64 in JSON and
+# the limits below it are per-image, so without this a token holder can hand
+# the process an arbitrarily large string to decode.
+MAX_REQUEST_BYTES = 4 * 1024 * 1024
+
+# Host values a browser may reach this backend on. A page cannot set Host, but
+# DNS rebinding gives it one of its own choosing, which the socket's
+# same-origin test then derives its answer from -- so a name outside this set
+# is refused rather than trusted.
+_LOCAL_HOSTS = ("127.0.0.1", "localhost", "[::1]", "::1")
+
 
 def generate_token() -> str:
     """A fresh API token for one backend process."""
@@ -261,6 +272,36 @@ def _presented_token(headers, query_params) -> str:
 
 def _token_ok(expected: str, presented: str) -> bool:
     return bool(presented) and secrets.compare_digest(expected, presented)
+
+
+def _host_allowed(host: str, allowed_origins: list[str]) -> bool:
+    """True if the Host header names somewhere this backend is served.
+
+    Bare hostname or host:port, matched against loopback and whatever the
+    launcher explicitly allowed. An empty Host is a non-browser client.
+    """
+    if not host:
+        return True
+    name = host.rsplit(":", 1)[0] if host.count(":") == 1 else host
+    if name in _LOCAL_HOSTS or host in _LOCAL_HOSTS:
+        return True
+    return any(origin.split("://", 1)[-1].rsplit(":", 1)[0] == name
+               for origin in allowed_origins if "://" in origin)
+
+
+def _identity_hashes(values: list[str]) -> list[bytes] | None:
+    """Decode identity hex from a request body.
+
+    Raises ValueError on anything that is not identity hex, so a malformed
+    request is answered as a bad request rather than a server error.
+    """
+    out = []
+    for value in values:
+        raw = bytes.fromhex(value)
+        if len(raw) != 16:
+            raise ValueError(f"{value!r} is not an identity hash")
+        out.append(raw)
+    return out or None
 
 
 def _origin_allowed(origin: str, host: str, allowed_origins: list[str]) -> bool:
@@ -312,6 +353,15 @@ def create_app(backend: Backend, *, token: str | None = None,
                   lifespan=lifespan)
     app.state.api_token = api_token
 
+    @app.exception_handler(ValueError)
+    async def _bad_request(request, exc: ValueError):
+        """Malformed input is the caller's fault, not a server failure.
+
+        Several endpoints decode hex or base64 straight out of a request body;
+        letting that raise turned a bad request into a 500.
+        """
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+
     def _is_api_request(request) -> bool:
         for route in app.router.routes:
             if isinstance(route, Mount):
@@ -324,6 +374,15 @@ def create_app(backend: Backend, *, token: str | None = None,
     async def _require_token(request, call_next):
         if request.method == "OPTIONS" or not _is_api_request(request):
             return await call_next(request)
+        if not _host_allowed(request.headers.get("host", ""), origins):
+            # A page cannot set Host, but DNS rebinding hands it one it chose,
+            # and the socket's same-origin test reads its answer back out of
+            # that header. The token is then the only control left standing.
+            return JSONResponse({"error": "unrecognised Host"}, status_code=421)
+        declared = request.headers.get("content-length")
+        if declared and declared.isdigit() and int(declared) > MAX_REQUEST_BYTES:
+            return JSONResponse({"error": "request body too large"},
+                                status_code=413)
         presented = _presented_token(request.headers, request.query_params)
         if not _token_ok(api_token, presented):
             return JSONResponse({"error": "invalid or missing API token"},
@@ -794,9 +853,9 @@ def create_app(backend: Backend, *, token: str | None = None,
         return {"ok": actions.update_membership(
             backend.storage, backend.invite_mgr, server_hash,
             backend.identity.hash_hex,
-            remove_members=[bytes.fromhex(h) for h in req.remove_members] or None,
-            add_admins=[bytes.fromhex(h) for h in req.add_admins] or None,
-            remove_admins=[bytes.fromhex(h) for h in req.remove_admins] or None,
+            remove_members=_identity_hashes(req.remove_members),
+            add_admins=_identity_hashes(req.add_admins),
+            remove_admins=_identity_hashes(req.remove_admins),
         )}
 
     @app.post("/servers/{server_hash}/invite")
@@ -938,9 +997,9 @@ def create_app(backend: Backend, *, token: str | None = None,
         # response doesn't claim success for a request that had no effect.
         applied = actions.update_membership(
             backend.storage, backend.invite_mgr, channel_hash, backend.identity.hash_hex,
-            remove_members=[bytes.fromhex(h) for h in req.remove_members] or None,
-            add_admins=[bytes.fromhex(h) for h in req.add_admins] or None,
-            remove_admins=[bytes.fromhex(h) for h in req.remove_admins] or None,
+            remove_members=_identity_hashes(req.remove_members),
+            add_admins=_identity_hashes(req.add_admins),
+            remove_admins=_identity_hashes(req.remove_admins),
         )
         return {"ok": applied}
 
@@ -996,13 +1055,26 @@ def create_app(backend: Backend, *, token: str | None = None,
         if row is None or not row["image_data"]:
             return JSONResponse({"error": "no image"}, status_code=404)
         data = bytes(row["image_data"])
-        return Response(content=data, media_type="image/gif" if is_gif(data) else "image/jpeg")
+        return Response(
+            content=data,
+            media_type="image/gif" if is_gif(data) else "image/jpeg",
+            # The type is a guess over peer bytes, which storage accepts
+            # without requiring them to parse as an image, so tell the browser
+            # not to second-guess it either.
+            headers={"X-Content-Type-Options": "nosniff"},
+        )
 
     @app.post("/channels/{channel_hash}/messages")
     def send_message(channel_hash: str, req: SendMessageRequest):
         image_data = None
         if req.image_data_b64:
-            raw = base64.b64decode(req.image_data_b64)
+            try:
+                raw = base64.b64decode(req.image_data_b64, validate=True)
+            except Exception:
+                return JSONResponse(
+                    {"ok": False, "error": "image_data_b64 is not valid base64"},
+                    status_code=400,
+                )
             # Fails closed, like main_window.py's _on_send_message: the
             # re-encode is the only sanitisation in the pipeline, and it
             # rejects precisely the inputs it exists to catch, so forwarding
@@ -1166,6 +1238,11 @@ def create_app(backend: Backend, *, token: str | None = None,
         # handshake, so this socket -- which streams every inbound message --
         # is checked here or nowhere.
         if not _token_ok(api_token, _presented_token(ws.headers, ws.query_params)):
+            await ws.close(code=1008)
+            return
+        # Checked before the origin test below, which derives "same origin"
+        # from this very header.
+        if not _host_allowed(ws.headers.get("host", ""), origins):
             await ws.close(code=1008)
             return
         if not _origin_allowed(ws.headers.get("origin", ""),

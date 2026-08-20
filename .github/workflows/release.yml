@@ -144,12 +144,18 @@ jobs:
             COMMITS="- No user-facing changes"
           fi
 
+          # A commit subject is attacker-controlled text, and a fixed
+          # delimiter appearing in one ends the block early -- after which the
+          # rest of that subject sets step outputs of its own, including the
+          # tag the build job checks out. A random one cannot be guessed by
+          # someone writing the commit.
+          DELIM="CHANGELOG_$(openssl rand -hex 16)"
           {
             echo "new_version=${NEW_VERSION}"
             echo "tag=${NEW_TAG}"
-            echo "changelog<<CHANGELOG_EOF"
+            echo "changelog<<${DELIM}"
             echo "$COMMITS"
-            echo "CHANGELOG_EOF"
+            echo "${DELIM}"
           } >> "$GITHUB_OUTPUT"
 
   # ---------------------------------------------------------------------------
@@ -196,7 +202,9 @@ jobs:
           cache: "pip"
 
       - name: Set up Flutter
-        uses: subosito/flutter-action@v2
+        # Pinned to a commit: a tag can be moved by its owner, and this
+        # runs in a job that can write to this repository.
+        uses: subosito/flutter-action@1508160852fb97248640997f7cfb38da241df0ba  # v2.9.1
         with:
           channel: stable
           cache: true
@@ -332,7 +340,8 @@ jobs:
         run: ls -lh release-assets/
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        # Pinned to a commit for the same reason as flutter-action above.
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2.6.2
         with:
           tag_name: ${{ needs.bump_version.outputs.tag }}
           name: "TrenchChat ${{ needs.bump_version.outputs.new_version }}"

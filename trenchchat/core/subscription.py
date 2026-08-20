@@ -26,6 +26,7 @@ import msgpack
 
 from trenchchat.core.control_retry import ControlRetryQueue
 from trenchchat.core.identity import Identity
+from trenchchat.core.permissions import is_open_join, permissions_from_json
 from trenchchat.core.protocol import (
     F_CHANNEL_HASH, F_MSG_TYPE, F_SUBSCRIBER_LIST,
     F_SUBSCRIBER_SIG, F_SUBSCRIBER_VERSION,
@@ -199,7 +200,19 @@ class SubscriptionManager:
 
         if msg_type == MT_SUBSCRIBE:
             channel = self._storage.get_channel(channel_hash_hex)
-            if channel and channel["creator_hash"] == self._identity.hash_hex:
+            # Subscribing is how an open-join channel is joined. An
+            # invite-only one has a member list instead, so a subscribe there
+            # asserts a membership nobody granted -- it delivers nothing,
+            # since recipients come from get_members(), but it writes the
+            # sender into the owner's persisted subscriber set.
+            if channel and not is_open_join(
+                    permissions_from_json(channel["permissions"])):
+                RNS.log(
+                    f"TrenchChat [subscription]: refusing subscribe from "
+                    f"{sender_hex[:12]}… — {channel_hash_hex[:12]}… is not open-join",
+                    RNS.LOG_WARNING,
+                )
+            elif channel and channel["creator_hash"] == self._identity.hash_hex:
                 self._add_subscriber(channel_hash_hex, sender_hex)
 
         elif msg_type == MT_UNSUBSCRIBE:

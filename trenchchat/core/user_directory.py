@@ -19,6 +19,11 @@ import RNS
 DIRECTORY_TTL_SECS: float = 86_400  # 24 hours
 
 
+# Peers remembered at once. Identities are free to mint and every announce
+# heard adds one, so the TTL alone bounds nothing.
+MAX_TRACKED_PEERS = 512
+
+
 class UserDirectory:
     """In-memory directory of discovered TrenchChat peers.
 
@@ -48,6 +53,13 @@ class UserDirectory:
         if peer_hex == self._self_hex:
             return
         with self._lock:
+            # Fed from every announce heard, and prune() only drops entries
+            # once they are stale -- which under a stream of fresh identities
+            # is never. Evict the least recently seen instead.
+            if (len(self._entries) >= MAX_TRACKED_PEERS
+                    and peer_hex not in self._entries):
+                oldest = min(self._entries, key=lambda k: self._entries[k][1])
+                del self._entries[oldest]
             self._entries[peer_hex] = (display_name, time.time())
         RNS.log(
             f"TrenchChat [user_directory]: recorded peer {peer_hex[:12]}… "

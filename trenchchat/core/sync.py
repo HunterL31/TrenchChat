@@ -156,6 +156,7 @@ MAX_QUEUED_HINTS_PER_PEER = 50
 
 
 _IDENTITY_HEX_RE = re.compile(r"^[0-9a-f]{32}$")
+_MESSAGE_ID_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 def _coerce_str(value) -> str:
@@ -167,6 +168,10 @@ def _coerce_str(value) -> str:
 
 def _is_identity_hex(value: str) -> bool:
     return bool(_IDENTITY_HEX_RE.match(value))
+
+
+def _is_message_id(value: str) -> bool:
+    return bool(_MESSAGE_ID_RE.match(value))
 
 
 def row_wire_size(row) -> int:
@@ -495,16 +500,22 @@ class SyncManager:
                                 sender_hex: str):
         if not self._peer_may_participate(channel_hash_hex, sender_hex):
             return
-        missed_for = fields.get(F_MISSED_FOR, "")
-        missed_msg_id = fields.get(F_MISSED_MSG_ID, "")
-        if isinstance(missed_for, bytes):
-            missed_for = missed_for.decode(errors="replace")
-        if isinstance(missed_msg_id, bytes):
-            missed_msg_id = missed_msg_id.decode(errors="replace")
-        if missed_for and missed_msg_id:
-            self._storage.record_missed_delivery(channel_hash_hex, missed_for, missed_msg_id)
-            if missed_for == self._identity.hash_hex:
-                self._status.note_gap(channel_hash_hex)
+        missed_for = _coerce_str(fields.get(F_MISSED_FOR, ""))
+        missed_msg_id = _coerce_str(fields.get(F_MISSED_MSG_ID, ""))
+        # Both are free-form strings on the wire and each distinct pair is a
+        # persistent row, so they are checked for shape rather than taken as
+        # given: a message_id is the hex digest messaging computes, and a
+        # recipient is an identity hash.
+        if not _is_identity_hex(missed_for) or not _is_message_id(missed_msg_id):
+            RNS.log(
+                f"TrenchChat [sync]: ignoring a malformed missed-delivery hint "
+                f"from {sender_hex[:12]}…",
+                RNS.LOG_WARNING,
+            )
+            return
+        self._storage.record_missed_delivery(channel_hash_hex, missed_for, missed_msg_id)
+        if missed_for == self._identity.hash_hex:
+            self._status.note_gap(channel_hash_hex)
 
     def _handle_sync_request(self, fields: dict, channel_hash_hex: str,
                               requester_hex: str):

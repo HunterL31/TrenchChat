@@ -71,8 +71,12 @@ exit 0
 EOF
 chmod 0755 "${STAGING}/DEBIAN/prerm"
 
-# Fix permissions: DEBIAN/ scripts must be owned by root in the final package
+# Fix permissions: DEBIAN/ scripts must be owned by root in the final package.
+# Files as well as directories: their modes come from whatever the build
+# produced, and a group- or world-writable file installed root-owned under
+# /opt is writable by whoever can reach it and then run as the launcher.
 find "${STAGING}" -type d -exec chmod 0755 {} \;
+find "${STAGING}" -type f -exec chmod go-w {} \;
 
 # --- Build ---
 dpkg-deb --root-owner-group --build "${STAGING}" "${DEB_OUT}"
