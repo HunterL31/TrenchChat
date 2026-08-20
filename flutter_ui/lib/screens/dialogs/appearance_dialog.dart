@@ -13,6 +13,7 @@ import 'package:flutter/material.dart';
 
 import '../../app_state.dart';
 import '../../theme/section_theme.dart';
+import '../../theme/theme_presets.dart';
 import '../../theme/theme_spec.dart';
 import '../../theme/tokens.dart';
 import '../../widgets/tc_button.dart';
@@ -92,6 +93,23 @@ class _AppearanceDialogContentState extends State<_AppearanceDialogContent> {
     });
   }
 
+  /// Replaces every override this client knows with the preset's, keeping
+  /// overrides under unknown section ids (same rule as RESET ALL).
+  void _applyPreset(ThemePreset preset) {
+    setState(() {
+      var next = _draft.clearBase();
+      for (final section in TCSection.values) {
+        next = next.clearSection(section);
+      }
+      next = next.withBaseOverrides(preset.spec.base);
+      for (final entry in preset.spec.sections.entries) {
+        final section = TCSection.fromWireId(entry.key);
+        if (section != null) next = next.withSectionOverrides(section, entry.value);
+      }
+      _draft = next;
+    });
+  }
+
   void _resetAll() {
     setState(() {
       var next = _draft.clearBase();
@@ -147,6 +165,29 @@ class _AppearanceDialogContentState extends State<_AppearanceDialogContent> {
         ),
       ],
       children: [
+        Text(
+          'PRESETS',
+          style: TextStyle(
+            fontSize: TCType.textCaption,
+            color: tc.accentPrimary,
+            letterSpacing: TCType.letterSpacingFor(TCType.textCaption, TCType.trackingWider),
+          ),
+        ),
+        const SizedBox(height: 8),
+        Row(
+          children: [
+            for (final preset in themePresets) ...[
+              TcGhostButton(
+                label: preset.name.toUpperCase(),
+                onPressed: () => _applyPreset(preset),
+              ),
+              const SizedBox(width: 6),
+            ],
+          ],
+        ),
+        const SizedBox(height: 12),
+        Container(height: 1, color: tc.borderSubtle),
+        const SizedBox(height: 12),
         Text(
           'SCOPE',
           style: TextStyle(
