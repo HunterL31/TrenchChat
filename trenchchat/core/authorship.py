@@ -52,6 +52,45 @@ def remember_identity(storage: Storage, rns_identity) -> None:
     storage.remember_identity_key(identity_hash_hex, public_key)
 
 
+def public_key_for(storage: Storage, author_hex: str) -> bytes | None:
+    """The author's public key, for relaying alongside their messages.
+
+    A relayed message is unverifiable to a receiver who has never met its
+    author, and an author who has left the mesh will never announce again --
+    so without this the history of everyone who leaves becomes unreadable to
+    everyone who arrives later. The key is public, and _key_matches proves it
+    belongs to the identity claiming it, so passing it through a relay adds
+    no trust in the relay.
+    """
+    identity = resolve_author(storage, author_hex)
+    if identity is None:
+        return None
+    try:
+        return identity.get_public_key()
+    except Exception:
+        return None
+
+
+def remember_relayed_key(storage: Storage, author_hex: str, public_key) -> bool:
+    """Cache a public key handed over by a relay. False if it isn't the author's.
+
+    The check is the whole point: an identity hash is derived from its public
+    key, so a key that does not hash back to author_hex simply is not their
+    key, whoever passed it along.
+    """
+    if not author_hex or not isinstance(public_key, bytes) or not public_key:
+        return False
+    if not _key_matches(public_key, author_hex):
+        RNS.log(
+            f"TrenchChat [authorship]: relayed key does not match author "
+            f"{author_hex[:12]}… — ignored",
+            RNS.LOG_WARNING,
+        )
+        return False
+    storage.remember_identity_key(author_hex, public_key)
+    return True
+
+
 def resolve_author(storage: Storage, author_hex: str):
     """The verifying identity for an author, from cache or from RNS.
 

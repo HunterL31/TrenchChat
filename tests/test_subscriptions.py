@@ -175,3 +175,95 @@ class TestSubscriberListBroadcast:
         # Bob is not the owner, so his subscriber set should remain empty
         # (The guard in _on_lxmf_message checks channel["creator_hash"] == sender_hex)
         assert bob.subscription_mgr.get_subscribers(ch_hash) == set()
+
+
+class TestSubscriberVersionSurvivesRestart:
+    def test_owner_restart_does_not_renumber_into_replay_rejection(self, peer_factory):
+        """
+        A restarted owner keeps numbering subscriber lists upward.
+
+        The counter used to live only in memory, so a restarted owner reissued
+        v1 while its subscribers still held the higher number from before.
+        Receivers reject anything not newer than what they hold, so every list
+        published after the restart was discarded as a replay -- leaving
+        existing subscribers permanently unaware of anyone who joined
+        afterwards (restart1 in docs/testenv-scenarios.md).
+        """
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+        carol = peer_factory("carol")
+
+        ch_hash = alice.channel_mgr.create_channel("version-restart", "", "public")
+        for peer in (bob, carol):
+            peer.storage.upsert_channel(ch_hash, "version-restart", "",
+                                        alice.identity.hash_hex, "public", time.time())
+
+        bob.subscription_mgr.subscribe(ch_hash, owner_hash_hex=alice.identity.hash_hex)
+        assert wait_for_subscriber(alice, ch_hash, bob.identity.hash_hex, timeout=5)
+        assert wait_for(
+            lambda: bob.identity.hash_hex in bob.subscription_mgr.get_subscribers(ch_hash),
+            timeout=5,
+        ), "Bob never received the first subscriber list"
+
+        issued = alice.storage.get_all_subscriber_list_versions().get(ch_hash, 0)
+        assert issued > 0, "the owner never persisted a subscriber-list version"
+
+        # Restart the owner's manager against the same storage, exactly what a
+        # process restart does: memory gone, database intact.
+        from trenchchat.core.subscription import SubscriptionManager
+        restarted = SubscriptionManager(alice.identity, alice.storage, alice.router)
+        assert restarted._next_subscriber_version(ch_hash) > issued, (
+            "a restarted owner reissued a version its subscribers already hold, "
+            "so every later list is rejected as a replay"
+        )
+
+        # Carol joining is what the surviving subscriber must learn about.
+        carol.subscription_mgr.subscribe(ch_hash, owner_hash_hex=alice.identity.hash_hex)
+        assert wait_for_subscriber(alice, ch_hash, carol.identity.hash_hex, timeout=5)
+        assert wait_for(
+            lambda: carol.identity.hash_hex in bob.subscription_mgr.get_subscribers(ch_hash),
+            timeout=5,
+        ), "Bob never learned about a peer that joined after the owner restarted"
+
+
+class TestSubscribeSurvivesAnUnresolvedPath:
+    def test_a_queued_subscribe_reaches_the_owner_once_the_path_resolves(
+        self, peer_factory, monkeypatch
+    ):
+        """
+        MT_SUBSCRIBE is held and re-sent, rather than dropped, when the
+        owner's path is not yet known.
+
+        A join is the very first thing a peer does on a channel, and it is
+        exactly when a path is least likely to be resolved. The message used
+        to be dropped outright -- no queue, no retry, no error -- so the owner
+        never learned of the subscriber, the subscriber was silently absent
+        from every send, and only joining a second time recovered (restart3 in
+        docs/testenv-scenarios.md).
+        """
+        import RNS
+
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+
+        ch_hash = alice.channel_mgr.create_channel("cold-path", "", "public")
+        bob.storage.upsert_channel(ch_hash, "cold-path", "",
+                                   alice.identity.hash_hex, "public", time.time())
+
+        monkeypatch.setattr(RNS.Identity, "recall", staticmethod(lambda *a, **k: None))
+        bob.subscription_mgr.subscribe(ch_hash, owner_hash_hex=alice.identity.hash_hex)
+
+        assert bob.subscription_mgr._retry.pending_for(alice.identity.hash_hex) == 1, (
+            "the subscribe was dropped instead of being held for retry"
+        )
+        assert not wait_for(
+            lambda: bob.identity.hash_hex in alice.subscription_mgr.get_subscribers(ch_hash),
+            timeout=1,
+        ), "the owner registered a subscriber whose message could not be sent"
+
+        monkeypatch.undo()
+        assert bob.subscription_mgr.flush_pending(alice.identity.hash_hex) == 1
+
+        assert wait_for_subscriber(alice, ch_hash, bob.identity.hash_hex, timeout=5), (
+            "the owner never learned of a subscriber whose queued join was flushed"
+        )

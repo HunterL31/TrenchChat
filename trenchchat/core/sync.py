@@ -51,15 +51,18 @@ import RNS
 import LXMF
 import msgpack
 
+from trenchchat.core.control_retry import ControlRetryQueue
 from trenchchat.core.identity import Identity
-from trenchchat.core.authorship import verify_message
+from trenchchat.core.authorship import (
+    public_key_for, remember_relayed_key, verify_message,
+)
 from trenchchat.core.image import MAX_IMAGE_BYTES, inbound_image_is_sane
 from trenchchat.core.messaging import Messaging
 from trenchchat.core.permissions import (
     FULL_SYNC, has_permission, is_open_join, permissions_from_json,
 )
 from trenchchat.core.protocol import (
-    F_CHANNEL_HASH, F_MSG_TYPE,
+    F_AUTHOR_KEYS, F_CHANNEL_HASH, F_MSG_TYPE,
     F_SYNC_WINDOW_START, F_SYNC_MESSAGES, F_SYNC_TRUNCATED, F_SYNC_SCAN_CURSOR,
     F_MISSED_FOR, F_MISSED_MSG_ID,
     MT_MISSED_DELIVERY, MT_SYNC_REQUEST, MT_SYNC_RESPONSE,
@@ -98,6 +101,11 @@ PEER_TRUST_HORIZON_SECS = 300
 # tenure and full_sync already gate what a peer is authorised to see; this
 # only paces how fast they can pull it.
 DEEP_SYNC_COOLDOWN_SECS = 60
+
+# How long an unanswered sync request waits before it is asked again. Longer
+# than the responder's deep-sync cooldown, so a retry lands in the next window
+# that cooldown will actually serve rather than inside the one that refused.
+SYNC_RETRY_SECS = 90.0
 
 # How long an idle (channel, peer) cooldown entry is kept before being
 # pruned, so the cooldown map doesn't grow unbounded over a long session
@@ -186,6 +194,9 @@ class SyncManager:
         # resets it, which is acceptable for a soft rate limit.
         self._deep_sync_last_served: dict[tuple[str, str], tuple[float, str]] = {}
         self._deep_sync_lock = threading.Lock()
+        # Held no longer than a requester will accept an answer for: past
+        # that they discard it as unsolicited and ask again anyway.
+        self._retry = ControlRetryQueue("sync", SYNC_RESPONSE_WINDOW_SECS)
 
         # (channel_hash_hex, peer_hex) -> continuation requests chained so far
         self._continuations: dict[tuple[str, str], int] = {}
@@ -303,6 +314,7 @@ class SyncManager:
         self._router.release_quarantined(peer_hex)
 
         self._messaging.flush_pending(peer_hex)
+        self._retry.flush(peer_hex, self._send_raw)
         self._flush_pending_hints(peer_hex)
 
         # Send sync requests for every channel we share with this peer, from
@@ -438,11 +450,24 @@ class SyncManager:
 
     def _handle_sync_request(self, fields: dict, channel_hash_hex: str,
                               requester_hex: str):
+        # Every refusal below is silent on the wire -- the requester cannot
+        # tell one from a lost packet -- so each says why in the log. Without
+        # that, "nobody answered" is indistinguishable from "nobody heard".
         if not self._storage.is_subscribed(channel_hash_hex):
+            RNS.log(
+                f"TrenchChat [sync]: ignoring request from {requester_hex[:12]}… "
+                f"for {channel_hash_hex[:12]}… — we are not subscribed to it",
+                RNS.LOG_DEBUG,
+            )
             return
 
         # Fails closed on an unknown channel.
         if not self._peer_may_participate(channel_hash_hex, requester_hex):
+            RNS.log(
+                f"TrenchChat [sync]: refusing request from {requester_hex[:12]}… "
+                f"for {channel_hash_hex[:12]}… — not a participant",
+                RNS.LOG_DEBUG,
+            )
             return
         channel = self._storage.get_channel(channel_hash_hex)
 
@@ -459,8 +484,15 @@ class SyncManager:
         # responder's disjoint answer landing first in the same reconnect
         # round (A1, test_sync_multipeer.py). A peer we HAVE served keeps
         # resuming from what we actually gave them, not from this horizon.
-        own_progress = self._storage.get_peer_sync_progress(channel_hash_hex, requester_hex)
-        trust_floor = max(own_progress, window_start - PEER_TRUST_HORIZON_SECS, 0.0)
+        #
+        # Read from sync_served, not sync_progress: the latter records what we
+        # received *from* this peer, and using it here collapsed the two
+        # directions onto one row, switching the widening off for any pair that
+        # had synced from each other (A7).
+        served_progress = self._storage.get_peer_served_progress(
+            channel_hash_hex, requester_hex
+        )
+        trust_floor = max(served_progress, window_start - PEER_TRUST_HORIZON_SECS, 0.0)
         sweep_start = min(window_start, trust_floor)
 
         # Hints name exact messages this peer missed, including ones older than
@@ -513,12 +545,21 @@ class SyncManager:
             F_SYNC_MESSAGES:  packed,
             F_SYNC_TRUNCATED: truncated,
         }
+        author_keys = self._author_keys_for(rows)
+        if author_keys:
+            response_fields[F_AUTHOR_KEYS] = author_keys
         # Lets the requester's next request resume past a run of rows it was
         # scanned but not entitled to, without touching its persisted
         # watermark -- see _handle_sync_response's resume_ts handling.
         if truncated:
             response_fields[F_SYNC_SCAN_CURSOR] = scan_cursor
         sent = self._send_raw(requester_hex, response_fields)
+        RNS.log(
+            f"TrenchChat [sync]: {'answered' if sent else 'held answer for'} "
+            f"{requester_hex[:12]}… on {channel_hash_hex[:12]}… — {len(rows)} row(s), "
+            f"truncated={truncated}",
+            RNS.LOG_DEBUG,
+        )
 
         # Remember how far we've actually scanned for this peer, so a later
         # request from them resumes from real, confirmed progress instead of
@@ -530,8 +571,8 @@ class SyncManager:
             advance_to = scan_cursor
             if rows:
                 advance_to = max(advance_to, rows[-1]["timestamp"])
-            if advance_to > own_progress:
-                self._storage.advance_peer_sync_progress(
+            if advance_to > served_progress:
+                self._storage.advance_peer_served_progress(
                     channel_hash_hex, requester_hex, advance_to
                 )
 
@@ -777,6 +818,7 @@ class SyncManager:
         if has_tenure and channel:
             my_role = self._storage.get_role(channel_hash_hex, my_hex)
             full_sync = has_permission(perms, my_role, FULL_SYNC)
+        self._learn_author_keys(fields.get(F_AUTHOR_KEYS))
         inserted_count = 0
         # Rows refused for failing verification -- as opposed to ones our own
         # tenure checks withheld, which we are simply not entitled to. Only
@@ -852,6 +894,15 @@ class SyncManager:
                         RNS.LOG_WARNING,
                     )
                     rejected_count += 1
+                    # Bounds the watermark, exactly like a failed insert: the
+                    # row is real history we could not verify *yet* -- an
+                    # author whose key we have never learned reads the same as
+                    # a forgery here -- and resuming past it would hide it from
+                    # every future sweep. A row with an implausible timestamp
+                    # above is different: it cannot be placed at all, so
+                    # letting it bound anything would let one bad row freeze
+                    # sync for good.
+                    failed_ts = msg_ts if failed_ts is None else min(failed_ts, msg_ts)
                     continue
 
                 image_stripped = False
@@ -1029,6 +1080,38 @@ class SyncManager:
                     not self._storage.emoji_exists(emoji_key):
                 self._reaction_mgr.request_emoji(responder_hex, emoji_key)
 
+    def _author_keys_for(self, rows: list) -> dict:
+        """Public keys for the authors of a batch, one entry per author.
+
+        Sent with the batch because the requester usually cannot obtain them
+        any other way: resolving an author needs an announce, and an author who
+        has left the network will never send one again. Everything they wrote
+        would then be unverifiable -- and so silently dropped -- for every peer
+        who arrives after they go.
+
+        One map per response rather than a key per row: a batch is usually a
+        handful of authors and up to fifty messages, and on a 1 kbps radio the
+        difference is the whole response over again.
+        """
+        keys: dict[str, bytes] = {}
+        for row in rows:
+            author = row["sender_hash"]
+            if not author or author in keys:
+                continue
+            key = public_key_for(self._storage, author)
+            if key:
+                keys[author] = key
+        return keys
+
+    def _learn_author_keys(self, keys) -> None:
+        """Cache the keys a responder sent with its batch, checking each one."""
+        if not isinstance(keys, dict):
+            return
+        for author, key in keys.items():
+            if isinstance(author, bytes):
+                author = author.decode(errors="replace")
+            remember_relayed_key(self._storage, author, key)
+
     @staticmethod
     def _row_to_dict(row) -> dict:
         d = {
@@ -1129,6 +1212,51 @@ class SyncManager:
         except (ValueError, TypeError):
             pass
         return forms
+
+    def tick(self) -> None:
+        """Re-ask peers whose answer never came.
+
+        Every other trigger is an event: a peer announcing, or this node's own
+        link returning. Both fire in a burst and then stop -- Reticulum
+        suppresses announce replays for a destination it has already
+        propagated -- so a request refused during that burst is never made
+        again. A responder's deep-sync cooldown refuses silently and lasts a
+        minute, which is long enough to swallow an entire burst, leaving a
+        returning peer waiting forever on an answer nobody is going to send
+        (sync2 in docs/testenv-scenarios.md).
+        """
+        now = time.time()
+        stale: dict[str, set[str]] = {}
+        with self._pending_requests_lock:
+            for (channel_hash_hex, _form), entries in self._pending_requests.items():
+                for asked_at, _since, dest_hex, _req_id in entries:
+                    if now - asked_at >= SYNC_RETRY_SECS:
+                        stale.setdefault(channel_hash_hex, set()).add(dest_hex)
+
+        for channel_hash_hex, peers in stale.items():
+            if not self._storage.is_subscribed(channel_hash_hex):
+                continue
+            for peer_hex in peers:
+                self._expire_pending_requests(channel_hash_hex, peer_hex, now)
+                since_ts = self._storage.get_peer_sync_progress(channel_hash_hex, peer_hex)
+                RNS.log(
+                    f"TrenchChat [sync]: re-asking {peer_hex[:12]}… for "
+                    f"{channel_hash_hex[:12]}… — no answer to the last request",
+                    RNS.LOG_DEBUG,
+                )
+                self._send_sync_request(peer_hex, channel_hash_hex, since_ts)
+
+    def _expire_pending_requests(self, channel_hash_hex: str, dest_hex: str,
+                                 now: float) -> None:
+        """Drop this peer's timed-out entries, so a retry is not itself stale."""
+        with self._pending_requests_lock:
+            for form in self._peer_key_forms(dest_hex):
+                entries = self._pending_requests.get((channel_hash_hex, form))
+                if not entries:
+                    continue
+                entries[:] = [e for e in entries if now - e[0] < SYNC_RETRY_SECS]
+                if not entries:
+                    del self._pending_requests[(channel_hash_hex, form)]
 
     def _record_pending_request(self, channel_hash_hex: str, dest_hex: str,
                                 since_ts: float = 0.0) -> int:
@@ -1250,6 +1378,13 @@ class SyncManager:
             delivery_dest_hash = RNS.Destination.hash(identity_hash, "lxmf", "delivery")
             dest_identity = RNS.Identity.recall(delivery_dest_hash)
             if dest_identity is None:
+                # A peer that just came back asks everyone for what it missed,
+                # and the answer dies here: the responder can read the request
+                # but cannot yet address a reply. The requester sees only
+                # silence, which it cannot tell from a refusal, and nothing
+                # ever re-sends the answer (sync2 in docs/testenv-scenarios.md).
+                RNS.Transport.request_path(delivery_dest_hash)
+                self._retry.queue(dest_hex, fields)
                 return False
             dest = RNS.Destination(
                 dest_identity,

@@ -12,6 +12,7 @@ multicast that has been observed to fail on this machine/network.
 """
 
 import json
+import os
 import threading
 import time
 from pathlib import Path
@@ -20,6 +21,8 @@ import RNS
 
 from trenchchat.config import DATA_DIR, Config
 from trenchchat.core import lockbox
+from trenchchat.core.connectivity import LinkWatcher
+from trenchchat.core.sync import SYNC_RETRY_SECS
 from trenchchat.core.identity import Identity
 from trenchchat.core.storage import Storage
 from trenchchat.core.channel import ChannelManager
@@ -73,6 +76,22 @@ loglevel = 3
 """
 
 
+def _rns_loglevel() -> int:
+    """RNS verbosity for a tester, from TC_TESTENV_LOGLEVEL.
+
+    Defaults to LOG_NOTICE. Raise it to LOG_DEBUG (7) when a scenario needs to
+    see why a peer stayed silent -- refusals in sync.py are logged at debug
+    precisely because they are silent on the wire.
+    """
+    raw = os.environ.get("TC_TESTENV_LOGLEVEL")
+    if not raw:
+        return RNS.LOG_NOTICE
+    try:
+        return max(0, min(int(raw), 7))
+    except ValueError:
+        return RNS.LOG_NOTICE
+
+
 def _write_reticulum_config(rns_dir: Path, instance_name: str, role: str,
                             listen_port: int, peer_host: str, peer_port: int,
                             enable_transport: bool = False,
@@ -116,6 +135,11 @@ def _write_reticulum_config(rns_dir: Path, instance_name: str, role: str,
     (rns_dir / "config").write_text(config_text)
 
 
+# Checked more often than SYNC_RETRY_SECS so a request that ages out is
+# re-asked promptly rather than up to a full interval late.
+SYNC_TICK_SECS = SYNC_RETRY_SECS / 3
+
+
 class Backend:
     """All the wired-up managers for one tester, plus lifecycle helpers."""
 
@@ -137,7 +161,7 @@ class Backend:
         self.config = Config(data_dir=data_dir)
         self.config.display_name = display_name
 
-        self.rns = RNS.Reticulum(configdir=str(rns_dir), loglevel=RNS.LOG_NOTICE)
+        self.rns = RNS.Reticulum(configdir=str(rns_dir), loglevel=_rns_loglevel())
 
         self.identity = Identity(self.config, identity_path=data_dir / "identity")
         self.storage = Storage(db_path=data_dir / "storage.db")
@@ -248,6 +272,8 @@ class Backend:
             self.presence_mgr.record_seen(peer_hex)
             self.avatar_mgr.flush_avatar(peer_hex)
             self.reaction_mgr.flush_pending_emoji(peer_hex)
+            self.subscription_mgr.flush_pending(peer_hex)
+            self.invite_mgr.flush_pending(peer_hex)
 
         RNS.Transport.register_announce_handler(
             PeerAnnounceHandler(_on_peer_appeared)
@@ -257,6 +283,11 @@ class Backend:
         # reached via a backchannel link without a prior announce, and peers
         # signing off (same rationale as main_window.py's _on_inbound_message).
         self.router.add_delivery_callback(self.presence_mgr.record_inbound)
+
+        # Nothing else notices *our own* link returning: every catch-up path
+        # is driven by hearing from a remote peer.
+        self.link_watcher = LinkWatcher(self.sync_mgr.request_sync_all)
+        self.link_watcher.start()
 
         self.channel_mgr.restore_owned_channels()
         self.server_mgr.restore_owned_servers()
@@ -295,14 +326,27 @@ class Backend:
 
     def start_voice_ticker(self, interval: float = 1.0) -> None:
         """Drive VoiceManager.tick, mirroring main.py's voice tick QTimer.
+
+        Also drives SyncManager.tick on its own slower cadence: an unanswered
+        sync request has nothing else to re-trigger it once the announce burst
+        that prompted it has passed.
+
         Runs as a daemon thread so it never blocks process exit."""
         def _loop():
+            last_sync_tick = 0.0
             while True:
                 time.sleep(interval)
                 try:
                     self.voice_mgr.tick()
                 except Exception as e:
                     RNS.log(f"TesterBackend: voice tick failed: {e}", RNS.LOG_WARNING)
+                now = time.time()
+                if now - last_sync_tick >= SYNC_TICK_SECS:
+                    last_sync_tick = now
+                    try:
+                        self.sync_mgr.tick()
+                    except Exception as e:
+                        RNS.log(f"TesterBackend: sync tick failed: {e}", RNS.LOG_WARNING)
 
         t = threading.Thread(target=_loop, daemon=True, name="voice-ticker")
         t.start()
@@ -343,6 +387,7 @@ class Backend:
         return self.presence_beacon.announce_offline()
 
     def close(self):
+        self.link_watcher.stop()
         self.router.stop()
         self.storage.close()
 

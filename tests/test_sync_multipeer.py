@@ -11,6 +11,8 @@ channel's history.
 
 import time
 
+import RNS
+
 from tests.helpers import sign_as, wait_for, wait_for_member, wait_for_message
 from trenchchat.core.messaging import _compute_message_id
 from trenchchat.core.sync_status import SyncState
@@ -651,4 +653,390 @@ class TestMixedPermissionViews:
             "Bob received pre-join history via Carol even though his own "
             "local permissions still deny full_sync -- the receive-side "
             "re-check in _handle_sync_response did not govern what was stored"
+        )
+
+
+# ---------------------------------------------------------------------------
+# A7 -- a responder that acquires older history after the requester's
+#       watermark has already passed it
+# ---------------------------------------------------------------------------
+
+class TestResponderAcquiresOlderHistoryLater:
+    def test_mutual_sync_does_not_disable_the_trust_horizon(self, peer_factory):
+        """
+        A responder widens its sweep by PEER_TRUST_HORIZON_SECS behind the
+        requester's claimed window_start, so history it picked up after that
+        watermark was set is still served.
+
+        That widening is computed as max(own_progress, window_start - horizon),
+        where own_progress is how far this responder has synced *from* the
+        requester -- the opposite direction to what it is about to serve them.
+        Once two peers have synced from each other, own_progress is recent
+        enough to swallow the widening, and anything older than the requester's
+        watermark is stranded on both sides for good.
+
+        Reproduces the four-way partition case in
+        docs/testenv-scenarios.md (sync11), where every peer ends up missing
+        precisely the oldest message each other peer wrote while partitioned.
+        """
+        from trenchchat.core.protocol import F_CHANNEL_HASH, F_MSG_TYPE, F_SYNC_WINDOW_START
+        from trenchchat.core.protocol import MT_SYNC_REQUEST
+
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+        carol = peer_factory("carol")
+
+        ch_hash = alice.channel_mgr.create_channel("late-older-history", "", "public")
+        _seed_channel_on_peer(bob, ch_hash, "late-older-history", alice.identity.hash_hex)
+        _seed_channel_on_peer(carol, ch_hash, "late-older-history", alice.identity.hash_hex)
+
+        base = time.time()
+
+        # Carol holds a message older than where Bob's watermark with her sits.
+        # In the partition case this is history Carol only picked up after Bob
+        # had already synced her newer messages.
+        stranded_id = _insert_message(carol.storage, ch_hash, alice.identity.hash_hex,
+                                      "written during the partition", base + 10)
+
+        # Bob has already synced Carol's newer history.
+        bob_watermark = base + 40
+        bob.storage.advance_peer_sync_progress(ch_hash, carol.identity.hash_hex,
+                                               bob_watermark)
+
+        # ... and Carol has synced *from* Bob, which is the direction
+        # own_progress actually tracks.
+        carol.storage.advance_peer_sync_progress(ch_hash, bob.identity.hash_hex,
+                                                 base + 60)
+
+        carol_responses = []
+        carol.sync_mgr._send_raw = (
+            lambda dest_hex, fields: carol_responses.append(fields) or True
+        )
+
+        carol.sync_mgr._handle_sync_request(
+            {
+                F_MSG_TYPE:          MT_SYNC_REQUEST,
+                F_CHANNEL_HASH:      bytes.fromhex(ch_hash),
+                F_SYNC_WINDOW_START: bob_watermark,
+            },
+            ch_hash, bob.identity.hash_hex,
+        )
+        assert len(carol_responses) == 1, "Carol never answered the request"
+
+        bob.sync_mgr._record_pending_request(ch_hash, carol.identity.hash_hex,
+                                             bob_watermark)
+        bob.sync_mgr._handle_sync_response(carol_responses[0], ch_hash,
+                                           carol.identity.hash_hex)
+
+        assert bob.storage.message_exists(stranded_id), (
+            "Bob never received history older than his watermark with Carol -- "
+            "Carol's own sync progress *from* Bob suppressed the trust-horizon "
+            "widening that should have covered it"
+        )
+
+
+# ---------------------------------------------------------------------------
+# A8 -- a batch where one row is refused and a newer one is accepted
+# ---------------------------------------------------------------------------
+
+class TestRejectedRowBoundsTheWatermark:
+    def test_unverifiable_row_is_not_skipped_past(self, peer_factory):
+        """
+        A row dropped for an unverifiable author signature must hold the
+        watermark back, the same as a row whose insert failed.
+
+        "Unverifiable" and "forged" are the same answer from verify_message:
+        an author whose public key this peer has never learned fails the check
+        exactly like a tampered row does. The first is ordinary -- the author
+        may simply be offline -- and the key usually arrives later. But if the
+        watermark advances past the refused row in the meantime,
+        get_messages_after's strict `>` hides it from every future sweep, so
+        honest history is lost permanently on the strength of a key that was
+        merely late.
+        """
+        import msgpack
+
+        from trenchchat.core.authorship import sign_message
+        from trenchchat.core.protocol import (
+            F_CHANNEL_HASH, F_MSG_TYPE, F_SYNC_MESSAGES, MT_SYNC_RESPONSE,
+        )
+
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+        carol = peer_factory("carol")
+
+        ch_hash = alice.channel_mgr.create_channel("late-key", "", "public")
+        _seed_channel_on_peer(bob, ch_hash, "late-key", alice.identity.hash_hex)
+
+        base = time.time() - 60
+        alice_hex = alice.identity.hash_hex
+        bob.storage.remember_identity_key(
+            alice_hex, alice.identity.rns_identity.get_public_key()
+        )
+
+        def row(content, ts, signed):
+            msg_id = _compute_message_id(content, alice_hex, ts)
+            sig = sign_message(alice.identity.rns_identity, ch_hash, msg_id, ts,
+                               content, None, None, None) if signed else b"\x00" * 64
+            return {"message_id": msg_id, "sender_hash": alice_hex,
+                    "sender_name": "Alice", "content": content, "timestamp": ts,
+                    "reply_to": None, "last_seen_id": None, "author_sig": sig}
+
+        refused = row("author key not learned yet", base + 10, signed=False)
+        accepted = row("verifiable and newer", base + 20, signed=True)
+
+        bob.sync_mgr._record_pending_request(ch_hash, carol.identity.hash_hex, base)
+        bob.sync_mgr._handle_sync_response(
+            {
+                F_MSG_TYPE:      MT_SYNC_RESPONSE,
+                F_CHANNEL_HASH:  bytes.fromhex(ch_hash),
+                F_SYNC_MESSAGES: msgpack.packb([refused, accepted], use_bin_type=True),
+            },
+            ch_hash, carol.identity.hash_hex,
+        )
+
+        assert bob.storage.message_exists(accepted["message_id"]), (
+            "the verifiable message was not stored"
+        )
+        assert not bob.storage.message_exists(refused["message_id"]), (
+            "a message with an invalid author signature was stored"
+        )
+        assert bob.storage.get_last_sync(ch_hash) < refused["timestamp"], (
+            "the watermark advanced past a refused message, so no future sweep "
+            "will ever offer it again -- history is lost the moment its author's "
+            "key turns up late"
+        )
+
+
+# ---------------------------------------------------------------------------
+# A9 -- history whose author is no longer reachable
+# ---------------------------------------------------------------------------
+
+class TestAuthorKeyTravelsWithTheBatch:
+    def test_relayed_history_stays_readable_after_its_author_leaves(
+        self, peer_factory, monkeypatch
+    ):
+        """
+        A responder sends the authors' public keys with the batch, so a
+        requester who has never met an author can still verify their messages.
+
+        Without this, a peer who leaves the network takes their history with
+        them: verifying needs their public key, the only route to one is an
+        announce they will never send again, and "cannot verify yet" is
+        dropped exactly like "forged". Every peer who joins afterwards sees a
+        transcript with that author's messages missing and nothing to say so
+        (integrity2 in docs/testenv-scenarios.md).
+
+        The relay is not trusted here -- a key is accepted only if it hashes
+        back to the identity claiming it, which is what makes passing one
+        through a third party safe.
+
+        RNS.Identity.recall is stubbed out for the newcomer's half of the
+        exchange because every peer in this suite shares one Reticulum
+        instance, so recall always succeeds here and the departure being
+        modelled -- an author whose announce can no longer be resolved --
+        cannot otherwise be reached in-process.
+        """
+        from trenchchat.core.authorship import sign_message
+        from trenchchat.core.protocol import (
+            F_CHANNEL_HASH, F_MSG_TYPE, F_SYNC_WINDOW_START, MT_SYNC_REQUEST,
+        )
+
+        author = peer_factory("author")
+        relay = peer_factory("relay")
+        newcomer = peer_factory("newcomer")
+
+        ch_hash = author.channel_mgr.create_channel("outlives-author", "", "public")
+        _seed_channel_on_peer(relay, ch_hash, "outlives-author", author.identity.hash_hex)
+        _seed_channel_on_peer(newcomer, ch_hash, "outlives-author",
+                              author.identity.hash_hex)
+
+        ts = time.time() - 30
+        author_hex = author.identity.hash_hex
+        content = "written before the author left"
+        msg_id = _compute_message_id(content, author_hex, ts)
+        signature = sign_message(author.identity.rns_identity, ch_hash, msg_id, ts,
+                                 content, None, None, None)
+        relay.storage.insert_message(
+            channel_hash=ch_hash, sender_hash=author_hex, sender_name="Author",
+            content=content, timestamp=ts, message_id=msg_id, reply_to=None,
+            last_seen_id=None, received_at=ts, author_sig=signature,
+        )
+        # The relay knows the author; the newcomer never has.
+        relay.storage.remember_identity_key(
+            author_hex, author.identity.rns_identity.get_public_key()
+        )
+        assert newcomer.storage.get_identity_key(author_hex) is None
+
+        responses = []
+        relay.sync_mgr._send_raw = (
+            lambda dest_hex, fields: responses.append(fields) or True
+        )
+        relay.sync_mgr._handle_sync_request(
+            {
+                F_MSG_TYPE:          MT_SYNC_REQUEST,
+                F_CHANNEL_HASH:      bytes.fromhex(ch_hash),
+                F_SYNC_WINDOW_START: ts - 60,
+            },
+            ch_hash, newcomer.identity.hash_hex,
+        )
+        assert len(responses) == 1, "the relay never answered"
+
+        monkeypatch.setattr(RNS.Identity, "recall", staticmethod(lambda *a, **k: None))
+        newcomer.sync_mgr._record_pending_request(ch_hash, relay.identity.hash_hex,
+                                                  ts - 60)
+        newcomer.sync_mgr._handle_sync_response(responses[0], ch_hash,
+                                                relay.identity.hash_hex)
+
+        assert newcomer.storage.message_exists(msg_id), (
+            "a peer that never met the author lost their history -- the key "
+            "did not travel with the batch"
+        )
+        assert newcomer.storage.get_identity_key(author_hex) is not None, (
+            "the author's key was used but not kept, so the next batch pays for "
+            "it again"
+        )
+
+    def test_a_key_that_is_not_the_authors_is_refused(self, peer_factory):
+        """A relay cannot substitute its own key for an author's.
+
+        The signature check would otherwise pass against whatever key the
+        relay supplied, which would let any relay rewrite any message it
+        passes on and sign it as someone else.
+        """
+        from trenchchat.core.authorship import remember_relayed_key
+
+        author = peer_factory("author")
+        impostor = peer_factory("impostor")
+        receiver = peer_factory("receiver")
+
+        accepted = remember_relayed_key(
+            receiver.storage, author.identity.hash_hex,
+            impostor.identity.rns_identity.get_public_key(),
+        )
+        assert accepted is False, "a key that is not the author's was cached as theirs"
+        assert receiver.storage.get_identity_key(author.identity.hash_hex) is None
+
+
+# ---------------------------------------------------------------------------
+# A10 -- the answer to a request from a peer we cannot yet address
+# ---------------------------------------------------------------------------
+
+class TestSyncAnswerSurvivesAnUnresolvedPath:
+    def test_a_response_is_held_and_re_sent_rather_than_dropped(self, peer_factory,
+                                                                monkeypatch):
+        """
+        A responder that cannot yet address the requester holds its answer.
+
+        This is the shape of a peer returning from an outage: it asks everyone
+        for what it missed, and each responder can read the request but cannot
+        resolve a path back yet. The answer used to be dropped on the floor --
+        without even requesting a path -- so the requester sat at `pending`
+        forever, unable to tell silence from a refusal, and nothing re-sent
+        anything (sync2 in docs/testenv-scenarios.md).
+        """
+        from trenchchat.core.protocol import (
+            F_CHANNEL_HASH, F_MSG_TYPE, F_SYNC_WINDOW_START, MT_SYNC_REQUEST,
+        )
+
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+
+        ch_hash = alice.channel_mgr.create_channel("answer-held", "", "public")
+        _seed_channel_on_peer(bob, ch_hash, "answer-held", alice.identity.hash_hex)
+
+        ts = time.time() - 30
+        _insert_message(alice.storage, ch_hash, alice.identity.hash_hex,
+                        "sent while bob was away", ts)
+
+        monkeypatch.setattr(RNS.Identity, "recall", staticmethod(lambda *a, **k: None))
+        alice.sync_mgr._handle_sync_request(
+            {
+                F_MSG_TYPE:          MT_SYNC_REQUEST,
+                F_CHANNEL_HASH:      bytes.fromhex(ch_hash),
+                F_SYNC_WINDOW_START: ts - 60,
+            },
+            ch_hash, bob.identity.hash_hex,
+        )
+        assert alice.sync_mgr._retry.pending_for(bob.identity.hash_hex) == 1, (
+            "the answer was dropped instead of being held until bob is addressable"
+        )
+
+        monkeypatch.undo()
+        bob.sync_mgr._record_pending_request(ch_hash, alice.identity.hash_hex, ts - 60)
+        alice.sync_mgr.on_peer_appeared(bob.identity.hash_hex)
+
+        assert wait_for(lambda: bob.storage.get_messages(ch_hash), timeout=5), (
+            "the held answer never reached the requester once its path resolved"
+        )
+
+
+# ---------------------------------------------------------------------------
+# A11 -- a request that nothing will ever ask again
+# ---------------------------------------------------------------------------
+
+class TestUnansweredRequestIsAskedAgain:
+    def test_a_request_nobody_answered_is_asked_again(self, peer_factory, monkeypatch):
+        """
+        A sync request that goes unanswered is asked again.
+
+        Every trigger in the app is an event -- a peer announcing, or this
+        node's own link returning -- and both fire in a burst and then stop,
+        because Reticulum suppresses announce replays for a destination it has
+        already propagated. A responder's deep-sync cooldown refuses silently
+        and lasts a minute, which is long enough to swallow an entire burst.
+        The requester then waits forever on an answer nobody will send: in
+        sync2 the returning peer asked eight times in thirty seconds, was
+        refused every time, and never asked again in the three minutes left.
+        """
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+
+        ch_hash = alice.channel_mgr.create_channel("silent-refusal", "", "public")
+        _seed_channel_on_peer(bob, ch_hash, "silent-refusal", alice.identity.hash_hex)
+
+        asked = []
+        real_send = bob.sync_mgr._send_sync_request
+
+        def record(dest_hex, channel_hash_hex, since_ts, continuation=False):
+            asked.append((dest_hex, channel_hash_hex))
+            return real_send(dest_hex, channel_hash_hex, since_ts, continuation)
+
+        monkeypatch.setattr(bob.sync_mgr, "_send_sync_request", record)
+
+        bob.sync_mgr._record_pending_request(ch_hash, alice.identity.hash_hex, 0.0)
+
+        bob.sync_mgr.tick()
+        assert asked == [], "a request was re-asked before it was old enough"
+
+        # Age it out by shortening the window rather than moving the clock,
+        # which every other manager in this process also reads.
+        monkeypatch.setattr("trenchchat.core.sync.SYNC_RETRY_SECS", 0.0)
+        bob.sync_mgr.tick()
+
+        assert [c for _, c in asked] == [ch_hash], (
+            "an unanswered request was never asked again, so a peer refused "
+            "once waits forever"
+        )
+        assert asked[0][0] == alice.identity.hash_hex
+
+    def test_the_retry_actually_recovers_the_history(self, peer_factory, monkeypatch):
+        """End to end: the retry is what delivers, with nothing else running."""
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+
+        ch_hash = alice.channel_mgr.create_channel("silent-refusal-e2e", "", "public")
+        _seed_channel_on_peer(bob, ch_hash, "silent-refusal-e2e",
+                              alice.identity.hash_hex)
+        _insert_message(alice.storage, ch_hash, alice.identity.hash_hex,
+                        "sent while bob was away", time.time() - 30)
+
+        bob.sync_mgr._record_pending_request(ch_hash, alice.identity.hash_hex, 0.0)
+        assert not bob.storage.get_messages(ch_hash)
+
+        monkeypatch.setattr("trenchchat.core.sync.SYNC_RETRY_SECS", 0.0)
+        bob.sync_mgr.tick()
+
+        assert wait_for(lambda: bob.storage.get_messages(ch_hash), timeout=5), (
+            "the retry never reached the responder"
         )

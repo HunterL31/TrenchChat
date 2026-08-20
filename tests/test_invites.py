@@ -488,3 +488,42 @@ class TestPendingInvitePersistence:
         bob = _restart_peer(peer_factory, bob)
         assert bob.invite_mgr.list_pending_invites() == [], \
             "a declined invite should not reappear after a restart"
+
+
+class TestInviteSurvivesAnUnresolvedPath:
+    def test_a_queued_invite_is_delivered_once_the_path_resolves(
+        self, peer_factory, monkeypatch
+    ):
+        """
+        An invite is held and re-sent, rather than dropped, when the invitee's
+        path is not yet known.
+
+        Inviting someone you have only just met is the common case, and it is
+        exactly when their path is least likely to be resolved. The invite
+        used to be dropped with a warning and nothing ever re-sent it, so the
+        invitee simply never heard -- the sender saw no error either
+        (restart3 in docs/testenv-scenarios.md).
+        """
+        import RNS
+
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+
+        ch_hash = alice.channel_mgr.create_channel("cold-invite", "", "invite")
+
+        monkeypatch.setattr(RNS.Identity, "recall", staticmethod(lambda *a, **k: None))
+        alice.invite_mgr.send_invite(ch_hash, bob.identity.hash_hex)
+
+        assert alice.invite_mgr._retry.pending_for(bob.identity.hash_hex) == 1, (
+            "the invite was dropped instead of being held for retry"
+        )
+        assert not wait_for(lambda: bool(bob.invite_mgr.list_pending_invites()),
+                            timeout=1), "an invite arrived that could not be sent"
+
+        monkeypatch.undo()
+        assert alice.invite_mgr.flush_pending(bob.identity.hash_hex) == 1
+
+        assert wait_for(lambda: any(
+            i["channel_hash_hex"] == ch_hash
+            for i in bob.invite_mgr.list_pending_invites()
+        ), timeout=5), "the invitee never received an invite that was flushed"

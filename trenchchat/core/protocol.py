@@ -83,6 +83,7 @@ F_VOICE_CODEC       = 0x63   # str   — codec the sender transmits ("opus")
 
 # --- Message integrity fields ---
 F_AUTHOR_SIG        = 0x70   # bytes[64] — author's Ed25519 signature over author_digest()
+F_AUTHOR_KEYS       = 0x71   # dict   — {author identity hex: public key} for a synced batch
 
 # --- Message type strings ---
 MT_SUBSCRIBE        = "subscribe"

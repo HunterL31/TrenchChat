@@ -843,6 +843,14 @@ def create_app(backend: Backend, *, token: str | None = None,
     def list_members(channel_hash: str):
         return [dict(row) for row in backend.storage.get_members(channel_hash)]
 
+    @app.get("/channels/{channel_hash}/subscribers")
+    def list_subscribers(channel_hash: str):
+        # Who this tester believes is on an open-join channel, which is what
+        # compute_channel_recipients() addresses a send to. The owner builds
+        # this from inbound MT_SUBSCRIBE; everyone else holds whatever the
+        # owner last broadcast, so the two views can legitimately differ.
+        return sorted(backend.subscription_mgr.get_subscribers(channel_hash))
+
     @app.get("/channels/{channel_hash}/sync_status")
     def get_sync_status(channel_hash: str):
         # Same tracker the GUI will read: who we asked for history, who
