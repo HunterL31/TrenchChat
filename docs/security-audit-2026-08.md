@@ -134,6 +134,65 @@ page — to fully impersonate the user's cryptographic identity.
 
 ---
 
+## 3a. Ground the second pass cleared
+
+A second subsystem-by-subsystem pass over the same tree found the gaps now
+recorded in `security-improvements.md`. What it *also* did was clear ground the
+first pass never covered — voice most of all, which is absent from the posture
+table above because it landed just before that audit. Recorded here for the
+same reason as §3: so it is not re-derived as a finding next time.
+
+- **Voice link identity is genuinely authenticated.** `_handle_hello` reads
+  `link.get_remote_identity()`, populated only by RNS's signed `identify` and
+  never from wire data, and `_peer_may_voice` keys membership off that same
+  hash. A `VP_HELLO` arriving before `identify` returns early rather than
+  failing open, and the channel binding is checked against the live session, so
+  a member of one channel cannot stream into another's. Outbound dials build
+  the destination from `Identity.recall`, so the link is encrypted to the
+  intended key.
+- **`voice_wire`'s parsers are strict and correct**: type byte, exact length
+  for HELLO, bounded frame count and per-frame length, truncation check, and a
+  no-trailing-bytes check. No offset or integer issue. Opus decode of hostile
+  bytes cannot overflow — a packet declaring more samples than the frame size
+  raises rather than writing past the buffer.
+- **No frame relay and no signalling amplification.** Received frames are never
+  forwarded; `send_frames` is driven only by local capture. An inbound
+  `voice_join` produces exactly one unicast reply.
+- **Third-party voice state cannot be forged.** Signalling upserts only the
+  authenticated sender's own roster entry; no field lets a peer mute, remove or
+  assert presence for anyone else. Mid-call revocation works: connected peers
+  are re-checked against current permissions once per second and torn down.
+- **Voice lock ordering is deadlock-free** — the transport never invokes a
+  manager callback while holding its own lock, and `get_roster` releases the
+  voice lock before calling into the transport.
+- **Member-list forgery resistance held under a second look.** Anchoring order,
+  signature payload shapes, the owner-set gate, the no-authority lockout check,
+  roster and server hash binding, `server_hash`/`creator_hash` being write-once
+  in the upsert, and the atomic token claim are all correct. Every finding in
+  the second pass was against a *trusted signer* or a *legitimate* protocol
+  message — none forges anything.
+- **SQL injection: still clean, migrations included.** The only interpolated
+  strings are a `_KNOWN_TABLE_RE`-guarded `PRAGMA table_info` and three
+  SQLCipher key PRAGMAs whose interpolant is PBKDF2-derived hex. `IN (...)`
+  clauses are generated placeholders. No dynamic `ORDER BY`/`LIMIT`.
+- **`messages` is insert-only** — no `UPDATE`, no `DELETE`, no
+  `INSERT OR REPLACE`. A sync response cannot touch another channel's rows, and
+  a watermark never advances over rows withheld, rejected or failed.
+- **No peer-controlled filename reaches the filesystem.** All media lives in
+  SQLite blobs; `atomic_write_bytes` is only ever called with local paths. No
+  subprocess is invoked on peer bytes or names. Avatar cache keys are the
+  authenticated sender hash.
+- **`authorship.py` is self-certifying and stayed that way** when relayed keys
+  were added: a key is cached only if it hashes back to the identity claiming
+  it, and the cache is first-write-wins, so a relay cannot overwrite a key
+  learned from a genuine announce.
+- **The Flutter client still has no injection surface.** No `dart:html`,
+  `package:web`, `url_launcher`, webview, or markdown renderer anywhere in
+  `lib/`; peer content renders through `Text`/`TextSpan`/`Image.memory` only.
+  The one `innerHTML` in the repo is the dev harness page, not the client.
+
+---
+
 ## 4. What was implemented, and what was left
 
 Everything found is done except the PIN work, plus most of the Low/DiD
