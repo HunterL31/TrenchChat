@@ -53,6 +53,7 @@ from tests.helpers import sign_as, wait_for, wait_for_member
 from trenchchat.network.router import QUARANTINE_MAX_PER_SENDER
 from trenchchat.core import actions
 from trenchchat.core.invite import _sign, _signed_payload
+from trenchchat.core.messaging import _compute_message_id
 from trenchchat.core.permissions import (
     ALL_PERMISSIONS, FULL_SYNC, INVITE, KICK, MANAGE_CHANNEL, MANAGE_ROLES,
     PRESET_OPEN, PRESET_PRIVATE, ROLE_ADMIN, ROLE_MEMBER, ROLE_OWNER, SEND_MESSAGE,
@@ -1111,14 +1112,14 @@ class TestAdversarialUnauthenticatedDelivery:
     at the router's real entry point.
     """
 
-    def _chat_lxm(self, sender, recipient, ch_hash, content, msg_id):
+    def _chat_lxm(self, sender, recipient, ch_hash, content, msg_id, ts=None):
         dest = RNS.Destination(
             recipient.identity.rns_identity, RNS.Destination.OUT,
             RNS.Destination.SINGLE, "lxmf", "delivery",
         )
         lxm = LXMF.LXMessage(dest, sender.router.delivery_destination, content,
                              desired_method=LXMF.LXMessage.DIRECT)
-        ts = time.time()
+        ts = time.time() if ts is None else ts
         lxm.fields = {
             F_CHANNEL_HASH: bytes.fromhex(ch_hash),
             F_DISPLAY_NAME: "Alice",
@@ -1160,14 +1161,16 @@ class TestAdversarialUnauthenticatedDelivery:
         alice, bob, ch_hash = _setup_channel_with_member(
             peer_factory, member_perms=[SEND_MESSAGE]
         )
-        lxm = self._chat_lxm(alice, bob, ch_hash, "genuine", "authentic-msg-1")
+        ts = time.time()
+        msg_id = _compute_message_id("genuine", alice.identity.hash_hex, ts)
+        lxm = self._chat_lxm(alice, bob, ch_hash, "genuine", msg_id, ts=ts)
         lxm.signature_validated = True
 
         bob.router._on_message_received(lxm)
         time.sleep(0.3)
 
         ids = [m["message_id"] for m in bob.storage.get_messages(ch_hash)]
-        assert "authentic-msg-1" in ids, \
+        assert msg_id in ids, \
             "A correctly signed message was not delivered"
 
     def test_forged_member_list_update_never_reaches_invite_manager(self, peer_factory):
@@ -1584,14 +1587,15 @@ class TestAdversarialPayloadLimits:
                              desired_method=LXMF.LXMessage.DIRECT)
         ts = time.time()
         oversized = b"\x00" * (MAX_IMAGE_BYTES + 1)
+        msg_id = _compute_message_id("huge", alice.identity.hash_hex, ts)
         lxm.fields = {
             F_CHANNEL_HASH: bytes.fromhex(ch_hash),
             F_DISPLAY_NAME: "Alice",
             F_TIMESTAMP:    ts,
-            F_MESSAGE_ID:   "oversized-img-1",
+            F_MESSAGE_ID:   msg_id,
             F_IMAGE_DATA:   oversized,
             F_AUTHOR_SIG:   sign_as(alice.identity.hash_hex, ch_hash,
-                                    "oversized-img-1", ts, "huge",
+                                    msg_id, ts, "huge",
                                     image_data=oversized),
         }
         lxm.signature_validated = True
@@ -1600,7 +1604,7 @@ class TestAdversarialPayloadLimits:
         time.sleep(0.3)
 
         rows = [m for m in bob.storage.get_messages(ch_hash)
-                if m["message_id"] == "oversized-img-1"]
+                if m["message_id"] == msg_id]
         assert rows, "The message itself should still be delivered"
         assert not rows[0]["image_data"], \
             "An over-cap image attachment was stored"
@@ -3100,3 +3104,142 @@ class TestAdversarialKickedMemberRejoin:
 
         assert wait_for_member(alice.storage, ch_hash, carol.identity.hash_hex, timeout=5), \
             "a fresh invite issued after the kick was refused"
+
+
+# ---------------------------------------------------------------------------
+# message_id is a hash, not a label a sender may choose
+# ---------------------------------------------------------------------------
+
+class TestAdversarialMessageIdSquatting:
+    """message_id is globally UNIQUE, so the first writer of one keeps it.
+
+    The author signature binds a message to its author, but an attacker signs
+    their *own* message -- so any member could mint a validly signed message
+    under an id they had seen elsewhere. The genuine copy then lost the insert
+    silently, and no future sweep would offer it again.
+    """
+
+    def _chat_lxm(self, sender, recipient, ch_hash, content, msg_id, ts):
+        dest = RNS.Destination(
+            recipient.identity.rns_identity, RNS.Destination.OUT,
+            RNS.Destination.SINGLE, "lxmf", "delivery",
+        )
+        lxm = LXMF.LXMessage(dest, sender.router.delivery_destination, content,
+                             desired_method=LXMF.LXMessage.DIRECT)
+        lxm.fields = {
+            F_CHANNEL_HASH: bytes.fromhex(ch_hash),
+            F_DISPLAY_NAME: "Peer",
+            F_TIMESTAMP:    ts,
+            F_MESSAGE_ID:   msg_id,
+            F_AUTHOR_SIG:   sign_as(sender.identity.hash_hex, ch_hash, msg_id,
+                                    ts, content),
+        }
+        lxm.signature_validated = True
+        return lxm
+
+    def test_a_member_cannot_claim_another_messages_id(self, peer_factory):
+        alice, bob, ch_hash = _setup_channel_with_member(
+            peer_factory, member_perms=[SEND_MESSAGE]
+        )
+        victim_ts = time.time()
+        victim_id = _compute_message_id("the real thing", alice.identity.hash_hex,
+                                        victim_ts)
+
+        squat_ts = time.time()
+        squat = self._chat_lxm(alice, bob, ch_hash, "not the real thing",
+                               victim_id, squat_ts)
+        bob.router._on_message_received(squat)
+        time.sleep(0.3)
+
+        ids = [m["message_id"] for m in bob.storage.get_messages(ch_hash)]
+        assert victim_id not in ids, "a squatted message_id was accepted"
+
+        genuine = self._chat_lxm(alice, bob, ch_hash, "the real thing",
+                                 victim_id, victim_ts)
+        bob.router._on_message_received(genuine)
+        time.sleep(0.3)
+
+        rows = [m for m in bob.storage.get_messages(ch_hash)
+                if m["message_id"] == victim_id]
+        assert rows and rows[0]["content"] == "the real thing", \
+            "the genuine message could not claim its own id afterwards"
+
+
+# ---------------------------------------------------------------------------
+# Reactions riding along with a synced message are attacker-chosen too
+# ---------------------------------------------------------------------------
+
+class TestAdversarialSyncedReactions:
+    """The message body is bound to its author by a signature; the reactions
+    beside it are not, and every field is the responder's to choose."""
+
+    def _seed(self, peer_factory):
+        alice, bob, ch_hash = _setup_channel_with_member(
+            peer_factory, member_perms=[SEND_MESSAGE]
+        )
+        carol = peer_factory("carol")
+        carol.storage.upsert_channel(ch_hash, "test-ch", "", alice.identity.hash_hex,
+                                     PRESET_PRIVATE, time.time())
+        carol.storage.subscribe(ch_hash)
+        return alice, bob, carol, ch_hash
+
+    def _serve(self, to_peer, from_peer, ch_hash, rows):
+        to_peer.sync_mgr._record_pending_request(ch_hash, from_peer.identity.hash_hex)
+        to_peer.sync_mgr._handle_sync_response(
+            {F_MSG_TYPE:      MT_SYNC_RESPONSE,
+             F_CHANNEL_HASH:  bytes.fromhex(ch_hash),
+             F_SYNC_MESSAGES: msgpack.packb(rows, use_bin_type=True)},
+            ch_hash, from_peer.identity.hash_hex,
+        )
+
+    def _row_with_reaction(self, alice, ch_hash, reactor_hex, emoji="\U0001F44D"):
+        ts = time.time() - 60
+        msg_id = _compute_message_id("hello", alice.identity.hash_hex, ts)
+        return {
+            "sender_hash":  alice.identity.hash_hex,
+            "sender_name":  "Alice",
+            "content":      "hello",
+            "timestamp":    ts,
+            "message_id":   msg_id,
+            "reply_to":     None,
+            "last_seen_id": None,
+            "author_sig":   sign_as(alice.identity.hash_hex, ch_hash, msg_id,
+                                    ts, "hello"),
+            "reactions":    [{"emoji": emoji, "reactor": reactor_hex,
+                              "at": ts + 1}],
+        }, msg_id
+
+    def test_a_reaction_from_a_non_member_is_dropped(self, peer_factory):
+        alice, bob, carol, ch_hash = self._seed(peer_factory)
+        stranger = "ab" * 16
+        row, msg_id = self._row_with_reaction(alice, ch_hash, stranger)
+
+        self._serve(bob, carol, ch_hash, [row])
+
+        reactors = [r["reactor_hash"] for r in bob.storage.get_reactions(msg_id)]
+        assert stranger not in reactors, \
+            "a synced reaction was stored for an identity that could not have sent it"
+
+    def test_a_reaction_cannot_be_attributed_to_us(self, peer_factory):
+        """Rendered as the local user's own reaction by both clients."""
+        alice, bob, carol, ch_hash = self._seed(peer_factory)
+        bob.storage.upsert_member(ch_hash, bob.identity.hash_hex, "Bob",
+                                  role=ROLE_MEMBER)
+        row, msg_id = self._row_with_reaction(alice, ch_hash, "cd" * 16)
+
+        self._serve(bob, carol, ch_hash, [row])
+
+        reactors = [r["reactor_hash"] for r in bob.storage.get_reactions(msg_id)]
+        assert "cd" * 16 not in reactors
+
+    def test_a_reaction_from_a_real_member_is_kept(self, peer_factory):
+        """The guard must not drop legitimate backfilled reactions."""
+        alice, bob, carol, ch_hash = self._seed(peer_factory)
+        row, msg_id = self._row_with_reaction(alice, ch_hash,
+                                              alice.identity.hash_hex)
+
+        self._serve(bob, carol, ch_hash, [row])
+
+        reactors = [r["reactor_hash"] for r in bob.storage.get_reactions(msg_id)]
+        assert alice.identity.hash_hex in reactors, \
+            "a legitimate synced reaction was dropped"

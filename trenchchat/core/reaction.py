@@ -351,6 +351,14 @@ class ReactionManager:
                     del self._emoji_request_times[stale]
             return True
 
+    def may_react(self, channel_hash_hex: str, reactor_hex: str) -> bool:
+        """Public form of the inbound reaction check, for the sync path.
+
+        A reaction arriving inside a sync batch is attacker-chosen in every
+        field, so it has to clear the same bar as one delivered directly.
+        """
+        return self._may_react(channel_hash_hex, reactor_hex)
+
     def _may_react(self, channel_hash_hex: str, sender_hex: str) -> bool:
         """Mirror the inbound authorisation Messaging applies to chat messages."""
         if not sender_hex:

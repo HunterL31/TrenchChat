@@ -79,6 +79,15 @@ from trenchchat.network.router import Router
 # Maximum messages returned in a single sync response (LXMF size budget)
 MAX_RESPONSE_MESSAGES = 50
 
+# Byte budget for one response. Every other cap here counts rows, but the cost
+# is bytes: MAX_RESPONSE_MESSAGES rows each carrying a MAX_IMAGE_BYTES image is
+# ~45 MB, far past what unpack_wire will accept at the other end -- so a window
+# holding a few images could never be synced at all, and each attempt put tens
+# of megabytes on a shared medium. Sits under MAX_WIRE_PAYLOAD with room for
+# msgpack framing. A single group still ships whole, so one oversized row is
+# never stranded.
+MAX_RESPONSE_BYTES = 1_000_000
+
 # Cap on the {author: public key} map a sync response may carry. One key per
 # author in a batch, so it can never legitimately exceed one per row.
 MAX_AUTHOR_KEYS = MAX_RESPONSE_MESSAGES
@@ -149,21 +158,44 @@ def _is_identity_hex(value: str) -> bool:
     return bool(_IDENTITY_HEX_RE.match(value))
 
 
+def row_wire_size(row) -> int:
+    """Roughly what a row costs on the wire, dominated by its attachment."""
+    try:
+        image = row["image_data"]
+    except (KeyError, IndexError):
+        image = None
+    try:
+        content = row["content"] or ""
+    except (KeyError, IndexError):
+        content = ""
+    return len(image or b"") + len(content.encode(errors="replace")) + 256
+
+
+def _cut_index(rows: list) -> int:
+    """First index past the rows that fit both the row and byte budgets."""
+    used = 0
+    for i, row in enumerate(rows):
+        used += row_wire_size(row)
+        if i >= MAX_RESPONSE_MESSAGES or (i > 0 and used > MAX_RESPONSE_BYTES):
+            return i
+    return len(rows)
+
+
 def _truncate_at_group_boundary(rows: list) -> tuple[list, bool]:
-    """Cut a batch to the response cap without splitting a timestamp group.
+    """Cut a batch to the response caps without splitting a timestamp group.
 
     Returns (rows, dropped_any). F_SYNC_WINDOW_START is a bare float and
     Storage.get_messages_after filters on a strict timestamp >, so messages
     sharing one timestamp have to travel together: whichever half landed on
     the far side of a cut would be skipped by every future sweep. A single
-    group larger than the cap ships whole rather than stalling forever --
+    group over either budget ships whole rather than stalling forever --
     the same rule _collect_permitted_rows applies while sweeping.
     """
-    if len(rows) <= MAX_RESPONSE_MESSAGES:
+    cut = _cut_index(rows)
+    if cut >= len(rows):
         return rows, False
 
-    boundary_ts = rows[MAX_RESPONSE_MESSAGES]["timestamp"]
-    cut = MAX_RESPONSE_MESSAGES
+    boundary_ts = rows[cut]["timestamp"]
     while cut > 0 and rows[cut - 1]["timestamp"] == boundary_ts:
         cut -= 1
     if cut == 0:
@@ -633,6 +665,7 @@ class SyncManager:
         past every row returned, when an entire group was withheld outright.
         """
         permitted: list = []
+        permitted_bytes = 0
         scan_cursor = window_start
         cursor_ts = window_start
         cursor_id: int | None = None
@@ -647,16 +680,20 @@ class SyncManager:
             doing so would exceed the response cap -- in which case the
             whole group is left for the next request instead of being split.
             """
-            nonlocal scan_cursor, truncated
+            nonlocal scan_cursor, truncated, permitted_bytes
             if not run_rows:
                 return True
             filtered = self._filter_rows_by_tenure(
                 channel, channel_hash_hex, requester_hex, run_rows
             )
-            if len(permitted) + len(filtered) > MAX_RESPONSE_MESSAGES:
+            group_bytes = sum(row_wire_size(r) for r in filtered)
+            over_rows = len(permitted) + len(filtered) > MAX_RESPONSE_MESSAGES
+            over_bytes = permitted and permitted_bytes + group_bytes > MAX_RESPONSE_BYTES
+            if over_rows or over_bytes:
                 truncated = True
                 return False
             permitted.extend(filtered)
+            permitted_bytes += group_bytes
             scan_cursor = run_ts
             return True
 
@@ -1058,9 +1095,12 @@ class SyncManager:
                                 responder_hex: str) -> None:
         """Store the reactions that rode along with a synced message.
 
-        Reactions are trusted exactly as far as the message body they arrive
-        with -- the responder could forge either, which is the same
-        application-layer trust gap sync already carries for content.
+        The body is bound to its author by a signature; these are not, and
+        every field is the responder's to choose. So each is authorised the
+        same way a directly delivered reaction is -- the reactor must be
+        someone who could have sent it -- and an unresolvable custom emoji is
+        ignored rather than fetched, since the reactor a fetch would be aimed
+        at is exactly what the responder picked.
         """
         reactions = m.get("reactions")
         if not isinstance(reactions, list):
@@ -1079,6 +1119,17 @@ class SyncManager:
             try:
                 reacted_at = float(r.get("at", 0.0))
             except (TypeError, ValueError):
+                continue
+
+            if not _is_identity_hex(reactor):
+                continue
+            if self._reaction_mgr is not None and \
+                    not self._reaction_mgr.may_react(channel_hash_hex, reactor):
+                RNS.log(
+                    f"TrenchChat [sync]: dropping synced reaction attributed to "
+                    f"{reactor[:12]}… on {channel_hash_hex[:12]}… — not permitted",
+                    RNS.LOG_WARNING,
+                )
                 continue
 
             self._storage.insert_reaction(

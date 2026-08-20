@@ -1814,7 +1814,11 @@ class TestReactionSync:
 # ---------------------------------------------------------------------------
 
 from trenchchat.core.sync import (  # noqa: E402
-    MAX_RESPONSE_MESSAGES, _truncate_at_group_boundary,
+    MAX_RESPONSE_BYTES, MAX_RESPONSE_MESSAGES, _truncate_at_group_boundary,
+    row_wire_size,
+)
+from trenchchat.core.image import (  # noqa: E402
+    MAX_IMAGE_BYTES,
 )
 
 
@@ -1865,3 +1869,51 @@ class TestTruncationKeepsTimestampGroupsWhole:
 
         assert len(out) == MAX_RESPONSE_MESSAGES
         assert dropped is True
+
+
+# ---------------------------------------------------------------------------
+# A response is capped in bytes, not only in rows
+# ---------------------------------------------------------------------------
+
+class TestResponseByteBudget:
+    """Every other cap counts rows, but the cost is bytes.
+
+    MAX_RESPONSE_MESSAGES rows each carrying a full-size image is ~45 MB,
+    far past what unpack_wire accepts -- so the batch was discarded as
+    malformed at the other end and the window could never sync, while each
+    attempt put tens of megabytes on a shared medium.
+    """
+
+    def _row(self, ts: float, image_len: int) -> dict:
+        return {"timestamp": ts, "content": "x",
+                "image_data": b"\x00" * image_len, "message_id": f"m{ts}"}
+
+    def test_a_batch_of_images_is_cut_by_bytes(self):
+        rows = [self._row(float(i), MAX_IMAGE_BYTES) for i in range(20)]
+        kept, dropped = _truncate_at_group_boundary(rows)
+
+        assert dropped, "an oversized batch was not truncated"
+        assert len(kept) < len(rows)
+        assert sum(row_wire_size(r) for r in kept) <= MAX_RESPONSE_BYTES
+
+    def test_a_single_oversized_row_still_ships(self):
+        """Otherwise one row past the budget stalls the channel forever."""
+        rows = [self._row(1.0, MAX_RESPONSE_BYTES * 2)]
+        kept, dropped = _truncate_at_group_boundary(rows)
+
+        assert kept == rows
+        assert not dropped
+
+    def test_small_rows_are_still_capped_by_count(self):
+        rows = [self._row(float(i), 0) for i in range(MAX_RESPONSE_MESSAGES + 10)]
+        kept, dropped = _truncate_at_group_boundary(rows)
+
+        assert dropped
+        assert len(kept) == MAX_RESPONSE_MESSAGES
+
+    def test_a_tied_timestamp_group_is_never_split(self):
+        """A group split across a cut is stranded by a strict timestamp >."""
+        rows = [self._row(1.0, MAX_IMAGE_BYTES) for _ in range(6)]
+        kept, _ = _truncate_at_group_boundary(rows)
+
+        assert len(kept) in (0, len(rows)), "a tied-timestamp group was split"
