@@ -16,7 +16,8 @@ import io
 
 from asserts import all_hold, hold_for, settle, wait_until, ScenarioFailure
 from flows import (
-    go_offline, go_online, public_channel, DISCOVERY_TIMEOUT, NEGATIVE_HOLD_SECS,
+    go_offline, go_online, invite_only_channel, public_channel,
+    DISCOVERY_TIMEOUT, NEGATIVE_HOLD_SECS,
 )
 from scenario import PROBE, scenario
 
@@ -216,3 +217,70 @@ def f8(env):
     wait_until(lambda: _reaction_count(a, ch, reply_id) == 1,
                "the reaction on the reply to reach A", DISCOVERY_TIMEOUT)
     return {}
+
+
+@scenario("social9", "A reply and a reaction resolve identically on an invite-only channel")
+def f9(env):
+    """social8's claim, re-made where recipients come from the member list
+    rather than the subscriber set and tenure gates what each member holds.
+    Every leg is a different author, so the conversation only converges if
+    member sends fan out correctly in both directions."""
+    a, b, c = env.peers("A", "B", "C")
+    ch = invite_only_channel(a, [b, c], "f9-private")
+
+    a.send(ch, "original")
+    all_hold([b, c], ch, {"original"}, timeout=DISCOVERY_TIMEOUT)
+    original_id = _first_message_id(b, ch)
+
+    b.send(ch, "the-reply", reply_to=original_id)
+    all_hold([a, c], ch, {"original", "the-reply"}, timeout=DISCOVERY_TIMEOUT)
+
+    def reply_row(peer):
+        return next((m for m in peer.messages(ch) if m["content"] == "the-reply"), None)
+
+    for peer in (a, c):
+        row = reply_row(peer)
+        if row is None or row["reply_to"] != original_id:
+            raise ScenarioFailure(f"{peer.tag} resolved reply_to as "
+                                  f"{row and row['reply_to']}, expected {original_id}")
+
+    reply_id = reply_row(c)["message_id"]
+    c.react(ch, reply_id, _emoji_hash(c, ch, reply_id))
+    for peer in (a, b):
+        wait_until(lambda peer=peer: _reaction_count(peer, ch, reply_id) == 1,
+                   f"{peer.tag} to see the reaction on the reply", DISCOVERY_TIMEOUT)
+    return {}
+
+
+@scenario("social10", "A custom emoji reaction carries its image to every peer")
+def f10(env):
+    """A custom emoji is a sha256 reaction key plus an image only the importer
+    holds; receivers must fetch the image over MT_EMOJI_REQUEST before they
+    can render what the count already shows."""
+    a, b, c = env.peers("A", "B", "C")
+    ch = public_channel(a, [b, c], "f10-public")
+
+    a.send(ch, "react-to-me")
+    all_hold([b, c], ch, {"react-to-me"}, timeout=DISCOVERY_TIMEOUT)
+    msg_id = _first_message_id(b, ch)
+
+    imported = b.import_emoji("testenv-flag", _tiny_png((30, 120, 200)))
+    if not imported.get("ok"):
+        raise ScenarioFailure(f"emoji import refused: {imported}")
+    emoji_hash = imported["emoji_hash"]
+
+    b.react(ch, msg_id, emoji_hash)
+    for peer in (a, c):
+        wait_until(lambda peer=peer: _reaction_count(peer, ch, msg_id) == 1,
+                   f"{peer.tag} to count the custom reaction", DISCOVERY_TIMEOUT)
+
+    def holds_image(peer) -> bool:
+        return any(e["emoji_hash"] == emoji_hash and e["image_data_b64"]
+                   for e in peer.emojis())
+
+    latency = {}
+    for peer in (a, c):
+        latency[peer.tag] = round(wait_until(
+            lambda peer=peer: holds_image(peer),
+            f"{peer.tag} to fetch the emoji image", 90.0), 1)
+    return {"image_fetch_secs": latency}

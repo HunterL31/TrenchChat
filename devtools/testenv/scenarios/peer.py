@@ -349,6 +349,13 @@ class Peer:
         return self._post(f"/channels/{channel_hash}/messages/{message_id}/reactions",
                           {"emoji_hash": emoji_hash})
 
+    def import_emoji(self, name: str, image_data_b64: str) -> dict:
+        return self._post("/emoji/import",
+                          {"name": name, "image_data_b64": image_data_b64})
+
+    def emojis(self) -> list[dict]:
+        return self._get("/emoji")
+
     def unreact(self, channel_hash: str, message_id: str, emoji_hash: str) -> dict:
         return self._delete(
             f"/channels/{channel_hash}/messages/{message_id}/reactions/{emoji_hash}"

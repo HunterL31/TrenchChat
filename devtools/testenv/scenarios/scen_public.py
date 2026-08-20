@@ -16,7 +16,8 @@ from asserts import (
 )
 from flows import (
     await_discovery as _await_discovery, go_offline, go_online,
-    join_all as _join_all, BACKFILL_TIMEOUT, DISCOVERY_TIMEOUT, NEGATIVE_HOLD_SECS,
+    join_all as _join_all, public_channel, BACKFILL_TIMEOUT, DISCOVERY_TIMEOUT,
+    NEGATIVE_HOLD_SECS,
 )
 from scenario import PROBE, scenario
 
@@ -280,3 +281,37 @@ def a9(env):
         "reached_departed_owner": got_a,
         "owner_still_subscribed": ch in joined_hashes(a),
     }
+
+
+@scenario("public11", "Leaving and rejoining a public channel")
+def a11(env):
+    """The round trip public7 stops halfway through: a subscriber that left
+    comes back, and the owner's next send must reach it again."""
+    a, b, c = env.peers("A", "B", "C")
+    ch = public_channel(a, [b, c], "a11-public")
+
+    a.send(ch, "before-leave")
+    all_hold([b, c], ch, {"before-leave"}, timeout=DISCOVERY_TIMEOUT)
+
+    if not b.leave(ch):
+        raise ScenarioFailure("leave was refused")
+    wait_until(lambda: b.hash not in a.subscribers(ch),
+               "A to drop B from the subscriber set", DISCOVERY_TIMEOUT)
+    a.send(ch, "while-away")
+    all_hold([c], ch, {"before-leave", "while-away"}, timeout=DISCOVERY_TIMEOUT)
+
+    _join_all([b], ch, a)
+    subscribers_converged([a, b, c], ch, timeout=DISCOVERY_TIMEOUT)
+    a.send(ch, "after-return")
+    wait_until(lambda: "after-return" in b.contents(ch),
+               "B to receive the post-return send", BACKFILL_TIMEOUT)
+    wait_until(lambda: "after-return" in c.contents(ch),
+               "C to receive it too", DISCOVERY_TIMEOUT)
+
+    # Public history is served to any subscriber (public6), so the message B
+    # missed may follow by backfill; that is a property to record, not the
+    # subject.
+    backfilled, secs = settle(lambda: "while-away" in b.contents(ch),
+                              "the missed message to backfill", 45.0)
+    return {"missed_backfilled": backfilled,
+            "backfill_secs": round(secs, 1) if backfilled else None}

@@ -15,7 +15,8 @@ from asserts import (
     rosters_identical, settle, wait_until, ScenarioFailure,
 )
 from flows import (
-    invite_and_accept, invite_only_channel, DISCOVERY_TIMEOUT, NEGATIVE_HOLD_SECS,
+    invite_and_accept, invite_only_channel, offer_invite,
+    DISCOVERY_TIMEOUT, NEGATIVE_HOLD_SECS,
 )
 from scenario import PROBE, scenario
 
@@ -24,6 +25,7 @@ SEND_MESSAGE = "send_message"
 INVITE = "invite"
 KICK = "kick"
 MANAGE_ROLES = "manage_roles"
+MANAGE_CHANNEL = "manage_channel"
 FULL_SYNC = "full_sync"
 
 ADMIN_DEFAULT = [SEND_MESSAGE, INVITE, KICK, MANAGE_ROLES]
@@ -295,3 +297,166 @@ def b13(env):
     hold_for(lambda: a.permissions(ch) == before,
              "stored permissions to stay unchanged", NEGATIVE_HOLD_SECS)
     return {"rejected": True}
+
+
+@scenario("invite14", "A promoted admin's kick takes effect everywhere")
+def b14(env):
+    """The rank invite6 and invite11 leave untested: an owner's kick works, a
+    member's dies on the wire, and an admin -- a trusted signer holding KICK --
+    is the highest rank below owner where the grant must demonstrably hold."""
+    a, b, c, d = env.peers("A", "B", "C", "D")
+    ch = invite_only_channel(a, [b, c, d], "b14-private")
+
+    if not a.set_roles(ch, add_admins=[b.hash]):
+        raise ScenarioFailure("promotion was rejected")
+    # Every peer must hold the promotion before B publishes, or B's document
+    # arrives from a signer that peer's stored list does not yet trust.
+    wait_until(lambda: all(roster(p, ch).get(b.hash) == "admin" for p in (a, b, c, d)),
+               "every peer to see B as admin", DISCOVERY_TIMEOUT)
+
+    if not b.set_roles(ch, remove_members=[d.hash]):
+        raise ScenarioFailure("the admin's kick was rejected locally")
+    wait_until(lambda: all(d.hash not in roster(p, ch) for p in (a, b, c)),
+               "D to be dropped from every remaining roster", DISCOVERY_TIMEOUT)
+
+    d.send(ch, "after-admin-kick")
+    hold_for(lambda: all("after-admin-kick" not in p.contents(ch) for p in (a, b, c)),
+             "the kicked member's message to stay rejected", NEGATIVE_HOLD_SECS)
+    return {"remaining": len(roster(a, ch))}
+
+
+@scenario("invite15", "An admin granted manage_channel can edit permissions")
+def b15(env):
+    """invite13's refusal only means something if a granted edit demonstrably
+    works. The owner opens manage_channel to admins; B's documents -- signed by
+    an admin, not the owner -- must be applied by every peer, both the
+    revocation and the re-grant that restores the silenced member."""
+    a, b, c = env.peers("A", "B", "C")
+    ch = invite_only_channel(a, [b, c], "b15-private")
+
+    granted_admin = ADMIN_DEFAULT + [MANAGE_CHANNEL]
+    if not a.set_permissions(ch, admin=granted_admin, member=MEMBER_DEFAULT):
+        raise ScenarioFailure("the owner's manage_channel grant was rejected")
+    a.set_roles(ch, add_admins=[b.hash])
+    # B may only publish once every peer trusts it as a signer holding the
+    # grant -- a document arriving ahead of the promotion is dropped for good.
+    wait_until(lambda: all(roster(p, ch).get(b.hash) == "admin" for p in (a, b, c)),
+               "every peer to see B as admin", DISCOVERY_TIMEOUT)
+    wait_until(lambda: all(MANAGE_CHANNEL in p.permissions(ch)["admin"] for p in (b, c)),
+               "every peer to hold the manage_channel grant", DISCOVERY_TIMEOUT)
+
+    if not b.set_permissions(ch, admin=granted_admin, member=[]):
+        raise ScenarioFailure("the admin's permission edit was rejected locally")
+    wait_until(lambda: all(SEND_MESSAGE not in p.permissions(ch)["member"] for p in (a, c)),
+               "the admin's revocation to be applied everywhere", DISCOVERY_TIMEOUT)
+
+    c.send(ch, "while-silenced")
+    hold_for(lambda: "while-silenced" not in a.contents(ch),
+             "the silenced member's message to stay rejected", NEGATIVE_HOLD_SECS)
+
+    if not b.set_permissions(ch, admin=granted_admin, member=MEMBER_DEFAULT):
+        raise ScenarioFailure("the admin's re-grant was rejected locally")
+    wait_until(lambda: SEND_MESSAGE in c.permissions(ch)["member"],
+               "C to see send_message restored", DISCOVERY_TIMEOUT)
+
+    c.send(ch, "after-regrant")
+    all_hold([a, b], ch, {"after-regrant"}, timeout=DISCOVERY_TIMEOUT)
+    return {}
+
+
+@scenario("invite16", "A member granted invite can admit a new peer", kind=PROBE)
+def b16(env):
+    """The invite-path twin of invite11. The grant passes every local check --
+    the token verifies, the join request is honoured -- but the admission
+    document is published by the inviter, and a plain member is not a trusted
+    signer. Prediction: the document is rejected everywhere, including by C's
+    own _accept_document, so D's token is spent for no membership at all."""
+    a, b, c, d = env.peers("A", "B", "C", "D")
+    ch = invite_only_channel(a, [b, c], "b16-private",
+                             permissions=(ADMIN_DEFAULT, MEMBER_DEFAULT + [INVITE]))
+    wait_until(lambda: INVITE in c.permissions(ch)["member"],
+               "C to hold the invite grant", DISCOVERY_TIMEOUT)
+
+    c.invite(ch, d.hash)
+    offer_invite(c, d, ch)
+    d.accept_invite(ch)
+
+    admitted_on_inviter, _ = settle(lambda: d.hash in roster(c, ch),
+                                    "the inviter to admit D locally", 45.0)
+    if admitted_on_inviter:
+        admitted_everywhere, _ = settle(
+            lambda: d.hash in roster(a, ch) and d.hash in roster(b, ch),
+            "the owner and B to admit D", 45.0,
+        )
+    else:
+        admitted_everywhere = False
+
+    notes = {
+        "admitted_on_inviter": admitted_on_inviter,
+        "admitted_everywhere": admitted_everywhere,
+        "views": roster_views([a, b, c, d], ch),
+    }
+    if admitted_everywhere:
+        notes["surprise"] = "a member-published admission document was accepted"
+    return notes
+
+
+@scenario("invite17", "Leaving an invite-only channel is noticed by the peers", kind=PROBE)
+def b17(env):
+    """leave_channel() unsubscribes locally and notifies the creator's
+    *subscriber* set -- nothing publishes a member-list update, so the
+    prediction is that the departure is invisible to everyone else: every
+    roster keeps the leaver and senders keep addressing them. The leaver's
+    own is_subscribed gate is what actually goes quiet."""
+    a, b, c = env.peers("A", "B", "C")
+    ch = invite_only_channel(a, [b, c], "b17-private")
+    a.send(ch, "before-leave")
+    all_hold([b, c], ch, {"before-leave"}, timeout=DISCOVERY_TIMEOUT)
+
+    if not c.leave(ch):
+        raise ScenarioFailure("leave was refused")
+    a.send(ch, "after-leave")
+    all_hold([b], ch, {"before-leave", "after-leave"}, timeout=DISCOVERY_TIMEOUT)
+
+    leaver_received, _ = settle(lambda: "after-leave" in c.contents(ch),
+                                "the leaver to receive a post-leave send",
+                                NEGATIVE_HOLD_SECS)
+    dropped, _ = settle(
+        lambda: c.hash not in roster(a, ch) and c.hash not in roster(b, ch),
+        "the rosters to drop the leaver", 45.0,
+    )
+    notes = {
+        "rosters_dropped_leaver": dropped,
+        "leaver_received_after_leaving": leaver_received,
+        "views": roster_views([a, b, c], ch),
+    }
+    if dropped:
+        notes["surprise"] = "the departure did propagate to the rosters"
+    return notes
+
+
+@scenario("invite18", "A kicked member can be re-invited")
+def b18(env):
+    """A kick revokes the target's outstanding invite tokens at every peer,
+    and invite_revoked_at is deliberately a moment rather than a flag so that
+    a fresh invite issued after the kick still works. This is the flow that
+    keeps moderation reversible."""
+    a, b, c = env.peers("A", "B", "C")
+    ch = invite_only_channel(a, [b, c], "b18-private")
+
+    if not a.set_roles(ch, remove_members=[c.hash]):
+        raise ScenarioFailure("the kick was rejected")
+    wait_until(lambda: all(c.hash not in roster(p, ch) for p in (a, b)),
+               "C to be dropped everywhere", DISCOVERY_TIMEOUT)
+
+    a.invite(ch, c.hash)
+    invite_and_accept(a, c, ch)
+    agreed = rosters_identical([a, b, c], ch, timeout=DISCOVERY_TIMEOUT)
+    if agreed.get(c.hash) != "member":
+        raise ScenarioFailure(
+            f"unexpected roles after re-admission: {roster_views([a, b, c], ch)}"
+        )
+
+    a.send(ch, "welcome-back")
+    all_hold([b, c], ch, {"welcome-back"}, timeout=DISCOVERY_TIMEOUT)
+    return {"members": len(agreed)}

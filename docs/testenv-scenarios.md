@@ -118,6 +118,7 @@ currently implies, and the scenario exists to confirm it.
 | public8 | A,B,C,D | All 4 joined and the subscriber set has converged; each sends 2 in turn | All four converge on 9 messages (a seed plus 8). Roster settle measured at 0.5–4.0s |
 | public9 | A,B,C,D | A (owner) leaves its own channel, then C sends | C's message still reaches B and D — the subscriber lists they already hold are unaffected by the owner leaving. The departed owner does not receive it and stays unsubscribed |
 | public10 | A,B,C,D | B, C join; C goes offline; D joins (C misses the broadcast); C returns | C learns about D and its next send reaches D. Recovery measured at 0.5s, 1.0s and 18.1s across runs — LXMF's own retry backoff, not an application-level repair |
+| public11 | A,B,C | B leaves; A sends; B rejoins; A sends again | ✅ The round trip public7 stops halfway through: the post-return send reaches B again, and the message B missed while away followed by backfill on every run (2.0–8.1s). 4/4 runs |
 
 ### `invite` — Invite-only channels and membership
 
@@ -136,6 +137,11 @@ currently implies, and the scenario exists to confirm it.
 | invite11 | A,B,C | A grants `kick` to member; C kicks B | Grant refused, not stored; C's kick returns `{"ok": false}` and B stays in every roster. 93s |
 | invite12 | A,B,C,D | A promotes B; A and B both publish a roster change within ~1s | Both documents validate against stored state; final rosters identical on all four; no split-brain |
 | invite13 | A,B,C | C (member) attempts `/channels/{h}/permissions` | `{"ok": false}` — lacks `manage_channel`; stored perms unchanged everywhere |
+| invite14 | A,B,C,D | A promotes B to admin; B kicks D | ✅ D dropped from A, B and C's rosters; D's later send rejected by all three. 4/4 runs, 39–45s. The rank invite6 and invite11 leave untested — an admin is a trusted signer, so the granted `kick` holds |
+| invite15 | A,B,C | A grants `manage_channel` to admin and promotes B; B revokes `send_message` from member, then re-grants it | ✅ Both admin-signed documents applied everywhere: C silenced after B's revocation (its send rejected by A), then heard again after B's re-grant. 4/4 runs, 40–48s. The working mirror of invite13's refusal, and the re-grant invite9 never covered |
+| invite16 | A,B,C,D | A grants `invite` to member; C (member) invites D; D accepts | ⚠ **Confirmed, worse than predicted, 4/4 runs.** The token verifies and C honours D's join request, but the admission document — signed by a plain member — is rejected by every peer *including C itself*, since `publish_member_list` applies its own document through `_accept_document`. D's token is spent, every roster is unchanged, and D ends holding no roster at all. invite11's gap, on the invite path. Re-confirmed unchanged after the second audit pass |
+| invite17 | A,B,C | C (member) leaves the invite-only channel | ⚠ **Confirmed.** The departure is invisible: `leave_channel()` unsubscribes locally and notifies only the creator's *subscriber* set, and no member-list update is published — so every roster, C's own included, keeps listing C, and senders keep addressing it. Only C's `is_subscribed` gate goes quiet: it received nothing after leaving. 4/4 runs |
+| invite18 | A,B,C | A kicks C, then re-invites; C accepts | ✅ A kick revokes C's outstanding tokens at every peer, but `invite_revoked_at` is a moment rather than a flag, so the fresh invite issued after the kick readmits C to every roster and A's next send reaches it. Moderation stays reversible. 4/4 runs, 24–36s |
 
 #### invite11: a grantable permission that could not take effect
 
@@ -166,6 +172,13 @@ Worth noting what this does to **invite10**, which asserts a member *cannot*
 kick the owner: it now passes for the right reason on the narrower rule, and
 invite7 (an admin using `kick` legitimately) is what rules out the "the
 endpoint refuses everything" reading invite11 used to cover.
+
+invite16 later confirmed the same disagreement on the invite path — a member's
+`invite` grant is honoured end-to-end right up to the document layer, where the
+admission is rejected by everyone including the inviter itself — and invite14
+and invite15 pin the boundary from the other side: the same grants demonstrably
+work at admin rank, so the gap is specific to grants below admin, not to the
+grants themselves.
 
 ### `sync` — Offline behavior and sync
 
@@ -283,6 +296,8 @@ the first ask is served and ~120s when it takes a retry.
 | social6 | A,B,C | A changes display name | ✅ Propagates; directory search finds the new name |
 | social7 | A,B,C | A adds B as a friend with a nickname | ✅ Local only — C sees nothing, B is not notified |
 | social8 | A,B,C | B replies to A's message; C reacts to the reply | ✅ `reply_to` and the reaction target resolve identically on all three |
+| social9 | A,B,C | Same conversation on an **invite-only** channel: B replies to A's message; C reacts to the reply | ✅ Resolves identically there too, 4/4 runs in 23–29s — member-list fan-out carries replies and reactions the same way the subscriber set does |
+| social10 | A,B,C | B imports a custom emoji and reacts with it | ✅ A and C converge on the count and fetch the image over `MT_EMOJI_REQUEST`, in 0.0–3.5s after the count landed. 4/4 runs |
 
 ### `restart` — Restart, persistence, ordering
 
@@ -316,6 +331,7 @@ three- and four-peer cases, and the states `docs/voice.md` is explicit about.
 | voice9 | A,B,C | All three stream the test tone for 8s | ✅ Each peer receives from both others: **384 frames, 0.0% loss, ~2ms jitter**. The full-mesh version of the smoke test's single pair |
 | voice10 | A,B,C | Five chat messages while the voice mesh streams | ✅ Text delivery unaffected (0.0s), despite sharing the interface |
 | voice11 | A,B | Voice over a `lora_fast` link, with the tone measured | ⚠️ **Two findings**: the link reports `streaming` and `loss_pct` reports ~6% while only ~8% of frames arrive. See below |
+| voice12 | A,B,C | B mutes, then unmutes, mid-call | ✅ Both peers' rosters flip `muted` within 3.0s each way — the coalesced `voice_state` refresh carries it. 4/4 runs |
 
 #### voice11: the quality metric cannot see a starved link
 
@@ -471,6 +487,8 @@ Everything the matrix turned up, across all ten families.
 |---|---|
 | **api4** — the dev environment shares one API token across every tester, and the orchestrator's unauthenticated `/config` serves it | **Confirmed** (probe). Fine for a dev box; it means port 8800 is the real trust boundary, not the tester ports |
 | **sync11** — a four-way partition reconciles only sometimes: 2 passes in 7 runs, always losing the *first* message a peer wrote in isolation | **Partly root-caused.** The watermark collision above was one cause and is fixed. The deep-sync cooldown refusing a returning peer's request silently, once per pair per 60s, is the leading candidate for the rest |
+| **invite16** — `invite` remains grantable to the member role (invite11's narrowing covers only `kick` and `manage_roles`), and the token check and join-request handler honour it, but the admission document a member publishes is rejected by every peer — including the inviter itself, whose own `_accept_document` refuses it | **Confirmed** (probe). The invitee's token is spent while membership lands nowhere. The same disagreement invite11 had, awaiting the same kind of decision: narrow the grant or admit the inviter's document. invite14 and invite15 show the identical grants working at admin rank |
+| **invite17** — leaving an invite-only channel propagates to nobody: `leave_channel()` unsubscribes locally and notifies only the creator's *subscriber* set, and no member-list update is published | **Confirmed** (probe). Every roster — the leaver's own included — keeps the departed member, and senders keep addressing it; only the leaver's `is_subscribed` gate goes quiet. A UI reading the roster shows a ghost member indefinitely. A self-removal document would hit the same trusted-signer wall as invite16, so the fix likely belongs to the owner or an admin noticing the goodbye |
 | **voice11** — `loss_pct`, the metric `docs/voice.md` designates for the UI's per-peer quality indicator, cannot see a starved link. It counts gaps between frames that arrived, so a link delivering 8% of the audio reports ~6% loss, and `link_state` still reads `streaming` | **Confirmed** across three runs. Delivery ratio (frames received against ~48/s) is the signal that shows it; `frame_stats()` has the raw counts but exposes no rate |
 | **voice5 / voice4** — a voice participant whose link drops shows `connecting` indefinitely rather than `unreachable`, and one whose process dies lingers for the roster TTL — 180s in production | **Confirmed.** Neither is wrong, but a UI showing "connecting…" for three minutes after someone crashed is not the honest state `docs/voice.md` asks for |
 | **public5** — a public-channel join fires no sync request; backfill waits on the next peer announce | **Confirmed, and deliberately left.** 0 messages at join, backfill at 1.0s / 9.1s tracking the 10s heartbeat; up to 60s in the real client, and at SF7 it never arrived at all (see the LoRa pass). Deferred by decision — public-channel behaviour is being left alone for now |
@@ -529,22 +547,22 @@ How to run it, when a scenario is the right tool, and how to add one live in
 
 ## Status
 
-All ten families built and run: **81 scenarios, 62 strict and 19 probes.**
+All ten families built and run: **90 scenarios, 69 strict and 21 probes.**
 
 | Family | Scenarios | Result |
 |---|---|---|
-| `public` — public channels | 10 (6 strict, 4 probes) | All passing, three consecutive clean runs |
-| `invite` — invite-only and membership | 13 (12 strict, 1 probe) | All passing; invite11 rewritten to the narrowed `kick` rule |
+| `public` — public channels | 11 (7 strict, 4 probes) | All passing, three consecutive clean runs |
+| `invite` — invite-only and membership | 18 (15 strict, 3 probes) | All passing; invite11 rewritten to the narrowed `kick` rule; invite16 and invite17 (probes) record the ineffective member `invite` grant and the invisible leave |
 | `sync` — offline and sync | 10 (9 strict, 1 probe) | 8/9 — **sync11 fails**, 2 passes in 7 runs. sync2 fixed, 12/12 |
 | `links` — degraded links | 10 (5 strict, 5 probes) | All passing, on genuinely shaped links |
 | `servers` — servers | 6 (5 strict, 1 probe) | All passing |
-| `social` — reactions, presence, identity | 8 (7 strict, 1 probe) | All passing; social3's prediction refuted |
+| `social` — reactions, presence, identity | 10 (9 strict, 1 probe) | All passing; social3's prediction refuted |
 | `restart` — restart and ordering | 5 (3 strict, 2 probes) | All passing; restart1 confirmed, then fixed; restart3 confirmed |
-| `voice` — live group voice | 11 (8 strict, 3 probes) | All passing; voice4, voice5 and voice11 recorded gaps |
+| `voice` — live group voice | 12 (9 strict, 3 probes) | All passing; voice4, voice5 and voice11 recorded gaps |
 | `api` — the API surface | 4 (3 strict, 1 probe) | All passing; api4 records the shared-token property |
 | `integrity` — message integrity | 4 (4 strict) | All passing; integrity2 found a real gap, now fixed and strict |
 
-**61 of 62 strict scenarios pass.** The one failure is a real defect, left
+**68 of 69 strict scenarios pass.** The one failure is a real defect, left
 strict and failing on purpose, so `--family sync` exits non-zero until it is
 resolved: sync11, intermittently (2 passes in 7). invite11 is now passing on
 the narrowed `kick` rule described above.
