@@ -105,7 +105,7 @@ class TcDialogShell extends StatelessWidget {
                 fontFamily: TCType.fontDisplay,
                 fontSize: 22,
                 height: 1.1,
-                color: TCColors.green100,
+                color: tc.textEmphasis,
               ),
             ),
             const SizedBox(height: 10),

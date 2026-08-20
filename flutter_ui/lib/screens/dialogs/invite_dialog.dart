@@ -190,7 +190,7 @@ class _InviteDialogContentState extends State<_InviteDialogContent> {
       child: MouseRegion(
         cursor: SystemMouseCursors.click,
         child: Container(
-          color: selected ? TCColors.green900 : Colors.transparent,
+          color: selected ? tc.bgSelected : Colors.transparent,
           padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
           child: Row(
             children: [
@@ -205,7 +205,7 @@ class _InviteDialogContentState extends State<_InviteDialogContent> {
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(
                     fontSize: TCType.textBodySm,
-                    color: selected ? TCColors.green100 : tc.textSecondary,
+                    color: selected ? tc.textEmphasis : tc.textSecondary,
                   ),
                 ),
               ),

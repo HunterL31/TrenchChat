@@ -148,7 +148,7 @@ class _DiscoveredRow extends StatelessWidget {
         cursor: SystemMouseCursors.click,
         child: Container(
           padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-          color: selected ? TCColors.green900 : Colors.transparent,
+          color: selected ? tc.bgSelected : Colors.transparent,
           child: Row(
             children: [
               Text('#',
@@ -160,7 +160,7 @@ class _DiscoveredRow extends StatelessWidget {
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(
                     fontSize: TCType.textBodySm,
-                    color: selected ? TCColors.green100 : tc.textSecondary,
+                    color: selected ? tc.textEmphasis : tc.textSecondary,
                   ),
                 ),
               ),

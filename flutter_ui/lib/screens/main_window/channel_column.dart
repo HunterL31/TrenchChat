@@ -98,7 +98,7 @@ class ChannelColumn extends StatelessWidget {
                       fontFamily: TCType.fontDisplay,
                       fontSize: 21,
                       height: 1.1,
-                      color: TCColors.green100,
+                      color: tc.textEmphasis,
                     ),
                   ),
                   const SizedBox(height: 2),
@@ -459,7 +459,7 @@ class _ChannelRowState extends State<_ChannelRow> {
           curve: TCEffects.easeTerminal,
           padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
           decoration: BoxDecoration(
-            color: selected ? TCColors.green900 : (_hover ? tc.bgHover : Colors.transparent),
+            color: selected ? tc.bgSelected : (_hover ? tc.bgHover : Colors.transparent),
             border: Border(
               left: BorderSide(
                 color: selected ? tc.accentPrimary : Colors.transparent,
@@ -478,7 +478,7 @@ class _ChannelRowState extends State<_ChannelRow> {
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(
                     fontSize: 13,
-                    color: selected ? TCColors.green100 : tc.textSecondary,
+                    color: selected ? tc.textEmphasis : tc.textSecondary,
                   ),
                 ),
               ),

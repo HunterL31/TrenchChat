@@ -581,7 +581,7 @@ class _NetworkMapPainter extends CustomPainter {
           fontFamily: TCType.fontMono,
           fontSize: TCType.textMicro,
           color: node.kind == MapNodeKind.self
-              ? TCColors.green100
+              ? colors.textEmphasis
               : colors.textSecondary,
           shadows: node.kind == MapNodeKind.self ? [TCEffects.textGlowGreen] : null,
         ),

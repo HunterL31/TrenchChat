@@ -343,6 +343,7 @@ class _UnlockContentState extends State<_UnlockContent> {
 
   @override
   Widget build(BuildContext context) {
+    final tc = SectionTheme.of(context);
     return TcDialogShell(
       title: 'TrenchChat — Unlock',
       width: 340,
@@ -358,7 +359,7 @@ class _UnlockContentState extends State<_UnlockContent> {
             style: TextStyle(
               fontFamily: TCType.fontDisplay,
               fontSize: TCType.textDisplaySm,
-              color: TCColors.green100,
+              color: tc.textEmphasis,
               shadows: [TCEffects.textGlowGreen],
             ),
           ),

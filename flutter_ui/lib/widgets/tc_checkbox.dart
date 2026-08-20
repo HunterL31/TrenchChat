@@ -130,7 +130,7 @@ class _ChoiceChip extends StatelessWidget {
           curve: TCEffects.easeTerminal,
           padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
           decoration: BoxDecoration(
-            color: selected ? TCColors.green900 : Colors.transparent,
+            color: selected ? tc.bgSelected : Colors.transparent,
             border: Border.all(
               color: selected ? tc.borderAccent : tc.borderDefault,
             ),
@@ -142,7 +142,7 @@ class _ChoiceChip extends StatelessWidget {
               letterSpacing: TCType.letterSpacingFor(TCType.textCaption, TCType.trackingWide),
               color: disabled
                   ? tc.textDisabled
-                  : (selected ? TCColors.green100 : tc.textSecondary),
+                  : (selected ? tc.textEmphasis : tc.textSecondary),
             ),
           ),
         ),

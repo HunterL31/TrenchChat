@@ -72,7 +72,7 @@ class ChannelHeader extends StatelessWidget {
                   child: Text(
                     channelName,
                     overflow: TextOverflow.ellipsis,
-                    style: TextStyle(color: TCColors.green100, fontSize: 15),
+                    style: TextStyle(color: tc.textEmphasis, fontSize: 15),
                   ),
                 ),
                 if (topic.isNotEmpty && !compact) ...[
@@ -169,7 +169,7 @@ class _HeaderTab extends StatelessWidget {
   Widget build(BuildContext context) {
     final tc = SectionTheme.of(context);
     final selected = tab == active;
-    final foreground = selected ? TCColors.green100 : tc.textTertiary;
+    final foreground = selected ? tc.textEmphasis : tc.textTertiary;
     return GestureDetector(
       onTap: () => onTap(tab),
       child: MouseRegion(
@@ -180,7 +180,7 @@ class _HeaderTab extends StatelessWidget {
             margin: const EdgeInsets.only(left: 2),
             padding: EdgeInsets.symmetric(horizontal: compact ? 7 : 10, vertical: 4),
             decoration: BoxDecoration(
-              color: selected ? TCColors.green900 : Colors.transparent,
+              color: selected ? tc.bgSelected : Colors.transparent,
               border: Border.all(color: selected ? tc.borderAccent : tc.borderSubtle),
             ),
             child: compact

@@ -246,7 +246,7 @@ class _IfaceTabState extends State<IfaceTab> {
       ),
       child: Row(
         children: [
-          cell(text(iface.name, color: TCColors.green100), _flexName),
+          cell(text(iface.name, color: tc.textEmphasis), _flexName),
           cell(text(iface.type), _flexType),
           cell(
             StatusDot(

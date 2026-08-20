@@ -151,7 +151,7 @@ class _AccessOption extends StatelessWidget {
           curve: TCEffects.easeTerminal,
           padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
           decoration: BoxDecoration(
-            color: selected ? TCColors.green900 : Colors.transparent,
+            color: selected ? tc.bgSelected : Colors.transparent,
             border: Border.all(color: selected ? tc.borderAccent : tc.borderDefault),
           ),
           child: Text(
@@ -159,7 +159,7 @@ class _AccessOption extends StatelessWidget {
             style: TextStyle(
               fontSize: TCType.textCaption,
               letterSpacing: TCType.letterSpacingFor(TCType.textCaption, TCType.trackingWide),
-              color: selected ? TCColors.green100 : tc.textSecondary,
+              color: selected ? tc.textEmphasis : tc.textSecondary,
             ),
           ),
         ),

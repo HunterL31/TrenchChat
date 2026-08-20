@@ -117,7 +117,7 @@ class _ServerTileState extends State<_ServerTile> {
           height: 38,
           alignment: Alignment.center,
           decoration: BoxDecoration(
-            color: selected ? TCColors.green900 : tc.bgInset,
+            color: selected ? tc.bgSelected : tc.bgInset,
             border: Border.all(
               color: selected
                   ? tc.borderAccent

@@ -120,7 +120,7 @@ void main() {
       expect(stock.statusDanger, TCColors.statusDanger);
       expect(stock.linkColor, TCColors.linkColor);
       expect(stock.linkHoverColor, TCColors.linkHoverColor);
-      expect(stock.asMap().length, 30);
+      expect(stock.asMap().length, 32);
       expect(stock.asMap().keys, TCSectionColors.tokenKeys);
     });
 

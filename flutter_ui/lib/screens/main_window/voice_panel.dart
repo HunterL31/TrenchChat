@@ -53,7 +53,7 @@ class VoicePanel extends StatelessWidget {
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(
                     fontSize: TCType.textCaption,
-                    color: TCColors.green100,
+                    color: tc.textEmphasis,
                     letterSpacing:
                         TCType.letterSpacingFor(TCType.textCaption, TCType.trackingWide),
                   ),

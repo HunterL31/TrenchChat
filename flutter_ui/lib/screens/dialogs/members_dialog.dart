@@ -189,7 +189,7 @@ class _MembersDialogContentState extends State<_MembersDialogContent> {
               overflow: TextOverflow.ellipsis,
               style: TextStyle(
                 fontSize: TCType.textBodySm,
-                color: isSelf ? TCColors.green100 : tc.textSecondary,
+                color: isSelf ? tc.textEmphasis : tc.textSecondary,
               ),
             ),
           ),

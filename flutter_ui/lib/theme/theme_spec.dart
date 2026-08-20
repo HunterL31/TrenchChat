@@ -79,11 +79,13 @@ class TCSectionColors {
     Color? bgInset,
     Color? bgHover,
     Color? bgPressed,
+    Color? bgSelected,
     Color? borderSubtle,
     Color? borderDefault,
     Color? borderStrong,
     Color? borderAccent,
     Color? textPrimary,
+    Color? textEmphasis,
     Color? textSecondary,
     Color? textTertiary,
     Color? textDisabled,
@@ -109,11 +111,13 @@ class TCSectionColors {
         bgInset = bgInset ?? TCColors.bgInset,
         bgHover = bgHover ?? TCColors.bgHover,
         bgPressed = bgPressed ?? TCColors.bgPressed,
+        bgSelected = bgSelected ?? TCColors.green900,
         borderSubtle = borderSubtle ?? TCColors.borderSubtle,
         borderDefault = borderDefault ?? TCColors.borderDefault,
         borderStrong = borderStrong ?? TCColors.borderStrong,
         borderAccent = borderAccent ?? TCColors.borderAccent,
         textPrimary = textPrimary ?? TCColors.textPrimary,
+        textEmphasis = textEmphasis ?? TCColors.green100,
         textSecondary = textSecondary ?? TCColors.textSecondary,
         textTertiary = textTertiary ?? TCColors.textTertiary,
         textDisabled = textDisabled ?? TCColors.textDisabled,
@@ -143,11 +147,13 @@ class TCSectionColors {
       bgInset: overrides['bgInset'],
       bgHover: overrides['bgHover'],
       bgPressed: overrides['bgPressed'],
+      bgSelected: overrides['bgSelected'],
       borderSubtle: overrides['borderSubtle'],
       borderDefault: overrides['borderDefault'],
       borderStrong: overrides['borderStrong'],
       borderAccent: overrides['borderAccent'],
       textPrimary: overrides['textPrimary'],
+      textEmphasis: overrides['textEmphasis'],
       textSecondary: overrides['textSecondary'],
       textTertiary: overrides['textTertiary'],
       textDisabled: overrides['textDisabled'],
@@ -176,6 +182,7 @@ class TCSectionColors {
   final Color bgInset;
   final Color bgHover;
   final Color bgPressed;
+  final Color bgSelected;
 
   final Color borderSubtle;
   final Color borderDefault;
@@ -183,6 +190,7 @@ class TCSectionColors {
   final Color borderAccent;
 
   final Color textPrimary;
+  final Color textEmphasis;
   final Color textSecondary;
   final Color textTertiary;
   final Color textDisabled;
@@ -218,11 +226,13 @@ class TCSectionColors {
     'bgInset',
     'bgHover',
     'bgPressed',
+    'bgSelected',
     'borderSubtle',
     'borderDefault',
     'borderStrong',
     'borderAccent',
     'textPrimary',
+    'textEmphasis',
     'textSecondary',
     'textTertiary',
     'textDisabled',
@@ -255,11 +265,13 @@ class TCSectionColors {
         'bgInset': bgInset,
         'bgHover': bgHover,
         'bgPressed': bgPressed,
+        'bgSelected': bgSelected,
         'borderSubtle': borderSubtle,
         'borderDefault': borderDefault,
         'borderStrong': borderStrong,
         'borderAccent': borderAccent,
         'textPrimary': textPrimary,
+        'textEmphasis': textEmphasis,
         'textSecondary': textSecondary,
         'textTertiary': textTertiary,
         'textDisabled': textDisabled,
