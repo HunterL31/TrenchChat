@@ -56,6 +56,7 @@ from trenchchat.core.invite import _sign, _signed_payload
 from trenchchat.core.permissions import (
     ALL_PERMISSIONS, FULL_SYNC, INVITE, KICK, MANAGE_CHANNEL, MANAGE_ROLES,
     PRESET_OPEN, PRESET_PRIVATE, ROLE_ADMIN, ROLE_MEMBER, ROLE_OWNER, SEND_MESSAGE,
+    is_open_join, permissions_from_json,
 )
 from trenchchat.core.subscription import SubscriptionManager, _subscriber_payload
 from trenchchat.core.protocol import (
@@ -2867,3 +2868,101 @@ class TestAdversarialRelayTampering:
         assert status["state"] != SyncState.SYNCED.value, \
             "a channel whose only answer was rejected reported itself synced"
         assert status["peers"][0]["messages_rejected"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Channel announces are discovery hints, not a channel of authority
+# ---------------------------------------------------------------------------
+
+class TestAdversarialChannelAnnounce:
+    """app_data on a channel announce is unsigned and unversioned.
+
+    RNS binds the destination hash to the announcing identity, so only a
+    channel's creator can announce it -- but "creator" is not "still in
+    charge", and the payload itself is free text either way.
+    """
+
+    def _announce(self, peer, channel_hash_hex, announcer, **metadata):
+        peer.channel_mgr._on_channel_discovered(
+            bytes.fromhex(channel_hash_hex),
+            announcer.identity.rns_identity,
+            metadata,
+        )
+
+    def _perms(self, peer, channel_hash_hex):
+        return permissions_from_json(
+            peer.storage.get_channel(channel_hash_hex)["permissions"])
+
+    def test_an_announce_cannot_open_a_private_channel(self, peer_factory):
+        """
+        open_join is what makes the inbound message handler stop checking
+        membership and SEND_MESSAGE, so flipping it opens a private
+        transcript to anyone on the mesh.
+        """
+        alice = peer_factory("alice")
+        ch_hash = alice.channel_mgr.create_channel("private", "", permissions=PRESET_PRIVATE)
+        assert not is_open_join(self._perms(alice, ch_hash))
+
+        self._announce(alice, ch_hash, alice, name="private", access="public")
+
+        assert not is_open_join(self._perms(alice, ch_hash)), \
+            "an unsigned announce flipped a private channel to open_join"
+
+    def test_an_announce_cannot_revert_a_signed_permission_change(self, peer_factory):
+        """MANAGE_CHANNEL owns this column; discovery metadata does not."""
+        alice = peer_factory("alice")
+        ch_hash = alice.channel_mgr.create_channel("open", "", permissions=PRESET_OPEN)
+
+        tightened = dict(PRESET_OPEN)
+        tightened[ROLE_MEMBER] = [SEND_MESSAGE]
+        alice.storage.set_channel_permissions(ch_hash, tightened)
+
+        self._announce(alice, ch_hash, alice, name="open", access="public")
+
+        assert self._perms(alice, ch_hash)[ROLE_MEMBER] == [SEND_MESSAGE], \
+            "a routine announce reverted a signed permission change"
+
+    def test_creator_hash_comes_from_the_announcer_not_the_payload(self, peer_factory):
+        """
+        creator_hash is a trusted-signer fallback when validating member list
+        documents, so a payload-supplied one launders signing authority.
+        """
+        alice = peer_factory("alice")
+        victim = peer_factory("victim")
+        attacker = peer_factory("attacker")
+        forged_hash = "cc" * 16
+
+        self._announce(alice, forged_hash, attacker,
+                       name="theirs", access="public",
+                       creator=victim.identity.hash_hex)
+
+        stored = alice.storage.get_channel(forged_hash)
+        assert stored["creator_hash"] == attacker.identity.hash_hex, \
+            "an announce named someone else as the channel creator"
+
+    def test_a_first_sighting_still_records_the_announced_metadata(self, peer_factory):
+        """The narrowing must not break discovery itself."""
+        alice = peer_factory("alice")
+        attacker = peer_factory("attacker")
+        new_hash = "dd" * 16
+
+        self._announce(alice, new_hash, attacker, name="fresh",
+                       description="hello", access="public")
+
+        stored = alice.storage.get_channel(new_hash)
+        assert stored["name"] == "fresh"
+        assert stored["description"] == "hello"
+        assert is_open_join(self._perms(alice, new_hash))
+
+    def test_a_later_announce_still_refreshes_name_and_description(self, peer_factory):
+        alice = peer_factory("alice")
+        attacker = peer_factory("attacker")
+        new_hash = "ee" * 16
+
+        self._announce(alice, new_hash, attacker, name="before", access="public")
+        self._announce(alice, new_hash, attacker, name="after",
+                       description="renamed", access="public")
+
+        stored = alice.storage.get_channel(new_hash)
+        assert stored["name"] == "after"
+        assert stored["description"] == "renamed"
