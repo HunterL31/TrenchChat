@@ -32,7 +32,7 @@ from trenchchat.core.protocol import (
 from trenchchat.core.permissions import PRESET_OPEN, PRESET_PRIVATE, ROLE_MEMBER
 from trenchchat.core.reaction import (
     EMOJI_FLUSH_BATCH, EMOJI_FLUSH_COOLDOWN_SECS, EMOJI_REQUEST_RETRY_SECS,
-    MAX_EMOJI_BYTES,
+    MAX_EMOJI_BYTES, MAX_EMOJI_NAME_LEN, MAX_EMOJI_REFS_PER_MESSAGE,
     ReactionManager, compute_emoji_hash,
 )
 from trenchchat.core.storage import Storage
@@ -1172,6 +1172,21 @@ class TestInlineEmojiFetch:
     custom emoji stayed as literal text forever.
     """
 
+    def _share_channel(self, storage, sender_hex: str) -> None:
+        """Put the sender in a channel we hold.
+
+        Fetching is gated on that, the same way answering a request is: a
+        message from an identity we share nothing with must not turn into an
+        outbound request per token it names.
+        """
+        channel_hex = "cc" * 16
+        storage.upsert_channel(
+            hash=channel_hex, name="test", description="",
+            creator_hash="aa" * 16, permissions=PRESET_PRIVATE, created_at=0.0,
+        )
+        storage.subscribe(channel_hex)
+        storage.upsert_member(channel_hex, sender_hex, "Member", role=ROLE_MEMBER)
+
     def _deliver_chat(self, mgr, router, sender_hex: str, content: str):
         sender_identity = MagicMock()
         sender_identity.hash = bytes.fromhex(sender_hex)
@@ -1195,6 +1210,7 @@ class TestInlineEmojiFetch:
         mgr, storage, identity, router = reaction_mgr
         emoji_hash = compute_emoji_hash(_make_png())
         sender_hex = "bb" * 16
+        self._share_channel(storage, sender_hex)
 
         sent = self._deliver_chat(
             mgr, router, sender_hex, f"look :wave@{emoji_hash}: here"
@@ -1210,6 +1226,7 @@ class TestInlineEmojiFetch:
         img = _make_png()
         emoji_hash = compute_emoji_hash(img)
         storage.insert_emoji(emoji_hash, "wave", img, time.time())
+        self._share_channel(storage, "bb" * 16)
 
         sent = self._deliver_chat(
             mgr, router, "bb" * 16, f"look :wave@{emoji_hash}: here"
@@ -1219,13 +1236,38 @@ class TestInlineEmojiFetch:
     def test_legacy_token_requests_nothing(self, reaction_mgr):
         """A :name: token carries no hash, so there is nothing to ask for."""
         mgr, storage, identity, router = reaction_mgr
+        self._share_channel(storage, "bb" * 16)
         sent = self._deliver_chat(mgr, router, "bb" * 16, "look :wave: here")
         assert sent == []
 
     def test_plain_message_requests_nothing(self, reaction_mgr):
         mgr, storage, identity, router = reaction_mgr
+        self._share_channel(storage, "bb" * 16)
         sent = self._deliver_chat(mgr, router, "bb" * 16, "no tokens at all")
         assert sent == []
+
+    def test_a_stranger_cannot_drive_any_fetch(self, reaction_mgr):
+        """No membership, no shared channel, and the path is unthrottled --
+        one received packet would otherwise buy an outbound request per token."""
+        mgr, storage, identity, router = reaction_mgr
+        emoji_hash = compute_emoji_hash(_make_png())
+
+        sent = self._deliver_chat(
+            mgr, router, "ee" * 16, f"look :wave@{emoji_hash}: here"
+        )
+        assert sent == []
+
+    def test_references_from_one_message_are_capped(self, reaction_mgr):
+        mgr, storage, identity, router = reaction_mgr
+        sender_hex = "bb" * 16
+        self._share_channel(storage, sender_hex)
+
+        hashes = [compute_emoji_hash(_make_png(color=(i, i, i)))
+                  for i in range(MAX_EMOJI_REFS_PER_MESSAGE + 4)]
+        content = " ".join(f":e{i}@{h}:" for i, h in enumerate(hashes))
+
+        sent = self._deliver_chat(mgr, router, sender_hex, content)
+        assert len(sent) == MAX_EMOJI_REFS_PER_MESSAGE
 
 
 # ---------------------------------------------------------------------------
@@ -1394,3 +1436,86 @@ class TestEmojiRequestRetry:
             mgr.flush_pending_emoji(peer_hex)
 
         assert len(sent) == EMOJI_FLUSH_BATCH
+
+
+# ---------------------------------------------------------------------------
+# Emoji is an image ingestion path like any other
+# ---------------------------------------------------------------------------
+
+def _png_declaring(width: int, height: int) -> bytes:
+    """A tiny PNG whose IHDR claims the given dimensions."""
+    import struct
+    import zlib
+
+    def chunk(kind: bytes, payload: bytes) -> bytes:
+        return (struct.pack(">I", len(payload)) + kind + payload
+                + struct.pack(">I", zlib.crc32(kind + payload) & 0xFFFFFFFF))
+
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr)
+            + chunk(b"IDAT", zlib.compress(b"\x00" * 16)) + chunk(b"IEND", b""))
+
+
+class TestEmojiImageSanity:
+    """The byte cap bounds the payload, not the raster it expands to.
+
+    Message images, sync images and avatars all check this; emoji was the one
+    ingestion path that did not, and it is the one rendered inline in the
+    transcript -- and re-served to anyone who asks for it.
+    """
+
+    def _respond_with(self, mgr, storage, image_bytes: bytes) -> str:
+        emoji_hash = compute_emoji_hash(image_bytes)
+        with mgr._lock:
+            mgr._pending_emoji_requests[emoji_hash] = time.time()
+        mgr._handle_emoji_response(_make_lxm({}), {
+            F_EMOJI_HASH: bytes.fromhex(emoji_hash),
+            F_EMOJI_DATA: image_bytes,
+            F_EMOJI_NAME: "boom",
+        })
+        return emoji_hash
+
+    def test_a_decompression_bomb_is_not_stored(self, reaction_mgr):
+        mgr, storage, identity, router = reaction_mgr
+        bomb = _png_declaring(30000, 30000)
+        assert len(bomb) < MAX_EMOJI_BYTES, "the bomb must pass the byte cap"
+
+        emoji_hash = self._respond_with(mgr, storage, bomb)
+
+        assert not storage.emoji_exists(emoji_hash), \
+            "an emoji declaring a 900-megapixel raster was stored"
+
+    def test_an_ordinary_emoji_is_still_stored(self, reaction_mgr):
+        mgr, storage, identity, router = reaction_mgr
+        emoji_hash = self._respond_with(mgr, storage, _make_png())
+        assert storage.emoji_exists(emoji_hash)
+
+    def test_import_refuses_a_bomb(self, reaction_mgr):
+        mgr, storage, identity, router = reaction_mgr
+        with pytest.raises(ValueError):
+            mgr.import_emoji("boom", _png_declaring(30000, 30000))
+
+
+class TestEmojiNameIsConstrained:
+    """Both clients resolve a legacy :name: token by exact match over the whole
+    library, so an unconstrained peer-supplied name shadows an honest one."""
+
+    def _store(self, mgr, name: str) -> str:
+        img = _make_png(color=(4, 5, 6))
+        emoji_hash = compute_emoji_hash(img)
+        with mgr._lock:
+            mgr._pending_emoji_requests[emoji_hash] = time.time()
+        mgr._handle_emoji_response(_make_lxm({}), {
+            F_EMOJI_HASH: bytes.fromhex(emoji_hash),
+            F_EMOJI_DATA: img,
+            F_EMOJI_NAME: name,
+        })
+        return emoji_hash
+
+    def test_a_name_is_trimmed_to_token_charset_and_length(self, reaction_mgr):
+        mgr, storage, identity, router = reaction_mgr
+        emoji_hash = self._store(mgr, "wa ve!" + "x" * 200)
+
+        stored = storage.get_emoji(emoji_hash)
+        assert len(stored["name"]) <= MAX_EMOJI_NAME_LEN
+        assert all(c.isalnum() or c in "_-" for c in stored["name"])

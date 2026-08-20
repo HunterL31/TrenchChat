@@ -29,6 +29,7 @@ import RNS
 import LXMF
 
 from trenchchat.core.identity import Identity
+from trenchchat.core.image import inbound_image_is_sane
 from trenchchat.core.permissions import (
     SEND_MESSAGE, is_open_join, permissions_from_json,
 )
@@ -66,9 +67,35 @@ EMOJI_FLUSH_BATCH = 6
 # blocked, and send nothing for as long as the two stayed in step.
 EMOJI_FLUSH_COOLDOWN_SECS = 30.0
 
+# Distinct emoji references acted on from one message body. Content carries no
+# length cap, and each unresolved reference costs a separate outbound request,
+# so without this one received packet buys thousands of transmissions on a
+# shared medium.
+MAX_EMOJI_REFS_PER_MESSAGE = 8
+
+# In-flight request markers kept before the oldest is dropped. Entries clear on
+# a matching response, which is exactly what a peer driving requests at
+# unresolvable hashes never sends.
+MAX_PENDING_EMOJI_REQUESTS = 256
+
+# Longest stored emoji name. Peer-supplied, and both clients resolve a legacy
+# :name: token by exact match over the whole library.
+MAX_EMOJI_NAME_LEN = 32
+
 # Matches :name@hexhash: (unambiguous) or :name: (legacy, name lookup only).
 # Group 1 = name, group 2 = 64-char SHA-256 hex, absent on legacy tokens.
 EMOJI_TOKEN_RE = re.compile(r":([a-zA-Z0-9_-]+)(?:@([0-9a-fA-F]{64}))?:")
+
+
+def _sanitise_emoji_name(name: str) -> str:
+    """Trim a peer-supplied emoji name to what a token could reference.
+
+    Both clients resolve a legacy :name: token by exact match over the whole
+    library, so an unconstrained name lets a stranger's emoji shadow one every
+    honest member already writes.
+    """
+    cleaned = "".join(c for c in name if c.isalnum() or c in "_-")
+    return cleaned[:MAX_EMOJI_NAME_LEN]
 
 _SHA256_HEX_RE = re.compile(r"^[0-9a-f]{64}$")
 
@@ -171,6 +198,8 @@ class ReactionManager:
             raise ValueError(
                 f"Emoji image is {len(image_data)} bytes, max is {MAX_EMOJI_BYTES}"
             )
+        if not inbound_image_is_sane(image_data):
+            raise ValueError("Emoji image declares an implausible decode")
         emoji_hash = compute_emoji_hash(image_data)
         self._storage.insert_emoji(emoji_hash, name, image_data, time.time())
         return emoji_hash
@@ -208,6 +237,17 @@ class ReactionManager:
         """
         if not sender_hex or ":" not in content:
             return
+        # The same gate that guards answering a request. Without it any
+        # identity that can reach us -- no membership, no shared channel --
+        # turns one inbound message into an outbound request per reference.
+        if not self._shares_any_channel(sender_hex):
+            RNS.log(
+                f"TrenchChat [reaction]: ignoring emoji references from "
+                f"{sender_hex[:12]}… — no shared channel",
+                RNS.LOG_DEBUG,
+            )
+            return
+        requested = 0
         for m in EMOJI_TOKEN_RE.finditer(content):
             emoji_hash = m.group(2)
             if not emoji_hash:
@@ -215,6 +255,14 @@ class ReactionManager:
             emoji_hash = emoji_hash.lower()
             if self._storage.emoji_exists(emoji_hash):
                 continue
+            if requested >= MAX_EMOJI_REFS_PER_MESSAGE:
+                RNS.log(
+                    f"TrenchChat [reaction]: capping emoji references from "
+                    f"{sender_hex[:12]}… at {MAX_EMOJI_REFS_PER_MESSAGE}",
+                    RNS.LOG_WARNING,
+                )
+                break
+            requested += 1
             self._request_emoji(sender_hex, emoji_hash, name=m.group(1))
 
     def flush_pending_emoji(self, peer_hex: str) -> None:
@@ -498,10 +546,18 @@ class ReactionManager:
                 return
             self._pending_emoji_requests.pop(emoji_hash, None)
 
+        if not inbound_image_is_sane(emoji_data):
+            RNS.log(
+                f"TrenchChat [reaction]: rejected emoji {emoji_hash[:12]}… — "
+                f"implausible decode for {len(emoji_data)} bytes",
+                RNS.LOG_WARNING,
+            )
+            return
+
         name_raw = fields.get(F_EMOJI_NAME, "")
         if isinstance(name_raw, bytes):
             name_raw = name_raw.decode(errors="replace")
-        name = str(name_raw) or emoji_hash[:8]
+        name = _sanitise_emoji_name(str(name_raw)) or emoji_hash[:8]
 
         if not self._storage.emoji_exists(emoji_hash):
             self._storage.insert_emoji(
@@ -571,6 +627,16 @@ class ReactionManager:
                     RNS.LOG_WARNING,
                 )
 
+    def _prune_pending_requests_locked(self, now: float) -> None:
+        """Drop expired in-flight markers, then the oldest past the cap."""
+        for h in [h for h, t in self._pending_emoji_requests.items()
+                  if now - t >= EMOJI_REQUEST_RETRY_SECS]:
+            del self._pending_emoji_requests[h]
+        while len(self._pending_emoji_requests) >= MAX_PENDING_EMOJI_REQUESTS:
+            oldest = min(self._pending_emoji_requests,
+                         key=self._pending_emoji_requests.get)
+            del self._pending_emoji_requests[oldest]
+
     def _request_emoji(self, peer_hex: str, emoji_hash: str,
                        name: str = "") -> None:
         """Send MT_EMOJI_REQUEST to a peer to obtain the emoji image bytes.
@@ -583,6 +649,7 @@ class ReactionManager:
             last = self._pending_emoji_requests.get(emoji_hash)
             if last is not None and now - last < EMOJI_REQUEST_RETRY_SECS:
                 return
+            self._prune_pending_requests_locked(now)
             self._pending_emoji_requests[emoji_hash] = now
 
         try:
