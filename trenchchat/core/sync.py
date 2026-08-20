@@ -122,6 +122,17 @@ DEEP_SYNC_COOLDOWN_SECS = 60
 # that cooldown will actually serve rather than inside the one that refused.
 SYNC_RETRY_SECS = 90.0
 
+# Consecutive unanswered re-asks to one peer on one channel before we stop.
+# A peer that keeps its path resolvable and simply never answers would
+# otherwise draw one whole-transcript request out of every member, forever --
+# and since our progress with them never advances, every retry asks for
+# everything. Resets as soon as they answer.
+MAX_SYNC_RETRIES = 5
+
+# Multiplier applied per consecutive unanswered re-ask, so a silent peer is
+# asked at a widening interval rather than a flat one.
+SYNC_RETRY_BACKOFF = 2.0
+
 # How long an idle (channel, peer) cooldown entry is kept before being
 # pruned, so the cooldown map doesn't grow unbounded over a long session
 # with many distinct peers.
@@ -242,6 +253,8 @@ class SyncManager:
         # Held no longer than a requester will accept an answer for: past
         # that they discard it as unsolicited and ask again anyway.
         self._retry = ControlRetryQueue("sync", SYNC_RESPONSE_WINDOW_SECS)
+        # (channel_hash_hex, peer_hex) -> consecutive unanswered re-asks.
+        self._retry_counts: dict[tuple[str, str], int] = {}
 
         # (channel_hash_hex, peer_hex) -> continuation requests chained so far
         self._continuations: dict[tuple[str, str], int] = {}
@@ -839,6 +852,7 @@ class SyncManager:
             )
             return
         requested_since, peer_hex = claim
+        self._clear_retry_budget(channel_hash_hex, peer_hex)
 
         # A malformed answer still answers the request.  Leaving the peer
         # pending would strand the channel reporting "syncing" for the rest of
@@ -1310,7 +1324,9 @@ class SyncManager:
         with self._pending_requests_lock:
             for (channel_hash_hex, _form), entries in self._pending_requests.items():
                 for asked_at, _since, dest_hex, _req_id in entries:
-                    if now - asked_at >= SYNC_RETRY_SECS:
+                    tries = self._retry_counts.get((channel_hash_hex, dest_hex), 0)
+                    due = SYNC_RETRY_SECS * (SYNC_RETRY_BACKOFF ** tries)
+                    if now - asked_at >= due:
                         stale.setdefault(channel_hash_hex, set()).add(dest_hex)
 
         for channel_hash_hex, peers in stale.items():
@@ -1318,10 +1334,21 @@ class SyncManager:
                 continue
             for peer_hex in peers:
                 self._expire_pending_requests(channel_hash_hex, peer_hex, now)
+                key = (channel_hash_hex, peer_hex)
+                tries = self._retry_counts.get(key, 0)
+                if tries >= MAX_SYNC_RETRIES:
+                    RNS.log(
+                        f"TrenchChat [sync]: giving up re-asking {peer_hex[:12]}… "
+                        f"for {channel_hash_hex[:12]}… after {tries} tries",
+                        RNS.LOG_DEBUG,
+                    )
+                    continue
+                self._retry_counts[key] = tries + 1
                 since_ts = self._storage.get_peer_sync_progress(channel_hash_hex, peer_hex)
                 RNS.log(
                     f"TrenchChat [sync]: re-asking {peer_hex[:12]}… for "
-                    f"{channel_hash_hex[:12]}… — no answer to the last request",
+                    f"{channel_hash_hex[:12]}… — no answer to the last request "
+                    f"(try {tries + 1})",
                     RNS.LOG_DEBUG,
                 )
                 self._send_sync_request(peer_hex, channel_hash_hex, since_ts)
@@ -1376,6 +1403,10 @@ class SyncManager:
                     entries.pop()
                 if not entries:
                     del self._pending_requests[key]
+
+    def _clear_retry_budget(self, channel_hash_hex: str, peer_hex: str) -> None:
+        """An answer means the peer is talking to us; start the count over."""
+        self._retry_counts.pop((channel_hash_hex, peer_hex), None)
 
     def _claim_pending_request(self, channel_hash_hex: str,
                                responder_hex: str) -> tuple[float, str] | None:
@@ -1451,6 +1482,15 @@ class SyncManager:
             self._deep_sync_last_served[key] = (now, policy)
             return True
 
+    # Message types the generic retry queue must not hold. A sync request is
+    # re-issued by on_peer_appeared and by tick(), and only through
+    # _send_sync_request, which is what records a claimable pending entry --
+    # a queued copy arrives with none, so its answer is dropped as unsolicited
+    # while still consuming the responder's deep-sync budget for that pair.
+    # Hints have their own _pending_hints queue, and holding them in both sent
+    # each one twice to every reachable subscriber.
+    _RETRY_EXEMPT_TYPES = (MT_SYNC_REQUEST, MT_MISSED_DELIVERY)
+
     def _send_raw(self, dest_hex: str, fields: dict) -> bool:
         """Send a control message to a peer. Returns False if it couldn't go out."""
         try:
@@ -1464,7 +1504,8 @@ class SyncManager:
                 # silence, which it cannot tell from a refusal, and nothing
                 # ever re-sends the answer (sync2 in docs/testenv-scenarios.md).
                 RNS.Transport.request_path(delivery_dest_hash)
-                self._retry.queue(dest_hex, fields)
+                if fields.get(F_MSG_TYPE) not in self._RETRY_EXEMPT_TYPES:
+                    self._retry.queue(dest_hex, fields)
                 return False
             dest = RNS.Destination(
                 dest_identity,
