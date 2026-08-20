@@ -4,6 +4,7 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 
 import '../theme/tokens.dart';
+import 'peer_image.dart';
 import 'status_dot.dart';
 
 class Avatar extends StatelessWidget {
@@ -34,12 +35,7 @@ class Avatar extends StatelessWidget {
           if (imageBytes != null)
             ClipRRect(
               borderRadius: BorderRadius.circular(TCSpace.radiusSm),
-              child: Image.memory(
-                imageBytes!,
-                width: size,
-                height: size,
-                fit: BoxFit.cover,
-              ),
+              child: peerImage(imageBytes!, size: size, fit: BoxFit.cover),
             )
           else
             Container(

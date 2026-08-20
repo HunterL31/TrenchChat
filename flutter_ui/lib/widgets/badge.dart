@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 
 import '../theme/effects.dart';
 import '../theme/tokens.dart';
+import 'peer_image.dart';
 
 final RegExp _sha256Hex = RegExp(r'^[0-9a-fA-F]{64}$');
 
@@ -60,8 +61,7 @@ class _ReactionChipState extends State<ReactionChip> {
             mainAxisSize: MainAxisSize.min,
             children: [
               if (widget.imageBytes != null)
-                Image.memory(widget.imageBytes!, width: 14, height: 14,
-                    filterQuality: FilterQuality.medium)
+                peerImage(widget.imageBytes!, size: 14)
               else
                 Text(
                   _sha256Hex.hasMatch(widget.emoji) ? '?' : widget.emoji,
