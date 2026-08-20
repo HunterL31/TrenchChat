@@ -917,6 +917,35 @@ class TestAuthorKeyTravelsWithTheBatch:
         assert accepted is False, "a key that is not the author's was cached as theirs"
         assert receiver.storage.get_identity_key(author.identity.hash_hex) is None
 
+    def test_an_oversized_author_key_map_is_refused_whole(self, peer_factory):
+        """
+        The map is the one bulk container carried as a bare LXMF dict rather
+        than as bytes through unpack_wire, so nothing else bounds it -- and an
+        identity hash is derived *from* its key, so valid pairs cost a hash
+        rather than a keypair.
+        """
+        import hashlib
+
+        from trenchchat.core.sync import MAX_AUTHOR_KEYS
+
+        receiver = peer_factory("receiver")
+        flood = {}
+        for i in range(MAX_AUTHOR_KEYS + 1):
+            key = hashlib.sha512(str(i).encode()).digest()[:64]
+            flood[hashlib.sha256(key).hexdigest()[:32]] = key
+
+        receiver.sync_mgr._learn_author_keys(flood)
+
+        assert all(receiver.storage.get_identity_key(h) is None for h in flood), \
+            "an unbounded author-key map was ingested"
+
+    def test_a_non_string_author_key_does_not_raise(self, peer_factory):
+        """It reaches a log line that slices the key; an int aborted the whole
+        response after its pending request had already been claimed."""
+        receiver = peer_factory("receiver")
+        receiver.sync_mgr._learn_author_keys({1: b"\x00" * 64})
+        receiver.sync_mgr._learn_author_keys({b"not-hex": b"\x00" * 64})
+
 
 # ---------------------------------------------------------------------------
 # A10 -- the answer to a request from a peer we cannot yet address

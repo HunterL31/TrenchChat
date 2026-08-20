@@ -45,8 +45,10 @@ grant that was still propagating when the request landed can be picked up
 later rather than being lost behind a watermark that ran past it.
 """
 
+import re
 import threading
 import time
+
 import RNS
 import LXMF
 import msgpack
@@ -76,6 +78,10 @@ from trenchchat.network.router import Router
 
 # Maximum messages returned in a single sync response (LXMF size budget)
 MAX_RESPONSE_MESSAGES = 50
+
+# Cap on the {author: public key} map a sync response may carry. One key per
+# author in a batch, so it can never legitimately exceed one per row.
+MAX_AUTHOR_KEYS = MAX_RESPONSE_MESSAGES
 
 # Reactions ride along with each synced message so backfilled history isn't
 # stripped of them. Capped per message to bound the response size.
@@ -129,11 +135,18 @@ MAX_SYNC_CONTINUATIONS = 20
 MAX_QUEUED_HINTS_PER_PEER = 50
 
 
+_IDENTITY_HEX_RE = re.compile(r"^[0-9a-f]{32}$")
+
+
 def _coerce_str(value) -> str:
     """Decode a msgpack field that may arrive as bytes rather than str."""
     if isinstance(value, bytes):
         return value.decode(errors="replace")
     return str(value) if value is not None else ""
+
+
+def _is_identity_hex(value: str) -> bool:
+    return bool(_IDENTITY_HEX_RE.match(value))
 
 
 def _truncate_at_group_boundary(rows: list) -> tuple[list, bool]:
@@ -1104,13 +1117,29 @@ class SyncManager:
         return keys
 
     def _learn_author_keys(self, keys) -> None:
-        """Cache the keys a responder sent with its batch, checking each one."""
+        """Cache the keys a responder sent with its batch, checking each one.
+
+        Bounded because this map is the one bulk container carried as a bare
+        LXMF dict rather than as bytes through unpack_wire, so nothing else
+        caps it. Every pair is self-certifying, but an identity hash is
+        derived *from* its key -- so a valid pair costs a hash, not a keypair,
+        and an unbounded map is a free way to grow identity_keys for good.
+        _author_keys_for never emits more than one key per row in a batch.
+        """
         if not isinstance(keys, dict):
             return
+        if len(keys) > MAX_AUTHOR_KEYS:
+            RNS.log(
+                f"TrenchChat [sync]: refusing an author-key map of {len(keys)} "
+                f"entries (max {MAX_AUTHOR_KEYS})",
+                RNS.LOG_WARNING,
+            )
+            return
         for author, key in keys.items():
-            if isinstance(author, bytes):
-                author = author.decode(errors="replace")
-            remember_relayed_key(self._storage, author, key)
+            author_hex = _coerce_str(author)
+            if not _is_identity_hex(author_hex):
+                continue
+            remember_relayed_key(self._storage, author_hex, key)
 
     @staticmethod
     def _row_to_dict(row) -> dict:
