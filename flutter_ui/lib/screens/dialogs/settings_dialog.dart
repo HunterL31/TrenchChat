@@ -165,7 +165,7 @@ class _SettingsDialogContentState extends State<_SettingsDialogContent> {
                     'LOADING…',
                     style: TextStyle(
                       fontSize: TCType.textCaption,
-                      color: TCColors.textTertiary,
+                      color: tc.textTertiary,
                       letterSpacing:
                           TCType.letterSpacingFor(TCType.textCaption, TCType.trackingWide),
                     ),
@@ -179,11 +179,11 @@ class _SettingsDialogContentState extends State<_SettingsDialogContent> {
                 child: ListView(
                   shrinkWrap: true,
                   children: [
-                    _sectionLabel('IDENTITY'),
+                    _sectionLabel(tc, 'IDENTITY'),
                     const SizedBox(height: 8),
                     TcTextField(label: 'Display name', controller: _displayName),
                     const SizedBox(height: 10),
-                    _readonlyRow('Identity hash', widget.state.meHashHex),
+                    _readonlyRow(tc, 'Identity hash', widget.state.meHashHex),
                     const SizedBox(height: 10),
                     TcTextField(
                       label: 'Propagation node',
@@ -191,9 +191,9 @@ class _SettingsDialogContentState extends State<_SettingsDialogContent> {
                       hintText: 'Leave blank to use direct delivery only',
                     ),
                     const SizedBox(height: 16),
-                    Container(height: 1, color: TCColors.borderSubtle),
+                    Container(height: 1, color: tc.borderSubtle),
                     const SizedBox(height: 12),
-                    _sectionLabel('PROPAGATION NODE'),
+                    _sectionLabel(tc, 'PROPAGATION NODE'),
                     const SizedBox(height: 8),
                     TcCheckbox(
                       value: _propEnabled,
@@ -213,7 +213,7 @@ class _SettingsDialogContentState extends State<_SettingsDialogContent> {
                       'CHANNEL FILTER',
                       style: TextStyle(
                         fontSize: TCType.textCaption,
-                        color: TCColors.textSecondary,
+                        color: tc.textSecondary,
                         letterSpacing:
                             TCType.letterSpacingFor(TCType.textCaption, TCType.trackingWide),
                       ),
@@ -225,9 +225,9 @@ class _SettingsDialogContentState extends State<_SettingsDialogContent> {
                       onSelected: (v) => setState(() => _filterMode = v),
                     ),
                     const SizedBox(height: 16),
-                    Container(height: 1, color: TCColors.borderSubtle),
+                    Container(height: 1, color: tc.borderSubtle),
                     const SizedBox(height: 12),
-                    _sectionLabel('SECURITY'),
+                    _sectionLabel(tc, 'SECURITY'),
                     const SizedBox(height: 8),
                     Text(
                       _sessionPin != null
@@ -235,7 +235,7 @@ class _SettingsDialogContentState extends State<_SettingsDialogContent> {
                           : 'No PIN is set. Your identity file and message database '
                               'are stored unencrypted.',
                       style: TextStyle(
-                          fontSize: TCType.textBodySm, color: TCColors.textSecondary),
+                          fontSize: TCType.textBodySm, color: tc.textSecondary),
                     ),
                     const SizedBox(height: 8),
                     Row(
@@ -254,14 +254,29 @@ class _SettingsDialogContentState extends State<_SettingsDialogContent> {
                       'The lock screen and PIN dialogs are UI-only in this spike '
                       '— the lockbox is not reachable over the API yet.',
                       style: TextStyle(
-                          fontSize: TCType.textMicro, color: TCColors.textTertiary),
+                          fontSize: TCType.textMicro, color: tc.textTertiary),
+                    ),
+                    const SizedBox(height: 16),
+                    Container(height: 1, color: tc.borderSubtle),
+                    const SizedBox(height: 12),
+                    _sectionLabel(tc, 'APPEARANCE'),
+                    const SizedBox(height: 8),
+                    Text(
+                      _themeSummary,
+                      style: TextStyle(fontSize: TCType.textBodySm, color: tc.textSecondary),
+                    ),
+                    const SizedBox(height: 8),
+                    Row(
+                      children: [
+                        TcGhostButton(label: 'EDIT COLORS…', onPressed: _onEditColors),
+                      ],
                     ),
                     if (_filterMode == 'allowlist' && _allChannels.isNotEmpty) ...[
                       const SizedBox(height: 10),
                       Container(
                         decoration: BoxDecoration(
-                          color: TCColors.bgInset,
-                          border: Border.all(color: TCColors.borderDefault),
+                          color: tc.bgInset,
+                          border: Border.all(color: tc.borderDefault),
                         ),
                         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
                         child: Column(
@@ -293,6 +308,22 @@ class _SettingsDialogContentState extends State<_SettingsDialogContent> {
     );
   }
 
+  /// One line describing how far the saved theme departs from stock.
+  String get _themeSummary {
+    final spec = widget.state.themeSpec;
+    if (spec.isEmpty) return 'Using the stock palette.';
+    final tokens = spec.base.length +
+        spec.sections.values.fold<int>(0, (sum, tokens) => sum + tokens.length);
+    final scopes = spec.sections.length + (spec.base.isEmpty ? 0 : 1);
+    return '$tokens color${tokens == 1 ? '' : 's'} customized '
+        'across $scopes scope${scopes == 1 ? '' : 's'}.';
+  }
+
+  Future<void> _onEditColors() async {
+    await showAppearanceDialog(context, widget.state);
+    if (mounted) setState(() {});
+  }
+
   Future<void> _onSetPin() async {
     final pin = await showSetPinDialog(context);
     if (pin != null && mounted) setState(() => _sessionPin = pin);
@@ -310,23 +341,23 @@ class _SettingsDialogContentState extends State<_SettingsDialogContent> {
     await showUnlockDialog(context, verifyPin: (pin) => pin == _sessionPin);
   }
 
-  Widget _sectionLabel(String label) => Text(
+  Widget _sectionLabel(TCSectionColors tc, String label) => Text(
         label,
         style: TextStyle(
           fontSize: TCType.textCaption,
-          color: TCColors.accentPrimary,
+          color: tc.accentPrimary,
           letterSpacing: TCType.letterSpacingFor(TCType.textCaption, TCType.trackingWider),
         ),
       );
 
-  Widget _readonlyRow(String label, String value) => Column(
+  Widget _readonlyRow(TCSectionColors tc, String label, String value) => Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Text(
             label.toUpperCase(),
             style: TextStyle(
               fontSize: TCType.textCaption,
-              color: TCColors.textSecondary,
+              color: tc.textSecondary,
               letterSpacing:
                   TCType.letterSpacingFor(TCType.textCaption, TCType.trackingWide),
             ),
@@ -334,7 +365,7 @@ class _SettingsDialogContentState extends State<_SettingsDialogContent> {
           const SizedBox(height: 6),
           SelectableText(
             value,
-            style: TextStyle(fontSize: TCType.textBodySm, color: TCColors.textTertiary),
+            style: TextStyle(fontSize: TCType.textBodySm, color: tc.textTertiary),
           ),
         ],
       );
