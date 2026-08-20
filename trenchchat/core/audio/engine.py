@@ -229,38 +229,67 @@ class AudioPipeline:
                     RNS.LOG_ERROR)
 
     def _playout_loop(self) -> None:
+        """Mix one frame per peer per tick.
+
+        Wrapped whole: this thread is the only thing driving playback, and
+        nothing restarts it, so an exception escaping here silences the
+        session while audio_status() still reports it available.
+        """
         from trenchchat.core.audio.mixer import mix
 
         interval = VOICE_FRAME_MS / 1000.0
         next_at = time.monotonic()
         while self._running:
-            next_at += interval
-            decoded: list[bytes] = []
-            with self._peer_lock:
-                peers = list(self._jitter.items())
-            for peer_hex, buffer in peers:
-                frame = buffer.pop()
-                decoder = self._decoders.get(peer_hex)
-                if decoder is None:
-                    continue
-                if frame is None and buffer.depth() == 0:
-                    continue  # silent, not a mid-stream gap: skip PLC
-                try:
-                    decoded.append(decoder.decode(frame))
-                except Exception as e:
-                    RNS.log(f"TrenchChat [voice]: decode error: {e}",
-                            RNS.LOG_DEBUG)
-            if decoded:
-                block = mix(decoded)
-                try:
-                    self._pcm_out.put_nowait(block)
-                except queue.Full:
-                    pass
-            delay = next_at - time.monotonic()
-            if delay > 0:
-                time.sleep(delay)
-            else:
-                next_at = time.monotonic()
+            try:
+                next_at = self._playout_tick(mix, next_at, interval)
+            except Exception as e:
+                RNS.log(f"TrenchChat [voice]: playout error: {e}", RNS.LOG_ERROR)
+                next_at = time.monotonic() + interval
+                time.sleep(interval)
+
+    def _playout_tick(self, mix, next_at: float, interval: float) -> float:
+        next_at += interval
+        decoded: list[bytes] = []
+        with self._peer_lock:
+            peers = list(self._jitter.items())
+        for peer_hex, buffer in peers:
+            frame = buffer.pop()
+            decoder = self._decoders.get(peer_hex)
+            if decoder is None:
+                continue
+            if frame is None and buffer.depth() == 0:
+                continue  # silent, not a mid-stream gap: skip PLC
+            try:
+                pcm = decoder.decode(frame)
+            except Exception as e:
+                RNS.log(f"TrenchChat [voice]: decode error: {e}",
+                        RNS.LOG_DEBUG)
+                continue
+            # Opus returns as many samples as the packet actually held, so
+            # a peer encoding at 10 ms yields half a frame. mix() sums
+            # int16 arrays and raises on a length mismatch, and this loop
+            # is the only thing driving playback.
+            if len(pcm) != FRAME_PCM_BYTES:
+                RNS.log(
+                    f"TrenchChat [voice]: dropping a {len(pcm)}-byte frame "
+                    f"from {peer_hex[:12]}… (expected {FRAME_PCM_BYTES})",
+                    RNS.LOG_DEBUG,
+                )
+                continue
+            decoded.append(pcm)
+        if decoded:
+            try:
+                self._pcm_out.put_nowait(mix(decoded))
+            except queue.Full:
+                pass
+            except Exception as e:
+                RNS.log(f"TrenchChat [voice]: mix error: {e}", RNS.LOG_WARNING)
+        delay = next_at - time.monotonic()
+        if delay > 0:
+            time.sleep(delay)
+        else:
+            next_at = time.monotonic()
+        return next_at
 
 
 class TonePipeline:

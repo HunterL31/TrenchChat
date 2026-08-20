@@ -215,6 +215,22 @@ class VoiceManager:
 
     # --- roster read model ---
 
+    def _link_only_peers(self, channel_hash_hex: str, known: set[str]) -> list[dict]:
+        """Entries for peers we are streaming with but never heard signalling.
+
+        docs/voice.md makes established links the ground truth for who you
+        actually hear, but the roster is built from the presence hint alone --
+        so a peer that skips signalling is audible and invisible.
+        """
+        if channel_hash_hex != self._session_channel:
+            return []
+        return [
+            {"identity_hash": peer_hex, "muted": False, "joined_at": 0.0,
+             "link_state": self._transport.peer_state(peer_hex),
+             "speaking": self._speaking.get(peer_hex, False)}
+            for peer_hex in sorted(self._transport.connected_peers() - known)
+        ]
+
     def get_roster(self, channel_hash_hex: str) -> list[dict]:
         """Current voice occupants of a channel, freshest signal first."""
         now = time.time()
@@ -234,6 +250,8 @@ class VoiceManager:
                                                    peer_hex, now),
                 "speaking": self._speaking.get(peer_hex, False),
             })
+        result.extend(self._link_only_peers(
+            channel_hash_hex, {r["identity_hash"] for r in result}))
         result.sort(key=lambda r: r["joined_at"])
         return result
 
@@ -333,14 +351,26 @@ class VoiceManager:
             channel_hash_hex, sender_hex, VOICE_CHAT)
 
     def _authorize_link(self, peer_hex: str, channel_hash_hex: str) -> bool:
-        """Transport authorize callback for inbound link handshakes."""
+        """Transport authorize callback for inbound link handshakes.
+
+        Occupancy counts established links as well as the signalled roster.
+        The roster is built only from LXMF signalling, so a peer that dials
+        in without ever sending voice_join is in neither it nor the count --
+        and links are what actually drive fan-out, which is the whole reason
+        the cap exists.
+        """
         if channel_hash_hex != self._session_channel:
             return False
         now = time.time()
         with self._lock:
             live = self._live_roster(channel_hash_hex, now)
-        occupants = set(live) | {peer_hex}
+        occupants = set(live) | self._transport.connected_peers() | {peer_hex}
         if len(occupants) > MAX_VOICE_PARTICIPANTS:
+            RNS.log(
+                f"TrenchChat [voice]: refusing {peer_hex[:12]}… — "
+                f"{len(occupants)} would exceed {MAX_VOICE_PARTICIPANTS}",
+                RNS.LOG_WARNING,
+            )
             return False
         return self._peer_may_voice(channel_hash_hex, peer_hex)
 
