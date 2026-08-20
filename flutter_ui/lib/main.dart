@@ -12,9 +12,25 @@ import 'theme/tokens.dart';
 /// Tester A defaults to :8801 when running orchestrator.py --testers 2.
 const String defaultBaseUrl = 'http://127.0.0.1:8801';
 
+/// Whether an `?api=` override points at the page's own host.
+///
+/// Port may differ -- that is the multi-tester layout it exists for -- but the
+/// host may not, and the scheme has to be one the client can actually talk.
+bool _isSameHost(String api, Uri page) {
+  final target = Uri.tryParse(api);
+  if (target == null || !target.hasAuthority) return false;
+  if (target.scheme != 'http' && target.scheme != 'https') return false;
+  return target.host.toLowerCase() == page.host.toLowerCase();
+}
+
 /// Backend address resolution, in priority order:
 /// 1. `--dart-define=TC_API_URL=...` baked in at build time.
-/// 2. On web, the page's `?api=` query parameter.
+/// 2. On web, the page's `?api=` query parameter, restricted to the page's own
+///    host. The orchestrator serves its page and each tester API on different
+///    ports of one host, which is the case this exists for; without the
+///    restriction any page could send someone to
+///    `http://127.0.0.1:8810/?api=https://evil.tld`, where the real client
+///    loads from their own origin and sends everything they type elsewhere.
 /// 3. On web, the page origin -- covers serve_profile.py (and anything else)
 ///    hosting the client and the API on one port, which is what makes a
 ///    remotely tunnelled or LAN-served page work with no configuration.
@@ -28,7 +44,7 @@ String resolveBaseUrl({Uri? pageUri, bool isWeb = kIsWeb,
   if (isWeb) {
     final uri = pageUri ?? Uri.base;
     final api = uri.queryParameters['api'];
-    if (api != null && api.isNotEmpty) return api;
+    if (api != null && api.isNotEmpty && _isSameHost(api, uri)) return api;
     return uri.origin;
   }
   final fromEnv = (environment ?? Platform.environment)['TC_API_URL'];

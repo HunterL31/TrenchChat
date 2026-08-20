@@ -8,6 +8,7 @@ import 'package:flutter/material.dart';
 import '../../app_state.dart';
 import '../../theme/effects.dart';
 import '../../theme/tokens.dart';
+import '../../widgets/peer_image.dart';
 import '../../widgets/tc_dialog.dart';
 import '../../widgets/tc_text_field.dart';
 import 'emoji_import_dialog.dart';
@@ -131,8 +132,7 @@ class _EmojiPickerContentState extends State<_EmojiPickerContent> {
                               composeToken: ':${e.name}@${e.emojiHash}:',
                             ),
                           ),
-                          child: Image.memory(e.imageBytes,
-                              width: 24, height: 24, filterQuality: FilterQuality.medium),
+                          child: peerImage(e.imageBytes, size: 24),
                         ),
                     ],
                   ),

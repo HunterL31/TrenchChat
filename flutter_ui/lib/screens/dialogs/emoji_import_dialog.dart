@@ -9,6 +9,7 @@ import 'package:flutter/material.dart';
 
 import '../../app_state.dart';
 import '../../theme/tokens.dart';
+import '../../widgets/peer_image.dart';
 import '../../widgets/tc_button.dart';
 import '../../widgets/tc_dialog.dart';
 import '../../widgets/tc_text_field.dart';
@@ -142,8 +143,7 @@ class _EmojiImportContentState extends State<_EmojiImportContent> {
               border: Border.all(color: TCColors.borderDefault),
             ),
             child: _imageBytes != null
-                ? Image.memory(_imageBytes!, width: 56, height: 56,
-                    filterQuality: FilterQuality.medium)
+                ? peerImage(_imageBytes!, size: 56)
                 : Text(
                     'NO IMAGE',
                     style: TextStyle(

@@ -5,6 +5,7 @@
 import 'package:flutter/material.dart';
 
 import '../api/models/emoji.dart';
+import 'peer_image.dart';
 
 final RegExp emojiTokenRe = RegExp(r':([a-zA-Z0-9_-]+)(?:@([0-9a-fA-F]{64}))?:');
 
@@ -35,12 +36,7 @@ List<InlineSpan> emojiSpans(
       alignment: PlaceholderAlignment.middle,
       child: Tooltip(
         message: ':${emoji.name}:',
-        child: Image.memory(
-          emoji.imageBytes,
-          width: _inlineEmojiSize,
-          height: _inlineEmojiSize,
-          filterQuality: FilterQuality.medium,
-        ),
+        child: peerImage(emoji.imageBytes, size: _inlineEmojiSize),
       ),
     ));
     last = m.end;
