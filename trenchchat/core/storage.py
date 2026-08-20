@@ -822,6 +822,21 @@ class Storage:
                   time.time(), server_hash))
             self._scope_cache.pop(hash, None)
 
+    def update_discovered_metadata(self, hash: str, name: str,
+                                   description: str) -> None:
+        """Refresh a known channel's presentation fields from an announce.
+
+        Deliberately narrower than upsert_channel: announce app_data is
+        unsigned and unversioned, so it may not touch permissions, which
+        signed member list documents own.
+        """
+        with self._tx():
+            self._conn.execute("""
+                UPDATE channels SET name = ?, description = ?, last_seen = ?
+                WHERE hash = ?
+            """, (name, description, time.time(), hash))
+        self._scope_cache.pop(hash, None)
+
     def get_channel(self, hash: str) -> sqlite3.Row | None:
         return self._fetchone("SELECT * FROM channels WHERE hash = ?", (hash,))
 

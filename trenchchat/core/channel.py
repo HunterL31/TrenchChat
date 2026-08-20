@@ -174,18 +174,30 @@ class ChannelManager:
         name = metadata.get("name", hash_hex[:8])
         description = metadata.get("description", "")
         access_mode = metadata.get("access", "public")
-        creator_hash = metadata.get("creator", announced_identity.hash.hex()
-                                    if announced_identity else "")
+        # Taken from the announcing identity, never from the payload: the
+        # destination hash is bound to that identity by RNS, while "creator"
+        # is unsigned text -- and creator_hash goes on to serve as a
+        # trusted-signer fallback when validating member list documents.
+        creator_hash = announced_identity.hash.hex() if announced_identity else ""
 
         already_known = self._storage.get_channel(hash_hex) is not None
-        self._storage.upsert_channel(
-            hash=hash_hex,
-            name=name,
-            description=description,
-            creator_hash=creator_hash,
-            access_mode=access_mode,
-            created_at=time.time(),
-        )
+        if already_known:
+            # Discovery metadata is unsigned and unversioned, so it may refresh
+            # the presentation fields but never the permissions column: that is
+            # governed by signed member list documents behind MANAGE_CHANNEL,
+            # and letting an announce rewrite it turns open_join on for a
+            # private channel -- after which the inbound message handler stops
+            # checking membership at all.
+            self._storage.update_discovered_metadata(hash_hex, name, description)
+        else:
+            self._storage.upsert_channel(
+                hash=hash_hex,
+                name=name,
+                description=description,
+                creator_hash=creator_hash,
+                access_mode=access_mode,
+                created_at=time.time(),
+            )
 
         channel = self._storage.get_channel(hash_hex)
         perms = permissions_from_json(channel["permissions"]) if channel else {}
