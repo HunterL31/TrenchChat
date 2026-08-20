@@ -385,3 +385,41 @@ class TestImageMessages:
         bob_msgs = bob.storage.get_messages(ch_hash)
         assert bob_msgs[0]["content"] == "Just text"
         assert bob_msgs[0]["image_data"] is None
+
+
+class TestPendingQueueIsBounded:
+    """_params_by_id is capped, but _pending holds the same dicts -- image
+    payloads included -- and was bounded only by a successful flush, which a
+    peer that never comes back never produces.
+    """
+
+    def test_one_peers_queue_is_capped(self, peer_factory):
+        from trenchchat.core.messaging import MAX_PENDING_PER_PEER
+
+        alice = peer_factory("alice")
+        unreachable = "ab" * 16
+        for i in range(MAX_PENDING_PER_PEER + 20):
+            alice.messaging._queue_pending(unreachable, {"msg_id": f"m{i}"})
+
+        assert len(alice.messaging._pending[unreachable]) == MAX_PENDING_PER_PEER
+
+    def test_the_newest_messages_are_the_ones_kept(self, peer_factory):
+        from trenchchat.core.messaging import MAX_PENDING_PER_PEER
+
+        alice = peer_factory("alice")
+        peer = "cd" * 16
+        for i in range(MAX_PENDING_PER_PEER + 1):
+            alice.messaging._queue_pending(peer, {"msg_id": f"m{i}"})
+
+        held = [p["msg_id"] for p in alice.messaging._pending[peer]]
+        assert "m0" not in held, "the oldest message was kept over a newer one"
+        assert f"m{MAX_PENDING_PER_PEER}" in held
+
+    def test_the_number_of_tracked_peers_is_capped(self, peer_factory):
+        from trenchchat.core.messaging import MAX_PENDING_PEERS
+
+        alice = peer_factory("alice")
+        for i in range(MAX_PENDING_PEERS + 30):
+            alice.messaging._queue_pending(f"{i:032x}", {"msg_id": f"m{i}"})
+
+        assert len(alice.messaging._pending) <= MAX_PENDING_PEERS

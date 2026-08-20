@@ -3,7 +3,17 @@ Propagation filter: decides whether an inbound LXMF message should be
 stored by the local propagation node based on its channel hash.
 
 Field 0x01 in TrenchChat LXMF messages carries the channel hash (bytes).
+
+The decision has to be applied where LXMF takes messages *into the
+propagation store*, not in its delivery callback: a delivery callback's
+return value is ignored, so a verdict returned there filtered nothing while
+the Settings UI presented it as controlling what this node relays for other
+people. Router.enable_propagation wraps LXMRouter.lxmf_propagation with
+allows_packed for that reason.
 """
+
+import LXMF
+import RNS
 
 from trenchchat.config import Config
 from trenchchat.core.protocol import F_CHANNEL_HASH
@@ -33,3 +43,22 @@ class PropagationFilter:
             channel_hex = str(channel_hash_bytes)
 
         return channel_hex in self._config.channel_filter_hashes
+
+    def allows_packed(self, lxmf_data: bytes) -> bool:
+        """Same decision, made from a message's packed bytes.
+
+        Fails closed on anything that will not unpack: allowlist mode means
+        "relay these channels", and bytes we cannot read are not one of them.
+        """
+        if self._config.channel_filter_mode == "all":
+            return True
+        try:
+            message = LXMF.LXMessage.unpack_from_bytes(lxmf_data)
+        except Exception as e:
+            RNS.log(
+                f"TrenchChat [propagation]: refusing an unreadable message "
+                f"under an allowlist filter: {e}",
+                RNS.LOG_DEBUG,
+            )
+            return False
+        return self.allows(message)

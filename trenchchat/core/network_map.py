@@ -9,6 +9,8 @@ PyQt6 into environments that deliberately do not install it.
 
 import RNS
 
+from trenchchat.core.protocol import unpack_wire
+
 from trenchchat.core.link_quality import LinkQuality, score_path
 
 _MAX_NODES = 120   # cap to keep the graph readable
@@ -288,8 +290,10 @@ def _make_label(hex_id: str, identity, kind: str, storage=None) -> str:
                 RNS.Destination.hash(identity.hash, "lxmf", "delivery")
             )
             if raw:
-                import msgpack
-                parsed = msgpack.unpackb(raw, raw=False)
+                # unpack_wire rather than a bare unpackb: this is announce
+                # app_data off the network, and every other ingest in the
+                # codebase goes through the same bounds.
+                parsed = unpack_wire(raw)
                 # List format: [display_name, stamp_cost, ...]
                 if isinstance(parsed, list) and len(parsed) >= 1:
                     app_data = parsed[0]

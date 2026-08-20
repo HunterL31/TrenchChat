@@ -64,7 +64,8 @@ def _stub_backend():
 
 @pytest.fixture
 def client():
-    return TestClient(create_app(_stub_backend(), token=TOKEN))
+    return TestClient(create_app(_stub_backend(), token=TOKEN),
+                      base_url="http://127.0.0.1:8801")
 
 
 @needs_backend
@@ -111,28 +112,45 @@ class TestCors:
     def test_configured_origin_is_echoed(self):
         app = create_app(_stub_backend(), token=TOKEN,
                          allowed_origins=["http://127.0.0.1:8800"])
-        res = TestClient(app).get(
+        res = TestClient(app, base_url="http://127.0.0.1:8801").get(
             "/me", headers={TOKEN_HEADER: TOKEN, "Origin": "http://127.0.0.1:8800"})
         assert res.headers.get("access-control-allow-origin") == "http://127.0.0.1:8800"
 
 
 @needs_backend
 class TestWebsocket:
+    # websocket_connect ignores base_url when it builds the Host header, so
+    # each of these names one explicitly. Without it the backend refuses the
+    # handshake on the Host alone and every test below passes for that reason
+    # rather than the one it is about.
+    HOST = {"Host": "127.0.0.1:8801"}
+
     def test_socket_without_token_is_refused(self, client):
         with pytest.raises(Exception):
-            with client.websocket_connect("/ws"):
+            with client.websocket_connect("/ws", headers=self.HOST):
                 pass
 
     def test_socket_with_token_is_accepted(self, client):
-        with client.websocket_connect(f"/ws?token={TOKEN}") as ws:
+        with client.websocket_connect(f"/ws?token={TOKEN}",
+                                      headers=self.HOST) as ws:
             assert ws is not None
 
     def test_socket_from_foreign_origin_is_refused(self, client):
         # Browsers apply neither CORS nor same-origin policy to a WS
         # handshake, so the Origin check here is the only one there is.
         with pytest.raises(Exception):
-            with client.websocket_connect(f"/ws?token={TOKEN}",
-                                          headers={"Origin": OTHER_ORIGIN}):
+            with client.websocket_connect(
+                    f"/ws?token={TOKEN}",
+                    headers={**self.HOST, "Origin": OTHER_ORIGIN}):
+                pass
+
+    def test_socket_with_an_unrecognised_host_is_refused(self, client):
+        """DNS rebinding hands a page a Host of its choosing, and the
+        same-origin test below reads its answer back out of that header."""
+        with pytest.raises(Exception):
+            with client.websocket_connect(
+                    f"/ws?token={TOKEN}",
+                    headers={"Host": "evil.tld", "Origin": "http://evil.tld"}):
                 pass
 
 
@@ -146,7 +164,7 @@ class TestStaticClientStaysPublic:
         app = create_app(_stub_backend(), token=TOKEN)
         app.mount("/", StaticFiles(directory=str(tmp_path), html=True), name="web")
 
-        client = TestClient(app)
+        client = TestClient(app, base_url="http://127.0.0.1:8801")
         assert client.get("/index.html").status_code == 200
         # ...while the API behind it still does.
         assert client.get("/me").status_code == 401
@@ -169,3 +187,48 @@ class TestBindDefaults:
 
     def test_main_flutter_binds_localhost(self):
         assert 'host="127.0.0.1"' in self._source("main_flutter.py")
+
+
+@needs_backend
+class TestHostIsChecked:
+    """A page cannot set Host, but DNS rebinding gives it one it chose, and
+    the socket's same-origin test derives its answer from that header. Without
+    this the token is the only control left standing where two were intended.
+    """
+
+    def test_an_unrecognised_host_is_refused(self, client):
+        res = client.get("/me", headers={TOKEN_HEADER: TOKEN, "Host": "evil.tld"})
+        assert res.status_code == 421
+
+    def test_loopback_is_accepted(self, client):
+        res = client.get("/me", headers={TOKEN_HEADER: TOKEN,
+                                         "Host": "localhost:8801"})
+        assert res.status_code == 200
+
+    def test_an_explicitly_served_host_is_accepted(self):
+        """remote_host.sh serves the client on a tailnet address."""
+        app = create_app(_stub_backend(), token=TOKEN,
+                         allowed_origins=["http://100.64.0.1:8801"])
+        res = TestClient(app, base_url="http://100.64.0.1:8801").get(
+            "/me", headers={TOKEN_HEADER: TOKEN, "Host": "100.64.0.1:8801"})
+        assert res.status_code == 200
+
+
+@needs_backend
+class TestRequestSizeIsBounded:
+    def test_an_oversized_body_is_refused(self, client):
+        from api import MAX_REQUEST_BYTES
+
+        res = client.post(
+            "/channels/aa/messages",
+            headers={TOKEN_HEADER: TOKEN,
+                     "Content-Length": str(MAX_REQUEST_BYTES + 1)},
+            content=b"{}",
+        )
+        assert res.status_code == 413
+
+    def test_malformed_base64_is_a_bad_request_not_a_server_error(self, client):
+        res = client.post("/channels/aa/messages",
+                          headers={TOKEN_HEADER: TOKEN},
+                          json={"content": "x", "image_data_b64": "!!!not base64!!!"})
+        assert res.status_code == 400

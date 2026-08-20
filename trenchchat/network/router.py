@@ -122,13 +122,6 @@ class Router:
 
     def _on_message_received(self, message: LXMF.LXMessage):
         """Called by LXMFRouter for every inbound message."""
-        # The filter governs what we store and forward for others; it must
-        # not gate messages addressed to us.
-        if (self._config.propagation_enabled
-                and not self._addressed_to_us(message)
-                and not self._filter.allows(message)):
-            return
-
         if not self._authenticate(message):
             return
 
@@ -369,11 +362,33 @@ class Router:
             limit_kb = self._config.propagation_storage_limit_mb * 1024
             self._router.set_message_storage_limit(kilobytes=limit_kb)
             self._router.enable_propagation()
+            self._install_propagation_filter()
             self._config.propagation_enabled = True
             RNS.log("TrenchChat: propagation node enabled", RNS.LOG_NOTICE)
         except Exception as e:
             RNS.log(f"TrenchChat: failed to enable propagation node: {e}", RNS.LOG_ERROR)
             raise
+
+    def _install_propagation_filter(self) -> None:
+        """Apply the channel filter where messages enter the propagation store.
+
+        The filter's verdict used to be returned from the delivery callback,
+        whose return value LXMF ignores -- so the Settings option presented as
+        controlling what this node relays for other people controlled nothing.
+        This is the ingest LXMF actually calls, so refusing here is what keeps
+        a message out of the store.
+        """
+        if getattr(self._router, "_tc_filter_installed", False):
+            return
+        original = self._router.lxmf_propagation
+
+        def _filtered(lxmf_data, *args, **kwargs):
+            if not self._filter.allows_packed(lxmf_data):
+                return None
+            return original(lxmf_data, *args, **kwargs)
+
+        self._router.lxmf_propagation = _filtered
+        self._router._tc_filter_installed = True
 
     def disable_propagation(self):
         self._router.disable_propagation()

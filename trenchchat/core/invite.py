@@ -677,6 +677,26 @@ class InviteManager:
                             RNS.LOG_ERROR)
         return accepted
 
+    def _validated_signer(self, stored_doc: dict, channel_hash_hex: str) -> bytes:
+        """The signer of a stored document, for the equal-version tiebreak.
+
+        Re-derived rather than read off the map, for the same reason the
+        incoming side uses its validated signer: a signature map may carry
+        keys that never validated.
+        """
+        readable = {
+            "channel_hash": stored_doc.get(b"channel_hash", b""),
+            "version": stored_doc.get(b"version", 0),
+            "published_at": stored_doc.get(b"published_at", 0.0),
+            "members": list(stored_doc.get(b"members", [])),
+            "admins": list(stored_doc.get(b"admins", [])),
+            "owners": list(stored_doc.get(b"owners", [])),
+            "permissions": stored_doc.get(b"permissions", b""),
+            "signatures": stored_doc.get(b"signatures", {}),
+        }
+        signer = self._validate_document(readable, channel_hash_hex)
+        return signer if signer is not None else b"\xff" * 16
+
     def _ordering_fields_are_sane(self, doc: dict, channel_hash_hex: str) -> bool:
         """False if version or published_at could not order a document.
 
@@ -752,11 +772,13 @@ class InviteManager:
                     return False
                 if new_ts == old_ts:
                     # Tiebreak: lowest signing admin hash wins
-                    new_min = min(doc.get("signatures", {}).keys(), default=b"\xff" * 16)
+                    # Over the signer that validated, not over every key in
+                    # the map: _validate_document ignores untrusted entries,
+                    # so taking the minimum of the raw keys let a trusted
+                    # signer pad a low junk key and win every tie.
                     old_doc = msgpack.unpackb(existing["document_blob"], raw=True)
-                    old_min = min(old_doc.get(b"signatures", {}).keys(),
-                                  default=b"\xff" * 16)
-                    if new_min >= old_min:
+                    old_min = self._validated_signer(old_doc, channel_hash_hex)
+                    if signer >= old_min:
                         return False
 
         # Build the roster before committing anything: a malformed entry here
@@ -1272,6 +1294,14 @@ class InviteManager:
             )
             return
 
+        # Held across the read, the +1, and the write below: LXMF delivers on
+        # background threads, so a document accepted in between would be
+        # overwritten by a lower version -- after which a replay of the ones
+        # it skipped is accepted again. _accept_document takes the same lock.
+        with self._accept_lock:
+            self._broadcast_permissions_locked(channel_hash_hex)
+
+    def _broadcast_permissions_locked(self, channel_hash_hex: str) -> None:
         existing = self._storage.get_member_list_version(channel_hash_hex)
         is_server = self._storage.is_server(channel_hash_hex)
         channel = self._storage.get_channel(channel_hash_hex)

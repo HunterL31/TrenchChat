@@ -72,6 +72,14 @@ def _compute_message_id(content: str, sender_hex: str, timestamp: float) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+# Messages held for one unreachable peer before the oldest is dropped, and
+# peers tracked at once. _params_by_id is capped but _pending holds the same
+# dicts -- including their image payloads -- and was bounded only by a
+# successful flush, which a peer that never returns never produces.
+MAX_PENDING_PER_PEER = 100
+MAX_PENDING_PEERS = 256
+
+
 class Messaging:
     def __init__(self, identity: Identity, storage: Storage, router: Router):
         self._identity = identity
@@ -152,7 +160,7 @@ class Messaging:
                 dest_identity = RNS.Identity.recall(delivery_dest_hash)
                 if dest_identity is None:
                     RNS.Transport.request_path(delivery_dest_hash)
-                    self._pending.setdefault(dest_hex, []).append(msg_params)
+                    self._queue_pending(dest_hex, msg_params)
                     self._notify_missed(channel_hash_hex, dest_hex, msg_id, subscriber_hashes)
                     continue
 
@@ -207,6 +215,18 @@ class Messaging:
         if is_open_join(permissions_from_json(channel["permissions"])):
             return True
         return self._storage.is_member(channel_hash_hex, dest_hex)
+
+    def _queue_pending(self, dest_hex: str, msg_params: dict) -> None:
+        """Hold a message for a peer we cannot address, within a fixed bound."""
+        queue = self._pending.setdefault(dest_hex, [])
+        if len(queue) >= MAX_PENDING_PER_PEER:
+            queue.pop(0)
+        queue.append(msg_params)
+        if len(self._pending) > MAX_PENDING_PEERS:
+            for stale in [p for p, q in self._pending.items() if not q]:
+                del self._pending[stale]
+            while len(self._pending) > MAX_PENDING_PEERS:
+                del self._pending[next(iter(self._pending))]
 
     def flush_pending(self, dest_hex: str):
         """Attempt to deliver all queued messages for a peer whose path is now known."""
@@ -293,7 +313,7 @@ class Messaging:
             # Only re-queue if not already pending (avoid duplicates)
             pending_ids = {p["msg_id"] for p in self._pending.get(dest_hex, [])}
             if msg_id not in pending_ids:
-                self._pending.setdefault(dest_hex, []).append(params)
+                self._queue_pending(dest_hex, params)
         self._notify_missed(channel_hash_hex, dest_hex, msg_id, subscriber_hashes)
 
     def _notify_missed(self, channel_hash_hex: str, missed_peer_hex: str,

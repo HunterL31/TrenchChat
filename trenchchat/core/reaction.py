@@ -78,6 +78,10 @@ MAX_EMOJI_REFS_PER_MESSAGE = 8
 # unresolvable hashes never sends.
 MAX_PENDING_EMOJI_REQUESTS = 256
 
+# Peers whose last emoji flush we remember. Keyed by peer and never pruned,
+# while identities are free to mint.
+MAX_TRACKED_FLUSH_PEERS = 256
+
 # Longest stored emoji name. Peer-supplied, and both clients resolve a legacy
 # :name: token by exact match over the whole library.
 MAX_EMOJI_NAME_LEN = 32
@@ -278,6 +282,10 @@ class ReactionManager:
             last = self._last_flush_by_peer.get(peer_hex)
             if last is not None and now - last < EMOJI_FLUSH_COOLDOWN_SECS:
                 return
+            if len(self._last_flush_by_peer) >= MAX_TRACKED_FLUSH_PEERS:
+                oldest = min(self._last_flush_by_peer,
+                             key=self._last_flush_by_peer.get)
+                del self._last_flush_by_peer[oldest]
             self._last_flush_by_peer[peer_hex] = now
 
         missing = [h for h in self._storage.get_unresolved_reaction_emoji(peer_hex)
