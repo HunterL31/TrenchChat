@@ -136,9 +136,9 @@ currently implies, and the scenario exists to confirm it.
 | invite11 | A,B,C | A grants `kick` to member; C kicks B | Grant refused, not stored; C's kick returns `{"ok": false}` and B stays in every roster. 93s |
 | invite12 | A,B,C,D | A promotes B; A and B both publish a roster change within ~1s | Both documents validate against stored state; final rosters identical on all four; no split-brain |
 | invite13 | A,B,C | C (member) attempts `/channels/{h}/permissions` | `{"ok": false}` — lacks `manage_channel`; stored perms unchanged everywhere |
-| invite14 | A,B,C,D | A promotes B to admin; B kicks D | ✅ D dropped from A, B and C's rosters; D's later send rejected by all three. The rank invite6 and invite11 leave untested — an admin is a trusted signer, so the granted `kick` holds |
-| invite15 | A,B,C | A grants `manage_channel` to admin and promotes B; B revokes `send_message` from member, then re-grants it | ✅ Both admin-signed documents applied everywhere: C silenced after B's revocation (its send rejected by A), then heard again after B's re-grant. The working mirror of invite13's refusal, and the re-grant invite9 never covered |
-| invite16 | A,B,C,D | A grants `invite` to member; C (member) invites D; D accepts | ⚠ **Confirmed, worse than predicted.** The token verifies and C honours D's join request, but the admission document — signed by a plain member — is rejected by every peer *including C itself*, since `publish_member_list` applies its own document through `_accept_document`. D's token is spent and D is a member nowhere. invite11's gap, on the invite path |
+| invite14 | A,B,C,D | A promotes B to admin; B kicks D | ✅ D dropped from A, B and C's rosters; D's later send rejected by all three. 4/4 runs, 39–45s. The rank invite6 and invite11 leave untested — an admin is a trusted signer, so the granted `kick` holds |
+| invite15 | A,B,C | A grants `manage_channel` to admin and promotes B; B revokes `send_message` from member, then re-grants it | ✅ Both admin-signed documents applied everywhere: C silenced after B's revocation (its send rejected by A), then heard again after B's re-grant. 4/4 runs, 40–48s. The working mirror of invite13's refusal, and the re-grant invite9 never covered |
+| invite16 | A,B,C,D | A grants `invite` to member; C (member) invites D; D accepts | ⚠ **Confirmed, worse than predicted, 4/4 runs.** The token verifies and C honours D's join request, but the admission document — signed by a plain member — is rejected by every peer *including C itself*, since `publish_member_list` applies its own document through `_accept_document`. D's token is spent, every roster is unchanged, and D ends holding no roster at all. invite11's gap, on the invite path |
 
 #### invite11: a grantable permission that could not take effect
 
@@ -293,7 +293,7 @@ the first ask is served and ~120s when it takes a retry.
 | social6 | A,B,C | A changes display name | ✅ Propagates; directory search finds the new name |
 | social7 | A,B,C | A adds B as a friend with a nickname | ✅ Local only — C sees nothing, B is not notified |
 | social8 | A,B,C | B replies to A's message; C reacts to the reply | ✅ `reply_to` and the reaction target resolve identically on all three |
-| social9 | A,B,C | Same conversation on an **invite-only** channel: B replies to A's message; C reacts to the reply | ✅ Resolves identically there too — member-list fan-out carries replies and reactions the same way the subscriber set does |
+| social9 | A,B,C | Same conversation on an **invite-only** channel: B replies to A's message; C reacts to the reply | ✅ Resolves identically there too, 4/4 runs in 23–29s — member-list fan-out carries replies and reactions the same way the subscriber set does |
 
 ### `restart` — Restart, persistence, ordering
 
