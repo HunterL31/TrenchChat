@@ -5,6 +5,9 @@ name: Build & Release
 # The build/bump_version/release jobs are gated to the push event so the
 # expensive multi-OS installer build only runs once per merge, not on every
 # PR push.
+# A merge whose commit message contains "[skip release]" runs tests only:
+# no tag, no build, no release. Its commits roll into the next release that
+# does build, since the changelog and bump scan everything since the last tag.
 # workflow_dispatch: dry run from any branch — tests + installer builds with
 # version 0.0.0, uploaded as workflow artifacts; no tag, no release.
 on:
@@ -69,12 +72,19 @@ jobs:
   #   - If any commit since that tag contains "[major]", bump major.
   #   - If any commit contains "[patch]", bump patch only.
   #   - Otherwise bump minor and reset patch to 0.
+  #
+  # "[skip release]" in the merge commit (the pushed head commit) skips this
+  # job, and build/release — which need it — skip with it. Only the head
+  # commit is checked, not the whole range since the last tag: a skipped
+  # merge must not also suppress the next merge's release.
   # ---------------------------------------------------------------------------
   bump_version:
     name: Bump version & collect changelog
     runs-on: ubuntu-22.04
     needs: test
-    if: github.event_name == 'push'
+    if: >-
+      github.event_name == 'push' &&
+      !contains(github.event.head_commit.message, '[skip release]')
     permissions:
       contents: write
     outputs:
