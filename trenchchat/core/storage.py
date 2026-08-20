@@ -269,7 +269,8 @@ CREATE TABLE IF NOT EXISTS pending_invites (
     token         BLOB NOT NULL,
     expiry        REAL NOT NULL,
     admin_hash    TEXT NOT NULL,
-    received_at   REAL NOT NULL
+    received_at   REAL NOT NULL,
+    issued_at     REAL NOT NULL DEFAULT 0
 );
 
 -- Local-only saved contacts. Nothing here is ever sent to a peer.
@@ -406,9 +407,18 @@ class Storage:
         self._migrate_image_stripped()
         self._migrate_reactions()
         self._migrate_servers()
+        self._migrate_invite_issued_at()
         # _scope() reads channels.server_hash, so this must run after
         # _migrate_servers() has ensured that column exists.
         self._repair_tenure_from_message_history()
+
+    def _migrate_invite_issued_at(self):
+        """Add pending_invites.issued_at for existing databases."""
+        if not self._has_column("pending_invites", "issued_at"):
+            self._conn.execute(
+                "ALTER TABLE pending_invites ADD COLUMN issued_at REAL NOT NULL DEFAULT 0"
+            )
+            self._conn.commit()
 
     def _migrate_servers(self):
         """Add channels.server_hash for existing databases.
@@ -1330,6 +1340,21 @@ class Storage:
         """, (channel_hash, identity_hash))
         return row["joined_at"] if row else None
 
+    def get_last_departure_at(self, channel_hash: str,
+                              identity_hash: str) -> float | None:
+        """When this identity most recently left, or None if they never have.
+
+        Unlike the spent/revoked token tables, this is carried in the signed
+        member list document, so every peer that accepted the removal has it --
+        not only the one that performed the kick.
+        """
+        channel_hash = self._scope(channel_hash)
+        row = self._fetchone("""
+            SELECT MAX(left_at) AS last_left FROM membership_tenure
+            WHERE channel_hash = ? AND identity_hash = ? AND left_at IS NOT NULL
+        """, (channel_hash, identity_hash))
+        return row["last_left"] if row and row["last_left"] is not None else None
+
     def has_any_tenure(self, channel_hash: str) -> bool:
         """Return True if the membership_tenure table has any rows for this channel.
 
@@ -1575,13 +1600,30 @@ class Storage:
     # --- pending (unaccepted) invites ---
 
     def record_pending_invite(self, channel_hash: str, channel_name: str,
-                              token: bytes, expiry: float, admin_hash: str) -> None:
+                              token: bytes, expiry: float, admin_hash: str,
+                              issued_at: float = 0.0) -> None:
         with self._tx():
             self._conn.execute("""
                 INSERT OR REPLACE INTO pending_invites
-                    (channel_hash, channel_name, token, expiry, admin_hash, received_at)
-                VALUES (?, ?, ?, ?, ?, ?)
-            """, (channel_hash, channel_name, token, expiry, admin_hash, time.time()))
+                    (channel_hash, channel_name, token, expiry, admin_hash,
+                     received_at, issued_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (channel_hash, channel_name, token, expiry, admin_hash,
+                  time.time(), issued_at))
+
+    def get_pending_invite_issued_at(self, channel_hash: str) -> float | None:
+        """The issue time bound into a stored invite's token, if it carried one.
+
+        None means the invite predates the field, so the token signs over the
+        original unbound payload.
+        """
+        row = self._fetchone(
+            "SELECT issued_at FROM pending_invites WHERE channel_hash = ?",
+            (channel_hash,),
+        )
+        if row is None or not row["issued_at"]:
+            return None
+        return float(row["issued_at"])
 
     def get_pending_invites(self) -> list[sqlite3.Row]:
         """Return unexpired pending invites, oldest first."""
@@ -1611,6 +1653,7 @@ class Storage:
         The insert is the atomic test-and-set; the second of two concurrent
         claims violates the primary key.
         """
+        channel_hash = self._scope(channel_hash)
         with self._tx():
             cur = self._conn.execute("""
                 INSERT OR IGNORE INTO spent_invite_tokens
@@ -1620,6 +1663,7 @@ class Storage:
             return cur.rowcount > 0
 
     def is_invite_token_spent(self, channel_hash: str, token_hash: str) -> bool:
+        channel_hash = self._scope(channel_hash)
         row = self._fetchone("""
             SELECT 1 FROM spent_invite_tokens
             WHERE channel_hash = ? AND token_hash = ?
@@ -1632,7 +1676,12 @@ class Storage:
 
         A removed member's token stays signature-valid for the rest of its
         TTL. Records a sentinel row keyed on the invitee.
+
+        Scope-normalised like every other membership write: a kick inside a
+        server records against the server, so a check against the raw child
+        channel hash would look in a different row and find nothing.
         """
+        channel_hash = self._scope(channel_hash)
         with self._tx():
             self._conn.execute("""
                 INSERT OR REPLACE INTO spent_invite_tokens
@@ -1641,15 +1690,24 @@ class Storage:
             """, (channel_hash, f"revoked:{invitee_hash}", invitee_hash,
                   expiry, time.time()))
 
-    def are_invite_tokens_revoked_for(self, channel_hash: str,
-                                      invitee_hash: str) -> bool:
+    def invite_revoked_at(self, channel_hash: str,
+                          invitee_hash: str) -> float | None:
+        """When this invitee's outstanding tokens were revoked, if still live.
+
+        Returns the time of the revocation rather than a bare flag: the
+        sentinel is keyed on the invitee, not on a token, so treating it as a
+        blanket "refuse this person" would also refuse a fresh invite issued
+        after the kick. What it actually means is "tokens issued before this
+        moment are dead".
+        """
+        channel_hash = self._scope(channel_hash)
         row = self._fetchone("""
-            SELECT expiry FROM spent_invite_tokens
+            SELECT expiry, recorded_at FROM spent_invite_tokens
             WHERE channel_hash = ? AND token_hash = ?
         """, (channel_hash, f"revoked:{invitee_hash}"))
-        if row is None:
-            return False
-        return time.time() < row["expiry"]
+        if row is None or time.time() >= row["expiry"]:
+            return None
+        return float(row["recorded_at"])
 
     def purge_expired_invite_tokens(self, now: float | None = None) -> None:
         with self._tx():

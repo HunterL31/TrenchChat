@@ -62,7 +62,8 @@ from trenchchat.core.subscription import SubscriptionManager, _subscriber_payloa
 from trenchchat.core.protocol import (
     F_SUBSCRIBER_LIST, F_SUBSCRIBER_SIG, F_SUBSCRIBER_VERSION, MT_SUBSCRIBER_LIST,
     F_ADMIN_HASH, F_CHANNEL_HASH, F_DISPLAY_NAME, F_EXPIRY_TS, F_INVITE_TOKEN,
-    F_INVITEE_HASH, F_MEMBER_LIST_DOC, F_MESSAGE_ID, F_MSG_TYPE, F_TIMESTAMP,
+    F_INVITEE_HASH, F_INVITE_ISSUED_TS, F_MEMBER_LIST_DOC, F_MESSAGE_ID, F_MSG_TYPE,
+    F_TIMESTAMP,
     F_EMOJI_HASH, F_IMAGE_DATA, F_MISSED_FOR, F_REACTION_MSG_ID, F_REACTION_REMOVE,
     F_REACTION_UNICODE, F_AUTHOR_SIG,
     MT_GOODBYE, MT_JOIN_REQUEST, MT_MEMBER_LIST_UPDATE, MT_REACTION,
@@ -2966,3 +2967,136 @@ class TestAdversarialChannelAnnounce:
         stored = alice.storage.get_channel(new_hash)
         assert stored["name"] == "after"
         assert stored["description"] == "renamed"
+
+
+# ---------------------------------------------------------------------------
+# A kick has to reach every admin, not only the one that performed it
+# ---------------------------------------------------------------------------
+
+class TestAdversarialKickedMemberRejoin:
+    """spent_invite_tokens and the revocation sentinel are written only by the
+    peer that saw the redemption or performed the kick.
+
+    A second admin holds neither, so a kicked member could replay their
+    original join request to it and be published straight back in -- with no
+    human involved, since the join-request handler is fully automatic. The
+    departure itself rides in the signed member list document, so every peer
+    that accepted the removal can make the call.
+    """
+
+    def _channel_with_two_admins_and_a_member(self, peer_factory):
+        alice = peer_factory("alice")      # owner
+        bob = peer_factory("bob")          # second admin
+        carol = peer_factory("carol")      # invitee, later kicked
+
+        ch_hash = alice.channel_mgr.create_channel(
+            "private", "", permissions=PRESET_PRIVATE)
+
+        # Bob joins through the real invite flow, so he holds the channel and
+        # its document and will receive later updates.
+        bob.invite_mgr.add_invite_callback(
+            lambda ch, name, token, expiry, admin_hex:
+                bob.invite_mgr.send_join_request(ch, token, expiry, admin_hex))
+        alice.invite_mgr.send_invite(ch_hash, bob.identity.hash_hex)
+        assert wait_for_member(alice.storage, ch_hash, bob.identity.hash_hex, timeout=5)
+        assert wait_for_member(bob.storage, ch_hash, bob.identity.hash_hex, timeout=5)
+
+        alice.invite_mgr.publish_member_list(ch_hash, add_admins=[bob.identity.hash])
+        assert wait_for(
+            lambda: bob.storage.get_role(ch_hash, bob.identity.hash_hex) == ROLE_ADMIN,
+            timeout=5), "Bob was never promoted to admin at his own peer"
+
+        captured = {}
+
+        def on_invite(channel_hash_hex, channel_name, token, expiry, admin_hex):
+            # Read before send_join_request, which clears the pending invite.
+            captured.update(
+                token=token, expiry=expiry, admin_hex=admin_hex,
+                issued_at=carol.storage.get_pending_invite_issued_at(channel_hash_hex),
+            )
+            carol.invite_mgr.send_join_request(
+                channel_hash_hex, token, expiry, admin_hex)
+
+        carol.invite_mgr.add_invite_callback(on_invite)
+        alice.invite_mgr.send_invite(ch_hash, carol.identity.hash_hex)
+
+        assert wait_for_member(alice.storage, ch_hash, carol.identity.hash_hex, timeout=5)
+        assert wait_for(
+            lambda: bob.storage.is_member(ch_hash, carol.identity.hash_hex), timeout=5), \
+            "Bob never learned Carol had joined"
+        return alice, bob, carol, ch_hash, captured
+
+    def _replay_to(self, admin_peer, ch_hash, carol, captured, issued_at):
+        fields = {
+            F_MSG_TYPE:      MT_JOIN_REQUEST,
+            F_CHANNEL_HASH:  bytes.fromhex(ch_hash),
+            F_INVITE_TOKEN:  captured["token"],
+            F_INVITEE_HASH:  carol.identity.hash,
+            F_EXPIRY_TS:     captured["expiry"],
+            F_ADMIN_HASH:    bytes.fromhex(captured["admin_hex"]),
+        }
+        if issued_at is not None:
+            fields[F_INVITE_ISSUED_TS] = issued_at
+        admin_peer.invite_mgr._handle_join_request(
+            fields, ch_hash, sender_hex=carol.identity.hash_hex)
+
+    def test_a_kicked_member_cannot_rejoin_through_a_second_admin(self, peer_factory):
+        alice, bob, carol, ch_hash, captured = \
+            self._channel_with_two_admins_and_a_member(peer_factory)
+        issued_at = captured["issued_at"]
+        assert issued_at, "the invite carried no bound issue time"
+
+        alice.invite_mgr.publish_member_list(
+            ch_hash, remove_members=[carol.identity.hash])
+        assert wait_for(
+            lambda: not bob.storage.is_member(ch_hash, carol.identity.hash_hex),
+            timeout=5), "Bob never accepted the removal"
+
+        self._replay_to(bob, ch_hash, carol, captured, issued_at)
+
+        assert not bob.storage.is_member(ch_hash, carol.identity.hash_hex), \
+            "a kicked member replayed their original invite through a second admin"
+
+    def test_a_token_with_no_bound_issue_time_is_refused_after_a_kick(self, peer_factory):
+        """A token from a peer predating the field cannot be dated, so it loses.
+
+        Minted through generate_invite_token with no issue time, which is
+        byte-for-byte what an older peer signs.
+        """
+        alice, bob, carol, ch_hash, _ = \
+            self._channel_with_two_admins_and_a_member(peer_factory)
+
+        legacy_token, legacy_expiry = alice.invite_mgr.generate_invite_token(
+            ch_hash, carol.identity.hash)
+        legacy = {"token": legacy_token, "expiry": legacy_expiry,
+                  "admin_hex": alice.identity.hash_hex}
+
+        alice.invite_mgr.publish_member_list(
+            ch_hash, remove_members=[carol.identity.hash])
+        assert wait_for(
+            lambda: not bob.storage.is_member(ch_hash, carol.identity.hash_hex),
+            timeout=5), "Bob never accepted the removal"
+
+        self._replay_to(bob, ch_hash, carol, legacy, None)
+
+        assert not bob.storage.is_member(ch_hash, carol.identity.hash_hex), \
+            "an undatable token was honoured after a kick"
+
+    def test_a_fresh_invite_after_the_kick_still_works(self, peer_factory):
+        """The point is to invalidate stale tokens, not to blacklist people."""
+        alice, bob, carol, ch_hash, _ = \
+            self._channel_with_two_admins_and_a_member(peer_factory)
+
+        alice.invite_mgr.publish_member_list(
+            ch_hash, remove_members=[carol.identity.hash])
+        assert wait_for(
+            lambda: not alice.storage.is_member(ch_hash, carol.identity.hash_hex),
+            timeout=5)
+
+        carol.invite_mgr.add_invite_callback(
+            lambda ch, name, token, expiry, admin_hex:
+                carol.invite_mgr.send_join_request(ch, token, expiry, admin_hex))
+        alice.invite_mgr.send_invite(ch_hash, carol.identity.hash_hex)
+
+        assert wait_for_member(alice.storage, ch_hash, carol.identity.hash_hex, timeout=5), \
+            "a fresh invite issued after the kick was refused"
