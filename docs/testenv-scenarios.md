@@ -133,35 +133,39 @@ currently implies, and the scenario exists to confirm it.
 | invite8 | A,B,D | A demotes B to member; B invites D | Join request rejected — `_handle_join_request` checks INVITE against B's current role; D never joins |
 | invite9 | A,B,C | A revokes `send_message` from member role | C's message is dropped by A and B (and by C's own outbound guard); B, still admin, sends fine |
 | invite10 | A,C | C calls `/roles` with `remove_members=[A]` | ✅ `{"ok": false}`, no document published, rosters unchanged on every peer — adversarial path, GUI bypassed |
-| invite11 | A,B,C | A grants `kick` to member; C kicks B | ❌ **Fails, and the failure is the finding.** The grant passes every local check and `/roles` reports success, but no peer ever applies it. See below |
+| invite11 | A,B,C | A grants `kick` to member; C kicks B | Grant refused, not stored; C's kick returns `{"ok": false}` and B stays in every roster. 93s |
 | invite12 | A,B,C,D | A promotes B; A and B both publish a roster change within ~1s | Both documents validate against stored state; final rosters identical on all four; no split-brain |
 | invite13 | A,B,C | C (member) attempts `/channels/{h}/permissions` | `{"ok": false}` — lacks `manage_channel`; stored perms unchanged everywhere |
 
-#### invite11: a grantable permission that cannot take effect
+#### invite11: a grantable permission that could not take effect
 
-`kick` and `manage_roles` are grantable to any role — `ALL_PERMISSIONS` offers
-them, the permissions dialog exposes them, `has_permission` honours them, and
-`update_membership` lets the change through. So a member granted `kick` gets a
-successful `/roles` call and a published member-list document.
+`kick` and `manage_roles` used to be grantable to any role — `ALL_PERMISSIONS`
+offered them, the permissions dialog exposed them, `has_permission` honoured
+them, and `update_membership` let the change through. So a member granted
+`kick` got a successful `/roles` call and a published member-list document.
 
-Every recipient then discards it. `_validate_document` builds
+Every recipient then discarded it. `_validate_document` builds
 `trusted_signers` from the stored document's `admins | owners`, so a plain
 member is not a recognised signer no matter what permissions they hold. The
-kick takes effect on the actor's own device and nowhere else.
+kick took effect on the actor's own device and nowhere else.
 
-Two layers disagree about what a permission means: the permission system treats
-`kick` as role-independent, the document layer ties signing authority to
-admin/owner. Both behaviours are defensible alone — signing authority *should*
-be narrow — but together they advertise a grant that silently does nothing.
+Two layers disagreed about what a permission means: the permission system
+treated `kick` as role-independent, the document layer ties signing authority
+to admin/owner.
 
-Worth noting what this does to **invite10**, which asserts a member *cannot* kick the
-owner. invite10 passes — but while invite11 fails, it passes for the wrong reason: no
-member can effectively kick anyone. invite11 is what gives invite10 its meaning, which is
-why the pair is worth keeping together.
+**Resolved by narrowing the permission rather than widening signing
+authority.** Removing someone from the member list strips every permission
+they had, so `kick` is the authority to unmake other people's — granting it to
+the base role would let every member do that to every other, which is the
+opposite of what the failing scenario asked for. `manage_roles` is restricted
+with it, because promoting yourself is how you would grant yourself `kick`.
+Both are dropped from the member role on read and on write, so a grant is
+refused rather than stored, and neither client offers the checkbox.
 
-Not fixed here: the resolution is a product decision (stop offering these
-permissions below admin, or admit permission-holders as trusted signers), not a
-bug with one obvious correction.
+Worth noting what this does to **invite10**, which asserts a member *cannot*
+kick the owner: it now passes for the right reason on the narrower rule, and
+invite7 (an admin using `kick` legitimately) is what rules out the "the
+endpoint refuses everything" reading invite11 used to cover.
 
 ### `sync` — Offline behavior and sync
 
@@ -458,6 +462,7 @@ Everything the matrix turned up, across all ten families.
 | **Nothing noticed our own link returning** — every catch-up path is driven by hearing *from* a peer, so the node that was itself away had no trigger | Fixed: `connectivity.py`'s `LinkWatcher` polls Reticulum's interface state and resyncs on the transition back to online, ignoring shared-instance client interfaces. Tests in `tests/test_connectivity.py` |
 | **A sync row rejected for an unverifiable author signature did not bound the watermark**, so a batch of `[rejected_old, accepted_new]` skipped past it and no future sweep would offer it again | Fixed on this branch: the signature-rejection path now sets `failed_ts` the same way a failed insert does. A row with an *implausible timestamp* deliberately does not, since it cannot be placed and would let one bad row freeze sync. Regression test in `tests/test_sync_multipeer.py` |
 | **One `sync_progress` row written from both directions**, collapsing the responder's trust-horizon floor and stranding history older than a requester's watermark | Root-caused and fixed by splitting the serve direction into a `sync_served` table; regression test in `tests/test_sync_multipeer.py`. Found through sync11, but **it did not fix sync11** — see below |
+| **invite11** — `kick` and `manage_roles` were grantable to any role, but a non-admin's member-list document is rejected by every recipient, so the grant did nothing on the network | Fixed by narrowing the permission: both are dropped from the member role on read and on write, and neither client offers them. Scenario rewritten to the new rule; regression tests in `tests/test_permissions.py` |
 | **restart1** — `_subscriber_versions` lived only in memory, so a restarted owner renumbered from 1 and every later list was rejected as a replay | Fixed on `main` by the August security audit, which persists the counter in a `subscriber_list_versions` table and re-checks the version under the commit lock. This branch's own fix was dropped at the merge in favour of it; the end-to-end regression test in `tests/test_subscriptions.py` stays |
 
 ### Open
@@ -466,7 +471,6 @@ Everything the matrix turned up, across all ten families.
 |---|---|
 | **api4** — the dev environment shares one API token across every tester, and the orchestrator's unauthenticated `/config` serves it | **Confirmed** (probe). Fine for a dev box; it means port 8800 is the real trust boundary, not the tester ports |
 | **sync11** — a four-way partition reconciles only sometimes: 2 passes in 7 runs, always losing the *first* message a peer wrote in isolation | **Partly root-caused.** The watermark collision above was one cause and is fixed. The deep-sync cooldown refusing a returning peer's request silently, once per pair per 60s, is the leading candidate for the rest |
-| **invite11** — `kick` and `manage_roles` are grantable to any role, but a non-admin's member-list document is rejected by every recipient | **Confirmed.** The grant succeeds locally and does nothing on the network. Resolution is a product decision — see below |
 | **voice11** — `loss_pct`, the metric `docs/voice.md` designates for the UI's per-peer quality indicator, cannot see a starved link. It counts gaps between frames that arrived, so a link delivering 8% of the audio reports ~6% loss, and `link_state` still reads `streaming` | **Confirmed** across three runs. Delivery ratio (frames received against ~48/s) is the signal that shows it; `frame_stats()` has the raw counts but exposes no rate |
 | **voice5 / voice4** — a voice participant whose link drops shows `connecting` indefinitely rather than `unreachable`, and one whose process dies lingers for the roster TTL — 180s in production | **Confirmed.** Neither is wrong, but a UI showing "connecting…" for three minutes after someone crashed is not the honest state `docs/voice.md` asks for |
 | **public5** — a public-channel join fires no sync request; backfill waits on the next peer announce | **Confirmed, and deliberately left.** 0 messages at join, backfill at 1.0s / 9.1s tracking the 10s heartbeat; up to 60s in the real client, and at SF7 it never arrived at all (see the LoRa pass). Deferred by decision — public-channel behaviour is being left alone for now |
@@ -530,7 +534,7 @@ All ten families built and run: **81 scenarios, 62 strict and 19 probes.**
 | Family | Scenarios | Result |
 |---|---|---|
 | `public` — public channels | 10 (6 strict, 4 probes) | All passing, three consecutive clean runs |
-| `invite` — invite-only and membership | 13 (12 strict, 1 probe) | 11/12 — **invite11 fails** on a confirmed permission gap |
+| `invite` — invite-only and membership | 13 (12 strict, 1 probe) | All passing; invite11 rewritten to the narrowed `kick` rule |
 | `sync` — offline and sync | 10 (9 strict, 1 probe) | 8/9 — **sync11 fails**, 2 passes in 7 runs. sync2 fixed, 12/12 |
 | `links` — degraded links | 10 (5 strict, 5 probes) | All passing, on genuinely shaped links |
 | `servers` — servers | 6 (5 strict, 1 probe) | All passing |
@@ -540,10 +544,10 @@ All ten families built and run: **81 scenarios, 62 strict and 19 probes.**
 | `api` — the API surface | 4 (3 strict, 1 probe) | All passing; api4 records the shared-token property |
 | `integrity` — message integrity | 4 (4 strict) | All passing; integrity2 found a real gap, now fixed and strict |
 
-**60 of 62 strict scenarios pass.** Both failures are real defects, left strict
-and failing on purpose, so `--family invite` and `--family sync` exit non-zero
-until they are resolved: invite11 every run, sync11 intermittently (2 passes in
-7).
+**61 of 62 strict scenarios pass.** The one failure is a real defect, left
+strict and failing on purpose, so `--family sync` exits non-zero until it is
+resolved: sync11, intermittently (2 passes in 7). invite11 is now passing on
+the narrowed `kick` rule described above.
 
 Re-run against `main` after the August security audit merged (PR 52): the suite
 is unchanged at 53/55, so the audit regressed nothing here. Its one effect on
@@ -559,11 +563,9 @@ Remaining work:
 1. Finish sync11: confirm the deep-sync cooldown is what strands the remaining
    `-alone-0` rows, then decide whether a refusal should answer with an
    explicit "throttled" rather than silence.
-2. Decide invite11: stop offering `kick`/`manage_roles` below admin, or admit
-   permission-holders as trusted signers.
-3. Let `SyncStatusTracker` distinguish "refused" from "waiting" — today both
+2. Let `SyncStatusTracker` distinguish "refused" from "waiting" — today both
    read as `pending` forever.
-4. Surface held-back messages in the UI rather than in a log line.
+3. Surface held-back messages in the UI rather than in a log line.
 5. The two deferred sync rows and a clock-skew scenario, all of which need
    control of a tester's clock — the audit's 300s ceiling silently drops every
    message from a peer whose clock runs fast, and nothing tests it.

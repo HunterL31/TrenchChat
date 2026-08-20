@@ -230,22 +230,34 @@ def b10(env):
     return {"rejected": True}
 
 
-@scenario("invite11", "A granted kick permission actually takes effect")
+@scenario("invite11", "Kick cannot be granted to the base member role")
 def b11(env):
-    """The mirror of invite10: proves the rejection there is the permission working,
-    not the endpoint refusing everything."""
+    """Replaces the earlier expectation that granting kick to members works.
+
+    Removing someone from the member list strips every permission they had,
+    so kick is the authority to unmake other people's -- granting it to the
+    base role would let every member do that to every other. The grant is now
+    refused rather than stored, so nobody is left believing they have it.
+
+    invite10 covers the mirror case (a member cannot kick the owner), and
+    invite7 covers an admin using the permission legitimately, so the
+    "endpoint refuses everything" reading this scenario used to rule out is
+    still ruled out.
+    """
     a, b, c = env.peers("A", "B", "C")
     ch = invite_only_channel(a, [b, c], "b11-private")
 
     a.set_permissions(ch, admin=ADMIN_DEFAULT, member=MEMBER_DEFAULT + [KICK])
-    wait_until(lambda: KICK in c.permissions(ch)["member"],
-               "C to see the kick grant", DISCOVERY_TIMEOUT)
+    settled, _ = settle(lambda: KICK in c.permissions(ch)["member"],
+                        "the kick grant to reach C", DISCOVERY_TIMEOUT)
+    if settled:
+        raise ScenarioFailure("kick was granted to the member role")
 
-    if not c.set_roles(ch, remove_members=[b.hash]):
-        raise ScenarioFailure("a granted kick was rejected")
-    wait_until(lambda: b.hash not in roster(a, ch),
-               "B to be dropped from the owner's roster", DISCOVERY_TIMEOUT)
-    return {"remaining": len(roster(a, ch))}
+    if c.set_roles(ch, remove_members=[b.hash]):
+        raise ScenarioFailure("a member removed another member")
+    hold_for(lambda: b.hash in roster(a, ch),
+             "B to stay in the owner's roster", 10.0)
+    return {"kick_offered_to_members": False, "remaining": len(roster(a, ch))}
 
 
 @scenario("invite12", "Two roster changes at once still converge", kind=PROBE)
