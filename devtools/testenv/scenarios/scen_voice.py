@@ -415,3 +415,34 @@ def h11(env):
         p.leave_voice()
     set_link_profile(env, b, BROADBAND)
     return notes
+
+
+@scenario("voice12", "Mute state propagates to every participant's roster")
+def v12(env):
+    """The roster's muted flag is what a UI renders as the mute indicator.
+    set_muted() advertises coalesced with the periodic voice_state refresh,
+    so the flip is eventually consistent rather than immediate."""
+    a, b, c = env.peers("A", "B", "C")
+    ch = public_channel(a, [b, c], "v12-voice")
+    _join_voice_all([a, b, c], ch)
+    voice_rosters_agree([a, b, c], ch, [a, b, c], MESH_TIMEOUT)
+
+    def sees_b_muted(peer, muted: bool) -> bool:
+        return any(e["identity_hash"] == b.hash and e["muted"] is muted
+                   for e in peer.voice_roster(ch))
+
+    b.set_voice_muted(True)
+    mute_secs = {}
+    for peer in (a, c):
+        mute_secs[peer.tag] = round(wait_until(
+            lambda peer=peer: sees_b_muted(peer, True),
+            f"{peer.tag} to see B muted", DISCOVERY_TIMEOUT), 1)
+
+    b.set_voice_muted(False)
+    for peer in (a, c):
+        wait_until(lambda peer=peer: sees_b_muted(peer, False),
+                   f"{peer.tag} to see B unmuted", DISCOVERY_TIMEOUT)
+
+    for p in (a, b, c):
+        p.leave_voice()
+    return {"mute_seen_secs": mute_secs}

@@ -250,3 +250,37 @@ def f9(env):
         wait_until(lambda peer=peer: _reaction_count(peer, ch, reply_id) == 1,
                    f"{peer.tag} to see the reaction on the reply", DISCOVERY_TIMEOUT)
     return {}
+
+
+@scenario("social10", "A custom emoji reaction carries its image to every peer")
+def f10(env):
+    """A custom emoji is a sha256 reaction key plus an image only the importer
+    holds; receivers must fetch the image over MT_EMOJI_REQUEST before they
+    can render what the count already shows."""
+    a, b, c = env.peers("A", "B", "C")
+    ch = public_channel(a, [b, c], "f10-public")
+
+    a.send(ch, "react-to-me")
+    all_hold([b, c], ch, {"react-to-me"}, timeout=DISCOVERY_TIMEOUT)
+    msg_id = _first_message_id(b, ch)
+
+    imported = b.import_emoji("testenv-flag", _tiny_png((30, 120, 200)))
+    if not imported.get("ok"):
+        raise ScenarioFailure(f"emoji import refused: {imported}")
+    emoji_hash = imported["emoji_hash"]
+
+    b.react(ch, msg_id, emoji_hash)
+    for peer in (a, c):
+        wait_until(lambda peer=peer: _reaction_count(peer, ch, msg_id) == 1,
+                   f"{peer.tag} to count the custom reaction", DISCOVERY_TIMEOUT)
+
+    def holds_image(peer) -> bool:
+        return any(e["emoji_hash"] == emoji_hash and e["image_data_b64"]
+                   for e in peer.emojis())
+
+    latency = {}
+    for peer in (a, c):
+        latency[peer.tag] = round(wait_until(
+            lambda peer=peer: holds_image(peer),
+            f"{peer.tag} to fetch the emoji image", 90.0), 1)
+    return {"image_fetch_secs": latency}

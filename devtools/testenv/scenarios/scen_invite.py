@@ -399,3 +399,64 @@ def b16(env):
     if admitted_everywhere:
         notes["surprise"] = "a member-published admission document was accepted"
     return notes
+
+
+@scenario("invite17", "Leaving an invite-only channel is noticed by the peers", kind=PROBE)
+def b17(env):
+    """leave_channel() unsubscribes locally and notifies the creator's
+    *subscriber* set -- nothing publishes a member-list update, so the
+    prediction is that the departure is invisible to everyone else: every
+    roster keeps the leaver and senders keep addressing them. The leaver's
+    own is_subscribed gate is what actually goes quiet."""
+    a, b, c = env.peers("A", "B", "C")
+    ch = invite_only_channel(a, [b, c], "b17-private")
+    a.send(ch, "before-leave")
+    all_hold([b, c], ch, {"before-leave"}, timeout=DISCOVERY_TIMEOUT)
+
+    if not c.leave(ch):
+        raise ScenarioFailure("leave was refused")
+    a.send(ch, "after-leave")
+    all_hold([b], ch, {"before-leave", "after-leave"}, timeout=DISCOVERY_TIMEOUT)
+
+    leaver_received, _ = settle(lambda: "after-leave" in c.contents(ch),
+                                "the leaver to receive a post-leave send",
+                                NEGATIVE_HOLD_SECS)
+    dropped, _ = settle(
+        lambda: c.hash not in roster(a, ch) and c.hash not in roster(b, ch),
+        "the rosters to drop the leaver", 45.0,
+    )
+    notes = {
+        "rosters_dropped_leaver": dropped,
+        "leaver_received_after_leaving": leaver_received,
+        "views": roster_views([a, b, c], ch),
+    }
+    if dropped:
+        notes["surprise"] = "the departure did propagate to the rosters"
+    return notes
+
+
+@scenario("invite18", "A kicked member can be re-invited")
+def b18(env):
+    """A kick revokes the target's outstanding invite tokens at every peer,
+    and invite_revoked_at is deliberately a moment rather than a flag so that
+    a fresh invite issued after the kick still works. This is the flow that
+    keeps moderation reversible."""
+    a, b, c = env.peers("A", "B", "C")
+    ch = invite_only_channel(a, [b, c], "b18-private")
+
+    if not a.set_roles(ch, remove_members=[c.hash]):
+        raise ScenarioFailure("the kick was rejected")
+    wait_until(lambda: all(c.hash not in roster(p, ch) for p in (a, b)),
+               "C to be dropped everywhere", DISCOVERY_TIMEOUT)
+
+    a.invite(ch, c.hash)
+    invite_and_accept(a, c, ch)
+    agreed = rosters_identical([a, b, c], ch, timeout=DISCOVERY_TIMEOUT)
+    if agreed.get(c.hash) != "member":
+        raise ScenarioFailure(
+            f"unexpected roles after re-admission: {roster_views([a, b, c], ch)}"
+        )
+
+    a.send(ch, "welcome-back")
+    all_hold([b, c], ch, {"welcome-back"}, timeout=DISCOVERY_TIMEOUT)
+    return {"members": len(agreed)}
