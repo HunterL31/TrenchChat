@@ -24,6 +24,7 @@ SEND_MESSAGE = "send_message"
 INVITE = "invite"
 KICK = "kick"
 MANAGE_ROLES = "manage_roles"
+MANAGE_CHANNEL = "manage_channel"
 FULL_SYNC = "full_sync"
 
 ADMIN_DEFAULT = [SEND_MESSAGE, INVITE, KICK, MANAGE_ROLES]
@@ -295,3 +296,97 @@ def b13(env):
     hold_for(lambda: a.permissions(ch) == before,
              "stored permissions to stay unchanged", NEGATIVE_HOLD_SECS)
     return {"rejected": True}
+
+
+@scenario("invite14", "A promoted admin's kick takes effect everywhere")
+def b14(env):
+    """The rank invite6 and invite11 leave untested: an owner's kick works, a
+    member's dies on the wire, and an admin -- a trusted signer holding KICK --
+    is the highest rank below owner where the grant must demonstrably hold."""
+    a, b, c, d = env.peers("A", "B", "C", "D")
+    ch = invite_only_channel(a, [b, c, d], "b14-private")
+
+    if not a.set_roles(ch, add_admins=[b.hash]):
+        raise ScenarioFailure("promotion was rejected")
+    # Every peer must hold the promotion before B publishes, or B's document
+    # arrives from a signer that peer's stored list does not yet trust.
+    wait_until(lambda: all(roster(p, ch).get(b.hash) == "admin" for p in (a, b, c, d)),
+               "every peer to see B as admin", DISCOVERY_TIMEOUT)
+
+    if not b.set_roles(ch, remove_members=[d.hash]):
+        raise ScenarioFailure("the admin's kick was rejected locally")
+    wait_until(lambda: all(d.hash not in roster(p, ch) for p in (a, b, c)),
+               "D to be dropped from every remaining roster", DISCOVERY_TIMEOUT)
+
+    d.send(ch, "after-admin-kick")
+    hold_for(lambda: all("after-admin-kick" not in p.contents(ch) for p in (a, b, c)),
+             "the kicked member's message to stay rejected", NEGATIVE_HOLD_SECS)
+    return {"remaining": len(roster(a, ch))}
+
+
+@scenario("invite15", "An admin granted manage_channel can edit permissions")
+def b15(env):
+    """invite13's refusal only means something if a granted edit demonstrably
+    works. The owner opens manage_channel to admins; B's documents -- signed by
+    an admin, not the owner -- must be applied by every peer, both the
+    revocation and the re-grant that restores the silenced member."""
+    a, b, c = env.peers("A", "B", "C")
+    ch = invite_only_channel(a, [b, c], "b15-private")
+
+    granted_admin = ADMIN_DEFAULT + [MANAGE_CHANNEL]
+    if not a.set_permissions(ch, admin=granted_admin, member=MEMBER_DEFAULT):
+        raise ScenarioFailure("the owner's manage_channel grant was rejected")
+    a.set_roles(ch, add_admins=[b.hash])
+    # B may only publish once every peer trusts it as a signer holding the
+    # grant -- a document arriving ahead of the promotion is dropped for good.
+    wait_until(lambda: all(roster(p, ch).get(b.hash) == "admin" for p in (a, b, c)),
+               "every peer to see B as admin", DISCOVERY_TIMEOUT)
+    wait_until(lambda: all(MANAGE_CHANNEL in p.permissions(ch)["admin"] for p in (b, c)),
+               "every peer to hold the manage_channel grant", DISCOVERY_TIMEOUT)
+
+    if not b.set_permissions(ch, admin=granted_admin, member=[]):
+        raise ScenarioFailure("the admin's permission edit was rejected locally")
+    wait_until(lambda: all(SEND_MESSAGE not in p.permissions(ch)["member"] for p in (a, c)),
+               "the admin's revocation to be applied everywhere", DISCOVERY_TIMEOUT)
+
+    c.send(ch, "while-silenced")
+    hold_for(lambda: "while-silenced" not in a.contents(ch),
+             "the silenced member's message to stay rejected", NEGATIVE_HOLD_SECS)
+
+    if not b.set_permissions(ch, admin=granted_admin, member=MEMBER_DEFAULT):
+        raise ScenarioFailure("the admin's re-grant was rejected locally")
+    wait_until(lambda: SEND_MESSAGE in c.permissions(ch)["member"],
+               "C to see send_message restored", DISCOVERY_TIMEOUT)
+
+    c.send(ch, "after-regrant")
+    all_hold([a, b], ch, {"after-regrant"}, timeout=DISCOVERY_TIMEOUT)
+    return {}
+
+
+@scenario("invite16", "A member granted invite can admit a new peer", kind=PROBE)
+def b16(env):
+    """The invite-path twin of invite11. The grant passes every local check --
+    the token verifies, the join request is honoured -- but the admission
+    document is published by the inviter, and a plain member is not a trusted
+    signer. Prediction: D becomes a member on C's device and nowhere else."""
+    a, b, c, d = env.peers("A", "B", "C", "D")
+    ch = invite_only_channel(a, [b, c], "b16-private",
+                             permissions=(ADMIN_DEFAULT, MEMBER_DEFAULT + [INVITE]))
+    wait_until(lambda: INVITE in c.permissions(ch)["member"],
+               "C to hold the invite grant", DISCOVERY_TIMEOUT)
+
+    c.invite(ch, d.hash)
+    invite_and_accept(c, d, ch)
+
+    admitted, secs = settle(
+        lambda: d.hash in roster(a, ch) and d.hash in roster(b, ch),
+        "the owner and B to admit D", 90.0,
+    )
+    notes = {
+        "admitted_everywhere": admitted,
+        "secs": round(secs, 1) if admitted else None,
+        "views": roster_views([a, b, c, d], ch),
+    }
+    if admitted:
+        notes["surprise"] = "a member-published admission document was accepted"
+    return notes
