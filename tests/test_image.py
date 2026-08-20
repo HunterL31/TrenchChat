@@ -333,7 +333,7 @@ class TestInboundImageIsSane:
     def test_animation_within_the_frame_cap_passes(self):
         assert inbound_image_is_sane(_gif_with_frames(5))
 
-    def test_unparseable_bytes_are_left_alone(self):
+    def test_unparseable_bytes_of_a_known_format_are_left_alone(self):
         """Not provably hostile, and stored as an opaque blob either way.
 
         Normalising these by re-encoding every inbound image is the stronger
@@ -341,4 +341,20 @@ class TestInboundImageIsSane:
         hardware Reticulum targets -- see docs/security-audit-2026-08.md.
         """
         assert inbound_image_is_sane(b"\xff\xd8\xff\xe0" + b"\x00" * 100)
-        assert inbound_image_is_sane(b"not an image at all")
+
+    def test_bytes_of_no_known_image_format_are_refused(self):
+        """Replaces the older "anything unparseable passes" contract.
+
+        Passing arbitrary bytes to Image.open() is what made this function its
+        own denial of service, and letting an unreadable format through is
+        only safe if no downstream decoder can read it either -- which is not
+        true of a browser.
+        """
+        assert not inbound_image_is_sane(b"not an image at all")
+        assert not inbound_image_is_sane(b"")
+
+    def test_a_format_pillow_parses_but_clients_never_send_is_refused(self):
+        """TIFF's frame count walks its whole IFD chain and ICO decodes inside
+        open(), both inside the function meant to avoid decoding."""
+        assert not inbound_image_is_sane(b"II*\x00" + b"\x00" * 64)   # TIFF
+        assert not inbound_image_is_sane(b"\x00\x00\x01\x00" + b"\x00" * 64)  # ICO

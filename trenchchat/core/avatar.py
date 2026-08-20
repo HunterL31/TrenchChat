@@ -47,6 +47,11 @@ RECEIVE_RATE_LIMIT_SECS = SEND_RATE_LIMIT_SECS
 # Ceiling on how many senders the receive-throttle map tracks at once.
 MAX_TRACKED_SENDERS = 512
 
+# Cached peer avatars kept before the least recently updated is evicted. The
+# rate limit is per sender and identities are free to mint, so it bounds one
+# peer's rate and nothing in aggregate.
+MAX_CACHED_PEER_AVATARS = 512
+
 
 def compress_avatar(image_bytes: bytes) -> bytes:
     """Resize and JPEG-compress raw image bytes to a 128x128 avatar.
@@ -270,12 +275,24 @@ class AvatarManager:
             return
 
         # The size cap bounds the payload, not the raster it decodes to, and
-        # these bytes go to the client's image decoder.
-        if not inbound_image_is_sane(avatar_data):
+        # these bytes go to the client's image decoder. Empty data is a
+        # removal, not an image, and is handled below.
+        if avatar_data and not inbound_image_is_sane(avatar_data):
             RNS.log(
                 f"TrenchChat [avatar]: rejected avatar from {sender_hex[:12]}… — "
                 f"header declares an implausible decode",
                 RNS.LOG_WARNING,
+            )
+            return
+
+        # An avatar from an identity we share nothing with is unsolicited
+        # storage: no membership is required to reach us, and the per-sender
+        # rate limit bounds one identity rather than the table.
+        if avatar_data and not self._storage.shares_any_channel(sender_hex):
+            RNS.log(
+                f"TrenchChat [avatar]: ignoring avatar from {sender_hex[:12]}… "
+                f"— no shared channel",
+                RNS.LOG_DEBUG,
             )
             return
 
@@ -313,6 +330,7 @@ class AvatarManager:
 
         if avatar_data:
             self._storage.upsert_peer_avatar(sender_hex, avatar_data, avatar_version)
+            self._storage.prune_peer_avatars(MAX_CACHED_PEER_AVATARS)
             RNS.log(
                 f"TrenchChat [avatar]: stored avatar v{avatar_version} "
                 f"from {sender_hex[:12]}…",

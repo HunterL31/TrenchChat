@@ -29,6 +29,7 @@ from trenchchat.core.avatar import (
     compress_avatar,
 )
 from trenchchat.core.protocol import F_MSG_TYPE, F_AVATAR_DATA, F_AVATAR_VERSION, MT_AVATAR_UPDATE
+from trenchchat.core.permissions import PRESET_PRIVATE, ROLE_MEMBER
 from trenchchat.core.storage import Storage
 
 
@@ -74,6 +75,17 @@ def db(tmp_path) -> Storage:
 @pytest.fixture
 def config(tmp_path) -> Config:
     return Config(data_dir=tmp_path)
+
+
+def _share_channel_with(mgr, sender_hex: str) -> None:
+    """Put a peer in a channel we hold; storing their avatar requires it."""
+    channel_hex = "cc" * 16
+    mgr._storage.upsert_channel(
+        hash=channel_hex, name="test", description="",
+        creator_hash="aa" * 16, permissions=PRESET_PRIVATE, created_at=0.0,
+    )
+    mgr._storage.subscribe(channel_hex)
+    mgr._storage.upsert_member(channel_hex, sender_hex, "Member", role=ROLE_MEMBER)
 
 
 @pytest.fixture
@@ -207,9 +219,25 @@ class TestSendRateLimit:
 # ---------------------------------------------------------------------------
 
 class TestReceiveRateLimit:
+    def _share_channel(self, mgr: AvatarManager, sender_hex: str) -> None:
+        """Put the sender in a channel we hold.
+
+        Storing an avatar is gated on that: nothing else requires membership
+        to reach us, and the per-sender rate limit bounds one identity rather
+        than the table, which identities being free to mint makes moot.
+        """
+        _share_channel_with(mgr, sender_hex)
+
     def _send_avatar_lxm(self, mgr: AvatarManager, sender_hex: str,
-                         avatar_data: bytes, version: int = 1):
-        """Simulate delivering an MT_AVATAR_UPDATE to the manager."""
+                         avatar_data: bytes, version: int = 1,
+                         share: bool = True):
+        """Simulate delivering an MT_AVATAR_UPDATE to the manager.
+
+        *share* puts the sender in a channel we hold first, which storing an
+        avatar now requires; pass False to deliver as a stranger.
+        """
+        if share:
+            self._share_channel(mgr, sender_hex)
         lxm = _make_lxm(
             {
                 F_MSG_TYPE: MT_AVATAR_UPDATE,
@@ -294,6 +322,7 @@ class TestReceiveRateLimit:
         """
         jpeg = compress_avatar(_make_test_jpeg())
         sender = "ef" * 16
+        self._share_channel(avatar_mgr, sender)
         mock_identity = MagicMock()
         mock_identity.hash = bytes.fromhex(sender)
 
@@ -327,6 +356,7 @@ class TestReceiveRateLimit:
         """An MT_AVATAR_UPDATE with empty avatar_data removes the stored avatar."""
         jpeg = compress_avatar(_make_test_jpeg())
         sender = "ee" * 16
+        self._share_channel(avatar_mgr, sender)
 
         # Store initial avatar
         lxm1 = _make_lxm(
@@ -434,6 +464,7 @@ class TestDeliveryTracking:
     def test_avatar_callback_fires_on_inbound(self, avatar_mgr):
         jpeg = compress_avatar(_make_test_jpeg())
         sender = "44" * 16
+        _share_channel_with(avatar_mgr, sender)
         received: list[str] = []
         avatar_mgr.add_avatar_callback(received.append)
 
@@ -447,3 +478,35 @@ class TestDeliveryTracking:
             avatar_mgr._on_lxmf_message(lxm)
 
         assert received == [sender]
+
+
+class TestAvatarStorageIsBounded:
+    """Nothing requires membership to reach us, and identities are free to
+    mint, so a per-sender rate limit bounds one peer rather than the table."""
+
+    def test_a_stranger_avatar_is_not_stored(self, avatar_mgr):
+        jpeg = compress_avatar(_make_test_jpeg())
+        sender = "ab" * 16
+
+        mock_identity = MagicMock()
+        mock_identity.hash = bytes.fromhex(sender)
+        lxm = _make_lxm(
+            {F_MSG_TYPE: MT_AVATAR_UPDATE, F_AVATAR_DATA: jpeg, F_AVATAR_VERSION: 1}
+        )
+        lxm.source_hash = bytes.fromhex(sender)
+        with patch("trenchchat.core.avatar.RNS.Identity.recall", return_value=mock_identity):
+            avatar_mgr._on_lxmf_message(lxm)
+
+        assert avatar_mgr._storage.get_peer_avatar(sender) is None
+
+    def test_the_cache_is_capped(self, avatar_mgr):
+        from trenchchat.core.avatar import MAX_CACHED_PEER_AVATARS
+
+        jpeg = compress_avatar(_make_test_jpeg())
+        for i in range(MAX_CACHED_PEER_AVATARS + 5):
+            avatar_mgr._storage.upsert_peer_avatar(f"{i:032x}", jpeg, 1)
+        avatar_mgr._storage.prune_peer_avatars(MAX_CACHED_PEER_AVATARS)
+
+        remaining = avatar_mgr._storage._fetchall(
+            "SELECT identity_hash FROM peer_avatars")
+        assert len(remaining) == MAX_CACHED_PEER_AVATARS
