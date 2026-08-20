@@ -42,6 +42,7 @@ Scenarios covered:
 
 import struct
 import time
+from unittest.mock import patch
 
 import msgpack
 import pytest
@@ -50,7 +51,9 @@ import RNS
 
 from tests.conftest import forge
 from tests.helpers import sign_as, wait_for, wait_for_member
-from trenchchat.network.router import QUARANTINE_MAX_PER_SENDER
+from trenchchat.network.router import (
+    PATH_REQUEST_GLOBAL_BURST, PATH_REQUEST_MAX_SOURCES, QUARANTINE_MAX_PER_SENDER,
+)
 from trenchchat.core import actions
 from trenchchat.core.invite import _sign, _signed_payload
 from trenchchat.core.messaging import _compute_message_id
@@ -3243,3 +3246,52 @@ class TestAdversarialSyncedReactions:
         reactors = [r["reactor_hash"] for r in bob.storage.get_reactions(msg_id)]
         assert alice.identity.hash_hex in reactors, \
             "a legitimate synced reaction was dropped"
+
+
+class TestAdversarialQuarantinePathRequests:
+    """Quarantine path requests fire before authentication.
+
+    The per-source throttle is keyed on source_hash -- wire data the sender
+    chooses and nothing has verified at that point -- so varying it made every
+    bucket fresh and restored the one-mesh-broadcast-per-packet amplification
+    the throttle exists to prevent.
+    """
+
+    def _unknown_source_lxm(self, bob, source_hash: bytes):
+        dest = RNS.Destination(
+            bob.identity.rns_identity, RNS.Destination.OUT,
+            RNS.Destination.SINGLE, "lxmf", "delivery",
+        )
+        lxm = LXMF.LXMessage(dest, dest, "x", desired_method=LXMF.LXMessage.DIRECT)
+        lxm.source_hash = source_hash
+        lxm.signature_validated = False
+        lxm.unverified_reason = LXMF.LXMessage.SOURCE_UNKNOWN
+        lxm.fields = {F_CHANNEL_HASH: b"\x00" * 16}
+        # Only a message with packed bytes can be re-validated later, so only
+        # one is quarantined -- and only a quarantined one requests a path.
+        lxm.packed = b"\x00" * 32
+        return lxm
+
+    def test_rotating_the_claimed_source_cannot_evade_the_throttle(self, peer_factory):
+        bob = peer_factory("bob")
+        requested = []
+
+        with patch("trenchchat.network.router.RNS.Transport.request_path",
+                   side_effect=lambda h: requested.append(h)):
+            for i in range(PATH_REQUEST_GLOBAL_BURST * 3):
+                bob.router._on_message_received(
+                    self._unknown_source_lxm(bob, i.to_bytes(16, "big")))
+
+        assert len(requested) <= PATH_REQUEST_GLOBAL_BURST, (
+            f"{len(requested)} mesh broadcasts from "
+            f"{PATH_REQUEST_GLOBAL_BURST * 3} packets with rotating sources"
+        )
+
+    def test_the_source_table_stays_bounded_under_rotation(self, peer_factory):
+        bob = peer_factory("bob")
+        with patch("trenchchat.network.router.RNS.Transport.request_path"):
+            for i in range(PATH_REQUEST_MAX_SOURCES * 2):
+                bob.router._on_message_received(
+                    self._unknown_source_lxm(bob, i.to_bytes(16, "big")))
+
+        assert len(bob.router._path_request_rate) <= PATH_REQUEST_MAX_SOURCES

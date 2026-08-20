@@ -43,6 +43,13 @@ PATH_REQUEST_WINDOW_SECS = 60.0
 PATH_REQUEST_BURST = 12
 PATH_REQUEST_MAX_SOURCES = 256
 
+# Global ceiling on quarantine path requests, whatever source they claim. The
+# per-source bucket is keyed on wire data an unauthenticated sender chooses, so
+# rotating it makes every bucket fresh and restores the one-broadcast-per-packet
+# amplification the per-source limit exists to prevent. This is the bound that
+# actually holds; the per-source one only paces a single honest peer.
+PATH_REQUEST_GLOBAL_BURST = 60
+
 
 def delivery_hash_for_identity(identity_hash: bytes) -> bytes:
     """Return the LXMF delivery destination hash for an identity hash."""
@@ -69,6 +76,9 @@ class Router:
         self._control_rate_lock = threading.Lock()
         # source_hash hex -> recent quarantine path-request timestamps
         self._path_request_rate: dict[str, list] = {}
+        # Its own bucket, never the per-source one: key eviction there could
+        # drop the global counter and reset the ceiling it enforces.
+        self._path_request_global: dict[str, list] = {}
         self._path_request_lock = threading.Lock()
 
         self._router = LXMF.LXMRouter(
@@ -164,6 +174,13 @@ class Router:
                 for stale, stamps in list(bucket.items()):
                     if not stamps or now - stamps[-1] > window_secs:
                         del bucket[stale]
+                # Eviction by age alone never fires under key rotation, where
+                # every entry is fresh -- and past max_keys the scan above then
+                # runs on every inbound packet, under this lock, on the
+                # delivery thread. Drop oldest-first until the cap holds.
+                while len(bucket) > max_keys:
+                    oldest = min(bucket, key=lambda k: bucket[k][-1] if bucket[k] else 0)
+                    del bucket[oldest]
         return True
 
     def _addressed_to_us(self, message: LXMF.LXMessage) -> bool:
@@ -239,6 +256,12 @@ class Router:
             f"{source_hex[:16]}… pending identity resolution",
             RNS.LOG_DEBUG,
         )
+        # Global bucket first: source_hex is unauthenticated wire data here, so
+        # the per-source bucket below cannot bound a sender that varies it.
+        if not self._allow_rate(self._path_request_global, self._path_request_lock,
+                                "all", PATH_REQUEST_WINDOW_SECS,
+                                PATH_REQUEST_GLOBAL_BURST, 1):
+            return
         if not self._allow_rate(self._path_request_rate, self._path_request_lock,
                                 source_hex, PATH_REQUEST_WINDOW_SECS,
                                 PATH_REQUEST_BURST, PATH_REQUEST_MAX_SOURCES):

@@ -1069,3 +1069,63 @@ class TestUnansweredRequestIsAskedAgain:
         assert wait_for(lambda: bob.storage.get_messages(ch_hash), timeout=5), (
             "the retry never reached the responder"
         )
+
+
+# ---------------------------------------------------------------------------
+# A peer that never answers must not be re-asked forever
+# ---------------------------------------------------------------------------
+
+class TestSyncRetryIsBounded:
+    """tick() re-asks whoever did not answer.
+
+    Our progress with a peer never advances while they stay silent, so every
+    re-ask is a whole-transcript request -- and one peer that keeps its path
+    resolvable and simply never replies would otherwise draw one out of every
+    member of the channel, at a flat interval, indefinitely.
+    """
+
+    def test_re_asks_stop_after_the_budget(self, peer_factory, monkeypatch):
+        from trenchchat.core.sync import MAX_SYNC_RETRIES
+
+        alice = peer_factory("alice")
+        ch_hash = alice.channel_mgr.create_channel("public", "", "public")
+        silent = "ab" * 16
+
+        sent = []
+        monkeypatch.setattr(alice.sync_mgr, "_send_raw",
+                            lambda dest, fields: sent.append(dest) or True)
+
+        real_time = time.time
+        clock = {"now": real_time()}
+        monkeypatch.setattr("trenchchat.core.sync.time.time",
+                            lambda: clock["now"])
+
+        alice.sync_mgr._send_sync_request(silent, ch_hash, 0.0)
+        for _ in range(MAX_SYNC_RETRIES + 5):
+            # Far enough ahead to clear any backoff the count has grown to.
+            clock["now"] += 10 ** 6
+            alice.sync_mgr.tick()
+
+        assert len(sent) <= MAX_SYNC_RETRIES + 1, (
+            f"{len(sent)} requests sent to a peer that never answered"
+        )
+
+    def test_a_sync_request_is_not_held_in_the_generic_retry_queue(
+            self, peer_factory, monkeypatch):
+        """The announce path re-issues it through _send_sync_request, which is
+        what records a claimable pending entry; a queued copy arrives with
+        none, so its answer is dropped while still burning the responder's
+        deep-sync budget for that pair."""
+        alice = peer_factory("alice")
+        ch_hash = alice.channel_mgr.create_channel("public", "", "public")
+        unreachable = "cd" * 16
+
+        monkeypatch.setattr("trenchchat.core.sync.RNS.Identity.recall",
+                            lambda h: None)
+        monkeypatch.setattr("trenchchat.core.sync.RNS.Transport.request_path",
+                            lambda h: None)
+
+        alice.sync_mgr._send_sync_request(unreachable, ch_hash, 0.0)
+
+        assert alice.sync_mgr._retry.pending_for(unreachable) == 0, \
+            "a sync request was held in the generic retry queue"

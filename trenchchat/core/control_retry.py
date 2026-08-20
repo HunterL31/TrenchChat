@@ -64,25 +64,23 @@ class ControlRetryQueue:
         if not waiting:
             return 0
 
+        # A failed send re-queues the message itself, through queue(), which
+        # is where both bounds are applied. Re-adding it here as well stored a
+        # second copy with a refreshed timestamp -- so the TTL could never
+        # expire it -- and bypassed MAX_QUEUED_PER_PEER, growing the list by
+        # the popped count on every failed flush.
         sent = 0
-        unsent = []
-        for queued_at, fields in waiting:
+        for _queued_at, fields in waiting:
             try:
                 if send(dest_hex, fields):
                     sent += 1
-                else:
-                    unsent.append((queued_at, fields))
             except Exception as e:
                 RNS.log(
                     f"TrenchChat [{self._label}]: retry to {dest_hex[:12]}… "
                     f"failed: {e}",
                     RNS.LOG_WARNING,
                 )
-                unsent.append((queued_at, fields))
 
-        if unsent:
-            with self._lock:
-                self._queued.setdefault(dest_hex, []).extend(unsent)
         if sent:
             RNS.log(
                 f"TrenchChat [{self._label}]: re-sent {sent} queued message(s) "
