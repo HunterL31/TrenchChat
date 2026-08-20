@@ -392,8 +392,20 @@ class Messaging:
         if not image_data:
             image_data = None
 
+        # The id *is* this hash, and a globally-UNIQUE column means the first
+        # writer of one keeps it: a member who signs their own message under
+        # an id they saw elsewhere makes the genuine copy a silent duplicate
+        # forever. Recomputing makes squatting a preimage problem.
+        expected_id = _compute_message_id(content, sender_hex, timestamp)
         if not msg_id:
-            msg_id = _compute_message_id(content, sender_hex, timestamp)
+            msg_id = expected_id
+        elif msg_id != expected_id:
+            RNS.log(
+                f"TrenchChat: dropping message from {sender_hex[:12]}… — "
+                f"message_id {msg_id[:12]}… is not the hash of its content",
+                RNS.LOG_WARNING,
+            )
+            return
 
         # Checked against the payload exactly as it arrived, before any of it
         # is stripped below -- the signature covers the image, so re-checking
