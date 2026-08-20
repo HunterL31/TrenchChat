@@ -317,6 +317,99 @@ vector), `TestAdversarialRelayTampering` (edit, re-thread, id-squat, invented
 message, and the status claim, each with a positive control) and
 `TestRejectedRowsAreNotCaughtUp`.
 
+## Fixed: the August 2026 second pass
+
+A second audit over the same tree, subsystem by subsystem. The first pass had
+hardened *document forgery* — signatures, versioning, trusted-signer
+anchoring — and that held: nothing below forges anything. What it found were
+four patterns the first pass had not systematically looked for.
+
+**Authority taken from data that is authenticated but not authorized.**
+
+- `KICK` alone deposed the owner. A role is derived from `doc["members"]`, so
+  an identity absent from it has no row and therefore no permissions —
+  including the owner short-circuit. `_signer_may_apply` gated removals on
+  `KICK` and never asked *who* was being removed, so an admin could publish a
+  document identical to the stored one except that the owner was dropped from
+  `members`, leaving `owners` untouched so its own gate never fired. Removal
+  now checks the target: an owner may only be removed by an owner, an admin
+  only with `MANAGE_ROLES`.
+- An unsigned channel announce wrote the `permissions` column. `upsert_channel`
+  protected `creator_hash` and `server_hash` from being overwritten this way
+  but not `permissions`, so a demoted creator — still holding the destination —
+  could announce their private channel as public and flip `open_join`, after
+  which the message handler stops checking membership and `SEND_MESSAGE`
+  entirely. A known channel's announce now refreshes only name and
+  description, and `creator_hash` comes from the announcing identity rather
+  than the payload.
+- Tenure was repaired from message timestamps. `_repair_tenure_from_message_history`
+  widened a member's join time to cover any older stored message from them,
+  but that timestamp is self-asserted and bounded only against the future — so
+  one backdated message bought history from before they joined. It now uses
+  `received_at`, which is our own clock.
+- `kick` and `manage_roles` were grantable to the base member role, where the
+  resulting document was rejected by every recipient anyway (scenario
+  invite11). Narrowed rather than widened: both are dropped from the member
+  role on read and on write. `manage_roles` goes with `kick` because promoting
+  yourself is how you would grant yourself `kick`.
+
+**Local state standing in for distributed state.**
+
+- A kicked member could rejoin through a second admin. The spent-token table
+  and the revocation sentinel are written only by the peer that saw the
+  redemption or performed the kick; a peer that merely accepted the removal
+  document held neither, and the join-request handler is fully automatic. Invite
+  tokens now bind their issue time (`F_INVITE_ISSUED_TS`), and any peer holding
+  the signed departure refuses a token issued before it. A token with no bound
+  issue time predates the field and cannot be dated, so it loses. Fixing this
+  also fixed re-inviting: the sentinel was keyed on the invitee, so a fresh
+  invite after a kick was refused for the sentinel's whole TTL.
+
+**Wire values used unvalidated in ordering and windowing.**
+
+- A member-list `version` of `float("inf")` was stored and then compared
+  greater than every later document forever — no kick, promotion or join could
+  be applied to that channel again, and the poisoned peer re-broadcast it.
+  Version must now be a bounded int and `published_at` must pass
+  `wire_timestamp`.
+- `message_id` came off the wire into a globally-UNIQUE column, so a member
+  could mint a validly-signed message under an id they had seen elsewhere and
+  make the genuine copy a silent duplicate forever. It is recomputed on ingest.
+- `F_SYNC_WINDOW_START` is still unbounded, but the row it poisons was split
+  (`sync_served`), so it now denies the sender rather than us.
+
+**Caps that counted the wrong thing, or nothing.**
+
+- Voice counted the signalled roster while fan-out is driven by links, so a
+  peer that dialled in without signalling was uncounted *and* invisible in the
+  participant list. Both now include established links.
+- Sync responses were capped at 50 rows with no byte budget: 50 image rows pack
+  to ~45 MB against a 4 MB parse limit, so a window holding a few images could
+  never sync at all while each attempt put tens of megabytes on the air.
+- Emoji was the one image ingestion path that never checked the declared
+  decode, and it is the one rendered inline and re-served to whoever asks.
+  Fetching also had no membership gate and no throttle — the path is exempt
+  from the control rate limit by design — so one message from a stranger bought
+  an outbound request per token it named.
+- `inbound_image_is_sane` was not header-only: `Image.open` walks a TIFF's
+  whole IFD chain and fully decodes an ICO frame. Format is now checked by
+  magic bytes first, which also closes the fail-open case for a format Pillow
+  cannot read but a browser can.
+- Quarantine path requests were throttled per source, keyed on `source_hash` —
+  unverified at that point — so rotating it made every bucket fresh. A global
+  ceiling is the bound that actually holds.
+
+**Also fixed:** a decoded voice frame of the wrong length reached the mixer and
+killed the only thread driving playback; `?api=` accepted any absolute URL, so
+a page could load the real client from the user's own origin and take
+everything typed into it; the `F_AUTHOR_KEYS` map was unbounded and its pairs
+cost a hash rather than a keypair; peer image bytes rendered without a decode
+bound; the propagation filter's verdict was returned from LXMF's delivery
+callback, whose return value it ignores, so the Settings option governed
+nothing; `Host` was unchecked while the socket's same-origin test read its
+answer out of that header; and the remaining unbounded per-peer maps are
+capped.
+
 ## Still open
 
 ### 0. Tenure filtering is a channel-level switch, so a tenure-blind peer is a hole
@@ -393,11 +486,11 @@ rediscovered as findings.
   is indistinguishable from a single malformed message.
 - macOS builds are unsigned (`trenchchat.spec` sets `codesign_identity=None`) —
   a distribution-trust matter rather than an application one.
-- Inbound image bytes that do not parse as an image are stored as-is. They
-  cannot be shown to be hostile and are opaque blobs either way, but the
-  client's decoder is still what eventually reads them. Re-encoding every
-  inbound image through one bounded library would normalise them; it is lossy
-  and costs CPU on the low-power hardware Reticulum targets, so it is a product
+- Inbound image bytes of a recognised format that do not parse are stored
+  as-is. Bytes of *no* recognised format are now refused outright, so this is
+  narrower than it was. Re-encoding every inbound image through one bounded
+  library would normalise the rest; it is lossy and costs CPU on the low-power
+  hardware Reticulum targets, so it is a product
   call rather than a straight win. `inbound_image_is_sane` covers the
   resource-exhaustion half of this today.
 - `INVITE` is not enforced on direct member *additions* in a member-list
