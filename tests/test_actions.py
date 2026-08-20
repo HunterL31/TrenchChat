@@ -10,6 +10,7 @@ import time
 import pytest
 
 from tests.helpers import wait_for_member
+from trenchchat.config import Config
 from trenchchat.core import actions
 from trenchchat.core.permissions import (
     FLAG_DISCOVERABLE, FLAG_OPEN_JOIN, PRESET_OPEN, PRESET_PRIVATE, ROLE_MEMBER, ROLE_OWNER,
@@ -232,6 +233,38 @@ class TestSettings:
             actions.apply_settings(alice.config, alice.router, {
                 "channel_filter_mode": "bogus",
             })
+
+
+class TestUiTheme:
+    def test_theme_defaults_to_empty(self, peer_factory):
+        alice = peer_factory("alice")
+
+        assert actions.read_ui_theme(alice.config) == {}
+
+    def test_set_then_read_returns_the_same_object(self, peer_factory):
+        alice = peer_factory("alice")
+        theme = {"sidebar": {"bg": "#101010"}, "accent": "#ff8800"}
+
+        actions.set_ui_theme(alice.config, theme)
+
+        assert actions.read_ui_theme(alice.config) == theme
+
+    def test_set_replaces_wholesale(self, peer_factory):
+        alice = peer_factory("alice")
+        actions.set_ui_theme(alice.config, {"sidebar": {"bg": "#101010"}})
+
+        actions.set_ui_theme(alice.config, {"accent": "#ff8800"})
+
+        assert actions.read_ui_theme(alice.config) == {"accent": "#ff8800"}
+
+    def test_theme_persists_across_a_fresh_config(self, peer_factory):
+        alice = peer_factory("alice")
+        theme = {"message_list": {"bg": "#202020", "text": "#eeeeee"}}
+        actions.set_ui_theme(alice.config, theme)
+
+        reloaded = Config(data_dir=alice.data_dir)
+
+        assert actions.read_ui_theme(reloaded) == theme
 
 
 class TestVoiceActions:

@@ -18,7 +18,12 @@ class RecordedRequest {
 }
 
 class FakeBackend {
-  final Map<String, Object> routes = {};
+  /// Seeded with the routes every AppState startup touches regardless of
+  /// what a test is exercising; a test overrides an entry by assigning it.
+  final Map<String, Object> routes = {
+    'GET /ui_theme': <String, dynamic>{'theme': <String, dynamic>{}},
+    'POST /ui_theme': <String, dynamic>{'ok': true},
+  };
   final List<RecordedRequest> requests = [];
 
   String get baseUrl => 'http://fake.test';

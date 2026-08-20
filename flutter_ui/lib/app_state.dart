@@ -20,6 +20,7 @@ import 'api/models/server.dart';
 import 'api/models/settings.dart';
 import 'api/models/voice.dart';
 import 'api/ws.dart';
+import 'theme/theme_spec.dart';
 
 /// How long reaction events for one channel are coalesced before the
 /// channel's messages are re-fetched.
@@ -92,6 +93,10 @@ class AppState extends ChangeNotifier {
   /// message bubbles or the presence roster (see friends_tab.dart).
   List<Friend> friends = [];
 
+  /// The saved per-section color theme. Empty means every section renders
+  /// stock; the shell resolves it per region via SectionTheme.
+  ThemeSpec themeSpec = ThemeSpec.empty;
+
   bool loading = true;
   String? error;
 
@@ -145,6 +150,7 @@ class AppState extends ChangeNotifier {
       }
 
       await loadFriends();
+      await loadTheme();
 
       loading = false;
       notifyListeners();
@@ -576,6 +582,30 @@ class AppState extends ChangeNotifier {
     } catch (e) {
       _reportActionError(e);
       return false;
+    }
+  }
+
+  /// Loads the saved per-section theme. Non-fatal by design: a backend that
+  /// cannot serve one leaves the stock theme in place rather than blocking
+  /// startup.
+  Future<void> loadTheme() async {
+    try {
+      themeSpec = ThemeSpec.fromJson(await api.getUiTheme());
+      notifyListeners();
+    } catch (_) {
+      themeSpec = ThemeSpec.empty;
+    }
+  }
+
+  /// Saves [spec] and adopts it, rebuilding every themed section. On failure
+  /// the previous theme stays in force and [actionError] carries the reason.
+  Future<void> saveTheme(ThemeSpec spec) async {
+    try {
+      await api.setUiTheme(spec.toJson());
+      themeSpec = spec;
+      notifyListeners();
+    } catch (e) {
+      _reportActionError(e);
     }
   }
 

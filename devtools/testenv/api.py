@@ -131,6 +131,10 @@ class SettingsUpdateRequest(BaseModel):
     outbound_propagation_node: str | None = None
 
 
+class SetUiThemeRequest(BaseModel):
+    theme: dict
+
+
 class CreateInterfaceRequest(BaseModel):
     name: str
     type: str
@@ -524,6 +528,15 @@ def create_app(backend: Backend, *, token: str | None = None,
         except ValueError as e:
             return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
         return {"ok": True, "settings": actions.read_settings(backend.config)}
+
+    @app.get("/ui_theme")
+    def get_ui_theme():
+        return {"theme": actions.read_ui_theme(backend.config)}
+
+    @app.post("/ui_theme")
+    def set_ui_theme(req: SetUiThemeRequest):
+        actions.set_ui_theme(backend.config, req.theme)
+        return {"ok": True}
 
     @app.get("/peers/{peer_hash}/presence")
     def get_peer_presence(peer_hash: str):

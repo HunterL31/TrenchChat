@@ -27,6 +27,7 @@ _DEFAULTS = {
         },
     },
     "outbound_propagation_node": None,
+    "ui_theme": {},
     "voice": {
         "input_device": None,
         "output_device": None,
@@ -234,4 +235,16 @@ class Config:
     @outbound_propagation_node.setter
     def outbound_propagation_node(self, value: str | None):
         self._data["outbound_propagation_node"] = value
+        self.save()
+
+    # --- ui theme ---
+
+    @property
+    def ui_theme(self) -> dict:
+        """Client-side theme object, stored opaquely. Empty dict when never set."""
+        return self._data.get("ui_theme", {})
+
+    @ui_theme.setter
+    def ui_theme(self, value: dict):
+        self._data["ui_theme"] = value
         self.save()

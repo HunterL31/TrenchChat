@@ -325,3 +325,13 @@ def apply_settings(config, router, updates: dict) -> None:
             router.enable_propagation()
         elif not enabled and config.propagation_enabled:
             router.disable_propagation()
+
+
+def read_ui_theme(config) -> dict:
+    """The stored UI theme object, empty when never set. Interpreted client-side."""
+    return config.ui_theme
+
+
+def set_ui_theme(config, theme: dict) -> None:
+    """Replace the stored UI theme object wholesale. Contents are not validated."""
+    config.ui_theme = theme

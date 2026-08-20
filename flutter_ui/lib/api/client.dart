@@ -443,6 +443,24 @@ class ApiClient {
     return (_decode(res) as Map<String, dynamic>)['ok'] as bool? ?? false;
   }
 
+  /// The saved per-section UI theme document, `{}` when none is stored. The
+  /// backend persists it verbatim; the client is what gives it meaning (see
+  /// theme/theme_spec.dart).
+  Future<Map<String, dynamic>> getUiTheme() async {
+    final res = await _http.get(_u('/ui_theme'));
+    final theme = (_decode(res) as Map<String, dynamic>)['theme'];
+    return theme is Map<String, dynamic> ? theme : <String, dynamic>{};
+  }
+
+  Future<void> setUiTheme(Map<String, dynamic> theme) async {
+    final res = await _http.post(
+      _u('/ui_theme'),
+      headers: _jsonHeaders,
+      body: jsonEncode({'theme': theme}),
+    );
+    _decode(res);
+  }
+
   Future<List<CustomEmoji>> getEmoji() async {
     final res = await _http.get(_u('/emoji'));
     return (_decode(res) as List<dynamic>)

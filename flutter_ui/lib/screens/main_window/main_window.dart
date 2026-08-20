@@ -8,7 +8,8 @@ import '../../api/models/message.dart';
 import '../../api/models/server.dart';
 import '../../api/models/voice.dart';
 import '../../app_state.dart';
-import '../../theme/tokens.dart';
+import '../../theme/section_theme.dart';
+import '../../theme/theme_spec.dart';
 import '../dialogs/add_friend_dialog.dart';
 import '../dialogs/emoji_picker_dialog.dart';
 import '../dialogs/incoming_invite_dialog.dart';
@@ -96,6 +97,10 @@ class _MainWindowState extends State<MainWindow> {
     return AnimatedBuilder(
       animation: state,
       builder: (context, _) {
+        final spec = state.themeSpec;
+        // Chrome that belongs to no single section: base overrides only.
+        final baseColors = spec.resolveBase();
+
         if (state.loading) {
           return const Center(child: CircularProgressIndicator());
         }
@@ -103,7 +108,7 @@ class _MainWindowState extends State<MainWindow> {
           return Center(
             child: Text(
               'Failed to load: ${state.error}',
-              style: TextStyle(color: TCColors.statusDanger),
+              style: TextStyle(color: baseColors.statusDanger),
             ),
           );
         }
@@ -142,14 +147,18 @@ class _MainWindowState extends State<MainWindow> {
 
         final compact = MediaQuery.of(context).size.width < compactBreakpoint;
 
-        final rail = ServerRail(
-          servers: [
-            for (final s in state.servers) ServerRailEntry(hash: s.hash, name: s.name),
-          ],
-          selectedHash: state.selectedServerHash,
-          onSelect: (hash) => state.selectServer(hash),
-          onAddServer: () => showNewServerDialog(context, state),
-          onSettings: () => showSettingsDialog(context, state),
+        final rail = SectionTheme(
+          spec: spec,
+          section: TCSection.serverRail,
+          child: ServerRail(
+            servers: [
+              for (final s in state.servers) ServerRailEntry(hash: s.hash, name: s.name),
+            ],
+            selectedHash: state.selectedServerHash,
+            onSelect: (hash) => state.selectServer(hash),
+            onAddServer: () => showNewServerDialog(context, state),
+            onSettings: () => showSettingsDialog(context, state),
+          ),
         );
 
         final channelColumn = ChannelColumn(
@@ -189,32 +198,43 @@ class _MainWindowState extends State<MainWindow> {
                 onLeave: () => state.leaveVoice(),
               )
             : null;
-        final channelPane = voicePanel == null
-            ? channelColumn
-            : Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [Expanded(child: channelColumn), voicePanel],
-              );
+        final channelPane = SectionTheme(
+          spec: spec,
+          section: TCSection.channelList,
+          child: voicePanel == null
+              ? channelColumn
+              : Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [Expanded(child: channelColumn), voicePanel],
+                ),
+        );
 
-        final content = Column(
+        final content = SectionTheme(
+          spec: spec,
+          section: TCSection.content,
+          child: Column(
                 children: [
-                  ChannelHeader(
-                    channelName: channel?.name ?? '',
-                    topic: channel?.description ?? '',
-                    linkQuality: linkQuality,
-                    activeTab: _tab,
-                    onTabSelected: (t) => setState(() => _tab = t),
-                    compact: compact,
-                    onOpenNav:
-                        compact ? () => _scaffoldKey.currentState?.openDrawer() : null,
-                    onViewMembers: channel == null || channelHash == null
-                        ? null
-                        : () => showMembersDialog(
-                              context,
-                              state,
-                              channelHashHex: channelHash,
-                              channelName: channel.name,
-                            ),
+                  SectionTheme(
+                    spec: spec,
+                    section: TCSection.topBar,
+                    child: ChannelHeader(
+                      channelName: channel?.name ?? '',
+                      topic: channel?.description ?? '',
+                      linkQuality: linkQuality,
+                      activeTab: _tab,
+                      onTabSelected: (t) => setState(() => _tab = t),
+                      compact: compact,
+                      onOpenNav:
+                          compact ? () => _scaffoldKey.currentState?.openDrawer() : null,
+                      onViewMembers: channel == null || channelHash == null
+                          ? null
+                          : () => showMembersDialog(
+                                context,
+                                state,
+                                channelHashHex: channelHash,
+                                channelName: channel.name,
+                              ),
+                    ),
                   ),
                   Expanded(
                     child: switch (_tab) {
@@ -249,7 +269,12 @@ class _MainWindowState extends State<MainWindow> {
                   ),
                   // In compact mode the drawer hides the column's panel, so
                   // mute/leave stay reachable above the compose bar.
-                  if (compact && voicePanel != null) voicePanel,
+                  if (compact && voicePanel != null)
+                    SectionTheme(
+                      spec: spec,
+                      section: TCSection.channelList,
+                      child: voicePanel,
+                    ),
                   if (_tab == ChannelTab.chat)
                     ComposeBar(
                       channelName: channel?.name ?? '',
@@ -260,15 +285,16 @@ class _MainWindowState extends State<MainWindow> {
                       compact: compact,
                     ),
                 ],
-              );
+              ),
+        );
 
         if (compact) {
           return Scaffold(
             key: _scaffoldKey,
-            backgroundColor: TCColors.bgApp,
+            backgroundColor: baseColors.bgApp,
             drawer: Drawer(
               width: 266,
-              backgroundColor: TCColors.bgSurface,
+              backgroundColor: baseColors.bgSurface,
               shape: const RoundedRectangleBorder(),
               child: Row(
                 crossAxisAlignment: CrossAxisAlignment.stretch,

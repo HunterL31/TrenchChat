@@ -8,6 +8,7 @@ import '../../api/models/message.dart';
 import '../../format.dart';
 import '../../grouping.dart';
 import '../../name_color.dart';
+import '../../theme/section_theme.dart';
 import '../../theme/tokens.dart';
 import '../../widgets/avatar.dart';
 import '../../widgets/badge.dart';
