@@ -1304,3 +1304,51 @@ class TestIsChannelSubscriber:
 
     def test_blank_identity(self, db):
         assert db.is_channel_subscriber("ab" * 16, "") is False
+
+
+# ---------------------------------------------------------------------------
+# Tenure repair takes its evidence from our own clock, not the sender's
+# ---------------------------------------------------------------------------
+
+class TestTenureRepairEvidence:
+    """_repair_tenure_from_message_history widens a member's join time.
+
+    Its evidence must be received_at. A message timestamp is self-asserted and
+    bounded only against the future, so taking it would let a member backdate
+    one message and have their tenure widened to cover history they were never
+    present for -- which is exactly what the requester-side tenure filter uses
+    to decide what to serve them.
+    """
+
+    def _channel_with_member(self, db, joined_at):
+        db.upsert_channel(hash=CHAN, name="c", description="",
+                          creator_hash=ID_B, permissions="invite",
+                          created_at=joined_at - 100)
+        db.open_tenure(CHAN, ID_A, joined_at)
+
+    def test_a_backdated_message_does_not_widen_tenure(self, db, tmp_path):
+        joined_at = 1_000_000.0
+        self._channel_with_member(db, joined_at)
+        # Sent "a year before they joined", received just now.
+        db.insert_message(CHAN, ID_A, "", "backdated", joined_at - 31_536_000,
+                          "m-backdated", None, None, received_at=joined_at + 10)
+
+        db._repair_tenure_from_message_history()
+
+        assert not db.was_member_at(CHAN, ID_A, joined_at - 1000), \
+            "a backdated message widened the sender's tenure"
+        assert db.was_member_at(CHAN, ID_A, joined_at + 10)
+
+    def test_a_genuinely_old_message_still_widens_tenure(self, db):
+        """The repair must still do the job it exists for."""
+        joined_at = 1_000_000.0
+        self._channel_with_member(db, joined_at)
+        # Received long before the tenure row says they joined -- the
+        # added_at-reset artifact the repair was written to correct.
+        db.insert_message(CHAN, ID_A, "", "genuinely old", joined_at - 5000,
+                          "m-old", None, None, received_at=joined_at - 5000)
+
+        db._repair_tenure_from_message_history()
+
+        assert db.was_member_at(CHAN, ID_A, joined_at - 4000), \
+            "the repair no longer widens tenure for genuinely old history"

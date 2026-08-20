@@ -478,9 +478,17 @@ class Storage:
         the LXMF transport layer, so it's safe evidence they were already a
         member by then. This only ever widens an interval already on file --
         it can never grant membership to an identity with no tenure record.
+
+        The evidence is received_at, our own clock, never the message's
+        timestamp: that is self-asserted and bounded only against the future,
+        so a member could send one message backdated a year and have their
+        tenure widened to cover it on our next startup -- after which our
+        requester-side tenure filter would serve them the channel's history
+        from before they joined. When we received a message is something we
+        observed; when the sender says they wrote it is not.
         """
         rows = self._conn.execute("""
-            SELECT channel_hash, sender_hash, MIN(timestamp) AS earliest_ts
+            SELECT channel_hash, sender_hash, MIN(received_at) AS earliest_ts
             FROM messages
             GROUP BY channel_hash, sender_hash
         """).fetchall()
