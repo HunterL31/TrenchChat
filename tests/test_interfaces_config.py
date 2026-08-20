@@ -7,7 +7,8 @@ import pytest
 
 from trenchchat.core.interfaces_config import (
     DuplicateInterfaceError, InterfaceConfigError,
-    delete_interface, load_interfaces_config, missing_required_field,
+    build_interface_config_dict, delete_interface, load_interfaces_config,
+    missing_required_field,
     write_interface, write_interfaces_bulk,
 )
 
@@ -129,3 +130,65 @@ def test_delete_interface_missing_name_returns_false(tmp_path):
     assert deleted is False
     result = load_interfaces_config(str(cfg_path))
     assert "Keep Me" in result
+
+
+# ---------------------------------------------------------------------------
+# Interface type is decided by the validated argument, never by a field value
+# ---------------------------------------------------------------------------
+
+def test_build_rejects_a_type_key_smuggled_through_type_values():
+    """
+    The caller-supplied field dicts used to be copied over the assembled
+    config, so a key named "type" replaced the value EDITABLE_TYPES had just
+    approved -- reaching PipeInterface, which runs a shell command.
+    """
+    with pytest.raises(InterfaceConfigError):
+        build_interface_config_dict(
+            "Sneaky", "AutoInterface", True,
+            {"type": "PipeInterface", "command": "touch /tmp/pwned"}, {},
+        )
+
+
+def test_build_rejects_a_type_key_smuggled_through_common_values():
+    with pytest.raises(InterfaceConfigError):
+        build_interface_config_dict(
+            "Sneaky", "AutoInterface", True, {},
+            {"type": "PipeInterface", "command": "touch /tmp/pwned"},
+        )
+
+
+def test_build_rejects_an_enabled_key_from_a_field_value():
+    with pytest.raises(InterfaceConfigError):
+        build_interface_config_dict("Sneaky", "AutoInterface", False,
+                                    {"enabled": "Yes"}, {})
+
+
+def test_build_rejects_a_type_that_is_not_editable():
+    with pytest.raises(InterfaceConfigError):
+        build_interface_config_dict("Sneaky", "PipeInterface", True,
+                                    {"command": "touch /tmp/pwned"}, {})
+
+
+def test_build_still_assembles_an_ordinary_interface():
+    cfg = build_interface_config_dict(
+        "My Hub", "TCPClientInterface", True,
+        {"target_host": "hub.example.com", "target_port": "4965"},
+        {"bitrate": "0"},
+    )
+    assert cfg["type"] == "TCPClientInterface"
+    assert cfg["enabled"] == "Yes"
+    assert cfg["target_host"] == "hub.example.com"
+    assert "bitrate" not in cfg          # "0" means unset
+
+
+def test_write_interface_refuses_a_non_editable_type(tmp_path):
+    """The last layer before an interface class reaches the RNS config."""
+    cfg_path = tmp_path / "config"
+    cfg_path.write_text("[interfaces]\n")
+
+    with pytest.raises(InterfaceConfigError):
+        write_interface(str(cfg_path), "Sneaky",
+                        {"type": "PipeInterface", "enabled": "Yes",
+                         "command": "touch /tmp/pwned"}, is_new=True)
+
+    assert load_interfaces_config(str(cfg_path)) == {}

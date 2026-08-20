@@ -542,9 +542,12 @@ def create_app(backend: Backend, *, token: str | None = None,
                 {"ok": False, "error": f"'{missing}' is required"}, status_code=400,
             )
 
-        cfg = build_interface_config_dict(
-            name, req.type, req.enabled, req.type_values, req.common_values,
-        )
+        try:
+            cfg = build_interface_config_dict(
+                name, req.type, req.enabled, req.type_values, req.common_values,
+            )
+        except InterfaceConfigError as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
         try:
             write_interface(backend.rns_config_path, name, cfg, is_new=True)
         except DuplicateInterfaceError as e:
@@ -580,9 +583,12 @@ def create_app(backend: Backend, *, token: str | None = None,
                 {"ok": False, "error": f"'{missing}' is required"}, status_code=400,
             )
 
-        cfg = build_interface_config_dict(
-            name, req.type, req.enabled, req.type_values, req.common_values,
-        )
+        try:
+            cfg = build_interface_config_dict(
+                name, req.type, req.enabled, req.type_values, req.common_values,
+            )
+        except InterfaceConfigError as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
         try:
             write_interface(backend.rns_config_path, name, cfg, is_new=False)
         except InterfaceConfigError as e:

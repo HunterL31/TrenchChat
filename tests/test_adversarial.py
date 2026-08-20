@@ -1680,6 +1680,157 @@ class TestAdversarialAdminSigner:
             "An admin demoted the channel owner"
         assert alice.storage.get_role(ch_hash, alice.identity.hash_hex) == ROLE_OWNER
 
+    def test_admin_cannot_depose_the_owner_by_dropping_them_from_members(
+            self, peer_factory):
+        """
+        The owners list is left byte-identical, so the owner-set gate never
+        fires -- but a role is derived from membership, so an owner absent
+        from members has no row and therefore no permissions at all.
+        """
+        alice, bob, ch_hash = _setup_channel_with_admin(peer_factory)
+        v = alice.storage.get_member_list_version(ch_hash)["version"]
+
+        doc = self._doc(
+            ch_hash, v + 1,
+            members=[bob.identity.hash],                      # Alice dropped
+            admins=[alice.identity.hash, bob.identity.hash],  # unchanged
+            owners=[alice.identity.hash],                     # unchanged
+            signer=bob,
+        )
+        assert not alice.invite_mgr._accept_document(doc, ch_hash), \
+            "KICK alone removed the channel owner from the member list"
+        assert alice.storage.is_member(ch_hash, alice.identity.hash_hex)
+        assert alice.storage.get_role(ch_hash, alice.identity.hash_hex) == ROLE_OWNER
+        assert alice.storage.has_permission(ch_hash, alice.identity.hash_hex, KICK)
+
+    def test_kick_alone_cannot_remove_a_fellow_admin(self, peer_factory):
+        """KICK says you may remove a member; removing an admin is MANAGE_ROLES.
+
+        The admins list is left byte-identical to stored, so the MANAGE_ROLES
+        gate on the admin *set* never fires -- dropping Carol from members is
+        what strips her, and only the removal rules can catch it.
+        """
+        alice, bob, ch_hash = _setup_channel_with_admin(
+            peer_factory, admin_perms=[SEND_MESSAGE, KICK]
+        )
+        carol = peer_factory("carol")
+        alice.invite_mgr.publish_member_list(
+            ch_hash, add_members=[carol.identity.hash],
+            add_admins=[carol.identity.hash],
+        )
+        assert wait_for_member(alice.storage, ch_hash, carol.identity.hash_hex)
+        stored = msgpack.unpackb(
+            alice.storage.get_member_list_version(ch_hash)["document_blob"], raw=True
+        )
+        v = alice.storage.get_member_list_version(ch_hash)["version"]
+
+        doc = self._doc(
+            ch_hash, v + 1,
+            members=[alice.identity.hash, bob.identity.hash],  # Carol dropped
+            admins=list(stored[b"admins"]),                    # unchanged
+            owners=list(stored[b"owners"]),                    # unchanged
+            signer=bob,
+        )
+        assert not alice.invite_mgr._accept_document(doc, ch_hash), \
+            "An admin holding only KICK removed a fellow admin"
+        assert alice.storage.is_member(ch_hash, carol.identity.hash_hex)
+
+    def test_an_admin_may_still_remove_a_plain_member(self, peer_factory):
+        """The guard above must not block the ordinary kick it sits beside."""
+        alice, bob, ch_hash = _setup_channel_with_admin(peer_factory)
+        carol = peer_factory("carol")
+        alice.invite_mgr.publish_member_list(ch_hash, add_members=[carol.identity.hash])
+        assert wait_for_member(alice.storage, ch_hash, carol.identity.hash_hex)
+        v = alice.storage.get_member_list_version(ch_hash)["version"]
+
+        doc = self._doc(
+            ch_hash, v + 1,
+            members=[alice.identity.hash, bob.identity.hash],  # Carol kicked
+            admins=[alice.identity.hash, bob.identity.hash],
+            owners=[alice.identity.hash],
+            signer=bob,
+        )
+        assert alice.invite_mgr._accept_document(doc, ch_hash), \
+            "A legitimate kick by an admin was refused"
+        assert not alice.storage.is_member(ch_hash, carol.identity.hash_hex)
+
+    def test_a_non_finite_version_is_refused(self, peer_factory):
+        """
+        version is signed wire data driving an ordering comparison. Stored,
+        float("inf") compares greater than every later document forever.
+        """
+        alice, bob, ch_hash = _setup_channel_with_admin(peer_factory)
+        stored = alice.storage.get_member_list_version(ch_hash)["version"]
+
+        doc = self._doc(
+            ch_hash, float("inf"),
+            members=[alice.identity.hash, bob.identity.hash],
+            admins=[alice.identity.hash, bob.identity.hash],
+            owners=[alice.identity.hash],
+            signer=bob,
+        )
+        assert not alice.invite_mgr._accept_document(doc, ch_hash), \
+            "A document with an infinite version was accepted"
+        assert alice.storage.get_member_list_version(ch_hash)["version"] == stored
+
+    def test_a_poisoned_version_cannot_freeze_the_channel(self, peer_factory):
+        """The point of refusing it: ordinary updates must still apply after."""
+        alice, bob, ch_hash = _setup_channel_with_admin(peer_factory)
+        carol = peer_factory("carol")
+        alice.invite_mgr.publish_member_list(ch_hash, add_members=[carol.identity.hash])
+        assert wait_for_member(alice.storage, ch_hash, carol.identity.hash_hex)
+
+        v = alice.storage.get_member_list_version(ch_hash)["version"]
+        alice.invite_mgr._accept_document(
+            self._doc(
+                ch_hash, float("inf"),
+                members=[alice.identity.hash, bob.identity.hash, carol.identity.hash],
+                admins=[alice.identity.hash, bob.identity.hash],
+                owners=[alice.identity.hash],
+                signer=bob,
+            ),
+            ch_hash,
+        )
+
+        follow_up = self._doc(
+            ch_hash, v + 1,
+            members=[alice.identity.hash, bob.identity.hash],  # Carol kicked
+            admins=[alice.identity.hash, bob.identity.hash],
+            owners=[alice.identity.hash],
+            signer=bob,
+        )
+        assert alice.invite_mgr._accept_document(follow_up, ch_hash), \
+            "A poisoned version froze every later document"
+        assert not alice.storage.is_member(ch_hash, carol.identity.hash_hex)
+
+    def test_an_implausible_published_at_is_refused(self, peer_factory):
+        """Signed over the bad value, so this cannot pass on a bad signature."""
+        alice, bob, ch_hash = _setup_channel_with_admin(peer_factory)
+        stored = alice.storage.get_member_list_version(ch_hash)["version"]
+
+        members = [alice.identity.hash, bob.identity.hash]
+        admins = [alice.identity.hash, bob.identity.hash]
+        owners = [alice.identity.hash]
+        published_at = float("inf")
+        payload = _signed_payload(
+            bytes.fromhex(ch_hash), stored + 1, published_at,
+            members, admins, owners, b"",
+        )
+        doc = {
+            "channel_hash": bytes.fromhex(ch_hash),
+            "version":      stored + 1,
+            "published_at": published_at,
+            "members":      members,
+            "admins":       admins,
+            "owners":       owners,
+            "permissions":  b"",
+            "signatures":   {bob.identity.hash: _sign(
+                bob.identity.rns_identity, payload)},
+        }
+        assert not alice.invite_mgr._accept_document(doc, ch_hash), \
+            "A document with an infinite published_at was accepted"
+        assert alice.storage.get_member_list_version(ch_hash)["version"] == stored
+
     def test_admin_without_manage_channel_cannot_rewrite_permissions(self, peer_factory):
         """
         PRESET_PRIVATE does not grant admins MANAGE_CHANNEL, yet the receiver

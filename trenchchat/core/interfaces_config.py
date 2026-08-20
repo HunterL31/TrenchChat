@@ -35,6 +35,12 @@ REQUIRED_FIELDS: dict[str, list[str]] = {
 # Values build_interface_config_dict treats as "unset" and omits.
 _OMITTED_VALUES = ("", "0", "0.0")
 
+# Keys a caller may never supply as a field value: they are decided by the
+# validated arguments, and letting a field overwrite "type" turns the
+# EDITABLE_TYPES check into a check on a value that is then discarded --
+# PipeInterface, which runs a shell command, is reachable that way.
+_RESERVED_KEYS = ("type", "enabled")
+
 
 class InterfaceConfigError(Exception):
     """Raised when reading or writing the Reticulum interface config fails."""
@@ -77,6 +83,13 @@ def build_interface_config_dict(
     or "0"/"0.0" is treated as unset and omitted, matching how the fields'
     QSpinBox/QLineEdit defaults surface an untouched field.
     """
+    if iface_type not in EDITABLE_TYPES:
+        raise InterfaceConfigError(f"'{iface_type}' is not an editable interface type")
+    for values in (type_values, common_values):
+        for key in values:
+            if key in _RESERVED_KEYS:
+                raise InterfaceConfigError(f"'{key}' cannot be set as a field value")
+
     cfg: dict[str, str] = {"type": iface_type, "enabled": "Yes" if enabled else "No"}
     for key, value in type_values.items():
         str_value = str(value)
@@ -104,9 +117,17 @@ def write_interface(config_path: str, name: str, cfg_dict: dict[str, str],
     """Write one interface section to the Reticulum config file.
 
     Raises DuplicateInterfaceError if is_new and an interface with this name
-    already exists, or InterfaceConfigError if the file can't be read or
-    written.
+    already exists, or InterfaceConfigError if the type is not editable or the
+    file can't be read or written.
+
+    The type is re-checked here rather than trusted from the caller: this is
+    the last layer before an interface class reaches the Reticulum config, and
+    some of the classes RNS will load run a subprocess.
     """
+    cfg_type = cfg_dict.get("type", "")
+    if cfg_type not in EDITABLE_TYPES:
+        raise InterfaceConfigError(f"'{cfg_type}' is not an editable interface type")
+
     try:
         file_cfg = ConfigObj(config_path)
     except Exception as e:
