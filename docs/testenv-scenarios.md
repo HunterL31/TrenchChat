@@ -118,7 +118,7 @@ currently implies, and the scenario exists to confirm it.
 | public8 | A,B,C,D | All 4 joined and the subscriber set has converged; each sends 2 in turn | All four converge on 9 messages (a seed plus 8). Roster settle measured at 0.5–4.0s |
 | public9 | A,B,C,D | A (owner) leaves its own channel, then C sends | C's message still reaches B and D — the subscriber lists they already hold are unaffected by the owner leaving. The departed owner does not receive it and stays unsubscribed |
 | public10 | A,B,C,D | B, C join; C goes offline; D joins (C misses the broadcast); C returns | C learns about D and its next send reaches D. Recovery measured at 0.5s, 1.0s and 18.1s across runs — LXMF's own retry backoff, not an application-level repair |
-| public11 | A,B,C | B leaves; A sends; B rejoins; A sends again | ✅ The round trip public7 stops halfway through: the post-return send reaches B again, and the message B missed while away followed by backfill in 2.0s |
+| public11 | A,B,C | B leaves; A sends; B rejoins; A sends again | ✅ The round trip public7 stops halfway through: the post-return send reaches B again, and the message B missed while away followed by backfill on every run (2.0–8.1s). 4/4 runs |
 
 ### `invite` — Invite-only channels and membership
 
@@ -140,8 +140,8 @@ currently implies, and the scenario exists to confirm it.
 | invite14 | A,B,C,D | A promotes B to admin; B kicks D | ✅ D dropped from A, B and C's rosters; D's later send rejected by all three. 4/4 runs, 39–45s. The rank invite6 and invite11 leave untested — an admin is a trusted signer, so the granted `kick` holds |
 | invite15 | A,B,C | A grants `manage_channel` to admin and promotes B; B revokes `send_message` from member, then re-grants it | ✅ Both admin-signed documents applied everywhere: C silenced after B's revocation (its send rejected by A), then heard again after B's re-grant. 4/4 runs, 40–48s. The working mirror of invite13's refusal, and the re-grant invite9 never covered |
 | invite16 | A,B,C,D | A grants `invite` to member; C (member) invites D; D accepts | ⚠ **Confirmed, worse than predicted, 4/4 runs.** The token verifies and C honours D's join request, but the admission document — signed by a plain member — is rejected by every peer *including C itself*, since `publish_member_list` applies its own document through `_accept_document`. D's token is spent, every roster is unchanged, and D ends holding no roster at all. invite11's gap, on the invite path. Re-confirmed unchanged after the second audit pass |
-| invite17 | A,B,C | C (member) leaves the invite-only channel | ⚠ **Confirmed.** The departure is invisible: `leave_channel()` unsubscribes locally and notifies only the creator's *subscriber* set, and no member-list update is published — so every roster, C's own included, keeps listing C, and senders keep addressing it. Only C's `is_subscribed` gate goes quiet: it received nothing after leaving |
-| invite18 | A,B,C | A kicks C, then re-invites; C accepts | ✅ A kick revokes C's outstanding tokens at every peer, but `invite_revoked_at` is a moment rather than a flag, so the fresh invite issued after the kick readmits C to every roster and A's next send reaches it. Moderation stays reversible |
+| invite17 | A,B,C | C (member) leaves the invite-only channel | ⚠ **Confirmed.** The departure is invisible: `leave_channel()` unsubscribes locally and notifies only the creator's *subscriber* set, and no member-list update is published — so every roster, C's own included, keeps listing C, and senders keep addressing it. Only C's `is_subscribed` gate goes quiet: it received nothing after leaving. 4/4 runs |
+| invite18 | A,B,C | A kicks C, then re-invites; C accepts | ✅ A kick revokes C's outstanding tokens at every peer, but `invite_revoked_at` is a moment rather than a flag, so the fresh invite issued after the kick readmits C to every roster and A's next send reaches it. Moderation stays reversible. 4/4 runs, 24–36s |
 
 #### invite11: a grantable permission that could not take effect
 
@@ -297,7 +297,7 @@ the first ask is served and ~120s when it takes a retry.
 | social7 | A,B,C | A adds B as a friend with a nickname | ✅ Local only — C sees nothing, B is not notified |
 | social8 | A,B,C | B replies to A's message; C reacts to the reply | ✅ `reply_to` and the reaction target resolve identically on all three |
 | social9 | A,B,C | Same conversation on an **invite-only** channel: B replies to A's message; C reacts to the reply | ✅ Resolves identically there too, 4/4 runs in 23–29s — member-list fan-out carries replies and reactions the same way the subscriber set does |
-| social10 | A,B,C | B imports a custom emoji and reacts with it | ✅ A and C converge on the count and fetch the image over `MT_EMOJI_REQUEST` — both already held it by the time the count landed |
+| social10 | A,B,C | B imports a custom emoji and reacts with it | ✅ A and C converge on the count and fetch the image over `MT_EMOJI_REQUEST`, in 0.0–3.5s after the count landed. 4/4 runs |
 
 ### `restart` — Restart, persistence, ordering
 
@@ -331,7 +331,7 @@ three- and four-peer cases, and the states `docs/voice.md` is explicit about.
 | voice9 | A,B,C | All three stream the test tone for 8s | ✅ Each peer receives from both others: **384 frames, 0.0% loss, ~2ms jitter**. The full-mesh version of the smoke test's single pair |
 | voice10 | A,B,C | Five chat messages while the voice mesh streams | ✅ Text delivery unaffected (0.0s), despite sharing the interface |
 | voice11 | A,B | Voice over a `lora_fast` link, with the tone measured | ⚠️ **Two findings**: the link reports `streaming` and `loss_pct` reports ~6% while only ~8% of frames arrive. See below |
-| voice12 | A,B,C | B mutes, then unmutes, mid-call | ✅ Both peers' rosters flip `muted` within 2.5s each way — the coalesced `voice_state` refresh carries it |
+| voice12 | A,B,C | B mutes, then unmutes, mid-call | ✅ Both peers' rosters flip `muted` within 3.0s each way — the coalesced `voice_state` refresh carries it. 4/4 runs |
 
 #### voice11: the quality metric cannot see a starved link
 
