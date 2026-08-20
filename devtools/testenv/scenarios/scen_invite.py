@@ -15,7 +15,8 @@ from asserts import (
     rosters_identical, settle, wait_until, ScenarioFailure,
 )
 from flows import (
-    invite_and_accept, invite_only_channel, DISCOVERY_TIMEOUT, NEGATIVE_HOLD_SECS,
+    invite_and_accept, invite_only_channel, offer_invite,
+    DISCOVERY_TIMEOUT, NEGATIVE_HOLD_SECS,
 )
 from scenario import PROBE, scenario
 
@@ -368,7 +369,8 @@ def b16(env):
     """The invite-path twin of invite11. The grant passes every local check --
     the token verifies, the join request is honoured -- but the admission
     document is published by the inviter, and a plain member is not a trusted
-    signer. Prediction: D becomes a member on C's device and nowhere else."""
+    signer. Prediction: the document is rejected everywhere, including by C's
+    own _accept_document, so D's token is spent for no membership at all."""
     a, b, c, d = env.peers("A", "B", "C", "D")
     ch = invite_only_channel(a, [b, c], "b16-private",
                              permissions=(ADMIN_DEFAULT, MEMBER_DEFAULT + [INVITE]))
@@ -376,17 +378,24 @@ def b16(env):
                "C to hold the invite grant", DISCOVERY_TIMEOUT)
 
     c.invite(ch, d.hash)
-    invite_and_accept(c, d, ch)
+    offer_invite(c, d, ch)
+    d.accept_invite(ch)
 
-    admitted, secs = settle(
-        lambda: d.hash in roster(a, ch) and d.hash in roster(b, ch),
-        "the owner and B to admit D", 90.0,
-    )
+    admitted_on_inviter, _ = settle(lambda: d.hash in roster(c, ch),
+                                    "the inviter to admit D locally", 45.0)
+    if admitted_on_inviter:
+        admitted_everywhere, _ = settle(
+            lambda: d.hash in roster(a, ch) and d.hash in roster(b, ch),
+            "the owner and B to admit D", 45.0,
+        )
+    else:
+        admitted_everywhere = False
+
     notes = {
-        "admitted_everywhere": admitted,
-        "secs": round(secs, 1) if admitted else None,
+        "admitted_on_inviter": admitted_on_inviter,
+        "admitted_everywhere": admitted_everywhere,
         "views": roster_views([a, b, c, d], ch),
     }
-    if admitted:
+    if admitted_everywhere:
         notes["surprise"] = "a member-published admission document was accepted"
     return notes

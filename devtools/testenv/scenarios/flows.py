@@ -96,8 +96,8 @@ def public_channel(owner, joiners, name: str) -> str:
     return channel_hash
 
 
-def invite_and_accept(inviter, invitee, channel_hash: str) -> None:
-    """Invite a peer and wait until the inviter's roster shows them as a member.
+def offer_invite(inviter, invitee, channel_hash: str) -> None:
+    """Re-issue an invite until the invitee holds it as pending.
 
     invite.py's _send_raw has no retry queue either, so an invite sent before
     the invitee's path resolves is dropped silently and nothing re-sends it.
@@ -110,14 +110,17 @@ def invite_and_accept(inviter, invitee, channel_hash: str) -> None:
             f"{invitee.tag} to receive an invite", INVITE_TIMEOUT,
         )
         if offered:
-            break
+            return
         if attempt < INVITE_ATTEMPTS - 1:
             inviter.invite(channel_hash, invitee.hash)
-    else:
-        raise ScenarioFailure(
-            f"{invitee.tag} never received an invite after {INVITE_ATTEMPTS} attempts"
-        )
+    raise ScenarioFailure(
+        f"{invitee.tag} never received an invite after {INVITE_ATTEMPTS} attempts"
+    )
 
+
+def invite_and_accept(inviter, invitee, channel_hash: str) -> None:
+    """Invite a peer and wait until the inviter's roster shows them as a member."""
+    offer_invite(inviter, invitee, channel_hash)
     invitee.accept_invite(channel_hash)
     wait_until(lambda: invitee.hash in roster(inviter, channel_hash),
                f"{inviter.tag} to admit {invitee.tag}", INVITE_TIMEOUT)
