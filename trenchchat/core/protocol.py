@@ -51,6 +51,7 @@ F_INVITE_TOKEN      = 0x11   # bytes — Ed25519 signature token
 F_INVITEE_HASH      = 0x12   # bytes — identity hash of the invitee
 F_EXPIRY_TS         = 0x13   # float — Unix timestamp when the token expires
 F_ADMIN_HASH        = 0x14   # bytes — identity hash of the issuing admin
+F_INVITE_ISSUED_TS  = 0x15   # float — when the token was issued, bound into its signature
 
 # --- Member-list fields ---
 F_MEMBER_LIST_DOC   = 0x21   # bytes — msgpack-encoded member list document

@@ -46,6 +46,7 @@ from trenchchat.core.permissions import (
 from trenchchat.core.protocol import (
     F_CHANNEL_HASH, F_MSG_TYPE,
     F_INVITE_TOKEN, F_INVITEE_HASH, F_EXPIRY_TS, F_ADMIN_HASH,
+    F_INVITE_ISSUED_TS,
     F_MEMBER_LIST_DOC, F_CHANNEL_NAME, F_CHANNEL_DESC,
     F_CHANNEL_CREATOR, F_CHANNEL_ACCESS, F_CHANNEL_CREATED_AT,
     F_CHANNEL_PERMISSIONS, F_SCOPE_KIND,
@@ -81,6 +82,21 @@ def _recover_owners(owners: list[bytes], admins: list[bytes],
         except ValueError:
             pass
     return list(admins)
+
+
+def _token_payload(invitee_hash: bytes, channel_hash_hex: str, expiry: float,
+                   issued_at: float | None) -> bytes:
+    """Bytes an invite token signs over.
+
+    issued_at is appended only when present, so a token from a peer that
+    predates the field reproduces its original payload exactly.
+    """
+    payload = (invitee_hash
+               + bytes.fromhex(channel_hash_hex)
+               + struct.pack(">d", expiry))
+    if issued_at is not None:
+        payload += struct.pack(">d", issued_at)
+    return payload
 
 
 def _signed_payload(channel_hash: bytes, version: int, published_at: float,
@@ -1338,13 +1354,17 @@ class InviteManager:
 
     def generate_invite_token(self, channel_hash_hex: str,
                                invitee_hash: bytes,
-                               ttl: float = DEFAULT_TOKEN_TTL) -> tuple[bytes, float]:
-        """Returns (token_bytes, expiry_timestamp)."""
-        expiry = time.time() + ttl
-        payload = (invitee_hash
-                   + bytes.fromhex(channel_hash_hex)
-                   + struct.pack(">d", expiry))
-        token = _sign(self._identity.rns_identity, payload)
+                               ttl: float = DEFAULT_TOKEN_TTL,
+                               issued_at: float | None = None) -> tuple[bytes, float]:
+        """Returns (token_bytes, expiry_timestamp).
+
+        *issued_at* is bound into the signature so a departure recorded after
+        it invalidates the token at every peer. Omitting it produces the
+        original unbound payload, which peers predating the field still send.
+        """
+        expiry = (time.time() if issued_at is None else issued_at) + ttl
+        token = _sign(self._identity.rns_identity,
+                      _token_payload(invitee_hash, channel_hash_hex, expiry, issued_at))
         return token, expiry
 
     def send_invite(self, channel_hash_hex: str, invitee_hash_hex: str,
@@ -1353,14 +1373,17 @@ class InviteManager:
         RNS.log(f"TrenchChat: sending invite for channel {channel_hash_hex[:12]}… "
                 f"to {invitee_hash_hex[:12]}…", RNS.LOG_NOTICE)
         invitee_hash = bytes.fromhex(invitee_hash_hex)
-        token, expiry = self.generate_invite_token(channel_hash_hex, invitee_hash, ttl)
+        issued_at = time.time()
+        token, expiry = self.generate_invite_token(
+            channel_hash_hex, invitee_hash, ttl, issued_at=issued_at)
         fields = {
-            F_MSG_TYPE:     MT_INVITE,
-            F_CHANNEL_HASH: bytes.fromhex(channel_hash_hex),
-            F_INVITE_TOKEN: token,
-            F_INVITEE_HASH: invitee_hash,
-            F_EXPIRY_TS:    expiry,
-            F_ADMIN_HASH:   self._identity.hash,
+            F_MSG_TYPE:          MT_INVITE,
+            F_CHANNEL_HASH:      bytes.fromhex(channel_hash_hex),
+            F_INVITE_TOKEN:      token,
+            F_INVITEE_HASH:      invitee_hash,
+            F_EXPIRY_TS:         expiry,
+            F_ADMIN_HASH:        self._identity.hash,
+            F_INVITE_ISSUED_TS:  issued_at,
         }
         # Invite-only scopes are never announced, so the invitee has no local
         # record yet -- without the name here, the MT_INVITE handler has
@@ -1376,10 +1399,18 @@ class InviteManager:
         self._send_raw(invitee_hash_hex, fields)
 
     def send_join_request(self, channel_hash_hex: str, token: bytes,
-                          expiry: float, admin_hash_hex: str):
-        """Send a join request to an admin using a received invite token."""
+                          expiry: float, admin_hash_hex: str,
+                          issued_at: float | None = None):
+        """Send a join request to an admin using a received invite token.
+
+        *issued_at* is part of what the token signs over, so it has to travel
+        with it. Callers that hold only the token read it back from the stored
+        invite; a token with none predates the field.
+        """
         RNS.log(f"TrenchChat: sending join request for channel {channel_hash_hex[:12]}… "
                 f"to admin {admin_hash_hex[:12]}…", RNS.LOG_NOTICE)
+        if issued_at is None:
+            issued_at = self._storage.get_pending_invite_issued_at(channel_hash_hex)
         # Anchors the first member list document we receive for this scope to
         # this admin; see _validate_document. Durable, so it survives a restart
         # between accepting the invite and the document arriving.
@@ -1387,18 +1418,28 @@ class InviteManager:
             channel_hash_hex, admin_hash_hex, expiry
         )
         self._storage.clear_pending_invite(channel_hash_hex)
-        self._send_raw(admin_hash_hex, {
+        request = {
             F_MSG_TYPE:     MT_JOIN_REQUEST,
             F_CHANNEL_HASH: bytes.fromhex(channel_hash_hex),
             F_INVITE_TOKEN: token,
             F_INVITEE_HASH: self._identity.hash,
             F_EXPIRY_TS:    expiry,
             F_ADMIN_HASH:   bytes.fromhex(admin_hash_hex),
-        })
+        }
+        if issued_at is not None:
+            request[F_INVITE_ISSUED_TS] = issued_at
+        self._send_raw(admin_hash_hex, request)
 
     def _verify_invite_token(self, token: bytes, invitee_hash: bytes,
                               channel_hash_hex: str, expiry: float,
-                              admin_hash: bytes) -> bool:
+                              admin_hash: bytes,
+                              issued_at: float | None = None) -> bool:
+        """Verify a token against exactly the payload form the sender used.
+
+        A token carrying no issue time is checked against the original
+        unbound payload, so stripping the field off a bound one fails rather
+        than downgrading it.
+        """
         if time.time() > expiry:
             return False
         if admin_hash == self._identity.hash:
@@ -1412,9 +1453,7 @@ class InviteManager:
             return False
         if not self._storage.has_permission(channel_hash_hex, admin_hash.hex(), INVITE):
             return False
-        payload = (invitee_hash
-                   + bytes.fromhex(channel_hash_hex)
-                   + struct.pack(">d", expiry))
+        payload = _token_payload(invitee_hash, channel_hash_hex, expiry, issued_at)
         return _verify(admin_identity, payload, token)
 
     # --- inbound handler ---
@@ -1568,7 +1607,8 @@ class InviteManager:
                     channel = self._storage.get_channel(channel_hash_hex)
                     channel_name = channel["name"] if channel else channel_hash_hex[:12]
                 self._storage.record_pending_invite(
-                    channel_hash_hex, channel_name, token, float(expiry), admin_hex
+                    channel_hash_hex, channel_name, token, float(expiry), admin_hex,
+                    issued_at=wire_timestamp(fields.get(F_INVITE_ISSUED_TS)) or 0.0,
                 )
                 for cb in self._invite_callbacks:
                     try:
@@ -1585,6 +1625,8 @@ class InviteManager:
         invitee_hash = fields.get(F_INVITEE_HASH)
         expiry       = fields.get(F_EXPIRY_TS)
         admin_hash   = fields.get(F_ADMIN_HASH)
+        issued_at    = wire_timestamp(fields.get(F_INVITE_ISSUED_TS)) \
+            if F_INVITE_ISSUED_TS in fields else None
 
         if not all([token, invitee_hash, expiry, admin_hash]):
             return
@@ -1605,17 +1647,29 @@ class InviteManager:
             return
 
         if not self._verify_invite_token(token, invitee_hash, channel_hash_hex,
-                                         expiry, admin_hash):
+                                         expiry, admin_hash, issued_at):
             RNS.log("TrenchChat: invalid or expired invite token rejected",
                     RNS.LOG_WARNING)
             return
 
         invitee_hex = invitee_hash.hex()
 
-        if self._storage.are_invite_tokens_revoked_for(channel_hash_hex, invitee_hex):
+        # Both sources say the same thing -- "this identity was removed at
+        # time T" -- so a token issued at or before T is dead. The revocation
+        # sentinel is written only by the peer that performed the kick, which
+        # is why the departure matters: it rides in the signed member list
+        # document, so a second admin can refuse a replayed token instead of
+        # publishing the sender straight back in. A token carrying no issue
+        # time predates the field and cannot be dated, so it loses.
+        removed_at = max(
+            self._storage.get_last_departure_at(channel_hash_hex, invitee_hex) or 0.0,
+            self._storage.invite_revoked_at(channel_hash_hex, invitee_hex) or 0.0,
+        )
+        if removed_at and removed_at >= (issued_at or 0.0):
             RNS.log(
-                f"TrenchChat [invite]: refusing revoked invite token for "
-                f"{invitee_hex[:12]}… on {channel_hash_hex[:12]}…",
+                f"TrenchChat [invite]: refusing invite token for "
+                f"{invitee_hex[:12]}… issued before they were removed from "
+                f"{channel_hash_hex[:12]}… — a fresh invite is required",
                 RNS.LOG_WARNING,
             )
             return
