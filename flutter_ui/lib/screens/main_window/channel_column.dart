@@ -7,6 +7,8 @@ import '../../api/models/member.dart';
 import '../../api/models/server.dart';
 import '../../api/models/voice.dart';
 import '../../theme/effects.dart';
+import '../../theme/section_theme.dart';
+import '../../theme/theme_spec.dart';
 import '../../theme/tokens.dart';
 import '../../widgets/status_dot.dart';
 import '../../widgets/tc_button.dart';
@@ -73,10 +75,11 @@ class ChannelColumn extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final tc = SectionTheme.of(context);
     final online = onlinePresence.where((p) => p.isOnline).toList();
     return Container(
       width: 206,
-      color: TCColors.bgSurface,
+      color: tc.bgSurface,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
@@ -84,7 +87,7 @@ class ChannelColumn extends StatelessWidget {
             Container(
               padding: const EdgeInsets.all(14),
               decoration: BoxDecoration(
-                border: Border(bottom: BorderSide(color: TCColors.borderSubtle)),
+                border: Border(bottom: BorderSide(color: tc.borderSubtle)),
               ),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -103,7 +106,7 @@ class ChannelColumn extends StatelessWidget {
                     serverMemberCount != null ? '$serverMemberCount MEMBERS' : 'MEMBERS UNKNOWN',
                     style: TextStyle(
                       fontSize: TCType.textMicro,
-                      color: TCColors.textSecondary,
+                      color: tc.textSecondary,
                       letterSpacing: TCType.letterSpacingFor(TCType.textMicro, TCType.trackingWide),
                     ),
                   ),
@@ -146,7 +149,7 @@ class ChannelColumn extends StatelessWidget {
                       '▾ VOICE — ${voiceParticipants.length}',
                       style: TextStyle(
                         fontSize: TCType.textMicro,
-                        color: TCColors.textSecondary,
+                        color: tc.textSecondary,
                         letterSpacing:
                             TCType.letterSpacingFor(TCType.textMicro, TCType.trackingWider),
                       ),
@@ -166,59 +169,17 @@ class ChannelColumn extends StatelessWidget {
               ],
             ),
           ),
-          Container(
-            decoration: BoxDecoration(
-              border: Border(top: BorderSide(color: TCColors.borderSubtle)),
-            ),
-            padding: const EdgeInsets.fromLTRB(14, 10, 14, 4),
-            child: Text(
-              '▾ ONLINE — ${online.length}',
-              style: TextStyle(
-                fontSize: TCType.textMicro,
-                color: TCColors.textSecondary,
-                letterSpacing: TCType.letterSpacingFor(TCType.textMicro, TCType.trackingWider),
-              ),
-            ),
-          ),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(14, 2, 14, 12),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                for (final p in online)
-                  Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 3),
-                    child: TcContextMenuRegion(
-                      items: [
-                        if (onAddFriend != null)
-                          TcContextMenuItem(
-                            label: friendHashes.contains(p.identityHash)
-                                ? 'Edit friend…'
-                                : 'Add friend…',
-                            onTap: () => onAddFriend!(p.identityHash),
-                          ),
-                      ],
-                      child: Row(
-                        children: [
-                          const StatusDot(status: PresenceStatus.online, size: 10),
-                          const SizedBox(width: 9),
-                          Expanded(
-                            child: Text(
-                              _shortHash(p.identityHash),
-                              overflow: TextOverflow.ellipsis,
-                              style: TextStyle(fontSize: 12, color: TCColors.textSecondary),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-              ],
+          _presenceSection(
+            context,
+            _PresenceRoster(
+              online: online,
+              friendHashes: friendHashes,
+              onAddFriend: onAddFriend,
             ),
           ),
           Container(
             decoration: BoxDecoration(
-              border: Border(top: BorderSide(color: TCColors.borderSubtle)),
+              border: Border(top: BorderSide(color: tc.borderSubtle)),
             ),
             padding: const EdgeInsets.all(10),
             child: Row(
@@ -239,6 +200,95 @@ class ChannelColumn extends StatelessWidget {
   }
 }
 
+/// Opens the presence section around the roster. When the enclosing
+/// SectionTheme carries no spec -- an unwrapped ChannelColumn in a widget
+/// test -- there is nothing to resolve overrides from, so the roster keeps
+/// the palette it would have rendered with anyway.
+Widget _presenceSection(BuildContext context, Widget child) {
+  final spec = SectionTheme.specOf(context);
+  if (spec == null) {
+    return SectionTheme.resolved(
+      section: TCSection.presence,
+      colors: SectionTheme.of(context),
+      child: child,
+    );
+  }
+  return SectionTheme(spec: spec, section: TCSection.presence, child: child);
+}
+
+class _PresenceRoster extends StatelessWidget {
+  const _PresenceRoster({
+    required this.online,
+    required this.friendHashes,
+    required this.onAddFriend,
+  });
+
+  final List<PresenceEntry> online;
+  final Set<String> friendHashes;
+  final void Function(String identityHashHex)? onAddFriend;
+
+  @override
+  Widget build(BuildContext context) {
+    final tc = SectionTheme.of(context);
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Container(
+          decoration: BoxDecoration(
+            border: Border(top: BorderSide(color: tc.borderSubtle)),
+          ),
+          padding: const EdgeInsets.fromLTRB(14, 10, 14, 4),
+          child: Text(
+            '▾ ONLINE — ${online.length}',
+            style: TextStyle(
+              fontSize: TCType.textMicro,
+              color: tc.textSecondary,
+              letterSpacing: TCType.letterSpacingFor(TCType.textMicro, TCType.trackingWider),
+            ),
+          ),
+        ),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(14, 2, 14, 12),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              for (final p in online)
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 3),
+                  child: TcContextMenuRegion(
+                    items: [
+                      if (onAddFriend != null)
+                        TcContextMenuItem(
+                          label: friendHashes.contains(p.identityHash)
+                              ? 'Edit friend…'
+                              : 'Add friend…',
+                          onTap: () => onAddFriend!(p.identityHash),
+                        ),
+                    ],
+                    child: Row(
+                      children: [
+                        const StatusDot(status: PresenceStatus.online, size: 10),
+                        const SizedBox(width: 9),
+                        Expanded(
+                          child: Text(
+                            _shortHash(p.identityHash),
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(fontSize: 12, color: tc.textSecondary),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+}
+
 String _shortHash(String hex) {
   if (hex.length <= 8) return hex;
   return '${hex.substring(0, 4)}…${hex.substring(hex.length - 4)}';
@@ -251,11 +301,12 @@ class _SectionLabel extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final tc = SectionTheme.of(context);
     final text = Text(
       label,
       style: TextStyle(
         fontSize: TCType.textMicro,
-        color: TCColors.textSecondary,
+        color: tc.textSecondary,
         letterSpacing: TCType.letterSpacingFor(TCType.textMicro, TCType.trackingWider),
       ),
     );
@@ -286,6 +337,7 @@ class _VoiceRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final tc = SectionTheme.of(context);
     // The online dot already carries the green glow, giving the "lit while
     // speaking" read without a new widget.
     final degraded = switch (participant.linkState) {
@@ -314,11 +366,11 @@ class _VoiceRow extends StatelessWidget {
               child: Text(
                 name,
                 overflow: TextOverflow.ellipsis,
-                style: TextStyle(fontSize: 12, color: TCColors.textSecondary),
+                style: TextStyle(fontSize: 12, color: tc.textSecondary),
               ),
             ),
             if (participant.muted)
-              TcIcon(TcIcons.micMuted, size: 12, color: TCColors.textTertiary),
+              TcIcon(TcIcons.micMuted, size: 12, color: tc.textTertiary),
           ],
         ),
       ),
@@ -341,6 +393,7 @@ class _InviteRowState extends State<_InviteRow> {
 
   @override
   Widget build(BuildContext context) {
+    final tc = SectionTheme.of(context);
     return MouseRegion(
       cursor: SystemMouseCursors.click,
       onEnter: (_) => setState(() => _hover = true),
@@ -351,10 +404,10 @@ class _InviteRowState extends State<_InviteRow> {
           duration: TCEffects.durationMed,
           curve: TCEffects.easeTerminal,
           padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
-          color: _hover ? TCColors.bgHover : Colors.transparent,
+          color: _hover ? tc.bgHover : Colors.transparent,
           child: Row(
             children: [
-              TcIcon(TcIcons.join, size: 12, color: TCColors.accentSecondary),
+              TcIcon(TcIcons.join, size: 12, color: tc.accentSecondary),
               const SizedBox(width: 6),
               Expanded(
                 child: Text(
@@ -393,6 +446,7 @@ class _ChannelRowState extends State<_ChannelRow> {
 
   @override
   Widget build(BuildContext context) {
+    final tc = SectionTheme.of(context);
     final selected = widget.selected;
     return MouseRegion(
       cursor: SystemMouseCursors.click,
@@ -405,17 +459,18 @@ class _ChannelRowState extends State<_ChannelRow> {
           curve: TCEffects.easeTerminal,
           padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
           decoration: BoxDecoration(
-            color: selected ? TCColors.green900 : (_hover ? TCColors.bgHover : Colors.transparent),
+            color: selected ? TCColors.green900 : (_hover ? tc.bgHover : Colors.transparent),
             border: Border(
               left: BorderSide(
-                color: selected ? TCColors.accentPrimary : Colors.transparent,
+                color: selected ? tc.accentPrimary : Colors.transparent,
                 width: 2,
               ),
             ),
           ),
           child: Row(
             children: [
-              Text('#', style: TextStyle(color: selected ? TCColors.accentPrimary : TCColors.textTertiary)),
+              Text('#',
+                  style: TextStyle(color: selected ? tc.accentPrimary : tc.textTertiary)),
               const SizedBox(width: 4),
               Expanded(
                 child: Text(
@@ -423,7 +478,7 @@ class _ChannelRowState extends State<_ChannelRow> {
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(
                     fontSize: 13,
-                    color: selected ? TCColors.green100 : TCColors.textSecondary,
+                    color: selected ? TCColors.green100 : tc.textSecondary,
                   ),
                 ),
               ),
@@ -434,7 +489,7 @@ class _ChannelRowState extends State<_ChannelRow> {
                     'INCOMPLETE',
                     style: TextStyle(
                       fontSize: TCType.textMicro,
-                      color: TCColors.accentSecondary,
+                      color: tc.accentSecondary,
                       letterSpacing:
                           TCType.letterSpacingFor(TCType.textMicro, TCType.trackingWide),
                     ),
@@ -443,7 +498,7 @@ class _ChannelRowState extends State<_ChannelRow> {
                 const SizedBox(width: 4),
               ],
               if (widget.channel.isInviteOnly)
-                TcIcon(TcIcons.lock, size: TCType.textMicro, color: TCColors.textTertiary),
+                TcIcon(TcIcons.lock, size: TCType.textMicro, color: tc.textTertiary),
             ],
           ),
         ),

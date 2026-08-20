@@ -14,6 +14,7 @@ import 'package:flutter/material.dart';
 
 import '../theme/effects.dart';
 import '../theme/notch.dart';
+import '../theme/section_theme.dart';
 import '../theme/tokens.dart';
 
 /// Presents [builder] as a centered modal with a dark scrim, fade + scale-in
@@ -83,12 +84,13 @@ class TcDialogShell extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final tc = SectionTheme.of(context);
     // Never wider than the screen minus a margin, so phone viewports fit.
     final maxWidth = MediaQuery.of(context).size.width - 24;
     return NotchedPanel(
       notch: TCSpace.notch,
-      color: TCColors.bgSurfaceRaised,
-      border: TCColors.borderDefault,
+      color: tc.bgSurfaceRaised,
+      border: tc.borderDefault,
       boxShadow: TCEffects.shadowModal,
       child: Container(
         width: maxWidth < width ? maxWidth : width,
@@ -107,14 +109,14 @@ class TcDialogShell extends StatelessWidget {
               ),
             ),
             const SizedBox(height: 10),
-            Container(height: 1, color: TCColors.borderSubtle),
+            Container(height: 1, color: tc.borderSubtle),
             const SizedBox(height: 16),
             ...children,
             if (errorText != null) ...[
               const SizedBox(height: 12),
               Text(
                 errorText!,
-                style: TextStyle(fontSize: TCType.textCaption, color: TCColors.statusDanger),
+                style: TextStyle(fontSize: TCType.textCaption, color: tc.statusDanger),
               ),
             ],
             if (actions.isNotEmpty) ...[

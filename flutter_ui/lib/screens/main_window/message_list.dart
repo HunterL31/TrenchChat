@@ -151,23 +151,24 @@ class _DateDivider extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final tc = SectionTheme.of(context);
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
       child: Row(
         children: [
-          Expanded(child: Container(height: 1, color: TCColors.borderSubtle)),
+          Expanded(child: Container(height: 1, color: tc.borderSubtle)),
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 12),
             child: Text(
               formatDateDivider(timestamp),
               style: TextStyle(
                 fontSize: TCType.textMicro,
-                color: TCColors.textTertiary,
+                color: tc.textTertiary,
                 letterSpacing: TCType.letterSpacingFor(TCType.textMicro, TCType.trackingWider),
               ),
             ),
           ),
-          Expanded(child: Container(height: 1, color: TCColors.borderSubtle)),
+          Expanded(child: Container(height: 1, color: tc.borderSubtle)),
         ],
       ),
     );
@@ -254,6 +255,7 @@ class _MessageRowWidgetState extends State<_MessageRowWidget> {
     if (!isContinuation && avatarBytes == null) {
       ensureAvatarLoaded?.call(message.senderHash);
     }
+    final tc = SectionTheme.of(context);
     final bg = isOwn ? const Color.fromRGBO(255, 255, 255, 0.02) : Colors.transparent;
     final bodyText = Text.rich(
       TextSpan(
@@ -263,7 +265,7 @@ class _MessageRowWidgetState extends State<_MessageRowWidget> {
           TextStyle(
             fontSize: TCType.textBodyMd,
             height: TCType.leadingBody,
-            color: TCColors.textPrimary,
+            color: tc.textPrimary,
           ),
         ),
       ),
@@ -281,7 +283,7 @@ class _MessageRowWidgetState extends State<_MessageRowWidget> {
                 'Attachment removed \u2014 it could not be displayed safely',
                 style: TextStyle(
                   fontSize: TCType.textMicro,
-                  color: TCColors.accentSecondary,
+                  color: tc.accentSecondary,
                 ),
               ),
             ],
@@ -308,7 +310,7 @@ class _MessageRowWidgetState extends State<_MessageRowWidget> {
                 child: Text(
                   formatTsShort(message.timestamp),
                   textAlign: TextAlign.right,
-                  style: TextStyle(fontSize: TCType.textMicro, color: TCColors.textTertiary),
+                  style: TextStyle(fontSize: TCType.textMicro, color: tc.textTertiary),
                 ),
               ),
             ),
@@ -354,12 +356,12 @@ class _MessageRowWidgetState extends State<_MessageRowWidget> {
                       const SizedBox(width: 8),
                       Text(
                         '[${message.senderHash.substring(0, message.senderHash.length >= 8 ? 8 : message.senderHash.length)}]',
-                        style: TextStyle(fontSize: TCType.textMicro, color: TCColors.textTertiary),
+                        style: TextStyle(fontSize: TCType.textMicro, color: tc.textTertiary),
                       ),
                       const SizedBox(width: 8),
                       Text(
                         formatTs(message.timestamp),
-                        style: TextStyle(fontSize: TCType.textMicro, color: TCColors.textTertiary),
+                        style: TextStyle(fontSize: TCType.textMicro, color: tc.textTertiary),
                       ),
                       if (isLate) ...[
                         const SizedBox(width: 8),
@@ -367,7 +369,7 @@ class _MessageRowWidgetState extends State<_MessageRowWidget> {
                           '⟳ received late',
                           style: TextStyle(
                             fontSize: TCType.textMicro,
-                            color: TCColors.textTertiary,
+                            color: tc.textTertiary,
                             fontStyle: FontStyle.italic,
                           ),
                         ),

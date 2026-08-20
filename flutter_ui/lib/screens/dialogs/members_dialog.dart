@@ -8,6 +8,8 @@ import 'package:flutter/material.dart';
 
 import '../../api/models/member.dart';
 import '../../app_state.dart';
+import '../../theme/section_theme.dart';
+import '../../theme/theme_spec.dart';
 import '../../theme/tokens.dart';
 import '../../widgets/status_dot.dart';
 import '../../widgets/tc_button.dart';
@@ -22,10 +24,14 @@ Future<void> showMembersDialog(BuildContext context, AppState state,
     {required String channelHashHex, required String channelName}) {
   return showTcDialog<void>(
     context: context,
-    builder: (context) => _MembersDialogContent(
-      state: state,
-      channelHashHex: channelHashHex,
-      channelName: channelName,
+    builder: (context) => SectionTheme(
+      spec: state.themeSpec,
+      section: TCSection.dialogs,
+      child: _MembersDialogContent(
+        state: state,
+        channelHashHex: channelHashHex,
+        channelName: channelName,
+      ),
     ),
   );
 }
@@ -103,6 +109,7 @@ class _MembersDialogContentState extends State<_MembersDialogContent> {
   @override
   Widget build(BuildContext context) {
     final state = widget.state;
+    final tc = SectionTheme.of(context);
     final perms = state.permissionsByChannel[widget.channelHashHex];
     final canKick = perms?.kick ?? false;
     final canManageRoles = perms?.manageRoles ?? false;
@@ -141,7 +148,7 @@ class _MembersDialogContentState extends State<_MembersDialogContent> {
               padding: const EdgeInsets.symmetric(vertical: 16),
               child: Text(
                 'No members known yet.',
-                style: TextStyle(fontSize: TCType.textBodySm, color: TCColors.textTertiary),
+                style: TextStyle(fontSize: TCType.textBodySm, color: tc.textTertiary),
               ),
             )
           else
@@ -161,6 +168,7 @@ class _MembersDialogContentState extends State<_MembersDialogContent> {
   }
 
   Widget _memberRow(Member m, {required bool canKick, required bool canManageRoles}) {
+    final tc = SectionTheme.of(context);
     final isSelf = m.identityHash == widget.state.meHashHex;
     final isOwner = m.role == _roleOwner;
     final actionable = !isSelf && !isOwner && !_busy;
@@ -181,7 +189,7 @@ class _MembersDialogContentState extends State<_MembersDialogContent> {
               overflow: TextOverflow.ellipsis,
               style: TextStyle(
                 fontSize: TCType.textBodySm,
-                color: isSelf ? TCColors.green100 : TCColors.textSecondary,
+                color: isSelf ? TCColors.green100 : tc.textSecondary,
               ),
             ),
           ),
@@ -190,14 +198,14 @@ class _MembersDialogContentState extends State<_MembersDialogContent> {
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
               decoration: BoxDecoration(
-                color: TCColors.bgInset,
-                border: Border.all(color: TCColors.borderSubtle),
+                color: tc.bgInset,
+                border: Border.all(color: tc.borderSubtle),
               ),
               child: Text(
                 m.role.toUpperCase(),
                 style: TextStyle(
                   fontSize: TCType.textMicro,
-                  color: isOwner ? TCColors.accentSecondary : TCColors.accentPrimary,
+                  color: isOwner ? tc.accentSecondary : tc.accentPrimary,
                   letterSpacing:
                       TCType.letterSpacingFor(TCType.textMicro, TCType.trackingWide),
                 ),
@@ -218,7 +226,7 @@ class _MembersDialogContentState extends State<_MembersDialogContent> {
             if (confirming) ...[
               Text(
                 'KICK?',
-                style: TextStyle(fontSize: TCType.textCaption, color: TCColors.statusDanger),
+                style: TextStyle(fontSize: TCType.textCaption, color: tc.statusDanger),
               ),
               const SizedBox(width: 6),
               TcGhostButton(

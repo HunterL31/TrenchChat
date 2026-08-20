@@ -7,11 +7,14 @@ import 'package:flutter/material.dart';
 import '../../api/models/server.dart';
 import '../../api/models/settings.dart';
 import '../../app_state.dart';
+import '../../theme/section_theme.dart';
+import '../../theme/theme_spec.dart';
 import '../../theme/tokens.dart';
 import '../../widgets/tc_button.dart';
 import '../../widgets/tc_checkbox.dart';
 import '../../widgets/tc_dialog.dart';
 import '../../widgets/tc_text_field.dart';
+import 'appearance_dialog.dart';
 import 'pin_dialogs.dart';
 
 Future<void> showSettingsDialog(BuildContext context, AppState state) {
@@ -133,6 +136,15 @@ class _SettingsDialogContentState extends State<_SettingsDialogContent> {
 
   @override
   Widget build(BuildContext context) {
+    return SectionTheme(
+      spec: widget.state.themeSpec,
+      section: TCSection.dialogs,
+      child: Builder(builder: _buildContent),
+    );
+  }
+
+  Widget _buildContent(BuildContext context) {
+    final tc = SectionTheme.of(context);
     return TcDialogShell(
       title: 'Settings',
       width: 460,

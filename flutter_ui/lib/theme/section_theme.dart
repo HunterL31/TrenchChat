@@ -17,7 +17,8 @@ class SectionTheme extends InheritedWidget {
     required ThemeSpec spec,
     required this.section,
     required super.child,
-  }) : colors = spec.resolve(section);
+  })  : spec = spec,
+        colors = spec.resolve(section);
 
   /// For a palette that is already resolved (a theme editor previewing one
   /// section, a test pinning colors directly).
@@ -26,10 +27,14 @@ class SectionTheme extends InheritedWidget {
     required this.section,
     required this.colors,
     required super.child,
-  });
+  }) : spec = null;
 
   final TCSection section;
   final TCSectionColors colors;
+
+  /// The spec this section was resolved from, or null when it was built from
+  /// already-resolved colors.
+  final ThemeSpec? spec;
 
   /// The nearest enclosing section's palette, or the stock palette when
   /// there is no [SectionTheme] above [context].
@@ -43,7 +48,15 @@ class SectionTheme extends InheritedWidget {
   static TCSection? sectionOf(BuildContext context) =>
       context.dependOnInheritedWidgetOfExactType<SectionTheme>()?.section;
 
+  /// The live spec behind the nearest section, for a widget that needs to
+  /// open a nested section of its own. Null when there is no [SectionTheme]
+  /// above [context], or when the one above was given resolved colors --
+  /// such a caller falls back to [SectionTheme.resolved] with the palette
+  /// [of] already returns.
+  static ThemeSpec? specOf(BuildContext context) =>
+      context.dependOnInheritedWidgetOfExactType<SectionTheme>()?.spec;
+
   @override
   bool updateShouldNotify(SectionTheme oldWidget) =>
-      colors != oldWidget.colors || section != oldWidget.section;
+      colors != oldWidget.colors || section != oldWidget.section || spec != oldWidget.spec;
 }

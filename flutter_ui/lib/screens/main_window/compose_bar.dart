@@ -3,6 +3,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../../theme/section_theme.dart';
 import '../../theme/tokens.dart';
 import '../../widgets/emoji_text.dart';
 import '../../widgets/tc_button.dart';
@@ -122,16 +123,17 @@ class _ComposeBarState extends State<ComposeBar> {
 
   @override
   Widget build(BuildContext context) {
+    final tc = SectionTheme.of(context);
     return Container(
       decoration: BoxDecoration(
-        color: TCColors.bgSurface,
-        border: Border(top: BorderSide(color: TCColors.borderSubtle)),
+        color: tc.bgSurface,
+        border: Border(top: BorderSide(color: tc.borderSubtle)),
       ),
       padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.center,
         children: [
-          TcIcon(TcIcons.plus, size: 15, color: TCColors.textTertiary),
+          TcIcon(TcIcons.plus, size: 15, color: tc.textTertiary),
           const SizedBox(width: 10),
           Expanded(
             child: TextField(
@@ -140,12 +142,12 @@ class _ComposeBarState extends State<ComposeBar> {
               enabled: widget.enabled,
               minLines: 1,
               maxLines: 6,
-              style: TextStyle(fontSize: TCType.textBodyMd, color: TCColors.textPrimary),
+              style: TextStyle(fontSize: TCType.textBodyMd, color: tc.textPrimary),
               decoration: InputDecoration(
                 isDense: true,
                 border: InputBorder.none,
                 hintText: 'Message #${widget.channelName}…',
-                hintStyle: TextStyle(fontSize: TCType.textBodyMd, color: TCColors.textTertiary),
+                hintStyle: TextStyle(fontSize: TCType.textBodyMd, color: tc.textTertiary),
               ),
             ),
           ),
@@ -156,7 +158,7 @@ class _ComposeBarState extends State<ComposeBar> {
                 : SystemMouseCursors.click,
             child: GestureDetector(
               onTap: widget.pickEmoji == null ? null : _insertEmoji,
-              child: TcIcon(TcIcons.emoji, size: 15, color: TCColors.textTertiary),
+              child: TcIcon(TcIcons.emoji, size: 15, color: tc.textTertiary),
             ),
           ),
           const SizedBox(width: 10),
@@ -172,7 +174,7 @@ class _ComposeBarState extends State<ComposeBar> {
               'ENTER TO SEND · SHIFT+ENTER NEWLINE',
               style: TextStyle(
                 fontSize: TCType.textMicro,
-                color: TCColors.textTertiary,
+                color: tc.textTertiary,
                 letterSpacing: TCType.letterSpacingFor(TCType.textMicro, TCType.trackingWide),
               ),
             ),

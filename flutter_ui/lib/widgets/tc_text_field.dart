@@ -4,6 +4,7 @@
 // compose row) need a visible boundary.
 import 'package:flutter/material.dart';
 
+import '../theme/section_theme.dart';
 import '../theme/tokens.dart';
 
 class TcTextField extends StatelessWidget {
@@ -29,6 +30,7 @@ class TcTextField extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final tc = SectionTheme.of(context);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -36,15 +38,15 @@ class TcTextField extends StatelessWidget {
           label,
           style: TextStyle(
             fontSize: TCType.textCaption,
-            color: TCColors.textSecondary,
+            color: tc.textSecondary,
             letterSpacing: TCType.letterSpacingFor(TCType.textCaption, TCType.trackingWide),
           ),
         ),
         const SizedBox(height: 6),
         Container(
           decoration: BoxDecoration(
-            color: TCColors.bgInset,
-            border: Border.all(color: TCColors.borderDefault),
+            color: tc.bgInset,
+            border: Border.all(color: tc.borderDefault),
           ),
           padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
           child: TextField(
@@ -54,13 +56,13 @@ class TcTextField extends StatelessWidget {
             readOnly: readOnly,
             style: TextStyle(
               fontSize: TCType.textBodyMd,
-              color: readOnly ? TCColors.textSecondary : TCColors.textPrimary,
+              color: readOnly ? tc.textSecondary : tc.textPrimary,
             ),
             decoration: InputDecoration(
               isDense: true,
               border: InputBorder.none,
               hintText: hintText,
-              hintStyle: TextStyle(fontSize: TCType.textBodyMd, color: TCColors.textTertiary),
+              hintStyle: TextStyle(fontSize: TCType.textBodyMd, color: tc.textTertiary),
             ),
           ),
         ),

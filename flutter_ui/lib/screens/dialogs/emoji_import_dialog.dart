@@ -8,6 +8,8 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 
 import '../../app_state.dart';
+import '../../theme/section_theme.dart';
+import '../../theme/theme_spec.dart';
 import '../../theme/tokens.dart';
 import '../../widgets/peer_image.dart';
 import '../../widgets/tc_button.dart';
@@ -20,7 +22,11 @@ const int maxEmojiBytes = 65536;
 Future<void> showEmojiImportDialog(BuildContext context, AppState state) {
   return showTcDialog<void>(
     context: context,
-    builder: (context) => _EmojiImportContent(state: state),
+    builder: (context) => SectionTheme(
+      spec: state.themeSpec,
+      section: TCSection.dialogs,
+      child: _EmojiImportContent(state: state),
+    ),
   );
 }
 
@@ -108,6 +114,7 @@ class _EmojiImportContentState extends State<_EmojiImportContent> {
 
   @override
   Widget build(BuildContext context) {
+    final tc = SectionTheme.of(context);
     return TcDialogShell(
       title: 'Import Emoji',
       width: 360,
@@ -139,15 +146,15 @@ class _EmojiImportContentState extends State<_EmojiImportContent> {
             height: 64,
             alignment: Alignment.center,
             decoration: BoxDecoration(
-              color: TCColors.bgInset,
-              border: Border.all(color: TCColors.borderDefault),
+              color: tc.bgInset,
+              border: Border.all(color: tc.borderDefault),
             ),
             child: _imageBytes != null
                 ? peerImage(_imageBytes!, size: 56)
                 : Text(
                     'NO IMAGE',
                     style: TextStyle(
-                        fontSize: TCType.textMicro, color: TCColors.textTertiary),
+                        fontSize: TCType.textMicro, color: tc.textTertiary),
                   ),
           ),
         ),

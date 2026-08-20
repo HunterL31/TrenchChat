@@ -3,6 +3,7 @@
 import 'package:flutter/material.dart';
 
 import '../theme/effects.dart';
+import '../theme/section_theme.dart';
 import '../theme/tokens.dart';
 
 class TcCheckbox extends StatefulWidget {
@@ -26,6 +27,7 @@ class _TcCheckboxState extends State<TcCheckbox> {
 
   @override
   Widget build(BuildContext context) {
+    final tc = SectionTheme.of(context);
     final disabled = widget.onChanged == null;
     final box = AnimatedContainer(
       duration: TCEffects.durationFast,
@@ -34,15 +36,15 @@ class _TcCheckboxState extends State<TcCheckbox> {
       height: 14,
       padding: const EdgeInsets.all(3),
       decoration: BoxDecoration(
-        color: TCColors.bgInset,
+        color: tc.bgInset,
         border: Border.all(
           color: widget.value
-              ? TCColors.borderAccent
-              : (_hover && !disabled ? TCColors.borderStrong : TCColors.borderDefault),
+              ? tc.borderAccent
+              : (_hover && !disabled ? tc.borderStrong : tc.borderDefault),
         ),
       ),
       child: widget.value
-          ? Container(color: disabled ? TCColors.textDisabled : TCColors.accentPrimary)
+          ? Container(color: disabled ? tc.textDisabled : tc.accentPrimary)
           : null,
     );
 
@@ -65,7 +67,7 @@ class _TcCheckboxState extends State<TcCheckbox> {
                       overflow: TextOverflow.ellipsis,
                       style: TextStyle(
                         fontSize: TCType.textBodySm,
-                        color: disabled ? TCColors.textDisabled : TCColors.textSecondary,
+                        color: disabled ? tc.textDisabled : tc.textSecondary,
                       ),
                     ),
                   ),
@@ -117,6 +119,7 @@ class _ChoiceChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final tc = SectionTheme.of(context);
     final disabled = onTap == null;
     return GestureDetector(
       onTap: onTap,
@@ -129,7 +132,7 @@ class _ChoiceChip extends StatelessWidget {
           decoration: BoxDecoration(
             color: selected ? TCColors.green900 : Colors.transparent,
             border: Border.all(
-              color: selected ? TCColors.borderAccent : TCColors.borderDefault,
+              color: selected ? tc.borderAccent : tc.borderDefault,
             ),
           ),
           child: Text(
@@ -138,8 +141,8 @@ class _ChoiceChip extends StatelessWidget {
               fontSize: TCType.textCaption,
               letterSpacing: TCType.letterSpacingFor(TCType.textCaption, TCType.trackingWide),
               color: disabled
-                  ? TCColors.textDisabled
-                  : (selected ? TCColors.green100 : TCColors.textSecondary),
+                  ? tc.textDisabled
+                  : (selected ? TCColors.green100 : tc.textSecondary),
             ),
           ),
         ),

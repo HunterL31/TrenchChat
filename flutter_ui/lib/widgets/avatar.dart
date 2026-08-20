@@ -3,6 +3,7 @@ import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 
+import '../theme/section_theme.dart';
 import '../theme/tokens.dart';
 import 'peer_image.dart';
 import 'status_dot.dart';
@@ -23,6 +24,7 @@ class Avatar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final tc = SectionTheme.of(context);
     final trimmed = name.trim();
     final initial = trimmed.isEmpty ? '?' : trimmed[0].toUpperCase();
 
@@ -43,14 +45,14 @@ class Avatar extends StatelessWidget {
               height: size,
               alignment: Alignment.center,
               decoration: BoxDecoration(
-                color: TCColors.bgInset,
-                border: Border.all(color: TCColors.borderDefault),
+                color: tc.bgInset,
+                border: Border.all(color: tc.borderDefault),
                 borderRadius: BorderRadius.circular(TCSpace.radiusSm),
               ),
               child: Text(
                 initial,
                 style: TextStyle(
-                  color: TCColors.accentPrimary,
+                  color: tc.accentPrimary,
                   fontFamily: TCType.fontMono,
                   fontWeight: TCType.weightSemibold,
                   fontSize: size * 0.4,

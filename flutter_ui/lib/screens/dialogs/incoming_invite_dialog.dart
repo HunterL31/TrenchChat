@@ -5,6 +5,8 @@ import 'package:flutter/material.dart';
 
 import '../../api/models/invite.dart';
 import '../../app_state.dart';
+import '../../theme/section_theme.dart';
+import '../../theme/theme_spec.dart';
 import '../../theme/tokens.dart';
 import '../../widgets/tc_button.dart';
 import '../../widgets/tc_dialog.dart';
@@ -13,7 +15,11 @@ Future<void> showIncomingInviteDialog(
     BuildContext context, AppState state, PendingInvite invite) {
   return showTcDialog<void>(
     context: context,
-    builder: (context) => _IncomingInviteDialogContent(state: state, invite: invite),
+    builder: (context) => SectionTheme(
+      spec: state.themeSpec,
+      section: TCSection.dialogs,
+      child: _IncomingInviteDialogContent(state: state, invite: invite),
+    ),
   );
 }
 
@@ -69,6 +75,7 @@ class _IncomingInviteDialogContentState extends State<_IncomingInviteDialogConte
   @override
   Widget build(BuildContext context) {
     final invite = widget.invite;
+    final tc = SectionTheme.of(context);
     final scopeLabel = invite.scopeKind == 'server' ? 'server' : 'channel';
     return TcDialogShell(
       title: 'Invite — ${invite.scopeKind == 'server' ? '' : '#'}${invite.channelName}',
@@ -82,28 +89,28 @@ class _IncomingInviteDialogContentState extends State<_IncomingInviteDialogConte
         Text(
           'You have been invited to the $scopeLabel '
           '${invite.scopeKind == 'server' ? '' : '#'}${invite.channelName}.',
-          style: TextStyle(fontSize: TCType.textBodySm, color: TCColors.textSecondary),
+          style: TextStyle(fontSize: TCType.textBodySm, color: tc.textSecondary),
         ),
         const SizedBox(height: 10),
         Text(
           'INVITED BY',
           style: TextStyle(
             fontSize: TCType.textMicro,
-            color: TCColors.textSecondary,
+            color: tc.textSecondary,
             letterSpacing: TCType.letterSpacingFor(TCType.textMicro, TCType.trackingWide),
           ),
         ),
         const SizedBox(height: 4),
         Text(
           invite.adminHex,
-          style: TextStyle(fontSize: TCType.textBodySm, color: TCColors.textTertiary),
+          style: TextStyle(fontSize: TCType.textBodySm, color: tc.textTertiary),
         ),
         const SizedBox(height: 8),
         Text(
           _expiryLabel.toUpperCase(),
           style: TextStyle(
             fontSize: TCType.textMicro,
-            color: TCColors.accentSecondary,
+            color: tc.accentSecondary,
             letterSpacing: TCType.letterSpacingFor(TCType.textMicro, TCType.trackingWide),
           ),
         ),
