@@ -38,6 +38,24 @@ VOICE_HELLO_MAX_ATTEMPTS = 5
 VOICE_REDIAL_BACKOFF = (2.0, 5.0, 10.0, 30.0)
 VOICE_ANNOUNCE_INTERVAL_SECS = 60.0
 
+# How long an exhausted connection is kept before it is dropped entirely.
+# Nothing else removes a _PeerConn: one stale voice_state from a peer that
+# never becomes reachable otherwise buys a mesh-wide path request and a link
+# attempt every VOICE_REDIAL_BACKOFF[-1] seconds for the rest of the session,
+# and _conns grows for the life of it.
+VOICE_CONN_GIVE_UP_SECS = 300.0
+
+# Ceiling on inbound link packets from one peer per second. The design rate is
+# 50 (25 audio + headroom); above that each packet still costs a parse, a lock
+# and a jitter-buffer push, and a VP_HELLO costs three database queries.
+VOICE_PACKET_RATE_LIMIT = 100
+VOICE_PACKET_RATE_WINDOW = 1.0
+
+# Pending inbound links held before the oldest is dropped. These exist before
+# any authentication -- the peer has not identified yet -- so this is the only
+# thing bounding them besides the auth timeout.
+MAX_PENDING_INBOUND_LINKS = 32
+
 # Internal connection states.
 _IDLE = "idle"
 _WAITING = "waiting"       # expecting the peer to dial us
@@ -131,6 +149,9 @@ class _PeerConn:
         self.waiting_deadline = 0.0
         self.hello_sent_at = 0.0
         self.hello_attempts = 0
+        self.last_failure_at = 0.0
+        # Inbound link-packet timestamps, for the per-peer rate limit.
+        self.packet_times: list[float] = []
 
     @property
     def exhausted(self) -> bool:
@@ -264,9 +285,21 @@ class RNSVoiceTransport(VoiceTransportBase):
         with self._lock:
             if self._channel_hex is None:
                 return
-            for conn in self._conns.values():
+            for conn in list(self._conns.values()):
                 if conn.state == _WAITING and now >= conn.waiting_deadline:
                     conn.state = _IDLE
+                if (conn.exhausted and conn.state == _IDLE
+                        and now - conn.last_failure_at >= VOICE_CONN_GIVE_UP_SECS):
+                    # Every re-dial is a mesh-wide path request, so a peer we
+                    # have never reached is dropped rather than retried for
+                    # the rest of the session.
+                    RNS.log(
+                        f"TrenchChat [voice]: giving up on {conn.peer_hex[:12]}… "
+                        f"after {conn.dial_attempts} dial attempts",
+                        RNS.LOG_DEBUG,
+                    )
+                    del self._conns[conn.peer_hex]
+                    continue
                 if conn.state == _IDLE and now >= conn.next_dial_at:
                     dial_needed.append(conn.peer_hex)
                 if conn.state == _LINKED and conn.is_initiator:
@@ -351,6 +384,7 @@ class RNSVoiceTransport(VoiceTransportBase):
             self._by_link.pop(id(conn.link), None)
             conn.link = None
         conn.state = _IDLE
+        conn.last_failure_at = time.time()
         backoff = VOICE_REDIAL_BACKOFF[
             min(conn.dial_attempts, len(VOICE_REDIAL_BACKOFF) - 1)]
         conn.dial_attempts += 1
@@ -392,13 +426,23 @@ class RNSVoiceTransport(VoiceTransportBase):
     def _on_inbound_link(self, link) -> None:
         link.set_packet_callback(self._on_link_packet)
         link.set_link_closed_callback(self._on_link_closed)
+        evicted = None
+        accepted = False
         with self._lock:
-            if self._channel_hex is None:
-                pass  # torn down below, outside the lock
-            else:
+            if self._channel_hex is not None:
+                # These are held before the peer has identified, so nothing
+                # here knows who they are yet and the auth timeout is the only
+                # other bound. Drop the oldest rather than grow.
+                if len(self._pending_inbound) >= MAX_PENDING_INBOUND_LINKS:
+                    oldest = min(self._pending_inbound,
+                                 key=lambda k: self._pending_inbound[k][1])
+                    evicted, _ = self._pending_inbound.pop(oldest)
                 self._pending_inbound[id(link)] = (link, time.time())
-                return
-        self._teardown_link(link, polite=False)
+                accepted = True
+        if evicted is not None:
+            self._teardown_link(evicted, polite=False)
+        if not accepted:
+            self._teardown_link(link, polite=False)
 
     def _handle_hello(self, link, payload: bytes) -> None:
         try:
@@ -472,6 +516,20 @@ class RNSVoiceTransport(VoiceTransportBase):
 
     # --- packet dispatch ---
 
+    def _allow_packet(self, conn: "_PeerConn", now: float) -> bool:
+        """Caller holds the lock. Per-peer ceiling on inbound link packets.
+
+        The frame plane bypasses LXMF, so the router's control throttle never
+        sees it. Nothing else paces a peer that sends faster than the design
+        rate, and each packet costs a parse, this lock, and a buffer push.
+        """
+        times = conn.packet_times
+        times[:] = [t for t in times if now - t < VOICE_PACKET_RATE_WINDOW]
+        if len(times) >= VOICE_PACKET_RATE_LIMIT:
+            return False
+        times.append(now)
+        return True
+
     def _on_link_packet(self, data, packet) -> None:
         link = packet.link
         try:
@@ -480,12 +538,27 @@ class RNSVoiceTransport(VoiceTransportBase):
             return
 
         if ptype == VP_HELLO:
+            with self._lock:
+                established = self._by_link.get(id(link))
+                conn = self._conns.get(established) if established else None
+                # Re-running the handshake on a live link re-authorises the
+                # peer -- three database queries -- and replies, for a packet
+                # they can repeat at will.
+                if conn is not None and conn.state == _STREAMING:
+                    return
             self._handle_hello(link, data)
             return
 
         with self._lock:
             peer_hex = self._by_link.get(id(link))
             conn = self._conns.get(peer_hex) if peer_hex else None
+            if conn is not None and not self._allow_packet(conn, time.time()):
+                conn = None
+                RNS.log(
+                    f"TrenchChat [voice]: rate-limited link packets from "
+                    f"{peer_hex[:12]}…",
+                    RNS.LOG_DEBUG,
+                )
 
         if conn is None:
             return

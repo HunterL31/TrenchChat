@@ -16,6 +16,7 @@ from tests.helpers import (
 )
 from trenchchat.core import actions
 from trenchchat.core.voice import MAX_VOICE_PARTICIPANTS
+from trenchchat.network.voice_transport import PEER_STREAMING
 from trenchchat.core.permissions import (
     PRESET_OPEN, PRESET_PRIVATE, ROLE_MEMBER, ROLE_OWNER, SEND_MESSAGE,
 )
@@ -297,3 +298,74 @@ class TestLinkOnlyParticipants:
 
         assert alice.voice_mgr._authorize_link(bob.identity.hash_hex, ch_hash), \
             "a legitimate member was refused a voice link"
+
+
+class TestVoiceResourceRelease:
+    """A peer's jitter buffer and native decoder were released only on a
+    polite voice_leave, so a dropped link or a revoked permission left both
+    behind for the rest of the session -- and nothing ever removed the
+    connection, whose every re-dial is another mesh-wide path request.
+    """
+
+    def test_a_dropped_link_releases_the_peers_audio_state(self, peer_factory):
+        alice, bob, ch_hash = _setup_invite_channel(peer_factory)
+        alice.voice_mgr.join_voice(ch_hash)
+        bob_hex = bob.identity.hash_hex
+
+        class _Pipeline:
+            def __init__(self):
+                self.dropped = []
+
+            def drop_peer(self, peer_hex):
+                self.dropped.append(peer_hex)
+
+        pipeline = _Pipeline()
+        alice.voice_mgr._audio_pipeline = pipeline
+        with alice.voice_mgr._lock:
+            alice.voice_mgr._rx_frames[bob_hex] = 1
+            alice.voice_mgr._speaking[bob_hex] = True
+
+        alice.voice_mgr._on_peer_link_state(bob_hex, "idle")
+
+        assert pipeline.dropped == [bob_hex], \
+            "a peer whose link dropped kept its decoder and jitter buffer"
+        assert bob_hex not in alice.voice_mgr._rx_frames
+        assert bob_hex not in alice.voice_mgr._speaking
+
+    def test_a_streaming_peer_keeps_its_audio_state(self, peer_factory):
+        alice, bob, ch_hash = _setup_invite_channel(peer_factory)
+        alice.voice_mgr.join_voice(ch_hash)
+
+        class _Pipeline:
+            def __init__(self):
+                self.dropped = []
+
+            def drop_peer(self, peer_hex):
+                self.dropped.append(peer_hex)
+
+        pipeline = _Pipeline()
+        alice.voice_mgr._audio_pipeline = pipeline
+
+        alice.voice_mgr._on_peer_link_state(bob.identity.hash_hex, PEER_STREAMING)
+
+        assert pipeline.dropped == [], "a live peer's decoder was released"
+
+    def test_leaving_clears_the_session_before_stopping_the_transport(
+            self, peer_factory):
+        """A VP_HELLO landing in between would otherwise be authorised against
+        the session being left, repopulating the connection table."""
+        alice, bob, ch_hash = _setup_invite_channel(peer_factory)
+        alice.voice_mgr.join_voice(ch_hash)
+
+        seen = {}
+        real_stop = alice.voice_transport.stop
+
+        def _stop():
+            seen["session_at_stop"] = alice.voice_mgr._session_channel
+            real_stop()
+
+        alice.voice_transport.stop = _stop
+        alice.voice_mgr.leave_voice()
+
+        assert seen["session_at_stop"] is None, \
+            "the transport stopped while the session was still authorising links"
