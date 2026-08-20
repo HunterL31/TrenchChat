@@ -51,12 +51,18 @@ from trenchchat.core.protocol import (
     F_CHANNEL_PERMISSIONS, F_SCOPE_KIND,
     MT_GOODBYE, MT_JOIN_REQUEST, MT_MEMBER_LIST_UPDATE, MT_INVITE, MT_PRESENCE,
     SYNC_WINDOW_SECS,
-    unpack_wire,
+    unpack_wire, wire_timestamp,
 )
 from trenchchat.core.storage import Storage
 from trenchchat.network.router import Router
 
 DEFAULT_TOKEN_TTL = 7 * 24 * 3600  # 7 days
+
+# Upper bound on a member list version. The counter increments by one per
+# publish, so nothing legitimate approaches this; the bound exists because
+# version is signed wire data that drives an ordering comparison, and a
+# non-finite value compares greater than every later document forever.
+MAX_MEMBER_LIST_VERSION = 2 ** 31 - 1
 
 
 def _recover_owners(owners: list[bytes], admins: list[bytes],
@@ -555,9 +561,27 @@ class InviteManager:
             return False
 
         # Additions are governed by the invite/join-request path, not here.
-        if old_members - new_members:
+        removed = old_members - new_members
+        if removed:
             if not self._storage.has_permission(channel_hash_hex, signer_hex, KICK):
                 return _deny("removing members", KICK)
+
+            # A role is derived from membership: an identity absent from
+            # members gets no row, and no row means no permission -- including
+            # the owner short-circuit. So removing someone from members is how
+            # far their authority reaches, and asking only "may you remove
+            # *someone*" lets KICK alone depose the owner who granted it,
+            # leaving the owners list untouched so its own gate never fires.
+            if removed & old_owners and signer not in old_owners:
+                RNS.log(
+                    f"TrenchChat [invite]: rejecting member list doc from "
+                    f"{signer_hex[:12]}… — only an owner may remove an owner",
+                    RNS.LOG_WARNING,
+                )
+                return False
+            if removed & old_admins and not self._storage.has_permission(
+                    channel_hash_hex, signer_hex, MANAGE_ROLES):
+                return _deny("removing an admin", MANAGE_ROLES)
 
         # Any change to the admin set requires MANAGE_ROLES.
         if old_admins != new_admins:
@@ -637,15 +661,44 @@ class InviteManager:
                             RNS.LOG_ERROR)
         return accepted
 
+    def _ordering_fields_are_sane(self, doc: dict, channel_hash_hex: str) -> bool:
+        """False if version or published_at could not order a document.
+
+        Both are signed, so a trusted signer can put anything in them, and both
+        drive the comparison that decides which document wins. A version of
+        float("inf") is stored, then compares greater than every later document
+        for good -- no kick, promotion or join can be applied to the channel
+        again, and the poisoned peer re-broadcasts it.
+        """
+        version = doc.get("version")
+        if isinstance(version, bool) or not isinstance(version, int) \
+                or not 0 <= version <= MAX_MEMBER_LIST_VERSION:
+            RNS.log(
+                f"TrenchChat [invite]: member list doc for {channel_hash_hex[:12]}… "
+                f"has an unusable version {version!r} — rejected",
+                RNS.LOG_WARNING,
+            )
+            return False
+
+        if wire_timestamp(doc.get("published_at")) is None:
+            RNS.log(
+                f"TrenchChat [invite]: member list doc for {channel_hash_hex[:12]}… "
+                f"has an implausible published_at {doc.get('published_at')!r} — rejected",
+                RNS.LOG_WARNING,
+            )
+            return False
+        return True
+
     def _accept_document_locked(self, doc: dict, channel_hash_hex: str) -> bool:
         """
         Apply acceptance rules. Returns True if accepted.
         Rules (in order):
           1. doc["channel_hash"] must match the expected channel.
-          2. At least one valid admin signature.
-          3. version > local_version  → accept.
-          4. version == local_version, higher published_at → accept.
-          5. version == local_version, same published_at, lower admin hash → accept.
+          2. version and published_at must be orderable values.
+          3. At least one valid admin signature.
+          4. version > local_version  → accept.
+          5. version == local_version, higher published_at → accept.
+          6. version == local_version, same published_at, lower admin hash → accept.
         """
         doc_channel_hex = doc.get("channel_hash", b"").hex() \
             if isinstance(doc.get("channel_hash"), bytes) else str(doc.get("channel_hash", ""))
@@ -655,6 +708,9 @@ class InviteManager:
                 f"(doc={doc_channel_hex[:12]}… expected={channel_hash_hex[:12]}…) — rejected",
                 RNS.LOG_WARNING,
             )
+            return False
+
+        if not self._ordering_fields_are_sane(doc, channel_hash_hex):
             return False
 
         signer = self._validate_document(doc, channel_hash_hex)
@@ -963,6 +1019,36 @@ class InviteManager:
 
     # --- publish a new member list (admin action) ---
 
+    def _removable_by(self, channel_hash_hex: str, actor_hex: str,
+                      targets: list[bytes]) -> list[bytes]:
+        """Drop targets the actor holds KICK over but not enough authority for.
+
+        Outbound mirror of _signer_may_apply's removal rules: KICK says you may
+        remove a member, not that you may remove the owner who granted it.
+        """
+        actor_is_owner = self._storage.get_role(channel_hash_hex, actor_hex) == ROLE_OWNER
+        may_manage_roles = self._storage.has_permission(
+            channel_hash_hex, actor_hex, MANAGE_ROLES)
+        allowed = []
+        for target in targets:
+            target_role = self._storage.get_role(channel_hash_hex, target.hex())
+            if target_role == ROLE_OWNER and not actor_is_owner:
+                RNS.log(
+                    f"TrenchChat [invite]: {actor_hex[:12]}… attempted to remove "
+                    f"owner {target.hex()[:12]}… — ignored",
+                    RNS.LOG_WARNING,
+                )
+                continue
+            if target_role == ROLE_ADMIN and not may_manage_roles:
+                RNS.log(
+                    f"TrenchChat [invite]: {actor_hex[:12]}… attempted to remove "
+                    f"admin {target.hex()[:12]}… without {MANAGE_ROLES} — ignored",
+                    RNS.LOG_WARNING,
+                )
+                continue
+            allowed.append(target)
+        return allowed
+
     def publish_member_list(self, channel_hash_hex: str,
                             add_members: list[bytes] | None = None,
                             remove_members: list[bytes] | None = None,
@@ -973,7 +1059,8 @@ class InviteManager:
         """Build, sign, persist, and broadcast an updated member list.
 
         Mutations are silently dropped if the caller lacks the required permission:
-        - remove_members requires KICK
+        - remove_members requires KICK, plus MANAGE_ROLES to remove an admin
+          and owner status to remove an owner
         - add_admins / remove_admins requires MANAGE_ROLES
         Owner-list mutations (add_owners / remove_owners) are always permitted
         for the channel owner and are not separately gated here.
@@ -993,6 +1080,9 @@ class InviteManager:
                 RNS.LOG_WARNING,
             )
             remove_members = None
+        if remove_members:
+            remove_members = self._removable_by(
+                channel_hash_hex, my_hex, remove_members) or None
         if (add_admins or remove_admins) and not self._storage.has_permission(
             channel_hash_hex, my_hex, MANAGE_ROLES
         ):
