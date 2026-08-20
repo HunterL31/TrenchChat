@@ -54,6 +54,10 @@ def main():
     parser.add_argument("--web-dir", default=str(_DEFAULT_WEB_DIR),
                         help="built web client to serve at / (default "
                              "flutter_ui/build/web; skipped if missing)")
+    parser.add_argument("--page-origin", action="append", default=[], dest="page_origins",
+                        help="extra browser origin allowed to reach this API "
+                             "(repeatable); required for any non-localhost address "
+                             "the client is served on, e.g. http://100.x.y.z:8899")
     args = parser.parse_args()
 
     import uvicorn
@@ -78,7 +82,7 @@ def main():
     threading.Timer(_STARTUP_SYNC_DELAY_SECS, backend.sync_mgr.request_sync_all).start()
 
     api_token = generate_token()
-    app = create_app(backend, token=api_token)
+    app = create_app(backend, token=api_token, allowed_origins=args.page_origins)
     # The Flutter bundle is ~10 MB of JS and wasm. Served raw over a slow or
     # relayed link the browser gives up mid-load, so compress it.
     app.add_middleware(GZipMiddleware, minimum_size=1024)
