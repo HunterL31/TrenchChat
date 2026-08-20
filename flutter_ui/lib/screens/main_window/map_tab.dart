@@ -7,12 +7,13 @@
 // center so they stay off the edge lines.
 import 'dart:math' as math;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import '../../api/client.dart';
 import '../../api/models/network_map.dart';
 import '../../app_state.dart';
-import '../../theme/effects.dart';
+import '../../theme/glow.dart';
 import '../../theme/section_theme.dart';
 import '../../theme/theme_spec.dart';
 import '../../theme/tokens.dart';
@@ -386,7 +387,11 @@ class _MapTabState extends State<MapTab> {
                         maxScale: 4,
                         boundaryMargin: const EdgeInsets.all(600),
                         child: CustomPaint(
-                          painter: _NetworkMapPainter(data: _filtered(data), colors: tc),
+                          painter: _NetworkMapPainter(
+                            data: _filtered(data),
+                            colors: tc,
+                            glow: tcTextGlow(context),
+                          ),
                           child: const SizedBox.expand(),
                         ),
                       ),
@@ -463,10 +468,13 @@ class _MapTabState extends State<MapTab> {
 }
 
 class _NetworkMapPainter extends CustomPainter {
-  _NetworkMapPainter({required this.data, required this.colors});
+  _NetworkMapPainter({required this.data, required this.colors, this.glow});
 
   final NetworkMapData data;
   final TCSectionColors colors;
+
+  /// The section's text glow, or null when it has glow off.
+  final List<Shadow>? glow;
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -583,7 +591,7 @@ class _NetworkMapPainter extends CustomPainter {
           color: node.kind == MapNodeKind.self
               ? colors.textEmphasis
               : colors.textSecondary,
-          shadows: node.kind == MapNodeKind.self ? [TCEffects.textGlowGreen] : null,
+          shadows: node.kind == MapNodeKind.self ? glow : null,
         ),
       ),
       textDirection: TextDirection.ltr,
@@ -607,5 +615,7 @@ class _NetworkMapPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant _NetworkMapPainter oldDelegate) =>
-      oldDelegate.data != data || oldDelegate.colors != colors;
+      oldDelegate.data != data ||
+      oldDelegate.colors != colors ||
+      !listEquals(oldDelegate.glow, glow);
 }

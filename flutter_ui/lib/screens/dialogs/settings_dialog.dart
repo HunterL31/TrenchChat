@@ -314,9 +314,17 @@ class _SettingsDialogContentState extends State<_SettingsDialogContent> {
     if (spec.isEmpty) return 'Using the stock palette.';
     final tokens = spec.base.length +
         spec.sections.values.fold<int>(0, (sum, tokens) => sum + tokens.length);
-    final scopes = spec.sections.length + (spec.base.isEmpty ? 0 : 1);
-    return '$tokens color${tokens == 1 ? '' : 's'} customized '
-        'across $scopes scope${scopes == 1 ? '' : 's'}.';
+    final styles = spec.styles.values.fold<int>(0, (sum, keys) => sum + keys.length);
+    final scopes = <String>{
+      ...spec.sections.keys,
+      ...spec.styles.keys,
+      if (spec.base.isNotEmpty) ThemeSpec.baseStyleScope,
+    }.length;
+    final counted = [
+      if (tokens > 0) '$tokens color${tokens == 1 ? '' : 's'}',
+      if (styles > 0) '$styles style${styles == 1 ? '' : 's'}',
+    ].join(' and ');
+    return '$counted customized across $scopes scope${scopes == 1 ? '' : 's'}.';
   }
 
   Future<void> _onEditColors() async {

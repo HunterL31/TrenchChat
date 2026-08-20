@@ -8,7 +8,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
-import '../../theme/effects.dart';
+import '../../theme/glow.dart';
 import '../../theme/section_theme.dart';
 import '../../theme/tokens.dart';
 import '../../widgets/tc_button.dart';
@@ -357,10 +357,10 @@ class _UnlockContentState extends State<_UnlockContent> {
           child: Text(
             'TrenchChat is locked',
             style: TextStyle(
-              fontFamily: TCType.fontDisplay,
+              fontFamily: SectionTheme.styleOf(context).displayFont,
               fontSize: TCType.textDisplaySm,
               color: tc.textEmphasis,
-              shadows: [TCEffects.textGlowGreen],
+              shadows: tcTextGlow(context),
             ),
           ),
         ),

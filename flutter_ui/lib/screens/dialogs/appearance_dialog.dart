@@ -1,4 +1,5 @@
-// Appearance editor: the whole per-section theme, one scope at a time.
+// Appearance editor: the whole per-section theme, one scope at a time --
+// the style block (text size, glow, display font) first, then every color.
 //
 // Scope is either Base -- the overrides every section inherits -- or one of
 // the six sections, whose overrides win over base for that region only. The
@@ -32,6 +33,23 @@ const Map<String, String> appearanceScopeLabels = {
   'content': 'CONTENT',
   'dialogs': 'DIALOGS',
 };
+
+/// The text scales the editor offers, keyed by the value they store.
+const Map<String, String> appearanceTextScaleOptions = {
+  '0.9': '90%',
+  '1.0': '100%',
+  '1.1': '110%',
+  '1.25': '125%',
+};
+
+/// Label per bundled display family, in the order the editor offers them.
+const Map<String, String> appearanceDisplayFontLabels = {
+  'VT323': 'VT323',
+  'IBM Plex Mono': 'PLEX MONO',
+};
+
+/// The option key standing for "this scope sets nothing here".
+const String _inheritKey = '';
 
 Future<void> showAppearanceDialog(BuildContext context, AppState state) {
   return showTcDialog<void>(
@@ -71,6 +89,19 @@ class _AppearanceDialogContentState extends State<_AppearanceDialogContent> {
     return section == null ? _draft.base : (_draft.sections[section.wireId] ?? const {});
   }
 
+  /// The style the scope renders with, resolved the same way as [_resolved].
+  TCSectionStyle get _resolvedStyle {
+    final section = _section;
+    return section == null ? _draft.resolveBaseStyle() : _draft.resolveStyle(section);
+  }
+
+  /// The style keys this scope sets itself, on the same terms as
+  /// [_ownOverrides].
+  Map<String, Object> get _ownStyles => _draft.styleOverridesFor(_section);
+
+  /// What a scope that sets nothing calls its inherited value.
+  String get _inheritLabel => _scope == 'base' ? 'DEFAULT' : 'INHERIT';
+
   void _setToken(String tokenKey, Color? color) {
     final section = _section;
     setState(() {
@@ -80,11 +111,35 @@ class _AppearanceDialogContentState extends State<_AppearanceDialogContent> {
     });
   }
 
+  void _setStyle(String styleKey, Object? value) {
+    setState(() => _draft = _draft.withStyleOverride(_section, styleKey, value));
+  }
+
+  /// The text-scale option this scope selects: the inherit chip when it sets
+  /// none, or a key no chip carries when it stores a scale the editor does
+  /// not offer, which leaves the row with nothing selected.
+  String get _selectedTextScale {
+    final own = _ownStyles[TCSectionStyle.keyTextScale];
+    if (own is! num) return _inheritKey;
+    for (final key in appearanceTextScaleOptions.keys) {
+      if (double.parse(key) == own.toDouble()) return key;
+    }
+    return 'custom';
+  }
+
+  String get _selectedDisplayFont {
+    final own = _ownStyles[TCSectionStyle.keyDisplayFont];
+    return own is String ? own : _inheritKey;
+  }
+
   /// True when RESET ALL would change something. Overrides under a section
   /// id this client does not know are not resettable and do not count.
   bool get _hasResettableOverrides =>
       _draft.base.isNotEmpty ||
-      TCSection.values.any((s) => (_draft.sections[s.wireId] ?? const {}).isNotEmpty);
+      _draft.styleOverridesFor(null).isNotEmpty ||
+      TCSection.values.any((s) =>
+          (_draft.sections[s.wireId] ?? const {}).isNotEmpty ||
+          _draft.styleOverridesFor(s).isNotEmpty);
 
   void _resetScope() {
     final section = _section;
@@ -102,9 +157,13 @@ class _AppearanceDialogContentState extends State<_AppearanceDialogContent> {
         next = next.clearSection(section);
       }
       next = next.withBaseOverrides(preset.spec.base);
+      next = next.withStyleOverrides(null, preset.spec.styleOverridesFor(null));
       for (final entry in preset.spec.sections.entries) {
         final section = TCSection.fromWireId(entry.key);
         if (section != null) next = next.withSectionOverrides(section, entry.value);
+      }
+      for (final section in TCSection.values) {
+        next = next.withStyleOverrides(section, preset.spec.styleOverridesFor(section));
       }
       _draft = next;
     });
@@ -147,6 +206,24 @@ class _AppearanceDialogContentState extends State<_AppearanceDialogContent> {
     );
   }
 
+  Widget _caption(TCSectionColors tc, String text) => Text(
+        text,
+        style: TextStyle(
+          fontSize: TCType.textCaption,
+          color: tc.accentPrimary,
+          letterSpacing: TCType.letterSpacingFor(TCType.textCaption, TCType.trackingWider),
+        ),
+      );
+
+  Widget _styleLabel(TCSectionColors tc, String text) => Text(
+        text,
+        style: TextStyle(
+          fontSize: TCType.textMicro,
+          color: tc.textSecondary,
+          letterSpacing: TCType.letterSpacingFor(TCType.textMicro, TCType.trackingWide),
+        ),
+      );
+
   Widget _buildContent(BuildContext context) {
     final tc = SectionTheme.of(context);
     final resolved = _resolved.asMap();
@@ -165,14 +242,7 @@ class _AppearanceDialogContentState extends State<_AppearanceDialogContent> {
         ),
       ],
       children: [
-        Text(
-          'PRESETS',
-          style: TextStyle(
-            fontSize: TCType.textCaption,
-            color: tc.accentPrimary,
-            letterSpacing: TCType.letterSpacingFor(TCType.textCaption, TCType.trackingWider),
-          ),
-        ),
+        _caption(tc, 'PRESETS'),
         const SizedBox(height: 8),
         Row(
           children: [
@@ -188,14 +258,7 @@ class _AppearanceDialogContentState extends State<_AppearanceDialogContent> {
         const SizedBox(height: 12),
         Container(height: 1, color: tc.borderSubtle),
         const SizedBox(height: 12),
-        Text(
-          'SCOPE',
-          style: TextStyle(
-            fontSize: TCType.textCaption,
-            color: tc.accentPrimary,
-            letterSpacing: TCType.letterSpacingFor(TCType.textCaption, TCType.trackingWider),
-          ),
-        ),
+        _caption(tc, 'SCOPE'),
         const SizedBox(height: 8),
         TcChoiceRow(
           options: appearanceScopeLabels,
@@ -205,16 +268,62 @@ class _AppearanceDialogContentState extends State<_AppearanceDialogContent> {
         const SizedBox(height: 8),
         Text(
           _scope == 'base'
-              ? 'Base colors apply everywhere. A section can override any of them.'
-              : 'These colors apply to $scopeLabel only, on top of the base colors.',
+              ? 'Base colors and styles apply everywhere. A section can override any of them.'
+              : 'These apply to $scopeLabel only, on top of the base colors and styles.',
           style: TextStyle(fontSize: TCType.textMicro, color: tc.textTertiary),
         ),
         const SizedBox(height: 6),
         Text(
-          own.isEmpty
+          own.isEmpty && _ownStyles.isEmpty
               ? 'No overrides in this scope — every color is inherited.'
-              : '${own.length} override${own.length == 1 ? '' : 's'} in this scope.',
+              : '${own.length + _ownStyles.length} '
+                  'override${own.length + _ownStyles.length == 1 ? '' : 's'} in this scope.',
           style: TextStyle(fontSize: TCType.textMicro, color: tc.textSecondary),
+        ),
+        const SizedBox(height: 12),
+        Container(height: 1, color: tc.borderSubtle),
+        const SizedBox(height: 12),
+        _caption(tc, 'STYLE'),
+        const SizedBox(height: 8),
+        _styleLabel(tc, 'TEXT SIZE'),
+        const SizedBox(height: 4),
+        TcChoiceRow(
+          options: {_inheritKey: _inheritLabel, ...appearanceTextScaleOptions},
+          value: _selectedTextScale,
+          onSelected: (v) => _setStyle(
+            TCSectionStyle.keyTextScale,
+            v == _inheritKey ? null : double.parse(v),
+          ),
+        ),
+        const SizedBox(height: 10),
+        _styleLabel(tc, 'GLOW'),
+        const SizedBox(height: 4),
+        Row(
+          children: [
+            TcCheckbox(
+              value: _resolvedStyle.glow,
+              label: 'Accent glow',
+              onChanged: (v) => _setStyle(TCSectionStyle.keyGlow, v),
+            ),
+            if (_ownStyles.containsKey(TCSectionStyle.keyGlow)) ...[
+              const SizedBox(width: 10),
+              TcGhostButton(
+                label: 'CLEAR',
+                onPressed: () => _setStyle(TCSectionStyle.keyGlow, null),
+              ),
+            ],
+          ],
+        ),
+        const SizedBox(height: 10),
+        _styleLabel(tc, 'DISPLAY FONT'),
+        const SizedBox(height: 4),
+        TcChoiceRow(
+          options: {_inheritKey: _inheritLabel, ...appearanceDisplayFontLabels},
+          value: _selectedDisplayFont,
+          onSelected: (v) => _setStyle(
+            TCSectionStyle.keyDisplayFont,
+            v == _inheritKey ? null : v,
+          ),
         ),
         const SizedBox(height: 12),
         Container(height: 1, color: tc.borderSubtle),
@@ -245,7 +354,7 @@ class _AppearanceDialogContentState extends State<_AppearanceDialogContent> {
           children: [
             TcGhostButton(
               label: _scope == 'base' ? 'RESET BASE' : 'RESET SECTION',
-              onPressed: own.isEmpty ? null : _resetScope,
+              onPressed: own.isEmpty && _ownStyles.isEmpty ? null : _resetScope,
             ),
             const SizedBox(width: 6),
             TcGhostButton(

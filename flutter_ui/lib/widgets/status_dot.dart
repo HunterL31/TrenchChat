@@ -1,7 +1,7 @@
 // Port of components/data-display/StatusDot.jsx.
 import 'package:flutter/material.dart';
 
-import '../theme/effects.dart';
+import '../theme/glow.dart';
 import '../theme/section_theme.dart';
 import '../theme/theme_spec.dart';
 
@@ -29,7 +29,7 @@ class StatusDot extends StatelessWidget {
         shape: BoxShape.circle,
         color: _color(tc),
         border: Border.all(color: tc.bgApp, width: 2),
-        boxShadow: status == PresenceStatus.online ? TCEffects.glowGreenSm : null,
+        boxShadow: status == PresenceStatus.online ? tcBoxGlowSm(context) : null,
       ),
     );
   }

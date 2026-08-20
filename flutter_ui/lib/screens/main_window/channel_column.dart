@@ -95,7 +95,7 @@ class ChannelColumn extends StatelessWidget {
                   Text(
                     serverName!,
                     style: TextStyle(
-                      fontFamily: TCType.fontDisplay,
+                      fontFamily: SectionTheme.styleOf(context).displayFont,
                       fontSize: 21,
                       height: 1.1,
                       color: tc.textEmphasis,
@@ -210,6 +210,7 @@ Widget _presenceSection(BuildContext context, Widget child) {
     return SectionTheme.resolved(
       section: TCSection.presence,
       colors: SectionTheme.of(context),
+      style: SectionTheme.styleOf(context),
       child: child,
     );
   }

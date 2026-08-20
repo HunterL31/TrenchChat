@@ -211,4 +211,136 @@ void main() {
     expect(find.text('SCOPE'), findsOneWidget);
     expect(find.byKey(tcColorInputKey('accentPrimary')), findsOneWidget);
   });
+
+  testWidgets('the settings summary counts style overrides', (tester) async {
+    backend.routes['GET /settings'] = {
+      'propagation_enabled': false,
+      'propagation_node_name': '',
+      'propagation_storage_limit_mb': 512,
+      'channel_filter_mode': 'all',
+      'channel_filter_hashes': <String>[],
+      'outbound_propagation_node': '',
+    };
+    state.themeSpec = ThemeSpec.fromJson({
+      'version': 1,
+      'styles': {
+        'base': {'glow': false},
+      },
+    });
+    useTallSurface(tester);
+    await tester.pumpWidget(_harness(state, (c) => showSettingsDialog(c, state)));
+    await tester.tap(find.text('open'));
+    await tester.pump();
+    await settle(tester);
+
+    await tester.dragUntilVisible(
+      find.text('EDIT COLORS…'),
+      find.byType(ListView),
+      const Offset(0, -80),
+    );
+    expect(find.text('1 style customized across 1 scope.'), findsOneWidget);
+  });
+
+  testWidgets('a section scope writes its style keys into styles', (tester) async {
+    await openEditor(tester);
+
+    await tester.tap(find.text('CONTENT'));
+    await tester.pump();
+    await tester.tap(find.text('110%'));
+    await tester.pump();
+    await tester.tap(find.text('Accent glow'));
+    await tester.pump();
+    await tester.tap(find.text('APPLY'));
+    await settle(tester);
+
+    final theme = lastPostedTheme();
+    expect(theme['base'], isEmpty);
+    expect((theme['styles'] as Map)['content'], {'textScale': 1.1, 'glow': false});
+
+    final content = state.themeSpec.resolveStyle(TCSection.content);
+    expect(content.textScale, 1.1);
+    expect(content.glow, isFalse);
+    expect(state.themeSpec.resolveStyle(TCSection.topBar), TCSectionStyle.stock);
+  });
+
+  testWidgets('the base scope writes a display font every section inherits', (tester) async {
+    await openEditor(tester);
+
+    await tester.tap(find.text('PLEX MONO'));
+    await tester.pump();
+    await tester.tap(find.text('APPLY'));
+    await settle(tester);
+
+    expect((lastPostedTheme()['styles'] as Map)['base'], {'displayFont': 'IBM Plex Mono'});
+    expect(state.themeSpec.resolveStyle(TCSection.dialogs).displayFont, 'IBM Plex Mono');
+  });
+
+  testWidgets('inheriting again clears the scope style, reset section clears the rest',
+      (tester) async {
+    state.themeSpec = ThemeSpec.fromJson({
+      'version': 1,
+      'styles': {
+        'base': {'glow': false},
+        'content': {'textScale': 1.25, 'displayFont': 'IBM Plex Mono'},
+      },
+    });
+    await openEditor(tester);
+
+    await tester.tap(find.text('CONTENT'));
+    await tester.pump();
+    // The scope's own font override goes back to the inherited value...
+    await tester.tap(find.text('INHERIT').last);
+    await tester.pump();
+    expect(find.text('RESET SECTION'), findsOneWidget);
+
+    await tester.tap(find.text('RESET SECTION'));
+    await tester.pump();
+    await tester.tap(find.text('APPLY'));
+    await settle(tester);
+
+    final styles = lastPostedTheme()['styles'] as Map;
+    expect(styles['content'], isNull);
+    expect(styles['base'], {'glow': false}, reason: 'the base scope is untouched');
+    expect(state.themeSpec.resolveStyle(TCSection.content).textScale, 1.0);
+    expect(state.themeSpec.resolveStyle(TCSection.content).glow, isFalse);
+  });
+
+  testWidgets('a text scale the editor does not offer selects nothing and survives',
+      (tester) async {
+    state.themeSpec = ThemeSpec.fromJson({
+      'version': 1,
+      'styles': {
+        'base': {'textScale': 1.35},
+      },
+    });
+    await openEditor(tester);
+
+    expect(find.text('135%'), findsNothing);
+    await tester.tap(find.text('APPLY'));
+    await settle(tester);
+
+    expect((lastPostedTheme()['styles'] as Map)['base'], {'textScale': 1.35});
+  });
+
+  testWidgets('reset all clears style overrides too', (tester) async {
+    state.themeSpec = ThemeSpec.fromJson({
+      'version': 1,
+      'styles': {
+        'base': {'glow': false},
+        'content': {'textScale': 1.1},
+        'holoDeck': {'glow': false},
+      },
+    });
+    await openEditor(tester);
+
+    await tester.tap(find.text('RESET ALL'));
+    await tester.pump();
+    await tester.tap(find.text('APPLY'));
+    await settle(tester);
+
+    final styles = lastPostedTheme()['styles'] as Map;
+    expect(styles['base'], isNull);
+    expect(styles['content'], isNull);
+    expect(styles['holoDeck'], {'glow': false});
+  });
 }

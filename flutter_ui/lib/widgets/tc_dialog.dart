@@ -102,7 +102,7 @@ class TcDialogShell extends StatelessWidget {
             Text(
               title,
               style: TextStyle(
-                fontFamily: TCType.fontDisplay,
+                fontFamily: SectionTheme.styleOf(context).displayFont,
                 fontSize: 22,
                 height: 1.1,
                 color: tc.textEmphasis,

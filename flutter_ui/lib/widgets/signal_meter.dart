@@ -2,7 +2,7 @@
 import 'package:flutter/material.dart';
 
 import '../api/models/link_quality.dart';
-import '../theme/effects.dart';
+import '../theme/glow.dart';
 import '../theme/section_theme.dart';
 
 class _Level {
@@ -40,7 +40,7 @@ class SignalMeter extends StatelessWidget {
           height: barHeight,
           decoration: BoxDecoration(
             color: lit ? l.color : tc.textDisabled,
-            boxShadow: (lit && level == LinkQualityLevel.excellent) ? TCEffects.glowGreenSm : null,
+            boxShadow: (lit && level == LinkQualityLevel.excellent) ? tcBoxGlowSm(context) : null,
           ),
         );
       }),

@@ -2,6 +2,7 @@
 import 'package:flutter/material.dart';
 
 import '../../theme/effects.dart';
+import '../../theme/glow.dart';
 import '../../theme/section_theme.dart';
 import '../../theme/tokens.dart';
 import '../../widgets/dashed_border.dart';
@@ -52,11 +53,11 @@ class ServerRail extends StatelessWidget {
           Text(
             '>_',
             style: TextStyle(
-              fontFamily: TCType.fontDisplay,
+              fontFamily: SectionTheme.styleOf(context).displayFont,
               fontSize: 26,
               height: 1,
               color: tc.accentPrimary,
-              shadows: [TCEffects.textGlowGreen],
+              shadows: tcTextGlow(context),
             ),
           ),
           const SizedBox(height: 12),
@@ -123,7 +124,7 @@ class _ServerTileState extends State<_ServerTile> {
                   ? tc.borderAccent
                   : (_hover ? tc.borderStrong : tc.borderDefault),
             ),
-            boxShadow: selected ? TCEffects.glowGreenSm : null,
+            boxShadow: selected ? tcBoxGlowSm(context) : null,
           ),
           child: Text(
             widget.label,

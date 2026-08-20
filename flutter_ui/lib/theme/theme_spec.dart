@@ -5,15 +5,21 @@
 //   {
 //     "version": 1,
 //     "base":     {"<tokenKey>": "#RRGGBB" | "#AARRGGBB"},
-//     "sections": {"<sectionId>": {"<tokenKey>": "..."}}
+//     "sections": {"<sectionId>": {"<tokenKey>": "..."}},
+//     "styles":   {"base": {"<styleKey>": value},
+//                  "<sectionId>": {"<styleKey>": value}}
 //   }
 //
-// Parsing is total: any garbage -- a wrong type, an unknown token key, a
-// malformed color, an unknown section id's *tokens* -- is dropped rather
-// than thrown, so a document written by a newer client still loads.
-// Unknown *section ids* are preserved through parse -> serialize, so a
-// section added later survives a round trip through this client without
-// needing an entry in [TCSection].
+// Colors and styles are two parallel layers over the same scopes: `base`
+// plus one entry per section, the section winning where both set a key.
+//
+// Parsing is total: any garbage -- a wrong type, an unknown token or style
+// key, a malformed color, an unknown font name, an unknown section id's
+// *tokens* -- is dropped rather than thrown, and a text scale out of range
+// is clamped, so a document written by a newer client still loads. Unknown
+// *section ids* are preserved through parse -> serialize, in both layers,
+// so a section added later survives a round trip through this client
+// without needing an entry in [TCSection].
 import 'package:flutter/widgets.dart';
 
 import 'tokens.dart';
@@ -313,29 +319,137 @@ class TCSectionColors {
   int get hashCode => Object.hashAll([for (final key in tokenKeys) asMap()[key]]);
 }
 
-/// A theme document: base overrides plus per-section overrides.
+/// The non-color half of one section's look: how large its text renders,
+/// whether it glows, and which display face its headings use.
+///
+/// The unnamed constructor defaults every field, so `TCSectionStyle()` is
+/// the stock style and passing only the fields a theme overrides is enough.
+/// A text scale out of range is clamped; any other unusable value -- an
+/// unknown font name, a scale that is not a number -- falls back to the
+/// default.
+class TCSectionStyle {
+  TCSectionStyle({double? textScale, bool? glow, String? displayFont})
+      : textScale = (normalizeStyleValue(keyTextScale, textScale) as double?) ?? defaultTextScale,
+        glow = (normalizeStyleValue(keyGlow, glow) as bool?) ?? defaultGlow,
+        displayFont =
+            (normalizeStyleValue(keyDisplayFont, displayFont) as String?) ?? defaultDisplayFont;
+
+  /// Builds a style from a style-key -> value map, ignoring unknown keys.
+  factory TCSectionStyle.fromOverrides(Map<String, Object> overrides) {
+    final scale = overrides[keyTextScale];
+    final glow = overrides[keyGlow];
+    final font = overrides[keyDisplayFont];
+    return TCSectionStyle(
+      textScale: scale is num ? scale.toDouble() : null,
+      glow: glow is bool ? glow : null,
+      displayFont: font is String ? font : null,
+    );
+  }
+
+  /// Multiplies the text scale the platform already asks for.
+  final double textScale;
+
+  /// Whether accent glow renders at all in this section.
+  final bool glow;
+
+  /// The family headings render in, one of [displayFonts].
+  final String displayFont;
+
+  static const String keyTextScale = 'textScale';
+  static const String keyGlow = 'glow';
+  static const String keyDisplayFont = 'displayFont';
+
+  /// Every style key a theme document may carry, in declaration order.
+  static const List<String> styleKeys = [keyTextScale, keyGlow, keyDisplayFont];
+
+  static const double minTextScale = 0.7;
+  static const double maxTextScale = 1.5;
+  static const double defaultTextScale = 1.0;
+  static const bool defaultGlow = true;
+  static const String defaultDisplayFont = TCType.fontDisplay;
+
+  /// The families bundled with the app, in the order the editor offers them.
+  static const List<String> displayFonts = [TCType.fontDisplay, TCType.fontMono];
+
+  /// The stock style: every key at its default.
+  static final TCSectionStyle stock = TCSectionStyle();
+
+  /// The storable form of [raw] for [styleKey] -- a clamped double, a bool,
+  /// a known font name -- or null when the key is unknown or the value is
+  /// not usable. This is the one place a style value is validated.
+  static Object? normalizeStyleValue(String styleKey, Object? raw) {
+    switch (styleKey) {
+      case keyTextScale:
+        if (raw is! num) return null;
+        final scale = raw.toDouble();
+        if (!scale.isFinite) return null;
+        return scale.clamp(minTextScale, maxTextScale).toDouble();
+      case keyGlow:
+        return raw is bool ? raw : null;
+      case keyDisplayFont:
+        return raw is String && displayFonts.contains(raw) ? raw : null;
+    }
+    return null;
+  }
+
+  /// The value for [styleKey], or null when the key is not a known style.
+  Object? byKey(String styleKey) => asMap()[styleKey];
+
+  /// This style as a style-key -> value map, one entry per [styleKeys].
+  Map<String, Object> asMap() => {
+        keyTextScale: textScale,
+        keyGlow: glow,
+        keyDisplayFont: displayFont,
+      };
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is TCSectionStyle &&
+          other.textScale == textScale &&
+          other.glow == glow &&
+          other.displayFont == displayFont;
+
+  @override
+  int get hashCode => Object.hash(textScale, glow, displayFont);
+
+  @override
+  String toString() =>
+      'TCSectionStyle(textScale: $textScale, glow: $glow, displayFont: $displayFont)';
+}
+
+/// A theme document: base overrides plus per-section overrides, for colors
+/// and styles alike.
 ///
 /// Immutable. Build a modified copy with [withBaseOverride],
 /// [withSectionOverride], [withBaseOverrides], [withSectionOverrides],
-/// [clearSection] or [clearBase] -- each returns a new spec and leaves this
-/// one untouched:
+/// [withStyleOverride], [withStyleOverrides], [clearSection] or [clearBase]
+/// -- each returns a new spec and leaves this one untouched:
 ///
 /// ```dart
 /// final next = state.themeSpec
 ///     .withBaseOverride('accentPrimary', const Color(0xFF00FF88))
-///     .withSectionOverride(TCSection.topBar, 'bgSurface', null); // clears it
+///     .withSectionOverride(TCSection.topBar, 'bgSurface', null) // clears it
+///     .withStyleOverride(null, TCSectionStyle.keyTextScale, 1.1) // base scope
+///     .withStyleOverride(TCSection.content, TCSectionStyle.keyGlow, false);
 /// await state.saveTheme(next);
 /// ```
+///
+/// The style editors take a nullable [TCSection]: null is the base scope,
+/// and a null value clears that key. [clearSection] and [clearBase] drop a
+/// scope's styles along with its colors.
 class ThemeSpec {
   ThemeSpec({
     Map<String, Color>? base,
     Map<String, Map<String, Color>>? sections,
+    Map<String, Map<String, Object>>? styles,
   })  : base = Map.unmodifiable(_pruneTokens(base ?? const {})),
         sections = Map.unmodifiable({
           for (final entry in (sections ?? const {}).entries)
             if (entry.value.isNotEmpty)
               entry.key: Map<String, Color>.unmodifiable(_pruneTokens(entry.value)),
-        });
+        }),
+        styles = Map.unmodifiable(_pruneStyleScopes(styles ?? const {}));
 
   /// Base overrides, applied to every section. Token keys only.
   final Map<String, Color> base;
@@ -344,6 +458,13 @@ class ThemeSpec {
   /// not know are kept so they survive a round trip.
   final Map<String, Map<String, Color>> sections;
 
+  /// Style overrides keyed by [baseStyleScope] or a section wire id, the
+  /// same preservation rule as [sections].
+  final Map<String, Map<String, Object>> styles;
+
+  /// The key the base scope's style overrides live under in [styles].
+  static const String baseStyleScope = 'base';
+
   /// A spec with no overrides at all: every section renders stock.
   static final ThemeSpec empty = ThemeSpec();
 
@@ -351,6 +472,27 @@ class ThemeSpec {
         for (final entry in input.entries)
           if (TCSectionColors.tokenKeys.contains(entry.key)) entry.key: entry.value,
       };
+
+  static Map<String, Object> _pruneStyles(Map<String, Object> input) {
+    final out = <String, Object>{};
+    for (final entry in input.entries) {
+      final value = TCSectionStyle.normalizeStyleValue(entry.key, entry.value);
+      if (value != null) out[entry.key] = value;
+    }
+    return out;
+  }
+
+  static Map<String, Map<String, Object>> _pruneStyleScopes(
+      Map<String, Map<String, Object>> input) {
+    final out = <String, Map<String, Object>>{};
+    for (final entry in input.entries) {
+      final pruned = _pruneStyles(entry.value);
+      if (pruned.isNotEmpty) out[entry.key] = Map<String, Object>.unmodifiable(pruned);
+    }
+    return out;
+  }
+
+  static String _styleScopeKey(TCSection? section) => section?.wireId ?? baseStyleScope;
 
   /// Parses a theme document. Never throws: anything unrecognized is dropped.
   factory ThemeSpec.fromJson(Map<String, dynamic> json) {
@@ -365,7 +507,29 @@ class ThemeSpec {
         if (tokens.isNotEmpty) sections[id] = tokens;
       }
     }
-    return ThemeSpec(base: base, sections: sections);
+    final styles = <String, Map<String, Object>>{};
+    final rawStyles = json['styles'];
+    if (rawStyles is Map) {
+      for (final entry in rawStyles.entries) {
+        final id = entry.key;
+        if (id is! String) continue;
+        final scope = _parseStyleMap(entry.value);
+        if (scope.isNotEmpty) styles[id] = scope;
+      }
+    }
+    return ThemeSpec(base: base, sections: sections, styles: styles);
+  }
+
+  static Map<String, Object> _parseStyleMap(Object? raw) {
+    final out = <String, Object>{};
+    if (raw is! Map) return out;
+    for (final entry in raw.entries) {
+      final key = entry.key;
+      if (key is! String) continue;
+      final value = TCSectionStyle.normalizeStyleValue(key, entry.value);
+      if (value != null) out[key] = value;
+    }
+    return out;
   }
 
   static Map<String, Color> _parseTokenMap(Object? raw) {
@@ -393,10 +557,16 @@ class ThemeSpec {
                 token.key: encodeThemeColor(token.value),
             },
         },
+        'styles': {
+          for (final entry in styles.entries) entry.key: {...entry.value},
+        },
       };
 
   /// True when nothing is overridden, so every section renders stock.
-  bool get isEmpty => base.isEmpty && sections.values.every((m) => m.isEmpty);
+  bool get isEmpty =>
+      base.isEmpty &&
+      sections.values.every((m) => m.isEmpty) &&
+      styles.values.every((m) => m.isEmpty);
 
   bool get isNotEmpty => !isEmpty;
 
@@ -413,13 +583,61 @@ class ThemeSpec {
   /// single section (the scaffold and drawer backgrounds, a fatal error).
   TCSectionColors resolveBase() => TCSectionColors.fromOverrides(base);
 
+  /// The style overrides [section] sets itself, or the base ones when
+  /// [section] is null. Empty when that scope overrides nothing.
+  Map<String, Object> styleOverridesFor(TCSection? section) =>
+      styles[_styleScopeKey(section)] ?? const {};
+
+  /// The style overrides in force for [section]: base, then its own.
+  Map<String, Object> resolvedStyleOverridesFor(TCSection section) =>
+      {...?styles[baseStyleScope], ...?styles[section.wireId]};
+
+  /// The style [section] renders with: defaults, then base overrides, then
+  /// the section's own.
+  TCSectionStyle resolveStyle(TCSection section) =>
+      TCSectionStyle.fromOverrides(resolvedStyleOverridesFor(section));
+
+  /// The style with base overrides only, the [resolveBase] of the style
+  /// layer.
+  TCSectionStyle resolveBaseStyle() =>
+      TCSectionStyle.fromOverrides(styles[baseStyleScope] ?? const {});
+
   /// A copy with one base token set, or cleared when [color] is null.
   ThemeSpec withBaseOverride(String tokenKey, Color? color) =>
       withBaseOverrides({tokenKey: color});
 
   /// A copy with several base tokens set; a null value clears that token.
   ThemeSpec withBaseOverrides(Map<String, Color?> overrides) =>
-      ThemeSpec(base: _merge(base, overrides), sections: sections);
+      ThemeSpec(base: _merge(base, overrides), sections: sections, styles: styles);
+
+  /// A copy with one style key of [section] set -- base scope when [section]
+  /// is null, cleared when [value] is null. A value the style layer cannot
+  /// store (an unknown font, a non-number scale) clears the key too; one out
+  /// of range is clamped.
+  ThemeSpec withStyleOverride(TCSection? section, String styleKey, Object? value) =>
+      withStyleOverrides(section, {styleKey: value});
+
+  /// A copy with several style keys of one scope set; a null value clears
+  /// one. [section] null means the base scope.
+  ThemeSpec withStyleOverrides(TCSection? section, Map<String, Object?> overrides) {
+    final scopeKey = _styleScopeKey(section);
+    final merged = Map<String, Object>.from(styles[scopeKey] ?? const {});
+    for (final entry in overrides.entries) {
+      final value = entry.value;
+      if (value == null) {
+        merged.remove(entry.key);
+      } else {
+        merged[entry.key] = value;
+      }
+    }
+    final next = Map<String, Map<String, Object>>.from(styles);
+    if (_pruneStyles(merged).isEmpty) {
+      next.remove(scopeKey);
+    } else {
+      next[scopeKey] = merged;
+    }
+    return ThemeSpec(base: base, sections: sections, styles: next);
+  }
 
   /// A copy with one token of [section] set, or cleared when [color] is null.
   ThemeSpec withSectionOverride(TCSection section, String tokenKey, Color? color) =>
@@ -434,17 +652,21 @@ class ThemeSpec {
     } else {
       next[section.wireId] = merged;
     }
-    return ThemeSpec(base: base, sections: next);
+    return ThemeSpec(base: base, sections: next, styles: styles);
   }
 
-  /// A copy with every override for [section] removed.
+  /// A copy with every override for [section] removed, colors and styles.
   ThemeSpec clearSection(TCSection section) {
     final next = Map<String, Map<String, Color>>.from(sections)..remove(section.wireId);
-    return ThemeSpec(base: base, sections: next);
+    final nextStyles = Map<String, Map<String, Object>>.from(styles)..remove(section.wireId);
+    return ThemeSpec(base: base, sections: next, styles: nextStyles);
   }
 
-  /// A copy with every base override removed.
-  ThemeSpec clearBase() => ThemeSpec(sections: sections);
+  /// A copy with every base override removed, colors and styles.
+  ThemeSpec clearBase() {
+    final nextStyles = Map<String, Map<String, Object>>.from(styles)..remove(baseStyleScope);
+    return ThemeSpec(sections: sections, styles: nextStyles);
+  }
 
   static Map<String, Color> _merge(Map<String, Color> current, Map<String, Color?> changes) {
     final next = Map<String, Color>.from(current);
@@ -469,10 +691,23 @@ class ThemeSpec {
       final theirs = other.sections[entry.key];
       if (theirs == null || !_sameTokens(entry.value, theirs)) return false;
     }
+    if (styles.length != other.styles.length) return false;
+    for (final entry in styles.entries) {
+      final theirs = other.styles[entry.key];
+      if (theirs == null || !_sameStyles(entry.value, theirs)) return false;
+    }
     return true;
   }
 
   static bool _sameTokens(Map<String, Color> a, Map<String, Color> b) {
+    if (a.length != b.length) return false;
+    for (final entry in a.entries) {
+      if (b[entry.key] != entry.value) return false;
+    }
+    return true;
+  }
+
+  static bool _sameStyles(Map<String, Object> a, Map<String, Object> b) {
     if (a.length != b.length) return false;
     for (final entry in a.entries) {
       if (b[entry.key] != entry.value) return false;
@@ -491,9 +726,17 @@ class ThemeSpec {
                   [for (final e in section.value.entries) Object.hash(e.key, e.value)]),
             ),
         ]),
+        Object.hashAllUnordered([
+          for (final scope in styles.entries)
+            Object.hash(
+              scope.key,
+              Object.hashAllUnordered(
+                  [for (final e in scope.value.entries) Object.hash(e.key, e.value)]),
+            ),
+        ]),
       );
 
   @override
   String toString() => 'ThemeSpec(base: ${base.length} tokens, '
-      'sections: ${sections.keys.join(', ')})';
+      'sections: ${sections.keys.join(', ')}, styles: ${styles.keys.join(', ')})';
 }
