@@ -15,6 +15,7 @@ from tests.helpers import (
     wait_for, wait_for_roster, wait_for_subscriber,
 )
 from trenchchat.core import actions
+from trenchchat.core.voice import MAX_VOICE_PARTICIPANTS
 from trenchchat.core.permissions import (
     PRESET_OPEN, PRESET_PRIVATE, ROLE_MEMBER, ROLE_OWNER, SEND_MESSAGE,
 )
@@ -254,3 +255,45 @@ class TestVoiceCallbacks:
         bob.voice_mgr.leave_voice()
         assert "joined" in states
         assert "left" in states
+
+
+# ---------------------------------------------------------------------------
+# The links are the ground truth for who is audible
+# ---------------------------------------------------------------------------
+
+class TestLinkOnlyParticipants:
+    """The roster is built only from LXMF signalling, but audio fan-out is
+    driven by established links -- so a peer that dials in without ever
+    sending voice_join was both uncounted by the participant cap and
+    invisible in the participant list every client shows.
+    """
+
+    def test_a_link_only_peer_counts_towards_the_cap(self, peer_factory):
+        alice, bob, ch_hash = _setup_invite_channel(peer_factory)
+        alice.voice_mgr.join_voice(ch_hash)
+
+        # Streaming links with nobody in the signalled roster. Bob is a real
+        # member, so only the cap can refuse him -- otherwise this would pass
+        # on the permission check instead.
+        stream_hexes = [f"{i:032x}" for i in range(MAX_VOICE_PARTICIPANTS)]
+        alice.voice_transport._streams.update(stream_hexes)
+        assert alice.voice_mgr._peer_may_voice(ch_hash, bob.identity.hash_hex)
+
+        assert not alice.voice_mgr._authorize_link(bob.identity.hash_hex, ch_hash), \
+            "the cap counted the signalled roster while links drive fan-out"
+
+    def test_a_link_only_peer_appears_in_the_roster(self, peer_factory):
+        alice, bob, ch_hash = _setup_invite_channel(peer_factory)
+        alice.voice_mgr.join_voice(ch_hash)
+        alice.voice_transport._streams.add("ab" * 16)
+
+        listeners = [r["identity_hash"] for r in alice.voice_mgr.get_roster(ch_hash)]
+        assert "ab" * 16 in listeners, \
+            "a peer we are streaming to was absent from the participant list"
+
+    def test_an_ordinary_join_is_still_authorised(self, peer_factory):
+        alice, bob, ch_hash = _setup_invite_channel(peer_factory)
+        alice.voice_mgr.join_voice(ch_hash)
+
+        assert alice.voice_mgr._authorize_link(bob.identity.hash_hex, ch_hash), \
+            "a legitimate member was refused a voice link"

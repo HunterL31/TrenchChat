@@ -184,3 +184,40 @@ class TestTonePipeline:
             assert emitted == []
         finally:
             pipeline.stop()
+
+
+# ---------------------------------------------------------------------------
+# One malformed frame must not silence the session
+# ---------------------------------------------------------------------------
+
+class TestPlayoutSurvivesABadFrame:
+    """Opus returns as many samples as the packet held, so a peer encoding at
+    10 ms yields half a frame. mix() sums int16 arrays and raises on a length
+    mismatch, and the playout thread is the only thing driving playback."""
+
+    def test_mix_skips_a_short_frame_instead_of_raising(self):
+        from trenchchat.core.audio.mixer import mix
+
+        full = b"\x01\x00" * 960
+        short = b"\x02\x00" * 480
+
+        out = mix([full, short, full])
+        assert len(out) == len(full), "a short frame changed the block length"
+
+    def test_mix_of_equal_frames_still_sums(self):
+        from trenchchat.core.audio.mixer import mix
+        import numpy as np
+
+        a = np.full(960, 100, dtype=np.int16).tobytes()
+        b = np.full(960, 200, dtype=np.int16).tobytes()
+
+        summed = np.frombuffer(mix([a, b]), dtype=np.int16)
+        assert summed[0] == 300
+
+    def test_mix_saturates_rather_than_wrapping(self):
+        from trenchchat.core.audio.mixer import mix
+        import numpy as np
+
+        loud = np.full(960, 30000, dtype=np.int16).tobytes()
+        summed = np.frombuffer(mix([loud, loud]), dtype=np.int16)
+        assert summed[0] == 32767
