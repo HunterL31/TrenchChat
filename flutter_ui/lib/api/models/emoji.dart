@@ -20,16 +20,32 @@ class CustomEmoji {
 class ScopePermissions {
   const ScopePermissions({
     required this.allPermissions,
+    required this.grantable,
     required this.admin,
     required this.member,
   });
 
   final List<String> allPermissions;
+
+  /// What each role may actually be granted on this scope. The core drops
+  /// anything outside it on read and on write, so offering a control for one
+  /// would show a checkbox that silently does nothing.
+  final Map<String, List<String>> grantable;
+
   final List<String> admin;
   final List<String> member;
 
+  /// Offered checkboxes for [role], falling back to the full list for a
+  /// backend that predates the field.
+  List<String> grantableFor(String role) =>
+      grantable[role] ?? allPermissions;
+
   factory ScopePermissions.fromJson(Map<String, dynamic> json) => ScopePermissions(
         allPermissions: (json['all_permissions'] as List<dynamic>? ?? []).cast<String>(),
+        grantable: ((json['grantable'] as Map<String, dynamic>?) ?? {}).map(
+          (role, perms) =>
+              MapEntry(role, (perms as List<dynamic>? ?? []).cast<String>()),
+        ),
         admin: (json['admin'] as List<dynamic>? ?? []).cast<String>(),
         member: (json['member'] as List<dynamic>? ?? []).cast<String>(),
       );

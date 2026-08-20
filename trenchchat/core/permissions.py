@@ -42,6 +42,16 @@ CREATE_CHANNEL = "create_channel"
 FULL_SYNC = "full_sync"
 VOICE_CHAT = "voice_chat"
 
+# Permissions a plain member may never hold, whatever a permissions blob says.
+#
+# Removing someone from the member list strips every permission they had, so
+# KICK is the authority to unmake other people's; granting it to the base role
+# makes every member able to do that to every other. MANAGE_ROLES rides along
+# because it is the way to grant yourself KICK: a member who can edit the admin
+# list can promote themselves and take it that way, so restricting one without
+# the other closes nothing.
+ADMIN_ONLY_PERMISSIONS = (KICK, MANAGE_ROLES)
+
 ALL_PERMISSIONS = (SEND_MESSAGE, INVITE, KICK, MANAGE_ROLES, MANAGE_CHANNEL,
                    CREATE_CHANNEL, FULL_SYNC, VOICE_CHAT)
 
@@ -91,7 +101,12 @@ DEFAULT_PRESET = "private"
 
 
 def permissions_to_json(perms: dict) -> str:
-    return json.dumps(perms, sort_keys=True)
+    """Serialise a permissions dict, dropping grants a role may never hold.
+
+    Sanitised on the way out as well as the way in, so a disallowed grant is
+    never stored locally nor broadcast to anyone else.
+    """
+    return json.dumps(sanitise_permissions(perms), sort_keys=True)
 
 
 def is_valid_permissions(perms: object) -> bool:
@@ -110,6 +125,50 @@ def is_valid_permissions(perms: object) -> bool:
         if not all(isinstance(p, str) for p in granted):
             return False
     return True
+
+
+def grantable_to(role: str) -> tuple[str, ...]:
+    """Permissions that may be granted to *role* at all."""
+    if role == ROLE_MEMBER:
+        return tuple(p for p in ALL_PERMISSIONS if p not in ADMIN_ONLY_PERMISSIONS)
+    return ALL_PERMISSIONS
+
+
+def offered_permissions(perms: dict, role: str) -> tuple[str, ...]:
+    """Permissions worth showing for *role* on a channel with *perms*.
+
+    Narrower than grantable_to: FULL_SYNC decides how much history a member
+    may pull, and an open-join channel serves its history to any subscriber,
+    so offering the toggle there presents a privacy control that is not one.
+    """
+    offered = grantable_to(role)
+    if is_open_join(perms):
+        offered = tuple(p for p in offered if p != FULL_SYNC)
+    return offered
+
+
+def sanitise_permissions(perms: dict) -> dict:
+    """Drop grants a role may never hold.
+
+    Applied on every read rather than only where permissions are edited: a
+    blob reaches us from a signed member list document as well as from local
+    storage, and a signature proves who wrote it, not that what it says is
+    allowed.
+    """
+    granted = perms.get(ROLE_MEMBER)
+    if not isinstance(granted, list):
+        return perms
+    allowed = [p for p in granted if p not in ADMIN_ONLY_PERMISSIONS]
+    if len(allowed) == len(granted):
+        return perms
+    RNS.log(
+        f"TrenchChat [permissions]: dropping "
+        f"{sorted(set(granted) - set(allowed))} from the member role",
+        RNS.LOG_WARNING,
+    )
+    cleaned = dict(perms)
+    cleaned[ROLE_MEMBER] = allowed
+    return cleaned
 
 
 def permissions_from_json(blob: str) -> dict:
@@ -135,7 +194,7 @@ def permissions_from_json(blob: str) -> dict:
             RNS.LOG_WARNING,
         )
         return dict(PRESET_PRIVATE)
-    return perms
+    return sanitise_permissions(perms)
 
 
 def has_permission(perms: dict, role: str, permission: str) -> bool:

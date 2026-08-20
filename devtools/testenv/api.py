@@ -43,7 +43,7 @@ from trenchchat.core.interfaces_config import (
 from trenchchat.core.permissions import (
     ALL_PERMISSIONS, CREATE_CHANNEL, INVITE, KICK, MANAGE_CHANNEL, MANAGE_ROLES,
     ROLE_ADMIN, ROLE_MEMBER, PRESET_OPEN, PRESET_PRIVATE, VOICE_CHAT,
-    is_open_join, permissions_from_json,
+    is_open_join, offered_permissions, permissions_from_json,
 )
 from trenchchat.core.presence import resolve_display_name
 
@@ -765,6 +765,13 @@ def create_app(backend: Backend, *, token: str | None = None,
         perms = backend.storage.get_server_permissions(server_hash)
         return {
             "all_permissions": list(ALL_PERMISSIONS),
+            # What each role may actually be granted here. A grant outside
+            # this set is dropped by the core on read and on write, so a
+            # client offering it would show a control that does nothing.
+            "grantable": {
+                ROLE_ADMIN: list(offered_permissions(perms, ROLE_ADMIN)),
+                ROLE_MEMBER: list(offered_permissions(perms, ROLE_MEMBER)),
+            },
             "admin": perms.get(ROLE_ADMIN, []),
             "member": perms.get(ROLE_MEMBER, []),
         }
@@ -887,6 +894,13 @@ def create_app(backend: Backend, *, token: str | None = None,
         perms = backend.storage.get_channel_permissions(channel_hash)
         return {
             "all_permissions": list(ALL_PERMISSIONS),
+            # What each role may actually be granted here. A grant outside
+            # this set is dropped by the core on read and on write, so a
+            # client offering it would show a control that does nothing.
+            "grantable": {
+                ROLE_ADMIN: list(offered_permissions(perms, ROLE_ADMIN)),
+                ROLE_MEMBER: list(offered_permissions(perms, ROLE_MEMBER)),
+            },
             "admin": perms.get(ROLE_ADMIN, []),
             "member": perms.get(ROLE_MEMBER, []),
         }
