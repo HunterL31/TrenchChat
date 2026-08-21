@@ -9,13 +9,14 @@ import '../../format.dart';
 import '../../grouping.dart';
 import '../../name_color.dart';
 import '../../theme/section_theme.dart';
+import '../../theme/theme_spec.dart';
 import '../../theme/tokens.dart';
 import '../../widgets/avatar.dart';
 import '../../widgets/badge.dart';
-import '../../widgets/emoji_text.dart';
 import '../../widgets/tc_button.dart';
 import '../../widgets/tc_context_menu.dart';
 import '../../widgets/tc_icon.dart';
+import '../../widgets/theme_share.dart';
 
 sealed class _Row {}
 
@@ -61,6 +62,7 @@ class MessageList extends StatefulWidget {
     this.emojiLibrary = const {},
     this.friendHashes = const {},
     this.onAddFriend,
+    this.onAddTheme,
   });
 
   final List<Message> messages;
@@ -88,6 +90,10 @@ class MessageList extends StatefulWidget {
   /// Fired with a sender's identity hash when "Add/Edit friend…" is chosen
   /// from a message row's right-click menu.
   final void Function(String identityHashHex)? onAddFriend;
+
+  /// Saves a theme shared in chat to the named library. Null hides the ADD
+  /// button on the theme card.
+  final Future<bool> Function(String name, ThemeSpec spec)? onAddTheme;
 
   @override
   State<MessageList> createState() => _MessageListState();
@@ -138,6 +144,7 @@ class _MessageListState extends State<MessageList> {
               emojiLibrary: widget.emojiLibrary,
               friendHashes: widget.friendHashes,
               onAddFriend: widget.onAddFriend,
+              onAddTheme: widget.onAddTheme,
             ),
         };
       },
@@ -188,6 +195,7 @@ class _MessageRowWidget extends StatefulWidget {
     this.emojiLibrary = const {},
     this.friendHashes = const {},
     this.onAddFriend,
+    this.onAddTheme,
   });
 
   final Message message;
@@ -207,6 +215,9 @@ class _MessageRowWidget extends StatefulWidget {
   /// Fired with the sender's identity hash when "Add/Edit friend…" is chosen
   /// from the row's right-click menu.
   final void Function(String identityHashHex)? onAddFriend;
+
+  /// Saves a theme shared in this message to the named library.
+  final Future<bool> Function(String name, ThemeSpec spec)? onAddTheme;
 
   @override
   State<_MessageRowWidget> createState() => _MessageRowWidgetState();
@@ -259,7 +270,7 @@ class _MessageRowWidgetState extends State<_MessageRowWidget> {
     final bg = isOwn ? const Color.fromRGBO(255, 255, 255, 0.02) : Colors.transparent;
     final bodyText = Text.rich(
       TextSpan(
-        children: emojiSpans(
+        children: messageContentSpans(
           message.content,
           widget.emojiLibrary,
           TextStyle(
@@ -271,21 +282,32 @@ class _MessageRowWidgetState extends State<_MessageRowWidget> {
       ),
     );
 
+    final sharedThemes = themeCodesIn(message.content);
+
     // An attachment we refused leaves the text intact, so without this the
     // message reads as though it never had one.
-    final body = message.imageStripped
+    final body = message.imageStripped || sharedThemes.isNotEmpty
         ? Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               bodyText,
-              const SizedBox(height: 4),
-              Text(
-                'Attachment removed \u2014 it could not be displayed safely',
-                style: TextStyle(
-                  fontSize: TCType.textMicro,
-                  color: tc.accentSecondary,
+              if (message.imageStripped) ...[
+                const SizedBox(height: 4),
+                Text(
+                  'Attachment removed \u2014 it could not be displayed safely',
+                  style: TextStyle(
+                    fontSize: TCType.textMicro,
+                    color: tc.accentSecondary,
+                  ),
                 ),
-              ),
+              ],
+              for (final theme in sharedThemes)
+                ThemeCodeCard(
+                  key: ValueKey('theme-card:${message.messageId}:${theme.code}'),
+                  name: theme.name,
+                  spec: theme.spec,
+                  onAdd: widget.onAddTheme,
+                ),
             ],
           )
         : bodyText;

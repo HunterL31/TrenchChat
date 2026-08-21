@@ -268,7 +268,7 @@ class _SettingsDialogContentState extends State<_SettingsDialogContent> {
                     const SizedBox(height: 8),
                     Row(
                       children: [
-                        TcGhostButton(label: 'EDIT COLORS…', onPressed: _onEditColors),
+                        TcGhostButton(label: 'EDIT THEME…', onPressed: _onEditTheme),
                       ],
                     ),
                     if (_filterMode == 'allowlist' && _allChannels.isNotEmpty) ...[
@@ -327,7 +327,7 @@ class _SettingsDialogContentState extends State<_SettingsDialogContent> {
     return '$counted customized across $scopes scope${scopes == 1 ? '' : 's'}.';
   }
 
-  Future<void> _onEditColors() async {
+  Future<void> _onEditTheme() async {
     await showAppearanceDialog(context, widget.state);
     if (mounted) setState(() {});
   }

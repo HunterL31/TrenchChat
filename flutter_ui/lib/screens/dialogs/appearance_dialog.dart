@@ -10,10 +10,17 @@
 // Every edit derives a new spec from the live one with the ThemeSpec with*/
 // clear* methods rather than rebuilding a spec from scratch, which is what
 // keeps section ids this client does not know from being dropped.
+//
+// A draft can also be kept under a name (MY THEMES), which is a library
+// separate from the theme in force: saving one changes nothing about how the
+// app looks, and applying one only loads it into the draft. SHARE posts the
+// theme to the open channel as a code (theme/theme_code.dart), which any
+// reader can add to their own library from the message.
 import 'package:flutter/material.dart';
 
 import '../../app_state.dart';
 import '../../theme/section_theme.dart';
+import '../../theme/theme_code.dart';
 import '../../theme/theme_presets.dart';
 import '../../theme/theme_spec.dart';
 import '../../theme/tokens.dart';
@@ -21,6 +28,8 @@ import '../../widgets/tc_button.dart';
 import '../../widgets/tc_checkbox.dart';
 import '../../widgets/tc_color_field.dart';
 import '../../widgets/tc_dialog.dart';
+import '../../widgets/tc_icon.dart';
+import '../../widgets/tc_text_field.dart';
 
 /// Human label per scope, in the order the scope picker shows them. The key
 /// is `base` or a [TCSection] wire id.
@@ -51,6 +60,15 @@ const Map<String, String> appearanceDisplayFontLabels = {
 /// The option key standing for "this scope sets nothing here".
 const String _inheritKey = '';
 
+/// The name field of the SAVE AS… row.
+const Key appearanceSaveAsFieldKey = Key('appearance-save-as');
+
+/// Keys of one saved theme's row controls. The row's APPLY carries the same
+/// label as the dialog's own, so these are how a caller tells them apart.
+Key appearanceApplySavedKey(String name) => Key('theme-apply:$name');
+Key appearanceShareSavedKey(String name) => Key('theme-share:$name');
+Key appearanceDeleteSavedKey(String name) => Key('theme-delete:$name');
+
 Future<void> showAppearanceDialog(BuildContext context, AppState state) {
   return showTcDialog<void>(
     context: context,
@@ -68,9 +86,25 @@ class _AppearanceDialogContent extends StatefulWidget {
 
 class _AppearanceDialogContentState extends State<_AppearanceDialogContent> {
   late ThemeSpec _draft = widget.state.themeSpec;
+  final TextEditingController _saveAsName = TextEditingController();
   String _scope = 'base';
   bool _busy = false;
   String? _error;
+
+  /// One line of feedback for a library action -- saved, shared, deleted.
+  String? _notice;
+
+  @override
+  void initState() {
+    super.initState();
+    _saveAsName.addListener(() => setState(() {}));
+  }
+
+  @override
+  void dispose() {
+    _saveAsName.dispose();
+    super.dispose();
+  }
 
   /// The section this scope edits, or null when the scope is Base.
   TCSection? get _section => _scope == 'base' ? null : TCSection.fromWireId(_scope);
@@ -148,26 +182,75 @@ class _AppearanceDialogContentState extends State<_AppearanceDialogContent> {
     });
   }
 
-  /// Replaces every override this client knows with the preset's, keeping
-  /// overrides under unknown section ids (same rule as RESET ALL).
-  void _applyPreset(ThemePreset preset) {
+  /// Replaces every override this client knows with [spec]'s, keeping
+  /// overrides under unknown section ids (same rule as RESET ALL). This is
+  /// what a preset and a saved theme both apply through.
+  void _applySpec(ThemeSpec spec) {
     setState(() {
       var next = _draft.clearBase();
       for (final section in TCSection.values) {
         next = next.clearSection(section);
       }
-      next = next.withBaseOverrides(preset.spec.base);
-      next = next.withStyleOverrides(null, preset.spec.styleOverridesFor(null));
-      for (final entry in preset.spec.sections.entries) {
+      next = next.withBaseOverrides(spec.base);
+      next = next.withStyleOverrides(null, spec.styleOverridesFor(null));
+      for (final entry in spec.sections.entries) {
         final section = TCSection.fromWireId(entry.key);
         if (section != null) next = next.withSectionOverrides(section, entry.value);
       }
       for (final section in TCSection.values) {
-        next = next.withStyleOverrides(section, preset.spec.styleOverridesFor(section));
+        next = next.withStyleOverrides(section, spec.styleOverridesFor(section));
       }
       _draft = next;
+      _notice = null;
     });
   }
+
+  /// The saved themes, newest names last -- ordered by name so the list does
+  /// not reshuffle when one is replaced.
+  List<String> get _savedNames => widget.state.themeLibrary.keys.toList()..sort();
+
+  /// True when SHARE has somewhere to send: a selected channel this identity
+  /// may post in. Mirrors the compose bar's own gate.
+  bool get _canShare {
+    final channelHash = widget.state.selectedChannelHash;
+    if (channelHash == null) return false;
+    return widget.state.permissionsByChannel[channelHash]?.sendMessage ?? true;
+  }
+
+  Future<void> _runLibraryAction(Future<bool> Function() action, String success) async {
+    setState(() {
+      _busy = true;
+      _error = null;
+      _notice = null;
+    });
+    final ok = await action();
+    if (!mounted) return;
+    setState(() {
+      _busy = false;
+      _notice = ok ? success : null;
+      _error = ok ? null : (widget.state.actionError ?? 'Could not reach the backend.');
+    });
+  }
+
+  Future<void> _saveDraftAs() async {
+    final name = _saveAsName.text.trim();
+    if (name.isEmpty) return;
+    await _runLibraryAction(
+      () => widget.state.saveThemeAs(name, _draft),
+      'Saved as $name.',
+    );
+    if (mounted && _error == null) _saveAsName.clear();
+  }
+
+  Future<void> _shareSaved(String name, ThemeSpec spec) => _runLibraryAction(
+        () => widget.state.sendMessage(encodeThemeCode(name, spec)),
+        'Shared $name to the open channel.',
+      );
+
+  Future<void> _deleteSaved(String name) => _runLibraryAction(
+        () => widget.state.deleteSavedTheme(name),
+        'Deleted $name.',
+      );
 
   void _resetAll() {
     setState(() {
@@ -224,6 +307,49 @@ class _AppearanceDialogContentState extends State<_AppearanceDialogContent> {
         ),
       );
 
+  Widget _savedThemeRow(TCSectionColors tc, String name) {
+    final spec = widget.state.themeLibrary[name] ?? ThemeSpec.empty;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 4),
+      child: Row(
+        children: [
+          Expanded(
+            child: Text(
+              name,
+              overflow: TextOverflow.ellipsis,
+              softWrap: false,
+              style: TextStyle(fontSize: TCType.textBodySm, color: tc.textPrimary),
+            ),
+          ),
+          const SizedBox(width: 6),
+          TcGhostButton(
+            key: appearanceApplySavedKey(name),
+            label: 'APPLY',
+            onPressed: _busy ? null : () => _applySpec(spec),
+          ),
+          const SizedBox(width: 6),
+          TcGhostButton(
+            key: appearanceShareSavedKey(name),
+            label: 'SHARE',
+            onPressed: _busy || !_canShare ? null : () => _shareSaved(name, spec),
+          ),
+          const SizedBox(width: 6),
+          SizedBox(
+            width: 22,
+            height: 22,
+            child: TcIconButton(
+              key: appearanceDeleteSavedKey(name),
+              icon: TcIcons.close,
+              tooltip: 'Delete theme',
+              size: 22,
+              onPressed: _busy ? null : () => _deleteSaved(name),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildContent(BuildContext context) {
     final tc = SectionTheme.of(context);
     final resolved = _resolved.asMap();
@@ -249,12 +375,49 @@ class _AppearanceDialogContentState extends State<_AppearanceDialogContent> {
             for (final preset in themePresets) ...[
               TcGhostButton(
                 label: preset.name.toUpperCase(),
-                onPressed: () => _applyPreset(preset),
+                onPressed: () => _applySpec(preset.spec),
               ),
               const SizedBox(width: 6),
             ],
           ],
         ),
+        const SizedBox(height: 12),
+        _caption(tc, 'MY THEMES'),
+        const SizedBox(height: 8),
+        if (_savedNames.isEmpty)
+          Text(
+            'Nothing saved yet — name the current draft below to keep it.',
+            style: TextStyle(fontSize: TCType.textMicro, color: tc.textTertiary),
+          )
+        else
+          for (final name in _savedNames) _savedThemeRow(tc, name),
+        const SizedBox(height: 8),
+        Row(
+          crossAxisAlignment: CrossAxisAlignment.end,
+          children: [
+            Expanded(
+              child: TcTextField(
+                key: appearanceSaveAsFieldKey,
+                label: 'Save the current draft as',
+                controller: _saveAsName,
+                hintText: 'Theme name',
+                onSubmitted: (_) => _saveDraftAs(),
+              ),
+            ),
+            const SizedBox(width: 6),
+            TcGhostButton(
+              label: 'SAVE AS…',
+              onPressed: _busy || _saveAsName.text.trim().isEmpty ? null : _saveDraftAs,
+            ),
+          ],
+        ),
+        if (_notice != null) ...[
+          const SizedBox(height: 6),
+          Text(
+            _notice!,
+            style: TextStyle(fontSize: TCType.textMicro, color: tc.accentSecondary),
+          ),
+        ],
         const SizedBox(height: 12),
         Container(height: 1, color: tc.borderSubtle),
         const SizedBox(height: 12),

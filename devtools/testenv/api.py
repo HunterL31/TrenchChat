@@ -135,6 +135,11 @@ class SetUiThemeRequest(BaseModel):
     theme: dict
 
 
+class SaveUiThemeRequest(BaseModel):
+    name: str
+    theme: dict
+
+
 class CreateInterfaceRequest(BaseModel):
     name: str
     type: str
@@ -536,6 +541,26 @@ def create_app(backend: Backend, *, token: str | None = None,
     @app.post("/ui_theme")
     def set_ui_theme(req: SetUiThemeRequest):
         actions.set_ui_theme(backend.config, req.theme)
+        return {"ok": True}
+
+    @app.get("/ui_theme_library")
+    def get_ui_theme_library():
+        return {"themes": actions.read_ui_theme_library(backend.config)}
+
+    @app.post("/ui_theme_library")
+    def save_ui_theme_to_library(req: SaveUiThemeRequest):
+        try:
+            actions.save_ui_theme_to_library(backend.config, req.name, req.theme)
+        except ValueError as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+        return {"ok": True}
+
+    @app.delete("/ui_theme_library/{name}")
+    def delete_ui_theme_from_library(name: str):
+        if not actions.delete_ui_theme_from_library(backend.config, name):
+            return JSONResponse(
+                {"ok": False, "error": "no such theme"}, status_code=404,
+            )
         return {"ok": True}
 
     @app.get("/peers/{peer_hash}/presence")

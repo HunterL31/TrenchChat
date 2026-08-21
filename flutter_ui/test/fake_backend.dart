@@ -23,6 +23,8 @@ class FakeBackend {
   final Map<String, Object> routes = {
     'GET /ui_theme': <String, dynamic>{'theme': <String, dynamic>{}},
     'POST /ui_theme': <String, dynamic>{'ok': true},
+    'GET /ui_theme_library': <String, dynamic>{'themes': <String, dynamic>{}},
+    'POST /ui_theme_library': <String, dynamic>{'ok': true},
   };
   final List<RecordedRequest> requests = [];
 

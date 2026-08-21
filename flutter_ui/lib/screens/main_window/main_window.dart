@@ -264,6 +264,7 @@ class _MainWindowState extends State<MainWindow> {
                             friendHashes: friendHashes,
                             onAddFriend: (hash) =>
                                 showAddFriendDialog(context, state, identityHash: hash),
+                            onAddTheme: state.saveThemeAs,
                           ),
                     },
                   ),

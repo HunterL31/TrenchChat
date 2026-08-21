@@ -97,6 +97,10 @@ class AppState extends ChangeNotifier {
   /// stock; the shell resolves it per region via SectionTheme.
   ThemeSpec themeSpec = ThemeSpec.empty;
 
+  /// Themes saved under a name, keyed by that name. Applying one is a local
+  /// edit -- only [themeSpec] is what the app renders with.
+  Map<String, ThemeSpec> themeLibrary = {};
+
   bool loading = true;
   String? error;
 
@@ -151,6 +155,7 @@ class AppState extends ChangeNotifier {
 
       await loadFriends();
       await loadTheme();
+      await loadThemeLibrary();
 
       loading = false;
       notifyListeners();
@@ -606,6 +611,51 @@ class AppState extends ChangeNotifier {
       notifyListeners();
     } catch (e) {
       _reportActionError(e);
+    }
+  }
+
+  /// Loads the named theme library, non-fatal on the same terms as
+  /// [loadTheme]: a backend that cannot serve one leaves the library empty.
+  Future<void> loadThemeLibrary() async {
+    try {
+      final themes = await api.getThemeLibrary();
+      themeLibrary = {
+        for (final entry in themes.entries)
+          if (entry.value is Map<String, dynamic>)
+            entry.key: ThemeSpec.fromJson(entry.value as Map<String, dynamic>),
+      };
+      notifyListeners();
+    } catch (_) {
+      themeLibrary = {};
+    }
+  }
+
+  /// Saves [spec] under [name], replacing any theme already saved there.
+  /// Returns true on success; on failure [actionError] carries the reason and
+  /// the library is left as it was.
+  Future<bool> saveThemeAs(String name, ThemeSpec spec) async {
+    try {
+      await api.saveThemeToLibrary(name, spec.toJson());
+      themeLibrary = {...themeLibrary, name: spec};
+      notifyListeners();
+      return true;
+    } catch (e) {
+      _reportActionError(e);
+      return false;
+    }
+  }
+
+  /// Removes a saved theme. Returns true on success; on failure [actionError]
+  /// carries the reason.
+  Future<bool> deleteSavedTheme(String name) async {
+    try {
+      await api.deleteThemeFromLibrary(name);
+      themeLibrary = {...themeLibrary}..remove(name);
+      notifyListeners();
+      return true;
+    } catch (e) {
+      _reportActionError(e);
+      return false;
     }
   }
 

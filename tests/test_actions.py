@@ -267,6 +267,95 @@ class TestUiTheme:
         assert actions.read_ui_theme(reloaded) == theme
 
 
+class TestUiThemeLibrary:
+    def test_library_defaults_to_empty(self, peer_factory):
+        alice = peer_factory("alice")
+
+        assert actions.read_ui_theme_library(alice.config) == {}
+
+    def test_save_then_read_returns_the_theme_under_its_name(self, peer_factory):
+        alice = peer_factory("alice")
+        theme = {"sidebar": {"bg": "#101010"}, "accent": "#ff8800"}
+
+        actions.save_ui_theme_to_library(alice.config, "midnight", theme)
+
+        assert actions.read_ui_theme_library(alice.config) == {"midnight": theme}
+
+    def test_saving_an_existing_name_overwrites_only_that_entry(self, peer_factory):
+        alice = peer_factory("alice")
+        actions.save_ui_theme_to_library(alice.config, "midnight", {"accent": "#111111"})
+        actions.save_ui_theme_to_library(alice.config, "daylight", {"accent": "#ffffff"})
+
+        actions.save_ui_theme_to_library(alice.config, "midnight", {"accent": "#222222"})
+
+        assert actions.read_ui_theme_library(alice.config) == {
+            "midnight": {"accent": "#222222"},
+            "daylight": {"accent": "#ffffff"},
+        }
+
+    def test_delete_removes_the_theme_and_reports_it(self, peer_factory):
+        alice = peer_factory("alice")
+        actions.save_ui_theme_to_library(alice.config, "midnight", {"accent": "#111111"})
+
+        assert actions.delete_ui_theme_from_library(alice.config, "midnight") is True
+        assert actions.read_ui_theme_library(alice.config) == {}
+
+    def test_deleting_an_unknown_name_returns_false(self, peer_factory):
+        alice = peer_factory("alice")
+
+        assert actions.delete_ui_theme_from_library(alice.config, "nothing") is False
+
+    def test_deleting_twice_returns_false_the_second_time(self, peer_factory):
+        alice = peer_factory("alice")
+        actions.save_ui_theme_to_library(alice.config, "midnight", {"accent": "#111111"})
+
+        assert actions.delete_ui_theme_from_library(alice.config, "midnight") is True
+        assert actions.delete_ui_theme_from_library(alice.config, "midnight") is False
+
+    def test_an_empty_name_is_rejected(self, peer_factory):
+        alice = peer_factory("alice")
+
+        with pytest.raises(ValueError):
+            actions.save_ui_theme_to_library(alice.config, "   ", {"accent": "#111111"})
+
+        assert actions.read_ui_theme_library(alice.config) == {}
+
+    def test_an_oversized_name_is_rejected(self, peer_factory):
+        alice = peer_factory("alice")
+        too_long = "x" * (actions.MAX_THEME_NAME_LEN + 1)
+
+        with pytest.raises(ValueError):
+            actions.save_ui_theme_to_library(alice.config, too_long, {"accent": "#111111"})
+
+        assert actions.read_ui_theme_library(alice.config) == {}
+
+    def test_names_are_stored_stripped(self, peer_factory):
+        alice = peer_factory("alice")
+
+        actions.save_ui_theme_to_library(alice.config, "  midnight  ", {"accent": "#111111"})
+
+        assert list(actions.read_ui_theme_library(alice.config)) == ["midnight"]
+        assert actions.delete_ui_theme_from_library(alice.config, " midnight ") is True
+
+    def test_library_persists_across_a_fresh_config(self, peer_factory):
+        alice = peer_factory("alice")
+        theme = {"message_list": {"bg": "#202020", "text": "#eeeeee"}}
+        actions.save_ui_theme_to_library(alice.config, "midnight", theme)
+
+        reloaded = Config(data_dir=alice.data_dir)
+
+        assert actions.read_ui_theme_library(reloaded) == {"midnight": theme}
+
+    def test_a_delete_persists_across_a_fresh_config(self, peer_factory):
+        alice = peer_factory("alice")
+        actions.save_ui_theme_to_library(alice.config, "midnight", {"accent": "#111111"})
+        actions.delete_ui_theme_from_library(alice.config, "midnight")
+
+        reloaded = Config(data_dir=alice.data_dir)
+
+        assert actions.read_ui_theme_library(reloaded) == {}
+
+
 class TestVoiceActions:
     def test_authorized_join_returns_true(self, peer_factory):
         alice, bob, ch_hash = _setup_channel_with_member(peer_factory)
