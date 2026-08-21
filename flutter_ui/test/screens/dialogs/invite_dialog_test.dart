@@ -95,4 +95,21 @@ void main() {
     await tester.pump();
     expect(inviteButton(tester).onPressed, isNotNull);
   });
+
+  testWidgets('rejects inviting your own identity hash', (tester) async {
+    const selfHash = 'a9f13c02e7d84b119876543210fedcba';
+    state.meHashHex = selfHash;
+    await open(tester);
+
+    final manualField = find.byType(TextField).last;
+    await tester.enterText(manualField, selfHash);
+    await tester.pump();
+    expect(inviteButton(tester).onPressed, isNull);
+    expect(find.text("You can't invite yourself."), findsOneWidget);
+
+    await tester.enterText(manualField, _peerHash);
+    await tester.pump();
+    expect(inviteButton(tester).onPressed, isNotNull);
+    expect(find.text("You can't invite yourself."), findsNothing);
+  });
 }

@@ -77,7 +77,6 @@ void main() {
     expect(find.text('OWNER'), findsOneWidget);
     expect(find.text('operator  (you)'), findsOneWidget);
     expect(find.text('Bob'), findsOneWidget);
-    expect(find.text('INVITE'), findsOneWidget);
   });
 
   testWidgets('kick and admin controls are hidden without permissions', (tester) async {
@@ -93,6 +92,7 @@ void main() {
 
     expect(find.text('KICK'), findsNothing);
     expect(find.text('+ADMIN'), findsNothing);
+    expect(find.text('INVITE'), findsNothing);
   });
 
   testWidgets('kick asks for inline confirmation, then posts the removal', (tester) async {
@@ -106,6 +106,7 @@ void main() {
     );
     await open(tester);
 
+    expect(find.text('INVITE'), findsOneWidget);
     // Owner and self rows are never actionable, so exactly one KICK (Bob's).
     expect(find.text('KICK'), findsOneWidget);
     await tester.tap(find.text('KICK'));

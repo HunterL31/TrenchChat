@@ -131,15 +131,16 @@ class _MembersDialogContentState extends State<_MembersDialogContent> {
                 channelName: widget.channelName,
               ),
             ),
-          TcGhostButton(
-            label: 'INVITE',
-            onPressed: () => showInviteDialog(
-              context,
-              state,
-              channelHashHex: widget.channelHashHex,
-              channelName: widget.channelName,
+          if (perms?.invite ?? false)
+            TcGhostButton(
+              label: 'INVITE',
+              onPressed: () => showInviteDialog(
+                context,
+                state,
+                channelHashHex: widget.channelHashHex,
+                channelName: widget.channelName,
+              ),
             ),
-          ),
           TcPrimaryButton(label: 'CLOSE', onPressed: () => Navigator.pop(context)),
         ],
         children: [

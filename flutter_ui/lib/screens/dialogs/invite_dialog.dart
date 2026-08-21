@@ -123,6 +123,12 @@ class _InviteDialogContentState extends State<_InviteDialogContent> {
   String? get _inviteeHash =>
       _selectedHash ?? (_manualValid ? _manualNormalized : null);
 
+  bool get _isSelf {
+    final invitee = _inviteeHash;
+    return invitee != null &&
+        invitee.toLowerCase() == widget.state.meHashHex.toLowerCase();
+  }
+
   Future<void> _submit() async {
     final invitee = _inviteeHash;
     if (invitee == null) return;
@@ -153,7 +159,7 @@ class _InviteDialogContentState extends State<_InviteDialogContent> {
         TcGhostButton(label: 'CANCEL', onPressed: () => Navigator.pop(context)),
         TcPrimaryButton(
           label: _busy ? 'INVITING…' : 'INVITE',
-          onPressed: _busy || _inviteeHash == null ? null : _submit,
+          onPressed: _busy || _inviteeHash == null || _isSelf ? null : _submit,
         ),
       ],
       children: [
@@ -193,6 +199,13 @@ class _InviteDialogContentState extends State<_InviteDialogContent> {
           controller: _manualHash,
           hintText: 'e.g. a3f1c2d4e5b6a7f8…  (hex, 32 chars)',
         ),
+        if (_isSelf) ...[
+          const SizedBox(height: 8),
+          Text(
+            "You can't invite yourself.",
+            style: TextStyle(fontSize: TCType.textCaption, color: tc.statusDanger),
+          ),
+        ],
       ],
     );
   }

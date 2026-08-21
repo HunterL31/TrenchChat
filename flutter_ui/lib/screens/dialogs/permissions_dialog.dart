@@ -15,6 +15,8 @@ import '../../widgets/tc_button.dart';
 import '../../widgets/tc_checkbox.dart';
 import '../../widgets/tc_dialog.dart';
 
+const _createChannelPerm = 'create_channel';
+
 const Map<String, String> _permissionLabels = {
   'send_message': 'Send messages',
   'invite': 'Invite members',
@@ -28,6 +30,9 @@ const Map<String, String> _permissionLabels = {
 
 Future<void> showPermissionsDialog(BuildContext context, AppState state,
     {required String channelHashHex, required String channelName}) {
+  // CREATE_CHANNEL only means something inside a server; a standalone channel
+  // has nowhere to create channels, so the row is hidden there.
+  final belongsToServer = state.channelByHash(channelHashHex)?.serverHash != null;
   return _showPermissionsDialog(
     context,
     state,
@@ -35,6 +40,7 @@ Future<void> showPermissionsDialog(BuildContext context, AppState state,
     load: () => state.api.getChannelPermissions(channelHashHex),
     save: (admin, member) =>
         state.updateChannelPermissions(channelHashHex, admin, member),
+    showCreateChannel: belongsToServer,
   );
 }
 
@@ -49,6 +55,7 @@ Future<void> showServerPermissionsDialog(BuildContext context, AppState state,
     load: () => state.api.getServerPermissions(serverHashHex),
     save: (admin, member) =>
         state.updateServerPermissions(serverHashHex, admin, member),
+    showCreateChannel: true,
   );
 }
 
@@ -58,13 +65,19 @@ Future<void> _showPermissionsDialog(
   required String title,
   required Future<ScopePermissions> Function() load,
   required Future<bool> Function(List<String>, List<String>) save,
+  required bool showCreateChannel,
 }) {
   return showTcDialog<void>(
     context: context,
     builder: (context) => SectionTheme(
       spec: state.themeSpec,
       section: TCSection.dialogs,
-      child: _PermissionsDialogContent(title: title, load: load, save: save),
+      child: _PermissionsDialogContent(
+        title: title,
+        load: load,
+        save: save,
+        showCreateChannel: showCreateChannel,
+      ),
     ),
   );
 }
@@ -74,11 +87,13 @@ class _PermissionsDialogContent extends StatefulWidget {
     required this.title,
     required this.load,
     required this.save,
+    required this.showCreateChannel,
   });
 
   final String title;
   final Future<ScopePermissions> Function() load;
   final Future<bool> Function(List<String>, List<String>) save;
+  final bool showCreateChannel;
 
   @override
   State<_PermissionsDialogContent> createState() => _PermissionsDialogContentState();
@@ -145,6 +160,10 @@ class _PermissionsDialogContentState extends State<_PermissionsDialogContent> {
 
   String _labelFor(String perm) => _permissionLabels[perm] ?? perm;
 
+  List<String> _visible(List<String> perms) => widget.showCreateChannel
+      ? perms
+      : perms.where((p) => p != _createChannelPerm).toList();
+
   @override
   Widget build(BuildContext context) {
     final tc = SectionTheme.of(context);
@@ -178,7 +197,7 @@ class _PermissionsDialogContentState extends State<_PermissionsDialogContent> {
               children: [
                 _roleLabel('OWNER', note: 'always has all permissions'),
                 const SizedBox(height: 6),
-                for (final perm in _allPermissions)
+                for (final perm in _visible(_allPermissions))
                   Padding(
                     padding: const EdgeInsets.symmetric(vertical: 3),
                     child: TcCheckbox(value: true, label: _labelFor(perm), onChanged: null),
@@ -186,7 +205,7 @@ class _PermissionsDialogContentState extends State<_PermissionsDialogContent> {
                 const SizedBox(height: 12),
                 _roleLabel('ADMIN'),
                 const SizedBox(height: 6),
-                for (final perm in _adminGrantable)
+                for (final perm in _visible(_adminGrantable))
                   Padding(
                     padding: const EdgeInsets.symmetric(vertical: 3),
                     child: TcCheckbox(
@@ -199,7 +218,7 @@ class _PermissionsDialogContentState extends State<_PermissionsDialogContent> {
                 const SizedBox(height: 12),
                 _roleLabel('MEMBER'),
                 const SizedBox(height: 6),
-                for (final perm in _memberGrantable)
+                for (final perm in _visible(_memberGrantable))
                   Padding(
                     padding: const EdgeInsets.symmetric(vertical: 3),
                     child: TcCheckbox(

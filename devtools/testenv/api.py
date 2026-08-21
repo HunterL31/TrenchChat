@@ -43,7 +43,7 @@ from trenchchat.core.interfaces_config import (
 from trenchchat.core.naming import NameInUseError
 from trenchchat.core.permissions import (
     ALL_PERMISSIONS, CREATE_CHANNEL, INVITE, KICK, MANAGE_CHANNEL, MANAGE_ROLES,
-    ROLE_ADMIN, ROLE_MEMBER, PRESET_OPEN, PRESET_PRIVATE, VOICE_CHAT,
+    ROLE_ADMIN, ROLE_MEMBER, PRESET_OPEN, PRESET_PRIVATE, SEND_MESSAGE, VOICE_CHAT,
     is_open_join, offered_permissions, permissions_from_json,
 )
 from trenchchat.core.presence import resolve_display_name
@@ -1065,7 +1065,16 @@ def create_app(backend: Backend, *, token: str | None = None,
         # main_window.py's _on_view_members does -- server-side enforcement
         # in actions.update_membership is the real boundary regardless.
         my_hex = backend.identity.hash_hex
+        # send_message mirrors messaging._on_lxmf_message: open-join channels
+        # accept anyone, so it is effectively true; otherwise it is the role
+        # check the delivery path applies.
+        channel = backend.storage.get_channel(channel_hash)
+        perms = permissions_from_json(channel["permissions"]) if channel else {}
+        send_message = True
+        if channel and not is_open_join(perms):
+            send_message = backend.storage.has_permission(channel_hash, my_hex, SEND_MESSAGE)
         return {
+            "send_message": send_message,
             "invite": backend.storage.has_permission(channel_hash, my_hex, INVITE),
             "kick": backend.storage.has_permission(channel_hash, my_hex, KICK),
             "manage_roles": backend.storage.has_permission(channel_hash, my_hex, MANAGE_ROLES),
