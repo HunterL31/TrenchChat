@@ -265,6 +265,7 @@ class _MainWindowState extends State<MainWindow> {
                             onAddFriend: (hash) =>
                                 showAddFriendDialog(context, state, identityHash: hash),
                             onAddTheme: state.saveThemeAs,
+                            themeLibrary: state.themeLibrary,
                           ),
                     },
                   ),
@@ -283,6 +284,8 @@ class _MainWindowState extends State<MainWindow> {
                       onSend: (content) => state.sendMessage(content),
                       pickEmoji: () async =>
                           (await showEmojiPickerDialog(context, state))?.composeToken,
+                      pendingThemeShare: state.pendingThemeShare,
+                      onThemeShareConsumed: state.consumePendingThemeShare,
                       compact: compact,
                     ),
                 ],

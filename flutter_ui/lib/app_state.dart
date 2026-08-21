@@ -101,6 +101,10 @@ class AppState extends ChangeNotifier {
   /// edit -- only [themeSpec] is what the app renders with.
   Map<String, ThemeSpec> themeLibrary = {};
 
+  /// A theme the appearance editor handed to the compose box, waiting to be
+  /// dropped into the draft. Nothing is sent until the user sends it.
+  ({String name, String code})? pendingThemeShare;
+
   bool loading = true;
   String? error;
 
@@ -643,6 +647,21 @@ class AppState extends ChangeNotifier {
       _reportActionError(e);
       return false;
     }
+  }
+
+  /// Offers [code] to the compose box under [name], where it lands in the
+  /// draft as a short token the user can still delete before sending.
+  void stageThemeShare(String name, String code) {
+    pendingThemeShare = (name: name, code: code);
+    notifyListeners();
+  }
+
+  /// Takes the staged share and clears it. Deliberately silent: it is read
+  /// while the compose box is already building.
+  ({String name, String code})? consumePendingThemeShare() {
+    final staged = pendingThemeShare;
+    pendingThemeShare = null;
+    return staged;
   }
 
   /// Removes a saved theme. Returns true on success; on failure [actionError]

@@ -1,5 +1,11 @@
 // 1a: no-chrome compose row. Enter sends, Shift+Enter inserts a newline.
 // There is deliberately no Send button.
+//
+// Two things the draft shows short and sends long: a picked custom emoji
+// (`:name:` -> `:name@hash:`) and a theme shared from the appearance editor
+// (`[theme:Name]` -> its `tct1:` code). Both expand at send time, so neither
+// a 64-char hash nor a whole packed theme ever sits in the user's words, and
+// deleting the token is all it takes to not send it.
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -9,6 +15,12 @@ import '../../widgets/emoji_text.dart';
 import '../../widgets/tc_button.dart';
 import '../../widgets/tc_icon.dart';
 
+/// The token a staged theme share reads as in the draft.
+String composeThemeToken(String name) => '[theme:$name]';
+
+/// Matches a staged theme token in draft text.
+final RegExp composeThemeTokenRe = RegExp(r'\[theme:([^\]\n]+)\]');
+
 class ComposeBar extends StatefulWidget {
   const ComposeBar({
     super.key,
@@ -16,6 +28,8 @@ class ComposeBar extends StatefulWidget {
     required this.enabled,
     required this.onSend,
     this.pickEmoji,
+    this.pendingThemeShare,
+    this.onThemeShareConsumed,
     this.compact = false,
   });
 
@@ -35,6 +49,13 @@ class ComposeBar extends StatefulWidget {
   /// so a 64-char hash never sits in the user's draft.
   final Future<String?> Function()? pickEmoji;
 
+  /// A theme the appearance editor staged: dropped into the draft as
+  /// `[theme:<name>]` and sent as [code]. Cleared through
+  /// [onThemeShareConsumed] once it is in the draft.
+  final ({String name, String code})? pendingThemeShare;
+
+  final VoidCallback? onThemeShareConsumed;
+
   @override
   State<ComposeBar> createState() => _ComposeBarState();
 }
@@ -47,10 +68,54 @@ class _ComposeBarState extends State<ComposeBar> {
   /// short `:name:` the user sees goes out as an unambiguous `:name@hash:`.
   final Map<String, String> _draftEmoji = {};
 
+  /// Theme name -> code for shares staged into the current draft, so the
+  /// short `[theme:name]` the user sees goes out as the full code.
+  final Map<String, String> _draftThemes = {};
+
+  /// Whether the share currently offered has already been taken. Cleared
+  /// when the offer goes away, so a second share still lands.
+  bool _shareConsumed = false;
+
   @override
   void initState() {
     super.initState();
     HardwareKeyboard.instance.addHandler(_onKeyEvent);
+    _consumeThemeShare();
+  }
+
+  @override
+  void didUpdateWidget(ComposeBar oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    _consumeThemeShare();
+  }
+
+  /// Takes the offered share once, after this frame -- the offer is read
+  /// while the compose bar is being built, so it cannot be cleared inline.
+  void _consumeThemeShare() {
+    if (widget.pendingThemeShare == null) {
+      _shareConsumed = false;
+      return;
+    }
+    if (_shareConsumed) return;
+    _shareConsumed = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final staged = widget.pendingThemeShare;
+      if (!mounted || staged == null) return;
+      _insertThemeToken(staged.name, staged.code);
+      widget.onThemeShareConsumed?.call();
+    });
+  }
+
+  /// Appends the theme's token to the draft, a space clear of whatever is
+  /// already typed there.
+  void _insertThemeToken(String name, String code) {
+    _draftThemes[name] = code;
+    final text = _controller.text;
+    final separator = text.isEmpty || text.endsWith(' ') || text.endsWith('\n') ? '' : ' ';
+    final next = '$text$separator${composeThemeToken(name)}';
+    _controller.text = next;
+    _controller.selection = TextSelection.collapsed(offset: next.length);
+    _focusNode.requestFocus();
   }
 
   @override
@@ -77,9 +142,10 @@ class _ComposeBarState extends State<ComposeBar> {
     final text = _controller.text;
     if (text.trim().isEmpty || !widget.enabled) return;
     _controller.clear();
-    final ok = await widget.onSend(_expandDraftEmoji(text));
+    final ok = await widget.onSend(_expandDraftThemes(_expandDraftEmoji(text)));
     if (ok) {
       _draftEmoji.clear();
+      _draftThemes.clear();
     } else if (mounted && _controller.text.isEmpty) {
       // Restore the short form, and keep the mapping so a retry still expands.
       _controller.text = text;
@@ -97,6 +163,16 @@ class _ComposeBarState extends State<ComposeBar> {
       final hash = _draftEmoji[m.group(1)!];
       return hash == null ? m[0]! : ':${m.group(1)}@$hash:';
     });
+  }
+
+  /// Rewrites each `[theme:name]` staged this draft to its code. A token the
+  /// user deleted simply is not there to expand.
+  String _expandDraftThemes(String text) {
+    if (_draftThemes.isEmpty) return text;
+    return text.replaceAllMapped(
+      composeThemeTokenRe,
+      (m) => _draftThemes[m.group(1)!] ?? m[0]!,
+    );
   }
 
   Future<void> _insertEmoji() async {

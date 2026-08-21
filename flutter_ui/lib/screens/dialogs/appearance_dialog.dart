@@ -13,9 +13,9 @@
 //
 // A draft can also be kept under a name (MY THEMES), which is a library
 // separate from the theme in force: saving one changes nothing about how the
-// app looks, and applying one only loads it into the draft. SHARE posts the
-// theme to the open channel as a code (theme/theme_code.dart), which any
-// reader can add to their own library from the message.
+// app looks, and applying one only loads it into the draft. SHARE stages the
+// theme's code (theme/theme_code.dart) into the compose box and closes the
+// way back to it -- nothing is sent until the user sends it.
 import 'package:flutter/material.dart';
 
 import '../../app_state.dart';
@@ -69,8 +69,11 @@ Key appearanceApplySavedKey(String name) => Key('theme-apply:$name');
 Key appearanceShareSavedKey(String name) => Key('theme-share:$name');
 Key appearanceDeleteSavedKey(String name) => Key('theme-delete:$name');
 
-Future<void> showAppearanceDialog(BuildContext context, AppState state) {
-  return showTcDialog<void>(
+/// Opens the editor. Resolves to true when it closed because a theme was
+/// staged into the compose box, which is the caller's cue to get out of the
+/// way too (see settings_dialog.dart).
+Future<bool?> showAppearanceDialog(BuildContext context, AppState state) {
+  return showTcDialog<bool>(
     context: context,
     builder: (context) => _AppearanceDialogContent(state: state),
   );
@@ -209,13 +212,12 @@ class _AppearanceDialogContentState extends State<_AppearanceDialogContent> {
   /// not reshuffle when one is replaced.
   List<String> get _savedNames => widget.state.themeLibrary.keys.toList()..sort();
 
-  /// True when SHARE has somewhere to send: a selected channel this identity
-  /// may post in. Mirrors the compose bar's own gate.
-  bool get _canShare {
-    final channelHash = widget.state.selectedChannelHash;
-    if (channelHash == null) return false;
-    return widget.state.permissionsByChannel[channelHash]?.sendMessage ?? true;
-  }
+  /// The trimmed name SAVE AS… would write to, empty when the field is blank.
+  String get _saveAsTarget => _saveAsName.text.trim();
+
+  /// True when saving would replace a theme already in the library.
+  bool get _saveAsOverwrites =>
+      _saveAsTarget.isNotEmpty && widget.state.themeLibrary.containsKey(_saveAsTarget);
 
   Future<void> _runLibraryAction(Future<bool> Function() action, String success) async {
     setState(() {
@@ -233,19 +235,22 @@ class _AppearanceDialogContentState extends State<_AppearanceDialogContent> {
   }
 
   Future<void> _saveDraftAs() async {
-    final name = _saveAsName.text.trim();
+    final name = _saveAsTarget;
     if (name.isEmpty) return;
+    final replaced = _saveAsOverwrites;
     await _runLibraryAction(
       () => widget.state.saveThemeAs(name, _draft),
-      'Saved as $name.',
+      replaced ? 'Replaced $name.' : 'Saved as $name.',
     );
     if (mounted && _error == null) _saveAsName.clear();
   }
 
-  Future<void> _shareSaved(String name, ThemeSpec spec) => _runLibraryAction(
-        () => widget.state.sendMessage(encodeThemeCode(name, spec)),
-        'Shared $name to the open channel.',
-      );
+  /// Hands the theme's code to the compose box and leaves, closing the
+  /// settings dialog underneath so the user lands on the draft.
+  void _shareSaved(String name, ThemeSpec spec) {
+    widget.state.stageThemeShare(name, encodeThemeCode(name, spec));
+    Navigator.pop(context, true);
+  }
 
   Future<void> _deleteSaved(String name) => _runLibraryAction(
         () => widget.state.deleteSavedTheme(name),
@@ -331,7 +336,7 @@ class _AppearanceDialogContentState extends State<_AppearanceDialogContent> {
           TcGhostButton(
             key: appearanceShareSavedKey(name),
             label: 'SHARE',
-            onPressed: _busy || !_canShare ? null : () => _shareSaved(name, spec),
+            onPressed: _busy ? null : () => _shareSaved(name, spec),
           ),
           const SizedBox(width: 6),
           SizedBox(
@@ -406,11 +411,18 @@ class _AppearanceDialogContentState extends State<_AppearanceDialogContent> {
             ),
             const SizedBox(width: 6),
             TcGhostButton(
-              label: 'SAVE AS…',
-              onPressed: _busy || _saveAsName.text.trim().isEmpty ? null : _saveDraftAs,
+              label: _saveAsOverwrites ? 'OVERWRITE' : 'SAVE AS…',
+              onPressed: _busy || _saveAsTarget.isEmpty ? null : _saveDraftAs,
             ),
           ],
         ),
+        if (_saveAsOverwrites) ...[
+          const SizedBox(height: 6),
+          Text(
+            'Overwrites existing "$_saveAsTarget".',
+            style: TextStyle(fontSize: TCType.textMicro, color: tc.statusWarn),
+          ),
+        ],
         if (_notice != null) ...[
           const SizedBox(height: 6),
           Text(
@@ -501,6 +513,7 @@ class _AppearanceDialogContentState extends State<_AppearanceDialogContent> {
                   TcColorField(
                     key: ValueKey('$_scope/$key'),
                     label: key,
+                    displayLabel: tokenLabels[key],
                     color: resolved[key]!,
                     overridden: own.containsKey(key),
                     onChanged: (color) => _setToken(key, color),

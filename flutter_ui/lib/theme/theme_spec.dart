@@ -28,6 +28,44 @@ import 'tokens.dart';
 /// still parsed field-by-field; there is nothing to migrate yet.
 const int themeSpecVersion = 1;
 
+/// What each token key is called in the editor. Display only -- the wire key
+/// stays the key everywhere else, so renaming a label changes no document.
+/// One entry per [TCSectionColors.tokenKeys].
+const Map<String, String> tokenLabels = {
+  'bgApp': 'App background',
+  'bgSurface': 'Panel background',
+  'bgSurfaceRaised': 'Raised panel background',
+  'bgInset': 'Inset background',
+  'bgHover': 'Hover highlight',
+  'bgPressed': 'Pressed highlight',
+  'bgSelected': 'Selection background',
+  'borderSubtle': 'Subtle border',
+  'borderDefault': 'Border',
+  'borderStrong': 'Strong border',
+  'borderAccent': 'Accent border',
+  'textPrimary': 'Text',
+  'textEmphasis': 'Emphasized text',
+  'textSecondary': 'Secondary text',
+  'textTertiary': 'Faint text',
+  'textDisabled': 'Disabled text',
+  'textOnAccent': 'Text on accent',
+  'textInverse': 'Inverted text',
+  'accentPrimary': 'Accent',
+  'accentPrimaryHover': 'Accent (hover)',
+  'accentPrimaryActive': 'Accent (pressed)',
+  'accentPrimaryMuted': 'Accent (muted)',
+  'accentSecondary': 'Secondary accent',
+  'accentSecondaryHover': 'Secondary accent (hover)',
+  'accentSecondaryMuted': 'Secondary accent (muted)',
+  'statusOnline': 'Online status',
+  'statusOffline': 'Offline status',
+  'statusDanger': 'Danger',
+  'statusDangerMuted': 'Danger (muted)',
+  'statusWarn': 'Warning',
+  'linkColor': 'Link',
+  'linkHoverColor': 'Link (hover)',
+};
+
 /// A themeable region of the UI. The enum name is the wire id.
 enum TCSection {
   serverRail,

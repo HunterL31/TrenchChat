@@ -328,8 +328,14 @@ class _SettingsDialogContentState extends State<_SettingsDialogContent> {
   }
 
   Future<void> _onEditTheme() async {
-    await showAppearanceDialog(context, widget.state);
-    if (mounted) setState(() {});
+    final staged = await showAppearanceDialog(context, widget.state);
+    if (!mounted) return;
+    // A staged share belongs in the compose box, so get out of its way.
+    if (staged == true) {
+      Navigator.pop(context);
+      return;
+    }
+    setState(() {});
   }
 
   Future<void> _onSetPin() async {

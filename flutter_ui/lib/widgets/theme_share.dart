@@ -24,6 +24,22 @@ const List<String> themePreviewTokens = [
   'textEmphasis',
 ];
 
+/// The name a shared theme should be saved under given what [taken] already
+/// holds: [name] itself when it is free, otherwise `name-2`, `name-3`, ...
+/// The stem is trimmed as far as it must be to keep the result within
+/// [maxThemeNameLength].
+String freeThemeName(String name, Iterable<String> taken) {
+  final used = taken.toSet();
+  if (!used.contains(name)) return name;
+  for (var n = 2;; n++) {
+    final suffix = '-$n';
+    final stemLimit = maxThemeNameLength - suffix.length;
+    final stem = name.length > stemLimit ? name.substring(0, stemLimit) : name;
+    final candidate = '$stem$suffix';
+    if (!used.contains(candidate)) return candidate;
+  }
+}
+
 /// One decodable theme code found in a message.
 typedef SharedTheme = ({String code, String name, ThemeSpec spec});
 
@@ -100,14 +116,28 @@ class _ThemeCodeChip extends StatelessWidget {
 
 /// The card under a message carrying a theme code: what the theme looks like,
 /// and the one button that keeps it.
+///
+/// ADD never silently replaces a theme the reader already has. A name that is
+/// free is used as it is; a name already holding this very theme is left alone
+/// and the button just reads ADDED; a name holding a different theme is saved
+/// beside it as `name-2`.
 class ThemeCodeCard extends StatefulWidget {
-  const ThemeCodeCard({super.key, required this.name, required this.spec, this.onAdd});
+  const ThemeCodeCard({
+    super.key,
+    required this.name,
+    required this.spec,
+    this.library = const {},
+    this.onAdd,
+  });
 
   final String name;
   final ThemeSpec spec;
 
-  /// Saves the theme under its own name, replacing one saved there already.
-  /// Returns whether it landed; the card only says ADDED when it did.
+  /// The reader's saved themes, which decide the name this one lands under.
+  final Map<String, ThemeSpec> library;
+
+  /// Saves the theme under the name the card settled on. Returns whether it
+  /// landed; the card only says ADDED when it did.
   final Future<bool> Function(String name, ThemeSpec spec)? onAdd;
 
   @override
@@ -118,13 +148,28 @@ class _ThemeCodeCardState extends State<ThemeCodeCard> {
   bool _busy = false;
   bool _added = false;
 
+  /// The name the theme was kept under, once it has been.
+  String? _savedAs;
+
+  /// True when the library already holds exactly this theme under this name.
+  bool get _alreadyHave => widget.library[widget.name] == widget.spec;
+
   Future<void> _add() async {
+    if (_alreadyHave) {
+      setState(() {
+        _added = true;
+        _savedAs = widget.name;
+      });
+      return;
+    }
+    final target = freeThemeName(widget.name, widget.library.keys);
     setState(() => _busy = true);
-    final ok = await widget.onAdd!(widget.name, widget.spec);
+    final ok = await widget.onAdd!(target, widget.spec);
     if (!mounted) return;
     setState(() {
       _busy = false;
       _added = ok;
+      _savedAs = ok ? target : null;
     });
   }
 
@@ -179,13 +224,27 @@ class _ThemeCodeCardState extends State<ThemeCodeCard> {
                       ],
                     ],
                   ),
+                  if (_savedAs != null && _savedAs != widget.name) ...[
+                    const SizedBox(height: 4),
+                    Text(
+                      'Saved as "$_savedAs"',
+                      overflow: TextOverflow.ellipsis,
+                      softWrap: false,
+                      style: TextStyle(fontSize: TCType.textMicro, color: tc.accentSecondary),
+                    ),
+                  ],
                 ],
               ),
             ),
             const SizedBox(width: 8),
-            TcGhostButton(
-              label: _added ? 'ADDED' : 'ADD',
-              onPressed: widget.onAdd == null || _busy || _added ? null : _add,
+            Tooltip(
+              message: _savedAs == null || _savedAs == widget.name
+                  ? 'Save to my themes'
+                  : 'Saved as "$_savedAs"',
+              child: TcGhostButton(
+                label: _added ? 'ADDED' : 'ADD',
+                onPressed: widget.onAdd == null || _busy || _added ? null : _add,
+              ),
             ),
           ],
         ),

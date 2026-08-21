@@ -81,6 +81,21 @@ void main() {
     expect(find.text('No overrides in this scope — every color is inherited.'), findsOneWidget);
   });
 
+  testWidgets('every color row reads as its human label, not its wire key', (tester) async {
+    await openEditor(tester);
+
+    for (final entry in tokenLabels.entries) {
+      expect(find.text(entry.value), findsOneWidget, reason: entry.key);
+    }
+    expect(tokenLabels.keys.toSet(), TCSectionColors.tokenKeys.toSet());
+    expect(find.text('App background'), findsOneWidget);
+    expect(find.text('Accent (pressed)'), findsOneWidget);
+    // The wire key is still what the field is keyed by, but never what it says.
+    expect(find.text('bgPressed'), findsNothing);
+    expect(find.text('accentPrimaryActive'), findsNothing);
+    expect(find.byKey(tcColorInputKey('bgPressed')), findsOneWidget);
+  });
+
   testWidgets('editing a base token saves it and adopts the new spec', (tester) async {
     await openEditor(tester);
 
@@ -325,7 +340,8 @@ void main() {
     expect((lastPostedTheme()['styles'] as Map)['base'], {'textScale': 1.35});
   });
 
-  testWidgets('SAVE AS… stores the current draft under a name', (tester) async {
+  testWidgets('SAVE AS… stores the current draft under a fresh name in one click',
+      (tester) async {
     await openEditor(tester);
 
     await tester.enterText(find.byKey(tcColorInputKey('bgApp')), '#102030');
@@ -334,6 +350,7 @@ void main() {
     await tester.pump();
     expect(find.text('Nothing saved yet — name the current draft below to keep it.'),
         findsOneWidget);
+    expect(find.textContaining('Overwrites existing'), findsNothing);
 
     await tester.tap(find.text('SAVE AS…'));
     await settle(tester);
@@ -360,6 +377,41 @@ void main() {
     await tester.pump();
     expect(tester.widget<TcGhostButton>(find.widgetWithText(TcGhostButton, 'SAVE AS…')).onPressed,
         isNull);
+  });
+
+  testWidgets('a name already in the library warns and offers OVERWRITE', (tester) async {
+    state.themeLibrary = {'Deep': ThemeSpec(base: {'bgApp': const Color(0xFF221100)})};
+    await openEditor(tester);
+
+    await tester.enterText(find.byKey(appearanceSaveAsFieldKey), ' Deep ');
+    await tester.pump();
+
+    expect(find.text('Overwrites existing "Deep".'), findsOneWidget);
+    expect(find.text('OVERWRITE'), findsOneWidget);
+    expect(find.text('SAVE AS…'), findsNothing);
+  });
+
+  testWidgets('OVERWRITE replaces the saved theme on the first click', (tester) async {
+    state.themeLibrary = {'Deep': ThemeSpec(base: {'bgApp': const Color(0xFF221100)})};
+    await openEditor(tester);
+
+    await tester.enterText(find.byKey(tcColorInputKey('bgApp')), '#102030');
+    await tester.pump();
+    await tester.enterText(find.byKey(appearanceSaveAsFieldKey), 'Deep');
+    await tester.pump();
+    await tester.tap(find.text('OVERWRITE'));
+    await settle(tester);
+
+    final post = backend.requests.lastWhere((r) => r.path == '/ui_theme_library');
+    final body = jsonDecode(post.body) as Map<String, dynamic>;
+    expect(post.method, 'POST');
+    expect(body['name'], 'Deep');
+    expect(((body['theme'] as Map)['base'] as Map)['bgApp'], '#102030');
+    expect(state.themeLibrary['Deep']!.base['bgApp'], const Color(0xFF102030));
+    expect(state.themeLibrary.keys, ['Deep']);
+    expect(find.text('Replaced Deep.'), findsOneWidget);
+    // The name field is cleared, so the warning goes with it.
+    expect(find.textContaining('Overwrites existing'), findsNothing);
   });
 
   testWidgets('applying a saved theme replaces the draft', (tester) async {
@@ -402,7 +454,8 @@ void main() {
     expect(find.text('Deleted Deep.'), findsOneWidget);
   });
 
-  testWidgets('SHARE sends the theme code to the open channel', (tester) async {
+  testWidgets('SHARE stages the theme for the compose box and sends nothing',
+      (tester) async {
     final spec = ThemeSpec(base: {'bgApp': const Color(0xFF221100)});
     state.themeLibrary = {'Deep': spec};
     state.selectedChannelHash = 'chan1';
@@ -413,29 +466,23 @@ void main() {
     await tester.tap(find.byKey(appearanceShareSavedKey('Deep')));
     await settle(tester);
 
-    final post = backend.requests.lastWhere(
-      (r) => r.method == 'POST' && r.path == '/channels/chan1/messages',
-    );
-    final content = (jsonDecode(post.body) as Map<String, dynamic>)['content'] as String;
-    final decoded = decodeThemeCode(content);
+    final staged = state.pendingThemeShare;
+    expect(staged, isNotNull);
+    expect(staged!.name, 'Deep');
+    final decoded = decodeThemeCode(staged.code);
     expect(decoded!.name, 'Deep');
     expect(decoded.spec, spec);
-    expect(find.text('Shared Deep to the open channel.'), findsOneWidget);
+    // Nothing goes out until the user sends the draft themselves.
+    expect(backend.requests.where((r) => r.path == '/channels/chan1/messages'), isEmpty);
+    // The editor is out of the way, and the staged share survives one read.
+    expect(find.text('Appearance'), findsNothing);
+    expect(state.consumePendingThemeShare()!.name, 'Deep');
+    expect(state.pendingThemeShare, isNull);
   });
 
-  testWidgets('SHARE is disabled with no channel open', (tester) async {
+  testWidgets('SHARE stays available with no channel open and no send permission',
+      (tester) async {
     state.themeLibrary = {'Deep': ThemeSpec.empty};
-    await openEditor(tester);
-
-    expect(
-      tester.widget<TcGhostButton>(find.byKey(appearanceShareSavedKey('Deep'))).onPressed,
-      isNull,
-    );
-  });
-
-  testWidgets('SHARE is disabled when sending is barred in the open channel', (tester) async {
-    state.themeLibrary = {'Deep': ThemeSpec.empty};
-    state.selectedChannelHash = 'chan1';
     state.permissionsByChannel['chan1'] = const ChannelPermissions(
       kick: false,
       manageRoles: false,
@@ -447,8 +494,45 @@ void main() {
 
     expect(
       tester.widget<TcGhostButton>(find.byKey(appearanceShareSavedKey('Deep'))).onPressed,
-      isNull,
+      isNotNull,
     );
+
+    await tester.tap(find.byKey(appearanceShareSavedKey('Deep')));
+    await settle(tester);
+
+    expect(state.pendingThemeShare!.name, 'Deep');
+  });
+
+  testWidgets('SHARE closes the settings dialog under the editor too', (tester) async {
+    backend.routes['GET /settings'] = {
+      'propagation_enabled': false,
+      'propagation_node_name': '',
+      'propagation_storage_limit_mb': 512,
+      'channel_filter_mode': 'all',
+      'channel_filter_hashes': <String>[],
+      'outbound_propagation_node': '',
+    };
+    state.themeLibrary = {'Deep': ThemeSpec.empty};
+    useTallSurface(tester);
+    await tester.pumpWidget(_harness(state, (c) => showSettingsDialog(c, state)));
+    await tester.tap(find.text('open'));
+    await tester.pump();
+    await settle(tester);
+
+    await tester.dragUntilVisible(
+      find.text('EDIT THEME…'),
+      find.byType(ListView),
+      const Offset(0, -80),
+    );
+    await tester.tap(find.text('EDIT THEME…'));
+    await settle(tester);
+
+    await tester.tap(find.byKey(appearanceShareSavedKey('Deep')));
+    await settle(tester);
+
+    expect(find.text('Appearance'), findsNothing);
+    expect(find.text('Settings'), findsNothing);
+    expect(state.pendingThemeShare!.name, 'Deep');
   });
 
   testWidgets('reset all clears style overrides too', (tester) async {

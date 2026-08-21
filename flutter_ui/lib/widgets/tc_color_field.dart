@@ -22,12 +22,17 @@ class TcColorField extends StatefulWidget {
     required this.label,
     required this.color,
     required this.onChanged,
+    this.displayLabel,
     this.overridden = false,
     this.onClear,
   });
 
-  /// The token key this row edits, shown as the row's name.
+  /// The token key this row edits. It names the row's input key and is what
+  /// the row's tooltip reveals; [displayLabel] is what the row reads as.
   final String label;
+
+  /// The human name shown instead of [label]. Null shows the key itself.
+  final String? displayLabel;
 
   /// The color in force right now -- the override if there is one, otherwise
   /// whatever the row inherits.
@@ -106,13 +111,16 @@ class _TcColorFieldState extends State<TcColorField> {
           ),
           const SizedBox(width: 8),
           Expanded(
-            child: Text(
-              widget.label,
-              overflow: TextOverflow.ellipsis,
-              softWrap: false,
-              style: TextStyle(
-                fontSize: TCType.textCaption,
-                color: widget.overridden ? tc.accentPrimary : tc.textSecondary,
+            child: Tooltip(
+              message: widget.label,
+              child: Text(
+                widget.displayLabel ?? widget.label,
+                overflow: TextOverflow.ellipsis,
+                softWrap: false,
+                style: TextStyle(
+                  fontSize: TCType.textCaption,
+                  color: widget.overridden ? tc.accentPrimary : tc.textSecondary,
+                ),
               ),
             ),
           ),

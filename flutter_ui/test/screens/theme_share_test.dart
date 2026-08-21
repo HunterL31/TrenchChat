@@ -44,6 +44,7 @@ Widget _harness(AppState state, String content) => MaterialApp(
             meHashHex: 'me',
             displayNameFor: (hash, fallback) => fallback,
             onAddTheme: state.saveThemeAs,
+            themeLibrary: state.themeLibrary,
           ),
         ),
       ),
@@ -107,6 +108,46 @@ void main() {
     expect(find.text('ADD'), findsOneWidget);
     expect(state.themeLibrary, isEmpty);
     expect(state.actionError, isNotNull);
+  });
+
+  testWidgets('a name already holding this very theme is not saved again',
+      (tester) async {
+    state.themeLibrary = {'Deep': _shared};
+    await tester.pumpWidget(_harness(state, encodeThemeCode('Deep', _shared)));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('ADD'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('ADDED'), findsOneWidget);
+    expect(backend.requests.where((r) => r.path == '/ui_theme_library'), isEmpty);
+    expect(state.themeLibrary.keys, ['Deep']);
+  });
+
+  testWidgets('a name holding a different theme is kept beside it as name-2',
+      (tester) async {
+    state.themeLibrary = {'Deep': ThemeSpec(base: {'bgApp': const Color(0xFF010203)})};
+    await tester.pumpWidget(_harness(state, encodeThemeCode('Deep', _shared)));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('ADD'));
+    await tester.pumpAndSettle();
+
+    final post = backend.requests.lastWhere((r) => r.path == '/ui_theme_library');
+    expect((jsonDecode(post.body) as Map<String, dynamic>)['name'], 'Deep-2');
+    expect(state.themeLibrary['Deep-2'], _shared);
+    expect(state.themeLibrary['Deep']!.base['bgApp'], const Color(0xFF010203));
+    expect(find.text('ADDED'), findsOneWidget);
+    expect(find.text('Saved as "Deep-2"'), findsOneWidget);
+  });
+
+  test('a free suffix skips every taken one and stays within the name limit', () {
+    expect(freeThemeName('Deep', const []), 'Deep');
+    expect(freeThemeName('Deep', const ['Deep', 'Deep-2', 'Deep-3']), 'Deep-4');
+    final long = 'x' * maxThemeNameLength;
+    final suffixed = freeThemeName(long, [long]);
+    expect(suffixed.length, maxThemeNameLength);
+    expect(suffixed.endsWith('-2'), isTrue);
   });
 
   testWidgets('an unreadable code stays literal text', (tester) async {
