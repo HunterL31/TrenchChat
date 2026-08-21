@@ -224,6 +224,36 @@ class _SettingsDialogContentState extends State<_SettingsDialogContent> {
                       value: _filterMode,
                       onSelected: (v) => setState(() => _filterMode = v),
                     ),
+                    if (_filterMode == 'allowlist' && _allChannels.isNotEmpty) ...[
+                      const SizedBox(height: 10),
+                      Container(
+                        decoration: BoxDecoration(
+                          color: tc.bgInset,
+                          border: Border.all(color: tc.borderDefault),
+                        ),
+                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            for (final c in _allChannels)
+                              Padding(
+                                padding: const EdgeInsets.symmetric(vertical: 3),
+                                child: TcCheckbox(
+                                  value: _filterHashes.contains(c.hash),
+                                  label: '#${c.name}',
+                                  onChanged: (v) => setState(() {
+                                    if (v) {
+                                      _filterHashes.add(c.hash);
+                                    } else {
+                                      _filterHashes.remove(c.hash);
+                                    }
+                                  }),
+                                ),
+                              ),
+                          ],
+                        ),
+                      ),
+                    ],
                     const SizedBox(height: 16),
                     Container(height: 1, color: tc.borderSubtle),
                     const SizedBox(height: 12),
@@ -271,36 +301,6 @@ class _SettingsDialogContentState extends State<_SettingsDialogContent> {
                         TcGhostButton(label: 'EDIT THEME…', onPressed: _onEditTheme),
                       ],
                     ),
-                    if (_filterMode == 'allowlist' && _allChannels.isNotEmpty) ...[
-                      const SizedBox(height: 10),
-                      Container(
-                        decoration: BoxDecoration(
-                          color: tc.bgInset,
-                          border: Border.all(color: tc.borderDefault),
-                        ),
-                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            for (final c in _allChannels)
-                              Padding(
-                                padding: const EdgeInsets.symmetric(vertical: 3),
-                                child: TcCheckbox(
-                                  value: _filterHashes.contains(c.hash),
-                                  label: '#${c.name}',
-                                  onChanged: (v) => setState(() {
-                                    if (v) {
-                                      _filterHashes.add(c.hash);
-                                    } else {
-                                      _filterHashes.remove(c.hash);
-                                    }
-                                  }),
-                                ),
-                              ),
-                          ],
-                        ),
-                      ),
-                    ],
                   ],
                 ),
               ),
