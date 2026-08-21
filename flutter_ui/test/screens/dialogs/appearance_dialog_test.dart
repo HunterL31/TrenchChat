@@ -633,4 +633,19 @@ void main() {
     await tester.pump();
     expect(find.text('ACTIVE'), findsNothing);
   });
+
+  testWidgets('a saved theme name renders in its own colors', (tester) async {
+    final blue = ThemeSpec(base: {
+      'textPrimary': const Color(0xFFAADDFF),
+      'bgApp': const Color(0xFF001020),
+    });
+    backend.routes['GET /ui_theme_library'] = {
+      'themes': {'sky': blue.toJson()},
+    };
+    await state.loadThemeLibrary();
+    await openEditor(tester);
+
+    final nameText = tester.widget<Text>(find.text('sky'));
+    expect(nameText.style?.color, const Color(0xFFAADDFF));
+  });
 }

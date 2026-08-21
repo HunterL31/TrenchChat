@@ -326,18 +326,27 @@ class _AppearanceDialogContentState extends State<_AppearanceDialogContent> {
   Widget _savedThemeRow(TCSectionColors tc, String name) {
     final spec = widget.state.themeLibrary[name] ?? ThemeSpec.empty;
     final active = spec == _draft;
+    // The name wears its own theme's colors, so each row previews itself.
+    final own = spec.resolveBase();
     return Padding(
       padding: const EdgeInsets.only(bottom: 4),
       child: Row(
         children: [
           Expanded(
-            child: Text(
-              name,
-              overflow: TextOverflow.ellipsis,
-              softWrap: false,
-              style: TextStyle(
-                fontSize: TCType.textBodySm,
-                color: active ? tc.textEmphasis : tc.textPrimary,
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                decoration: BoxDecoration(
+                  color: own.bgApp,
+                  border: Border.all(color: tc.borderSubtle),
+                ),
+                child: Text(
+                  name,
+                  overflow: TextOverflow.ellipsis,
+                  softWrap: false,
+                  style: TextStyle(fontSize: TCType.textBodySm, color: own.textPrimary),
+                ),
               ),
             ),
           ),
