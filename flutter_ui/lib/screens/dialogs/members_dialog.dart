@@ -101,7 +101,7 @@ class _MembersDialogContentState extends State<_MembersDialogContent> {
     setState(() {
       _busy = false;
       if (!ok) {
-        _error = widget.state.actionError ?? 'The backend rejected the change.';
+        _error = widget.state.takeActionError() ?? 'The backend rejected the change.';
       }
     });
   }

@@ -63,6 +63,18 @@ Future<T?> showTcDialog<T>({
   );
 }
 
+/// Right-hand room for the scrollbar a desktop scroll behavior draws inside
+/// the viewport, over whatever is at its right edge. Give it to a scrollable's
+/// padding so the scrollbar never lands on the content: platforms that draw
+/// none (and the widget tests, which render as one of them) need no room.
+double scrollbarInset(BuildContext context) => switch (Theme.of(context).platform) {
+      TargetPlatform.linux ||
+      TargetPlatform.macOS ||
+      TargetPlatform.windows =>
+        TCSpace.space4,
+      _ => 0,
+    };
+
 /// Shared chrome for dialog content: notched panel, title rule, and a
 /// bottom-aligned action row. Dialogs supply their form fields as [children]
 /// and their buttons as [actions].

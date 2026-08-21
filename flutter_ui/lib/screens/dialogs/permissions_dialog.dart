@@ -109,7 +109,7 @@ class _PermissionsDialogContentState extends State<_PermissionsDialogContent> {
     if (!ok) {
       setState(() {
         _busy = false;
-        _error = widget.state.actionError ?? 'The backend rejected the change.';
+        _error = widget.state.takeActionError() ?? 'The backend rejected the change.';
       });
       return;
     }

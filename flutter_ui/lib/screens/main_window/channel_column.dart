@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 
 import '../../api/models/invite.dart';
 import '../../api/models/member.dart';
+import '../../api/models/permissions.dart';
 import '../../api/models/server.dart';
 import '../../api/models/voice.dart';
 import '../../theme/effects.dart';
@@ -35,6 +36,11 @@ class ChannelColumn extends StatelessWidget {
     this.voiceParticipants = const [],
     this.onJoinVoice,
     this.syncStates = const {},
+    this.channelPermissions = const {},
+    this.onViewMembers,
+    this.onInviteToChannel,
+    this.onEditPermissions,
+    this.onLeaveChannel,
   });
 
   final String? serverName;
@@ -72,6 +78,43 @@ class ChannelColumn extends StatelessWidget {
   /// Channel hash -> sync state as reported by the backend. Only
   /// `incomplete` draws anything; every other state is the quiet case.
   final Map<String, String> syncStates;
+
+  /// Channel hash -> this reader's permissions there, as far as they are
+  /// known. A channel not opened yet has no entry, and the entries its
+  /// permissions gate are left out of the row menu rather than guessed at --
+  /// the backend enforces either way.
+  final Map<String, ChannelPermissions> channelPermissions;
+
+  /// Row context-menu actions. Each is handed the channel the menu was opened
+  /// on; a null one leaves that entry out.
+  final void Function(Channel channel)? onViewMembers;
+  final void Function(Channel channel)? onInviteToChannel;
+  final void Function(Channel channel)? onEditPermissions;
+  final void Function(Channel channel)? onLeaveChannel;
+
+  /// The right-click menu for one channel row, mirroring the Qt client's
+  /// channel menu (main_window.py's _on_channel_context_menu). Leaving is
+  /// offered for standalone channels only: membership of a server's channel
+  /// belongs to the server, so there is no such thing as leaving one of them.
+  List<TcContextMenuItem> _menuFor(Channel channel) {
+    final perms = channelPermissions[channel.hash];
+    return [
+      if (onInviteToChannel != null && (perms?.invite ?? false))
+        TcContextMenuItem(
+          label: 'Invite…',
+          onTap: () => onInviteToChannel!(channel),
+        ),
+      if (onViewMembers != null)
+        TcContextMenuItem(label: 'Members…', onTap: () => onViewMembers!(channel)),
+      if (onEditPermissions != null && (perms?.manageChannel ?? false))
+        TcContextMenuItem(
+          label: 'Edit permissions…',
+          onTap: () => onEditPermissions!(channel),
+        ),
+      if (onLeaveChannel != null && channel.serverHash == null)
+        TcContextMenuItem(label: 'Leave channel', onTap: () => onLeaveChannel!(channel)),
+    ];
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -130,6 +173,7 @@ class ChannelColumn extends StatelessWidget {
                       selected: c.hash == selectedChannelHash,
                       onTap: () => onSelectChannel(c.hash),
                       incomplete: syncStates[c.hash] == 'incomplete',
+                      menuItems: _menuFor(c),
                     ),
                 ],
                 if (directChannels.isNotEmpty || onCreateDirectChannel != null) ...[
@@ -140,6 +184,7 @@ class ChannelColumn extends StatelessWidget {
                       selected: c.hash == selectedChannelHash,
                       onTap: () => onSelectChannel(c.hash),
                       incomplete: syncStates[c.hash] == 'incomplete',
+                      menuItems: _menuFor(c),
                     ),
                 ],
                 if (voiceParticipants.isNotEmpty || onJoinVoice != null) ...[
@@ -431,12 +476,14 @@ class _ChannelRow extends StatefulWidget {
     required this.selected,
     required this.onTap,
     this.incomplete = false,
+    this.menuItems = const [],
   });
 
   final Channel channel;
   final bool selected;
   final VoidCallback onTap;
   final bool incomplete;
+  final List<TcContextMenuItem> menuItems;
 
   @override
   State<_ChannelRow> createState() => _ChannelRowState();
@@ -449,58 +496,61 @@ class _ChannelRowState extends State<_ChannelRow> {
   Widget build(BuildContext context) {
     final tc = SectionTheme.of(context);
     final selected = widget.selected;
-    return MouseRegion(
-      cursor: SystemMouseCursors.click,
-      onEnter: (_) => setState(() => _hover = true),
-      onExit: (_) => setState(() => _hover = false),
-      child: GestureDetector(
-        onTap: widget.onTap,
-        child: AnimatedContainer(
-          duration: TCEffects.durationMed,
-          curve: TCEffects.easeTerminal,
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
-          decoration: BoxDecoration(
-            color: selected ? tc.bgSelected : (_hover ? tc.bgHover : Colors.transparent),
-            border: Border(
-              left: BorderSide(
-                color: selected ? tc.accentPrimary : Colors.transparent,
-                width: 2,
-              ),
-            ),
-          ),
-          child: Row(
-            children: [
-              Text('#',
-                  style: TextStyle(color: selected ? tc.accentPrimary : tc.textTertiary)),
-              const SizedBox(width: 4),
-              Expanded(
-                child: Text(
-                  widget.channel.name,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    fontSize: 13,
-                    color: selected ? tc.textEmphasis : tc.textSecondary,
-                  ),
+    return TcContextMenuRegion(
+      items: widget.menuItems,
+      child: MouseRegion(
+        cursor: SystemMouseCursors.click,
+        onEnter: (_) => setState(() => _hover = true),
+        onExit: (_) => setState(() => _hover = false),
+        child: GestureDetector(
+          onTap: widget.onTap,
+          child: AnimatedContainer(
+            duration: TCEffects.durationMed,
+            curve: TCEffects.easeTerminal,
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+            decoration: BoxDecoration(
+              color: selected ? tc.bgSelected : (_hover ? tc.bgHover : Colors.transparent),
+              border: Border(
+                left: BorderSide(
+                  color: selected ? tc.accentPrimary : Colors.transparent,
+                  width: 2,
                 ),
               ),
-              if (widget.incomplete) ...[
-                Tooltip(
-                  message: 'History incomplete \u2014 some messages could not be synced',
+            ),
+            child: Row(
+              children: [
+                Text('#',
+                    style: TextStyle(color: selected ? tc.accentPrimary : tc.textTertiary)),
+                const SizedBox(width: 4),
+                Expanded(
                   child: Text(
-                    'INCOMPLETE',
+                    widget.channel.name,
+                    overflow: TextOverflow.ellipsis,
                     style: TextStyle(
-                      fontSize: TCType.textMicro,
-                      color: tc.accentSecondary,
-                      letterSpacing:
-                          TCType.letterSpacingFor(TCType.textMicro, TCType.trackingWide),
+                      fontSize: 13,
+                      color: selected ? tc.textEmphasis : tc.textSecondary,
                     ),
                   ),
                 ),
-                const SizedBox(width: 4),
+                if (widget.incomplete) ...[
+                  Tooltip(
+                    message: 'History incomplete \u2014 some messages could not be synced',
+                    child: Text(
+                      'INCOMPLETE',
+                      style: TextStyle(
+                        fontSize: TCType.textMicro,
+                        color: tc.accentSecondary,
+                        letterSpacing:
+                            TCType.letterSpacingFor(TCType.textMicro, TCType.trackingWide),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 4),
+                ],
+                if (widget.channel.isInviteOnly)
+                  TcIcon(TcIcons.lock, size: TCType.textMicro, color: tc.textTertiary),
               ],
-              if (widget.channel.isInviteOnly)
-                TcIcon(TcIcons.lock, size: TCType.textMicro, color: tc.textTertiary),
-            ],
+            ),
           ),
         ),
       ),

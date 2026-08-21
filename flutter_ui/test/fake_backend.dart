@@ -17,6 +17,14 @@ class RecordedRequest {
   final String body;
 }
 
+/// A canned failure: assign one as a route to exercise an error path
+/// (`routes['POST /channels'] = FakeError(409, {'error': '...'})`).
+class FakeError {
+  const FakeError(this.status, this.body);
+  final int status;
+  final Object body;
+}
+
 class FakeBackend {
   /// Seeded with the routes every AppState startup touches regardless of
   /// what a test is exercising; a test overrides an entry by assigning it.
@@ -35,6 +43,10 @@ class FakeBackend {
         final handler = routes['${req.method} ${req.url.path}'];
         if (handler == null) {
           return http.Response(jsonEncode({'error': 'not found'}), 404,
+              headers: {'content-type': 'application/json'});
+        }
+        if (handler is FakeError) {
+          return http.Response(jsonEncode(handler.body), handler.status,
               headers: {'content-type': 'application/json'});
         }
         return http.Response(jsonEncode(handler), 200,

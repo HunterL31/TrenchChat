@@ -7,6 +7,7 @@ import '../../theme/tokens.dart';
 import '../../widgets/signal_meter.dart';
 import '../../widgets/tc_button.dart';
 import '../../widgets/tc_icon.dart';
+import '../../widgets/tc_tooltip.dart';
 
 enum ChannelTab { chat, map, iface, friends }
 
@@ -174,7 +175,7 @@ class _HeaderTab extends StatelessWidget {
       onTap: () => onTap(tab),
       child: MouseRegion(
         cursor: SystemMouseCursors.click,
-        child: Tooltip(
+        child: TcTooltip(
           message: compact ? label : '',
           child: Container(
             margin: const EdgeInsets.only(left: 2),

@@ -127,7 +127,7 @@ class _SettingsDialogContentState extends State<_SettingsDialogContent> {
     if (!okName || !okSettings) {
       setState(() {
         _busy = false;
-        _error = widget.state.actionError ?? 'Could not save settings.';
+        _error = widget.state.takeActionError() ?? 'Could not save settings.';
       });
       return;
     }
@@ -178,10 +178,17 @@ class _SettingsDialogContentState extends State<_SettingsDialogContent> {
                 constraints: const BoxConstraints(maxHeight: 420),
                 child: ListView(
                   shrinkWrap: true,
+                  // Keeps every line clear of the scrollbar, rather than the
+                  // longer ones running under it.
+                  padding: EdgeInsets.only(right: scrollbarInset(context)),
                   children: [
                     _sectionLabel(tc, 'IDENTITY'),
                     const SizedBox(height: 8),
-                    TcTextField(label: 'Display name', controller: _displayName),
+                    TcTextField(
+                      label: 'Display name',
+                      controller: _displayName,
+                      onSubmitted: (_) => _submit(),
+                    ),
                     const SizedBox(height: 10),
                     _readonlyRow(tc, 'Identity hash', widget.state.meHashHex),
                     const SizedBox(height: 10),
@@ -189,6 +196,7 @@ class _SettingsDialogContentState extends State<_SettingsDialogContent> {
                       label: 'Propagation node',
                       controller: _outboundNode,
                       hintText: 'Leave blank to use direct delivery only',
+                      onSubmitted: (_) => _submit(),
                     ),
                     const SizedBox(height: 16),
                     Container(height: 1, color: tc.borderSubtle),
@@ -205,9 +213,14 @@ class _SettingsDialogContentState extends State<_SettingsDialogContent> {
                       label: 'Node name',
                       controller: _nodeName,
                       hintText: 'e.g. my-relay',
+                      onSubmitted: (_) => _submit(),
                     ),
                     const SizedBox(height: 10),
-                    TcTextField(label: 'Storage limit (MB)', controller: _storageLimit),
+                    TcTextField(
+                      label: 'Storage limit (MB)',
+                      controller: _storageLimit,
+                      onSubmitted: (_) => _submit(),
+                    ),
                     const SizedBox(height: 10),
                     Text(
                       'CHANNEL FILTER',

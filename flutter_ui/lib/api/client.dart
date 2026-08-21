@@ -169,6 +169,13 @@ class ApiClient {
     return (_decode(res) as Map<String, dynamic>)['ok'] as bool? ?? false;
   }
 
+  /// Unsubscribes from a standalone channel. Stored history is kept; ok=false
+  /// means the backend has no such channel.
+  Future<bool> leaveChannel(String channelHashHex) async {
+    final res = await _http.post(_u('/channels/$channelHashHex/leave'));
+    return (_decode(res) as Map<String, dynamic>)['ok'] as bool? ?? false;
+  }
+
   Future<List<Member>> getMembers(String channelHashHex) async {
     final res = await _http.get(_u('/channels/$channelHashHex/members'));
     return (_decode(res) as List<dynamic>)

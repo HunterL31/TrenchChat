@@ -272,7 +272,7 @@ class _AppearanceDialogContentState extends State<_AppearanceDialogContent> {
     setState(() {
       _busy = false;
       _notice = ok ? success : null;
-      _error = ok ? null : (widget.state.actionError ?? 'Could not reach the backend.');
+      _error = ok ? null : (widget.state.takeActionError() ?? 'Could not reach the backend.');
     });
   }
 
@@ -303,7 +303,7 @@ class _AppearanceDialogContentState extends State<_AppearanceDialogContent> {
     if (widget.state.themeSpec != spec) {
       setState(() {
         _busy = false;
-        _error = widget.state.actionError ?? 'Could not save the theme.';
+        _error = widget.state.takeActionError() ?? 'Could not save the theme.';
       });
       return;
     }
@@ -369,7 +369,7 @@ class _AppearanceDialogContentState extends State<_AppearanceDialogContent> {
     if (widget.state.themeSpec != target) {
       setState(() {
         _busy = false;
-        _error = widget.state.actionError ?? 'Could not save the theme.';
+        _error = widget.state.takeActionError() ?? 'Could not save the theme.';
       });
       return;
     }

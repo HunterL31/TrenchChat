@@ -443,7 +443,9 @@ class _MessageRowWidgetState extends State<_MessageRowWidget> {
             label: 'React…',
             onTap: () => widget.onReact!(message.messageId),
           ),
-        if (onAddFriend != null)
+        // Never on your own message: the backend refuses befriending yourself,
+        // so offering it here could only ever fail.
+        if (onAddFriend != null && !isOwn)
           TcContextMenuItem(
             label: friendHashes.contains(message.senderHash) ? 'Edit friend…' : 'Add friend…',
             onTap: () => onAddFriend!(message.senderHash),

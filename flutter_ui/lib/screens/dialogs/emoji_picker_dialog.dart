@@ -13,6 +13,7 @@ import '../../theme/tokens.dart';
 import '../../widgets/peer_image.dart';
 import '../../widgets/tc_dialog.dart';
 import '../../widgets/tc_text_field.dart';
+import '../../widgets/tc_tooltip.dart';
 import 'emoji_import_dialog.dart';
 
 /// What the user picked: [reactionKey] goes to the reactions endpoint;
@@ -169,7 +170,7 @@ class _EmojiCellState extends State<_EmojiCell> {
   @override
   Widget build(BuildContext context) {
     final tc = SectionTheme.of(context);
-    return Tooltip(
+    return TcTooltip(
       message: widget.tooltip,
       child: MouseRegion(
         cursor: SystemMouseCursors.click,

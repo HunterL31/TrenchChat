@@ -136,4 +136,47 @@ void main() {
         VoiceLinkState.signalled);
     expect(state.permissionsByChannel[_channelHash]!.voiceChat, isTrue);
   });
+
+  test('a session with no working audio reads as audio-error from the status', () async {
+    // The backend reports it on GET /voice/status as well as in the one-shot
+    // voice_session event, so a client that connected after the failure --
+    // a reload, a dropped socket -- still shows listening-only.
+    backend.routes['GET /voice/status'] = {
+      ..._statusInCall(),
+      'audio': {'available': false, 'reason': 'no audio pipeline available'},
+    };
+
+    await state.refreshVoiceStatus();
+
+    expect(state.voiceAudioError, isTrue);
+  });
+
+  test('a recovered pipeline clears the audio-error state', () async {
+    backend.routes['GET /voice/status'] = {
+      ..._statusInCall(),
+      'audio': {'available': false, 'reason': 'no audio pipeline available'},
+    };
+    await state.refreshVoiceStatus();
+    expect(state.voiceAudioError, isTrue);
+
+    backend.routes['GET /voice/status'] = _statusInCall();
+    await state.refreshVoiceStatus();
+
+    expect(state.voiceAudioError, isFalse);
+  });
+
+  test('out of a call the missing pipeline is not an error', () async {
+    // audio_status() reports no pipeline whenever one is not running, which
+    // out of a session is simply the idle state.
+    backend.routes['GET /voice/status'] = {
+      'channel': null,
+      'muted': false,
+      'stats': {'tx_packets': 0, 'rx_frames': <String, Object>{}, 'rx_quality': <String, Object>{}},
+      'audio': {'available': false, 'reason': 'no audio pipeline'},
+    };
+
+    await state.refreshVoiceStatus();
+
+    expect(state.voiceAudioError, isFalse);
+  });
 }

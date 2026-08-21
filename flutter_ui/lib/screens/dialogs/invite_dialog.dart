@@ -114,7 +114,7 @@ class _InviteDialogContentState extends State<_InviteDialogContent> {
     if (!ok) {
       setState(() {
         _busy = false;
-        _error = widget.state.actionError ?? 'Could not send the invite.';
+        _error = widget.state.takeActionError() ?? 'Could not send the invite.';
       });
       return;
     }

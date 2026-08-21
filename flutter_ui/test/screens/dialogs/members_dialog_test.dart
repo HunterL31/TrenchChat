@@ -82,6 +82,7 @@ void main() {
 
   testWidgets('kick and admin controls are hidden without permissions', (tester) async {
     state.permissionsByChannel[_channelHash] = const ChannelPermissions(
+      invite: false,
       kick: false,
       manageRoles: false,
       manageChannel: false,
@@ -96,6 +97,7 @@ void main() {
 
   testWidgets('kick asks for inline confirmation, then posts the removal', (tester) async {
     state.permissionsByChannel[_channelHash] = const ChannelPermissions(
+      invite: true,
       kick: true,
       manageRoles: true,
       manageChannel: false,

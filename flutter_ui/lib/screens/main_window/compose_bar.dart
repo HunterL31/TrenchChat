@@ -82,12 +82,24 @@ int _themeTokenPrefixLength(String text, int start, String token) {
   return null;
 }
 
+/// One channel's unsent draft: the text plus the token maps that expand it.
+class _ComposeDraft {
+  const _ComposeDraft(this.text, this.emoji, this.themes);
+
+  final String text;
+  final Map<String, String> emoji;
+  final Map<String, String> themes;
+
+  bool get isEmpty => text.isEmpty && emoji.isEmpty && themes.isEmpty;
+}
+
 class ComposeBar extends StatefulWidget {
   const ComposeBar({
     super.key,
     required this.channelName,
     required this.enabled,
     required this.onSend,
+    this.channelHash,
     this.pickEmoji,
     this.pendingThemeShare,
     this.onThemeShareConsumed,
@@ -95,6 +107,13 @@ class ComposeBar extends StatefulWidget {
   });
 
   final String channelName;
+
+  /// Which channel the draft belongs to. Switching it stashes the draft under
+  /// the old hash and restores whatever was left in the new one, so words
+  /// typed in one channel never follow the reader into another. Null keeps a
+  /// single draft; the shell always passes one.
+  final String? channelHash;
+
   final bool enabled;
 
   /// Returns whether the message was accepted; on false the composed text is
@@ -132,6 +151,9 @@ class _ComposeBarState extends State<ComposeBar> {
   /// Theme name -> code for shares staged into the current draft, so the
   /// short `[theme:name]` the user sees goes out as the full code.
   final Map<String, String> _draftThemes = {};
+
+  /// Drafts left behind in other channels, keyed by channel hash.
+  final Map<String, _ComposeDraft> _stashedDrafts = {};
 
   /// Whether the share currently offered has already been taken. Cleared
   /// when the offer goes away, so a second share still lands.
@@ -185,7 +207,35 @@ class _ComposeBarState extends State<ComposeBar> {
   @override
   void didUpdateWidget(ComposeBar oldWidget) {
     super.didUpdateWidget(oldWidget);
+    // Before the share is taken, so a theme staged while the channel changes
+    // still lands in the channel the reader is looking at.
+    if (oldWidget.channelHash != widget.channelHash) {
+      _switchDraft(oldWidget.channelHash);
+    }
     _consumeThemeShare();
+  }
+
+  /// Stashes the draft under the channel being left and restores the one left
+  /// in the channel being entered.
+  void _switchDraft(String? leaving) {
+    if (leaving != null) {
+      final draft = _ComposeDraft(
+          _controller.text, Map.of(_draftEmoji), Map.of(_draftThemes));
+      if (draft.isEmpty) {
+        _stashedDrafts.remove(leaving);
+      } else {
+        _stashedDrafts[leaving] = draft;
+      }
+    }
+    final entering = widget.channelHash;
+    final restored = entering == null ? null : _stashedDrafts.remove(entering);
+    _draftEmoji
+      ..clear()
+      ..addAll(restored?.emoji ?? const {});
+    _draftThemes
+      ..clear()
+      ..addAll(restored?.themes ?? const {});
+    _setDraftText(restored?.text ?? '');
   }
 
   /// Takes the offered share once, after this frame -- the offer is read

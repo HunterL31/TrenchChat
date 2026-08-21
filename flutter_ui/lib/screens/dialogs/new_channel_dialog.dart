@@ -69,7 +69,7 @@ class _NewChannelDialogContentState extends State<_NewChannelDialogContent> {
     if (hash == null) {
       setState(() {
         _busy = false;
-        _error = widget.state.actionError ?? 'Could not create channel.';
+        _error = widget.state.takeActionError() ?? 'Could not create channel.';
       });
       return;
     }
@@ -88,9 +88,19 @@ class _NewChannelDialogContentState extends State<_NewChannelDialogContent> {
         TcPrimaryButton(label: _busy ? 'CREATING…' : 'CREATE', onPressed: _busy ? null : _submit),
       ],
       children: [
-        TcTextField(label: 'Name', controller: _name, hintText: 'general', autofocus: true),
+        TcTextField(
+          label: 'Name',
+          controller: _name,
+          hintText: 'general',
+          autofocus: true,
+          onSubmitted: (_) => _submit(),
+        ),
         const SizedBox(height: 12),
-        TcTextField(label: 'Description', controller: _desc),
+        TcTextField(
+          label: 'Description',
+          controller: _desc,
+          onSubmitted: (_) => _submit(),
+        ),
         if (!inServer) ...[
           const SizedBox(height: 12),
           Text(

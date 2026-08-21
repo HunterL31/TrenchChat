@@ -57,7 +57,7 @@ class _NewServerDialogContentState extends State<_NewServerDialogContent> {
     if (hash == null) {
       setState(() {
         _busy = false;
-        _error = widget.state.actionError ?? 'Could not create server.';
+        _error = widget.state.takeActionError() ?? 'Could not create server.';
       });
       return;
     }

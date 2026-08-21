@@ -15,6 +15,7 @@ import '../theme/tokens.dart';
 import 'tc_button.dart';
 import 'tc_color_picker.dart';
 import 'tc_icon.dart';
+import 'tc_tooltip.dart';
 
 /// The key of the text input inside a [TcColorField] labelled [label].
 Key tcColorInputKey(String label) => Key('tc-color-input:$label');
@@ -117,7 +118,7 @@ class _TcColorFieldState extends State<TcColorField> {
       padding: const EdgeInsets.symmetric(vertical: 3),
       child: Row(
         children: [
-          Tooltip(
+          TcTooltip(
             message: 'Pick color…',
             child: MouseRegion(
               cursor: SystemMouseCursors.click,

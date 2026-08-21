@@ -16,6 +16,16 @@ import RNS
 from trenchchat import APP_NAME, APP_ASPECT_CHANNEL, APP_ASPECT_SERVER
 
 
+class NameInUseError(ValueError):
+    """Raised when a name derives to an address this identity already owns.
+
+    A hash comes from the creator's identity plus the sanitised name alone, so
+    two channels (or two servers) of one name are one address. Reusing it would
+    re-register a live RNS destination -- a hard error -- and overwrite the
+    existing record.
+    """
+
+
 def sanitise_name(name: str) -> str:
     """Lower-case, alphanumeric + hyphens only, max 32 chars."""
     sanitised = "".join(c if c.isalnum() or c == "-" else "-" for c in name.lower())

@@ -14,7 +14,7 @@ import msgpack
 
 from trenchchat import APP_NAME, APP_ASPECT_CHANNEL
 from trenchchat.core.identity import Identity
-from trenchchat.core.naming import sanitise_name
+from trenchchat.core.naming import NameInUseError, channel_hash_for, sanitise_name
 from trenchchat.core.permissions import (
     PRESET_OPEN, PRESET_PRIVATE, PRESETS, ROLE_OWNER,
     is_discoverable, is_open_join, permissions_from_json,
@@ -60,6 +60,9 @@ class ChannelManager:
         interval are written here, and the channel is never announced.
 
         Returns the channel hash hex string.
+
+        Raises NameInUseError when this identity already has a channel at the
+        address *name* derives to.
         """
         if permissions is None:
             permissions = PRESETS.get(
@@ -68,6 +71,11 @@ class ChannelManager:
             )
 
         aspect = _sanitise_name(name)
+        hash_hex = channel_hash_for(self._identity.hash, name)
+        if hash_hex in self._owned_destinations or \
+                self._storage.get_channel(hash_hex) is not None:
+            raise NameInUseError(f"you already have a channel named '{name}'")
+
         dest = RNS.Destination(
             self._identity.rns_identity,
             RNS.Destination.IN,
@@ -76,7 +84,6 @@ class ChannelManager:
             APP_ASPECT_CHANNEL,
             aspect,
         )
-        hash_hex = dest.hash.hex()
 
         created_at = time.time()
         self._owned_destinations[hash_hex] = dest

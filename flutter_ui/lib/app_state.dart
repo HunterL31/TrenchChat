@@ -71,8 +71,12 @@ class AppState extends ChangeNotifier {
   /// Optimistic local mute state; reconciled from the backend on each poll.
   bool voiceMuted = false;
 
-  /// Set by a `voice_session: audio_error` event: the session is up but
-  /// capture/playback failed -- we stay in the call, listening-only.
+  /// The session is up but the backend has no working audio pipeline -- we
+  /// stay in the call, listening-only. A `voice_session: audio_error` event
+  /// raises it the moment the pipeline fails; [refreshVoiceStatus] keeps it
+  /// true from GET /voice/status thereafter, so a client that joined before
+  /// this one connected (or missed the event on a dropped socket) still shows
+  /// the state instead of a plain LIVE.
   bool voiceAudioError = false;
   Timer? _voicePollTimer;
 
@@ -112,7 +116,23 @@ class AppState extends ChangeNotifier {
   /// [error], which is fatal and takes over the whole screen on init failure --
   /// this one is transient and meant for a toast/snackbar, cleared on the next
   /// attempt. Single surface so every call site reports failures the same way.
+  ///
+  /// Read it with [takeActionError], never directly: main_window.dart shows
+  /// whatever is left here in an app-wide snackbar, which is the right surface
+  /// only for failures with no UI of their own.
   String? actionError;
+
+  /// The last action error, claimed: taking it stops main_window.dart's
+  /// app-wide snackbar from showing the same failure a second time.
+  ///
+  /// Every flow that renders the failure itself -- every dialog -- must read it
+  /// this way. Nothing renders [actionError] directly, so no notification is
+  /// needed to clear it.
+  String? takeActionError() {
+    final message = actionError;
+    actionError = null;
+    return message;
+  }
 
   Channel? get selectedChannel {
     final hash = selectedChannelHash;
@@ -350,6 +370,32 @@ class AppState extends ChangeNotifier {
     }
   }
 
+  /// Leaves a standalone channel: unsubscribes and drops it from the list,
+  /// selecting whatever is left when it was the open one. Stored history is
+  /// kept, so re-joining shows it again.
+  Future<bool> leaveChannel(String channelHashHex) async {
+    try {
+      final ok = await api.leaveChannel(channelHashHex);
+      if (!ok) return false;
+      standaloneChannels = await api.getChannels();
+      if (selectedChannelHash == channelHashHex) {
+        final visible = selectedServerHash != null
+            ? channelsByServer[selectedServerHash] ?? const <Channel>[]
+            : standaloneChannels;
+        final next = visible.isNotEmpty ? visible.first.hash : null;
+        selectedChannelHash = next;
+        notifyListeners();
+        if (next != null) await loadChannel(next);
+        return true;
+      }
+      notifyListeners();
+      return true;
+    } catch (e) {
+      _reportActionError(e);
+      return false;
+    }
+  }
+
   /// Joins [channelHashHex]'s voice session. Returns false (with
   /// [actionError] set) when the backend refused the join.
   Future<bool> joinVoice(String channelHashHex) async {
@@ -416,6 +462,9 @@ class AppState extends ChangeNotifier {
     try {
       voiceStatus = await api.getVoiceStatus();
       voiceMuted = voiceStatus.muted;
+      // Only meaningful inside a session: with no call up there is no pipeline
+      // to run, and the backend reports that as unavailable too.
+      voiceAudioError = voiceStatus.channel != null && !voiceStatus.audioAvailable;
       notifyListeners();
     } catch (_) {
       // Next poll tick will catch it up.

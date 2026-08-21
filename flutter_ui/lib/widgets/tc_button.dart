@@ -6,6 +6,7 @@ import '../theme/effects.dart';
 import '../theme/section_theme.dart';
 import '../theme/tokens.dart';
 import 'tc_icon.dart';
+import 'tc_tooltip.dart';
 
 class TcGhostButton extends StatefulWidget {
   const TcGhostButton({
@@ -182,7 +183,7 @@ class _TcIconButtonState extends State<TcIconButton> {
   @override
   Widget build(BuildContext context) {
     final tc = SectionTheme.of(context);
-    return Tooltip(
+    return TcTooltip(
       message: widget.tooltip,
       child: MouseRegion(
         cursor: SystemMouseCursors.click,

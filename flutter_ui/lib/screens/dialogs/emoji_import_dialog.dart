@@ -105,7 +105,7 @@ class _EmojiImportContentState extends State<_EmojiImportContent> {
     if (!ok) {
       setState(() {
         _busy = false;
-        _error = widget.state.actionError ?? 'Could not import the emoji.';
+        _error = widget.state.takeActionError() ?? 'Could not import the emoji.';
       });
       return;
     }

@@ -199,8 +199,11 @@ void main() {
 
     expect(find.text('Appearance'), findsOneWidget);
     expect(state.themeSpec.base, isEmpty);
-    expect(state.actionError, isNotNull);
-    expect(find.text(state.actionError!), findsOneWidget);
+    // The editor shows the backend's own reason, and claims it: leaving it in
+    // AppState.actionError would raise the app-wide snackbar over the top of
+    // the dialog already saying it.
+    expect(find.text('not found'), findsOneWidget);
+    expect(state.actionError, isNull);
   });
 
   testWidgets('the settings dialog opens the appearance editor', (tester) async {
@@ -454,8 +457,8 @@ void main() {
     expect(state.themeSpec.isEmpty, isTrue);
     expect(find.text('Appearance'), findsOneWidget);
     expect(find.text('Applied Deep.'), findsNothing);
-    expect(state.actionError, isNotNull);
-    expect(find.text(state.actionError!), findsOneWidget);
+    expect(find.text('not found'), findsOneWidget);
+    expect(state.actionError, isNull);
   });
 
   testWidgets('deleting a saved theme takes a confirming second click', (tester) async {
@@ -564,6 +567,7 @@ void main() {
       (tester) async {
     state.themeLibrary = {'Deep': ThemeSpec.empty};
     state.permissionsByChannel['chan1'] = const ChannelPermissions(
+      invite: false,
       kick: false,
       manageRoles: false,
       manageChannel: false,
@@ -783,8 +787,8 @@ void main() {
     await tester.tap(find.text('SAVE AS…'));
     await settle(tester);
 
-    expect(state.actionError, isNotNull);
-    expect(find.text(state.actionError!), findsOneWidget);
+    expect(find.text('not found'), findsOneWidget);
+    expect(state.actionError, isNull);
     expect(find.text('Saved as Deep.'), findsNothing);
     expect(state.themeLibrary, isEmpty);
     // The name is kept so the save can be retried.

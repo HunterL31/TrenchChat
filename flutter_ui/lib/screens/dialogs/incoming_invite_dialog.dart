@@ -58,7 +58,7 @@ class _IncomingInviteDialogContentState extends State<_IncomingInviteDialogConte
     if (!ok) {
       setState(() {
         _busy = false;
-        _error = widget.state.actionError ?? 'Could not accept the invite.';
+        _error = widget.state.takeActionError() ?? 'Could not accept the invite.';
       });
       return;
     }

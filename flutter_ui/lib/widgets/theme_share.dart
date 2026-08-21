@@ -14,6 +14,7 @@ import '../theme/theme_spec.dart';
 import '../theme/tokens.dart';
 import 'emoji_text.dart';
 import 'tc_button.dart';
+import 'tc_tooltip.dart';
 
 /// A miniature of the main window painted with [spec]'s resolved palettes --
 /// rail, channel column, top bar, and content each in their own section's
@@ -384,7 +385,7 @@ class _ThemeCodeCardState extends State<ThemeCodeCard> {
             Column(
               crossAxisAlignment: CrossAxisAlignment.end,
               children: [
-                Tooltip(
+                TcTooltip(
                   message: _savedAs == null || _savedAs == widget.name
                       ? 'Save to my themes'
                       : 'Saved as "$_savedAs"',
@@ -395,7 +396,7 @@ class _ThemeCodeCardState extends State<ThemeCodeCard> {
                 ),
                 if (widget.onApply != null) ...[
                   const SizedBox(height: 4),
-                  Tooltip(
+                  TcTooltip(
                     message: 'Use this theme now',
                     child: TcGhostButton(
                       label: 'APPLY',

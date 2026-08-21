@@ -87,7 +87,7 @@ class _AddFriendDialogContentState extends State<_AddFriendDialogContent> {
     if (!ok) {
       setState(() {
         _busy = false;
-        _error = widget.state.actionError ?? 'Could not save friend.';
+        _error = widget.state.takeActionError() ?? 'Could not save friend.';
       });
       return;
     }

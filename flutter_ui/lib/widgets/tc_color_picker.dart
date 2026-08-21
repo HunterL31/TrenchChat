@@ -14,6 +14,7 @@ import '../theme/theme_spec.dart';
 import '../theme/tokens.dart';
 import 'tc_button.dart';
 import 'tc_dialog.dart';
+import 'tc_tooltip.dart';
 
 /// The saturation/value pad.
 const Key tcPickerPadKey = Key('tc-picker-pad');
@@ -166,7 +167,7 @@ class _TcColorPickerContentState extends State<_TcColorPickerContent> {
       ),
     );
     if (onTap == null) return box;
-    if (tip != null) box = Tooltip(message: tip, child: box);
+    if (tip != null) box = TcTooltip(message: tip, child: box);
     return MouseRegion(
       cursor: SystemMouseCursors.click,
       child: GestureDetector(key: key, onTap: onTap, child: box),

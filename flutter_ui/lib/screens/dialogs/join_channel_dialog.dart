@@ -57,7 +57,7 @@ class _JoinChannelDialogContentState extends State<_JoinChannelDialogContent> {
     if (!ok) {
       setState(() {
         _busy = false;
-        _error = widget.state.actionError ?? 'Could not join channel.';
+        _error = widget.state.takeActionError() ?? 'Could not join channel.';
       });
       return;
     }
