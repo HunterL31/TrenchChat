@@ -169,6 +169,13 @@ class ApiClient {
     return (_decode(res) as Map<String, dynamic>)['ok'] as bool? ?? false;
   }
 
+  /// Unsubscribes from a standalone channel. Stored history is kept; ok=false
+  /// means the backend has no such channel.
+  Future<bool> leaveChannel(String channelHashHex) async {
+    final res = await _http.post(_u('/channels/$channelHashHex/leave'));
+    return (_decode(res) as Map<String, dynamic>)['ok'] as bool? ?? false;
+  }
+
   Future<List<Member>> getMembers(String channelHashHex) async {
     final res = await _http.get(_u('/channels/$channelHashHex/members'));
     return (_decode(res) as List<dynamic>)
@@ -441,6 +448,54 @@ class ApiClient {
       body: jsonEncode({'admin': admin, 'member': member}),
     );
     return (_decode(res) as Map<String, dynamic>)['ok'] as bool? ?? false;
+  }
+
+  /// The saved per-section UI theme document, `{}` when none is stored. The
+  /// backend persists it verbatim; the client is what gives it meaning (see
+  /// theme/theme_spec.dart).
+  Future<Map<String, dynamic>> getUiTheme() async {
+    final res = await _http.get(_u('/ui_theme'));
+    final theme = (_decode(res) as Map<String, dynamic>)['theme'];
+    return theme is Map<String, dynamic> ? theme : <String, dynamic>{};
+  }
+
+  Future<void> setUiTheme(Map<String, dynamic> theme) async {
+    final res = await _http.post(
+      _u('/ui_theme'),
+      headers: _jsonHeaders,
+      body: jsonEncode({'theme': theme}),
+    );
+    _decode(res);
+  }
+
+  /// Every theme saved under a name, keyed by that name. The documents have
+  /// the same shape as GET /ui_theme's, and are just as uninterpreted by the
+  /// backend.
+  Future<Map<String, dynamic>> getThemeLibrary() async {
+    final res = await _http.get(_u('/ui_theme_library'));
+    final themes = (_decode(res) as Map<String, dynamic>)['themes'];
+    return themes is Map<String, dynamic> ? themes : <String, dynamic>{};
+  }
+
+  /// Saves [theme] under [name], replacing any theme already saved there.
+  Future<void> saveThemeToLibrary(String name, Map<String, dynamic> theme) async {
+    final res = await _http.post(
+      _u('/ui_theme_library'),
+      headers: _jsonHeaders,
+      body: jsonEncode({'name': name, 'theme': theme}),
+    );
+    _decode(res);
+  }
+
+  /// Deletes a saved theme. The name travels in the body, not the path: a
+  /// name containing '/' cannot be addressed as a path segment even encoded.
+  Future<void> deleteThemeFromLibrary(String name) async {
+    final res = await _http.post(
+      _u('/ui_theme_library/delete'),
+      headers: _jsonHeaders,
+      body: jsonEncode({'name': name}),
+    );
+    _decode(res);
   }
 
   Future<List<CustomEmoji>> getEmoji() async {

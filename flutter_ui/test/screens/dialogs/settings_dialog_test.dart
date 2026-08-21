@@ -8,8 +8,9 @@ import 'package:flutter_ui/screens/dialogs/settings_dialog.dart';
 
 import '../../fake_backend.dart';
 
-Widget _harness(AppState state) {
+Widget _harness(AppState state, {TargetPlatform? platform}) {
   return MaterialApp(
+    theme: platform == null ? null : ThemeData(platform: platform),
     home: Scaffold(
       body: Builder(
         builder: (context) => ElevatedButton(
@@ -46,8 +47,8 @@ void main() {
     state.dispose();
   });
 
-  Future<void> open(WidgetTester tester) async {
-    await tester.pumpWidget(_harness(state));
+  Future<void> open(WidgetTester tester, {TargetPlatform? platform}) async {
+    await tester.pumpWidget(_harness(state, platform: platform));
     await tester.tap(find.text('open'));
     await tester.pump();
     await settle(tester);
@@ -91,5 +92,35 @@ void main() {
     expect(body['propagation_node_name'], 'ridge-node');
     expect(body['propagation_enabled'], true);
     expect(body['propagation_storage_limit_mb'], 512);
+  });
+
+  testWidgets('the scrollable content keeps clear of the desktop scrollbar',
+      (tester) async {
+    // The scroll behavior draws the scrollbar inside the viewport, over
+    // whatever is at its right edge -- the SECURITY notes are the longest
+    // lines and ran under it.
+    await open(tester, platform: TargetPlatform.linux);
+
+    final list = tester.widget<ListView>(find.byType(ListView));
+    expect((list.padding! as EdgeInsets).right, greaterThan(0));
+  });
+
+  testWidgets('platforms that draw no scrollbar reserve no room', (tester) async {
+    await open(tester, platform: TargetPlatform.android);
+
+    final list = tester.widget<ListView>(find.byType(ListView));
+    expect((list.padding! as EdgeInsets).right, 0);
+  });
+
+  testWidgets('Enter in a settings field saves', (tester) async {
+    await open(tester);
+
+    await tester.enterText(find.widgetWithText(TextField, 'my-relay'), 'ridge-node');
+    await tester.testTextInput.receiveAction(TextInputAction.done);
+    await settle(tester);
+    await tester.pumpAndSettle();
+
+    expect(find.text('Settings'), findsNothing);
+    expect(backend.requests.any((r) => r.path == '/settings' && r.method == 'POST'), isTrue);
   });
 }

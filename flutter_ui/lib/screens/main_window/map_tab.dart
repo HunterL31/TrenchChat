@@ -7,12 +7,15 @@
 // center so they stay off the edge lines.
 import 'dart:math' as math;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import '../../api/client.dart';
 import '../../api/models/network_map.dart';
 import '../../app_state.dart';
-import '../../theme/effects.dart';
+import '../../theme/glow.dart';
+import '../../theme/section_theme.dart';
+import '../../theme/theme_spec.dart';
 import '../../theme/tokens.dart';
 import '../../widgets/tc_button.dart';
 import '../../widgets/tc_checkbox.dart';
@@ -20,13 +23,18 @@ import '../../widgets/tc_icon.dart';
 
 /// Same tiers as the Qt map's _COL_QUALITY and SignalMeter, so the map
 /// agrees with the header's link chip: 4=excellent .. 1=poor, 0=unknown.
-Color mapQualityColor(int quality) => switch (quality) {
-      4 => TCColors.green400,
-      3 => HSLColor.fromAHSL(1, 70, 0.85, 0.55).toColor(),
-      2 => TCColors.amber400,
-      1 => TCColors.statusDanger,
-      _ => TCColors.ink500,
-    };
+/// [colors] defaults to the stock palette so the tear-off stays a
+/// `Color Function(int)`.
+Color mapQualityColor(int quality, {TCSectionColors? colors}) {
+  final tc = colors ?? TCSectionColors.stock;
+  return switch (quality) {
+    4 => tc.statusOnline,
+    3 => HSLColor.fromAHSL(1, 70, 0.85, 0.55).toColor(),
+    2 => tc.statusWarn,
+    1 => tc.statusDanger,
+    _ => tc.statusOffline,
+  };
+}
 
 /// Nodes kept by the "peers only" filter: real TrenchChat identities, not
 /// infrastructure (interfaces, transports, unresolved hashes).
@@ -308,9 +316,10 @@ class _MapTabState extends State<MapTab> {
 
   @override
   Widget build(BuildContext context) {
+    final tc = SectionTheme.of(context);
     final data = _data;
     return Container(
-      color: TCColors.bgApp,
+      color: tc.bgApp,
       padding: const EdgeInsets.all(18),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -321,7 +330,7 @@ class _MapTabState extends State<MapTab> {
                 'NETWORK MAP',
                 style: TextStyle(
                   fontSize: TCType.textCaption,
-                  color: TCColors.textSecondary,
+                  color: tc.textSecondary,
                   letterSpacing:
                       TCType.letterSpacingFor(TCType.textCaption, TCType.trackingWider),
                 ),
@@ -337,11 +346,11 @@ class _MapTabState extends State<MapTab> {
                   runSpacing: 6,
                   children: [
                     if (data != null) ...[
-                      _statChip('${data.nodeCount} NODES'),
+                      _statChip(tc, '${data.nodeCount} NODES'),
                       const SizedBox(width: 6),
-                      _statChip('${data.pathCount} PATHS'),
+                      _statChip(tc, '${data.pathCount} PATHS'),
                       const SizedBox(width: 6),
-                      _statChip('${data.interfaceCount} IFACES'),
+                      _statChip(tc, '${data.interfaceCount} IFACES'),
                       const SizedBox(width: 8),
                     ],
                     TcGhostButton(icon: TcIcons.sync, label: 'REFRESH', onPressed: _refresh),
@@ -354,22 +363,21 @@ class _MapTabState extends State<MapTab> {
             const SizedBox(height: 10),
             Text(
               _error!,
-              style: TextStyle(fontSize: TCType.textCaption, color: TCColors.statusDanger),
+              style: TextStyle(fontSize: TCType.textCaption, color: tc.statusDanger),
             ),
           ],
           const SizedBox(height: 12),
           Expanded(
             child: Container(
               decoration: BoxDecoration(
-                color: TCColors.bgSurface,
-                border: Border.all(color: TCColors.borderSubtle),
+                color: tc.bgSurface,
+                border: Border.all(color: tc.borderSubtle),
               ),
               child: data == null
                   ? Center(
                       child: Text(
                         'LOADING…',
-                        style: TextStyle(
-                            fontSize: TCType.textCaption, color: TCColors.textTertiary),
+                        style: TextStyle(fontSize: TCType.textCaption, color: tc.textTertiary),
                       ),
                     )
                   : ClipRect(
@@ -379,7 +387,11 @@ class _MapTabState extends State<MapTab> {
                         maxScale: 4,
                         boundaryMargin: const EdgeInsets.all(600),
                         child: CustomPaint(
-                          painter: _NetworkMapPainter(data: _filtered(data)),
+                          painter: _NetworkMapPainter(
+                            data: _filtered(data),
+                            colors: tc,
+                            glow: tcTextGlow(context),
+                          ),
                           child: const SizedBox.expand(),
                         ),
                       ),
@@ -408,7 +420,7 @@ class _MapTabState extends State<MapTab> {
                       ('POOR', 1),
                       ('UNKNOWN', 0),
                     ])
-                      _legendEntry(label, quality),
+                      _legendEntry(tc, label, quality),
                   ],
                 ),
               ),
@@ -421,16 +433,16 @@ class _MapTabState extends State<MapTab> {
 
   /// One legend swatch + label. The trailing gap rides inside the entry so an
   /// end-aligned Wrap keeps the same right margin the old Row had.
-  Widget _legendEntry(String label, int quality) => Row(
+  Widget _legendEntry(TCSectionColors tc, String label, int quality) => Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Container(width: 8, height: 8, color: mapQualityColor(quality)),
+          Container(width: 8, height: 8, color: mapQualityColor(quality, colors: tc)),
           const SizedBox(width: 4),
           Text(
             label,
             style: TextStyle(
               fontSize: TCType.textMicro,
-              color: TCColors.textSecondary,
+              color: tc.textSecondary,
               letterSpacing: TCType.letterSpacingFor(TCType.textMicro, TCType.trackingWide),
             ),
           ),
@@ -438,17 +450,17 @@ class _MapTabState extends State<MapTab> {
         ],
       );
 
-  Widget _statChip(String label) => Container(
+  Widget _statChip(TCSectionColors tc, String label) => Container(
         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
         decoration: BoxDecoration(
-          color: TCColors.bgInset,
-          border: Border.all(color: TCColors.borderSubtle),
+          color: tc.bgInset,
+          border: Border.all(color: tc.borderSubtle),
         ),
         child: Text(
           label,
           style: TextStyle(
             fontSize: TCType.textMicro,
-            color: TCColors.textSecondary,
+            color: tc.textSecondary,
             letterSpacing: TCType.letterSpacingFor(TCType.textMicro, TCType.trackingWide),
           ),
         ),
@@ -456,9 +468,13 @@ class _MapTabState extends State<MapTab> {
 }
 
 class _NetworkMapPainter extends CustomPainter {
-  _NetworkMapPainter({required this.data});
+  _NetworkMapPainter({required this.data, required this.colors, this.glow});
 
   final NetworkMapData data;
+  final TCSectionColors colors;
+
+  /// The section's text glow, or null when it has glow off.
+  final List<Shadow>? glow;
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -480,7 +496,7 @@ class _NetworkMapPainter extends CustomPainter {
       final dir = delta / len;
       final start = a + dir * (_nodeHalf + 4);
       final end = b - dir * (_nodeHalf + 4);
-      final color = mapQualityColor(edge.quality);
+      final color = mapQualityColor(edge.quality, colors: colors);
       final paint = Paint()
         ..color = edge.direct ? color : color.withValues(alpha: 0.35)
         ..strokeWidth = edge.direct ? 1.2 : 1
@@ -532,25 +548,25 @@ class _NetworkMapPainter extends CustomPainter {
         canvas.drawRect(
           rect.inflate(3),
           Paint()
-            ..color = TCColors.accentPrimary.withValues(alpha: 0.25)
+            ..color = colors.accentPrimary.withValues(alpha: 0.25)
             ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 6),
         );
-        canvas.drawRect(rect, Paint()..color = TCColors.accentPrimary);
+        canvas.drawRect(rect, Paint()..color = colors.accentPrimary);
       case MapNodeKind.interface_:
         canvas.drawPath(
           diamond,
           Paint()
-            ..color = TCColors.accentSecondary
+            ..color = colors.accentSecondary
             ..style = PaintingStyle.stroke
             ..strokeWidth = 1.5,
         );
       case MapNodeKind.transport:
-        canvas.drawPath(diamond, Paint()..color = mapQualityColor(node.quality));
+        canvas.drawPath(diamond, Paint()..color = mapQualityColor(node.quality, colors: colors));
       case MapNodeKind.peer:
         canvas.drawRect(
           rect,
           Paint()
-            ..color = mapQualityColor(node.quality)
+            ..color = mapQualityColor(node.quality, colors: colors)
             ..style = PaintingStyle.stroke
             ..strokeWidth = 1.5,
         );
@@ -558,7 +574,7 @@ class _NetworkMapPainter extends CustomPainter {
         canvas.drawRect(
           rect,
           Paint()
-            ..color = TCColors.ink500
+            ..color = colors.statusOffline
             ..style = PaintingStyle.stroke
             ..strokeWidth = 1,
         );
@@ -573,9 +589,9 @@ class _NetworkMapPainter extends CustomPainter {
           fontFamily: TCType.fontMono,
           fontSize: TCType.textMicro,
           color: node.kind == MapNodeKind.self
-              ? TCColors.green100
-              : TCColors.textSecondary,
-          shadows: node.kind == MapNodeKind.self ? [TCEffects.textGlowGreen] : null,
+              ? colors.textEmphasis
+              : colors.textSecondary,
+          shadows: node.kind == MapNodeKind.self ? glow : null,
         ),
       ),
       textDirection: TextDirection.ltr,
@@ -592,11 +608,14 @@ class _NetworkMapPainter extends CustomPainter {
     // Backing box so text stays readable where an edge passes underneath.
     canvas.drawRect(
       Rect.fromLTWH(x - 3, y - 1, painter.width + 6, painter.height + 2),
-      Paint()..color = TCColors.bgSurface,
+      Paint()..color = colors.bgSurface,
     );
     painter.paint(canvas, Offset(x, y));
   }
 
   @override
-  bool shouldRepaint(covariant _NetworkMapPainter oldDelegate) => oldDelegate.data != data;
+  bool shouldRepaint(covariant _NetworkMapPainter oldDelegate) =>
+      oldDelegate.data != data ||
+      oldDelegate.colors != colors ||
+      !listEquals(oldDelegate.glow, glow);
 }

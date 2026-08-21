@@ -7,6 +7,8 @@ import 'package:flutter/material.dart';
 import '../../api/client.dart';
 import '../../api/models/interface.dart';
 import '../../app_state.dart';
+import '../../theme/section_theme.dart';
+import '../../theme/theme_spec.dart';
 import '../../theme/tokens.dart';
 import '../../widgets/status_dot.dart';
 import '../../widgets/tc_button.dart';
@@ -87,9 +89,10 @@ class _IfaceTabState extends State<IfaceTab> {
 
   @override
   Widget build(BuildContext context) {
+    final tc = SectionTheme.of(context);
     final interfaces = _interfaces;
     return Container(
-      color: TCColors.bgApp,
+      color: tc.bgApp,
       padding: const EdgeInsets.all(18),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -102,7 +105,7 @@ class _IfaceTabState extends State<IfaceTab> {
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(
                     fontSize: TCType.textCaption,
-                    color: TCColors.textSecondary,
+                    color: tc.textSecondary,
                     letterSpacing:
                         TCType.letterSpacingFor(TCType.textCaption, TCType.trackingWider),
                   ),
@@ -136,7 +139,7 @@ class _IfaceTabState extends State<IfaceTab> {
             const SizedBox(height: 10),
             Text(
               _error!,
-              style: TextStyle(fontSize: TCType.textCaption, color: TCColors.statusDanger),
+              style: TextStyle(fontSize: TCType.textCaption, color: tc.statusDanger),
             ),
           ],
           const SizedBox(height: 12),
@@ -156,9 +159,9 @@ class _IfaceTabState extends State<IfaceTab> {
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
-                        _headerRow(),
-                        Container(height: 1, color: TCColors.borderDefault),
-                        Expanded(child: _tableBody(interfaces)),
+                        _headerRow(tc),
+                        Container(height: 1, color: tc.borderDefault),
+                        Expanded(child: _tableBody(tc, interfaces)),
                       ],
                     ),
                   ),
@@ -179,12 +182,12 @@ class _IfaceTabState extends State<IfaceTab> {
   static const _actionsWidth = 200.0;
   static const _minTableWidth = 620.0;
 
-  Widget _tableBody(List<RetInterface>? interfaces) {
+  Widget _tableBody(TCSectionColors tc, List<RetInterface>? interfaces) {
     if (interfaces == null) {
       return Center(
         child: Text(
           'LOADING…',
-          style: TextStyle(fontSize: TCType.textCaption, color: TCColors.textTertiary),
+          style: TextStyle(fontSize: TCType.textCaption, color: tc.textTertiary),
         ),
       );
     }
@@ -192,21 +195,21 @@ class _IfaceTabState extends State<IfaceTab> {
       return Center(
         child: Text(
           'No interfaces configured.',
-          style: TextStyle(fontSize: TCType.textBodySm, color: TCColors.textTertiary),
+          style: TextStyle(fontSize: TCType.textBodySm, color: tc.textTertiary),
         ),
       );
     }
-    return ListView(children: [for (final i in interfaces) _interfaceRow(i)]);
+    return ListView(children: [for (final i in interfaces) _interfaceRow(tc, i)]);
   }
 
-  Widget _headerRow() {
+  Widget _headerRow(TCSectionColors tc) {
     Widget cell(String label, int flex) => Expanded(
           flex: flex,
           child: Text(
             label,
             style: TextStyle(
               fontSize: TCType.textMicro,
-              color: TCColors.textTertiary,
+              color: tc.textTertiary,
               letterSpacing: TCType.letterSpacingFor(TCType.textMicro, TCType.trackingWide),
             ),
           ),
@@ -227,23 +230,23 @@ class _IfaceTabState extends State<IfaceTab> {
     );
   }
 
-  Widget _interfaceRow(RetInterface iface) {
+  Widget _interfaceRow(TCSectionColors tc, RetInterface iface) {
     final confirming = _confirmDeleteName == iface.name;
     Widget cell(Widget child, int flex) => Expanded(flex: flex, child: child);
     Text text(String s, {Color? color}) => Text(
           s,
           overflow: TextOverflow.ellipsis,
-          style: TextStyle(fontSize: TCType.textBodySm, color: color ?? TCColors.textSecondary),
+          style: TextStyle(fontSize: TCType.textBodySm, color: color ?? tc.textSecondary),
         );
 
     return Container(
       padding: const EdgeInsets.symmetric(vertical: 8),
       decoration: BoxDecoration(
-        border: Border(bottom: BorderSide(color: TCColors.borderSubtle)),
+        border: Border(bottom: BorderSide(color: tc.borderSubtle)),
       ),
       child: Row(
         children: [
-          cell(text(iface.name, color: TCColors.green100), _flexName),
+          cell(text(iface.name, color: tc.textEmphasis), _flexName),
           cell(text(iface.type), _flexType),
           cell(
             StatusDot(
@@ -256,9 +259,9 @@ class _IfaceTabState extends State<IfaceTab> {
             text(
               switch (iface.status) { true => 'UP', false => 'DOWN', null => '—' },
               color: switch (iface.status) {
-                true => TCColors.statusOnline,
-                false => TCColors.statusDanger,
-                null => TCColors.textTertiary,
+                true => tc.statusOnline,
+                false => tc.statusDanger,
+                null => tc.textTertiary,
               },
             ),
             _flexStatus,
@@ -276,7 +279,7 @@ class _IfaceTabState extends State<IfaceTab> {
                               'DELETE?',
                               style: TextStyle(
                                   fontSize: TCType.textCaption,
-                                  color: TCColors.statusDanger),
+                                  color: tc.statusDanger),
                             ),
                             const SizedBox(width: 6),
                             TcGhostButton(label: 'YES', onPressed: () => _delete(iface.name)),
@@ -302,7 +305,7 @@ class _IfaceTabState extends State<IfaceTab> {
                       'READ-ONLY',
                       style: TextStyle(
                         fontSize: TCType.textMicro,
-                        color: TCColors.textTertiary,
+                        color: tc.textTertiary,
                         letterSpacing:
                             TCType.letterSpacingFor(TCType.textMicro, TCType.trackingWide),
                       ),

@@ -18,6 +18,8 @@ from trenchchat.core.permissions import (
     VOICE_CHAT, is_open_join, permissions_from_json,
 )
 
+MAX_THEME_NAME_LEN = 64
+
 
 def create_channel(channel_mgr, invite_mgr, name: str, description: str,
                    permissions: dict) -> str:
@@ -325,3 +327,41 @@ def apply_settings(config, router, updates: dict) -> None:
             router.enable_propagation()
         elif not enabled and config.propagation_enabled:
             router.disable_propagation()
+
+
+def read_ui_theme(config) -> dict:
+    """The stored UI theme object, empty when never set. Interpreted client-side."""
+    return config.ui_theme
+
+
+def set_ui_theme(config, theme: dict) -> None:
+    """Replace the stored UI theme object wholesale. Contents are not validated."""
+    config.ui_theme = theme
+
+
+def read_ui_theme_library(config) -> dict:
+    """The saved themes by name, empty when none were saved. Interpreted client-side."""
+    return config.ui_theme_library
+
+
+def save_ui_theme_to_library(config, name: str, theme: dict) -> None:
+    """
+    Save a theme under a name, overwriting any theme already saved there.
+    Raises ValueError if the name is empty or longer than MAX_THEME_NAME_LEN
+    once stripped. Theme contents are not validated.
+    """
+    config.save_ui_theme(_validate_theme_name(name), theme)
+
+
+def delete_ui_theme_from_library(config, name: str) -> bool:
+    """Remove a saved theme. False when no theme is stored under that name."""
+    return config.delete_ui_theme(name.strip())
+
+
+def _validate_theme_name(name: str) -> str:
+    stripped = name.strip()
+    if not stripped:
+        raise ValueError("theme name must not be empty")
+    if len(stripped) > MAX_THEME_NAME_LEN:
+        raise ValueError(f"theme name must be at most {MAX_THEME_NAME_LEN} characters")
+    return stripped

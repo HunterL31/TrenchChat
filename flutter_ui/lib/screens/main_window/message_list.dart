@@ -8,13 +8,15 @@ import '../../api/models/message.dart';
 import '../../format.dart';
 import '../../grouping.dart';
 import '../../name_color.dart';
+import '../../theme/section_theme.dart';
+import '../../theme/theme_spec.dart';
 import '../../theme/tokens.dart';
 import '../../widgets/avatar.dart';
 import '../../widgets/badge.dart';
-import '../../widgets/emoji_text.dart';
 import '../../widgets/tc_button.dart';
 import '../../widgets/tc_context_menu.dart';
 import '../../widgets/tc_icon.dart';
+import '../../widgets/theme_share.dart';
 
 sealed class _Row {}
 
@@ -60,6 +62,9 @@ class MessageList extends StatefulWidget {
     this.emojiLibrary = const {},
     this.friendHashes = const {},
     this.onAddFriend,
+    this.onAddTheme,
+    this.onApplyTheme,
+    this.themeLibrary = const {},
   });
 
   final List<Message> messages;
@@ -87,6 +92,17 @@ class MessageList extends StatefulWidget {
   /// Fired with a sender's identity hash when "Add/Edit friend…" is chosen
   /// from a message row's right-click menu.
   final void Function(String identityHashHex)? onAddFriend;
+
+  /// Saves a theme shared in chat to the named library. Null hides the ADD
+  /// button on the theme card.
+  final Future<bool> Function(String name, ThemeSpec spec)? onAddTheme;
+
+  /// Makes a shared theme the active one. Null hides the APPLY button.
+  final Future<bool> Function(ThemeSpec spec)? onApplyTheme;
+
+  /// The reader's saved themes, so a shared one never quietly replaces a
+  /// theme of the same name.
+  final Map<String, ThemeSpec> themeLibrary;
 
   @override
   State<MessageList> createState() => _MessageListState();
@@ -137,6 +153,9 @@ class _MessageListState extends State<MessageList> {
               emojiLibrary: widget.emojiLibrary,
               friendHashes: widget.friendHashes,
               onAddFriend: widget.onAddFriend,
+              onAddTheme: widget.onAddTheme,
+              onApplyTheme: widget.onApplyTheme,
+              themeLibrary: widget.themeLibrary,
             ),
         };
       },
@@ -150,23 +169,24 @@ class _DateDivider extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final tc = SectionTheme.of(context);
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
       child: Row(
         children: [
-          Expanded(child: Container(height: 1, color: TCColors.borderSubtle)),
+          Expanded(child: Container(height: 1, color: tc.borderSubtle)),
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 12),
             child: Text(
               formatDateDivider(timestamp),
               style: TextStyle(
                 fontSize: TCType.textMicro,
-                color: TCColors.textTertiary,
+                color: tc.textTertiary,
                 letterSpacing: TCType.letterSpacingFor(TCType.textMicro, TCType.trackingWider),
               ),
             ),
           ),
-          Expanded(child: Container(height: 1, color: TCColors.borderSubtle)),
+          Expanded(child: Container(height: 1, color: tc.borderSubtle)),
         ],
       ),
     );
@@ -186,6 +206,9 @@ class _MessageRowWidget extends StatefulWidget {
     this.emojiLibrary = const {},
     this.friendHashes = const {},
     this.onAddFriend,
+    this.onAddTheme,
+    this.onApplyTheme,
+    this.themeLibrary = const {},
   });
 
   final Message message;
@@ -205,6 +228,16 @@ class _MessageRowWidget extends StatefulWidget {
   /// Fired with the sender's identity hash when "Add/Edit friend…" is chosen
   /// from the row's right-click menu.
   final void Function(String identityHashHex)? onAddFriend;
+
+  /// Saves a theme shared in this message to the named library.
+  final Future<bool> Function(String name, ThemeSpec spec)? onAddTheme;
+
+  /// Makes a shared theme the active one.
+  final Future<bool> Function(ThemeSpec spec)? onApplyTheme;
+
+  /// The reader's saved themes, which decide the name a shared one lands
+  /// under.
+  final Map<String, ThemeSpec> themeLibrary;
 
   @override
   State<_MessageRowWidget> createState() => _MessageRowWidgetState();
@@ -253,36 +286,50 @@ class _MessageRowWidgetState extends State<_MessageRowWidget> {
     if (!isContinuation && avatarBytes == null) {
       ensureAvatarLoaded?.call(message.senderHash);
     }
+    final tc = SectionTheme.of(context);
     final bg = isOwn ? const Color.fromRGBO(255, 255, 255, 0.02) : Colors.transparent;
     final bodyText = Text.rich(
       TextSpan(
-        children: emojiSpans(
+        children: messageContentSpans(
           message.content,
           widget.emojiLibrary,
           TextStyle(
             fontSize: TCType.textBodyMd,
             height: TCType.leadingBody,
-            color: TCColors.textPrimary,
+            color: tc.textPrimary,
           ),
         ),
       ),
     );
 
+    final sharedThemes = themeCodesIn(message.content);
+
     // An attachment we refused leaves the text intact, so without this the
     // message reads as though it never had one.
-    final body = message.imageStripped
+    final body = message.imageStripped || sharedThemes.isNotEmpty
         ? Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               bodyText,
-              const SizedBox(height: 4),
-              Text(
-                'Attachment removed \u2014 it could not be displayed safely',
-                style: TextStyle(
-                  fontSize: TCType.textMicro,
-                  color: TCColors.accentSecondary,
+              if (message.imageStripped) ...[
+                const SizedBox(height: 4),
+                Text(
+                  'Attachment removed \u2014 it could not be displayed safely',
+                  style: TextStyle(
+                    fontSize: TCType.textMicro,
+                    color: tc.accentSecondary,
+                  ),
                 ),
-              ),
+              ],
+              for (final theme in sharedThemes)
+                ThemeCodeCard(
+                  key: ValueKey('theme-card:${message.messageId}:${theme.code}'),
+                  name: theme.name,
+                  spec: theme.spec,
+                  library: widget.themeLibrary,
+                  onAdd: widget.onAddTheme,
+                  onApply: widget.onApplyTheme,
+                ),
             ],
           )
         : bodyText;
@@ -307,7 +354,7 @@ class _MessageRowWidgetState extends State<_MessageRowWidget> {
                 child: Text(
                   formatTsShort(message.timestamp),
                   textAlign: TextAlign.right,
-                  style: TextStyle(fontSize: TCType.textMicro, color: TCColors.textTertiary),
+                  style: TextStyle(fontSize: TCType.textMicro, color: tc.textTertiary),
                 ),
               ),
             ),
@@ -353,12 +400,12 @@ class _MessageRowWidgetState extends State<_MessageRowWidget> {
                       const SizedBox(width: 8),
                       Text(
                         '[${message.senderHash.substring(0, message.senderHash.length >= 8 ? 8 : message.senderHash.length)}]',
-                        style: TextStyle(fontSize: TCType.textMicro, color: TCColors.textTertiary),
+                        style: TextStyle(fontSize: TCType.textMicro, color: tc.textTertiary),
                       ),
                       const SizedBox(width: 8),
                       Text(
                         formatTs(message.timestamp),
-                        style: TextStyle(fontSize: TCType.textMicro, color: TCColors.textTertiary),
+                        style: TextStyle(fontSize: TCType.textMicro, color: tc.textTertiary),
                       ),
                       if (isLate) ...[
                         const SizedBox(width: 8),
@@ -366,7 +413,7 @@ class _MessageRowWidgetState extends State<_MessageRowWidget> {
                           '⟳ received late',
                           style: TextStyle(
                             fontSize: TCType.textMicro,
-                            color: TCColors.textTertiary,
+                            color: tc.textTertiary,
                             fontStyle: FontStyle.italic,
                           ),
                         ),
@@ -396,7 +443,9 @@ class _MessageRowWidgetState extends State<_MessageRowWidget> {
             label: 'React…',
             onTap: () => widget.onReact!(message.messageId),
           ),
-        if (onAddFriend != null)
+        // Never on your own message: the backend refuses befriending yourself,
+        // so offering it here could only ever fail.
+        if (onAddFriend != null && !isOwn)
           TcContextMenuItem(
             label: friendHashes.contains(message.senderHash) ? 'Edit friend…' : 'Add friend…',
             onTap: () => onAddFriend!(message.senderHash),

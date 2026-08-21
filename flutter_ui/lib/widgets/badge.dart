@@ -4,6 +4,7 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 
 import '../theme/effects.dart';
+import '../theme/section_theme.dart';
 import '../theme/tokens.dart';
 import 'peer_image.dart';
 
@@ -38,9 +39,10 @@ class _ReactionChipState extends State<ReactionChip> {
 
   @override
   Widget build(BuildContext context) {
-    final bg = widget.reactedByMe ? TCColors.accentPrimaryMuted : TCColors.bgInset;
-    final border = widget.reactedByMe ? TCColors.borderAccent : TCColors.borderDefault;
-    final fg = widget.reactedByMe ? TCColors.accentPrimary : TCColors.textSecondary;
+    final tc = SectionTheme.of(context);
+    final bg = widget.reactedByMe ? tc.accentPrimaryMuted : tc.bgInset;
+    final border = widget.reactedByMe ? tc.borderAccent : tc.borderDefault;
+    final fg = widget.reactedByMe ? tc.accentPrimary : tc.textSecondary;
 
     return MouseRegion(
       cursor: SystemMouseCursors.click,
@@ -54,7 +56,7 @@ class _ReactionChipState extends State<ReactionChip> {
           padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
           decoration: BoxDecoration(
             color: bg,
-            border: Border.all(color: _hover ? TCColors.accentPrimary : border),
+            border: Border.all(color: _hover ? tc.accentPrimary : border),
             borderRadius: BorderRadius.circular(TCSpace.radiusSm),
           ),
           child: Row(

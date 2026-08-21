@@ -4,6 +4,7 @@
 import 'package:flutter/material.dart';
 
 import '../../api/models/link_quality.dart';
+import '../../theme/section_theme.dart';
 import '../../theme/tokens.dart';
 import '../../widgets/signal_meter.dart';
 import '../../widgets/tc_button.dart';
@@ -32,10 +33,11 @@ class VoicePanel extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final tc = SectionTheme.of(context);
     return Container(
       decoration: BoxDecoration(
-        color: TCColors.bgSurfaceRaised,
-        border: Border(top: BorderSide(color: TCColors.borderSubtle)),
+        color: tc.bgSurfaceRaised,
+        border: Border(top: BorderSide(color: tc.borderSubtle)),
       ),
       padding: const EdgeInsets.fromLTRB(14, 8, 10, 8),
       child: Column(
@@ -51,7 +53,7 @@ class VoicePanel extends StatelessWidget {
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(
                     fontSize: TCType.textCaption,
-                    color: TCColors.green100,
+                    color: tc.textEmphasis,
                     letterSpacing:
                         TCType.letterSpacingFor(TCType.textCaption, TCType.trackingWide),
                   ),
@@ -66,7 +68,7 @@ class VoicePanel extends StatelessWidget {
                 'NO AUDIO DEVICE — LISTENING ONLY',
                 style: TextStyle(
                   fontSize: TCType.textMicro,
-                  color: TCColors.statusWarn,
+                  color: tc.statusWarn,
                   letterSpacing:
                       TCType.letterSpacingFor(TCType.textMicro, TCType.trackingWide),
                 ),
@@ -93,7 +95,7 @@ class VoicePanel extends StatelessWidget {
                 muted ? 'MUTED' : 'LIVE',
                 style: TextStyle(
                   fontSize: TCType.textMicro,
-                  color: muted ? TCColors.statusWarn : TCColors.green400,
+                  color: muted ? tc.statusWarn : tc.statusOnline,
                   letterSpacing:
                       TCType.letterSpacingFor(TCType.textMicro, TCType.trackingWide),
                 ),

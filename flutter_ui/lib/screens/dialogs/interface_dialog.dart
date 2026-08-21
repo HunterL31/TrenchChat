@@ -7,6 +7,8 @@ import 'package:flutter/material.dart';
 import '../../api/client.dart';
 import '../../api/models/interface.dart';
 import '../../app_state.dart';
+import '../../theme/section_theme.dart';
+import '../../theme/theme_spec.dart';
 import '../../theme/tokens.dart';
 import '../../widgets/tc_button.dart';
 import '../../widgets/tc_checkbox.dart';
@@ -110,7 +112,11 @@ Future<bool?> showInterfaceDialog(BuildContext context, AppState state,
     {RetInterface? existing}) {
   return showTcDialog<bool>(
     context: context,
-    builder: (context) => _InterfaceDialogContent(state: state, existing: existing),
+    builder: (context) => SectionTheme(
+      spec: state.themeSpec,
+      section: TCSection.dialogs,
+      child: _InterfaceDialogContent(state: state, existing: existing),
+    ),
   );
 }
 
@@ -323,7 +329,7 @@ class _InterfaceDialogContentState extends State<_InterfaceDialogContent> {
         label,
         style: TextStyle(
           fontSize: TCType.textCaption,
-          color: TCColors.textSecondary,
+          color: SectionTheme.of(context).textSecondary,
           letterSpacing: TCType.letterSpacingFor(TCType.textCaption, TCType.trackingWide),
         ),
       );

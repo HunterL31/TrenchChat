@@ -40,6 +40,7 @@ from trenchchat.core.interfaces_config import (
     build_interface_config_dict, delete_interface, load_interfaces_config,
     missing_required_field, write_interface,
 )
+from trenchchat.core.naming import NameInUseError
 from trenchchat.core.permissions import (
     ALL_PERMISSIONS, CREATE_CHANNEL, INVITE, KICK, MANAGE_CHANNEL, MANAGE_ROLES,
     ROLE_ADMIN, ROLE_MEMBER, PRESET_OPEN, PRESET_PRIVATE, VOICE_CHAT,
@@ -129,6 +130,19 @@ class SettingsUpdateRequest(BaseModel):
     channel_filter_mode: str | None = None
     channel_filter_hashes: list[str] | None = None
     outbound_propagation_node: str | None = None
+
+
+class SetUiThemeRequest(BaseModel):
+    theme: dict
+
+
+class SaveUiThemeRequest(BaseModel):
+    name: str
+    theme: dict
+
+
+class DeleteUiThemeRequest(BaseModel):
+    name: str
 
 
 class CreateInterfaceRequest(BaseModel):
@@ -525,6 +539,54 @@ def create_app(backend: Backend, *, token: str | None = None,
             return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
         return {"ok": True, "settings": actions.read_settings(backend.config)}
 
+    @app.get("/ui_theme")
+    def get_ui_theme():
+        return {"theme": actions.read_ui_theme(backend.config)}
+
+    @app.post("/ui_theme")
+    def set_ui_theme(req: SetUiThemeRequest):
+        actions.set_ui_theme(backend.config, req.theme)
+        # Theme changes come from a client rather than the mesh, so nothing
+        # else would tell this profile's other open clients about them.
+        bus.emit("ui_theme", theme=actions.read_ui_theme(backend.config))
+        return {"ok": True}
+
+    @app.get("/ui_theme_library")
+    def get_ui_theme_library():
+        return {"themes": actions.read_ui_theme_library(backend.config)}
+
+    def _emit_theme_library() -> None:
+        bus.emit("ui_theme_library",
+                 themes=actions.read_ui_theme_library(backend.config))
+
+    def _delete_ui_theme(name: str):
+        if not actions.delete_ui_theme_from_library(backend.config, name):
+            return JSONResponse(
+                {"ok": False, "error": "no such theme"}, status_code=404,
+            )
+        _emit_theme_library()
+        return {"ok": True}
+
+    @app.post("/ui_theme_library")
+    def save_ui_theme_to_library(req: SaveUiThemeRequest):
+        try:
+            actions.save_ui_theme_to_library(backend.config, req.name, req.theme)
+        except ValueError as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+        _emit_theme_library()
+        return {"ok": True}
+
+    # A name containing '/' cannot be addressed as a path segment -- even
+    # percent-encoded, the router splits on it -- so deleting goes through a
+    # body. The path form stays for older clients.
+    @app.post("/ui_theme_library/delete")
+    def delete_ui_theme_by_body(req: DeleteUiThemeRequest):
+        return _delete_ui_theme(req.name)
+
+    @app.delete("/ui_theme_library/{name}")
+    def delete_ui_theme_from_library(name: str):
+        return _delete_ui_theme(name)
+
     @app.get("/peers/{peer_hash}/presence")
     def get_peer_presence(peer_hash: str):
         return {
@@ -777,10 +839,14 @@ def create_app(backend: Backend, *, token: str | None = None,
 
     @app.post("/servers")
     def create_server(req: CreateServerRequest):
-        return {"hash": actions.create_server(
-            backend.server_mgr, backend.invite_mgr,
-            name=req.name, description=req.description,
-        )}
+        try:
+            server_hash = actions.create_server(
+                backend.server_mgr, backend.invite_mgr,
+                name=req.name, description=req.description,
+            )
+        except NameInUseError as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=409)
+        return {"hash": server_hash}
 
     @app.get("/servers/{server_hash}/channels")
     def list_server_channels(server_hash: str):
@@ -791,11 +857,14 @@ def create_app(backend: Backend, *, token: str | None = None,
     def create_server_channel(server_hash: str, req: CreateServerChannelRequest):
         # Outbound guard: returns None when the caller lacks CREATE_CHANNEL.
         # The core layer re-checks on both the publishing and receiving side.
-        ch_hash = actions.create_channel_in_server(
-            backend.storage, backend.channel_mgr, backend.invite_mgr,
-            server_hash, backend.identity.hash_hex,
-            name=req.name, description=req.description,
-        )
+        try:
+            ch_hash = actions.create_channel_in_server(
+                backend.storage, backend.channel_mgr, backend.invite_mgr,
+                server_hash, backend.identity.hash_hex,
+                name=req.name, description=req.description,
+            )
+        except NameInUseError as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=409)
         if ch_hash is None:
             return JSONResponse(
                 status_code=403,
@@ -895,10 +964,13 @@ def create_app(backend: Backend, *, token: str | None = None,
     @app.post("/channels")
     def create_channel(req: CreateChannelRequest):
         permissions = PRESET_OPEN if req.access == "public" else PRESET_PRIVATE
-        ch_hash = actions.create_channel(
-            backend.channel_mgr, backend.invite_mgr,
-            name=req.name, description=req.description, permissions=permissions,
-        )
+        try:
+            ch_hash = actions.create_channel(
+                backend.channel_mgr, backend.invite_mgr,
+                name=req.name, description=req.description, permissions=permissions,
+            )
+        except NameInUseError as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=409)
         return {"hash": ch_hash}
 
     @app.post("/channels/{channel_hash}/join")
@@ -942,6 +1014,7 @@ def create_app(backend: Backend, *, token: str | None = None,
         # in actions.update_membership is the real boundary regardless.
         my_hex = backend.identity.hash_hex
         return {
+            "invite": backend.storage.has_permission(channel_hash, my_hex, INVITE),
             "kick": backend.storage.has_permission(channel_hash, my_hex, KICK),
             "manage_roles": backend.storage.has_permission(channel_hash, my_hex, MANAGE_ROLES),
             "manage_channel": backend.storage.has_permission(channel_hash, my_hex, MANAGE_CHANNEL),

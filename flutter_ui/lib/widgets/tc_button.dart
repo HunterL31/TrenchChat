@@ -3,8 +3,10 @@
 import 'package:flutter/material.dart';
 
 import '../theme/effects.dart';
+import '../theme/section_theme.dart';
 import '../theme/tokens.dart';
 import 'tc_icon.dart';
+import 'tc_tooltip.dart';
 
 class TcGhostButton extends StatefulWidget {
   const TcGhostButton({
@@ -12,11 +14,16 @@ class TcGhostButton extends StatefulWidget {
     required this.label,
     required this.onPressed,
     this.icon,
+    this.accent,
   });
 
   final String label;
   final TcIconData? icon;
   final VoidCallback? onPressed;
+
+  /// Paints the label and border in this color instead of the neutral pair --
+  /// for a button whose meaning is a warning (a delete confirmation).
+  final Color? accent;
 
   @override
   State<TcGhostButton> createState() => _TcGhostButtonState();
@@ -28,18 +35,17 @@ class _TcGhostButtonState extends State<TcGhostButton> {
 
   @override
   Widget build(BuildContext context) {
+    final tc = SectionTheme.of(context);
     final disabled = widget.onPressed == null;
     final Color bg = _pressed
-        ? TCColors.bgPressed
+        ? tc.bgPressed
         : _hover
-            ? TCColors.bgHover
+            ? tc.bgHover
             : Colors.transparent;
     final Color fg = disabled
-        ? TCColors.textDisabled
-        : _hover
-            ? TCColors.textPrimary
-            : TCColors.textSecondary;
-    final Color border = _hover ? TCColors.borderStrong : TCColors.borderDefault;
+        ? tc.textDisabled
+        : widget.accent ?? (_hover ? tc.textPrimary : tc.textSecondary);
+    final Color border = widget.accent ?? (_hover ? tc.borderStrong : tc.borderDefault);
 
     return MouseRegion(
       cursor: disabled ? SystemMouseCursors.basic : SystemMouseCursors.click,
@@ -111,15 +117,16 @@ class _TcPrimaryButtonState extends State<TcPrimaryButton> {
 
   @override
   Widget build(BuildContext context) {
+    final tc = SectionTheme.of(context);
     final disabled = widget.onPressed == null;
     final Color bg = disabled
-        ? TCColors.bgInset
+        ? tc.bgInset
         : _pressed
-            ? TCColors.accentPrimaryActive
+            ? tc.accentPrimaryActive
             : _hover
-                ? TCColors.accentPrimaryHover
-                : TCColors.accentPrimary;
-    final Color fg = disabled ? TCColors.textDisabled : TCColors.textOnAccent;
+                ? tc.accentPrimaryHover
+                : tc.accentPrimary;
+    final Color fg = disabled ? tc.textDisabled : tc.textOnAccent;
 
     return MouseRegion(
       cursor: disabled ? SystemMouseCursors.basic : SystemMouseCursors.click,
@@ -175,7 +182,8 @@ class _TcIconButtonState extends State<TcIconButton> {
 
   @override
   Widget build(BuildContext context) {
-    return Tooltip(
+    final tc = SectionTheme.of(context);
+    return TcTooltip(
       message: widget.tooltip,
       child: MouseRegion(
         cursor: SystemMouseCursors.click,
@@ -190,13 +198,13 @@ class _TcIconButtonState extends State<TcIconButton> {
             height: widget.size,
             alignment: Alignment.center,
             decoration: BoxDecoration(
-              color: _hover ? TCColors.bgHover : Colors.transparent,
-              border: Border.all(color: _hover ? TCColors.borderStrong : TCColors.borderDefault),
+              color: _hover ? tc.bgHover : Colors.transparent,
+              border: Border.all(color: _hover ? tc.borderStrong : tc.borderDefault),
             ),
             child: TcIcon(
               widget.icon,
               size: 14,
-              color: _hover ? TCColors.textPrimary : TCColors.textSecondary,
+              color: _hover ? tc.textPrimary : tc.textSecondary,
             ),
           ),
         ),

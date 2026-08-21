@@ -33,6 +33,7 @@ from trenchchat.core.connectivity import LinkWatcher
 from trenchchat.core.sync import SYNC_RETRY_SECS
 from trenchchat.core.identity import Identity
 from trenchchat.core.image import prepare_image, MAX_IMAGE_BYTES
+from trenchchat.core.naming import NameInUseError
 from trenchchat.core.permissions import (
     CREATE_CHANNEL, INVITE, MANAGE_CHANNEL, SEND_MESSAGE, PRESETS, PRESET_PRIVATE,
     is_discoverable, is_open_join, permissions_from_json,
@@ -909,10 +910,14 @@ class MainWindow(QMainWindow):
         if not name:
             QMessageBox.warning(self, "TrenchChat", "Channel name cannot be empty.")
             return
-        hash_hex = actions.create_channel(
-            self._channel_mgr, self._invite_mgr,
-            name=name, description=dlg.description, permissions=dlg.permissions,
-        )
+        try:
+            hash_hex = actions.create_channel(
+                self._channel_mgr, self._invite_mgr,
+                name=name, description=dlg.description, permissions=dlg.permissions,
+            )
+        except NameInUseError as e:
+            QMessageBox.warning(self, "TrenchChat", str(e).capitalize() + ".")
+            return
         self._refresh_channel_list()
         self._switch_to_channel(hash_hex)
 
@@ -923,10 +928,14 @@ class MainWindow(QMainWindow):
         if not dlg.server_name:
             QMessageBox.warning(self, "TrenchChat", "Server name cannot be empty.")
             return
-        actions.create_server(
-            self._server_mgr, self._invite_mgr,
-            name=dlg.server_name, description=dlg.description,
-        )
+        try:
+            actions.create_server(
+                self._server_mgr, self._invite_mgr,
+                name=dlg.server_name, description=dlg.description,
+            )
+        except NameInUseError as e:
+            QMessageBox.warning(self, "TrenchChat", str(e).capitalize() + ".")
+            return
         self._refresh_channel_list()
 
     def _on_new_channel_in_server(self, server_hash: str):
@@ -936,11 +945,15 @@ class MainWindow(QMainWindow):
         if not dlg.channel_name:
             QMessageBox.warning(self, "TrenchChat", "Channel name cannot be empty.")
             return
-        hash_hex = actions.create_channel_in_server(
-            self._storage, self._channel_mgr, self._invite_mgr,
-            server_hash, self._identity.hash_hex,
-            name=dlg.channel_name, description=dlg.description,
-        )
+        try:
+            hash_hex = actions.create_channel_in_server(
+                self._storage, self._channel_mgr, self._invite_mgr,
+                server_hash, self._identity.hash_hex,
+                name=dlg.channel_name, description=dlg.description,
+            )
+        except NameInUseError as e:
+            QMessageBox.warning(self, "TrenchChat", str(e).capitalize() + ".")
+            return
         if hash_hex is None:
             QMessageBox.warning(
                 self, "TrenchChat",

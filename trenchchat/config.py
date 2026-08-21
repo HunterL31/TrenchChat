@@ -27,6 +27,8 @@ _DEFAULTS = {
         },
     },
     "outbound_propagation_node": None,
+    "ui_theme": {},
+    "ui_theme_library": {},
     "voice": {
         "input_device": None,
         "output_device": None,
@@ -235,3 +237,37 @@ class Config:
     def outbound_propagation_node(self, value: str | None):
         self._data["outbound_propagation_node"] = value
         self.save()
+
+    # --- ui theme ---
+
+    @property
+    def ui_theme(self) -> dict:
+        """Client-side theme object, stored opaquely. Empty dict when never set."""
+        return self._data.get("ui_theme", {})
+
+    @ui_theme.setter
+    def ui_theme(self, value: dict):
+        self._data["ui_theme"] = value
+        self.save()
+
+    # --- ui theme library ---
+
+    @property
+    def ui_theme_library(self) -> dict:
+        """Saved themes by name, stored opaquely. Empty dict when never set."""
+        return self._data.get("ui_theme_library", {})
+
+    def save_ui_theme(self, name: str, theme: dict) -> None:
+        """Store a theme under a name, replacing any theme already saved there."""
+        library = self._data.setdefault("ui_theme_library", {})
+        library[name] = theme
+        self.save()
+
+    def delete_ui_theme(self, name: str) -> bool:
+        """Remove a saved theme. False when no theme is stored under that name."""
+        library = self._data.setdefault("ui_theme_library", {})
+        if name not in library:
+            return False
+        del library[name]
+        self.save()
+        return True

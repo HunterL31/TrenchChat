@@ -19,6 +19,14 @@ from trenchchat.core.protocol import F_MSG_TYPE, MT_PRESENCE
 from trenchchat.network.router import Router
 
 
+def _beacons(received):
+    """The presence beacons among captured deliveries. The subscription setup
+    makes Alice broadcast a subscriber_list to Bob, which can race into a
+    test's delivery capture; keying on MT_PRESENCE keeps that setup traffic
+    from being mistaken for (or masking) a beacon."""
+    return [m for m in received if m.fields.get(F_MSG_TYPE) == MT_PRESENCE]
+
+
 def _beaconing_peer(peer_factory, beacon_after_secs: float = 30.0):
     """Alice owns an open channel Bob subscribes to, giving Alice a channel
     peer (Bob) to beacon. Returns (alice, bob, ch_hash, presence_mgr, beacon)."""
@@ -57,7 +65,7 @@ def test_beacon_fires_only_after_silence_threshold(peer_factory):
         mock_time.time.return_value = now + 10
         beacon.tick()
 
-    assert not wait_for(lambda: len(received) >= 1, timeout=1), \
+    assert not wait_for(lambda: len(_beacons(received)) >= 1, timeout=1), \
         "beacon must not fire before the silence threshold elapses"
 
     with patch("trenchchat.core.presence.time") as mock_time:
@@ -65,7 +73,7 @@ def test_beacon_fires_only_after_silence_threshold(peer_factory):
         mock_time.time.return_value = now + 31
         beacon.tick()
 
-    assert wait_for(lambda: len(received) >= 1, timeout=5), \
+    assert wait_for(lambda: len(_beacons(received)) >= 1, timeout=5), \
         "beacon must fire once the silence threshold has elapsed"
 
 
@@ -92,7 +100,7 @@ def test_inbound_traffic_suppresses_the_beacon(peer_factory):
         mock_time.time.return_value = now + 40
         beacon.tick()
 
-    assert not wait_for(lambda: len(received) >= 1, timeout=1), \
+    assert not wait_for(lambda: len(_beacons(received)) >= 1, timeout=1), \
         "fresh inbound evidence must suppress the beacon"
 
 
@@ -118,7 +126,7 @@ def test_outbound_only_contact_suppresses_beacon_but_not_online(peer_factory):
         assert not presence_mgr.is_online(bob.identity.hash_hex), \
             "outbound-only contact must never mark the peer online"
 
-    assert not wait_for(lambda: len(received) >= 1, timeout=1), \
+    assert not wait_for(lambda: len(_beacons(received)) >= 1, timeout=1), \
         "outbound-only contact must suppress the beacon"
 
 
@@ -132,8 +140,8 @@ def test_beacon_message_carries_right_type_and_empty_content(peer_factory):
 
     beacon.tick()  # never heard from Bob -- beacons immediately
 
-    assert wait_for(lambda: len(received) >= 1, timeout=5)
-    msg = received[0]
+    assert wait_for(lambda: len(_beacons(received)) >= 1, timeout=5)
+    msg = _beacons(received)[0]
     assert msg.fields.get(F_MSG_TYPE) == MT_PRESENCE
     assert msg.content == b""
     assert set(msg.fields.keys()) == {F_MSG_TYPE}
@@ -160,7 +168,7 @@ def test_inbound_beacon_is_inert_for_invite_manager(peer_factory):
 
     with patch("trenchchat.core.invite.RNS.log", side_effect=_capture):
         beacon.tick()  # never heard from Bob -- beacons immediately
-        assert wait_for(lambda: len(received) >= 1, timeout=5), \
+        assert wait_for(lambda: len(_beacons(received)) >= 1, timeout=5), \
             "beacon never reached Bob"
         time.sleep(0.2)  # let every registered delivery callback finish, invite_mgr included
 

@@ -9,6 +9,8 @@ import 'package:flutter/material.dart';
 
 import '../../api/models/server.dart';
 import '../../app_state.dart';
+import '../../theme/section_theme.dart';
+import '../../theme/theme_spec.dart';
 import '../../theme/tokens.dart';
 import '../../widgets/tc_button.dart';
 import '../../widgets/tc_dialog.dart';
@@ -16,7 +18,11 @@ import '../../widgets/tc_dialog.dart';
 Future<void> showJoinChannelDialog(BuildContext context, AppState state) {
   return showTcDialog<void>(
     context: context,
-    builder: (context) => _JoinChannelDialogContent(state: state),
+    builder: (context) => SectionTheme(
+      spec: state.themeSpec,
+      section: TCSection.dialogs,
+      child: _JoinChannelDialogContent(state: state),
+    ),
   );
 }
 
@@ -51,7 +57,7 @@ class _JoinChannelDialogContentState extends State<_JoinChannelDialogContent> {
     if (!ok) {
       setState(() {
         _busy = false;
-        _error = widget.state.actionError ?? 'Could not join channel.';
+        _error = widget.state.takeActionError() ?? 'Could not join channel.';
       });
       return;
     }
@@ -60,6 +66,7 @@ class _JoinChannelDialogContentState extends State<_JoinChannelDialogContent> {
 
   @override
   Widget build(BuildContext context) {
+    final tc = SectionTheme.of(context);
     return AnimatedBuilder(
       animation: widget.state,
       builder: (context, _) {
@@ -85,17 +92,17 @@ class _JoinChannelDialogContentState extends State<_JoinChannelDialogContent> {
           children: [
             Text(
               'Channels announced on the network appear here.',
-              style: TextStyle(fontSize: TCType.textCaption, color: TCColors.textTertiary),
+              style: TextStyle(fontSize: TCType.textCaption, color: tc.textTertiary),
             ),
             const SizedBox(height: 12),
             Container(
               height: 220,
-              decoration: BoxDecoration(border: Border.all(color: TCColors.borderDefault)),
+              decoration: BoxDecoration(border: Border.all(color: tc.borderDefault)),
               child: channels.isEmpty
                   ? Center(
                       child: Text(
                         'No channels discovered yet.',
-                        style: TextStyle(fontSize: TCType.textCaption, color: TCColors.textTertiary),
+                        style: TextStyle(fontSize: TCType.textCaption, color: tc.textTertiary),
                       ),
                     )
                   : ListView(
@@ -134,18 +141,18 @@ class _DiscoveredRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final tc = SectionTheme.of(context);
     return GestureDetector(
       onTap: onTap,
       child: MouseRegion(
         cursor: SystemMouseCursors.click,
         child: Container(
           padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-          color: selected ? TCColors.green900 : Colors.transparent,
+          color: selected ? tc.bgSelected : Colors.transparent,
           child: Row(
             children: [
               Text('#',
-                  style:
-                      TextStyle(color: selected ? TCColors.accentPrimary : TCColors.textTertiary)),
+                  style: TextStyle(color: selected ? tc.accentPrimary : tc.textTertiary)),
               const SizedBox(width: 4),
               Expanded(
                 child: Text(
@@ -153,7 +160,7 @@ class _DiscoveredRow extends StatelessWidget {
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(
                     fontSize: TCType.textBodySm,
-                    color: selected ? TCColors.green100 : TCColors.textSecondary,
+                    color: selected ? tc.textEmphasis : tc.textSecondary,
                   ),
                 ),
               ),
@@ -163,7 +170,7 @@ class _DiscoveredRow extends StatelessWidget {
                     channel.description,
                     overflow: TextOverflow.ellipsis,
                     textAlign: TextAlign.right,
-                    style: TextStyle(fontSize: TCType.textCaption, color: TCColors.textTertiary),
+                    style: TextStyle(fontSize: TCType.textCaption, color: tc.textTertiary),
                   ),
                 ),
             ],

@@ -7,6 +7,8 @@ import 'package:flutter/material.dart';
 
 import '../../api/models/invite.dart';
 import '../../app_state.dart';
+import '../../theme/section_theme.dart';
+import '../../theme/theme_spec.dart';
 import '../../theme/tokens.dart';
 import '../../widgets/status_dot.dart';
 import '../../widgets/tc_button.dart';
@@ -19,10 +21,14 @@ Future<void> showInviteDialog(BuildContext context, AppState state,
     {required String channelHashHex, required String channelName}) {
   return showTcDialog<void>(
     context: context,
-    builder: (context) => _InviteDialogContent(
-      state: state,
-      channelHashHex: channelHashHex,
-      channelName: channelName,
+    builder: (context) => SectionTheme(
+      spec: state.themeSpec,
+      section: TCSection.dialogs,
+      child: _InviteDialogContent(
+        state: state,
+        channelHashHex: channelHashHex,
+        channelName: channelName,
+      ),
     ),
   );
 }
@@ -108,7 +114,7 @@ class _InviteDialogContentState extends State<_InviteDialogContent> {
     if (!ok) {
       setState(() {
         _busy = false;
-        _error = widget.state.actionError ?? 'Could not send the invite.';
+        _error = widget.state.takeActionError() ?? 'Could not send the invite.';
       });
       return;
     }
@@ -117,6 +123,7 @@ class _InviteDialogContentState extends State<_InviteDialogContent> {
 
   @override
   Widget build(BuildContext context) {
+    final tc = SectionTheme.of(context);
     return TcDialogShell(
       title: 'Invite to #${widget.channelName}',
       width: 440,
@@ -139,8 +146,8 @@ class _InviteDialogContentState extends State<_InviteDialogContent> {
         Container(
           height: 150,
           decoration: BoxDecoration(
-            color: TCColors.bgInset,
-            border: Border.all(color: TCColors.borderDefault),
+            color: tc.bgInset,
+            border: Border.all(color: tc.borderDefault),
           ),
           child: _entries.isEmpty
               ? Center(
@@ -151,7 +158,7 @@ class _InviteDialogContentState extends State<_InviteDialogContent> {
                       'once their announce has been received.',
                       textAlign: TextAlign.center,
                       style: TextStyle(
-                          fontSize: TCType.textCaption, color: TCColors.textTertiary),
+                          fontSize: TCType.textCaption, color: tc.textTertiary),
                     ),
                   ),
                 )
@@ -170,6 +177,7 @@ class _InviteDialogContentState extends State<_InviteDialogContent> {
   }
 
   Widget _entryRow(DirectoryEntry e) {
+    final tc = SectionTheme.of(context);
     final selected = e.identityHash == _selectedHash;
     final label = e.displayName.isNotEmpty
         ? e.displayName
@@ -182,7 +190,7 @@ class _InviteDialogContentState extends State<_InviteDialogContent> {
       child: MouseRegion(
         cursor: SystemMouseCursors.click,
         child: Container(
-          color: selected ? TCColors.green900 : Colors.transparent,
+          color: selected ? tc.bgSelected : Colors.transparent,
           padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
           child: Row(
             children: [
@@ -197,13 +205,13 @@ class _InviteDialogContentState extends State<_InviteDialogContent> {
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(
                     fontSize: TCType.textBodySm,
-                    color: selected ? TCColors.green100 : TCColors.textSecondary,
+                    color: selected ? tc.textEmphasis : tc.textSecondary,
                   ),
                 ),
               ),
               Text(
                 '${e.identityHash.substring(0, 8)}…',
-                style: TextStyle(fontSize: TCType.textMicro, color: TCColors.textTertiary),
+                style: TextStyle(fontSize: TCType.textMicro, color: tc.textTertiary),
               ),
             ],
           ),

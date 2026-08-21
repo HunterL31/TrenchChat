@@ -3,6 +3,7 @@
 // unrecognized types are ignored.
 import 'dart:convert';
 
+import '../theme/theme_spec.dart';
 import 'models/message.dart';
 
 sealed class TcEvent {
@@ -66,6 +67,18 @@ sealed class TcEvent {
         );
       case 'voice_session':
         return VoiceSessionEvent(json['state'] as String);
+      case 'ui_theme':
+        final theme = json['theme'];
+        if (theme is! Map<String, dynamic>) return null;
+        return UiThemeEvent(ThemeSpec.fromJson(theme));
+      case 'ui_theme_library':
+        final themes = json['themes'];
+        if (themes is! Map<String, dynamic>) return null;
+        return UiThemeLibraryEvent({
+          for (final entry in themes.entries)
+            if (entry.value is Map<String, dynamic>)
+              entry.key: ThemeSpec.fromJson(entry.value as Map<String, dynamic>),
+        });
       default:
         return null;
     }
@@ -156,6 +169,21 @@ class VoiceSessionEvent extends TcEvent {
   final String state;
 }
 
+
+/// The theme in force changed -- this profile's own theme, edited from this
+/// client or another one open on the same backend. Carries the whole
+/// document, so applying it needs no re-fetch.
+class UiThemeEvent extends TcEvent {
+  const UiThemeEvent(this.spec);
+  final ThemeSpec spec;
+}
+
+/// The saved theme library changed: one was added, replaced, or deleted.
+/// Carries the whole library for the same reason [UiThemeEvent] does.
+class UiThemeLibraryEvent extends TcEvent {
+  const UiThemeLibraryEvent(this.library);
+  final Map<String, ThemeSpec> library;
+}
 
 /// How caught up a channel is. INCOMPLETE means history is known to be
 /// missing -- a truncated batch, a hint naming us, or rows a peer served that

@@ -7,10 +7,13 @@ import 'package:flutter/material.dart';
 
 import '../../app_state.dart';
 import '../../theme/effects.dart';
+import '../../theme/section_theme.dart';
+import '../../theme/theme_spec.dart';
 import '../../theme/tokens.dart';
 import '../../widgets/peer_image.dart';
 import '../../widgets/tc_dialog.dart';
 import '../../widgets/tc_text_field.dart';
+import '../../widgets/tc_tooltip.dart';
 import 'emoji_import_dialog.dart';
 
 /// What the user picked: [reactionKey] goes to the reactions endpoint;
@@ -30,7 +33,11 @@ const List<String> _builtinEmoji = [
 Future<EmojiSelection?> showEmojiPickerDialog(BuildContext context, AppState state) {
   return showTcDialog<EmojiSelection>(
     context: context,
-    builder: (context) => _EmojiPickerContent(state: state),
+    builder: (context) => SectionTheme(
+      spec: state.themeSpec,
+      section: TCSection.dialogs,
+      child: _EmojiPickerContent(state: state),
+    ),
   );
 }
 
@@ -61,6 +68,7 @@ class _EmojiPickerContentState extends State<_EmojiPickerContent> {
   @override
   Widget build(BuildContext context) {
     final state = widget.state;
+    final tc = SectionTheme.of(context);
     final query = _search.text.trim().toLowerCase();
     return AnimatedBuilder(
       animation: state,
@@ -103,7 +111,7 @@ class _EmojiPickerContentState extends State<_EmojiPickerContent> {
                 ],
               ),
               const SizedBox(height: 10),
-              Container(height: 1, color: TCColors.borderSubtle),
+              Container(height: 1, color: tc.borderSubtle),
               const SizedBox(height: 10),
             ],
             if (customs.isEmpty)
@@ -111,7 +119,7 @@ class _EmojiPickerContentState extends State<_EmojiPickerContent> {
                 padding: const EdgeInsets.symmetric(vertical: 10),
                 child: Text(
                   query.isEmpty ? 'No custom emojis yet.' : 'No matches.',
-                  style: TextStyle(fontSize: TCType.textCaption, color: TCColors.textTertiary),
+                  style: TextStyle(fontSize: TCType.textCaption, color: tc.textTertiary),
                 ),
               )
             else
@@ -161,7 +169,8 @@ class _EmojiCellState extends State<_EmojiCell> {
 
   @override
   Widget build(BuildContext context) {
-    return Tooltip(
+    final tc = SectionTheme.of(context);
+    return TcTooltip(
       message: widget.tooltip,
       child: MouseRegion(
         cursor: SystemMouseCursors.click,
@@ -175,9 +184,9 @@ class _EmojiCellState extends State<_EmojiCell> {
             height: 34,
             alignment: Alignment.center,
             decoration: BoxDecoration(
-              color: _hover ? TCColors.bgHover : Colors.transparent,
+              color: _hover ? tc.bgHover : Colors.transparent,
               border: Border.all(
-                  color: _hover ? TCColors.borderStrong : Colors.transparent),
+                  color: _hover ? tc.borderStrong : Colors.transparent),
             ),
             child: widget.child,
           ),
@@ -195,6 +204,7 @@ class _FooterButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final tc = SectionTheme.of(context);
     return GestureDetector(
       onTap: onTap,
       child: MouseRegion(
@@ -203,7 +213,7 @@ class _FooterButton extends StatelessWidget {
           label,
           style: TextStyle(
             fontSize: TCType.textCaption,
-            color: TCColors.textSecondary,
+            color: tc.textSecondary,
             letterSpacing: TCType.letterSpacingFor(TCType.textCaption, TCType.trackingWide),
           ),
         ),

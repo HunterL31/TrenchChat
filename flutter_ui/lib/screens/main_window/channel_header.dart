@@ -2,10 +2,12 @@
 import 'package:flutter/material.dart';
 
 import '../../api/models/link_quality.dart';
+import '../../theme/section_theme.dart';
 import '../../theme/tokens.dart';
 import '../../widgets/signal_meter.dart';
 import '../../widgets/tc_button.dart';
 import '../../widgets/tc_icon.dart';
+import '../../widgets/tc_tooltip.dart';
 
 enum ChannelTab { chat, map, iface, friends }
 
@@ -45,6 +47,7 @@ class ChannelHeader extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final tc = SectionTheme.of(context);
     final hopsLabel = linkQuality.hops != null
         ? '${linkQuality.hops} HOP${linkQuality.hops == 1 ? '' : 'S'}'
         : 'HOPS UNKNOWN';
@@ -53,8 +56,8 @@ class ChannelHeader extends StatelessWidget {
       height: 42,
       padding: const EdgeInsets.symmetric(horizontal: 18),
       decoration: BoxDecoration(
-        color: TCColors.bgSurfaceRaised,
-        border: Border(bottom: BorderSide(color: TCColors.borderSubtle)),
+        color: tc.bgSurfaceRaised,
+        border: Border(bottom: BorderSide(color: tc.borderSubtle)),
       ),
       child: Row(
         children: [
@@ -65,12 +68,12 @@ class ChannelHeader extends StatelessWidget {
           Expanded(
             child: Row(
               children: [
-                Text('#', style: TextStyle(color: TCColors.accentPrimary, fontSize: 15)),
+                Text('#', style: TextStyle(color: tc.accentPrimary, fontSize: 15)),
                 Flexible(
                   child: Text(
                     channelName,
                     overflow: TextOverflow.ellipsis,
-                    style: TextStyle(color: TCColors.green100, fontSize: 15),
+                    style: TextStyle(color: tc.textEmphasis, fontSize: 15),
                   ),
                 ),
                 if (topic.isNotEmpty && !compact) ...[
@@ -80,7 +83,7 @@ class ChannelHeader extends StatelessWidget {
                       topic,
                       overflow: TextOverflow.ellipsis,
                       style:
-                          TextStyle(fontSize: TCType.textCaption, color: TCColors.textTertiary),
+                          TextStyle(fontSize: TCType.textCaption, color: tc.textTertiary),
                     ),
                   ),
                 ],
@@ -90,8 +93,8 @@ class ChannelHeader extends StatelessWidget {
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 3),
             decoration: BoxDecoration(
-              color: TCColors.bgInset,
-              border: Border.all(color: TCColors.borderSubtle),
+              color: tc.bgInset,
+              border: Border.all(color: tc.borderSubtle),
             ),
             child: Row(
               mainAxisSize: MainAxisSize.min,
@@ -103,7 +106,7 @@ class ChannelHeader extends StatelessWidget {
                     '$_levelLabel · $hopsLabel',
                     style: TextStyle(
                       fontSize: TCType.textMicro,
-                      color: TCColors.textSecondary,
+                      color: tc.textSecondary,
                       letterSpacing:
                           TCType.letterSpacingFor(TCType.textMicro, TCType.trackingWide),
                     ),
@@ -165,20 +168,21 @@ class _HeaderTab extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final tc = SectionTheme.of(context);
     final selected = tab == active;
-    final foreground = selected ? TCColors.green100 : TCColors.textTertiary;
+    final foreground = selected ? tc.textEmphasis : tc.textTertiary;
     return GestureDetector(
       onTap: () => onTap(tab),
       child: MouseRegion(
         cursor: SystemMouseCursors.click,
-        child: Tooltip(
+        child: TcTooltip(
           message: compact ? label : '',
           child: Container(
             margin: const EdgeInsets.only(left: 2),
             padding: EdgeInsets.symmetric(horizontal: compact ? 7 : 10, vertical: 4),
             decoration: BoxDecoration(
-              color: selected ? TCColors.green900 : Colors.transparent,
-              border: Border.all(color: selected ? TCColors.borderAccent : TCColors.borderSubtle),
+              color: selected ? tc.bgSelected : Colors.transparent,
+              border: Border.all(color: selected ? tc.borderAccent : tc.borderSubtle),
             ),
             child: compact
                 ? TcIcon(icon, size: 13, color: foreground)

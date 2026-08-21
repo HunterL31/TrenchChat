@@ -11,6 +11,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 import '../theme/effects.dart';
+import '../theme/section_theme.dart';
 import '../theme/tokens.dart';
 
 class TcContextMenuItem {
@@ -124,6 +125,7 @@ class _TcContextMenuPanel extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final tc = SectionTheme.of(context);
     // A Stack child positioned by left/top alone is laid out unbounded, so the
     // stretched rows below need an explicit width to resolve against.
     return Material(
@@ -133,8 +135,8 @@ class _TcContextMenuPanel extends StatelessWidget {
         child: IntrinsicWidth(
           child: Container(
             decoration: BoxDecoration(
-              color: TCColors.bgSurfaceRaised,
-              border: Border.all(color: TCColors.borderDefault),
+              color: tc.bgSurfaceRaised,
+              border: Border.all(color: tc.borderDefault),
               boxShadow: TCEffects.shadowModal,
             ),
             padding: const EdgeInsets.symmetric(vertical: 4),
@@ -172,6 +174,7 @@ class _TcContextMenuRowState extends State<_TcContextMenuRow> {
 
   @override
   Widget build(BuildContext context) {
+    final tc = SectionTheme.of(context);
     return MouseRegion(
       cursor: SystemMouseCursors.click,
       onEnter: (_) => setState(() => _hover = true),
@@ -181,11 +184,11 @@ class _TcContextMenuRowState extends State<_TcContextMenuRow> {
         child: AnimatedContainer(
           duration: TCEffects.durationFast,
           curve: TCEffects.easeTerminal,
-          color: _hover ? TCColors.bgHover : Colors.transparent,
+          color: _hover ? tc.bgHover : Colors.transparent,
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
           child: Text(
             widget.item.label,
-            style: TextStyle(fontSize: TCType.textBodySm, color: TCColors.textSecondary),
+            style: TextStyle(fontSize: TCType.textBodySm, color: tc.textSecondary),
           ),
         ),
       ),

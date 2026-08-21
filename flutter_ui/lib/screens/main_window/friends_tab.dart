@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 import '../../api/models/friend.dart';
 import '../../app_state.dart';
 import '../../format.dart';
+import '../../theme/section_theme.dart';
 import '../../theme/tokens.dart';
 import '../../widgets/status_dot.dart';
 import '../../widgets/tc_button.dart';
@@ -32,9 +33,10 @@ class FriendsTab extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final tc = SectionTheme.of(context);
     final friends = state.friends;
     return Container(
-      color: TCColors.bgApp,
+      color: tc.bgApp,
       padding: const EdgeInsets.all(18),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -45,7 +47,7 @@ class FriendsTab extends StatelessWidget {
                 'FRIENDS',
                 style: TextStyle(
                   fontSize: TCType.textCaption,
-                  color: TCColors.textSecondary,
+                  color: tc.textSecondary,
                   letterSpacing:
                       TCType.letterSpacingFor(TCType.textCaption, TCType.trackingWider),
                 ),
@@ -62,15 +64,14 @@ class FriendsTab extends StatelessWidget {
           Expanded(
             child: Container(
               decoration: BoxDecoration(
-                color: TCColors.bgSurface,
-                border: Border.all(color: TCColors.borderSubtle),
+                color: tc.bgSurface,
+                border: Border.all(color: tc.borderSubtle),
               ),
               child: friends.isEmpty
                   ? Center(
                       child: Text(
                         'No saved friends yet.',
-                        style:
-                            TextStyle(fontSize: TCType.textBodySm, color: TCColors.textTertiary),
+                        style: TextStyle(fontSize: TCType.textBodySm, color: tc.textTertiary),
                       ),
                     )
                   : ListView(
@@ -114,6 +115,7 @@ class _FriendRowState extends State<_FriendRow> {
 
   @override
   Widget build(BuildContext context) {
+    final tc = SectionTheme.of(context);
     final f = widget.friend;
     return MouseRegion(
       cursor: SystemMouseCursors.click,
@@ -122,7 +124,7 @@ class _FriendRowState extends State<_FriendRow> {
       child: TcContextMenuRegion(
         items: _menuItems(context),
         child: Container(
-          color: _hover ? TCColors.bgHover : Colors.transparent,
+          color: _hover ? tc.bgHover : Colors.transparent,
           padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
           child: Row(
             children: [
@@ -135,13 +137,13 @@ class _FriendRowState extends State<_FriendRow> {
                 child: Text(
                   friendLabel(f),
                   overflow: TextOverflow.ellipsis,
-                  style: TextStyle(fontSize: 13, color: TCColors.textSecondary),
+                  style: TextStyle(fontSize: 13, color: tc.textSecondary),
                 ),
               ),
               const SizedBox(width: 6),
               Text(
                 formatRelative(f.lastSeenAt),
-                style: TextStyle(fontSize: TCType.textMicro, color: TCColors.textTertiary),
+                style: TextStyle(fontSize: TCType.textMicro, color: tc.textTertiary),
               ),
             ],
           ),

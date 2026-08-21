@@ -1,5 +1,6 @@
 import 'dart:convert';
 
+import 'package:flutter/painting.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:flutter_ui/api/events.dart';
@@ -66,6 +67,42 @@ void main() {
     }));
 
     expect(event, isA<VoiceSessionEvent>().having((e) => e.state, 'state', 'audio_error'));
+  });
+
+  test('ui_theme carries the whole theme document', () {
+    final event = TcEvent.tryParse(jsonEncode({
+      'type': 'ui_theme',
+      'theme': {
+        'version': 1,
+        'base': {'bgApp': '#ff0000'},
+      },
+    }));
+
+    expect(event, isA<UiThemeEvent>());
+    expect((event as UiThemeEvent).spec.base['bgApp'], const Color(0xFFFF0000));
+  });
+
+  test('ui_theme_library carries every saved theme, skipping junk entries', () {
+    final event = TcEvent.tryParse(jsonEncode({
+      'type': 'ui_theme_library',
+      'themes': {
+        'Deep': {
+          'version': 1,
+          'base': {'bgApp': '#ff0000'},
+        },
+        'Broken': 'not a document',
+      },
+    }));
+
+    expect(event, isA<UiThemeLibraryEvent>());
+    final library = (event as UiThemeLibraryEvent).library;
+    expect(library.keys, ['Deep']);
+    expect(library['Deep']!.base['bgApp'], const Color(0xFFFF0000));
+  });
+
+  test('a theme event with no document is ignored', () {
+    expect(TcEvent.tryParse(jsonEncode({'type': 'ui_theme'})), isNull);
+    expect(TcEvent.tryParse(jsonEncode({'type': 'ui_theme_library'})), isNull);
   });
 
   test('unknown event types are ignored', () {

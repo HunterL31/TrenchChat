@@ -8,14 +8,19 @@ import '../../api/models/message.dart';
 import '../../api/models/server.dart';
 import '../../api/models/voice.dart';
 import '../../app_state.dart';
+import '../../theme/section_theme.dart';
+import '../../theme/theme_spec.dart';
 import '../../theme/tokens.dart';
 import '../dialogs/add_friend_dialog.dart';
+import '../dialogs/confirm_dialog.dart';
 import '../dialogs/emoji_picker_dialog.dart';
 import '../dialogs/incoming_invite_dialog.dart';
+import '../dialogs/invite_dialog.dart';
 import '../dialogs/join_channel_dialog.dart';
 import '../dialogs/members_dialog.dart';
 import '../dialogs/new_channel_dialog.dart';
 import '../dialogs/new_server_dialog.dart';
+import '../dialogs/permissions_dialog.dart';
 import '../dialogs/settings_dialog.dart';
 import 'channel_column.dart';
 import 'channel_header.dart';
@@ -43,20 +48,71 @@ class _MainWindowState extends State<MainWindow> {
   ChannelTab _tab = ChannelTab.chat;
   final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
 
-  // Dialogs show their own inline error text for a failed submit; this is
-  // the catch-all for actions with no dialog to show it in (a failed send,
-  // a failed background reload) so AppState.actionError has exactly one
-  // place it surfaces app-wide.
+  // Dialogs show their own inline error text for a failed submit and claim it
+  // with AppState.takeActionError(); this is the catch-all for actions with no
+  // UI of their own (a failed send, a failed background reload) so
+  // AppState.actionError has exactly one place it surfaces app-wide.
   String? _lastShownActionError;
 
-  void _maybeShowActionError(AppState state) {
+  /// True while the current staged theme share has already pulled the view
+  /// back to chat, so the switch happens once per share.
+  bool _themeShareShown = false;
+
+  void _maybeShowActionError(AppState state, TCSectionColors colors) {
     final message = state.actionError;
     if (message == null || message == _lastShownActionError) return;
-    _lastShownActionError = message;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      // Re-read rather than trusting the message this frame was built with: a
+      // dialog showing the failure itself takes it in the meantime, and then
+      // there is nothing left for the snackbar to say.
+      final pending = state.actionError;
+      if (!mounted || pending == null || pending == _lastShownActionError) return;
+      _lastShownActionError = pending;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(
+          pending,
+          style: TextStyle(fontSize: TCType.textBodySm, color: colors.textPrimary),
+        ),
+        backgroundColor: colors.bgSurfaceRaised,
+        behavior: SnackBarBehavior.floating,
+        duration: const Duration(seconds: 4),
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.zero,
+          side: BorderSide(color: colors.statusDanger),
+        ),
+      ));
+    });
+  }
+
+  /// A theme staged from the appearance editor lands in the compose box,
+  /// which only the chat tab shows -- so the share brings the chat tab back
+  /// with it rather than dropping into a pane that cannot show it.
+  void _maybeShowThemeShare(AppState state) {
+    if (state.pendingThemeShare == null) {
+      _themeShareShown = false;
+      return;
+    }
+    if (_themeShareShown || _tab == ChannelTab.chat) return;
+    _themeShareShown = true;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
+      setState(() => _tab = ChannelTab.chat);
     });
+  }
+
+  /// Leaves a channel from its row menu, once confirmed. Stored history is
+  /// kept either way, which is what the confirmation says.
+  Future<void> _leaveChannel(Channel channel) async {
+    final confirmed = await showTcConfirmDialog(
+      context,
+      widget.state,
+      title: 'Leave #${channel.name}',
+      message: 'You will stop receiving messages here. '
+          'Your local history is kept, and you can join again later.',
+      confirmLabel: 'LEAVE',
+    );
+    if (!confirmed) return;
+    await widget.state.leaveChannel(channel.hash);
   }
 
   /// Adds the reaction if the viewer hasn't reacted with [emojiKey] yet,
@@ -96,6 +152,10 @@ class _MainWindowState extends State<MainWindow> {
     return AnimatedBuilder(
       animation: state,
       builder: (context, _) {
+        final spec = state.themeSpec;
+        // Chrome that belongs to no single section: base overrides only.
+        final baseColors = spec.resolveBase();
+
         if (state.loading) {
           return const Center(child: CircularProgressIndicator());
         }
@@ -103,12 +163,13 @@ class _MainWindowState extends State<MainWindow> {
           return Center(
             child: Text(
               'Failed to load: ${state.error}',
-              style: TextStyle(color: TCColors.statusDanger),
+              style: TextStyle(color: baseColors.statusDanger),
             ),
           );
         }
 
-        _maybeShowActionError(state);
+        _maybeShowActionError(state, baseColors);
+        _maybeShowThemeShare(state);
 
         final selectedServer = state.selectedServerHash;
         final serverName = selectedServer != null
@@ -142,14 +203,18 @@ class _MainWindowState extends State<MainWindow> {
 
         final compact = MediaQuery.of(context).size.width < compactBreakpoint;
 
-        final rail = ServerRail(
-          servers: [
-            for (final s in state.servers) ServerRailEntry(hash: s.hash, name: s.name),
-          ],
-          selectedHash: state.selectedServerHash,
-          onSelect: (hash) => state.selectServer(hash),
-          onAddServer: () => showNewServerDialog(context, state),
-          onSettings: () => showSettingsDialog(context, state),
+        final rail = SectionTheme(
+          spec: spec,
+          section: TCSection.serverRail,
+          child: ServerRail(
+            servers: [
+              for (final s in state.servers) ServerRailEntry(hash: s.hash, name: s.name),
+            ],
+            selectedHash: state.selectedServerHash,
+            onSelect: (hash) => state.selectServer(hash),
+            onAddServer: () => showNewServerDialog(context, state),
+            onSettings: () => showSettingsDialog(context, state),
+          ),
         );
 
         final channelColumn = ChannelColumn(
@@ -177,6 +242,14 @@ class _MainWindowState extends State<MainWindow> {
           voiceParticipants: voiceRoster,
           onJoinVoice: canJoinVoice ? () => state.joinVoice(channelHash) : null,
           syncStates: state.syncStateByChannel,
+          channelPermissions: state.permissionsByChannel,
+          onViewMembers: (c) => showMembersDialog(context, state,
+              channelHashHex: c.hash, channelName: c.name),
+          onInviteToChannel: (c) => showInviteDialog(context, state,
+              channelHashHex: c.hash, channelName: c.name),
+          onEditPermissions: (c) => showPermissionsDialog(context, state,
+              channelHashHex: c.hash, channelName: c.name),
+          onLeaveChannel: _leaveChannel,
         );
 
         final voicePanel = inVoice
@@ -189,32 +262,43 @@ class _MainWindowState extends State<MainWindow> {
                 onLeave: () => state.leaveVoice(),
               )
             : null;
-        final channelPane = voicePanel == null
-            ? channelColumn
-            : Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [Expanded(child: channelColumn), voicePanel],
-              );
+        final channelPane = SectionTheme(
+          spec: spec,
+          section: TCSection.channelList,
+          child: voicePanel == null
+              ? channelColumn
+              : Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [Expanded(child: channelColumn), voicePanel],
+                ),
+        );
 
-        final content = Column(
+        final content = SectionTheme(
+          spec: spec,
+          section: TCSection.content,
+          child: Column(
                 children: [
-                  ChannelHeader(
-                    channelName: channel?.name ?? '',
-                    topic: channel?.description ?? '',
-                    linkQuality: linkQuality,
-                    activeTab: _tab,
-                    onTabSelected: (t) => setState(() => _tab = t),
-                    compact: compact,
-                    onOpenNav:
-                        compact ? () => _scaffoldKey.currentState?.openDrawer() : null,
-                    onViewMembers: channel == null || channelHash == null
-                        ? null
-                        : () => showMembersDialog(
-                              context,
-                              state,
-                              channelHashHex: channelHash,
-                              channelName: channel.name,
-                            ),
+                  SectionTheme(
+                    spec: spec,
+                    section: TCSection.topBar,
+                    child: ChannelHeader(
+                      channelName: channel?.name ?? '',
+                      topic: channel?.description ?? '',
+                      linkQuality: linkQuality,
+                      activeTab: _tab,
+                      onTabSelected: (t) => setState(() => _tab = t),
+                      compact: compact,
+                      onOpenNav:
+                          compact ? () => _scaffoldKey.currentState?.openDrawer() : null,
+                      onViewMembers: channel == null || channelHash == null
+                          ? null
+                          : () => showMembersDialog(
+                                context,
+                                state,
+                                channelHashHex: channelHash,
+                                channelName: channel.name,
+                              ),
+                    ),
                   ),
                   Expanded(
                     child: switch (_tab) {
@@ -244,31 +328,46 @@ class _MainWindowState extends State<MainWindow> {
                             friendHashes: friendHashes,
                             onAddFriend: (hash) =>
                                 showAddFriendDialog(context, state, identityHash: hash),
+                            onAddTheme: state.saveThemeAs,
+                            onApplyTheme: (spec) async {
+                              await state.saveTheme(spec);
+                              return state.themeSpec == spec;
+                            },
+                            themeLibrary: state.themeLibrary,
                           ),
                     },
                   ),
                   // In compact mode the drawer hides the column's panel, so
                   // mute/leave stay reachable above the compose bar.
-                  if (compact && voicePanel != null) voicePanel,
+                  if (compact && voicePanel != null)
+                    SectionTheme(
+                      spec: spec,
+                      section: TCSection.channelList,
+                      child: voicePanel,
+                    ),
                   if (_tab == ChannelTab.chat)
                     ComposeBar(
                       channelName: channel?.name ?? '',
+                      channelHash: channelHash,
                       enabled: channelHash != null && (permissions?.sendMessage ?? true),
                       onSend: (content) => state.sendMessage(content),
                       pickEmoji: () async =>
                           (await showEmojiPickerDialog(context, state))?.composeToken,
+                      pendingThemeShare: state.pendingThemeShare,
+                      onThemeShareConsumed: state.consumePendingThemeShare,
                       compact: compact,
                     ),
                 ],
-              );
+              ),
+        );
 
         if (compact) {
           return Scaffold(
             key: _scaffoldKey,
-            backgroundColor: TCColors.bgApp,
+            backgroundColor: baseColors.bgApp,
             drawer: Drawer(
               width: 266,
-              backgroundColor: TCColors.bgSurface,
+              backgroundColor: baseColors.bgSurface,
               shape: const RoundedRectangleBorder(),
               child: Row(
                 crossAxisAlignment: CrossAxisAlignment.stretch,

@@ -6,6 +6,8 @@ import 'package:flutter/material.dart';
 
 import '../../app_state.dart';
 import '../../theme/effects.dart';
+import '../../theme/section_theme.dart';
+import '../../theme/theme_spec.dart';
 import '../../theme/tokens.dart';
 import '../../widgets/tc_button.dart';
 import '../../widgets/tc_dialog.dart';
@@ -18,8 +20,11 @@ Future<void> showNewChannelDialog(BuildContext context, AppState state,
     {String? serverHashHex}) {
   return showTcDialog<void>(
     context: context,
-    builder: (context) =>
-        _NewChannelDialogContent(state: state, serverHashHex: serverHashHex),
+    builder: (context) => SectionTheme(
+      spec: state.themeSpec,
+      section: TCSection.dialogs,
+      child: _NewChannelDialogContent(state: state, serverHashHex: serverHashHex),
+    ),
   );
 }
 
@@ -64,7 +69,7 @@ class _NewChannelDialogContentState extends State<_NewChannelDialogContent> {
     if (hash == null) {
       setState(() {
         _busy = false;
-        _error = widget.state.actionError ?? 'Could not create channel.';
+        _error = widget.state.takeActionError() ?? 'Could not create channel.';
       });
       return;
     }
@@ -74,6 +79,7 @@ class _NewChannelDialogContentState extends State<_NewChannelDialogContent> {
   @override
   Widget build(BuildContext context) {
     final inServer = widget.serverHashHex != null;
+    final tc = SectionTheme.of(context);
     return TcDialogShell(
       title: inServer ? 'New Channel in Server' : 'New Channel',
       errorText: _error,
@@ -82,16 +88,26 @@ class _NewChannelDialogContentState extends State<_NewChannelDialogContent> {
         TcPrimaryButton(label: _busy ? 'CREATING…' : 'CREATE', onPressed: _busy ? null : _submit),
       ],
       children: [
-        TcTextField(label: 'Name', controller: _name, hintText: 'general', autofocus: true),
+        TcTextField(
+          label: 'Name',
+          controller: _name,
+          hintText: 'general',
+          autofocus: true,
+          onSubmitted: (_) => _submit(),
+        ),
         const SizedBox(height: 12),
-        TcTextField(label: 'Description', controller: _desc),
+        TcTextField(
+          label: 'Description',
+          controller: _desc,
+          onSubmitted: (_) => _submit(),
+        ),
         if (!inServer) ...[
           const SizedBox(height: 12),
           Text(
             'ACCESS',
             style: TextStyle(
               fontSize: TCType.textCaption,
-              color: TCColors.textSecondary,
+              color: tc.textSecondary,
               letterSpacing: TCType.letterSpacingFor(TCType.textCaption, TCType.trackingWide),
             ),
           ),
@@ -134,6 +150,7 @@ class _AccessOption extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final tc = SectionTheme.of(context);
     final selected = value == groupValue;
     return GestureDetector(
       onTap: () => onSelected(value),
@@ -144,15 +161,15 @@ class _AccessOption extends StatelessWidget {
           curve: TCEffects.easeTerminal,
           padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
           decoration: BoxDecoration(
-            color: selected ? TCColors.green900 : Colors.transparent,
-            border: Border.all(color: selected ? TCColors.borderAccent : TCColors.borderDefault),
+            color: selected ? tc.bgSelected : Colors.transparent,
+            border: Border.all(color: selected ? tc.borderAccent : tc.borderDefault),
           ),
           child: Text(
             label,
             style: TextStyle(
               fontSize: TCType.textCaption,
               letterSpacing: TCType.letterSpacingFor(TCType.textCaption, TCType.trackingWide),
-              color: selected ? TCColors.green100 : TCColors.textSecondary,
+              color: selected ? tc.textEmphasis : tc.textSecondary,
             ),
           ),
         ),

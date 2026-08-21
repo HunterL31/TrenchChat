@@ -7,11 +7,14 @@ import 'package:flutter/material.dart';
 import '../../api/models/server.dart';
 import '../../api/models/settings.dart';
 import '../../app_state.dart';
+import '../../theme/section_theme.dart';
+import '../../theme/theme_spec.dart';
 import '../../theme/tokens.dart';
 import '../../widgets/tc_button.dart';
 import '../../widgets/tc_checkbox.dart';
 import '../../widgets/tc_dialog.dart';
 import '../../widgets/tc_text_field.dart';
+import 'appearance_dialog.dart';
 import 'pin_dialogs.dart';
 
 Future<void> showSettingsDialog(BuildContext context, AppState state) {
@@ -124,7 +127,7 @@ class _SettingsDialogContentState extends State<_SettingsDialogContent> {
     if (!okName || !okSettings) {
       setState(() {
         _busy = false;
-        _error = widget.state.actionError ?? 'Could not save settings.';
+        _error = widget.state.takeActionError() ?? 'Could not save settings.';
       });
       return;
     }
@@ -133,6 +136,15 @@ class _SettingsDialogContentState extends State<_SettingsDialogContent> {
 
   @override
   Widget build(BuildContext context) {
+    return SectionTheme(
+      spec: widget.state.themeSpec,
+      section: TCSection.dialogs,
+      child: Builder(builder: _buildContent),
+    );
+  }
+
+  Widget _buildContent(BuildContext context) {
+    final tc = SectionTheme.of(context);
     return TcDialogShell(
       title: 'Settings',
       width: 460,
@@ -153,7 +165,7 @@ class _SettingsDialogContentState extends State<_SettingsDialogContent> {
                     'LOADING…',
                     style: TextStyle(
                       fontSize: TCType.textCaption,
-                      color: TCColors.textTertiary,
+                      color: tc.textTertiary,
                       letterSpacing:
                           TCType.letterSpacingFor(TCType.textCaption, TCType.trackingWide),
                     ),
@@ -166,22 +178,30 @@ class _SettingsDialogContentState extends State<_SettingsDialogContent> {
                 constraints: const BoxConstraints(maxHeight: 420),
                 child: ListView(
                   shrinkWrap: true,
+                  // Keeps every line clear of the scrollbar, rather than the
+                  // longer ones running under it.
+                  padding: EdgeInsets.only(right: scrollbarInset(context)),
                   children: [
-                    _sectionLabel('IDENTITY'),
+                    _sectionLabel(tc, 'IDENTITY'),
                     const SizedBox(height: 8),
-                    TcTextField(label: 'Display name', controller: _displayName),
+                    TcTextField(
+                      label: 'Display name',
+                      controller: _displayName,
+                      onSubmitted: (_) => _submit(),
+                    ),
                     const SizedBox(height: 10),
-                    _readonlyRow('Identity hash', widget.state.meHashHex),
+                    _readonlyRow(tc, 'Identity hash', widget.state.meHashHex),
                     const SizedBox(height: 10),
                     TcTextField(
                       label: 'Propagation node',
                       controller: _outboundNode,
                       hintText: 'Leave blank to use direct delivery only',
+                      onSubmitted: (_) => _submit(),
                     ),
                     const SizedBox(height: 16),
-                    Container(height: 1, color: TCColors.borderSubtle),
+                    Container(height: 1, color: tc.borderSubtle),
                     const SizedBox(height: 12),
-                    _sectionLabel('PROPAGATION NODE'),
+                    _sectionLabel(tc, 'PROPAGATION NODE'),
                     const SizedBox(height: 8),
                     TcCheckbox(
                       value: _propEnabled,
@@ -193,15 +213,20 @@ class _SettingsDialogContentState extends State<_SettingsDialogContent> {
                       label: 'Node name',
                       controller: _nodeName,
                       hintText: 'e.g. my-relay',
+                      onSubmitted: (_) => _submit(),
                     ),
                     const SizedBox(height: 10),
-                    TcTextField(label: 'Storage limit (MB)', controller: _storageLimit),
+                    TcTextField(
+                      label: 'Storage limit (MB)',
+                      controller: _storageLimit,
+                      onSubmitted: (_) => _submit(),
+                    ),
                     const SizedBox(height: 10),
                     Text(
                       'CHANNEL FILTER',
                       style: TextStyle(
                         fontSize: TCType.textCaption,
-                        color: TCColors.textSecondary,
+                        color: tc.textSecondary,
                         letterSpacing:
                             TCType.letterSpacingFor(TCType.textCaption, TCType.trackingWide),
                       ),
@@ -212,44 +237,12 @@ class _SettingsDialogContentState extends State<_SettingsDialogContent> {
                       value: _filterMode,
                       onSelected: (v) => setState(() => _filterMode = v),
                     ),
-                    const SizedBox(height: 16),
-                    Container(height: 1, color: TCColors.borderSubtle),
-                    const SizedBox(height: 12),
-                    _sectionLabel('SECURITY'),
-                    const SizedBox(height: 8),
-                    Text(
-                      _sessionPin != null
-                          ? 'Your identity and message database are protected by a PIN.'
-                          : 'No PIN is set. Your identity file and message database '
-                              'are stored unencrypted.',
-                      style: TextStyle(
-                          fontSize: TCType.textBodySm, color: TCColors.textSecondary),
-                    ),
-                    const SizedBox(height: 8),
-                    Row(
-                      children: [
-                        if (_sessionPin == null)
-                          TcGhostButton(label: 'SET PIN…', onPressed: _onSetPin)
-                        else ...[
-                          TcGhostButton(label: 'CHANGE PIN…', onPressed: _onChangePin),
-                          const SizedBox(width: 6),
-                          TcGhostButton(label: 'LOCK NOW', onPressed: _onLockNow),
-                        ],
-                      ],
-                    ),
-                    const SizedBox(height: 6),
-                    Text(
-                      'The lock screen and PIN dialogs are UI-only in this spike '
-                      '— the lockbox is not reachable over the API yet.',
-                      style: TextStyle(
-                          fontSize: TCType.textMicro, color: TCColors.textTertiary),
-                    ),
                     if (_filterMode == 'allowlist' && _allChannels.isNotEmpty) ...[
                       const SizedBox(height: 10),
                       Container(
                         decoration: BoxDecoration(
-                          color: TCColors.bgInset,
-                          border: Border.all(color: TCColors.borderDefault),
+                          color: tc.bgInset,
+                          border: Border.all(color: tc.borderDefault),
                         ),
                         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
                         child: Column(
@@ -274,11 +267,88 @@ class _SettingsDialogContentState extends State<_SettingsDialogContent> {
                         ),
                       ),
                     ],
+                    const SizedBox(height: 16),
+                    Container(height: 1, color: tc.borderSubtle),
+                    const SizedBox(height: 12),
+                    _sectionLabel(tc, 'SECURITY'),
+                    const SizedBox(height: 8),
+                    Text(
+                      _sessionPin != null
+                          ? 'Your identity and message database are protected by a PIN.'
+                          : 'No PIN is set. Your identity file and message database '
+                              'are stored unencrypted.',
+                      style: TextStyle(
+                          fontSize: TCType.textBodySm, color: tc.textSecondary),
+                    ),
+                    const SizedBox(height: 8),
+                    Row(
+                      children: [
+                        if (_sessionPin == null)
+                          TcGhostButton(label: 'SET PIN…', onPressed: _onSetPin)
+                        else ...[
+                          TcGhostButton(label: 'CHANGE PIN…', onPressed: _onChangePin),
+                          const SizedBox(width: 6),
+                          TcGhostButton(label: 'LOCK NOW', onPressed: _onLockNow),
+                        ],
+                      ],
+                    ),
+                    const SizedBox(height: 6),
+                    Text(
+                      'The lock screen and PIN dialogs are UI-only in this spike '
+                      '— the lockbox is not reachable over the API yet.',
+                      style: TextStyle(
+                          fontSize: TCType.textMicro, color: tc.textTertiary),
+                    ),
+                    const SizedBox(height: 16),
+                    Container(height: 1, color: tc.borderSubtle),
+                    const SizedBox(height: 12),
+                    _sectionLabel(tc, 'APPEARANCE'),
+                    const SizedBox(height: 8),
+                    Text(
+                      _themeSummary,
+                      style: TextStyle(fontSize: TCType.textBodySm, color: tc.textSecondary),
+                    ),
+                    const SizedBox(height: 8),
+                    Row(
+                      children: [
+                        TcGhostButton(label: 'EDIT THEME…', onPressed: _onEditTheme),
+                      ],
+                    ),
                   ],
                 ),
               ),
             ],
     );
+  }
+
+  /// One line describing how far the saved theme departs from stock.
+  String get _themeSummary {
+    final spec = widget.state.themeSpec;
+    if (spec.isEmpty) return 'Using the stock palette.';
+    final tokens = spec.base.length +
+        spec.sections.values.fold<int>(0, (sum, tokens) => sum + tokens.length);
+    final styles = spec.styles.values.fold<int>(0, (sum, keys) => sum + keys.length);
+    final scopes = <String>{
+      ...spec.sections.keys,
+      ...spec.styles.keys,
+      if (spec.base.isNotEmpty) ThemeSpec.baseStyleScope,
+    }.length;
+    final counted = [
+      if (tokens > 0) '$tokens color${tokens == 1 ? '' : 's'}',
+      if (styles > 0) '$styles style${styles == 1 ? '' : 's'}',
+    ].join(' and ');
+    return '$counted customized across $scopes scope${scopes == 1 ? '' : 's'}.';
+  }
+
+  Future<void> _onEditTheme() async {
+    final staged = await showAppearanceDialog(context, widget.state);
+    if (!mounted) return;
+    // A staged share belongs in the compose box, so get out of its way.
+    if (staged == true) {
+      Navigator.pop(context);
+      return;
+    }
+    setState(() {});
   }
 
   Future<void> _onSetPin() async {
@@ -298,23 +368,23 @@ class _SettingsDialogContentState extends State<_SettingsDialogContent> {
     await showUnlockDialog(context, verifyPin: (pin) => pin == _sessionPin);
   }
 
-  Widget _sectionLabel(String label) => Text(
+  Widget _sectionLabel(TCSectionColors tc, String label) => Text(
         label,
         style: TextStyle(
           fontSize: TCType.textCaption,
-          color: TCColors.accentPrimary,
+          color: tc.accentPrimary,
           letterSpacing: TCType.letterSpacingFor(TCType.textCaption, TCType.trackingWider),
         ),
       );
 
-  Widget _readonlyRow(String label, String value) => Column(
+  Widget _readonlyRow(TCSectionColors tc, String label, String value) => Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Text(
             label.toUpperCase(),
             style: TextStyle(
               fontSize: TCType.textCaption,
-              color: TCColors.textSecondary,
+              color: tc.textSecondary,
               letterSpacing:
                   TCType.letterSpacingFor(TCType.textCaption, TCType.trackingWide),
             ),
@@ -322,7 +392,7 @@ class _SettingsDialogContentState extends State<_SettingsDialogContent> {
           const SizedBox(height: 6),
           SelectableText(
             value,
-            style: TextStyle(fontSize: TCType.textBodySm, color: TCColors.textTertiary),
+            style: TextStyle(fontSize: TCType.textBodySm, color: tc.textTertiary),
           ),
         ],
       );

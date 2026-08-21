@@ -6,6 +6,8 @@
 import 'package:flutter/material.dart';
 
 import '../../app_state.dart';
+import '../../theme/section_theme.dart';
+import '../../theme/theme_spec.dart';
 import '../../widgets/tc_button.dart';
 import '../../widgets/tc_dialog.dart';
 import '../../widgets/tc_text_field.dart';
@@ -17,7 +19,11 @@ Future<void> showAddFriendDialog(
 }) {
   return showTcDialog<void>(
     context: context,
-    builder: (context) => _AddFriendDialogContent(state: state, identityHash: identityHash),
+    builder: (context) => SectionTheme(
+      spec: state.themeSpec,
+      section: TCSection.dialogs,
+      child: _AddFriendDialogContent(state: state, identityHash: identityHash),
+    ),
   );
 }
 
@@ -81,7 +87,7 @@ class _AddFriendDialogContentState extends State<_AddFriendDialogContent> {
     if (!ok) {
       setState(() {
         _busy = false;
-        _error = widget.state.actionError ?? 'Could not save friend.';
+        _error = widget.state.takeActionError() ?? 'Could not save friend.';
       });
       return;
     }

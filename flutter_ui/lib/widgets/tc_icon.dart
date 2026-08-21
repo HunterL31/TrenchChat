@@ -4,7 +4,7 @@
 // Material icons; the rounded Material style clashes with this design.
 import 'package:flutter/widgets.dart';
 
-import '../theme/tokens.dart';
+import '../theme/section_theme.dart';
 
 /// One glyph: polylines and filled polygons in a 16x16 coordinate space.
 /// A polyline whose first and last points are equal is drawn closed.
@@ -265,8 +265,8 @@ class TcIcons {
   ];
 }
 
-/// Renders a [TcIconData] at [size], stroked in [color]
-/// (defaults to [TCColors.textSecondary]).
+/// Renders a [TcIconData] at [size], stroked in [color] (defaults to the
+/// enclosing section's `textSecondary`).
 class TcIcon extends StatelessWidget {
   const TcIcon(this.icon, {super.key, this.size = 16, this.color});
 
@@ -278,7 +278,7 @@ class TcIcon extends StatelessWidget {
   Widget build(BuildContext context) {
     return CustomPaint(
       size: Size.square(size),
-      painter: _TcIconPainter(icon: icon, color: color ?? TCColors.textSecondary),
+      painter: _TcIconPainter(icon: icon, color: color ?? SectionTheme.of(context).textSecondary),
     );
   }
 }

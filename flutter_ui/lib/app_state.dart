@@ -20,6 +20,7 @@ import 'api/models/server.dart';
 import 'api/models/settings.dart';
 import 'api/models/voice.dart';
 import 'api/ws.dart';
+import 'theme/theme_spec.dart';
 
 /// How long reaction events for one channel are coalesced before the
 /// channel's messages are re-fetched.
@@ -70,8 +71,12 @@ class AppState extends ChangeNotifier {
   /// Optimistic local mute state; reconciled from the backend on each poll.
   bool voiceMuted = false;
 
-  /// Set by a `voice_session: audio_error` event: the session is up but
-  /// capture/playback failed -- we stay in the call, listening-only.
+  /// The session is up but the backend has no working audio pipeline -- we
+  /// stay in the call, listening-only. A `voice_session: audio_error` event
+  /// raises it the moment the pipeline fails; [refreshVoiceStatus] keeps it
+  /// true from GET /voice/status thereafter, so a client that joined before
+  /// this one connected (or missed the event on a dropped socket) still shows
+  /// the state instead of a plain LIVE.
   bool voiceAudioError = false;
   Timer? _voicePollTimer;
 
@@ -92,6 +97,18 @@ class AppState extends ChangeNotifier {
   /// message bubbles or the presence roster (see friends_tab.dart).
   List<Friend> friends = [];
 
+  /// The saved per-section color theme. Empty means every section renders
+  /// stock; the shell resolves it per region via SectionTheme.
+  ThemeSpec themeSpec = ThemeSpec.empty;
+
+  /// Themes saved under a name, keyed by that name. Applying one is a local
+  /// edit -- only [themeSpec] is what the app renders with.
+  Map<String, ThemeSpec> themeLibrary = {};
+
+  /// A theme the appearance editor handed to the compose box, waiting to be
+  /// dropped into the draft. Nothing is sent until the user sends it.
+  ({String name, String code})? pendingThemeShare;
+
   bool loading = true;
   String? error;
 
@@ -99,7 +116,23 @@ class AppState extends ChangeNotifier {
   /// [error], which is fatal and takes over the whole screen on init failure --
   /// this one is transient and meant for a toast/snackbar, cleared on the next
   /// attempt. Single surface so every call site reports failures the same way.
+  ///
+  /// Read it with [takeActionError], never directly: main_window.dart shows
+  /// whatever is left here in an app-wide snackbar, which is the right surface
+  /// only for failures with no UI of their own.
   String? actionError;
+
+  /// The last action error, claimed: taking it stops main_window.dart's
+  /// app-wide snackbar from showing the same failure a second time.
+  ///
+  /// Every flow that renders the failure itself -- every dialog -- must read it
+  /// this way. Nothing renders [actionError] directly, so no notification is
+  /// needed to clear it.
+  String? takeActionError() {
+    final message = actionError;
+    actionError = null;
+    return message;
+  }
 
   Channel? get selectedChannel {
     final hash = selectedChannelHash;
@@ -145,6 +178,8 @@ class AppState extends ChangeNotifier {
       }
 
       await loadFriends();
+      await loadTheme();
+      await loadThemeLibrary();
 
       loading = false;
       notifyListeners();
@@ -335,6 +370,32 @@ class AppState extends ChangeNotifier {
     }
   }
 
+  /// Leaves a standalone channel: unsubscribes and drops it from the list,
+  /// selecting whatever is left when it was the open one. Stored history is
+  /// kept, so re-joining shows it again.
+  Future<bool> leaveChannel(String channelHashHex) async {
+    try {
+      final ok = await api.leaveChannel(channelHashHex);
+      if (!ok) return false;
+      standaloneChannels = await api.getChannels();
+      if (selectedChannelHash == channelHashHex) {
+        final visible = selectedServerHash != null
+            ? channelsByServer[selectedServerHash] ?? const <Channel>[]
+            : standaloneChannels;
+        final next = visible.isNotEmpty ? visible.first.hash : null;
+        selectedChannelHash = next;
+        notifyListeners();
+        if (next != null) await loadChannel(next);
+        return true;
+      }
+      notifyListeners();
+      return true;
+    } catch (e) {
+      _reportActionError(e);
+      return false;
+    }
+  }
+
   /// Joins [channelHashHex]'s voice session. Returns false (with
   /// [actionError] set) when the backend refused the join.
   Future<bool> joinVoice(String channelHashHex) async {
@@ -401,6 +462,9 @@ class AppState extends ChangeNotifier {
     try {
       voiceStatus = await api.getVoiceStatus();
       voiceMuted = voiceStatus.muted;
+      // Only meaningful inside a session: with no call up there is no pipeline
+      // to run, and the backend reports that as unavailable too.
+      voiceAudioError = voiceStatus.channel != null && !voiceStatus.audioAvailable;
       notifyListeners();
     } catch (_) {
       // Next poll tick will catch it up.
@@ -579,6 +643,90 @@ class AppState extends ChangeNotifier {
     }
   }
 
+  /// Loads the saved per-section theme. Non-fatal by design: a backend that
+  /// cannot serve one leaves the stock theme in place rather than blocking
+  /// startup.
+  Future<void> loadTheme() async {
+    try {
+      themeSpec = ThemeSpec.fromJson(await api.getUiTheme());
+      notifyListeners();
+    } catch (_) {
+      themeSpec = ThemeSpec.empty;
+    }
+  }
+
+  /// Saves [spec] and adopts it, rebuilding every themed section. On failure
+  /// the previous theme stays in force and [actionError] carries the reason.
+  Future<void> saveTheme(ThemeSpec spec) async {
+    try {
+      await api.setUiTheme(spec.toJson());
+      themeSpec = spec;
+      notifyListeners();
+    } catch (e) {
+      _reportActionError(e);
+    }
+  }
+
+  /// Loads the named theme library, non-fatal on the same terms as
+  /// [loadTheme]: a backend that cannot serve one leaves the library empty.
+  Future<void> loadThemeLibrary() async {
+    try {
+      final themes = await api.getThemeLibrary();
+      themeLibrary = {
+        for (final entry in themes.entries)
+          if (entry.value is Map<String, dynamic>)
+            entry.key: ThemeSpec.fromJson(entry.value as Map<String, dynamic>),
+      };
+      notifyListeners();
+    } catch (_) {
+      themeLibrary = {};
+    }
+  }
+
+  /// Saves [spec] under [name], replacing any theme already saved there.
+  /// Returns true on success; on failure [actionError] carries the reason and
+  /// the library is left as it was.
+  Future<bool> saveThemeAs(String name, ThemeSpec spec) async {
+    try {
+      await api.saveThemeToLibrary(name, spec.toJson());
+      themeLibrary = {...themeLibrary, name: spec};
+      notifyListeners();
+      return true;
+    } catch (e) {
+      _reportActionError(e);
+      return false;
+    }
+  }
+
+  /// Offers [code] to the compose box under [name], where it lands in the
+  /// draft as a short token the user can still delete before sending.
+  void stageThemeShare(String name, String code) {
+    pendingThemeShare = (name: name, code: code);
+    notifyListeners();
+  }
+
+  /// Takes the staged share and clears it. Deliberately silent: it is read
+  /// while the compose box is already building.
+  ({String name, String code})? consumePendingThemeShare() {
+    final staged = pendingThemeShare;
+    pendingThemeShare = null;
+    return staged;
+  }
+
+  /// Removes a saved theme. Returns true on success; on failure [actionError]
+  /// carries the reason.
+  Future<bool> deleteSavedTheme(String name) async {
+    try {
+      await api.deleteThemeFromLibrary(name);
+      themeLibrary = {...themeLibrary}..remove(name);
+      notifyListeners();
+      return true;
+    } catch (e) {
+      _reportActionError(e);
+      return false;
+    }
+  }
+
   /// Saves the propagation/outbound settings. Returns true on success; on
   /// failure [actionError] is set.
   Future<bool> saveSettings(TcSettings settings) async {
@@ -695,6 +843,17 @@ class AppState extends ChangeNotifier {
             notifyListeners();
           }
         }
+      case UiThemeEvent(:final spec):
+        // An event that only says what is already in force is what this
+        // client's own save just produced; adopting it again would rebuild
+        // every section for nothing.
+        if (spec == themeSpec) break;
+        themeSpec = spec;
+        notifyListeners();
+      case UiThemeLibraryEvent(:final library):
+        if (mapEquals(library, themeLibrary)) break;
+        themeLibrary = library;
+        notifyListeners();
       case VoiceSessionEvent(:final state):
         switch (state) {
           case 'joined':

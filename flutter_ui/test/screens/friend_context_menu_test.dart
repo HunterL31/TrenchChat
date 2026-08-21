@@ -206,4 +206,31 @@ void main() {
 
     expect(reacted, 'm1');
   });
+
+  testWidgets('your own message offers no Add friend, since you cannot befriend yourself',
+      (tester) async {
+    await tester.pumpWidget(MaterialApp(
+      home: Scaffold(
+        body: SizedBox(
+          width: 800,
+          height: 600,
+          child: MessageList(
+            messages: [_message()],
+            meHashHex: kAliceHash, // the sender is the local identity
+            displayNameFor: (hash, fallback) => fallback,
+            onAddFriend: (_) {},
+            onReact: (_) {},
+          ),
+        ),
+      ),
+    ));
+    await tester.pumpAndSettle();
+
+    await _rightClick(tester, find.text('hello'));
+    await tester.pump();
+
+    expect(find.text('React…'), findsOneWidget); // the menu did open
+    expect(find.text('Add friend…'), findsNothing);
+    expect(find.text('Edit friend…'), findsNothing);
+  });
 }

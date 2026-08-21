@@ -7,6 +7,8 @@
 import 'package:flutter/material.dart';
 
 import '../../app_state.dart';
+import '../../theme/section_theme.dart';
+import '../../theme/theme_spec.dart';
 import '../../theme/tokens.dart';
 import '../../widgets/tc_button.dart';
 import '../../widgets/tc_checkbox.dart';
@@ -27,10 +29,14 @@ Future<void> showPermissionsDialog(BuildContext context, AppState state,
     {required String channelHashHex, required String channelName}) {
   return showTcDialog<void>(
     context: context,
-    builder: (context) => _PermissionsDialogContent(
-      state: state,
-      channelHashHex: channelHashHex,
-      channelName: channelName,
+    builder: (context) => SectionTheme(
+      spec: state.themeSpec,
+      section: TCSection.dialogs,
+      child: _PermissionsDialogContent(
+        state: state,
+        channelHashHex: channelHashHex,
+        channelName: channelName,
+      ),
     ),
   );
 }
@@ -103,7 +109,7 @@ class _PermissionsDialogContentState extends State<_PermissionsDialogContent> {
     if (!ok) {
       setState(() {
         _busy = false;
-        _error = widget.state.actionError ?? 'The backend rejected the change.';
+        _error = widget.state.takeActionError() ?? 'The backend rejected the change.';
       });
       return;
     }
@@ -114,6 +120,7 @@ class _PermissionsDialogContentState extends State<_PermissionsDialogContent> {
 
   @override
   Widget build(BuildContext context) {
+    final tc = SectionTheme.of(context);
     return TcDialogShell(
       title: 'Permissions — #${widget.channelName}',
       width: 440,
@@ -132,7 +139,7 @@ class _PermissionsDialogContentState extends State<_PermissionsDialogContent> {
             child: Center(
               child: Text(
                 'LOADING…',
-                style: TextStyle(fontSize: TCType.textCaption, color: TCColors.textTertiary),
+                style: TextStyle(fontSize: TCType.textCaption, color: tc.textTertiary),
               ),
             ),
           )
@@ -179,7 +186,7 @@ class _PermissionsDialogContentState extends State<_PermissionsDialogContent> {
                 Text(
                   'Changes take effect immediately for this device and are '
                   'broadcast to other members.',
-                  style: TextStyle(fontSize: TCType.textCaption, color: TCColors.textTertiary),
+                  style: TextStyle(fontSize: TCType.textCaption, color: tc.textTertiary),
                 ),
               ],
             ),
@@ -194,7 +201,7 @@ class _PermissionsDialogContentState extends State<_PermissionsDialogContent> {
             role,
             style: TextStyle(
               fontSize: TCType.textCaption,
-              color: TCColors.accentPrimary,
+              color: SectionTheme.of(context).accentPrimary,
               letterSpacing:
                   TCType.letterSpacingFor(TCType.textCaption, TCType.trackingWider),
             ),
@@ -203,7 +210,8 @@ class _PermissionsDialogContentState extends State<_PermissionsDialogContent> {
             const SizedBox(width: 8),
             Text(
               note,
-              style: TextStyle(fontSize: TCType.textMicro, color: TCColors.textTertiary),
+              style: TextStyle(
+                  fontSize: TCType.textMicro, color: SectionTheme.of(context).textTertiary),
             ),
           ],
         ],

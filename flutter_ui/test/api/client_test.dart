@@ -103,6 +103,19 @@ void main() {
     expect(await client.joinChannel('chan-hash'), isTrue);
   });
 
+  test('leaveChannel posts to the channel\'s leave route', () async {
+    final client = ApiClient(
+      baseUrl: 'http://example.test',
+      client: MockClient((request) async {
+        expect(request.method, 'POST');
+        expect(request.url.path, '/channels/chan-hash/leave');
+        return http.Response(jsonEncode({'ok': true}), 200);
+      }),
+    );
+
+    expect(await client.leaveChannel('chan-hash'), isTrue);
+  });
+
   test('getFriends decodes the friend list', () async {
     final client = ApiClient(
       baseUrl: 'http://example.test',

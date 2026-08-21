@@ -9,6 +9,8 @@ import json
 
 import pytest
 
+from trenchchat.core.channel import ChannelManager
+from trenchchat.core.naming import NameInUseError
 from trenchchat.core.permissions import FLAG_DISCOVERABLE, PRESET_PRIVATE, is_open_join, permissions_from_json
 from tests.helpers import (
     announce_and_wait,
@@ -97,6 +99,38 @@ class TestChannelCreation:
         # Instead, just verify the in-memory dict is populated correctly.
         owned = alice.channel_mgr._owned_destinations
         assert ch_hash in owned
+
+    def test_duplicate_name_is_refused(self, peer_factory):
+        """A second channel of the same name is the same address, so it is
+        refused instead of re-registering the destination (a hard RNS error)
+        and overwriting the first channel's row."""
+        alice = peer_factory("alice")
+        alice.channel_mgr.create_channel("general", "", "public")
+
+        with pytest.raises(NameInUseError) as excinfo:
+            alice.channel_mgr.create_channel("general", "again", "public")
+
+        assert "general" in str(excinfo.value)
+        assert len(alice.storage.get_all_channels()) == 1
+
+    def test_duplicate_name_is_refused_after_a_restart(self, peer_factory):
+        """The stored row is authoritative too: a fresh manager over the same
+        database refuses the name before touching RNS."""
+        alice = peer_factory("alice")
+        alice.channel_mgr.create_channel("general", "", "public")
+
+        fresh = ChannelManager(alice.identity, alice.storage)
+        with pytest.raises(NameInUseError):
+            fresh.create_channel("general", "", "public")
+
+    def test_duplicate_name_differing_only_in_punctuation_is_refused(self, peer_factory):
+        """Names are sanitised into the aspect, so two that sanitise alike
+        collide on the same address."""
+        alice = peer_factory("alice")
+        alice.channel_mgr.create_channel("Trench Chat", "", "public")
+
+        with pytest.raises(NameInUseError):
+            alice.channel_mgr.create_channel("trench chat", "", "public")
 
 
 class TestChannelDiscovery:

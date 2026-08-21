@@ -8,7 +8,8 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
-import '../../theme/effects.dart';
+import '../../theme/glow.dart';
+import '../../theme/section_theme.dart';
 import '../../theme/tokens.dart';
 import '../../widgets/tc_button.dart';
 import '../../widgets/tc_dialog.dart';
@@ -42,10 +43,11 @@ class _PinField extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final tc = SectionTheme.of(context);
     return Container(
       decoration: BoxDecoration(
-        color: TCColors.bgInset,
-        border: Border.all(color: TCColors.borderDefault),
+        color: tc.bgInset,
+        border: Border.all(color: tc.borderDefault),
       ),
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
       child: TextField(
@@ -58,7 +60,7 @@ class _PinField extends StatelessWidget {
         onSubmitted: onSubmitted,
         style: TextStyle(
           fontSize: TCType.textBodyMd,
-          color: TCColors.textPrimary,
+          color: tc.textPrimary,
           letterSpacing: TCType.letterSpacingFor(TCType.textBodyMd, TCType.trackingWider),
         ),
         decoration: InputDecoration(
@@ -66,18 +68,18 @@ class _PinField extends StatelessWidget {
           counterText: '',
           border: InputBorder.none,
           hintText: hint,
-          hintStyle: TextStyle(fontSize: TCType.textBodyMd, color: TCColors.textTertiary),
+          hintStyle: TextStyle(fontSize: TCType.textBodyMd, color: tc.textTertiary),
         ),
       ),
     );
   }
 }
 
-Widget _fieldLabel(String label) => Text(
+Widget _fieldLabel(BuildContext context, String label) => Text(
       label,
       style: TextStyle(
         fontSize: TCType.textCaption,
-        color: TCColors.textSecondary,
+        color: SectionTheme.of(context).textSecondary,
         letterSpacing: TCType.letterSpacingFor(TCType.textCaption, TCType.trackingWide),
       ),
     );
@@ -142,14 +144,15 @@ class _SetPinContentState extends State<_SetPinContent> {
         Text(
           'Choose a $pinMinLen–$pinMaxLen digit numeric PIN to lock your '
           'identity and message database.',
-          style: TextStyle(fontSize: TCType.textBodySm, color: TCColors.textSecondary),
+          style: TextStyle(
+              fontSize: TCType.textBodySm, color: SectionTheme.of(context).textSecondary),
         ),
         const SizedBox(height: 12),
-        _fieldLabel('NEW PIN'),
+        _fieldLabel(context, 'NEW PIN'),
         const SizedBox(height: 6),
         _PinField(controller: _pin1, hint: 'New PIN', autofocus: true),
         const SizedBox(height: 10),
-        _fieldLabel('CONFIRM PIN'),
+        _fieldLabel(context, 'CONFIRM PIN'),
         const SizedBox(height: 6),
         _PinField(controller: _pin2, hint: 'Confirm PIN', onSubmitted: (_) => _submit()),
       ],
@@ -239,18 +242,19 @@ class _ChangePinContentState extends State<_ChangePinContent> {
         Text(
           'Enter your current PIN, then set a new one. Leave the new PIN '
           'fields empty to remove PIN protection.',
-          style: TextStyle(fontSize: TCType.textBodySm, color: TCColors.textSecondary),
+          style: TextStyle(
+              fontSize: TCType.textBodySm, color: SectionTheme.of(context).textSecondary),
         ),
         const SizedBox(height: 12),
-        _fieldLabel('CURRENT PIN'),
+        _fieldLabel(context, 'CURRENT PIN'),
         const SizedBox(height: 6),
         _PinField(controller: _current, hint: 'Current PIN', autofocus: true),
         const SizedBox(height: 10),
-        _fieldLabel('NEW PIN'),
+        _fieldLabel(context, 'NEW PIN'),
         const SizedBox(height: 6),
         _PinField(controller: _new1, hint: 'New PIN (leave blank to remove)'),
         const SizedBox(height: 10),
-        _fieldLabel('CONFIRM NEW PIN'),
+        _fieldLabel(context, 'CONFIRM NEW PIN'),
         const SizedBox(height: 6),
         _PinField(controller: _new2, hint: 'Confirm new PIN', onSubmitted: (_) => _submit()),
       ],
@@ -339,6 +343,7 @@ class _UnlockContentState extends State<_UnlockContent> {
 
   @override
   Widget build(BuildContext context) {
+    final tc = SectionTheme.of(context);
     return TcDialogShell(
       title: 'TrenchChat — Unlock',
       width: 340,
@@ -352,10 +357,10 @@ class _UnlockContentState extends State<_UnlockContent> {
           child: Text(
             'TrenchChat is locked',
             style: TextStyle(
-              fontFamily: TCType.fontDisplay,
+              fontFamily: SectionTheme.styleOf(context).displayFont,
               fontSize: TCType.textDisplaySm,
-              color: TCColors.green100,
-              shadows: [TCEffects.textGlowGreen],
+              color: tc.textEmphasis,
+              shadows: tcTextGlow(context),
             ),
           ),
         ),
@@ -363,7 +368,8 @@ class _UnlockContentState extends State<_UnlockContent> {
         Center(
           child: Text(
             'Enter your PIN to unlock.',
-            style: TextStyle(fontSize: TCType.textBodySm, color: TCColors.textSecondary),
+            style: TextStyle(
+                fontSize: TCType.textBodySm, color: SectionTheme.of(context).textSecondary),
           ),
         ),
         const SizedBox(height: 14),

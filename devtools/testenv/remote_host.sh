@@ -114,14 +114,9 @@ start_testenv() {
     # discover the address its default route uses, and every call the pages
     # make to a tester is cross-origin, so an address missing from the
     # allow-list shows up as every tester "failed to connect".
-    local origins=()
-    local ip
-    ip="$(ts_ip)"
-    if [ -n "$ip" ]; then
-        origins+=(--page-origin "http://$ip:8800" --page-origin "http://$ip:$CLIENT_PORT")
-    fi
+    # shellcheck disable=SC2046
     nohup "$VENV/bin/python" "$REPO_ROOT/devtools/testenv/orchestrator.py" \
-        --testers "$TESTERS" --host 0.0.0.0 "${origins[@]}" \
+        --testers "$TESTERS" --host 0.0.0.0 $(page_origins) \
         >"$STATE_DIR/orchestrator.log" 2>&1 &
     echo $! >"$STATE_DIR/orchestrator.pid"
 }
@@ -130,12 +125,34 @@ ts_ip() {
     ts ip -4 2>/dev/null | head -1
 }
 
+ts_dnsname() {
+    # This node's MagicDNS name, without the trailing dot. Empty if the
+    # tailnet has MagicDNS off or status is unavailable.
+    ts status --json 2>/dev/null \
+        | grep -o '"DNSName": *"[^"]*"' | head -1 \
+        | cut -d'"' -f4 | sed 's/\.$//'
+}
+
+# --page-origin flags for every address a browser may reach this stack on:
+# tailnet IP and MagicDNS name, on the dev-environment and client ports.
+page_origins() {
+    local ip dns host
+    ip="$(ts_ip)"
+    dns="$(ts_dnsname)"
+    for host in $ip $dns; do
+        printf -- '--page-origin http://%s:8800 --page-origin http://%s:%s ' \
+            "$host" "$host" "$CLIENT_PORT"
+    done
+}
+
 start_client() {
     port_up "$CLIENT_PORT" && return
     log "starting web client (own identity) on $CLIENT_PORT"
     ensure_rns_config
+    # shellcheck disable=SC2046
     nohup "$VENV/bin/python" "$REPO_ROOT/devtools/testenv/serve_profile.py" \
         --port "$CLIENT_PORT" --host 0.0.0.0 --rns-configdir "$STATE_DIR/rns" \
+        $(page_origins) \
         >"$STATE_DIR/client.log" 2>&1 &
     echo $! >"$STATE_DIR/client.pid"
 }

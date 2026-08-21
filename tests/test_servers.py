@@ -15,7 +15,7 @@ import pytest
 
 from tests.helpers import wait_for, wait_for_member
 from trenchchat.core import actions
-from trenchchat.core.naming import server_hash_for
+from trenchchat.core.naming import NameInUseError, server_hash_for
 from trenchchat.core.permissions import (
     CREATE_CHANNEL, INVITE, PRESET_PRIVATE, PRESET_SERVER, ROLE_ADMIN,
     ROLE_MEMBER, ROLE_OWNER, SEND_MESSAGE, is_open_join, permissions_from_json,
@@ -45,6 +45,17 @@ class TestServerCreation:
         bob = peer_factory("bob")
         assert alice.server_mgr.create_server("Same Name") != \
             bob.server_mgr.create_server("Same Name")
+
+    def test_duplicate_name_is_refused(self, peer_factory):
+        """Same identity, same name, same address -- creating it twice would
+        re-register a live RNS destination and overwrite the first server."""
+        alice = peer_factory("alice")
+        alice.server_mgr.create_server("My Server")
+
+        with pytest.raises(NameInUseError) as excinfo:
+            alice.server_mgr.create_server("My Server")
+
+        assert "My Server" in str(excinfo.value)
 
     def test_creator_is_owner_with_tenure(self, peer_factory):
         alice = peer_factory("alice")

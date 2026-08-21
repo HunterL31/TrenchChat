@@ -14,6 +14,7 @@ import 'package:flutter/material.dart';
 
 import '../theme/effects.dart';
 import '../theme/notch.dart';
+import '../theme/section_theme.dart';
 import '../theme/tokens.dart';
 
 /// Presents [builder] as a centered modal with a dark scrim, fade + scale-in
@@ -62,6 +63,18 @@ Future<T?> showTcDialog<T>({
   );
 }
 
+/// Right-hand room for the scrollbar a desktop scroll behavior draws inside
+/// the viewport, over whatever is at its right edge. Give it to a scrollable's
+/// padding so the scrollbar never lands on the content: platforms that draw
+/// none (and the widget tests, which render as one of them) need no room.
+double scrollbarInset(BuildContext context) => switch (Theme.of(context).platform) {
+      TargetPlatform.linux ||
+      TargetPlatform.macOS ||
+      TargetPlatform.windows =>
+        TCSpace.space4,
+      _ => 0,
+    };
+
 /// Shared chrome for dialog content: notched panel, title rule, and a
 /// bottom-aligned action row. Dialogs supply their form fields as [children]
 /// and their buttons as [actions].
@@ -83,12 +96,13 @@ class TcDialogShell extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final tc = SectionTheme.of(context);
     // Never wider than the screen minus a margin, so phone viewports fit.
     final maxWidth = MediaQuery.of(context).size.width - 24;
     return NotchedPanel(
       notch: TCSpace.notch,
-      color: TCColors.bgSurfaceRaised,
-      border: TCColors.borderDefault,
+      color: tc.bgSurfaceRaised,
+      border: tc.borderDefault,
       boxShadow: TCEffects.shadowModal,
       child: Container(
         width: maxWidth < width ? maxWidth : width,
@@ -100,21 +114,21 @@ class TcDialogShell extends StatelessWidget {
             Text(
               title,
               style: TextStyle(
-                fontFamily: TCType.fontDisplay,
+                fontFamily: SectionTheme.styleOf(context).displayFont,
                 fontSize: 22,
                 height: 1.1,
-                color: TCColors.green100,
+                color: tc.textEmphasis,
               ),
             ),
             const SizedBox(height: 10),
-            Container(height: 1, color: TCColors.borderSubtle),
+            Container(height: 1, color: tc.borderSubtle),
             const SizedBox(height: 16),
             ...children,
             if (errorText != null) ...[
               const SizedBox(height: 12),
               Text(
                 errorText!,
-                style: TextStyle(fontSize: TCType.textCaption, color: TCColors.statusDanger),
+                style: TextStyle(fontSize: TCType.textCaption, color: tc.statusDanger),
               ),
             ],
             if (actions.isNotEmpty) ...[

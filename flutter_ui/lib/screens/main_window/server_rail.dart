@@ -2,6 +2,8 @@
 import 'package:flutter/material.dart';
 
 import '../../theme/effects.dart';
+import '../../theme/glow.dart';
+import '../../theme/section_theme.dart';
 import '../../theme/tokens.dart';
 import '../../widgets/dashed_border.dart';
 import '../../widgets/tc_button.dart';
@@ -41,24 +43,25 @@ class ServerRail extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final tc = SectionTheme.of(context);
     return Container(
       width: 60,
-      color: TCColors.ink950,
+      color: tc.bgApp,
       child: Column(
         children: [
           const SizedBox(height: 12),
           Text(
             '>_',
             style: TextStyle(
-              fontFamily: TCType.fontDisplay,
+              fontFamily: SectionTheme.styleOf(context).displayFont,
               fontSize: 26,
               height: 1,
-              color: TCColors.accentPrimary,
-              shadows: [TCEffects.textGlowGreen],
+              color: tc.accentPrimary,
+              shadows: tcTextGlow(context),
             ),
           ),
           const SizedBox(height: 12),
-          Container(width: 28, height: 1, color: TCColors.borderSubtle),
+          Container(width: 28, height: 1, color: tc.borderSubtle),
           const SizedBox(height: 12),
           for (final s in servers) ...[
             _ServerTile(
@@ -100,6 +103,7 @@ class _ServerTileState extends State<_ServerTile> {
 
   @override
   Widget build(BuildContext context) {
+    final tc = SectionTheme.of(context);
     final selected = widget.selected;
     return MouseRegion(
       cursor: SystemMouseCursors.click,
@@ -114,20 +118,20 @@ class _ServerTileState extends State<_ServerTile> {
           height: 38,
           alignment: Alignment.center,
           decoration: BoxDecoration(
-            color: selected ? TCColors.green900 : TCColors.bgInset,
+            color: selected ? tc.bgSelected : tc.bgInset,
             border: Border.all(
               color: selected
-                  ? TCColors.borderAccent
-                  : (_hover ? TCColors.borderStrong : TCColors.borderDefault),
+                  ? tc.borderAccent
+                  : (_hover ? tc.borderStrong : tc.borderDefault),
             ),
-            boxShadow: selected ? TCEffects.glowGreenSm : null,
+            boxShadow: selected ? tcBoxGlowSm(context) : null,
           ),
           child: Text(
             widget.label,
             style: TextStyle(
               fontSize: 13,
               letterSpacing: TCType.letterSpacingFor(13, 0.04),
-              color: selected ? TCColors.accentPrimary : TCColors.textSecondary,
+              color: selected ? tc.accentPrimary : tc.textSecondary,
             ),
           ),
         ),
@@ -150,6 +154,7 @@ class _AddServerTileState extends State<_AddServerTile> {
 
   @override
   Widget build(BuildContext context) {
+    final tc = SectionTheme.of(context);
     final disabled = widget.onTap == null;
     return MouseRegion(
       cursor: disabled ? SystemMouseCursors.basic : SystemMouseCursors.click,
@@ -158,7 +163,7 @@ class _AddServerTileState extends State<_AddServerTile> {
       child: GestureDetector(
         onTap: widget.onTap,
         child: DashedBorder(
-          color: _hover ? TCColors.borderStrong : TCColors.borderDefault,
+          color: _hover ? tc.borderStrong : tc.borderDefault,
           child: SizedBox(
             width: 38,
             height: 38,
@@ -167,7 +172,7 @@ class _AddServerTileState extends State<_AddServerTile> {
                 '+',
                 style: TextStyle(
                   fontSize: 16,
-                  color: _hover ? TCColors.textSecondary : TCColors.textTertiary,
+                  color: _hover ? tc.textSecondary : tc.textTertiary,
                 ),
               ),
             ),

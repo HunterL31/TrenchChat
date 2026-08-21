@@ -2,8 +2,8 @@
 import 'package:flutter/material.dart';
 
 import '../api/models/link_quality.dart';
-import '../theme/effects.dart';
-import '../theme/tokens.dart';
+import '../theme/glow.dart';
+import '../theme/section_theme.dart';
 
 class _Level {
   const _Level(this.n, this.color);
@@ -19,12 +19,13 @@ class SignalMeter extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final tc = SectionTheme.of(context);
     final levels = <LinkQualityLevel, _Level>{
-      LinkQualityLevel.excellent: _Level(4, TCColors.green400),
+      LinkQualityLevel.excellent: _Level(4, tc.statusOnline),
       LinkQualityLevel.good: _Level(3, HSLColor.fromAHSL(1, 70, 0.85, 0.55).toColor()),
-      LinkQualityLevel.fair: _Level(2, TCColors.amber400),
-      LinkQualityLevel.poor: _Level(1, TCColors.statusDanger),
-      LinkQualityLevel.unknown: _Level(0, TCColors.ink500),
+      LinkQualityLevel.fair: _Level(2, tc.statusWarn),
+      LinkQualityLevel.poor: _Level(1, tc.statusDanger),
+      LinkQualityLevel.unknown: _Level(0, tc.statusOffline),
     };
     final l = levels[level]!;
     return Row(
@@ -38,8 +39,8 @@ class SignalMeter extends StatelessWidget {
           width: 3,
           height: barHeight,
           decoration: BoxDecoration(
-            color: lit ? l.color : TCColors.ink700,
-            boxShadow: (lit && level == LinkQualityLevel.excellent) ? TCEffects.glowGreenSm : null,
+            color: lit ? l.color : tc.textDisabled,
+            boxShadow: (lit && level == LinkQualityLevel.excellent) ? tcBoxGlowSm(context) : null,
           ),
         );
       }),
