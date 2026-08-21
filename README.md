@@ -173,3 +173,4 @@ All application data is stored under `~/.trenchchat/`:
 | `identity` | Ed25519/X25519 keypair |
 | `storage.db` | SQLite: channels, messages, subscriptions, members, missed-delivery hints |
 | `messagestore/` | LXMF propagation node message store (if enabled) |
+| `launcher.log` | Console output from an installed build, which runs without a console |
