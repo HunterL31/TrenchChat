@@ -260,6 +260,41 @@ class TestStandaloneChannelsUnaffected:
         assert alice.storage.get_role(solo, bob.identity.hash_hex) is None
 
 
+class TestLeaveServer:
+    def test_leaving_removes_the_server_from_the_listing(self, peer_factory):
+        """leave_server must drop the local membership row, not just unsubscribe.
+
+        list_servers is gated on is_member, so a surviving membership row left a
+        "left" server on /servers forever with no way for the client to clear it.
+        """
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+        s = actions.create_server(alice.server_mgr, alice.invite_mgr, "S")
+        ch = actions.create_channel_in_server(
+            alice.storage, alice.channel_mgr, alice.invite_mgr,
+            s, alice.identity.hash_hex, "general")
+        _invite_and_join(alice, bob, s)
+        assert wait_for(lambda: bob.storage.get_server(s) is not None, timeout=5)
+        assert wait_for(
+            lambda: any(row["hash"] == s for row in bob.server_mgr.list_servers()),
+            timeout=5,
+        ), "bob never saw the server in his listing"
+
+        assert actions.leave_server(
+            bob.storage, bob.subscription_mgr, s, bob.identity.hash_hex) is True
+
+        assert s not in [row["hash"] for row in bob.server_mgr.list_servers()], \
+            "the left server still appears in the listing"
+        assert bob.storage.is_member(s, bob.identity.hash_hex) is False
+        assert bob.storage.is_subscribed(ch) is False
+
+    def test_leaving_an_unknown_server_returns_false(self, peer_factory):
+        alice = peer_factory("alice")
+        assert actions.leave_server(
+            alice.storage, alice.subscription_mgr, "ff" * 16,
+            alice.identity.hash_hex) is False
+
+
 # ---------------------------------------------------------------------------
 # Qt GUI port
 # ---------------------------------------------------------------------------

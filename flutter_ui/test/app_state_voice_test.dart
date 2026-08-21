@@ -112,9 +112,8 @@ void main() {
   test('loadChannel also loads the voice roster', () async {
     backend.routes['GET /channels/$_channelHash/members'] = <Object>[];
     backend.routes['GET /channels/$_channelHash/messages'] = <Object>[];
-    // Presence and link quality are client-side compositions over members
-    // and the network map (see client.dart's phase-b seams).
-    backend.routes['GET /network/map'] = {'nodes': <Object>[]};
+    backend.routes['GET /channels/$_channelHash/presence'] = <Object>[];
+    backend.routes['GET /channels/$_channelHash/link_quality'] = {'level': 'unknown'};
     backend.routes['GET /channels/$_channelHash/my_permissions'] = {
       'kick': false,
       'manage_roles': false,

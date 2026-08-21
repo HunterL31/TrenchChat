@@ -141,7 +141,14 @@ class VoiceManager:
         now = time.time()
         with self._lock:
             roster = self._live_roster(channel_hash_hex, now)
-            if len(roster) >= MAX_VOICE_PARTICIPANTS:
+            # Real occupancy is established links, never the signalled roster:
+            # voice_join is unauthenticated, so a flood of forged ones would
+            # otherwise fill the roster and lock every legit member out. Links
+            # are what actually drive fan-out, which is why the cap exists;
+            # _authorize_link enforces the same cap per inbound link.
+            real_occupancy = (self._transport.connected_peers()
+                              if self._transport is not None else set())
+            if len(real_occupancy) >= MAX_VOICE_PARTICIPANTS:
                 RNS.log(
                     f"TrenchChat [voice]: session for "
                     f"{channel_hash_hex[:12]}… is full",

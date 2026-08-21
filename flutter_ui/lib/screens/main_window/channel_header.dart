@@ -2,6 +2,7 @@
 import 'package:flutter/material.dart';
 
 import '../../api/models/link_quality.dart';
+import '../../api/ws.dart';
 import '../../theme/section_theme.dart';
 import '../../theme/tokens.dart';
 import '../../widgets/signal_meter.dart';
@@ -19,6 +20,7 @@ class ChannelHeader extends StatelessWidget {
     required this.linkQuality,
     required this.activeTab,
     required this.onTabSelected,
+    this.connectionState = TcConnState.connected,
     this.onViewMembers,
     this.onOpenNav,
     this.compact = false,
@@ -27,6 +29,11 @@ class ChannelHeader extends StatelessWidget {
   final String channelName;
   final String topic;
   final ChannelLinkQuality linkQuality;
+
+  /// The backend event-socket state. Distinct from [linkQuality], which is the
+  /// mesh radio link: this indicator only shows when live updates are down.
+  final TcConnState connectionState;
+
   final ChannelTab activeTab;
   final ValueChanged<ChannelTab> onTabSelected;
   final VoidCallback? onViewMembers;
@@ -90,6 +97,10 @@ class ChannelHeader extends StatelessWidget {
               ],
             ),
           ),
+          if (connectionState != TcConnState.connected) ...[
+            _ConnectionPill(state: connectionState, compact: compact),
+            const SizedBox(width: 8),
+          ],
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 3),
             decoration: BoxDecoration(
@@ -142,6 +153,58 @@ class ChannelHeader extends StatelessWidget {
             ],
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// The backend-socket status pill: shown only when live updates are down, in
+/// a colour distinct from the mesh link pill so the two are never confused.
+class _ConnectionPill extends StatelessWidget {
+  const _ConnectionPill({required this.state, this.compact = false});
+
+  final TcConnState state;
+  final bool compact;
+
+  @override
+  Widget build(BuildContext context) {
+    final tc = SectionTheme.of(context);
+    final (color, label) = switch (state) {
+      TcConnState.reconnecting => (tc.statusWarn, 'RECONNECTING…'),
+      TcConnState.disconnected => (tc.statusDanger, 'OFFLINE'),
+      TcConnState.connected => (tc.statusOnline, 'LIVE'),
+    };
+    return TcTooltip(
+      message: 'Backend connection $label — live updates '
+          '${state == TcConnState.connected ? 'flowing' : 'paused'}',
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 3),
+        decoration: BoxDecoration(
+          color: tc.bgInset,
+          border: Border.all(color: color),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              width: 8,
+              height: 8,
+              decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+            ),
+            if (!compact) ...[
+              const SizedBox(width: 7),
+              Text(
+                label,
+                style: TextStyle(
+                  fontSize: TCType.textMicro,
+                  color: color,
+                  letterSpacing:
+                      TCType.letterSpacingFor(TCType.textMicro, TCType.trackingWide),
+                ),
+              ),
+            ],
+          ],
+        ),
       ),
     );
   }

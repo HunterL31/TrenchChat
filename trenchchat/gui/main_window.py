@@ -980,7 +980,8 @@ class MainWindow(QMainWindow):
                 view.setParent(None)
             if self._current_channel == row["hash"]:
                 self._current_channel = None
-        actions.leave_server(self._storage, self._subscription_mgr, server_hash)
+        actions.leave_server(self._storage, self._subscription_mgr, server_hash,
+                             self._identity.hash_hex)
         self._refresh_channel_list()
 
     # --- send ---

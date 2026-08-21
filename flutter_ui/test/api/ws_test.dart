@@ -63,6 +63,34 @@ void main() {
     await waitFor(() => received.length == 2);
   });
 
+  test('connState flips to connected, reconnecting, then connected again', () async {
+    final socket = TcSocket(baseUrl: 'http://127.0.0.1:${server.port}');
+    addTearDown(socket.close);
+    final states = <TcConnState>[];
+    socket.onConnStateChanged = states.add;
+
+    expect(socket.connState, TcConnState.disconnected);
+    socket.events.listen((_) {});
+
+    await waitFor(() => socket.connState == TcConnState.connected);
+    expect(states, contains(TcConnState.connected));
+
+    await clients[0].close();
+    await waitFor(() => states.contains(TcConnState.reconnecting));
+
+    await waitFor(() => clients.length == 2);
+    await waitFor(() => socket.connState == TcConnState.connected);
+  });
+
+  test('close() drives connState to disconnected', () async {
+    final socket = TcSocket(baseUrl: 'http://127.0.0.1:${server.port}');
+    socket.events.listen((_) {});
+    await waitFor(() => socket.connState == TcConnState.connected);
+
+    socket.close();
+    expect(socket.connState, TcConnState.disconnected);
+  });
+
   test('close() stops reconnect attempts', () async {
     final socket = TcSocket(baseUrl: 'http://127.0.0.1:${server.port}');
     socket.events.listen((_) {});

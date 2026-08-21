@@ -36,5 +36,8 @@ class PresenceEntry {
   factory PresenceEntry.fromJson(Map<String, dynamic> json) => PresenceEntry(
         identityHash: json['identity_hash'] as String,
         isOnline: json['is_online'] as bool? ?? false,
+        displayName: (json['display_name'] as String?)?.isNotEmpty == true
+            ? json['display_name'] as String
+            : null,
       );
 }

@@ -264,17 +264,37 @@ def edit_server_permissions(storage, invite_mgr, server_hash_hex: str,
     return True
 
 
-def leave_server(storage, subscription_mgr, server_hash_hex: str) -> bool:
-    """Unsubscribe from every channel in a server.
+def leave_server(storage, subscription_mgr, server_hash_hex: str,
+                 my_hex: str) -> bool:
+    """Leave a server: unsubscribe from every channel and drop local membership.
 
-    Local only, like leave_channel: membership rows are left for the next
-    accepted document to replace.
+    Local only. Removing our own membership row is what actually takes the
+    server off /servers -- unsubscribing the channels alone left the row in
+    place, so a "left" server reappeared and could never be cleared.
     """
     if storage.get_server(server_hash_hex) is None:
         return False
     for row in storage.get_server_channels(server_hash_hex):
         subscription_mgr.unsubscribe(row["hash"], row["creator_hash"])
+    storage.remove_member(server_hash_hex, my_hex)
     return True
+
+
+def channel_roster_hexes(storage, subscription_mgr,
+                         channel_hash_hex: str) -> list[str]:
+    """Identity hashes making up a channel's roster, for presence and quality.
+
+    Open-join channels keep no members table -- their roster is the subscriber
+    list -- so presence and link quality derived from members alone read empty
+    forever. Invite-only channels keep using their membership.
+    """
+    channel = storage.get_channel(channel_hash_hex)
+    if channel is None:
+        return []
+    perms = permissions_from_json(channel["permissions"])
+    if is_open_join(perms):
+        return sorted(subscription_mgr.get_subscribers(channel_hash_hex))
+    return [row["identity_hash"] for row in storage.get_members(channel_hash_hex)]
 
 
 # ---------------------------------------------------------------------------

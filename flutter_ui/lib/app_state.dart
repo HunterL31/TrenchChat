@@ -26,6 +26,10 @@ import 'theme/theme_spec.dart';
 /// channel's messages are re-fetched.
 const Duration _reactionRefreshWindow = Duration(milliseconds: 250);
 
+/// How many messages a single history page holds. A full page back means
+/// there may be more; a short page is the end of history.
+const int messagePageSize = 50;
+
 class AppState extends ChangeNotifier {
   /// [httpClient] lets tests inject a mock transport; the real app leaves it
   /// null and gets a standard IO client.
@@ -55,6 +59,21 @@ class AppState extends ChangeNotifier {
   final Map<String, List<PresenceEntry>> presenceByChannel = {};
   final Map<String, ChannelLinkQuality> linkQualityByChannel = {};
   final Map<String, ChannelPermissions> permissionsByChannel = {};
+
+  /// This reader's permissions on each server, gating the server-rail menu's
+  /// Invite / Edit permissions items. Loaded in [init].
+  final Map<String, ChannelPermissions> serverPermissionsByHash = {};
+
+  /// Per-channel history paging. `true` in [hasMoreOlderByChannel] means an
+  /// older page may still exist; [loadingOlderByChannel] guards against firing
+  /// overlapping older-page fetches while one is in flight.
+  final Map<String, bool> hasMoreOlderByChannel = {};
+  final Map<String, bool> loadingOlderByChannel = {};
+
+  /// The backend event socket's state, separate from mesh link quality: this
+  /// says whether live updates are flowing. Optimistic default so a client
+  /// that never opens the socket (widget tests) reads as connected.
+  TcConnState connectionState = TcConnState.connected;
 
   /// Per-channel sync state from the backend's SyncStatusTracker. "incomplete"
   /// means history is known to be missing -- including rows a peer served that
@@ -163,6 +182,7 @@ class AppState extends ChangeNotifier {
       for (final s in servers) {
         channelsByServer[s.hash] = await api.getServerChannels(s.hash);
         serverMemberCounts[s.hash] = (await api.getServerMembers(s.hash)).length;
+        serverPermissionsByHash[s.hash] = await api.getMyServerPermissions(s.hash);
       }
 
       selectedServerHash = servers.isNotEmpty ? servers.first.hash : null;
@@ -185,6 +205,7 @@ class AppState extends ChangeNotifier {
       notifyListeners();
 
       _socket.onReconnected = _onSocketReconnected;
+      _socket.onConnStateChanged = _onConnStateChanged;
       _sub = _socket.events.listen(_onEvent);
       unawaited(ensureEmojiLoaded());
       // The backend session outlives client restarts; pick it up if live.
@@ -201,7 +222,7 @@ class AppState extends ChangeNotifier {
     try {
       final results = await Future.wait([
         api.getMembers(channelHashHex),
-        api.getMessages(channelHashHex),
+        api.getMessages(channelHashHex, limit: messagePageSize),
         api.getChannelPresence(channelHashHex),
         api.getChannelLinkQuality(channelHashHex),
         api.getMyPermissions(channelHashHex),
@@ -209,7 +230,9 @@ class AppState extends ChangeNotifier {
         api.getSyncState(channelHashHex),
       ]);
       membersByChannel[channelHashHex] = results[0] as List<Member>;
-      messagesByChannel[channelHashHex] = results[1] as List<Message>;
+      final page = results[1] as List<Message>;
+      messagesByChannel[channelHashHex] = page;
+      hasMoreOlderByChannel[channelHashHex] = page.length >= messagePageSize;
       presenceByChannel[channelHashHex] = results[2] as List<PresenceEntry>;
       linkQualityByChannel[channelHashHex] = results[3] as ChannelLinkQuality;
       permissionsByChannel[channelHashHex] = results[4] as ChannelPermissions;
@@ -286,11 +309,51 @@ class AppState extends ChangeNotifier {
 
   Future<void> refreshMessages(String channelHashHex) async {
     try {
-      messagesByChannel[channelHashHex] = await api.getMessages(channelHashHex);
+      // Cover everything already on screen, not just the newest page, so a
+      // live refresh never drops older pages the reader scrolled in.
+      final loaded = messagesByChannel[channelHashHex]?.length ?? 0;
+      final limit = loaded > messagePageSize ? loaded : messagePageSize;
+      messagesByChannel[channelHashHex] =
+          await api.getMessages(channelHashHex, limit: limit);
       notifyListeners();
     } catch (_) {
       // Next WS event or channel reload will catch it up.
     }
+  }
+
+  bool hasMoreOlder(String channelHashHex) => hasMoreOlderByChannel[channelHashHex] ?? false;
+  bool loadingOlder(String channelHashHex) => loadingOlderByChannel[channelHashHex] ?? false;
+
+  /// Fetches the next older page for [channelHashHex] and prepends it. No-op
+  /// when a fetch is already running or the start of history is reached.
+  Future<void> loadOlderMessages(String channelHashHex) async {
+    if (loadingOlder(channelHashHex) || !hasMoreOlder(channelHashHex)) return;
+    final current = messagesByChannel[channelHashHex] ?? const [];
+    if (current.isEmpty) return;
+    final oldestTs = current.map((m) => m.timestamp).reduce((a, b) => a < b ? a : b);
+
+    loadingOlderByChannel[channelHashHex] = true;
+    notifyListeners();
+    try {
+      final older = await api.getMessages(channelHashHex,
+          limit: messagePageSize, beforeTs: oldestTs);
+      final known = current.map((m) => m.messageId).toSet();
+      final fresh = older.where((m) => !known.contains(m.messageId)).toList();
+      if (fresh.isNotEmpty) {
+        messagesByChannel[channelHashHex] = [...fresh, ...current];
+      }
+      hasMoreOlderByChannel[channelHashHex] = older.length >= messagePageSize;
+    } catch (e) {
+      _reportActionError(e);
+    } finally {
+      loadingOlderByChannel[channelHashHex] = false;
+      notifyListeners();
+    }
+  }
+
+  void _onConnStateChanged(TcConnState state) {
+    connectionState = state;
+    notifyListeners();
   }
 
   /// Standalone channels announced on the mesh but not yet joined. Refreshed
@@ -390,6 +453,64 @@ class AppState extends ChangeNotifier {
       }
       notifyListeners();
       return true;
+    } catch (e) {
+      _reportActionError(e);
+      return false;
+    }
+  }
+
+  /// Deselects the current server and returns to the plain DIRECT CHANNELS
+  /// view, selecting the first direct channel if there is one.
+  Future<void> selectHome() async {
+    selectedServerHash = null;
+    final next = standaloneChannels.isNotEmpty ? standaloneChannels.first.hash : null;
+    selectedChannelHash = next;
+    notifyListeners();
+    if (next != null && !messagesByChannel.containsKey(next)) {
+      await loadChannel(next);
+    }
+  }
+
+  /// Leaves a server: drops the membership and removes it from the rail. When
+  /// it was the selected server, falls back to the DIRECT CHANNELS view.
+  Future<bool> leaveServer(String serverHashHex) async {
+    try {
+      final ok = await api.leaveServer(serverHashHex);
+      if (!ok) return false;
+      servers = servers.where((s) => s.hash != serverHashHex).toList();
+      channelsByServer.remove(serverHashHex);
+      serverMemberCounts.remove(serverHashHex);
+      serverPermissionsByHash.remove(serverHashHex);
+      if (selectedServerHash == serverHashHex) {
+        await selectHome();
+      } else {
+        notifyListeners();
+      }
+      return true;
+    } catch (e) {
+      _reportActionError(e);
+      return false;
+    }
+  }
+
+  /// Sends an invite to a server. Returns true on success; on failure
+  /// [actionError] is set.
+  Future<bool> inviteToServer(String serverHashHex, String peerHashHex) async {
+    try {
+      await api.inviteToServer(serverHashHex, peerHashHex);
+      return true;
+    } catch (e) {
+      _reportActionError(e);
+      return false;
+    }
+  }
+
+  /// Replaces a server's role-permission matrix. Returns false when the
+  /// backend's MANAGE_CHANNEL gate dropped the change.
+  Future<bool> updateServerPermissions(
+      String serverHashHex, List<String> admin, List<String> member) async {
+    try {
+      return await api.updateServerPermissions(serverHashHex, admin, member);
     } catch (e) {
       _reportActionError(e);
       return false;
@@ -789,7 +910,11 @@ class AppState extends ChangeNotifier {
           final list = entry.value;
           final idx = list.indexWhere((p) => p.identityHash == identityHash);
           if (idx >= 0) {
-            list[idx] = PresenceEntry(identityHash: identityHash, isOnline: isOnline);
+            list[idx] = PresenceEntry(
+              identityHash: identityHash,
+              isOnline: isOnline,
+              displayName: list[idx].displayName,
+            );
           }
         }
         final friendIdx = friends.indexWhere((f) => f.identityHash == identityHash);

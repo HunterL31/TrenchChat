@@ -47,6 +47,9 @@ from trenchchat.core.permissions import (
     is_open_join, offered_permissions, permissions_from_json,
 )
 from trenchchat.core.presence import resolve_display_name
+from trenchchat.core.link_quality import (
+    LinkQuality, quality_label, score_path,
+)
 
 from backend_core import Backend
 
@@ -935,7 +938,8 @@ def create_app(backend: Backend, *, token: str | None = None,
     @app.post("/servers/{server_hash}/leave")
     def leave_server(server_hash: str):
         return {"ok": actions.leave_server(
-            backend.storage, backend.subscription_mgr, server_hash)}
+            backend.storage, backend.subscription_mgr, server_hash,
+            backend.identity.hash_hex)}
 
     # --- channels ---
 
@@ -994,6 +998,54 @@ def create_app(backend: Backend, *, token: str | None = None,
         # this from inbound MT_SUBSCRIBE; everyone else holds whatever the
         # owner last broadcast, so the two views can legitimately differ.
         return sorted(backend.subscription_mgr.get_subscribers(channel_hash))
+
+    def _peer_link_quality(peer_hex: str) -> LinkQuality:
+        if peer_hex == backend.identity.hash_hex:
+            return LinkQuality.EXCELLENT
+        try:
+            delivery = RNS.Destination.hash(bytes.fromhex(peer_hex), "lxmf", "delivery")
+            for entry in backend.rns.get_path_table():
+                dest_h = entry.get("hash")
+                if isinstance(dest_h, bytes) and dest_h == delivery:
+                    via = entry.get("via")
+                    via_hex = via.hex() if isinstance(via, bytes) else None
+                    return score_path(delivery.hex(), entry.get("hops", 0), via_hex)
+        except Exception:
+            pass
+        return LinkQuality.UNKNOWN
+
+    @app.get("/channels/{channel_hash}/presence")
+    def channel_presence(channel_hash: str):
+        # Roster source follows the channel kind: subscribers for open-join
+        # (no members table), members for invite-only. Same shape either way.
+        return [
+            {
+                "identity_hash": peer_hex,
+                "display_name": resolve_display_name(
+                    peer_hex, backend.identity.hash_hex, backend.storage,
+                    backend.config),
+                "is_online": backend.presence_mgr.is_online(peer_hex),
+                "last_seen": backend.presence_mgr.last_seen_at(peer_hex),
+            }
+            for peer_hex in actions.channel_roster_hexes(
+                backend.storage, backend.subscription_mgr, channel_hash)
+        ]
+
+    @app.get("/channels/{channel_hash}/link_quality")
+    def channel_link_quality(channel_hash: str):
+        entries = []
+        for peer_hex in actions.channel_roster_hexes(
+                backend.storage, backend.subscription_mgr, channel_hash):
+            quality = _peer_link_quality(peer_hex)
+            entries.append({
+                "identity_hash": peer_hex,
+                "display_name": resolve_display_name(
+                    peer_hex, backend.identity.hash_hex, backend.storage,
+                    backend.config),
+                "quality": int(quality),
+                "quality_label": quality_label(quality),
+            })
+        return entries
 
     @app.get("/channels/{channel_hash}/sync_status")
     def get_sync_status(channel_hash: str):
@@ -1113,18 +1165,19 @@ def create_app(backend: Backend, *, token: str | None = None,
     # --- messages ---
 
     @app.get("/channels/{channel_hash}/messages")
-    def list_messages(channel_hash: str):
+    def list_messages(channel_hash: str, limit: int = 200,
+                      before_ts: float | None = None):
         return [
             _message_to_dict(
                 m, _reactions_summary(backend.storage, m["message_id"], backend.identity.hash_hex)
             )
-            for m in backend.storage.get_messages(channel_hash)
+            for m in backend.storage.get_messages(
+                channel_hash, limit=limit, before_ts=before_ts)
         ]
 
     @app.get("/channels/{channel_hash}/messages/{message_id}/image")
     def get_message_image(channel_hash: str, message_id: str):
-        msgs = backend.storage.get_messages(channel_hash)
-        row = next((m for m in msgs if m["message_id"] == message_id), None)
+        row = backend.storage.get_message(channel_hash, message_id)
         if row is None or not row["image_data"]:
             return JSONResponse({"error": "no image"}, status_code=404)
         data = bytes(row["image_data"])

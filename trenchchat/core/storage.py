@@ -914,19 +914,38 @@ class Storage:
 
     def get_messages(self, channel_hash: str, limit: int = 200,
                      before_ts: float | None = None) -> list[sqlite3.Row]:
+        """The most recent *limit* messages, ascending for display.
+
+        Selected from the newest end, not the oldest: a channel with more than
+        *limit* messages otherwise froze on its oldest page. Paging older
+        history passes the oldest currently-shown timestamp as *before_ts* to
+        fetch the previous page (messages with timestamp < before_ts), still
+        newest-selected and returned ascending.
+        """
         if before_ts is None:
             return self._fetchall("""
-                SELECT * FROM messages
-                WHERE channel_hash = ?
-                ORDER BY timestamp ASC, received_at ASC
-                LIMIT ?
+                SELECT * FROM (
+                    SELECT * FROM messages
+                    WHERE channel_hash = ?
+                    ORDER BY timestamp DESC, received_at DESC
+                    LIMIT ?
+                ) ORDER BY timestamp ASC, received_at ASC
             """, (channel_hash, limit))
         return self._fetchall("""
-            SELECT * FROM messages
-            WHERE channel_hash = ? AND timestamp < ?
-            ORDER BY timestamp ASC, received_at ASC
-            LIMIT ?
+            SELECT * FROM (
+                SELECT * FROM messages
+                WHERE channel_hash = ? AND timestamp < ?
+                ORDER BY timestamp DESC, received_at DESC
+                LIMIT ?
+            ) ORDER BY timestamp ASC, received_at ASC
         """, (channel_hash, before_ts, limit))
+
+    def get_message(self, channel_hash: str, message_id: str) -> sqlite3.Row | None:
+        """A single message by id, unbounded by the display page window."""
+        return self._fetchone(
+            "SELECT * FROM messages WHERE channel_hash = ? AND message_id = ?",
+            (channel_hash, message_id),
+        )
 
     def get_latest_message_id(self, channel_hash: str) -> str | None:
         row = self._fetchone("""

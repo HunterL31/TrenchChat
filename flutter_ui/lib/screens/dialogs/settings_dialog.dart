@@ -274,7 +274,8 @@ class _SettingsDialogContentState extends State<_SettingsDialogContent> {
                     const SizedBox(height: 8),
                     Text(
                       _sessionPin != null
-                          ? 'Your identity and message database are protected by a PIN.'
+                          ? 'A PIN locks the app in this session only — it does not '
+                              'encrypt your identity or message database at rest.'
                           : 'No PIN is set. Your identity file and message database '
                               'are stored unencrypted.',
                       style: TextStyle(

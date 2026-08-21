@@ -59,7 +59,7 @@ from trenchchat.core.authorship import (
     public_key_for, remember_relayed_key, verify_message,
 )
 from trenchchat.core.image import MAX_IMAGE_BYTES, inbound_image_is_sane
-from trenchchat.core.messaging import Messaging
+from trenchchat.core.messaging import Messaging, _compute_message_id
 from trenchchat.core.permissions import (
     FULL_SYNC, has_permission, is_open_join, permissions_from_json,
 )
@@ -952,6 +952,31 @@ class SyncManager:
                 if not image_data:
                     image_data = None
 
+                content = m.get("content", "")
+                if isinstance(content, bytes):
+                    content = content.decode(errors="replace")
+                msg_id = m.get("message_id", "")
+                if isinstance(msg_id, bytes):
+                    msg_id = msg_id.decode(errors="replace")
+
+                # Recomputed exactly as the direct path does: the id *is* the
+                # hash of the row's own content, so a relayed row whose id was
+                # minted for another sender's message can't squat the UNIQUE id
+                # column and suppress the genuine copy forever.
+                expected_id = _compute_message_id(content, sender_hash, msg_ts)
+                if not msg_id:
+                    msg_id = expected_id
+                elif msg_id != expected_id:
+                    RNS.log(
+                        f"TrenchChat [sync]: dropping synced message "
+                        f"{msg_id[:12]}… — message_id is not the hash of its "
+                        f"content",
+                        RNS.LOG_WARNING,
+                    )
+                    rejected_count += 1
+                    failed_ts = msg_ts if failed_ts is None else min(failed_ts, msg_ts)
+                    continue
+
                 # Checked against the row exactly as the responder sent it,
                 # before anything is stripped. This is what makes a relayed
                 # message verifiable independently of who relayed it: the
@@ -959,8 +984,8 @@ class SyncManager:
                 author_sig = m.get("author_sig")
                 if not verify_message(
                         self._storage, sender_hash, author_sig,
-                        channel_hash_hex, m.get("message_id", ""), msg_ts,
-                        m.get("content", ""), m.get("reply_to"),
+                        channel_hash_hex, msg_id, msg_ts,
+                        content, m.get("reply_to"),
                         m.get("last_seen_id"), image_data):
                     RNS.log(
                         f"TrenchChat [sync]: dropping synced message "
@@ -992,9 +1017,9 @@ class SyncManager:
                     channel_hash=channel_hash_hex,
                     sender_hash=sender_hash,
                     sender_name=m.get("sender_name", ""),
-                    content=m.get("content", ""),
+                    content=content,
                     timestamp=msg_ts,
-                    message_id=m.get("message_id", ""),
+                    message_id=msg_id,
                     reply_to=m.get("reply_to"),
                     last_seen_id=m.get("last_seen_id"),
                     received_at=time.time(),
@@ -1007,7 +1032,7 @@ class SyncManager:
                 # that lives in another channel is not: nothing landed here,
                 # so advancing would skip history we never received.
                 if inserted or self._storage.has_message(
-                    channel_hash_hex, m.get("message_id", "")
+                    channel_hash_hex, msg_id
                 ):
                     accepted_ts.append(msg_ts)
                     self._apply_synced_reactions(
@@ -1018,7 +1043,7 @@ class SyncManager:
                     inserted_count += 1
                     self._storage.touch_channel(channel_hash_hex)
                     self._messaging.notify_message_received(
-                        channel_hash_hex, m.get("message_id", "")
+                        channel_hash_hex, msg_id
                     )
                     if self._reaction_mgr is not None:
                         self._reaction_mgr.request_missing_from_content(

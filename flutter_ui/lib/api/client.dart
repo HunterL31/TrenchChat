@@ -190,8 +190,18 @@ class ApiClient {
         .toList();
   }
 
-  Future<List<Message>> getMessages(String channelHashHex) async {
-    final res = await _http.get(_u('/channels/$channelHashHex/messages'));
+  /// A page of a channel's messages. With [beforeTs] set the backend returns
+  /// up to [limit] messages older than it; without it, the newest [limit].
+  /// Either way the page is ordered ascending for display.
+  Future<List<Message>> getMessages(String channelHashHex,
+      {int? limit, double? beforeTs}) async {
+    final query = <String, String>{
+      if (limit != null) 'limit': '$limit',
+      if (beforeTs != null) 'before_ts': '$beforeTs',
+    };
+    final uri = _u('/channels/$channelHashHex/messages')
+        .replace(queryParameters: query.isEmpty ? null : query);
+    final res = await _http.get(uri);
     return (_decode(res) as List<dynamic>)
         .map((e) => Message.fromJson(e as Map<String, dynamic>))
         .toList();
@@ -534,48 +544,57 @@ class ApiClient {
     return (_decode(res) as Map<String, dynamic>)['ok'] as bool? ?? false;
   }
 
-  // --- Phase B seams -----------------------------------------------------
-  // These two endpoints don't exist on the backend yet. Each is a thin,
-  // clearly-marked composition of endpoints that do, so swapping in the
-  // real thing later is a one-line change at the call site.
-
-  /// TODO(phase-b): replace with a single GET /channels/{h}/presence call.
+  /// A channel's presence roster: one entry per subscriber/member with their
+  /// identity hash, display name and online state. Populated for open-join
+  /// channels too, sourced from subscribers by the backend.
   Future<List<PresenceEntry>> getChannelPresence(String channelHashHex) async {
-    final members = await getMembers(channelHashHex);
-    return Future.wait(members.map((m) => getPeerPresence(m.identityHash)));
+    final res = await _http.get(_u('/channels/$channelHashHex/presence'));
+    return (_decode(res) as List<dynamic>)
+        .map((e) => PresenceEntry.fromJson(e as Map<String, dynamic>))
+        .toList();
   }
 
-  /// TODO(phase-b): replace with a single GET /channels/{h}/link_quality call.
-  /// Until then this reads /network/map and takes the worst hop count among
-  /// the channel's members that appear in the map; anyone not represented
-  /// there is UNKNOWN rather than guessed.
+  /// The channel's overall mesh link quality, computed over its subscribers.
   Future<ChannelLinkQuality> getChannelLinkQuality(String channelHashHex) async {
-    final members = await getMembers(channelHashHex);
-    final memberHashes = members.map((m) => m.identityHash).toSet();
-    final map = await getNetworkMap();
-    final nodes = (map['nodes'] as List<dynamic>? ?? []).cast<Map<String, dynamic>>();
+    final res = await _http.get(_u('/channels/$channelHashHex/link_quality'));
+    return ChannelLinkQuality.fromJson(_decode(res) as Map<String, dynamic>);
+  }
 
-    int? worstHops;
-    for (final n in nodes) {
-      final id = n['id'] as String?;
-      if (id == null || !memberHashes.contains(id)) continue;
-      final hops = n['hops'] as int?;
-      if (hops == null) continue;
-      if (worstHops == null || hops > worstHops) worstHops = hops;
-    }
-    if (worstHops == null) return ChannelLinkQuality.unknown;
+  /// Leaves a server: drops the membership so the server disappears from
+  /// GET /servers. ok=false means the backend had no such server.
+  Future<bool> leaveServer(String serverHashHex) async {
+    final res = await _http.post(_u('/servers/$serverHashHex/leave'));
+    return (_decode(res) as Map<String, dynamic>)['ok'] as bool? ?? false;
+  }
 
-    final LinkQualityLevel level;
-    if (worstHops <= 1) {
-      level = LinkQualityLevel.excellent;
-    } else if (worstHops <= 2) {
-      level = LinkQualityLevel.good;
-    } else if (worstHops <= 4) {
-      level = LinkQualityLevel.fair;
-    } else {
-      level = LinkQualityLevel.poor;
-    }
-    return ChannelLinkQuality(level: level, hops: worstHops);
+  Future<ChannelPermissions> getMyServerPermissions(String serverHashHex) async {
+    final res = await _http.get(_u('/servers/$serverHashHex/my_permissions'));
+    return ChannelPermissions.fromJson(_decode(res) as Map<String, dynamic>);
+  }
+
+  Future<void> inviteToServer(String serverHashHex, String peerHashHex) async {
+    final res = await _http.post(
+      _u('/servers/$serverHashHex/invite'),
+      headers: _jsonHeaders,
+      body: jsonEncode({'peer_hash_hex': peerHashHex}),
+    );
+    _decode(res);
+  }
+
+  Future<ScopePermissions> getServerPermissions(String serverHashHex) async {
+    final res = await _http.get(_u('/servers/$serverHashHex/permissions'));
+    return ScopePermissions.fromJson(_decode(res) as Map<String, dynamic>);
+  }
+
+  /// Returns false when the backend's MANAGE_CHANNEL gate dropped the change.
+  Future<bool> updateServerPermissions(
+      String serverHashHex, List<String> admin, List<String> member) async {
+    final res = await _http.post(
+      _u('/servers/$serverHashHex/permissions'),
+      headers: _jsonHeaders,
+      body: jsonEncode({'admin': admin, 'member': member}),
+    );
+    return (_decode(res) as Map<String, dynamic>)['ok'] as bool? ?? false;
   }
 
   void close() => _http.close();

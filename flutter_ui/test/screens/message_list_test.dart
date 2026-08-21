@@ -23,15 +23,20 @@ Message _msg(String sender, double ts, String content,
       imageStripped: imageStripped,
     );
 
-Widget _harness(List<Message> messages) => MaterialApp(
+Widget _harness(List<Message> messages,
+        {VoidCallback? onLoadOlder, bool hasMoreOlder = false, bool loadingOlder = false}) =>
+    MaterialApp(
       home: Scaffold(
         body: SizedBox(
           width: 800,
-          height: 900,
+          height: 400,
           child: MessageList(
             messages: messages,
             meHashHex: 'me',
             displayNameFor: (hash, fallback) => fallback,
+            onLoadOlder: onLoadOlder,
+            hasMoreOlder: hasMoreOlder,
+            loadingOlder: loadingOlder,
           ),
         ),
       ),
@@ -110,6 +115,71 @@ void main() {
       (w) => w is Text && w.data != null && dateLabelPattern.hasMatch(w.data!),
     );
     expect(dateLabels, findsNothing);
+  });
+
+  testWidgets('scrolling to the top requests an older page when more exist',
+      (tester) async {
+    const base = 1_700_000_000.0;
+    final messages = [for (var i = 0; i < 40; i++) _msg('alice', base + i * 400, 'm$i')];
+    var loadOlderCalls = 0;
+
+    await tester.pumpWidget(_harness(messages,
+        hasMoreOlder: true, onLoadOlder: () => loadOlderCalls++));
+    await tester.pumpAndSettle();
+
+    // Opens pinned to the bottom (newest), so no load fires yet.
+    expect(loadOlderCalls, 0);
+
+    // Drag the list down (scrolling up toward the oldest) until it reaches the
+    // top, which triggers the older-page fetch.
+    await tester.fling(find.byType(MessageList), const Offset(0, 4000), 8000);
+    await tester.pumpAndSettle();
+
+    expect(loadOlderCalls, greaterThan(0));
+  });
+
+  testWidgets('reaching the top does not request when history is exhausted',
+      (tester) async {
+    const base = 1_700_000_000.0;
+    final messages = [for (var i = 0; i < 40; i++) _msg('alice', base + i * 400, 'm$i')];
+    var loadOlderCalls = 0;
+
+    await tester.pumpWidget(_harness(messages,
+        hasMoreOlder: false, onLoadOlder: () => loadOlderCalls++));
+    await tester.pumpAndSettle();
+
+    await tester.fling(find.byType(MessageList), const Offset(0, 4000), 8000);
+    await tester.pumpAndSettle();
+
+    expect(loadOlderCalls, 0);
+  });
+
+  testWidgets('an older page prepended at the top keeps the view from jumping to bottom',
+      (tester) async {
+    const base = 1_700_000_000.0;
+    final newest = [for (var i = 0; i < 30; i++) _msg('alice', base + i * 400, 'new$i')];
+    await tester.pumpWidget(_harness(newest, hasMoreOlder: true, onLoadOlder: () {}));
+    await tester.pumpAndSettle();
+
+    final controller = tester
+        .widget<Scrollable>(find.byType(Scrollable))
+        .controller!;
+    final bottom = controller.position.pixels;
+
+    // Scroll up a bit, then a prepend arrives.
+    controller.jumpTo(bottom - 200);
+    await tester.pump();
+    final beforePrepend = controller.position.pixels;
+
+    final older = [for (var i = 0; i < 20; i++) _msg('alice', base - (20 - i) * 400, 'old$i')];
+    await tester.pumpWidget(_harness([...older, ...newest],
+        hasMoreOlder: true, onLoadOlder: () {}));
+    await tester.pumpAndSettle();
+
+    // The view stayed anchored rather than snapping to the newest message.
+    expect(controller.position.pixels, greaterThan(beforePrepend));
+    expect(controller.position.pixels,
+        lessThan(controller.position.maxScrollExtent));
   });
 
   testWidgets('a stripped attachment is marked, an intact message is not',

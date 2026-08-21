@@ -19,6 +19,27 @@ const _identityHashHexLength = 32;
 
 Future<void> showInviteDialog(BuildContext context, AppState state,
     {required String channelHashHex, required String channelName}) {
+  return _showInviteDialog(
+    context,
+    state,
+    title: 'Invite to #$channelName',
+    onSubmit: (peer) => state.inviteToChannel(channelHashHex, peer),
+  );
+}
+
+/// The same peer-picker, targeting a server instead of a channel.
+Future<void> showServerInviteDialog(BuildContext context, AppState state,
+    {required String serverHashHex, required String serverName}) {
+  return _showInviteDialog(
+    context,
+    state,
+    title: 'Invite to $serverName',
+    onSubmit: (peer) => state.inviteToServer(serverHashHex, peer),
+  );
+}
+
+Future<void> _showInviteDialog(BuildContext context, AppState state,
+    {required String title, required Future<bool> Function(String) onSubmit}) {
   return showTcDialog<void>(
     context: context,
     builder: (context) => SectionTheme(
@@ -26,8 +47,8 @@ Future<void> showInviteDialog(BuildContext context, AppState state,
       section: TCSection.dialogs,
       child: _InviteDialogContent(
         state: state,
-        channelHashHex: channelHashHex,
-        channelName: channelName,
+        title: title,
+        onSubmit: onSubmit,
       ),
     ),
   );
@@ -36,13 +57,13 @@ Future<void> showInviteDialog(BuildContext context, AppState state,
 class _InviteDialogContent extends StatefulWidget {
   const _InviteDialogContent({
     required this.state,
-    required this.channelHashHex,
-    required this.channelName,
+    required this.title,
+    required this.onSubmit,
   });
 
   final AppState state;
-  final String channelHashHex;
-  final String channelName;
+  final String title;
+  final Future<bool> Function(String) onSubmit;
 
   @override
   State<_InviteDialogContent> createState() => _InviteDialogContentState();
@@ -109,7 +130,7 @@ class _InviteDialogContentState extends State<_InviteDialogContent> {
       _busy = true;
       _error = null;
     });
-    final ok = await widget.state.inviteToChannel(widget.channelHashHex, invitee);
+    final ok = await widget.onSubmit(invitee);
     if (!mounted) return;
     if (!ok) {
       setState(() {
@@ -125,7 +146,7 @@ class _InviteDialogContentState extends State<_InviteDialogContent> {
   Widget build(BuildContext context) {
     final tc = SectionTheme.of(context);
     return TcDialogShell(
-      title: 'Invite to #${widget.channelName}',
+      title: widget.title,
       width: 440,
       errorText: _error,
       actions: [

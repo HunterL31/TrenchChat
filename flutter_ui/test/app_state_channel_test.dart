@@ -22,7 +22,8 @@ Map<String, Object?> _channelJson(String name) => {
 void _seedChannelReads(FakeBackend backend, String hash) {
   backend.routes['GET /channels/$hash/members'] = <Object>[];
   backend.routes['GET /channels/$hash/messages'] = <Object>[];
-  backend.routes['GET /network/map'] = {'nodes': <Object>[]};
+  backend.routes['GET /channels/$hash/presence'] = <Object>[];
+  backend.routes['GET /channels/$hash/link_quality'] = {'level': 'unknown'};
   backend.routes['GET /channels/$hash/my_permissions'] = {'invite': false};
   backend.routes['GET /channels/$hash/voice/roster'] = <Object>[];
   backend.routes['GET /channels/$hash/sync_status'] = {'state': 'synced'};

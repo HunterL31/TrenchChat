@@ -219,7 +219,14 @@ class TestVoiceJoinGuards:
         assert alice.voice_mgr.join_voice(other) is False
         assert alice.voice_mgr.current_channel == ch_hash
 
-    def test_participant_cap_enforced(self, peer_factory, monkeypatch):
+    def test_participant_cap_enforced_at_the_link_layer(self, peer_factory, monkeypatch):
+        """Occupancy is counted where it is real -- the inbound link handshake.
+
+        A local join can't observe remote links, so it admits optimistically;
+        the over-cap peer is turned away when it tries to establish a link into
+        the full session. (A local cap keyed on the signalled roster instead
+        would be spoofable -- see the flood test in test_adversarial.py.)
+        """
         monkeypatch.setattr("trenchchat.core.voice.MAX_VOICE_PARTICIPANTS", 2)
         (alice, bob, carol), ch_hash = _setup_open_channel(
             peer_factory, names=("alice", "bob", "carol"))
@@ -227,10 +234,12 @@ class TestVoiceJoinGuards:
         assert alice.voice_mgr.join_voice(ch_hash) is True
         assert wait_for_roster(bob, ch_hash, alice.identity.hash_hex)
         assert bob.voice_mgr.join_voice(ch_hash) is True
-        assert wait_for_roster(carol, ch_hash, alice.identity.hash_hex)
-        assert wait_for_roster(carol, ch_hash, bob.identity.hash_hex)
+        assert wait_for_roster(alice, ch_hash, bob.identity.hash_hex)
 
-        assert carol.voice_mgr.join_voice(ch_hash) is False
+        # The session is genuinely full (two real, signalling members).
+        assert alice.voice_mgr._authorize_link(
+            carol.identity.hash_hex, ch_hash) is False, \
+            "a third participant was admitted past the cap at the link layer"
 
     def test_leave_when_not_in_session_is_noop(self, peer_factory):
         bob = peer_factory("bob")

@@ -200,16 +200,22 @@ class Backend:
         self.identity = Identity(self.config)
         self.storage = Storage()
         self.router = Router(self.config, self.identity)
-        self._wire_managers()
+        self._wire_managers(use_tone_audio=False)
         return self
 
     def _wire_managers(self, presence_timeout_secs: float | None = None,
                        presence_beacon_after_secs: float | None = None,
                        voice_state_refresh_secs: float | None = None,
-                       voice_roster_ttl_secs: float | None = None) -> None:
+                       voice_roster_ttl_secs: float | None = None,
+                       use_tone_audio: bool = True) -> None:
         """Managers and announce handlers shared by both constructors,
         mirroring main.py. The presence overrides shorten the testenv's
-        observation windows; None keeps the production defaults."""
+        observation windows; None keeps the production defaults.
+
+        use_tone_audio drives the tone pipeline for headless testers (no sound
+        devices); a real profile passes False so VoiceManager builds the same
+        real AudioPipeline main.py does, degrading to receive-only when the
+        machine has no audio libraries or devices."""
         self.channel_mgr = ChannelManager(self.identity, self.storage)
         self.server_mgr = ServerManager(self.identity, self.storage)
         self.messaging = Messaging(self.identity, self.storage, self.router)
@@ -237,18 +243,21 @@ class Backend:
         self.friends_mgr = FriendsManager(self.storage, self.identity.hash_hex, self.presence_mgr)
         self.presence_mgr.add_seen_callback(self.friends_mgr.record_seen)
         self.presence_mgr.add_presence_callback(self.friends_mgr.record_presence)
-        # Headless workers have no sound devices; the tone pipeline feeds the
-        # real encode/transmit path with a generated signal instead.
+        # Headless testers have no sound devices; the tone pipeline feeds the
+        # real encode/transmit path with a generated signal instead. A real
+        # profile uses no factory, so VoiceManager builds the real
+        # AudioPipeline (mic capture + playback), exactly as main.py does.
         voice_kwargs = {}
         if voice_state_refresh_secs is not None:
             voice_kwargs["state_refresh_secs"] = voice_state_refresh_secs
         if voice_roster_ttl_secs is not None:
             voice_kwargs["roster_ttl_secs"] = voice_roster_ttl_secs
+        if use_tone_audio:
+            voice_kwargs["audio_factory"] = make_tone_pipeline
         self.voice_transport = RNSVoiceTransport(self.identity)
         self.voice_mgr = VoiceManager(
             self.identity, self.storage, self.router, self.subscription_mgr,
-            self.config, transport=self.voice_transport,
-            audio_factory=make_tone_pipeline, **voice_kwargs,
+            self.config, transport=self.voice_transport, **voice_kwargs,
         )
 
         # Mirrors main.py's _on_user_announced: a trenchchat.user announce is

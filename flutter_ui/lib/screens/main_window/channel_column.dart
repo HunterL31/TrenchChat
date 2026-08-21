@@ -26,6 +26,7 @@ class ChannelColumn extends StatelessWidget {
     required this.selectedChannelHash,
     required this.onSelectChannel,
     required this.onlinePresence,
+    this.meHashHex = '',
     this.pendingInvites = const [],
     this.onTapInvite,
     this.onCreateChannel,
@@ -50,6 +51,11 @@ class ChannelColumn extends StatelessWidget {
   final String? selectedChannelHash;
   final ValueChanged<String> onSelectChannel;
   final List<PresenceEntry> onlinePresence;
+
+  /// The local user's identity hash, so the ONLINE roster never lists the
+  /// reader as one of their own peers.
+  final String meHashHex;
+
   final List<PendingInvite> pendingInvites;
   final ValueChanged<PendingInvite>? onTapInvite;
   final VoidCallback? onCreateChannel;
@@ -119,7 +125,9 @@ class ChannelColumn extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final tc = SectionTheme.of(context);
-    final online = onlinePresence.where((p) => p.isOnline).toList();
+    final online = onlinePresence
+        .where((p) => p.isOnline && p.identityHash != meHashHex)
+        .toList();
     return Container(
       width: 206,
       color: tc.bgSurface,
@@ -318,7 +326,9 @@ class _PresenceRoster extends StatelessWidget {
                         const SizedBox(width: 9),
                         Expanded(
                           child: Text(
-                            _shortHash(p.identityHash),
+                            p.displayName?.isNotEmpty == true
+                                ? p.displayName!
+                                : _shortHash(p.identityHash),
                             overflow: TextOverflow.ellipsis,
                             style: TextStyle(fontSize: 12, color: tc.textSecondary),
                           ),

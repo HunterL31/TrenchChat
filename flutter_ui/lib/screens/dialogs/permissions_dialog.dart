@@ -6,6 +6,7 @@
 // server-side regardless.
 import 'package:flutter/material.dart';
 
+import '../../api/models/emoji.dart';
 import '../../app_state.dart';
 import '../../theme/section_theme.dart';
 import '../../theme/theme_spec.dart';
@@ -27,30 +28,57 @@ const Map<String, String> _permissionLabels = {
 
 Future<void> showPermissionsDialog(BuildContext context, AppState state,
     {required String channelHashHex, required String channelName}) {
+  return _showPermissionsDialog(
+    context,
+    state,
+    title: 'Permissions — #$channelName',
+    load: () => state.api.getChannelPermissions(channelHashHex),
+    save: (admin, member) =>
+        state.updateChannelPermissions(channelHashHex, admin, member),
+  );
+}
+
+/// The same role matrix, editing a server's permissions instead of a
+/// channel's.
+Future<void> showServerPermissionsDialog(BuildContext context, AppState state,
+    {required String serverHashHex, required String serverName}) {
+  return _showPermissionsDialog(
+    context,
+    state,
+    title: 'Permissions — $serverName',
+    load: () => state.api.getServerPermissions(serverHashHex),
+    save: (admin, member) =>
+        state.updateServerPermissions(serverHashHex, admin, member),
+  );
+}
+
+Future<void> _showPermissionsDialog(
+  BuildContext context,
+  AppState state, {
+  required String title,
+  required Future<ScopePermissions> Function() load,
+  required Future<bool> Function(List<String>, List<String>) save,
+}) {
   return showTcDialog<void>(
     context: context,
     builder: (context) => SectionTheme(
       spec: state.themeSpec,
       section: TCSection.dialogs,
-      child: _PermissionsDialogContent(
-        state: state,
-        channelHashHex: channelHashHex,
-        channelName: channelName,
-      ),
+      child: _PermissionsDialogContent(title: title, load: load, save: save),
     ),
   );
 }
 
 class _PermissionsDialogContent extends StatefulWidget {
   const _PermissionsDialogContent({
-    required this.state,
-    required this.channelHashHex,
-    required this.channelName,
+    required this.title,
+    required this.load,
+    required this.save,
   });
 
-  final AppState state;
-  final String channelHashHex;
-  final String channelName;
+  final String title;
+  final Future<ScopePermissions> Function() load;
+  final Future<bool> Function(List<String>, List<String>) save;
 
   @override
   State<_PermissionsDialogContent> createState() => _PermissionsDialogContentState();
@@ -75,7 +103,7 @@ class _PermissionsDialogContentState extends State<_PermissionsDialogContent> {
 
   Future<void> _load() async {
     try {
-      final perms = await widget.state.api.getChannelPermissions(widget.channelHashHex);
+      final perms = await widget.load();
       if (!mounted) return;
       setState(() {
         _allPermissions = perms.allPermissions;
@@ -101,15 +129,14 @@ class _PermissionsDialogContentState extends State<_PermissionsDialogContent> {
     });
     // Send only what each role may hold: the core drops the rest anyway, and
     // submitting a grant it will discard makes the dialog look like it worked.
-    final ok = await widget.state.updateChannelPermissions(
-        widget.channelHashHex,
+    final ok = await widget.save(
         _admin.where(_adminGrantable.contains).toList(),
         _member.where(_memberGrantable.contains).toList());
     if (!mounted) return;
     if (!ok) {
       setState(() {
         _busy = false;
-        _error = widget.state.takeActionError() ?? 'The backend rejected the change.';
+        _error = 'The backend rejected the change.';
       });
       return;
     }
@@ -122,7 +149,7 @@ class _PermissionsDialogContentState extends State<_PermissionsDialogContent> {
   Widget build(BuildContext context) {
     final tc = SectionTheme.of(context);
     return TcDialogShell(
-      title: 'Permissions — #${widget.channelName}',
+      title: widget.title,
       width: 440,
       errorText: _error,
       actions: [

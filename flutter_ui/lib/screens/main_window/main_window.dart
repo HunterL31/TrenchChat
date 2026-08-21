@@ -115,6 +115,27 @@ class _MainWindowState extends State<MainWindow> {
     await widget.state.leaveChannel(channel.hash);
   }
 
+  String _serverName(AppState state, String hash) =>
+      state.servers.firstWhere((s) => s.hash == hash,
+          orElse: () => state.servers.isNotEmpty
+              ? state.servers.first
+              : throw StateError('no server')).name;
+
+  /// Leaves a server from its rail menu, once confirmed.
+  Future<void> _leaveServer(String hash) async {
+    final name = _serverName(widget.state, hash);
+    final confirmed = await showTcConfirmDialog(
+      context,
+      widget.state,
+      title: 'Leave $name',
+      message: 'You will stop receiving this server’s channels. '
+          'You can be invited back later.',
+      confirmLabel: 'LEAVE',
+    );
+    if (!confirmed) return;
+    await widget.state.leaveServer(hash);
+  }
+
   /// Adds the reaction if the viewer hasn't reacted with [emojiKey] yet,
   /// removes it if they have -- same toggle the chips use.
   void _toggleReaction(String channelHash, String messageId, String emojiKey) {
@@ -208,12 +229,26 @@ class _MainWindowState extends State<MainWindow> {
           section: TCSection.serverRail,
           child: ServerRail(
             servers: [
-              for (final s in state.servers) ServerRailEntry(hash: s.hash, name: s.name),
+              for (final s in state.servers)
+                ServerRailEntry(
+                  hash: s.hash,
+                  name: s.name,
+                  canInvite: state.serverPermissionsByHash[s.hash]?.invite ?? false,
+                  canManage: state.serverPermissionsByHash[s.hash]?.manageChannel ?? false,
+                ),
             ],
             selectedHash: state.selectedServerHash,
             onSelect: (hash) => state.selectServer(hash),
+            onHome: () => state.selectHome(),
             onAddServer: () => showNewServerDialog(context, state),
             onSettings: () => showSettingsDialog(context, state),
+            onLeaveServer: _leaveServer,
+            onInviteServer: (hash) => showServerInviteDialog(
+                context, state,
+                serverHashHex: hash, serverName: _serverName(state, hash)),
+            onEditServerPermissions: (hash) => showServerPermissionsDialog(
+                context, state,
+                serverHashHex: hash, serverName: _serverName(state, hash)),
           ),
         );
 
@@ -231,6 +266,7 @@ class _MainWindowState extends State<MainWindow> {
             }
           },
           onlinePresence: presence,
+          meHashHex: state.meHashHex,
           pendingInvites: state.pendingInvites,
           onTapInvite: (invite) => showIncomingInviteDialog(context, state, invite),
           onCreateChannel: () =>
@@ -285,6 +321,7 @@ class _MainWindowState extends State<MainWindow> {
                       channelName: channel?.name ?? '',
                       topic: channel?.description ?? '',
                       linkQuality: linkQuality,
+                      connectionState: state.connectionState,
                       activeTab: _tab,
                       onTabSelected: (t) => setState(() => _tab = t),
                       compact: compact,
@@ -334,6 +371,13 @@ class _MainWindowState extends State<MainWindow> {
                               return state.themeSpec == spec;
                             },
                             themeLibrary: state.themeLibrary,
+                            onLoadOlder: channelHash == null
+                                ? null
+                                : () => state.loadOlderMessages(channelHash),
+                            hasMoreOlder:
+                                channelHash != null && state.hasMoreOlder(channelHash),
+                            loadingOlder:
+                                channelHash != null && state.loadingOlder(channelHash),
                           ),
                     },
                   ),

@@ -65,11 +65,25 @@ class MessageList extends StatefulWidget {
     this.onAddTheme,
     this.onApplyTheme,
     this.themeLibrary = const {},
+    this.onLoadOlder,
+    this.hasMoreOlder = false,
+    this.loadingOlder = false,
   });
 
   final List<Message> messages;
   final String meHashHex;
   final String Function(String identityHashHex, String fallback) displayNameFor;
+
+  /// Fetches the next older page when the reader scrolls to the top. Null
+  /// disables load-on-scroll (e.g. isolated widget tests).
+  final VoidCallback? onLoadOlder;
+
+  /// Whether an older page may still exist; the top-of-list loader hides when
+  /// history's start has been reached.
+  final bool hasMoreOlder;
+
+  /// Whether an older-page fetch is in flight, so the trigger fires once.
+  final bool loadingOlder;
 
   /// Synchronous cache read -- null until [ensureAvatarLoaded] has fetched it.
   final Uint8List? Function(String identityHashHex)? avatarBytesFor;
@@ -108,21 +122,61 @@ class MessageList extends StatefulWidget {
   State<MessageList> createState() => _MessageListState();
 }
 
+/// Distance from the top, in pixels, at which scrolling triggers the next
+/// older-page fetch -- a little ahead of the very edge so the page is loading
+/// before the reader reaches blank space.
+const double _loadOlderThreshold = 120;
+
 class _MessageListState extends State<MessageList> {
   final ScrollController _controller = ScrollController();
 
   @override
   void didUpdateWidget(covariant MessageList oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.messages.length != widget.messages.length) {
+    if (oldWidget.messages.length == widget.messages.length) return;
+    if (_isOlderPagePrepend(oldWidget.messages, widget.messages)) {
+      // Keep the reader's view anchored to the same message when an older
+      // page lands at the top, rather than jerking the list.
+      final before = _controller.hasClients ? _controller.position.maxScrollExtent : 0.0;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!_controller.hasClients) return;
+        final after = _controller.position.maxScrollExtent;
+        _controller.jumpTo(_controller.position.pixels + (after - before));
+      });
+    } else {
       WidgetsBinding.instance.addPostFrameCallback((_) => _jumpToBottom());
     }
+  }
+
+  /// True when [next] is [prev] with older messages added at the top and the
+  /// newest message unchanged -- the load-older case, as opposed to a new
+  /// message arriving at the bottom.
+  bool _isOlderPagePrepend(List<Message> prev, List<Message> next) {
+    if (prev.isEmpty || next.length <= prev.length) return false;
+    double newest(List<Message> m) => m.map((e) => e.timestamp).reduce((a, b) => a > b ? a : b);
+    double oldest(List<Message> m) => m.map((e) => e.timestamp).reduce((a, b) => a < b ? a : b);
+    return newest(next) == newest(prev) && oldest(next) < oldest(prev);
   }
 
   @override
   void initState() {
     super.initState();
+    _controller.addListener(_onScroll);
     WidgetsBinding.instance.addPostFrameCallback((_) => _jumpToBottom());
+  }
+
+  void _onScroll() {
+    if (!_controller.hasClients) return;
+    if (widget.onLoadOlder == null || !widget.hasMoreOlder || widget.loadingOlder) return;
+    if (_controller.position.pixels <= _loadOlderThreshold) {
+      widget.onLoadOlder!();
+    }
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
   }
 
   void _jumpToBottom() {
@@ -133,12 +187,14 @@ class _MessageListState extends State<MessageList> {
   @override
   Widget build(BuildContext context) {
     final rows = _buildRows(widget.messages);
+    final showLoader = widget.loadingOlder;
     return ListView.builder(
       controller: _controller,
       padding: const EdgeInsets.symmetric(vertical: 12),
-      itemCount: rows.length,
+      itemCount: rows.length + (showLoader ? 1 : 0),
       itemBuilder: (context, i) {
-        final row = rows[i];
+        if (showLoader && i == 0) return const _OlderLoader();
+        final row = rows[showLoader ? i - 1 : i];
         return switch (row) {
           _DateDividerRow() => _DateDivider(timestamp: row.timestamp),
           _MessageRow() => _MessageRowWidget(
@@ -159,6 +215,28 @@ class _MessageListState extends State<MessageList> {
             ),
         };
       },
+    );
+  }
+}
+
+class _OlderLoader extends StatelessWidget {
+  const _OlderLoader();
+
+  @override
+  Widget build(BuildContext context) {
+    final tc = SectionTheme.of(context);
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 10),
+      child: Center(
+        child: Text(
+          'LOADING EARLIER MESSAGES…',
+          style: TextStyle(
+            fontSize: TCType.textMicro,
+            color: tc.textTertiary,
+            letterSpacing: TCType.letterSpacingFor(TCType.textMicro, TCType.trackingWider),
+          ),
+        ),
+      ),
     );
   }
 }
