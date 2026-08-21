@@ -63,6 +63,9 @@ const String _inheritKey = '';
 /// The name field of the SAVE AS… row.
 const Key appearanceSaveAsFieldKey = Key('appearance-save-as');
 
+/// The preset chip row; its selected value is the preset the draft matches.
+const Key appearancePresetRowKey = Key('appearance-presets');
+
 /// Keys of one saved theme's row controls. The row's APPLY carries the same
 /// label as the dialog's own, so these are how a caller tells them apart.
 Key appearanceApplySavedKey(String name) => Key('theme-apply:$name');
@@ -138,6 +141,14 @@ class _AppearanceDialogContentState extends State<_AppearanceDialogContent> {
 
   /// What a scope that sets nothing calls its inherited value.
   String get _inheritLabel => _scope == 'base' ? 'DEFAULT' : 'INHERIT';
+
+  /// The preset the draft currently matches, or '' when it matches none.
+  String get _activePresetName {
+    for (final p in themePresets) {
+      if (p.spec == _draft) return p.name;
+    }
+    return '';
+  }
 
   void _setToken(String tokenKey, Color? color) {
     final section = _section;
@@ -314,6 +325,7 @@ class _AppearanceDialogContentState extends State<_AppearanceDialogContent> {
 
   Widget _savedThemeRow(TCSectionColors tc, String name) {
     final spec = widget.state.themeLibrary[name] ?? ThemeSpec.empty;
+    final active = spec == _draft;
     return Padding(
       padding: const EdgeInsets.only(bottom: 4),
       child: Row(
@@ -323,9 +335,31 @@ class _AppearanceDialogContentState extends State<_AppearanceDialogContent> {
               name,
               overflow: TextOverflow.ellipsis,
               softWrap: false,
-              style: TextStyle(fontSize: TCType.textBodySm, color: tc.textPrimary),
+              style: TextStyle(
+                fontSize: TCType.textBodySm,
+                color: active ? tc.textEmphasis : tc.textPrimary,
+              ),
             ),
           ),
+          if (active) ...[
+            const SizedBox(width: 6),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+              decoration: BoxDecoration(
+                color: tc.bgSelected,
+                border: Border.all(color: tc.borderAccent),
+              ),
+              child: Text(
+                'ACTIVE',
+                style: TextStyle(
+                  fontSize: TCType.textMicro,
+                  color: tc.textEmphasis,
+                  letterSpacing:
+                      TCType.letterSpacingFor(TCType.textMicro, TCType.trackingWide),
+                ),
+              ),
+            ),
+          ],
           const SizedBox(width: 6),
           TcGhostButton(
             key: appearanceApplySavedKey(name),
@@ -375,16 +409,14 @@ class _AppearanceDialogContentState extends State<_AppearanceDialogContent> {
       children: [
         _caption(tc, 'PRESETS'),
         const SizedBox(height: 8),
-        Row(
-          children: [
-            for (final preset in themePresets) ...[
-              TcGhostButton(
-                label: preset.name.toUpperCase(),
-                onPressed: () => _applySpec(preset.spec),
-              ),
-              const SizedBox(width: 6),
-            ],
-          ],
+        TcChoiceRow(
+          key: appearancePresetRowKey,
+          options: {for (final p in themePresets) p.name: p.name.toUpperCase()},
+          value: _activePresetName,
+          onSelected: _busy
+              ? null
+              : (name) =>
+                  _applySpec(themePresets.firstWhere((p) => p.name == name).spec),
         ),
         const SizedBox(height: 12),
         _caption(tc, 'MY THEMES'),

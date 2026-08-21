@@ -8,8 +8,10 @@ import 'package:flutter_ui/app_state.dart';
 import 'package:flutter_ui/screens/dialogs/appearance_dialog.dart';
 import 'package:flutter_ui/screens/dialogs/settings_dialog.dart';
 import 'package:flutter_ui/theme/theme_code.dart';
+import 'package:flutter_ui/theme/theme_presets.dart';
 import 'package:flutter_ui/theme/theme_spec.dart';
 import 'package:flutter_ui/widgets/tc_button.dart';
+import 'package:flutter_ui/widgets/tc_checkbox.dart';
 import 'package:flutter_ui/widgets/tc_color_field.dart';
 
 import '../../fake_backend.dart';
@@ -555,5 +557,38 @@ void main() {
     expect(styles['base'], isNull);
     expect(styles['content'], isNull);
     expect(styles['holoDeck'], {'glow': false});
+  });
+
+  testWidgets('the preset matching the draft is highlighted', (tester) async {
+    state.themeSpec = themePresets.firstWhere((p) => p.name == 'Ember').spec;
+    await openEditor(tester);
+
+    TcChoiceRow presetRow() =>
+        tester.widget<TcChoiceRow>(find.byKey(appearancePresetRowKey));
+    expect(presetRow().value, 'Ember');
+
+    await tester.tap(find.text('TRENCH'));
+    await tester.pump();
+    expect(presetRow().value, 'Trench');
+
+    await tester.enterText(find.byKey(tcColorInputKey('bgApp')), '#102030');
+    await tester.pump();
+    expect(presetRow().value, '');
+  });
+
+  testWidgets('a saved theme matching the draft is marked ACTIVE', (tester) async {
+    final mine = ThemeSpec(base: {'bgApp': const Color(0xFF102030)});
+    backend.routes['GET /ui_theme_library'] = {
+      'themes': {'mine': mine.toJson()},
+    };
+    await state.loadThemeLibrary();
+    state.themeSpec = mine;
+    await openEditor(tester);
+
+    expect(find.text('ACTIVE'), findsOneWidget);
+
+    await tester.enterText(find.byKey(tcColorInputKey('bgApp')), '#445566');
+    await tester.pump();
+    expect(find.text('ACTIVE'), findsNothing);
   });
 }
