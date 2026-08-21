@@ -191,4 +191,13 @@ void main() {
     final post = backend.requests.lastWhere((r) => r.path == '/ui_theme');
     expect(post.method, 'POST');
   });
+
+  testWidgets('the card previews the theme as a mini window', (tester) async {
+    await tester.pumpWidget(_harness(state, encodeThemeCode('Deep', _shared)));
+    await tester.pumpAndSettle();
+
+    expect(find.byType(ThemeMiniPreview), findsOneWidget);
+    final preview = tester.widget<ThemeMiniPreview>(find.byType(ThemeMiniPreview));
+    expect(preview.spec, _shared);
+  });
 }

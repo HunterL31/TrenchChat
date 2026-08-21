@@ -14,15 +14,125 @@ import '../theme/tokens.dart';
 import 'emoji_text.dart';
 import 'tc_button.dart';
 
-/// The base tokens a card previews, in the order the swatch strip shows them.
-const List<String> themePreviewTokens = [
-  'bgApp',
-  'bgSurface',
-  'accentPrimary',
-  'accentSecondary',
-  'textPrimary',
-  'textEmphasis',
-];
+/// A miniature of the main window painted with [spec]'s resolved palettes --
+/// rail, channel column, top bar, and content each in their own section's
+/// colors, so a per-section theme previews where it will actually land.
+class ThemeMiniPreview extends StatelessWidget {
+  const ThemeMiniPreview({super.key, required this.spec, this.height = 64});
+
+  final ThemeSpec spec;
+  final double height;
+
+  /// A stand-in text line: a thin rounded-nothing bar of [color].
+  Widget _bar(Color color, double width, [double barHeight = 3]) =>
+      Container(width: width, height: barHeight, color: color);
+
+  @override
+  Widget build(BuildContext context) {
+    final tc = SectionTheme.of(context);
+    final rail = spec.resolve(TCSection.serverRail);
+    final channels = spec.resolve(TCSection.channelList);
+    final topBar = spec.resolve(TCSection.topBar);
+    final content = spec.resolve(TCSection.content);
+
+    return Container(
+      height: height,
+      decoration: BoxDecoration(border: Border.all(color: tc.borderStrong)),
+      clipBehavior: Clip.hardEdge,
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Container(
+            width: 12,
+            color: rail.bgApp,
+            padding: const EdgeInsets.symmetric(horizontal: 3, vertical: 4),
+            child: Column(
+              children: [
+                Container(width: 6, height: 6, color: rail.accentPrimary),
+                const SizedBox(height: 3),
+                Container(width: 6, height: 6, color: rail.bgInset),
+                const SizedBox(height: 3),
+                Container(width: 6, height: 6, color: rail.bgInset),
+              ],
+            ),
+          ),
+          Container(
+            width: 30,
+            color: channels.bgSurface,
+            padding: const EdgeInsets.all(4),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                _bar(channels.textEmphasis, 16),
+                const SizedBox(height: 4),
+                Container(
+                  width: 22,
+                  padding: const EdgeInsets.all(1.5),
+                  color: channels.bgSelected,
+                  child: _bar(channels.textEmphasis, 12),
+                ),
+                const SizedBox(height: 3),
+                _bar(channels.textSecondary, 14),
+                const SizedBox(height: 3),
+                _bar(channels.textSecondary, 17),
+                const SizedBox(height: 3),
+                _bar(channels.statusOnline, 8),
+              ],
+            ),
+          ),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Container(
+                  height: 12,
+                  color: topBar.bgSurfaceRaised,
+                  padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
+                  child: Row(
+                    children: [
+                      _bar(topBar.textEmphasis, 18, 4),
+                      const Spacer(),
+                      _bar(topBar.accentPrimary, 10, 4),
+                    ],
+                  ),
+                ),
+                Expanded(
+                  child: Container(
+                    color: content.bgApp,
+                    padding: const EdgeInsets.all(4),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        _bar(content.accentPrimary, 14),
+                        const SizedBox(height: 3),
+                        _bar(content.textPrimary, 42),
+                        const SizedBox(height: 3),
+                        _bar(content.textPrimary, 30),
+                        const SizedBox(height: 5),
+                        _bar(content.accentSecondary, 12),
+                        const SizedBox(height: 3),
+                        _bar(content.textPrimary, 36),
+                      ],
+                    ),
+                  ),
+                ),
+                Container(
+                  height: 9,
+                  color: content.bgSurface,
+                  padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 3),
+                  child: Align(
+                    alignment: Alignment.centerLeft,
+                    child: _bar(content.textTertiary, 24),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
 
 /// The name a shared theme should be saved under given what [taken] already
 /// holds: [name] itself when it is free, otherwise `name-2`, `name-3`, ...
@@ -205,7 +315,6 @@ class _ThemeCodeCardState extends State<ThemeCodeCard> {
   @override
   Widget build(BuildContext context) {
     final tc = SectionTheme.of(context);
-    final preview = widget.spec.resolveBase().asMap();
     return Padding(
       padding: const EdgeInsets.only(top: 6),
       child: Container(
@@ -238,21 +347,7 @@ class _ThemeCodeCardState extends State<ThemeCodeCard> {
                     style: TextStyle(fontSize: TCType.textBodySm, color: tc.textPrimary),
                   ),
                   const SizedBox(height: 6),
-                  Row(
-                    children: [
-                      for (final token in themePreviewTokens) ...[
-                        Container(
-                          width: 16,
-                          height: 16,
-                          decoration: BoxDecoration(
-                            color: preview[token],
-                            border: Border.all(color: tc.borderStrong),
-                          ),
-                        ),
-                        const SizedBox(width: 4),
-                      ],
-                    ],
-                  ),
+                  ThemeMiniPreview(spec: widget.spec),
                   const SizedBox(height: 4),
                   Text(
                     _contents,
