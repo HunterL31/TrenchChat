@@ -1,8 +1,9 @@
-"""Generate the Windows installer artwork from the TrenchChat design tokens.
+"""Generate the Windows branding artwork from the TrenchChat design tokens.
 
 Writes the setup icon and the two wizard bitmaps (one per display scaling)
-into packaging/windows/assets/. Re-run after changing a colour token or the
-mark:
+into packaging/windows/assets/, and the same mark as the Flutter client's
+Windows app icon -- the one Windows shows in the title bar and taskbar.
+Re-run after changing a colour token or the mark:
 
     python3 packaging/windows/make_assets.py
 
@@ -18,6 +19,7 @@ from PIL import Image, ImageDraw, ImageFont
 REPO = Path(__file__).resolve().parents[2]
 OUT = Path(__file__).resolve().parent / "assets"
 FONTS = REPO / "flutter_ui" / "assets" / "fonts"
+CLIENT_ICON = REPO / "flutter_ui" / "windows" / "runner" / "resources" / "app_icon.ico"
 
 SUPERSAMPLE = 8
 
@@ -163,8 +165,9 @@ def main() -> None:
     OUT.mkdir(parents=True, exist_ok=True)
 
     icons = [render_icon(s) for s in ICON_SIZES]
-    icons[-1].save(OUT / "trenchchat.ico", format="ICO",
-                   sizes=[(s, s) for s in ICON_SIZES], append_images=icons[:-1])
+    for target in (OUT / "trenchchat.ico", CLIENT_ICON):
+        icons[-1].save(target, format="ICO", sizes=[(s, s) for s in ICON_SIZES],
+                       append_images=icons[:-1])
 
     for factor in SCALINGS:
         tag = f"{round(factor * 100)}"
@@ -174,6 +177,7 @@ def main() -> None:
         small.save(OUT / f"wizard-small-{tag}.bmp")
 
     print(f"wrote {len(list(OUT.iterdir()))} files to {OUT}")
+    print(f"wrote {CLIENT_ICON}")
 
 
 if __name__ == "__main__":
