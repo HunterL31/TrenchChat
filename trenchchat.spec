@@ -96,7 +96,8 @@ if voicelibs.is_dir():
 is_windows = sys.platform == "win32"
 is_macos = sys.platform == "darwin"
 
-icon_path = None
+win_icon = REPO / "packaging" / "windows" / "assets" / "trenchchat.ico"
+icon_path = str(win_icon) if is_windows and win_icon.is_file() else None
 
 # No console window on GUI platforms; keep it on Linux for terminal users
 no_console = is_windows or is_macos
