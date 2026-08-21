@@ -29,6 +29,9 @@ Widget _harness({
       ),
     );
 
+String _draft(WidgetTester tester) =>
+    tester.widget<TextField>(find.byType(TextField)).controller!.text;
+
 Future<void> _send(WidgetTester tester) async {
   await tester.tap(find.byTooltip('Send'));
   await tester.pumpAndSettle();
@@ -90,6 +93,88 @@ void main() {
     await _send(tester);
 
     expect(sent, 'changed my mind');
+  });
+
+  testWidgets('backspacing into the token takes the whole token out',
+      (tester) async {
+    String? sent;
+    await tester.pumpWidget(_harness(
+      onSend: (c) async {
+        sent = c;
+        return true;
+      },
+      staged: (name: 'Deep', code: _code),
+    ));
+    await tester.pumpAndSettle();
+
+    // One backspace at the end of the token: its ']' is gone.
+    await tester.enterText(find.byType(TextField), 'try [theme:Deep');
+    await tester.pumpAndSettle();
+
+    expect(_draft(tester), 'try ');
+    expect(find.textContaining('[theme:'), findsNothing);
+
+    await tester.enterText(find.byType(TextField), 'try something else');
+    await _send(tester);
+
+    expect(sent, 'try something else');
+    expect(sent, isNot(contains(_code)));
+  });
+
+  testWidgets('a delete inside the name takes the whole token out too',
+      (tester) async {
+    await tester.pumpWidget(_harness(
+      onSend: (_) async => true,
+      staged: (name: 'Deep', code: _code),
+    ));
+    await tester.pumpAndSettle();
+
+    await tester.enterText(find.byType(TextField), 'a [theme:Dep] b');
+    await tester.pumpAndSettle();
+
+    expect(_draft(tester), 'a  b');
+  });
+
+  testWidgets('a token deleted in full leaves the rest of the draft alone',
+      (tester) async {
+    String? sent;
+    await tester.pumpWidget(_harness(
+      onSend: (c) async {
+        sent = c;
+        return true;
+      },
+      staged: (name: 'Deep', code: _code),
+    ));
+    await tester.pumpAndSettle();
+
+    await tester.enterText(find.byType(TextField), 'changed my mind');
+    await tester.pumpAndSettle();
+
+    expect(_draft(tester), 'changed my mind');
+
+    await _send(tester);
+    expect(sent, 'changed my mind');
+  });
+
+  testWidgets('an unrelated theme token the user typed is left alone',
+      (tester) async {
+    String? sent;
+    await tester.pumpWidget(_harness(
+      onSend: (c) async {
+        sent = c;
+        return true;
+      },
+      staged: (name: 'Deep', code: _code),
+    ));
+    await tester.pumpAndSettle();
+
+    await tester.enterText(find.byType(TextField), 'about [theme:Other] really');
+    await tester.pumpAndSettle();
+
+    expect(_draft(tester), 'about [theme:Other] really');
+
+    await _send(tester);
+    expect(sent, 'about [theme:Other] really');
   });
 
   testWidgets('the token is appended after what is already typed', (tester) async {

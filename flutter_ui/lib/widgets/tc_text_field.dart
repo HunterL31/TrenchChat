@@ -3,6 +3,7 @@
 // wrapped in a bordered box since dialog fields (unlike the chromeless
 // compose row) need a visible boundary.
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../theme/section_theme.dart';
 import '../theme/tokens.dart';
@@ -16,6 +17,7 @@ class TcTextField extends StatelessWidget {
     this.autofocus = false,
     this.onSubmitted,
     this.readOnly = false,
+    this.inputFormatters,
   });
 
   final String label;
@@ -23,6 +25,9 @@ class TcTextField extends StatelessWidget {
   final String? hintText;
   final bool autofocus;
   final ValueChanged<String>? onSubmitted;
+
+  /// Passed straight to the inner field -- a length cap, a character filter.
+  final List<TextInputFormatter>? inputFormatters;
 
   /// When true, the field displays its value but rejects edits -- used for
   /// an identity hash pre-filled from a context menu (see add_friend_dialog.dart).
@@ -54,6 +59,7 @@ class TcTextField extends StatelessWidget {
             autofocus: autofocus,
             onSubmitted: onSubmitted,
             readOnly: readOnly,
+            inputFormatters: inputFormatters,
             style: TextStyle(
               fontSize: TCType.textBodyMd,
               color: readOnly ? tc.textSecondary : tc.textPrimary,

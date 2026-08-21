@@ -50,6 +50,10 @@ class _MainWindowState extends State<MainWindow> {
   // place it surfaces app-wide.
   String? _lastShownActionError;
 
+  /// True while the current staged theme share has already pulled the view
+  /// back to chat, so the switch happens once per share.
+  bool _themeShareShown = false;
+
   void _maybeShowActionError(AppState state) {
     final message = state.actionError;
     if (message == null || message == _lastShownActionError) return;
@@ -57,6 +61,22 @@ class _MainWindowState extends State<MainWindow> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
+    });
+  }
+
+  /// A theme staged from the appearance editor lands in the compose box,
+  /// which only the chat tab shows -- so the share brings the chat tab back
+  /// with it rather than dropping into a pane that cannot show it.
+  void _maybeShowThemeShare(AppState state) {
+    if (state.pendingThemeShare == null) {
+      _themeShareShown = false;
+      return;
+    }
+    if (_themeShareShown || _tab == ChannelTab.chat) return;
+    _themeShareShown = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      setState(() => _tab = ChannelTab.chat);
     });
   }
 
@@ -114,6 +134,7 @@ class _MainWindowState extends State<MainWindow> {
         }
 
         _maybeShowActionError(state);
+        _maybeShowThemeShare(state);
 
         final selectedServer = state.selectedServerHash;
         final serverName = selectedServer != null

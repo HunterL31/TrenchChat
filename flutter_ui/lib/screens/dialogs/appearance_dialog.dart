@@ -13,10 +13,14 @@
 //
 // A draft can also be kept under a name (MY THEMES), which is a library
 // separate from the theme in force: saving one changes nothing about how the
-// app looks, and applying one only loads it into the draft. SHARE stages the
+// app looks, while applying one puts it in force there and then, the same as
+// the dialog's own APPLY but without closing. SHARE stages the
 // theme's code (theme/theme_code.dart) into the compose box and closes the
 // way back to it -- nothing is sent until the user sends it.
+import 'dart:async';
+
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../../app_state.dart';
 import '../../theme/section_theme.dart';
@@ -60,6 +64,9 @@ const Map<String, String> appearanceDisplayFontLabels = {
 /// The option key standing for "this scope sets nothing here".
 const String _inheritKey = '';
 
+/// How long a delete stays armed before the row goes back to offering ×.
+const Duration appearanceDeleteConfirmWindow = Duration(seconds: 3);
+
 /// The name field of the SAVE AS… row.
 const Key appearanceSaveAsFieldKey = Key('appearance-save-as');
 
@@ -68,6 +75,8 @@ const Key appearancePresetRowKey = Key('appearance-presets');
 
 /// Keys of one saved theme's row controls. The row's APPLY carries the same
 /// label as the dialog's own, so these are how a caller tells them apart.
+/// The delete key stays on whatever occupies that slot -- × first, then the
+/// SURE? confirmation -- so deleting is the same control tapped twice.
 Key appearanceApplySavedKey(String name) => Key('theme-apply:$name');
 Key appearanceShareSavedKey(String name) => Key('theme-share:$name');
 Key appearanceDeleteSavedKey(String name) => Key('theme-delete:$name');
@@ -100,14 +109,31 @@ class _AppearanceDialogContentState extends State<_AppearanceDialogContent> {
   /// One line of feedback for a library action -- saved, shared, deleted.
   String? _notice;
 
+  /// The saved theme the draft is understood to be wearing, so duplicates of
+  /// one spec do not all claim to be the active one. Null when the draft
+  /// belongs to no saved theme.
+  String? _activeName;
+
+  /// The row whose delete is armed, waiting for the confirming second click.
+  String? _armedDelete;
+  Timer? _armedDeleteTimer;
+
   @override
   void initState() {
     super.initState();
     _saveAsName.addListener(() => setState(() {}));
+    final applied = widget.state.themeSpec;
+    for (final name in _savedNames) {
+      if (widget.state.themeLibrary[name] == applied) {
+        _activeName = name;
+        break;
+      }
+    }
   }
 
   @override
   void dispose() {
+    _armedDeleteTimer?.cancel();
     _saveAsName.dispose();
     super.dispose();
   }
@@ -226,9 +252,14 @@ class _AppearanceDialogContentState extends State<_AppearanceDialogContent> {
   /// The trimmed name SAVE AS… would write to, empty when the field is blank.
   String get _saveAsTarget => _saveAsName.text.trim();
 
-  /// True when saving would replace a theme already in the library.
-  bool get _saveAsOverwrites =>
-      _saveAsTarget.isNotEmpty && widget.state.themeLibrary.containsKey(_saveAsTarget);
+  /// True when saving would replace a theme already in the library with a
+  /// different one. Re-saving a name that already holds this exact draft
+  /// changes nothing, so it is not an overwrite worth warning about.
+  bool get _saveAsOverwrites {
+    if (_saveAsTarget.isEmpty) return false;
+    final stored = widget.state.themeLibrary[_saveAsTarget];
+    return stored != null && stored != _draft;
+  }
 
   Future<void> _runLibraryAction(Future<bool> Function() action, String success) async {
     setState(() {
@@ -253,7 +284,52 @@ class _AppearanceDialogContentState extends State<_AppearanceDialogContent> {
       () => widget.state.saveThemeAs(name, _draft),
       replaced ? 'Replaced $name.' : 'Saved as $name.',
     );
-    if (mounted && _error == null) _saveAsName.clear();
+    if (!mounted || _error != null) return;
+    setState(() => _activeName = name);
+    _saveAsName.clear();
+  }
+
+  /// Puts a saved theme in force: it is persisted at once, the draft becomes
+  /// it, and the dialog stays open. The row's APPLY means the same thing the
+  /// shared-theme card's does -- not "load this for editing".
+  Future<void> _applySaved(String name, ThemeSpec spec) async {
+    setState(() {
+      _busy = true;
+      _error = null;
+      _notice = null;
+    });
+    await widget.state.saveTheme(spec);
+    if (!mounted) return;
+    if (widget.state.themeSpec != spec) {
+      setState(() {
+        _busy = false;
+        _error = widget.state.actionError ?? 'Could not save the theme.';
+      });
+      return;
+    }
+    setState(() {
+      _busy = false;
+      _draft = spec;
+      _activeName = name;
+      _notice = 'Applied $name.';
+    });
+  }
+
+  /// First click on × arms the row; the second, within
+  /// [appearanceDeleteConfirmWindow], deletes. Anything else clicked in the
+  /// dialog disarms it (see [_disarmDelete]).
+  void _armDelete(String name) {
+    _armedDeleteTimer?.cancel();
+    setState(() => _armedDelete = name);
+    _armedDeleteTimer = Timer(appearanceDeleteConfirmWindow, () {
+      if (mounted) setState(() => _armedDelete = null);
+    });
+  }
+
+  void _disarmDelete() {
+    _armedDeleteTimer?.cancel();
+    _armedDeleteTimer = null;
+    if (_armedDelete != null) setState(() => _armedDelete = null);
   }
 
   /// Hands the theme's code to the compose box and leaves, closing the
@@ -263,10 +339,14 @@ class _AppearanceDialogContentState extends State<_AppearanceDialogContent> {
     Navigator.pop(context, true);
   }
 
-  Future<void> _deleteSaved(String name) => _runLibraryAction(
-        () => widget.state.deleteSavedTheme(name),
-        'Deleted $name.',
-      );
+  Future<void> _deleteSaved(String name) {
+    _disarmDelete();
+    if (_activeName == name) _activeName = null;
+    return _runLibraryAction(
+      () => widget.state.deleteSavedTheme(name),
+      'Deleted $name.',
+    );
+  }
 
   void _resetAll() {
     setState(() {
@@ -298,10 +378,15 @@ class _AppearanceDialogContentState extends State<_AppearanceDialogContent> {
 
   @override
   Widget build(BuildContext context) {
+    // The pointer-up runs before any tap callback, so a click landing on a
+    // delete control still arms or confirms it after this disarms the row.
     return SectionTheme(
       spec: _draft,
       section: TCSection.dialogs,
-      child: Builder(builder: _buildContent),
+      child: Listener(
+        onPointerUp: _armedDelete == null ? null : (_) => _disarmDelete(),
+        child: Builder(builder: _buildContent),
+      ),
     );
   }
 
@@ -325,7 +410,7 @@ class _AppearanceDialogContentState extends State<_AppearanceDialogContent> {
 
   Widget _savedThemeRow(TCSectionColors tc, String name) {
     final spec = widget.state.themeLibrary[name] ?? ThemeSpec.empty;
-    final active = spec == _draft;
+    final active = name == _activeName && spec == _draft;
     // The name wears its own theme's colors, so each row previews itself.
     final own = spec.resolveBase();
     return Padding(
@@ -373,7 +458,7 @@ class _AppearanceDialogContentState extends State<_AppearanceDialogContent> {
           TcGhostButton(
             key: appearanceApplySavedKey(name),
             label: 'APPLY',
-            onPressed: _busy ? null : () => _applySpec(spec),
+            onPressed: _busy ? null : () => _applySaved(name, spec),
           ),
           const SizedBox(width: 6),
           TcGhostButton(
@@ -382,17 +467,25 @@ class _AppearanceDialogContentState extends State<_AppearanceDialogContent> {
             onPressed: _busy ? null : () => _shareSaved(name, spec),
           ),
           const SizedBox(width: 6),
-          SizedBox(
-            width: 22,
-            height: 22,
-            child: TcIconButton(
+          if (_armedDelete == name)
+            TcGhostButton(
               key: appearanceDeleteSavedKey(name),
-              icon: TcIcons.close,
-              tooltip: 'Delete theme',
-              size: 22,
+              label: 'SURE?',
+              accent: tc.statusDanger,
               onPressed: _busy ? null : () => _deleteSaved(name),
+            )
+          else
+            SizedBox(
+              width: 22,
+              height: 22,
+              child: TcIconButton(
+                key: appearanceDeleteSavedKey(name),
+                icon: TcIcons.close,
+                tooltip: 'Delete theme',
+                size: 22,
+                onPressed: _busy ? null : () => _armDelete(name),
+              ),
             ),
-          ),
         ],
       ),
     );
@@ -447,6 +540,9 @@ class _AppearanceDialogContentState extends State<_AppearanceDialogContent> {
                 label: 'Save the current draft as',
                 controller: _saveAsName,
                 hintText: 'Theme name',
+                inputFormatters: [
+                  LengthLimitingTextInputFormatter(maxThemeNameLength),
+                ],
                 onSubmitted: (_) => _saveDraftAs(),
               ),
             ),

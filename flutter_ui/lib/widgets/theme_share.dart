@@ -4,6 +4,7 @@
 // Same contract as the custom-emoji tokens next door -- a token this client
 // can read is rewritten, one it cannot stays literal text, so a code from a
 // newer client is still readable as words.
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import '../api/models/emoji.dart';
@@ -260,10 +261,20 @@ class ThemeCodeCard extends StatefulWidget {
 
 class _ThemeCodeCardState extends State<ThemeCodeCard> {
   bool _busy = false;
-  late bool _added = _nameAlreadyHolding != null;
 
-  /// The name the theme was kept under, once it has been.
-  late String? _savedAs = _nameAlreadyHolding;
+  /// The name this card's own ADD wrote, kept only until a fresh library
+  /// arrives. Everything else the card says about being added is read off
+  /// [ThemeCodeCard.library], so a theme added by another card -- or deleted
+  /// from the editor -- moves every card showing it.
+  String? _justAdded;
+
+  @override
+  void didUpdateWidget(ThemeCodeCard oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (!mapEquals(oldWidget.library, widget.library)) {
+      setState(() => _justAdded = null);
+    }
+  }
 
   /// The library name already holding exactly this theme, if any -- the
   /// sender's own share starts out ADDED instead of offering ADD.
@@ -275,6 +286,11 @@ class _ThemeCodeCardState extends State<ThemeCodeCard> {
     return null;
   }
 
+  /// The name the theme is kept under, or null when it is not kept at all.
+  String? get _savedAs => _nameAlreadyHolding ?? _justAdded;
+
+  bool get _added => _savedAs != null;
+
   Future<void> _add() async {
     final target = freeThemeName(widget.name, widget.library.keys);
     setState(() => _busy = true);
@@ -282,8 +298,7 @@ class _ThemeCodeCardState extends State<ThemeCodeCard> {
     if (!mounted) return;
     setState(() {
       _busy = false;
-      _added = ok;
-      _savedAs = ok ? target : null;
+      _justAdded = ok ? target : null;
     });
   }
 

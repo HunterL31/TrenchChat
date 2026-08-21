@@ -794,6 +794,17 @@ class AppState extends ChangeNotifier {
             notifyListeners();
           }
         }
+      case UiThemeEvent(:final spec):
+        // An event that only says what is already in force is what this
+        // client's own save just produced; adopting it again would rebuild
+        // every section for nothing.
+        if (spec == themeSpec) break;
+        themeSpec = spec;
+        notifyListeners();
+      case UiThemeLibraryEvent(:final library):
+        if (mapEquals(library, themeLibrary)) break;
+        themeLibrary = library;
+        notifyListeners();
       case VoiceSessionEvent(:final state):
         switch (state) {
           case 'joined':

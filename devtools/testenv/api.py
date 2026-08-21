@@ -140,6 +140,10 @@ class SaveUiThemeRequest(BaseModel):
     theme: dict
 
 
+class DeleteUiThemeRequest(BaseModel):
+    name: str
+
+
 class CreateInterfaceRequest(BaseModel):
     name: str
     type: str
@@ -541,11 +545,26 @@ def create_app(backend: Backend, *, token: str | None = None,
     @app.post("/ui_theme")
     def set_ui_theme(req: SetUiThemeRequest):
         actions.set_ui_theme(backend.config, req.theme)
+        # Theme changes come from a client rather than the mesh, so nothing
+        # else would tell this profile's other open clients about them.
+        bus.emit("ui_theme", theme=actions.read_ui_theme(backend.config))
         return {"ok": True}
 
     @app.get("/ui_theme_library")
     def get_ui_theme_library():
         return {"themes": actions.read_ui_theme_library(backend.config)}
+
+    def _emit_theme_library() -> None:
+        bus.emit("ui_theme_library",
+                 themes=actions.read_ui_theme_library(backend.config))
+
+    def _delete_ui_theme(name: str):
+        if not actions.delete_ui_theme_from_library(backend.config, name):
+            return JSONResponse(
+                {"ok": False, "error": "no such theme"}, status_code=404,
+            )
+        _emit_theme_library()
+        return {"ok": True}
 
     @app.post("/ui_theme_library")
     def save_ui_theme_to_library(req: SaveUiThemeRequest):
@@ -553,15 +572,19 @@ def create_app(backend: Backend, *, token: str | None = None,
             actions.save_ui_theme_to_library(backend.config, req.name, req.theme)
         except ValueError as e:
             return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+        _emit_theme_library()
         return {"ok": True}
+
+    # A name containing '/' cannot be addressed as a path segment -- even
+    # percent-encoded, the router splits on it -- so deleting goes through a
+    # body. The path form stays for older clients.
+    @app.post("/ui_theme_library/delete")
+    def delete_ui_theme_by_body(req: DeleteUiThemeRequest):
+        return _delete_ui_theme(req.name)
 
     @app.delete("/ui_theme_library/{name}")
     def delete_ui_theme_from_library(name: str):
-        if not actions.delete_ui_theme_from_library(backend.config, name):
-            return JSONResponse(
-                {"ok": False, "error": "no such theme"}, status_code=404,
-            )
-        return {"ok": True}
+        return _delete_ui_theme(name)
 
     @app.get("/peers/{peer_hash}/presence")
     def get_peer_presence(peer_hash: str):

@@ -417,44 +417,121 @@ void main() {
     expect(find.textContaining('Overwrites existing'), findsNothing);
   });
 
-  testWidgets('applying a saved theme replaces the draft', (tester) async {
-    state.themeLibrary = {
-      'Deep': ThemeSpec(
-        base: {'bgApp': const Color(0xFF221100)},
-        styles: {
-          'base': {'glow': false},
-        },
-      ),
-    };
+  testWidgets('applying a saved theme puts it in force without closing',
+      (tester) async {
+    final deep = ThemeSpec(
+      base: {'bgApp': const Color(0xFF221100)},
+      styles: {
+        'base': {'glow': false},
+      },
+    );
+    state.themeLibrary = {'Deep': deep};
     await openEditor(tester);
 
     await tester.tap(find.byKey(appearanceApplySavedKey('Deep')));
-    await tester.pump();
-    expect(fieldText(tester, 'bgApp'), '#221100');
-
-    await tester.tap(find.descendant(
-      of: find.byType(TcPrimaryButton),
-      matching: find.text('APPLY'),
-    ));
     await settle(tester);
 
+    // Saved there and then -- no second click on the dialog's own APPLY.
     final theme = lastPostedTheme();
     expect((theme['base'] as Map)['bgApp'], '#221100');
     expect((theme['styles'] as Map)['base'], {'glow': false});
-    expect(state.themeSpec.base['bgApp'], const Color(0xFF221100));
+    expect(state.themeSpec, deep);
+    // The draft follows it, and the editor is still open on it.
+    expect(fieldText(tester, 'bgApp'), '#221100');
+    expect(find.text('Appearance'), findsOneWidget);
+    expect(find.text('Applied Deep.'), findsOneWidget);
   });
 
-  testWidgets('a saved theme can be deleted', (tester) async {
+  testWidgets('a saved theme that will not save says so and stays undone',
+      (tester) async {
+    backend.routes.remove('POST /ui_theme');
     state.themeLibrary = {'Deep': ThemeSpec(base: {'bgApp': const Color(0xFF221100)})};
-    backend.routes['DELETE /ui_theme_library/Deep'] = {'ok': true};
     await openEditor(tester);
+
+    await tester.tap(find.byKey(appearanceApplySavedKey('Deep')));
+    await settle(tester);
+
+    expect(state.themeSpec.isEmpty, isTrue);
+    expect(find.text('Appearance'), findsOneWidget);
+    expect(find.text('Applied Deep.'), findsNothing);
+    expect(state.actionError, isNotNull);
+    expect(find.text(state.actionError!), findsOneWidget);
+  });
+
+  testWidgets('deleting a saved theme takes a confirming second click', (tester) async {
+    state.themeLibrary = {'Deep': ThemeSpec(base: {'bgApp': const Color(0xFF221100)})};
+    backend.routes['POST /ui_theme_library/delete'] = {'ok': true};
+    await openEditor(tester);
+
+    await tester.tap(find.byKey(appearanceDeleteSavedKey('Deep')));
+    await tester.pump();
+
+    // The first click only arms it -- nothing has been asked of the backend.
+    expect(find.text('SURE?'), findsOneWidget);
+    expect(backend.requests.where((r) => r.path.endsWith('/delete')), isEmpty);
+    expect(state.themeLibrary.keys, ['Deep']);
 
     await tester.tap(find.byKey(appearanceDeleteSavedKey('Deep')));
     await settle(tester);
 
-    expect(backend.requests.last.method, 'DELETE');
+    expect(backend.requests.last.path, '/ui_theme_library/delete');
     expect(state.themeLibrary, isEmpty);
     expect(find.text('Deleted Deep.'), findsOneWidget);
+  });
+
+  testWidgets('an armed delete reverts on its own after the confirm window',
+      (tester) async {
+    state.themeLibrary = {'Deep': ThemeSpec(base: {'bgApp': const Color(0xFF221100)})};
+    await openEditor(tester);
+
+    await tester.tap(find.byKey(appearanceDeleteSavedKey('Deep')));
+    await tester.pump();
+    expect(find.text('SURE?'), findsOneWidget);
+    expect(
+      tester.widget<TcGhostButton>(find.byKey(appearanceDeleteSavedKey('Deep'))).accent,
+      isNotNull,
+    );
+
+    await tester.pump(appearanceDeleteConfirmWindow + const Duration(milliseconds: 100));
+    await tester.pump();
+
+    expect(find.text('SURE?'), findsNothing);
+    expect(find.byKey(appearanceDeleteSavedKey('Deep')), findsOneWidget);
+    expect(state.themeLibrary.keys, ['Deep']);
+  });
+
+  testWidgets('clicking anything else in the editor disarms the delete', (tester) async {
+    state.themeLibrary = {'Deep': ThemeSpec(base: {'bgApp': const Color(0xFF221100)})};
+    await openEditor(tester);
+
+    await tester.tap(find.byKey(appearanceDeleteSavedKey('Deep')));
+    await tester.pump();
+    expect(find.text('SURE?'), findsOneWidget);
+
+    await tester.tap(find.text('CONTENT'));
+    await tester.pump();
+
+    expect(find.text('SURE?'), findsNothing);
+    expect(state.themeLibrary.keys, ['Deep']);
+  });
+
+  testWidgets('arming one row disarms the other', (tester) async {
+    final spec = ThemeSpec(base: {'bgApp': const Color(0xFF221100)});
+    state.themeLibrary = {'Deep': spec, 'Shallow': spec};
+    await openEditor(tester);
+
+    await tester.tap(find.byKey(appearanceDeleteSavedKey('Deep')));
+    await tester.pump();
+    await tester.tap(find.byKey(appearanceDeleteSavedKey('Shallow')));
+    await tester.pump();
+
+    expect(find.text('SURE?'), findsOneWidget);
+    expect(
+      tester.widget<TcGhostButton>(find.byKey(appearanceDeleteSavedKey('Shallow'))).label,
+      'SURE?',
+    );
+
+    await tester.pump(appearanceDeleteConfirmWindow + const Duration(milliseconds: 100));
   });
 
   testWidgets('SHARE stages the theme for the compose box and sends nothing',
@@ -632,6 +709,112 @@ void main() {
     await tester.enterText(find.byKey(tcColorInputKey('bgApp')), '#445566');
     await tester.pump();
     expect(find.text('ACTIVE'), findsNothing);
+  });
+
+  testWidgets('only one saved row wears the ACTIVE tag when specs are duplicated',
+      (tester) async {
+    final mine = ThemeSpec(base: {'bgApp': const Color(0xFF102030)});
+    state.themeLibrary = {'alpha': mine, 'beta': mine};
+    state.themeSpec = mine;
+    await openEditor(tester);
+
+    Finder rowOf(String name) =>
+        find.ancestor(of: find.text(name), matching: find.byType(Row)).first;
+
+    expect(find.text('ACTIVE'), findsOneWidget);
+    expect(find.descendant(of: rowOf('alpha'), matching: find.text('ACTIVE')),
+        findsOneWidget);
+
+    // Applying the duplicate moves the tag rather than lighting both rows.
+    await tester.tap(find.byKey(appearanceApplySavedKey('beta')));
+    await settle(tester);
+    expect(find.text('ACTIVE'), findsOneWidget);
+    expect(find.descendant(of: rowOf('beta'), matching: find.text('ACTIVE')),
+        findsOneWidget);
+
+    // Editing the draft still clears every tag.
+    await tester.enterText(find.byKey(tcColorInputKey('bgApp')), '#445566');
+    await tester.pump();
+    expect(find.text('ACTIVE'), findsNothing);
+  });
+
+  testWidgets('SAVE AS… makes the name it wrote the active one', (tester) async {
+    // A theme already holding what the draft is about to become: the tag has
+    // to follow the name just saved, not every row that matches.
+    state.themeLibrary = {'zzz': ThemeSpec(base: {'bgApp': const Color(0xFF102030)})};
+    await openEditor(tester);
+
+    await tester.enterText(find.byKey(tcColorInputKey('bgApp')), '#102030');
+    await tester.pump();
+    await tester.enterText(find.byKey(appearanceSaveAsFieldKey), 'Deep');
+    await tester.pump();
+    await tester.tap(find.text('SAVE AS…'));
+    await settle(tester);
+
+    expect(find.text('ACTIVE'), findsOneWidget);
+    expect(
+      find.descendant(
+        of: find.ancestor(of: find.text('Deep'), matching: find.byType(Row)).first,
+        matching: find.text('ACTIVE'),
+      ),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('the name field stops at the length the library accepts', (tester) async {
+    await openEditor(tester);
+
+    await tester.enterText(find.byKey(appearanceSaveAsFieldKey), 'x' * 200);
+    await tester.pump();
+
+    final field = tester.widget<TextField>(
+      find.descendant(of: find.byKey(appearanceSaveAsFieldKey), matching: find.byType(TextField)),
+    );
+    expect(field.controller!.text.length, maxThemeNameLength);
+  });
+
+  testWidgets('a refused save shows the reason in the editor, not just a snackbar',
+      (tester) async {
+    backend.routes.remove('POST /ui_theme_library');
+    await openEditor(tester);
+
+    await tester.enterText(find.byKey(appearanceSaveAsFieldKey), 'Deep');
+    await tester.pump();
+    await tester.tap(find.text('SAVE AS…'));
+    await settle(tester);
+
+    expect(state.actionError, isNotNull);
+    expect(find.text(state.actionError!), findsOneWidget);
+    expect(find.text('Saved as Deep.'), findsNothing);
+    expect(state.themeLibrary, isEmpty);
+    // The name is kept so the save can be retried.
+    expect(find.text('Appearance'), findsOneWidget);
+  });
+
+  testWidgets('re-saving a name that already holds this exact draft is not an overwrite',
+      (tester) async {
+    state.themeLibrary = {'Deep': ThemeSpec.empty};
+    await openEditor(tester);
+
+    await tester.enterText(find.byKey(appearanceSaveAsFieldKey), 'Deep');
+    await tester.pump();
+
+    expect(find.textContaining('Overwrites existing'), findsNothing);
+    expect(find.text('SAVE AS…'), findsOneWidget);
+    expect(find.text('OVERWRITE'), findsNothing);
+
+    await tester.tap(find.text('SAVE AS…'));
+    await settle(tester);
+    expect(find.text('Saved as Deep.'), findsOneWidget);
+    expect(state.themeLibrary.keys, ['Deep']);
+
+    // Once the draft differs from what is stored, the warning is back.
+    await tester.enterText(find.byKey(appearanceSaveAsFieldKey), 'Deep');
+    await tester.pump();
+    await tester.enterText(find.byKey(tcColorInputKey('bgApp')), '#102030');
+    await tester.pump();
+    expect(find.text('Overwrites existing "Deep".'), findsOneWidget);
+    expect(find.text('OVERWRITE'), findsOneWidget);
   });
 
   testWidgets('a saved theme name renders in its own colors', (tester) async {

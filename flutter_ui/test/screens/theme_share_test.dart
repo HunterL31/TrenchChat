@@ -1,6 +1,7 @@
 // A theme code in a message: the inline chip, the preview card, and ADD
 // putting the theme in the library. A code this client cannot read must stay
-// readable as text.
+// readable as text. Staging one from the editor must also land somewhere the
+// user can see it, which is the chat tab.
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
@@ -8,6 +9,8 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'package:flutter_ui/api/models/message.dart';
 import 'package:flutter_ui/app_state.dart';
+import 'package:flutter_ui/screens/main_window/compose_bar.dart';
+import 'package:flutter_ui/screens/main_window/main_window.dart';
 import 'package:flutter_ui/screens/main_window/message_list.dart';
 import 'package:flutter_ui/theme/theme_code.dart';
 import 'package:flutter_ui/theme/theme_spec.dart';
@@ -22,8 +25,8 @@ final ThemeSpec _shared = ThemeSpec(
   },
 );
 
-Message _msg(String content) => Message(
-      messageId: 'm1',
+Message _msg(String content, [String id = 'm1']) => Message(
+      messageId: id,
       senderHash: 'alice',
       senderName: 'alice',
       content: content,
@@ -34,13 +37,16 @@ Message _msg(String content) => Message(
       imageStripped: false,
     );
 
-Widget _harness(AppState state, String content) => MaterialApp(
+/// The message list holding [content], and [second] when a second message is
+/// wanted -- one code is deduped within a message, so two cards for the same
+/// theme need two messages.
+Widget _harness(AppState state, String content, [String? second]) => MaterialApp(
       home: Scaffold(
         body: SizedBox(
           width: 800,
           height: 600,
           child: MessageList(
-            messages: [_msg(content)],
+            messages: [_msg(content), if (second != null) _msg(second, 'm2')],
             meHashHex: 'me',
             displayNameFor: (hash, fallback) => fallback,
             onAddTheme: state.saveThemeAs,
@@ -53,6 +59,17 @@ Widget _harness(AppState state, String content) => MaterialApp(
         ),
       ),
     );
+
+/// The whole shell on a desktop-width viewport, where the header's tab strip
+/// carries labels and nothing overflows.
+Future<void> pumpShell(WidgetTester tester, AppState state) async {
+  tester.view.physicalSize = const Size(1400, 900);
+  tester.view.devicePixelRatio = 1.0;
+  addTearDown(tester.view.reset);
+  state.loading = false;
+  await tester.pumpWidget(MaterialApp(home: Scaffold(body: MainWindow(state: state))));
+  await tester.pump();
+}
 
 void main() {
   late FakeBackend backend;
@@ -142,6 +159,39 @@ void main() {
     expect(find.text('Saved as "Deep-2"'), findsOneWidget);
   });
 
+  testWidgets('ADD on one card flips every card holding that theme', (tester) async {
+    final code = encodeThemeCode('Deep', _shared);
+    await tester.pumpWidget(_harness(state, code, 'and again $code'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('ADD'), findsNWidgets(2));
+
+    await tester.tap(find.text('ADD').first);
+    await tester.pumpAndSettle();
+
+    // The library the cards were given is a snapshot; this is it arriving.
+    await tester.pumpWidget(_harness(state, code, 'and again $code'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('ADDED'), findsNWidgets(2));
+    expect(find.text('ADD'), findsNothing);
+  });
+
+  testWidgets('deleting the theme from the library offers ADD again',
+      (tester) async {
+    state.themeLibrary = {'Deep': _shared};
+    await tester.pumpWidget(_harness(state, encodeThemeCode('Deep', _shared)));
+    await tester.pumpAndSettle();
+    expect(find.text('ADDED'), findsOneWidget);
+
+    state.themeLibrary = {};
+    await tester.pumpWidget(_harness(state, encodeThemeCode('Deep', _shared)));
+    await tester.pumpAndSettle();
+
+    expect(find.text('ADD'), findsOneWidget);
+    expect(find.text('ADDED'), findsNothing);
+  });
+
   test('a free suffix skips every taken one and stays within the name limit', () {
     expect(freeThemeName('Deep', const []), 'Deep');
     expect(freeThemeName('Deep', const ['Deep', 'Deep-2', 'Deep-3']), 'Deep-4');
@@ -190,6 +240,39 @@ void main() {
     expect(state.themeSpec, _shared);
     final post = backend.requests.lastWhere((r) => r.path == '/ui_theme');
     expect(post.method, 'POST');
+  });
+
+  testWidgets('staging a share from another tab brings the compose box back',
+      (tester) async {
+    await pumpShell(tester, state);
+
+    // Leave the chat tab, where the compose box lives.
+    await tester.tap(find.text('MAP'));
+    await tester.pump();
+    expect(find.byType(ComposeBar), findsNothing);
+
+    state.stageThemeShare('Deep', encodeThemeCode('Deep', _shared));
+    await tester.pumpAndSettle();
+
+    expect(find.byType(ComposeBar), findsOneWidget);
+    expect(find.text('[theme:Deep]'), findsOneWidget);
+    expect(state.pendingThemeShare, isNull);
+  });
+
+  testWidgets('a share staged while the chat tab is open leaves the tab alone',
+      (tester) async {
+    await pumpShell(tester, state);
+
+    state.stageThemeShare('Deep', encodeThemeCode('Deep', _shared));
+    await tester.pumpAndSettle();
+
+    expect(find.byType(ComposeBar), findsOneWidget);
+    expect(find.text('[theme:Deep]'), findsOneWidget);
+
+    // A tab change after the share is consumed is not undone by it.
+    await tester.tap(find.text('MAP'));
+    await tester.pumpAndSettle();
+    expect(find.byType(ComposeBar), findsNothing);
   });
 
   testWidgets('the card previews the theme as a mini window', (tester) async {

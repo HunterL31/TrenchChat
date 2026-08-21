@@ -480,8 +480,14 @@ class ApiClient {
     _decode(res);
   }
 
+  /// Deletes a saved theme. The name travels in the body, not the path: a
+  /// name containing '/' cannot be addressed as a path segment even encoded.
   Future<void> deleteThemeFromLibrary(String name) async {
-    final res = await _http.delete(_u('/ui_theme_library/${Uri.encodeComponent(name)}'));
+    final res = await _http.post(
+      _u('/ui_theme_library/delete'),
+      headers: _jsonHeaders,
+      body: jsonEncode({'name': name}),
+    );
     _decode(res);
   }
 

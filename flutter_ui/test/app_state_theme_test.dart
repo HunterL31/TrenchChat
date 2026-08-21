@@ -1,6 +1,7 @@
 import 'package:flutter/painting.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:flutter_ui/api/events.dart';
 import 'package:flutter_ui/app_state.dart';
 import 'package:flutter_ui/theme/theme_spec.dart';
 
@@ -124,12 +125,66 @@ void main() {
   });
 
   test('deleteSavedTheme drops the entry', () async {
-    backend.routes['DELETE /ui_theme_library/Deep'] = {'ok': true};
+    backend.routes['POST /ui_theme_library/delete'] = {'ok': true};
     await state.saveThemeAs('Deep', ThemeSpec.empty);
 
     expect(await state.deleteSavedTheme('Deep'), isTrue);
 
     expect(state.themeLibrary, isEmpty);
+  });
+
+  test('deleting sends the name in the body, so a slashed one still goes', () async {
+    // A name with a '/' in it cannot be addressed as a path segment: the
+    // backend's router splits on it however the client encodes it.
+    backend.routes['POST /ui_theme_library/delete'] = {'ok': true};
+    await state.saveThemeAs('a/b', ThemeSpec.empty);
+
+    expect(await state.deleteSavedTheme('a/b'), isTrue);
+
+    final sent = backend.requests.last;
+    expect(sent.method, 'POST');
+    expect(sent.path, '/ui_theme_library/delete');
+    expect(sent.body, contains('"name":"a/b"'));
+    expect(state.themeLibrary, isEmpty);
+  });
+
+  test('a ui_theme event adopts the theme another client applied', () async {
+    final spec = ThemeSpec.empty.withBaseOverride('bgApp', _red);
+    var notified = 0;
+    state.addListener(() => notified++);
+
+    state.applyEvent(UiThemeEvent(spec));
+
+    expect(state.themeSpec, spec);
+    expect(notified, 1);
+  });
+
+  test('a ui_theme event matching what is in force changes nothing', () async {
+    final spec = ThemeSpec.empty.withBaseOverride('bgApp', _red);
+    await state.saveTheme(spec);
+    var notified = 0;
+    state.addListener(() => notified++);
+
+    // The event this client's own save produced comes back to it.
+    state.applyEvent(UiThemeEvent(ThemeSpec.empty.withBaseOverride('bgApp', _red)));
+
+    expect(state.themeSpec, spec);
+    expect(notified, 0);
+  });
+
+  test('a ui_theme_library event replaces the library', () async {
+    final spec = ThemeSpec.empty.withBaseOverride('bgApp', _red);
+    state.themeLibrary = {'Gone': ThemeSpec.empty};
+    var notified = 0;
+    state.addListener(() => notified++);
+
+    state.applyEvent(UiThemeLibraryEvent({'Deep': spec}));
+
+    expect(state.themeLibrary, {'Deep': spec});
+    expect(notified, 1);
+
+    state.applyEvent(UiThemeLibraryEvent({'Deep': spec}));
+    expect(notified, 1);
   });
 
   test('deleting a theme the backend does not have reports the error', () async {

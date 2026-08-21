@@ -13,11 +13,16 @@ class TcGhostButton extends StatefulWidget {
     required this.label,
     required this.onPressed,
     this.icon,
+    this.accent,
   });
 
   final String label;
   final TcIconData? icon;
   final VoidCallback? onPressed;
+
+  /// Paints the label and border in this color instead of the neutral pair --
+  /// for a button whose meaning is a warning (a delete confirmation).
+  final Color? accent;
 
   @override
   State<TcGhostButton> createState() => _TcGhostButtonState();
@@ -38,10 +43,8 @@ class _TcGhostButtonState extends State<TcGhostButton> {
             : Colors.transparent;
     final Color fg = disabled
         ? tc.textDisabled
-        : _hover
-            ? tc.textPrimary
-            : tc.textSecondary;
-    final Color border = _hover ? tc.borderStrong : tc.borderDefault;
+        : widget.accent ?? (_hover ? tc.textPrimary : tc.textSecondary);
+    final Color border = widget.accent ?? (_hover ? tc.borderStrong : tc.borderDefault);
 
     return MouseRegion(
       cursor: disabled ? SystemMouseCursors.basic : SystemMouseCursors.click,

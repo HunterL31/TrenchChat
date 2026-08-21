@@ -5,7 +5,9 @@
 // (`:name:` -> `:name@hash:`) and a theme shared from the appearance editor
 // (`[theme:Name]` -> its `tct1:` code). Both expand at send time, so neither
 // a 64-char hash nor a whole packed theme ever sits in the user's words, and
-// deleting the token is all it takes to not send it.
+// deleting the token is all it takes to not send it. A theme token is
+// all-or-nothing: editing any part of one takes the whole token out, so a
+// half-deleted one is never sent as literal text.
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -20,6 +22,65 @@ String composeThemeToken(String name) => '[theme:$name]';
 
 /// Matches a staged theme token in draft text.
 final RegExp composeThemeTokenRe = RegExp(r'\[theme:([^\]\n]+)\]');
+
+/// The opener a staged token always starts with, and the least of it that
+/// has to survive for what is left to still read as one.
+const String _themeTokenOpener = '[theme:';
+
+/// True when [candidate] is [token] with characters taken out of it -- what a
+/// half-deleted token looks like. An unrelated `[theme:...]` the user typed
+/// is not one, since its own letters are not in the token.
+bool _isThemeTokenRemnant(String candidate, String token) {
+  if (candidate.length >= token.length ||
+      candidate.length < _themeTokenOpener.length) {
+    return false;
+  }
+  var i = 0;
+  for (var j = 0; j < token.length && i < candidate.length; j++) {
+    if (candidate.codeUnitAt(i) == token.codeUnitAt(j)) i++;
+  }
+  return i == candidate.length;
+}
+
+/// How much of [token] [text] still reads out from [start].
+int _themeTokenPrefixLength(String text, int start, String token) {
+  var n = 0;
+  while (start + n < text.length &&
+      n < token.length &&
+      text.codeUnitAt(start + n) == token.codeUnitAt(n)) {
+    n++;
+  }
+  return n;
+}
+
+/// The span of [text] holding what is left of [token] after part of it was
+/// deleted, or null when nothing there reads as a remnant.
+///
+/// Two shapes count: a bracketed group that is the token with characters
+/// taken out of it (a delete inside the name), and a leading run of the token
+/// that stops short (a delete off its end). Both have to be more than the
+/// opener, or an unrelated `[theme:something]` the user typed would qualify.
+({int start, int end})? themeTokenRemnant(String text, String token) {
+  const core = 'theme:';
+  for (var at = text.indexOf(core); at >= 0; at = text.indexOf(core, at + 1)) {
+    final start = at > 0 && text[at - 1] == '[' ? at - 1 : at;
+    final newline = text.indexOf('\n', at);
+    var end = text.indexOf(']', at);
+    if (end < 0 || (newline >= 0 && newline < end)) {
+      end = newline >= 0 ? newline : text.length;
+    } else {
+      end += 1;
+    }
+    if (_isThemeTokenRemnant(text.substring(start, end), token)) {
+      return (start: start, end: end);
+    }
+    final prefix = _themeTokenPrefixLength(text, start, token);
+    if (prefix > _themeTokenOpener.length) {
+      return (start: start, end: start + prefix);
+    }
+  }
+  return null;
+}
 
 class ComposeBar extends StatefulWidget {
   const ComposeBar({
@@ -76,11 +137,49 @@ class _ComposeBarState extends State<ComposeBar> {
   /// when the offer goes away, so a second share still lands.
   bool _shareConsumed = false;
 
+  /// True while this widget is the one writing the draft, so the edit does
+  /// not re-enter the listener that is making it.
+  bool _rewritingDraft = false;
+
   @override
   void initState() {
     super.initState();
     HardwareKeyboard.instance.addHandler(_onKeyEvent);
+    _controller.addListener(_onDraftChanged);
     _consumeThemeShare();
+  }
+
+  /// Keeps a staged theme token all-or-nothing: editing any part of one takes
+  /// the whole token out of the draft, the way deleting an attachment chip
+  /// does, rather than leaving a half-token to be sent as literal text.
+  void _onDraftChanged() {
+    if (_rewritingDraft || _draftThemes.isEmpty) return;
+    var text = _controller.text;
+    var cursor = _controller.selection.baseOffset;
+    var changed = false;
+    for (final name in _draftThemes.keys.toList()) {
+      final token = composeThemeToken(name);
+      if (text.contains(token)) continue;
+      _draftThemes.remove(name);
+      final remnant = themeTokenRemnant(text, token);
+      if (remnant == null) continue;
+      text = text.replaceRange(remnant.start, remnant.end, '');
+      cursor = remnant.start;
+      changed = true;
+    }
+    if (changed) _setDraftText(text, cursor: cursor);
+  }
+
+  /// Writes the draft without [_onDraftChanged] acting on it -- every caller
+  /// here already knows what the token mappings should be.
+  void _setDraftText(String text, {int? cursor}) {
+    final offset = (cursor ?? text.length).clamp(0, text.length);
+    _rewritingDraft = true;
+    _controller.value = TextEditingValue(
+      text: text,
+      selection: TextSelection.collapsed(offset: offset),
+    );
+    _rewritingDraft = false;
   }
 
   @override
@@ -112,15 +211,14 @@ class _ComposeBarState extends State<ComposeBar> {
     _draftThemes[name] = code;
     final text = _controller.text;
     final separator = text.isEmpty || text.endsWith(' ') || text.endsWith('\n') ? '' : ' ';
-    final next = '$text$separator${composeThemeToken(name)}';
-    _controller.text = next;
-    _controller.selection = TextSelection.collapsed(offset: next.length);
+    _setDraftText('$text$separator${composeThemeToken(name)}');
     _focusNode.requestFocus();
   }
 
   @override
   void dispose() {
     HardwareKeyboard.instance.removeHandler(_onKeyEvent);
+    _controller.removeListener(_onDraftChanged);
     _controller.dispose();
     _focusNode.dispose();
     super.dispose();
@@ -141,15 +239,15 @@ class _ComposeBarState extends State<ComposeBar> {
   Future<void> _submit() async {
     final text = _controller.text;
     if (text.trim().isEmpty || !widget.enabled) return;
-    _controller.clear();
-    final ok = await widget.onSend(_expandDraftThemes(_expandDraftEmoji(text)));
+    final expanded = _expandDraftThemes(_expandDraftEmoji(text));
+    _setDraftText('');
+    final ok = await widget.onSend(expanded);
     if (ok) {
       _draftEmoji.clear();
       _draftThemes.clear();
     } else if (mounted && _controller.text.isEmpty) {
       // Restore the short form, and keep the mapping so a retry still expands.
-      _controller.text = text;
-      _controller.selection = TextSelection.collapsed(offset: text.length);
+      _setDraftText(text);
     }
   }
 
@@ -183,8 +281,7 @@ class _ComposeBarState extends State<ComposeBar> {
     final selection = _controller.selection;
     final start = selection.isValid ? selection.start : text.length;
     final end = selection.isValid ? selection.end : text.length;
-    _controller.text = text.replaceRange(start, end, token);
-    _controller.selection = TextSelection.collapsed(offset: start + token.length);
+    _setDraftText(text.replaceRange(start, end, token), cursor: start + token.length);
     _focusNode.requestFocus();
   }
 
