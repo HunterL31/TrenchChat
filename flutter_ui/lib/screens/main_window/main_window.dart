@@ -265,6 +265,10 @@ class _MainWindowState extends State<MainWindow> {
                             onAddFriend: (hash) =>
                                 showAddFriendDialog(context, state, identityHash: hash),
                             onAddTheme: state.saveThemeAs,
+                            onApplyTheme: (spec) async {
+                              await state.saveTheme(spec);
+                              return state.themeSpec == spec;
+                            },
                             themeLibrary: state.themeLibrary,
                           ),
                     },

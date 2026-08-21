@@ -44,6 +44,10 @@ Widget _harness(AppState state, String content) => MaterialApp(
             meHashHex: 'me',
             displayNameFor: (hash, fallback) => fallback,
             onAddTheme: state.saveThemeAs,
+            onApplyTheme: (spec) async {
+              await state.saveTheme(spec);
+              return state.themeSpec == spec;
+            },
             themeLibrary: state.themeLibrary,
           ),
         ),
@@ -110,15 +114,12 @@ void main() {
     expect(state.actionError, isNotNull);
   });
 
-  testWidgets('a name already holding this very theme is not saved again',
-      (tester) async {
+  testWidgets('a theme the reader already has starts out ADDED', (tester) async {
     state.themeLibrary = {'Deep': _shared};
     await tester.pumpWidget(_harness(state, encodeThemeCode('Deep', _shared)));
     await tester.pumpAndSettle();
 
-    await tester.tap(find.text('ADD'));
-    await tester.pumpAndSettle();
-
+    expect(find.text('ADD'), findsNothing);
     expect(find.text('ADDED'), findsOneWidget);
     expect(backend.requests.where((r) => r.path == '/ui_theme_library'), isEmpty);
     expect(state.themeLibrary.keys, ['Deep']);
@@ -170,5 +171,24 @@ void main() {
     expect(find.byType(ThemeCodeCard), findsNWidgets(2));
     expect(find.text('[THEME: Deep]'), findsOneWidget);
     expect(find.text('[THEME: Shallow]'), findsOneWidget);
+  });
+
+  testWidgets('the card names what the theme carries', (tester) async {
+    await tester.pumpWidget(_harness(state, encodeThemeCode('Deep', _shared)));
+    await tester.pumpAndSettle();
+
+    expect(find.text('2 colors \u00b7 1 style'), findsOneWidget);
+  });
+
+  testWidgets('APPLY makes the shared theme active', (tester) async {
+    await tester.pumpWidget(_harness(state, encodeThemeCode('Deep', _shared)));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('APPLY'));
+    await tester.pumpAndSettle();
+
+    expect(state.themeSpec, _shared);
+    final post = backend.requests.lastWhere((r) => r.path == '/ui_theme');
+    expect(post.method, 'POST');
   });
 }

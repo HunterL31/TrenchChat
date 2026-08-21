@@ -63,6 +63,7 @@ class MessageList extends StatefulWidget {
     this.friendHashes = const {},
     this.onAddFriend,
     this.onAddTheme,
+    this.onApplyTheme,
     this.themeLibrary = const {},
   });
 
@@ -95,6 +96,9 @@ class MessageList extends StatefulWidget {
   /// Saves a theme shared in chat to the named library. Null hides the ADD
   /// button on the theme card.
   final Future<bool> Function(String name, ThemeSpec spec)? onAddTheme;
+
+  /// Makes a shared theme the active one. Null hides the APPLY button.
+  final Future<bool> Function(ThemeSpec spec)? onApplyTheme;
 
   /// The reader's saved themes, so a shared one never quietly replaces a
   /// theme of the same name.
@@ -150,6 +154,7 @@ class _MessageListState extends State<MessageList> {
               friendHashes: widget.friendHashes,
               onAddFriend: widget.onAddFriend,
               onAddTheme: widget.onAddTheme,
+              onApplyTheme: widget.onApplyTheme,
               themeLibrary: widget.themeLibrary,
             ),
         };
@@ -202,6 +207,7 @@ class _MessageRowWidget extends StatefulWidget {
     this.friendHashes = const {},
     this.onAddFriend,
     this.onAddTheme,
+    this.onApplyTheme,
     this.themeLibrary = const {},
   });
 
@@ -225,6 +231,9 @@ class _MessageRowWidget extends StatefulWidget {
 
   /// Saves a theme shared in this message to the named library.
   final Future<bool> Function(String name, ThemeSpec spec)? onAddTheme;
+
+  /// Makes a shared theme the active one.
+  final Future<bool> Function(ThemeSpec spec)? onApplyTheme;
 
   /// The reader's saved themes, which decide the name a shared one lands
   /// under.
@@ -319,6 +328,7 @@ class _MessageRowWidgetState extends State<_MessageRowWidget> {
                   spec: theme.spec,
                   library: widget.themeLibrary,
                   onAdd: widget.onAddTheme,
+                  onApply: widget.onApplyTheme,
                 ),
             ],
           )

@@ -128,6 +128,7 @@ class ThemeCodeCard extends StatefulWidget {
     required this.spec,
     this.library = const {},
     this.onAdd,
+    this.onApply,
   });
 
   final String name;
@@ -140,28 +141,31 @@ class ThemeCodeCard extends StatefulWidget {
   /// landed; the card only says ADDED when it did.
   final Future<bool> Function(String name, ThemeSpec spec)? onAdd;
 
+  /// Makes the theme the active one. Returns whether it took.
+  final Future<bool> Function(ThemeSpec spec)? onApply;
+
   @override
   State<ThemeCodeCard> createState() => _ThemeCodeCardState();
 }
 
 class _ThemeCodeCardState extends State<ThemeCodeCard> {
   bool _busy = false;
-  bool _added = false;
+  late bool _added = _nameAlreadyHolding != null;
 
   /// The name the theme was kept under, once it has been.
-  String? _savedAs;
+  late String? _savedAs = _nameAlreadyHolding;
 
-  /// True when the library already holds exactly this theme under this name.
-  bool get _alreadyHave => widget.library[widget.name] == widget.spec;
+  /// The library name already holding exactly this theme, if any -- the
+  /// sender's own share starts out ADDED instead of offering ADD.
+  String? get _nameAlreadyHolding {
+    if (widget.library[widget.name] == widget.spec) return widget.name;
+    for (final entry in widget.library.entries) {
+      if (entry.value == widget.spec) return entry.key;
+    }
+    return null;
+  }
 
   Future<void> _add() async {
-    if (_alreadyHave) {
-      setState(() {
-        _added = true;
-        _savedAs = widget.name;
-      });
-      return;
-    }
     final target = freeThemeName(widget.name, widget.library.keys);
     setState(() => _busy = true);
     final ok = await widget.onAdd!(target, widget.spec);
@@ -171,6 +175,31 @@ class _ThemeCodeCardState extends State<ThemeCodeCard> {
       _added = ok;
       _savedAs = ok ? target : null;
     });
+  }
+
+  Future<void> _apply() async {
+    setState(() => _busy = true);
+    await widget.onApply!(widget.spec);
+    if (!mounted) return;
+    setState(() => _busy = false);
+  }
+
+  /// One line saying what the theme carries, so a style-only theme -- whose
+  /// swatches are just the stock palette -- still reads as something.
+  String get _contents {
+    var colors = widget.spec.base.length;
+    for (final tokens in widget.spec.sections.values) {
+      colors += tokens.length;
+    }
+    var styles = 0;
+    for (final overrides in widget.spec.styles.values) {
+      styles += overrides.length;
+    }
+    final parts = [
+      if (colors > 0) '$colors color${colors == 1 ? '' : 's'}',
+      if (styles > 0) '$styles style${styles == 1 ? '' : 's'}',
+    ];
+    return parts.isEmpty ? 'stock theme' : parts.join(' · ');
   }
 
   @override
@@ -224,6 +253,11 @@ class _ThemeCodeCardState extends State<ThemeCodeCard> {
                       ],
                     ],
                   ),
+                  const SizedBox(height: 4),
+                  Text(
+                    _contents,
+                    style: TextStyle(fontSize: TCType.textMicro, color: tc.textSecondary),
+                  ),
                   if (_savedAs != null && _savedAs != widget.name) ...[
                     const SizedBox(height: 4),
                     Text(
@@ -237,14 +271,29 @@ class _ThemeCodeCardState extends State<ThemeCodeCard> {
               ),
             ),
             const SizedBox(width: 8),
-            Tooltip(
-              message: _savedAs == null || _savedAs == widget.name
-                  ? 'Save to my themes'
-                  : 'Saved as "$_savedAs"',
-              child: TcGhostButton(
-                label: _added ? 'ADDED' : 'ADD',
-                onPressed: widget.onAdd == null || _busy || _added ? null : _add,
-              ),
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                Tooltip(
+                  message: _savedAs == null || _savedAs == widget.name
+                      ? 'Save to my themes'
+                      : 'Saved as "$_savedAs"',
+                  child: TcGhostButton(
+                    label: _added ? 'ADDED' : 'ADD',
+                    onPressed: widget.onAdd == null || _busy || _added ? null : _add,
+                  ),
+                ),
+                if (widget.onApply != null) ...[
+                  const SizedBox(height: 4),
+                  Tooltip(
+                    message: 'Use this theme now',
+                    child: TcGhostButton(
+                      label: 'APPLY',
+                      onPressed: _busy ? null : _apply,
+                    ),
+                  ),
+                ],
+              ],
             ),
           ],
         ),
