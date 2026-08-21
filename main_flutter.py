@@ -43,6 +43,33 @@ else:
     _WEB_DIR = _REPO_ROOT / "flutter_ui" / "build" / "web"
     _DESKTOP_ROOT = None
 
+_LOG_DIR = Path.home() / ".trenchchat"
+_LAUNCHER_LOG = _LOG_DIR / "launcher.log"
+
+
+def ensure_std_streams() -> None:
+    """Give the process usable stdout/stderr when the OS handed it none.
+
+    A windowed PyInstaller build has no console, so both are None and
+    uvicorn's logging setup dies calling isatty() on stdout. A log file
+    keeps what the console would have shown, RNS output included.
+    """
+    if sys.stdout is not None and sys.stderr is not None:
+        return
+    try:
+        _LOG_DIR.mkdir(parents=True, exist_ok=True)
+        stream = open(_LAUNCHER_LOG, "w", buffering=1, errors="replace")
+    except OSError:
+        stream = open(os.devnull, "w")
+    if sys.stdout is None:
+        sys.stdout = stream
+    if sys.stderr is None:
+        sys.stderr = stream
+
+
+ensure_std_streams()
+
+
 _DEFAULT_PORT = 8810
 
 # Mirrors main.py's minute reannounce and main_window.py's startup sync delay.
