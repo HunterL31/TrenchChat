@@ -4,17 +4,23 @@
 //
 // Editing is total: a valid `#rrggbb` / `#aarrggbb` commits as it is typed,
 // anything else is ignored, and the field snaps back to the live color when
-// it loses focus. Nothing the user types can produce an invalid color.
+// it loses focus. Nothing the user types can produce an invalid color. The
+// swatch opens the visual picker on the same value, which commits the same
+// way -- the two are alternatives, not a replacement.
 import 'package:flutter/material.dart';
 
 import '../theme/section_theme.dart';
 import '../theme/theme_spec.dart';
 import '../theme/tokens.dart';
 import 'tc_button.dart';
+import 'tc_color_picker.dart';
 import 'tc_icon.dart';
 
 /// The key of the text input inside a [TcColorField] labelled [label].
 Key tcColorInputKey(String label) => Key('tc-color-input:$label');
+
+/// The key of the swatch button that opens the picker for [label].
+Key tcColorSwatchKey(String label) => Key('tc-color-swatch:$label');
 
 class TcColorField extends StatefulWidget {
   const TcColorField({
@@ -93,6 +99,16 @@ class _TcColorFieldState extends State<TcColorField> {
     if (parsed != null && parsed != widget.color) widget.onChanged(parsed);
   }
 
+  Future<void> _pick() async {
+    final picked = await showTcColorPicker(
+      context,
+      initial: widget.color,
+      title: widget.displayLabel ?? widget.label,
+    );
+    if (!mounted || picked == null || picked == widget.color) return;
+    widget.onChanged(picked);
+  }
+
   @override
   Widget build(BuildContext context) {
     final tc = SectionTheme.of(context);
@@ -101,12 +117,22 @@ class _TcColorFieldState extends State<TcColorField> {
       padding: const EdgeInsets.symmetric(vertical: 3),
       child: Row(
         children: [
-          Container(
-            width: 16,
-            height: 16,
-            decoration: BoxDecoration(
-              color: widget.color,
-              border: Border.all(color: tc.borderStrong),
+          Tooltip(
+            message: 'Pick color…',
+            child: MouseRegion(
+              cursor: SystemMouseCursors.click,
+              child: GestureDetector(
+                key: tcColorSwatchKey(widget.label),
+                onTap: _pick,
+                child: Container(
+                  width: 16,
+                  height: 16,
+                  decoration: BoxDecoration(
+                    color: widget.color,
+                    border: Border.all(color: tc.borderStrong),
+                  ),
+                ),
+              ),
             ),
           ),
           const SizedBox(width: 8),

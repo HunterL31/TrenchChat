@@ -13,6 +13,7 @@ import 'package:flutter_ui/theme/theme_spec.dart';
 import 'package:flutter_ui/widgets/tc_button.dart';
 import 'package:flutter_ui/widgets/tc_checkbox.dart';
 import 'package:flutter_ui/widgets/tc_color_field.dart';
+import 'package:flutter_ui/widgets/tc_color_picker.dart';
 
 import '../../fake_backend.dart';
 
@@ -574,6 +575,47 @@ void main() {
     await tester.enterText(find.byKey(tcColorInputKey('bgApp')), '#102030');
     await tester.pump();
     expect(presetRow().value, '');
+  });
+
+  testWidgets('a row swatch opens the picker and USE commits the color', (tester) async {
+    await openEditor(tester);
+
+    await tester.tap(find.byKey(tcColorSwatchKey('bgApp')));
+    await settle(tester);
+    expect(find.text('App background'), findsNWidgets(2));
+    expect(
+      tester.widget<TextField>(find.byKey(tcPickerHexKey)).controller!.text,
+      encodeThemeColor(TCSectionColors.stock.bgApp),
+    );
+
+    await tester.enterText(find.byKey(tcPickerHexKey), '#102030');
+    await tester.pump();
+    await tester.tap(find.byKey(tcPickerUseKey));
+    await settle(tester);
+
+    expect(fieldText(tester, 'bgApp'), '#102030');
+
+    await tester.tap(find.text('APPLY'));
+    await settle(tester);
+    expect((lastPostedTheme()['base'] as Map)['bgApp'], '#102030');
+  });
+
+  testWidgets('cancelling the picker leaves the row alone', (tester) async {
+    await openEditor(tester);
+
+    await tester.tap(find.byKey(tcColorSwatchKey('bgApp')));
+    await settle(tester);
+    await tester.enterText(find.byKey(tcPickerHexKey), '#102030');
+    await tester.pump();
+    await tester.tap(find.byKey(tcPickerCancelKey));
+    await settle(tester);
+
+    expect(find.byKey(tcPickerHexKey), findsNothing);
+    expect(fieldText(tester, 'bgApp'), encodeThemeColor(TCSectionColors.stock.bgApp));
+
+    await tester.tap(find.text('APPLY'));
+    await settle(tester);
+    expect(lastPostedTheme()['base'], isEmpty);
   });
 
   testWidgets('a saved theme matching the draft is marked ACTIVE', (tester) async {
