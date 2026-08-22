@@ -23,6 +23,16 @@ class PropagationFilter:
     def __init__(self, config: Config):
         self._config = config
 
+    def relays_nothing(self) -> bool:
+        """True when the current filter can never store anything.
+
+        Allowlist mode with an empty allowlist rejects every message, so a
+        node in this state relays nothing for anyone -- worth warning about,
+        since it is also the default and silent otherwise.
+        """
+        return (self._config.channel_filter_mode == "allowlist"
+                and not self._config.channel_filter_hashes)
+
     def allows(self, message) -> bool:
         """Return True if this message should be stored by the propagation node."""
         mode = self._config.channel_filter_mode

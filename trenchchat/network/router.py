@@ -365,6 +365,13 @@ class Router:
             self._install_propagation_filter()
             self._config.propagation_enabled = True
             RNS.log("TrenchChat: propagation node enabled", RNS.LOG_NOTICE)
+            if self._filter.relays_nothing():
+                RNS.log(
+                    "TrenchChat: propagation node is in allowlist mode with an "
+                    "empty allowlist — it will relay nothing until channels are "
+                    "added or the filter is set to 'all'",
+                    RNS.LOG_WARNING,
+                )
         except Exception as e:
             RNS.log(f"TrenchChat: failed to enable propagation node: {e}", RNS.LOG_ERROR)
             raise
