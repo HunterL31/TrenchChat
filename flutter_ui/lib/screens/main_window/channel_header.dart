@@ -11,7 +11,7 @@ import '../../widgets/tc_button.dart';
 import '../../widgets/tc_icon.dart';
 import '../../widgets/tc_tooltip.dart';
 
-enum ChannelTab { chat, map, iface, friends }
+enum ChannelTab { chat, map, iface, friends, browse }
 
 /// Below this header width -- narrower than the compact breakpoint, which is
 /// the whole window -- the tabs render as icons and the link label drops, so
@@ -165,6 +165,9 @@ class ChannelHeader extends StatelessWidget {
                   active: activeTab, onTap: onTabSelected, compact: dense),
               _HeaderTab(
                   label: 'FRIENDS', icon: TcIcons.users, tab: ChannelTab.friends,
+                  active: activeTab, onTap: onTabSelected, compact: dense),
+              _HeaderTab(
+                  label: 'NET', icon: TcIcons.globe, tab: ChannelTab.browse,
                   active: activeTab, onTap: onTabSelected, compact: dense),
             ],
           ),

@@ -259,9 +259,28 @@ class TcIcons {
     ],
   ]);
 
+  static const globe = TcIconData('globe', [
+    [
+      Offset(8, 1.5), Offset(12.6, 3.4), Offset(14.5, 8), Offset(12.6, 12.6),
+      Offset(8, 14.5), Offset(3.4, 12.6), Offset(1.5, 8), Offset(3.4, 3.4),
+      Offset(8, 1.5),
+    ],
+    [
+      Offset(1.5, 8), Offset(14.5, 8),
+    ],
+    [
+      Offset(8, 1.5), Offset(10.6, 4.4), Offset(11.5, 8), Offset(10.6, 11.6),
+      Offset(8, 14.5),
+    ],
+    [
+      Offset(8, 1.5), Offset(5.4, 4.4), Offset(4.5, 8), Offset(5.4, 11.6),
+      Offset(8, 14.5),
+    ],
+  ]);
+
   static const List<TcIconData> all = [
     settings, lock, plus, join, emoji, hash, users, close, search, send, sync, map, iface,
-    mic, micMuted, headset, menu,
+    mic, micMuted, headset, menu, globe,
   ];
 }
 
