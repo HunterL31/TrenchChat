@@ -2,7 +2,7 @@
 // the unambiguous :name@hash:, so a 64-char hash never faces the user.
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
-
+import 'package:flutter_ui/attachments.dart';
 import 'package:flutter_ui/screens/main_window/compose_bar.dart';
 import 'package:flutter_ui/widgets/tc_icon.dart';
 
@@ -10,7 +10,7 @@ const _hash =
     'aa11bb22cc33dd44ee55ff6677889900aa11bb22cc33dd44ee55ff6677889900';
 
 Widget _harness({
-  required Future<bool> Function(String) onSend,
+  required Future<bool> Function(String, PickedAttachment?) onSend,
   required Future<String?> Function() pickEmoji,
 }) =>
     MaterialApp(
@@ -42,7 +42,7 @@ Future<void> _send(WidgetTester tester) async {
 void main() {
   testWidgets('the draft shows :name:, not the hash', (tester) async {
     await tester.pumpWidget(_harness(
-      onSend: (_) async => true,
+      onSend: (_, _) async => true,
       pickEmoji: () async => ':salute@$_hash:',
     ));
 
@@ -55,7 +55,7 @@ void main() {
   testWidgets('the sent content re-expands to :name@hash:', (tester) async {
     String? sent;
     await tester.pumpWidget(_harness(
-      onSend: (c) async {
+      onSend: (c, _) async {
         sent = c;
         return true;
       },
@@ -72,7 +72,7 @@ void main() {
   testWidgets('a unicode pick is inserted and sent unchanged', (tester) async {
     String? sent;
     await tester.pumpWidget(_harness(
-      onSend: (c) async {
+      onSend: (c, _) async {
         sent = c;
         return true;
       },
@@ -89,7 +89,7 @@ void main() {
   testWidgets('a name the user typed themselves is left alone', (tester) async {
     String? sent;
     await tester.pumpWidget(_harness(
-      onSend: (c) async {
+      onSend: (c, _) async {
         sent = c;
         return true;
       },
@@ -108,7 +108,7 @@ void main() {
     final sends = <String>[];
     var accept = false;
     await tester.pumpWidget(_harness(
-      onSend: (c) async {
+      onSend: (c, _) async {
         sends.add(c);
         return accept;
       },

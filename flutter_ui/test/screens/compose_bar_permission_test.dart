@@ -9,7 +9,7 @@ Widget _harness({required bool enabled}) => MaterialApp(
           channelHash: 'hash-a',
           channelName: 'alpha',
           enabled: enabled,
-          onSend: (_) async => true,
+          onSend: (_, _) async => true,
           compact: true,
         ),
       ),

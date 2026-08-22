@@ -305,6 +305,26 @@ class AppState extends ChangeNotifier {
     return data;
   }
 
+  /// Attachment bytes by `channelHash/messageId`. A cached null means the
+  /// message's image was asked for and there was none to fetch, which stops
+  /// the list refetching it on every rebuild.
+  final Map<String, Uint8List?> attachmentCache = {};
+
+  static String attachmentKey(String channelHashHex, String messageId) =>
+      '$channelHashHex/$messageId';
+
+  Future<Uint8List?> attachmentFor(String channelHashHex, String messageId) async {
+    final key = attachmentKey(channelHashHex, messageId);
+    if (attachmentCache.containsKey(key)) return attachmentCache[key];
+    // Claim the key before awaiting so a row rebuilt mid-fetch does not start
+    // a second request for the same image.
+    attachmentCache[key] = null;
+    final data = await api.getMessageImage(channelHashHex, messageId);
+    attachmentCache[key] = data;
+    notifyListeners();
+    return data;
+  }
+
   /// Refetches the server and channel lists (and each server's channels,
   /// member count and permissions) -- the same set the initial load builds.
   /// Shared by [init], reconnect resync, and [ChannelJoinedEvent].
@@ -342,12 +362,14 @@ class AppState extends ChangeNotifier {
     unawaited(refreshVoiceStatus());
   }
 
-  Future<bool> sendMessage(String content, {String? replyTo}) async {
+  Future<bool> sendMessage(String content,
+      {String? replyTo, String? imageDataB64}) async {
     final channelHashHex = selectedChannelHash;
-    if (channelHashHex == null || content.trim().isEmpty) return false;
+    if (channelHashHex == null) return false;
+    if (content.trim().isEmpty && imageDataB64 == null) return false;
     try {
-      final result =
-          await api.sendMessage(channelHashHex, content.trim(), replyTo: replyTo);
+      final result = await api.sendMessage(channelHashHex, content.trim(),
+          replyTo: replyTo, imageDataB64: imageDataB64);
       if (result.ok) {
         // The WS event echoes it too; this covers a dropped socket so the
         // sender always sees their own message land.
@@ -1009,6 +1031,13 @@ class AppState extends ChangeNotifier {
       _reportActionError(e);
       return false;
     }
+  }
+
+  /// Puts a failure the client itself detected -- rather than one a request
+  /// came back with -- on the same surface every other action error uses.
+  void reportError(String message) {
+    actionError = message;
+    notifyListeners();
   }
 
   void _reportActionError(Object e) {

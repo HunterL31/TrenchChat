@@ -1,5 +1,7 @@
 // The three-column shell: server rail (1b) + channel column (1b) +
 // [channel header (1b) / message list (1a) / compose bar (1a)].
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -9,6 +11,7 @@ import '../../api/models/message.dart';
 import '../../api/models/server.dart';
 import '../../api/models/voice.dart';
 import '../../app_state.dart';
+import '../../attachments.dart';
 import '../../theme/section_theme.dart';
 import '../../theme/theme_spec.dart';
 import '../../theme/tokens.dart';
@@ -156,6 +159,19 @@ class _MainWindowState extends State<MainWindow> {
     } else {
       state.api.addReaction(channelHash, messageId, emojiKey);
     }
+  }
+
+  /// Opens the file picker for the compose bar's + button. A refusal (too
+  /// large, unreadable) goes to the app-wide error surface; a cancel is
+  /// silent, since the user already knows they cancelled.
+  Future<PickedAttachment?> _pickAttachment() async {
+    final picked = await pickImageAttachment();
+    if (!mounted) return null;
+    if (picked.error != null) {
+      widget.state.reportError(picked.error!);
+      return null;
+    }
+    return picked.attachment;
   }
 
   /// Interim link action: url_launcher is not a dependency, so a tapped link
@@ -385,6 +401,14 @@ class _MainWindowState extends State<MainWindow> {
                             displayNameFor: _displayNameFor,
                             avatarBytesFor: (hash) => state.avatarCache[hash],
                             ensureAvatarLoaded: (hash) => state.avatarFor(hash),
+                            attachmentBytesFor: channelHash == null
+                                ? null
+                                : (messageId) => state.attachmentCache[
+                                    AppState.attachmentKey(channelHash, messageId)],
+                            ensureAttachmentLoaded: channelHash == null
+                                ? null
+                                : (messageId) =>
+                                    state.attachmentFor(channelHash, messageId),
                             emojiLibrary: state.customEmojis,
                             onToggleReaction: channelHash == null
                                 ? null
@@ -448,14 +472,21 @@ class _MainWindowState extends State<MainWindow> {
                               snippet: _replyTarget!.content.replaceAll('\n', ' '),
                             ),
                       onCancelReply: () => setState(() => _replyTarget = null),
-                      onSend: (content) async {
+                      onSend: (content, attachment) async {
                         final replyTo = _replyTarget?.messageId;
-                        final ok = await state.sendMessage(content, replyTo: replyTo);
+                        final ok = await state.sendMessage(
+                          content,
+                          replyTo: replyTo,
+                          imageDataB64: attachment == null
+                              ? null
+                              : base64Encode(attachment.bytes),
+                        );
                         if (ok && _replyTarget != null) {
                           setState(() => _replyTarget = null);
                         }
                         return ok;
                       },
+                      pickAttachment: _pickAttachment,
                       pickEmoji: () async =>
                           (await showEmojiPickerDialog(context, state, title: 'Add emoji'))
                               ?.composeToken,
