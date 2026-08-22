@@ -12,7 +12,11 @@ from unittest.mock import patch
 
 import pytest
 
+import trenchchat.core.lockbox as lockbox
 from trenchchat.core.lockbox import (
+    LockedOutError,
+    MAX_UNLOCK_ATTEMPTS,
+    MIN_PIN_LENGTH,
     WrongPinError,
     create_lock,
     decrypt_bytes,
@@ -25,6 +29,14 @@ from trenchchat.core.lockbox import (
     _SALT_PATH,
     _VERIFY_PATH,
 )
+
+
+@pytest.fixture(autouse=True)
+def _reset_throttle():
+    """Clear module-global throttle state so tests don't leak lockouts."""
+    lockbox._reset_throttle()
+    yield
+    lockbox._reset_throttle()
 
 
 # ---------------------------------------------------------------------------
@@ -192,3 +204,100 @@ class TestLockLifecycle:
             k1 = unlock("4321")
             k2 = unlock("4321")
             assert k1 == k2
+
+
+# ---------------------------------------------------------------------------
+# Minimum PIN length (bug 76)
+# ---------------------------------------------------------------------------
+
+class TestMinPinLength:
+    def test_create_lock_rejects_empty_pin(self, tmp_path):
+        with _patch_paths(tmp_path):
+            with pytest.raises(ValueError):
+                create_lock("")
+            assert not is_locked()
+
+    def test_create_lock_rejects_short_pin(self, tmp_path):
+        with _patch_paths(tmp_path):
+            with pytest.raises(ValueError):
+                create_lock("1" * (MIN_PIN_LENGTH - 1))
+            assert not is_locked()
+
+    def test_unlock_rejects_short_pin(self, tmp_path):
+        with _patch_paths(tmp_path):
+            create_lock("1234")
+            with pytest.raises(WrongPinError):
+                unlock("1" * (MIN_PIN_LENGTH - 1))
+
+
+# ---------------------------------------------------------------------------
+# Unlock throttle / lockout (bug 76)
+# ---------------------------------------------------------------------------
+
+class TestUnlockThrottle:
+    def test_lockout_after_max_attempts(self, tmp_path):
+        with _patch_paths(tmp_path):
+            create_lock("1234")
+            for _ in range(MAX_UNLOCK_ATTEMPTS):
+                with pytest.raises(WrongPinError):
+                    unlock("9999")
+            # The next attempt -- even with the correct PIN -- is locked out.
+            with pytest.raises(LockedOutError):
+                unlock("1234")
+
+    def test_lockout_is_wrong_pin_subclass(self, tmp_path):
+        """Existing `except WrongPinError` handlers must still catch a lockout."""
+        with _patch_paths(tmp_path):
+            create_lock("1234")
+            for _ in range(MAX_UNLOCK_ATTEMPTS):
+                with pytest.raises(WrongPinError):
+                    unlock("9999")
+            with pytest.raises(WrongPinError):
+                unlock("9999")
+
+    def test_successful_unlock_resets_counter(self, tmp_path):
+        with _patch_paths(tmp_path):
+            create_lock("1234")
+            for _ in range(MAX_UNLOCK_ATTEMPTS - 1):
+                with pytest.raises(WrongPinError):
+                    unlock("9999")
+            # A correct unlock resets the counter before the lockout trips.
+            unlock("1234")
+            for _ in range(MAX_UNLOCK_ATTEMPTS - 1):
+                with pytest.raises(WrongPinError):
+                    unlock("9999")
+            # Still not locked out -- correct PIN works.
+            assert unlock("1234") is not None
+
+    def test_lockout_clears_after_cooldown(self, tmp_path):
+        with _patch_paths(tmp_path):
+            create_lock("1234")
+            for _ in range(MAX_UNLOCK_ATTEMPTS):
+                with pytest.raises(WrongPinError):
+                    unlock("9999")
+            # Simulate the cooldown elapsing.
+            lockbox._lockout_until = 0.0
+            assert unlock("1234") is not None
+
+
+# ---------------------------------------------------------------------------
+# Partial-lock state (bug 77)
+# ---------------------------------------------------------------------------
+
+class TestPartialLockState:
+    def test_missing_verify_token_raises_wrong_pin(self, tmp_path):
+        """Salt present but verify token missing must raise WrongPinError,
+        not an uncaught FileNotFoundError that crashes the caller."""
+        with _patch_paths(tmp_path):
+            create_lock("1234")
+            (tmp_path / "lock.verify").unlink()
+            assert is_locked()  # salt still present
+            with pytest.raises(WrongPinError):
+                unlock("1234")
+
+    def test_no_lock_at_all_still_raises_file_not_found(self, tmp_path):
+        """A wholly-absent lock (no salt) keeps the documented FileNotFoundError."""
+        with _patch_paths(tmp_path):
+            assert not is_locked()
+            with pytest.raises(FileNotFoundError):
+                unlock("1234")

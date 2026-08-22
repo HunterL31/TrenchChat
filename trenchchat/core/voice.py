@@ -414,11 +414,22 @@ class VoiceManager:
 
         now = time.time()
         timestamp = fields.get(F_TIMESTAMP)
-        if not isinstance(timestamp, (int, float)) or \
-                abs(now - timestamp) > VOICE_SIGNAL_MAX_AGE_SECS:
+        if not isinstance(timestamp, (int, float)):
             RNS.log(
-                f"TrenchChat [voice]: dropped stale {msg_type} from "
-                f"{sender_hex[:12]}…",
+                f"TrenchChat [voice]: dropped {msg_type} from "
+                f"{sender_hex[:12]}… — missing or invalid timestamp",
+                RNS.LOG_WARNING,
+            )
+            return
+        skew = now - timestamp
+        if abs(skew) > VOICE_SIGNAL_MAX_AGE_SECS:
+            # Distinguishable from packet loss for a clock-drifting mesh node:
+            # name the skew and its direction so it is diagnosable.
+            direction = "past" if skew > 0 else "future"
+            RNS.log(
+                f"TrenchChat [voice]: dropped {msg_type} from "
+                f"{sender_hex[:12]}… — clock skew {abs(skew):.0f}s ({direction}) "
+                f"exceeds {VOICE_SIGNAL_MAX_AGE_SECS:.0f}s; check clock sync",
                 RNS.LOG_WARNING,
             )
             return

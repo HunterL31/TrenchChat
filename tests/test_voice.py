@@ -6,6 +6,7 @@ frame plane (links, streaming) is covered in test_voice_transport.py.
 """
 
 import time
+from unittest.mock import MagicMock, patch
 
 import LXMF
 import RNS
@@ -15,7 +16,7 @@ from tests.helpers import (
     wait_for, wait_for_roster, wait_for_subscriber,
 )
 from trenchchat.core import actions
-from trenchchat.core.voice import MAX_VOICE_PARTICIPANTS
+from trenchchat.core.voice import MAX_VOICE_PARTICIPANTS, VOICE_SIGNAL_MAX_AGE_SECS
 from trenchchat.network.voice_transport import PEER_STREAMING
 from trenchchat.core.permissions import (
     PRESET_OPEN, PRESET_PRIVATE, ROLE_MEMBER, ROLE_OWNER, SEND_MESSAGE,
@@ -186,6 +187,56 @@ class TestVoiceSignalling:
         })
         time.sleep(0.3)
         assert alice.voice_mgr.get_roster(ch_hash) == []
+
+
+class TestStaleSignalDiagnostics:
+    """Bug 79: an age-dropped voice signal must be diagnosable -- a clock-drift
+    drop looks identical to packet loss otherwise."""
+
+    def _deliver(self, mgr, sender_hex, fields):
+        lxm = MagicMock()
+        lxm.fields = fields
+        lxm.source_hash = bytes.fromhex(sender_hex)
+        ident = MagicMock()
+        ident.hash = bytes.fromhex(sender_hex)
+        with patch("trenchchat.core.voice.RNS.Identity.recall", return_value=ident), \
+                patch("trenchchat.core.voice.RNS.log") as log:
+            mgr._on_lxmf_message(lxm)
+        return log
+
+    def test_past_skew_logs_clock_skew_warning(self, peer_factory):
+        alice, bob, ch_hash = _setup_invite_channel(peer_factory)
+        now = time.time()
+        log = self._deliver(alice.voice_mgr, bob.identity.hash_hex, {
+            F_MSG_TYPE: MT_VOICE_JOIN,
+            F_CHANNEL_HASH: bytes.fromhex(ch_hash),
+            F_TIMESTAMP: now - VOICE_SIGNAL_MAX_AGE_SECS - 60,
+            F_VOICE_MUTED: False,
+        })
+        messages = " ".join(str(c.args[0]) for c in log.call_args_list)
+        assert "clock skew" in messages and "past" in messages
+
+    def test_future_skew_logs_direction(self, peer_factory):
+        alice, bob, ch_hash = _setup_invite_channel(peer_factory)
+        now = time.time()
+        log = self._deliver(alice.voice_mgr, bob.identity.hash_hex, {
+            F_MSG_TYPE: MT_VOICE_JOIN,
+            F_CHANNEL_HASH: bytes.fromhex(ch_hash),
+            F_TIMESTAMP: now + VOICE_SIGNAL_MAX_AGE_SECS + 60,
+            F_VOICE_MUTED: False,
+        })
+        messages = " ".join(str(c.args[0]) for c in log.call_args_list)
+        assert "clock skew" in messages and "future" in messages
+
+    def test_missing_timestamp_logged_distinctly(self, peer_factory):
+        alice, bob, ch_hash = _setup_invite_channel(peer_factory)
+        log = self._deliver(alice.voice_mgr, bob.identity.hash_hex, {
+            F_MSG_TYPE: MT_VOICE_JOIN,
+            F_CHANNEL_HASH: bytes.fromhex(ch_hash),
+            F_VOICE_MUTED: False,
+        })
+        messages = " ".join(str(c.args[0]) for c in log.call_args_list)
+        assert "missing or invalid timestamp" in messages
 
 
 class TestVoiceJoinGuards:

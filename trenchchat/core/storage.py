@@ -1877,6 +1877,14 @@ class Storage:
         with self._tx():
             self._conn.execute("DELETE FROM avatar_deliveries")
 
+    def delete_avatar_delivery(self, identity_hash: str) -> None:
+        """Drop one peer's delivery record so the avatar is re-sent on retry."""
+        with self._tx():
+            self._conn.execute(
+                "DELETE FROM avatar_deliveries WHERE identity_hash = ?",
+                (identity_hash,),
+            )
+
     # --- custom emojis ---
 
     def insert_emoji(self, emoji_hash: str, name: str,

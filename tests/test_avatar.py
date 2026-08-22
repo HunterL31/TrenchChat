@@ -480,6 +480,73 @@ class TestDeliveryTracking:
         assert received == [sender]
 
 
+class TestDeliveryRetry:
+    """Bug 80: a failed/unconfirmed delivery must be retried, not leave the
+    peer stuck on a stale avatar until the next avatar change."""
+
+    def test_failed_delivery_undoes_record_and_queues_retry(self, avatar_mgr, config):
+        config.avatar_bytes = _make_test_jpeg()
+        config.avatar_version = 2
+        peer_hex = "77" * 16
+        avatar_mgr._storage.upsert_avatar_delivery(peer_hex, 2)
+
+        with patch("trenchchat.core.avatar.RNS.Transport.request_path"):
+            avatar_mgr._on_delivery_failed(peer_hex, 2)
+
+        assert avatar_mgr._storage.get_avatar_delivery_version(peer_hex) is None
+        assert peer_hex in avatar_mgr._pending
+
+    def test_flush_retries_a_pending_peer(self, avatar_mgr, config):
+        config.avatar_bytes = _make_test_jpeg()
+        config.avatar_version = 2
+        peer_hex = "88" * 16
+
+        with patch("trenchchat.core.avatar.RNS.Transport.request_path"):
+            avatar_mgr._on_delivery_failed(peer_hex, 2)
+
+        sent = []
+        avatar_mgr._send_avatar_to = lambda h, d, v: sent.append((h, v))
+        avatar_mgr.flush_avatar(peer_hex)
+        assert sent == [(peer_hex, 2)]
+
+    def test_flush_retries_even_if_delivery_record_matches(self, avatar_mgr, config):
+        """A queued peer is retried even when a stale delivery record claims
+        the current version was delivered."""
+        config.avatar_bytes = _make_test_jpeg()
+        config.avatar_version = 3
+        peer_hex = "99" * 16
+        avatar_mgr._storage.upsert_avatar_delivery(peer_hex, 3)
+        avatar_mgr._queue_pending(peer_hex, 3)
+
+        sent = []
+        avatar_mgr._send_avatar_to = lambda h, d, v: sent.append((h, v))
+        avatar_mgr.flush_avatar(peer_hex)
+        assert sent == [(peer_hex, 3)]
+
+    def test_unknown_path_queues_pending_and_requests_path(self, avatar_mgr):
+        peer_hex = "aa" * 16
+        with patch("trenchchat.core.avatar.RNS.Identity.recall", return_value=None), \
+                patch("trenchchat.core.avatar.RNS.Transport.request_path") as req:
+            avatar_mgr._send_avatar_to(peer_hex, b"data", 1)
+        assert peer_hex in avatar_mgr._pending
+        assert avatar_mgr._storage.get_avatar_delivery_version(peer_hex) is None
+        req.assert_called_once()
+
+    def test_successful_send_clears_pending(self, avatar_mgr):
+        peer_hex = "bc" * 16
+        avatar_mgr._queue_pending(peer_hex, 1)
+
+        mock_identity = MagicMock()
+        with patch("trenchchat.core.avatar.RNS.Identity.recall", return_value=mock_identity), \
+                patch("trenchchat.core.avatar.RNS.Destination"), \
+                patch("trenchchat.core.avatar.LXMF.LXMessage"):
+            avatar_mgr._send_avatar_to(peer_hex, b"data", 1)
+
+        assert peer_hex not in avatar_mgr._pending
+        assert avatar_mgr._storage.get_avatar_delivery_version(peer_hex) == 1
+        avatar_mgr._router.send.assert_called_once()
+
+
 class TestAvatarStorageIsBounded:
     """Nothing requires membership to reach us, and identities are free to
     mint, so a per-sender rate limit bounds one peer rather than the table."""

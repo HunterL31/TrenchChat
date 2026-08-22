@@ -30,6 +30,8 @@ Removing a PIN::
 import base64
 import hashlib
 import os
+import threading
+import time
 from pathlib import Path
 
 from cryptography.fernet import Fernet, InvalidToken
@@ -41,6 +43,21 @@ from trenchchat.core.fileutils import atomic_write_bytes, secure_file
 # Files managed by this module.
 _SALT_PATH = DATA_DIR / "lock.salt"
 _VERIFY_PATH = DATA_DIR / "lock.verify"
+
+# Minimum accepted PIN length. Enforced here so headless/non-Qt callers get the
+# same floor the Qt pin dialog applies.
+MIN_PIN_LENGTH = 4
+
+# Consecutive wrong guesses before a cooldown, and the cooldown length. Mirrors
+# the Qt dialog's limits so the core layer protects every caller, not just it.
+MAX_UNLOCK_ATTEMPTS = 5
+LOCKOUT_SECS = 30
+
+# Throttle state, guarded by _throttle_lock. A monotonic clock is used so
+# moving the wall clock back cannot shorten a lockout.
+_throttle_lock = threading.Lock()
+_failed_attempts = 0
+_lockout_until = 0.0
 
 # PBKDF2 iteration count.  NIST SP 800-132 recommends ≥ 210 000 for SHA-256
 # in 2023; 600 000 provides comfortable headroom on modern hardware while
@@ -54,6 +71,37 @@ _VERIFY_SENTINEL = b"trenchchat-lock-verify-v1"
 
 class WrongPinError(Exception):
     """Raised when an incorrect PIN is supplied to unlock()."""
+
+
+class LockedOutError(WrongPinError):
+    """Raised when unlock() is called during a post-failure cooldown.
+
+    Subclasses WrongPinError so existing ``except WrongPinError`` handlers
+    still treat a locked-out attempt as a failed unlock.
+    """
+
+
+def _register_failure() -> None:
+    """Count a failed unlock and start a cooldown once the limit is hit."""
+    global _failed_attempts, _lockout_until
+    with _throttle_lock:
+        _failed_attempts += 1
+        if _failed_attempts >= MAX_UNLOCK_ATTEMPTS:
+            _lockout_until = time.monotonic() + LOCKOUT_SECS
+            _failed_attempts = 0
+            RNS.log(
+                f"TrenchChat [lockbox]: too many failed unlock attempts; "
+                f"locked out for {LOCKOUT_SECS}s",
+                RNS.LOG_WARNING,
+            )
+
+
+def _reset_throttle() -> None:
+    """Clear failed-attempt and lockout state (successful unlock or new lock)."""
+    global _failed_attempts, _lockout_until
+    with _throttle_lock:
+        _failed_attempts = 0
+        _lockout_until = 0.0
 
 
 def derive_key(pin: str, salt: bytes) -> bytes:
@@ -108,8 +156,11 @@ def create_lock(pin: str) -> bytes:
     the salt and a verification token to disk.  Returns the 32-byte raw key
     so the caller can immediately use it without prompting again.
 
-    Raises ValueError if a lock is already set — call remove_lock first.
+    Raises ValueError if a lock is already set — call remove_lock first — or
+    if the PIN is shorter than MIN_PIN_LENGTH.
     """
+    if len(pin) < MIN_PIN_LENGTH:
+        raise ValueError(f"PIN must be at least {MIN_PIN_LENGTH} characters")
     if is_locked():
         raise ValueError("A PIN lock is already set; remove it before creating a new one")
 
@@ -123,6 +174,7 @@ def create_lock(pin: str) -> bytes:
     token = _make_fernet(raw_key).encrypt(_VERIFY_SENTINEL)
     atomic_write_bytes(_VERIFY_PATH, token)
 
+    _reset_throttle()
     RNS.log("TrenchChat [lockbox]: PIN lock created", RNS.LOG_NOTICE)
     return raw_key
 
@@ -131,18 +183,42 @@ def unlock(pin: str) -> bytes:
     """Derive the key from a PIN and verify it against the stored token.
 
     Returns the 32-byte raw key on success.
-    Raises WrongPinError if the PIN is incorrect.
-    Raises FileNotFoundError if no lock has been set.
+    Raises WrongPinError if the PIN is incorrect, too short, the verify token
+    is missing (a partial-lock state), or an unlock cooldown is in effect
+    (LockedOutError, a WrongPinError subclass).
+    Raises FileNotFoundError if no lock has been set at all.
     """
+    if len(pin) < MIN_PIN_LENGTH:
+        raise WrongPinError(f"PIN must be at least {MIN_PIN_LENGTH} characters")
+
+    with _throttle_lock:
+        remaining = _lockout_until - time.monotonic()
+    if remaining > 0:
+        raise LockedOutError(
+            f"Too many attempts; wait {int(remaining) + 1}s"
+        )
+
     salt = _SALT_PATH.read_bytes()
     raw_key = derive_key(pin, salt)
 
-    token = _VERIFY_PATH.read_bytes()
+    try:
+        token = _VERIFY_PATH.read_bytes()
+    except FileNotFoundError as exc:
+        # Salt present but verify token missing: a partial-lock state, not a
+        # "never locked" one. Treat it as a failed unlock instead of letting
+        # FileNotFoundError escape and crash the caller.
+        _register_failure()
+        raise WrongPinError(
+            "Lock state incomplete: verification token missing"
+        ) from exc
+
     try:
         _make_fernet(raw_key).decrypt(token)
     except InvalidToken as exc:
+        _register_failure()
         raise WrongPinError("Incorrect PIN") from exc
 
+    _reset_throttle()
     RNS.log("TrenchChat [lockbox]: unlocked successfully", RNS.LOG_DEBUG)
     return raw_key
 
@@ -157,4 +233,5 @@ def remove_lock() -> None:
     for path in (_SALT_PATH, _VERIFY_PATH):
         if path.exists():
             path.unlink()
+    _reset_throttle()
     RNS.log("TrenchChat [lockbox]: PIN lock removed", RNS.LOG_NOTICE)

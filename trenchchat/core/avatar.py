@@ -52,6 +52,9 @@ MAX_TRACKED_SENDERS = 512
 # peer's rate and nothing in aggregate.
 MAX_CACHED_PEER_AVATARS = 512
 
+# Peers whose avatar delivery is awaiting retry, before the oldest is dropped.
+MAX_PENDING_AVATAR_PEERS = 256
+
 
 def compress_avatar(image_bytes: bytes) -> bytes:
     """Resize and JPEG-compress raw image bytes to a 128x128 avatar.
@@ -96,6 +99,11 @@ class AvatarManager:
 
         # identity_hash_hex -> last accepted inbound avatar timestamp
         self._last_received: dict[str, float] = {}
+
+        # peer_hex -> avatar version whose delivery is unconfirmed and awaiting
+        # retry (path unknown at send time, or delivery reported failed).
+        # Flushed by flush_avatar() when the peer is next seen.
+        self._pending: dict[str, int] = {}
 
         # track our own last change time for send rate limiting
         self._last_changed: float = 0.0
@@ -203,8 +211,10 @@ class AvatarManager:
         current_version = self._config.avatar_version
         if current_version == 0:
             return
+        with self._lock:
+            pending = peer_hex in self._pending
         delivered_version = self._storage.get_avatar_delivery_version(peer_hex)
-        if delivered_version == current_version:
+        if not pending and delivered_version == current_version:
             return
 
         own_avatar = self._config.avatar_bytes
@@ -374,14 +384,18 @@ class AvatarManager:
                         avatar_version: int) -> None:
         """Attempt to send an MT_AVATAR_UPDATE control message to a single peer.
 
-        Records the delivery if the send does not fail immediately.
-        Silently skips peers whose RNS path is not yet known.
+        Records the delivery optimistically once handed to the router. A peer
+        whose RNS path is unknown, or whose delivery is later reported failed,
+        is held for retry (see flush_avatar) instead of being left on a stale
+        avatar until our next change.
         """
         try:
             identity_hash = bytes.fromhex(peer_hex)
             delivery_dest_hash = RNS.Destination.hash(identity_hash, "lxmf", "delivery")
             dest_identity = RNS.Identity.recall(delivery_dest_hash)
             if dest_identity is None:
+                RNS.Transport.request_path(delivery_dest_hash)
+                self._queue_pending(peer_hex, avatar_version)
                 return
 
             dest = RNS.Destination(
@@ -402,10 +416,44 @@ class AvatarManager:
                 F_AVATAR_DATA:   avatar_data,
                 F_AVATAR_VERSION: avatar_version,
             }
+            lxm.register_failed_callback(
+                lambda m, p=peer_hex, v=avatar_version:
+                    self._on_delivery_failed(p, v)
+            )
             self._router.send(lxm)
             self._storage.upsert_avatar_delivery(peer_hex, avatar_version)
+            with self._lock:
+                self._pending.pop(peer_hex, None)
         except Exception as e:
             RNS.log(
                 f"TrenchChat [avatar]: send error to {peer_hex[:12]}…: {e}",
                 RNS.LOG_WARNING,
             )
+
+    def _queue_pending(self, peer_hex: str, avatar_version: int) -> None:
+        """Hold a peer for avatar-delivery retry, within a fixed bound."""
+        with self._lock:
+            self._pending[peer_hex] = avatar_version
+            if len(self._pending) > MAX_PENDING_AVATAR_PEERS:
+                del self._pending[next(iter(self._pending))]
+
+    def _on_delivery_failed(self, peer_hex: str, avatar_version: int) -> None:
+        """LXMF failed-delivery callback: undo the optimistic delivery record
+        and hold the peer for retry when its path returns."""
+        self._storage.delete_avatar_delivery(peer_hex)
+        self._queue_pending(peer_hex, avatar_version)
+        try:
+            identity_hash = bytes.fromhex(peer_hex)
+            delivery_dest_hash = RNS.Destination.hash(identity_hash, "lxmf", "delivery")
+            RNS.Transport.request_path(delivery_dest_hash)
+        except Exception as e:
+            RNS.log(
+                f"TrenchChat [avatar]: path request after failed delivery to "
+                f"{peer_hex[:12]}… errored: {e}",
+                RNS.LOG_DEBUG,
+            )
+        RNS.log(
+            f"TrenchChat [avatar]: delivery to {peer_hex[:12]}… failed, "
+            f"queued for retry",
+            RNS.LOG_DEBUG,
+        )
