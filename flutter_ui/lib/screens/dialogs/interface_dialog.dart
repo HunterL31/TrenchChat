@@ -264,6 +264,9 @@ class _InterfaceDialogContentState extends State<_InterfaceDialogContent> {
                 controller: _name,
                 hintText: 'e.g. My TCP Hub',
                 autofocus: !_editing,
+                // The name is the record key, so a rename would 404 the PUT.
+                // Editable only on create.
+                readOnly: _editing,
               ),
               const SizedBox(height: 10),
               _fieldLabel('TYPE'),

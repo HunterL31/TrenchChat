@@ -12,7 +12,7 @@ import 'package:flutter_ui/theme/tokens.dart';
 import 'package:flutter_ui/widgets/avatar.dart';
 
 Message _msg(String sender, double ts, String content,
-        {bool imageStripped = false, String? replyTo}) =>
+        {bool imageStripped = false, String? replyTo, String? deliveryState}) =>
     Message(
       messageId: '$sender-$ts',
       senderHash: sender,
@@ -23,6 +23,7 @@ Message _msg(String sender, double ts, String content,
       hasImage: false,
       reactions: const [],
       imageStripped: imageStripped,
+      deliveryState: deliveryState,
     );
 
 Widget _harness(List<Message> messages,
@@ -348,6 +349,36 @@ void main() {
 
     (linkSpan!.recognizer as TapGestureRecognizer).onTap!();
     expect(opened, 'https://example.com/docs');
+  });
+
+  testWidgets('own pending and failed messages show a delivery glyph; delivered/null do not',
+      (tester) async {
+    const base = 1_700_000_000.0;
+    final messages = [
+      _msg('me', base, 'queued one', deliveryState: 'pending'),
+      _msg('me', base + 400, 'lost one', deliveryState: 'failed'),
+      _msg('me', base + 800, 'sent one', deliveryState: 'delivered'),
+      _msg('me', base + 1200, 'untracked one'),
+    ];
+
+    await tester.pumpWidget(_harness(messages, meHashHex: 'me'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('◷'), findsOneWidget); // pending
+    expect(find.text('⚠'), findsOneWidget); // failed
+    expect(find.text('✓'), findsOneWidget); // delivered
+  });
+
+  testWidgets('a peer message never shows a delivery glyph', (tester) async {
+    const base = 1_700_000_000.0;
+    // A peer's message would never carry a state, but even if one leaked
+    // through the row must not render an indicator for it.
+    final messages = [_msg('alice', base, 'hi', deliveryState: 'pending')];
+
+    await tester.pumpWidget(_harness(messages, meHashHex: 'me'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('◷'), findsNothing);
   });
 
   testWidgets('a stripped attachment is marked, an intact message is not',

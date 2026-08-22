@@ -24,6 +24,12 @@ sealed class TcEvent {
         return MessageEvent(channelHash, Message.fromJson(messageJson));
       case 'presence':
         return PresenceEvent(json['identity_hash'] as String, json['is_online'] as bool);
+      case 'delivery_status':
+        return DeliveryStatusEvent(
+          json['channel_hash'] as String,
+          json['message_id'] as String,
+          json['delivery_state'] as String?,
+        );
       case 'reaction_updated':
         return ReactionUpdatedEvent(
           json['channel_hash'] as String,
@@ -105,6 +111,16 @@ class PresenceEvent extends TcEvent {
   const PresenceEvent(this.identityHash, this.isOnline);
   final String identityHash;
   final bool isOnline;
+}
+
+/// A message's aggregate delivery state changed (pending -> delivered after a
+/// queued send flushed, or delivered -> failed). Applied in place to the
+/// matching message; only the local user's own messages carry a state.
+class DeliveryStatusEvent extends TcEvent {
+  const DeliveryStatusEvent(this.channelHash, this.messageId, this.deliveryState);
+  final String channelHash;
+  final String messageId;
+  final String? deliveryState;
 }
 
 class ReactionUpdatedEvent extends TcEvent {

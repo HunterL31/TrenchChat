@@ -185,14 +185,8 @@ class AppState extends ChangeNotifier {
       meHashHex = me['hash_hex'] as String;
       meDisplayName = me['display_name'] as String;
 
-      servers = await api.getServers();
-      standaloneChannels = await api.getChannels();
+      await _reloadServersAndChannels();
       pendingInvites = await api.getInvites();
-      for (final s in servers) {
-        channelsByServer[s.hash] = await api.getServerChannels(s.hash);
-        serverMemberCounts[s.hash] = (await api.getServerMembers(s.hash)).length;
-        serverPermissionsByHash[s.hash] = await api.getMyServerPermissions(s.hash);
-      }
 
       selectedServerHash = servers.isNotEmpty ? servers.first.hash : null;
       final initialChannels = selectedServerHash != null
@@ -311,11 +305,39 @@ class AppState extends ChangeNotifier {
     return data;
   }
 
+  /// Refetches the server and channel lists (and each server's channels,
+  /// member count and permissions) -- the same set the initial load builds.
+  /// Shared by [init], reconnect resync, and [ChannelJoinedEvent].
+  Future<void> _reloadServersAndChannels() async {
+    servers = await api.getServers();
+    standaloneChannels = await api.getChannels();
+    for (final s in servers) {
+      channelsByServer[s.hash] = await api.getServerChannels(s.hash);
+      serverMemberCounts[s.hash] = (await api.getServerMembers(s.hash)).length;
+      serverPermissionsByHash[s.hash] = await api.getMyServerPermissions(s.hash);
+    }
+  }
+
   /// Anything whose WS events may have been missed while the socket was down.
+  /// The server/channel/friend lists are refetched too: a channel joined or a
+  /// friend changed while the socket was down would otherwise stay stale until
+  /// a full reload.
   void _onSocketReconnected() {
+    unawaited(_resyncAfterReconnect());
+  }
+
+  Future<void> _resyncAfterReconnect() async {
+    try {
+      await _reloadServersAndChannels();
+      notifyListeners();
+    } catch (_) {
+      // Non-fatal: the individual refreshes below still run, and a later
+      // reconnect or reload catches the rest up.
+    }
     final channelHash = selectedChannelHash;
     if (channelHash != null) unawaited(loadChannel(channelHash));
     unawaited(refreshInvites());
+    unawaited(loadFriends());
     unawaited(refreshEmoji());
     unawaited(refreshVoiceStatus());
   }
@@ -999,6 +1021,11 @@ class AppState extends ChangeNotifier {
   @visibleForTesting
   void applyEvent(TcEvent event) => _onEvent(event);
 
+  /// Runs the reconnect resync directly, so tests can exercise it without a
+  /// live WebSocket dropping and coming back.
+  @visibleForTesting
+  void simulateReconnect() => _onSocketReconnected();
+
   void _onEvent(TcEvent event) {
     switch (event) {
       case MessageEvent(:final channelHash, :final message):
@@ -1043,10 +1070,19 @@ class AppState extends ChangeNotifier {
             notifyListeners();
           }));
         }
+      case DeliveryStatusEvent(:final channelHash, :final messageId, :final deliveryState):
+        final list = messagesByChannel[channelHash];
+        if (list != null) {
+          final idx = list.indexWhere((m) => m.messageId == messageId);
+          if (idx >= 0) {
+            list[idx] = list[idx].withDeliveryState(deliveryState);
+            notifyListeners();
+          }
+        }
       case ReactionUpdatedEvent(:final channelHash):
         _scheduleReactionRefresh(channelHash);
       case ChannelJoinedEvent():
-        break;
+        unawaited(_applyChannelJoined());
       case ChannelDiscoveredEvent():
         unawaited(refreshDiscoveredChannels());
       case InviteReceivedEvent():
@@ -1102,6 +1138,18 @@ class AppState extends ChangeNotifier {
             voiceAudioError = true;
             notifyListeners();
         }
+    }
+  }
+
+  /// A channel was joined (accepted invite, or a join that completed on the
+  /// backend) -- refetch the server and channel lists so it appears without a
+  /// full reload.
+  Future<void> _applyChannelJoined() async {
+    try {
+      await _reloadServersAndChannels();
+      notifyListeners();
+    } catch (_) {
+      // Non-fatal: a later reconnect or reload catches it up.
     }
   }
 

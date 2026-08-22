@@ -663,6 +663,8 @@ class _MessageRowWidgetState extends State<_MessageRowWidget> {
                 ],
               ),
             ),
+            if (isOwn && message.deliveryState != null)
+              _DeliveryIndicator(state: message.deliveryState!),
           ],
         ),
       );
@@ -721,6 +723,8 @@ class _MessageRowWidgetState extends State<_MessageRowWidget> {
                 ],
               ),
             ),
+            if (isOwn && message.deliveryState != null)
+              _DeliveryIndicator(state: message.deliveryState!),
           ],
         ),
       );
@@ -803,6 +807,37 @@ class _ReplyPreview extends StatelessWidget {
                   ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// A subtle status glyph on the reader's own outbound messages: a message to
+/// an unreachable peer must not look identical to a delivered one. Shown only
+/// when the backend tracks a state (null for peers' messages and untracked
+/// sends -- see Message.deliveryState).
+class _DeliveryIndicator extends StatelessWidget {
+  const _DeliveryIndicator({required this.state});
+  final String state;
+
+  @override
+  Widget build(BuildContext context) {
+    final tc = SectionTheme.of(context);
+    final (String glyph, Color color, String tip) = switch (state) {
+      'pending' => ('◷', tc.textTertiary, 'Queued — waiting to deliver'),
+      'failed' => ('⚠', tc.accentSecondary, 'Delivery failed'),
+      'delivered' => ('✓', tc.textTertiary, 'Delivered'),
+      _ => ('', tc.textTertiary, ''),
+    };
+    if (glyph.isEmpty) return const SizedBox.shrink();
+    return Padding(
+      padding: const EdgeInsets.only(left: 8, top: 4),
+      child: Tooltip(
+        message: tip,
+        child: Text(
+          glyph,
+          style: TextStyle(fontSize: TCType.textMicro, color: color),
+        ),
       ),
     );
   }
