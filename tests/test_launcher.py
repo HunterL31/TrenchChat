@@ -1,5 +1,5 @@
 """
-main_flutter.py's console-less startup.
+main_flutter.py's console-less startup and its --version flag.
 
 The installed Windows and macOS builds are windowed: the process has no
 console, so sys.stdout and sys.stderr are None. uvicorn's logging config
@@ -15,6 +15,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import main_flutter
+from trenchchat.version import VERSION_ENV_VAR, reset_version_cache
 
 
 @pytest.fixture
@@ -70,3 +71,15 @@ def test_uvicorn_logging_configures_without_a_console(log_dir, monkeypatch):
 
     uvicorn.Config(lambda scope, receive, send: None,
                    host="127.0.0.1", port=8810, log_level="warning")
+
+
+def test_version_flag_prints_the_build_and_starts_nothing(monkeypatch, capsys):
+    """Support's first question, answerable without launching the app."""
+    monkeypatch.setenv(VERSION_ENV_VAR, "4.2.0")
+    reset_version_cache()
+    monkeypatch.setattr(sys, "argv", ["main_flutter.py", "--version"])
+
+    main_flutter.main()
+
+    assert capsys.readouterr().out.strip() == "4.2.0"
+    reset_version_cache()

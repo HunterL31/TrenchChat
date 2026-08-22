@@ -115,7 +115,14 @@ def main():
     parser.add_argument("--no-ui", action="store_true",
                         help="start only the backend; open the printed URL "
                              "yourself")
+    parser.add_argument("--version", action="store_true",
+                        help="print this build's version and exit")
     args = parser.parse_args()
+
+    if args.version:
+        from trenchchat.version import app_version
+        print(app_version())
+        return
 
     import uvicorn
 

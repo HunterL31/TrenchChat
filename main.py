@@ -3,7 +3,7 @@ Legacy Qt entry point. The active client is the Flutter app -- launch it
 with main_flutter.py; this stays until the migration finishes.
 
 Startup order:
-  1. Load config
+  1. Load config and record this build's version against the profile
   2. Start Qt application (required before showing any dialogs)
   3. PIN gate — if a lock is set, show UnlockDialog and derive the key
   4. Initialise Reticulum
@@ -42,6 +42,7 @@ from trenchchat.core.voice import VoiceManager
 from trenchchat.network.router import REANNOUNCE_INTERVAL_SECS, Router
 from trenchchat.network.voice_transport import RNSVoiceTransport
 from trenchchat.network.announce import UserAnnounceHandler
+from trenchchat.version import record_launch
 from trenchchat.gui.main_window import MainWindow
 from trenchchat.gui.pin_dialog import UnlockDialog
 
@@ -75,6 +76,9 @@ def main():
 
     # --- config ---
     config = Config()
+
+    # --- version record ---
+    record_launch()
 
     # --- Qt app (must exist before any QDialog is shown) ---
     app = QApplication(sys.argv)

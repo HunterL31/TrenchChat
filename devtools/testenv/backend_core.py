@@ -45,6 +45,7 @@ from trenchchat.core.audio.engine import make_tone_pipeline
 from trenchchat.network.router import Router
 from trenchchat.network.voice_transport import RNSVoiceTransport
 from trenchchat.network.announce import PeerAnnounceHandler, UserAnnounceHandler
+from trenchchat.version import record_launch
 
 _LINK_INTERFACE_NAME = "TesterLink"
 
@@ -164,6 +165,7 @@ class Backend:
 
         self.config = Config(data_dir=data_dir)
         self.config.display_name = display_name
+        self.version_state = record_launch(data_dir)
 
         self.rns = RNS.Reticulum(configdir=str(rns_dir), loglevel=_rns_loglevel())
 
@@ -199,6 +201,7 @@ class Backend:
         self.data_dir = DATA_DIR
         self._link_callbacks = []
         self.config = Config()
+        self.version_state = record_launch(self.data_dir)
         self.rns = RNS.Reticulum(configdir=rns_configdir, loglevel=RNS.LOG_NOTICE)
         self.rns_config_path = str(Path(RNS.Reticulum.configdir) / "config")
         self.identity = Identity(self.config)
