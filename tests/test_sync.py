@@ -1973,6 +1973,22 @@ class TestAnnounceSyncCooldown:
         assert seen.count((alice.identity.hash_hex, ch_hash)) == 2, \
             "an announce after the cooldown elapsed did not send a fresh request"
 
+    def test_request_sync_all_resets_the_cooldown(self, peer_factory):
+        """Our own link returning runs request_sync_all; a cooldown armed
+        before the outage must not suppress the announce-driven requests
+        that follow it."""
+        alice, bob, ch_hash = self._shared_channel(peer_factory)
+        seen = self._spy_requests(bob)
+
+        bob.sync_mgr.on_peer_appeared(alice.identity.hash_hex)
+        bob.sync_mgr.request_sync_all()
+
+        before = seen.count((alice.identity.hash_hex, ch_hash))
+        bob.sync_mgr.on_peer_appeared(alice.identity.hash_hex)
+
+        assert seen.count((alice.identity.hash_hex, ch_hash)) == before + 1, \
+            "request_sync_all did not lift the announce cooldown"
+
     def test_cooldown_is_per_peer(self, peer_factory):
         """One peer's cooldown must not swallow another peer's first request."""
         alice, bob, ch_hash = self._shared_channel(peer_factory)

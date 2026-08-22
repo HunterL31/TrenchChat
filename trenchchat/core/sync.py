@@ -308,7 +308,15 @@ class SyncManager:
         """
         On startup: send MT_SYNC_REQUEST for every subscribed channel to all
         known-online peers (those whose RNS path is already resolved).
+
+        Also runs when our own link returns (LinkWatcher). Either way any
+        standing announce cooldown predates the world we are catching up
+        with, so it must not suppress the announce-driven requests that
+        follow -- a peer unreachable here (path not yet resolved) has only
+        those left.
         """
+        with self._announce_sync_lock:
+            self._announce_sync_times.clear()
         for sub in self._storage.get_subscriptions():
             self._request_sync_for_channel(sub["channel_hash"])
 
