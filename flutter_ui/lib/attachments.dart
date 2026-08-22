@@ -25,6 +25,22 @@ class PickedAttachment {
 /// null means the user cancelled, which is not an error.
 typedef AttachmentPick = ({PickedAttachment? attachment, String? error});
 
+/// The refusal shown for anything over [maxAttachmentBytes], wherever the
+/// image came from.
+String get tooLargeMessage =>
+    'That image is too large to send '
+    '(limit ${maxAttachmentBytes ~/ (1024 * 1024)} MB).';
+
+/// Wraps bytes that arrived whole -- a paste, rather than a file the picker
+/// could measure before reading -- in the same size gate the picker applies.
+AttachmentPick attachmentFromBytes(String name, Uint8List bytes) {
+  if (bytes.isEmpty) return (attachment: null, error: 'That image is empty.');
+  if (bytes.length > maxAttachmentBytes) {
+    return (attachment: null, error: tooLargeMessage);
+  }
+  return (attachment: PickedAttachment(name: name, bytes: bytes), error: null);
+}
+
 /// Opens the platform's file dialog on an image filter.
 ///
 /// [pickFile] is injectable so widget tests never reach the plugin's method
@@ -48,11 +64,7 @@ Future<AttachmentPick> pickImageAttachment({
     // Checked before the read so an enormous pick is refused rather than
     // pulled into memory to be refused.
     if (await file.length() > maxAttachmentBytes) {
-      return (
-        attachment: null,
-        error: 'That image is too large to send '
-            '(limit ${maxAttachmentBytes ~/ (1024 * 1024)} MB).',
-      );
+      return (attachment: null, error: tooLargeMessage);
     }
     final bytes = await file.readAsBytes();
     if (bytes.isEmpty) {

@@ -12,6 +12,8 @@ import '../../api/models/server.dart';
 import '../../api/models/voice.dart';
 import '../../app_state.dart';
 import '../../attachments.dart';
+import '../../clipboard_image.dart';
+import '../../clipboard_paste.dart';
 import '../../theme/section_theme.dart';
 import '../../theme/theme_spec.dart';
 import '../../theme/tokens.dart';
@@ -172,6 +174,19 @@ class _MainWindowState extends State<MainWindow> {
       return null;
     }
     return picked.attachment;
+  }
+
+  /// Puts a pasted image through the same size gate the file picker applies,
+  /// so the compose bar only ever sees one the backend will accept.
+  VoidCallback _watchPastedImages(void Function(PickedAttachment) onImage) {
+    return watchClipboardImagePaste((PastedImage pasted) {
+      final result = attachmentFromBytes(pasted.name, pasted.bytes);
+      if (result.error != null) {
+        if (mounted) widget.state.reportError(result.error!);
+        return;
+      }
+      onImage(result.attachment!);
+    });
   }
 
   /// Interim link action: url_launcher is not a dependency, so a tapped link
@@ -487,6 +502,7 @@ class _MainWindowState extends State<MainWindow> {
                         return ok;
                       },
                       pickAttachment: _pickAttachment,
+                      watchPastedImages: _watchPastedImages,
                       pickEmoji: () async =>
                           (await showEmojiPickerDialog(context, state, title: 'Add emoji'))
                               ?.composeToken,

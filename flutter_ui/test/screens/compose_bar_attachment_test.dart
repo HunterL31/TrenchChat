@@ -13,9 +13,26 @@ final _png = Uint8List.fromList([1, 2, 3, 4]);
 
 const _attachment = 'shot.png';
 
+/// Stands in for the platform paste route: [paste] fires whatever a real
+/// paste event would have delivered, and [disposed] records that the compose
+/// bar unsubscribed.
+class _FakePasteSource {
+  void Function(PickedAttachment)? _handler;
+  var disposed = false;
+
+  VoidCallback watch(void Function(PickedAttachment) onImage) {
+    _handler = onImage;
+    return () => disposed = true;
+  }
+
+  void paste(PickedAttachment image) => _handler!(image);
+}
+
 Widget _harness({
   required Future<bool> Function(String, PickedAttachment?) onSend,
   Future<PickedAttachment?> Function()? pickAttachment,
+  _FakePasteSource? pasteSource,
+  bool enabled = true,
   String? channelHash,
 }) =>
     MaterialApp(
@@ -23,9 +40,10 @@ Widget _harness({
         body: ComposeBar(
           channelName: 'general',
           channelHash: channelHash,
-          enabled: true,
+          enabled: enabled,
           onSend: onSend,
           pickAttachment: pickAttachment,
+          watchPastedImages: pasteSource?.watch,
           compact: true, // gives a tappable send button
         ),
       ),
@@ -143,6 +161,75 @@ void main() {
 
     await _tapPlus(tester);
     expect(find.text(_attachment), findsNothing);
+  });
+
+  testWidgets('a pasted image stages while the message field has focus',
+      (tester) async {
+    final source = _FakePasteSource();
+    await tester.pumpWidget(
+        _harness(onSend: (_, _) async => true, pasteSource: source));
+
+    await tester.tap(find.byType(TextField));
+    await tester.pumpAndSettle();
+    source.paste(PickedAttachment(name: _attachment, bytes: _png));
+    await tester.pumpAndSettle();
+
+    expect(find.text(_attachment), findsOneWidget);
+  });
+
+  testWidgets('a paste with the message field unfocused is ignored',
+      (tester) async {
+    final source = _FakePasteSource();
+    await tester.pumpWidget(
+        _harness(onSend: (_, _) async => true, pasteSource: source));
+
+    source.paste(PickedAttachment(name: _attachment, bytes: _png));
+    await tester.pumpAndSettle();
+
+    expect(find.text(_attachment), findsNothing);
+  });
+
+  testWidgets('a pasted image is what the send carries', (tester) async {
+    final source = _FakePasteSource();
+    PickedAttachment? sent;
+    await tester.pumpWidget(_harness(
+      onSend: (_, attachment) async {
+        sent = attachment;
+        return true;
+      },
+      pasteSource: source,
+    ));
+
+    await tester.tap(find.byType(TextField));
+    await tester.pumpAndSettle();
+    source.paste(PickedAttachment(name: _attachment, bytes: _png));
+    await tester.pumpAndSettle();
+    await _send(tester);
+
+    expect(sent?.bytes, _png);
+  });
+
+  testWidgets('a paste into a channel that refuses sends is ignored',
+      (tester) async {
+    final source = _FakePasteSource();
+    await tester.pumpWidget(_harness(
+        onSend: (_, _) async => true, pasteSource: source, enabled: false));
+
+    source.paste(PickedAttachment(name: _attachment, bytes: _png));
+    await tester.pumpAndSettle();
+
+    expect(find.text(_attachment), findsNothing);
+  });
+
+  testWidgets('the paste subscription is dropped with the compose bar',
+      (tester) async {
+    final source = _FakePasteSource();
+    await tester.pumpWidget(
+        _harness(onSend: (_, _) async => true, pasteSource: source));
+    expect(source.disposed, isFalse);
+
+    await tester.pumpWidget(const MaterialApp(home: Scaffold()));
+    expect(source.disposed, isTrue);
   });
 
   testWidgets('a staged image follows its own channel', (tester) async {

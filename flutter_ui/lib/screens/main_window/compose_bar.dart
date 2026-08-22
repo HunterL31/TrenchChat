@@ -108,6 +108,7 @@ class ComposeBar extends StatefulWidget {
     this.channelHash,
     this.pickEmoji,
     this.pickAttachment,
+    this.watchPastedImages,
     this.pendingThemeShare,
     this.onThemeShareConsumed,
     this.replyPreview,
@@ -141,6 +142,11 @@ class ComposeBar extends StatefulWidget {
   /// Opens the file picker behind the + button. Null leaves the button inert,
   /// which is what isolated widget tests want.
   final Future<PickedAttachment?> Function()? pickAttachment;
+
+  /// Subscribes a handler to the platform's paste events for as long as this
+  /// compose bar lives, returning the disposer. Null disables paste-to-attach.
+  final VoidCallback Function(void Function(PickedAttachment image) onImage)?
+      watchPastedImages;
 
   /// A theme the appearance editor staged: dropped into the draft as
   /// `[theme:<name>]` and sent as [code]. Cleared through
@@ -186,12 +192,23 @@ class _ComposeBarState extends State<ComposeBar> {
   /// not re-enter the listener that is making it.
   bool _rewritingDraft = false;
 
+  /// Stops the paste subscription when this compose bar goes away.
+  VoidCallback? _stopWatchingPastes;
+
   @override
   void initState() {
     super.initState();
     HardwareKeyboard.instance.addHandler(_onKeyEvent);
     _controller.addListener(_onDraftChanged);
+    _stopWatchingPastes = widget.watchPastedImages?.call(_onPastedImage);
     _consumeThemeShare();
+  }
+
+  /// A paste fires wherever the app has focus, so the compose bar takes one
+  /// only when the message field is what the user is typing into.
+  void _onPastedImage(PickedAttachment image) {
+    if (!mounted || !_focusNode.hasFocus || !widget.enabled) return;
+    setState(() => _attachment = image);
   }
 
   /// Keeps a staged theme token all-or-nothing: editing any part of one takes
@@ -292,6 +309,7 @@ class _ComposeBarState extends State<ComposeBar> {
   @override
   void dispose() {
     HardwareKeyboard.instance.removeHandler(_onKeyEvent);
+    _stopWatchingPastes?.call();
     _controller.removeListener(_onDraftChanged);
     _controller.dispose();
     _focusNode.dispose();
