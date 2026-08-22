@@ -21,6 +21,7 @@ import RNS
 
 from trenchchat.config import DATA_DIR, Config
 from trenchchat.core import lockbox
+from trenchchat.core.bandwidth import SAMPLE_INTERVAL_SECS, BandwidthMonitor
 from trenchchat.core.connectivity import LinkWatcher
 from trenchchat.core.sync import SYNC_RETRY_SECS
 from trenchchat.core.identity import Identity
@@ -299,6 +300,8 @@ class Backend:
         # _on_inbound_message).
         self.router.add_delivery_callback(self._on_inbound_message)
 
+        self.bandwidth = BandwidthMonitor()
+
         # Nothing else notices *our own* link returning: every catch-up path
         # is driven by hearing from a remote peer.
         self.link_watcher = LinkWatcher(self.sync_mgr.request_sync_all)
@@ -400,6 +403,21 @@ class Backend:
                         RNS.log(f"TesterBackend: sync tick failed: {e}", RNS.LOG_WARNING)
 
         t = threading.Thread(target=_loop, daemon=True, name="voice-ticker")
+        t.start()
+
+    def start_bandwidth_sampler(self, interval: float = SAMPLE_INTERVAL_SECS) -> None:
+        """Periodically sample the interface byte counters so /bandwidth can
+        answer windowed rates. Runs as a daemon thread so it never blocks
+        process exit."""
+        def _loop():
+            while True:
+                time.sleep(interval)
+                try:
+                    self.bandwidth.sample()
+                except Exception as e:
+                    RNS.log(f"TesterBackend: bandwidth sample failed: {e}", RNS.LOG_WARNING)
+
+        t = threading.Thread(target=_loop, daemon=True, name="bandwidth-sampler")
         t.start()
 
     def start_presence_pruner(self, interval: float = 15.0) -> None:

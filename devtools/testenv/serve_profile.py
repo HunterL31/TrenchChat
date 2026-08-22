@@ -80,6 +80,7 @@ def main():
     backend.start_heartbeat(interval=REANNOUNCE_INTERVAL_SECS)
     backend.start_presence_pruner()
     backend.start_voice_ticker()
+    backend.start_bandwidth_sampler()
     threading.Timer(_STARTUP_SYNC_DELAY_SECS, backend.sync_mgr.request_sync_all).start()
 
     api_token = generate_token()
