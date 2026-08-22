@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import '../../api/models/link_quality.dart';
 import '../../api/ws.dart';
 import '../../theme/section_theme.dart';
+import '../../theme/theme_spec.dart';
 import '../../theme/tokens.dart';
 import '../../widgets/signal_meter.dart';
 import '../../widgets/tc_button.dart';
@@ -11,6 +12,11 @@ import '../../widgets/tc_icon.dart';
 import '../../widgets/tc_tooltip.dart';
 
 enum ChannelTab { chat, map, iface, friends }
+
+/// Below this header width -- narrower than the compact breakpoint, which is
+/// the whole window -- the tabs render as icons and the link label drops, so
+/// the channel name stays visible and the FRIENDS tab stays on-screen.
+const double _denseHeaderWidth = 560;
 
 class ChannelHeader extends StatelessWidget {
   const ChannelHeader({
@@ -59,6 +65,16 @@ class ChannelHeader extends StatelessWidget {
         ? '${linkQuality.hops} HOP${linkQuality.hops == 1 ? '' : 'S'}'
         : 'HOPS UNKNOWN';
 
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final dense = compact || constraints.maxWidth < _denseHeaderWidth;
+        return _buildBar(context, tc, hopsLabel, dense);
+      },
+    );
+  }
+
+  Widget _buildBar(
+      BuildContext context, TCSectionColors tc, String hopsLabel, bool dense) {
     return Container(
       height: 42,
       padding: const EdgeInsets.symmetric(horizontal: 18),
@@ -83,7 +99,7 @@ class ChannelHeader extends StatelessWidget {
                     style: TextStyle(color: tc.textEmphasis, fontSize: 15),
                   ),
                 ),
-                if (topic.isNotEmpty && !compact) ...[
+                if (topic.isNotEmpty && !dense) ...[
                   const SizedBox(width: 12),
                   Expanded(
                     child: Text(
@@ -98,7 +114,7 @@ class ChannelHeader extends StatelessWidget {
             ),
           ),
           if (connectionState != TcConnState.connected) ...[
-            _ConnectionPill(state: connectionState, compact: compact),
+            _ConnectionPill(state: connectionState, compact: dense),
             const SizedBox(width: 8),
           ],
           Container(
@@ -111,7 +127,7 @@ class ChannelHeader extends StatelessWidget {
               mainAxisSize: MainAxisSize.min,
               children: [
                 SignalMeter(level: linkQuality.level, size: 12),
-                if (!compact) ...[
+                if (!dense) ...[
                   const SizedBox(width: 7),
                   Text(
                     '$_levelLabel · $hopsLabel',
@@ -140,16 +156,16 @@ class ChannelHeader extends StatelessWidget {
             children: [
               _HeaderTab(
                   label: 'CHAT', icon: TcIcons.hash, tab: ChannelTab.chat,
-                  active: activeTab, onTap: onTabSelected, compact: compact),
+                  active: activeTab, onTap: onTabSelected, compact: dense),
               _HeaderTab(
                   label: 'MAP', icon: TcIcons.map, tab: ChannelTab.map,
-                  active: activeTab, onTap: onTabSelected, compact: compact),
+                  active: activeTab, onTap: onTabSelected, compact: dense),
               _HeaderTab(
                   label: 'IFACE', icon: TcIcons.iface, tab: ChannelTab.iface,
-                  active: activeTab, onTap: onTabSelected, compact: compact),
+                  active: activeTab, onTap: onTabSelected, compact: dense),
               _HeaderTab(
                   label: 'FRIENDS', icon: TcIcons.users, tab: ChannelTab.friends,
-                  active: activeTab, onTap: onTabSelected, compact: compact),
+                  active: activeTab, onTap: onTabSelected, compact: dense),
             ],
           ),
         ],

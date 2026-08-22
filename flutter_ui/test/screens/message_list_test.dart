@@ -182,6 +182,14 @@ void main() {
         lessThan(controller.position.maxScrollExtent));
   });
 
+  testWidgets('a channel with no messages shows an empty-state placeholder',
+      (tester) async {
+    await tester.pumpWidget(_harness(const []));
+    await tester.pumpAndSettle();
+
+    expect(find.text('No messages yet — say something.'), findsOneWidget);
+  });
+
   testWidgets('a stripped attachment is marked, an intact message is not',
       (tester) async {
     const base = 1_700_000_000.0;

@@ -396,7 +396,8 @@ class _MainWindowState extends State<MainWindow> {
                       enabled: channelHash != null && (permissions?.sendMessage ?? true),
                       onSend: (content) => state.sendMessage(content),
                       pickEmoji: () async =>
-                          (await showEmojiPickerDialog(context, state))?.composeToken,
+                          (await showEmojiPickerDialog(context, state, title: 'Add emoji'))
+                              ?.composeToken,
                       pendingThemeShare: state.pendingThemeShare,
                       onThemeShareConsumed: state.consumePendingThemeShare,
                       compact: compact,
@@ -422,13 +423,16 @@ class _MainWindowState extends State<MainWindow> {
           );
         }
 
-        return Row(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            rail,
-            SizedBox(width: 206, child: channelPane),
-            Expanded(child: content),
-          ],
+        return Scaffold(
+          backgroundColor: baseColors.bgApp,
+          body: Row(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              rail,
+              SizedBox(width: 206, child: channelPane),
+              Expanded(child: content),
+            ],
+          ),
         );
       },
     );

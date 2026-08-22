@@ -30,20 +30,22 @@ const List<String> _builtinEmoji = [
   '✅', '❌', '👀', '🫡', '🤔', '🙏', '💯', '🚀',
 ];
 
-Future<EmojiSelection?> showEmojiPickerDialog(BuildContext context, AppState state) {
+Future<EmojiSelection?> showEmojiPickerDialog(BuildContext context, AppState state,
+    {String title = 'React'}) {
   return showTcDialog<EmojiSelection>(
     context: context,
     builder: (context) => SectionTheme(
       spec: state.themeSpec,
       section: TCSection.dialogs,
-      child: _EmojiPickerContent(state: state),
+      child: _EmojiPickerContent(state: state, title: title),
     ),
   );
 }
 
 class _EmojiPickerContent extends StatefulWidget {
-  const _EmojiPickerContent({required this.state});
+  const _EmojiPickerContent({required this.state, required this.title});
   final AppState state;
+  final String title;
 
   @override
   State<_EmojiPickerContent> createState() => _EmojiPickerContentState();
@@ -78,7 +80,7 @@ class _EmojiPickerContentState extends State<_EmojiPickerContent> {
             .toList()
           ..sort((a, b) => a.name.compareTo(b.name));
         return TcDialogShell(
-          title: 'React',
+          title: widget.title,
           width: 340,
           actions: [
             _FooterButton(

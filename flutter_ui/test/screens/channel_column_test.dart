@@ -47,7 +47,7 @@ void main() {
     expect(directCreates, 1);
     expect(serverCreates, 0);
 
-    await tester.tap(find.text('CHANNEL'));
+    await tester.tap(find.text('NEW CHANNEL'));
     expect(serverCreates, 1);
     expect(directCreates, 1);
   });

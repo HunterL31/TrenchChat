@@ -188,6 +188,15 @@ class _MessageListState extends State<MessageList> {
   Widget build(BuildContext context) {
     final rows = _buildRows(widget.messages);
     final showLoader = widget.loadingOlder;
+    if (rows.isEmpty && !showLoader) {
+      final tc = SectionTheme.of(context);
+      return Center(
+        child: Text(
+          'No messages yet — say something.',
+          style: TextStyle(fontSize: TCType.textBodySm, color: tc.textTertiary),
+        ),
+      );
+    }
     return ListView.builder(
       controller: _controller,
       padding: const EdgeInsets.symmetric(vertical: 12),

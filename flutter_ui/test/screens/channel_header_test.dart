@@ -40,4 +40,36 @@ void main() {
     await tester.pumpWidget(_harness(TcConnState.disconnected));
     expect(find.text('OFFLINE'), findsOneWidget);
   });
+
+  testWidgets('a narrow header keeps the name visible and the FRIENDS tab reachable',
+      (tester) async {
+    ChannelTab? selected;
+    await tester.pumpWidget(MaterialApp(
+      home: Scaffold(
+        body: Align(
+          alignment: Alignment.topLeft,
+          child: SizedBox(
+            width: 460,
+            child: ChannelHeader(
+              channelName: 'a-very-long-channel-name-that-would-collapse',
+              topic: 'a topic competing for the same row',
+              linkQuality:
+                  const ChannelLinkQuality(level: LinkQualityLevel.excellent, hops: 2),
+              activeTab: ChannelTab.chat,
+              onTabSelected: (t) => selected = t,
+            ),
+          ),
+        ),
+      ),
+    ));
+    await tester.pumpAndSettle();
+
+    // No RenderFlex overflow at this width, and the name is not dropped.
+    expect(tester.takeException(), isNull);
+    expect(find.text('a-very-long-channel-name-that-would-collapse'), findsOneWidget);
+
+    // The FRIENDS tab is on-screen (as a tooltipped icon) and still fires.
+    await tester.tap(find.byTooltip('FRIENDS'));
+    expect(selected, ChannelTab.friends);
+  });
 }

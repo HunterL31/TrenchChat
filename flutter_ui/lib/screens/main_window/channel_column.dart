@@ -1,5 +1,5 @@
 // 1b: 206px channel column -- server header, CHANNELS, DIRECT CHANNELS,
-// ONLINE roster footer, +CHANNEL / JOIN ghost buttons.
+// ONLINE roster footer, NEW CHANNEL / JOIN CHANNEL ghost buttons.
 import 'package:flutter/material.dart';
 
 import '../../api/models/invite.dart';
@@ -235,15 +235,14 @@ class ChannelColumn extends StatelessWidget {
               border: Border(top: BorderSide(color: tc.borderSubtle)),
             ),
             padding: const EdgeInsets.all(10),
-            child: Row(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                Expanded(
-                  child: TcGhostButton(icon: TcIcons.plus, label: 'CHANNEL', onPressed: onCreateChannel),
-                ),
-                const SizedBox(width: 6),
-                Expanded(
-                  child: TcGhostButton(icon: TcIcons.join, label: 'JOIN', onPressed: onJoinChannel),
-                ),
+                TcGhostButton(
+                    icon: TcIcons.plus, label: 'NEW CHANNEL', onPressed: onCreateChannel),
+                const SizedBox(height: 6),
+                TcGhostButton(
+                    icon: TcIcons.join, label: 'JOIN CHANNEL', onPressed: onJoinChannel),
               ],
             ),
           ),
