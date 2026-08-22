@@ -113,6 +113,11 @@ flutter test --update-goldens
   one dialog pattern in the app -- see `lib/screens/dialogs/` for examples. Don't
   reach for a raw Material `AlertDialog`; the app theme sets no `dialogTheme`, so it
   renders visually wrong for this design language.
+- **Shape comes from the theme**: a widget asks `lib/theme/shape.dart` for its
+  corners (`tcCorners`), its avatar cut (`tcAvatarCorners`) or its panel edge
+  (`TcPanel`) rather than hardcoding a radius. A section that rounds nothing hands
+  back the `stock:` value the call site passes, so an unthemed app renders exactly
+  as it did before shapes existed.
 - **API errors**: `lib/api/client.dart`'s `ApiClient` throws `ApiException` for any
   non-2xx response. `AppState`'s mutating methods (`createServer`, `sendMessage`,
   ...) catch it and set `actionError`, one surface for every action's failure.

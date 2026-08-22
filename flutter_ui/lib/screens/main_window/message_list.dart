@@ -10,6 +10,7 @@ import '../../format.dart';
 import '../../grouping.dart';
 import '../../name_color.dart';
 import '../../theme/section_theme.dart';
+import '../../theme/shape.dart';
 import '../../theme/theme_spec.dart';
 import '../../theme/tokens.dart';
 import '../../widgets/avatar.dart';
@@ -363,6 +364,7 @@ class _NewMessagesPill extends StatelessWidget {
           decoration: BoxDecoration(
             color: tc.accentPrimary,
             border: Border.all(color: tc.borderAccent),
+            borderRadius: tcCorners(context, scale: 1.5),
           ),
           child: Text(
             '↓ NEW MESSAGES',

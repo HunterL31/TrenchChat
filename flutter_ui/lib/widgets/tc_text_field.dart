@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../theme/section_theme.dart';
+import '../theme/shape.dart';
 import '../theme/tokens.dart';
 
 class TcTextField extends StatefulWidget {
@@ -79,6 +80,7 @@ class _TcTextFieldState extends State<TcTextField> {
           decoration: BoxDecoration(
             color: tc.bgInset,
             border: Border.all(color: tc.borderDefault),
+            borderRadius: tcCorners(context, scale: 0.5),
           ),
           padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
           child: TextField(

@@ -64,7 +64,7 @@ class _MainWindowState extends State<MainWindow> {
   /// back to chat, so the switch happens once per share.
   bool _themeShareShown = false;
 
-  void _maybeShowActionError(AppState state, TCSectionColors colors) {
+  void _maybeShowActionError(AppState state, TCSectionColors colors, TCSectionStyle style) {
     final message = state.actionError;
     if (message == null || message == _lastShownActionError) return;
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -83,7 +83,7 @@ class _MainWindowState extends State<MainWindow> {
         behavior: SnackBarBehavior.floating,
         duration: const Duration(seconds: 4),
         shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.zero,
+          borderRadius: BorderRadius.circular(style.cornerRadius),
           side: BorderSide(color: colors.statusDanger),
         ),
       ));
@@ -210,7 +210,7 @@ class _MainWindowState extends State<MainWindow> {
           );
         }
 
-        _maybeShowActionError(state, baseColors);
+        _maybeShowActionError(state, baseColors, spec.resolveBaseStyle());
         _maybeShowThemeShare(state);
 
         final selectedServer = state.selectedServerHash;

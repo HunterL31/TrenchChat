@@ -6,15 +6,16 @@
 // renders with default Material rounded corners and surface tint, which
 // clashes with this terminal-styled design language.
 //
-// The shell uses NotchedPanel (theme/notch.dart) -- "reserved for emphasis
-// panels only" per that file's own comment, and a modal is exactly that --
-// plus TCEffects.shadowModal, the ported --shadow-modal token that was
-// sitting unused before this.
+// The shell uses TcPanel (theme/shape.dart), which is the NotchedPanel cut
+// -- "reserved for emphasis panels only" per that file's own comment, and a
+// modal is exactly that -- until a theme asks its dialogs for a plain
+// rounded edge instead. Either way it carries TCEffects.shadowModal, the
+// ported --shadow-modal token.
 import 'package:flutter/material.dart';
 
 import '../theme/effects.dart';
-import '../theme/notch.dart';
 import '../theme/section_theme.dart';
+import '../theme/shape.dart';
 import '../theme/tokens.dart';
 
 /// Presents [builder] as a centered modal with a dark scrim, fade + scale-in
@@ -75,8 +76,8 @@ double scrollbarInset(BuildContext context) => switch (Theme.of(context).platfor
       _ => 0,
     };
 
-/// Shared chrome for dialog content: notched panel, title rule, and a
-/// bottom-aligned action row. Dialogs supply their form fields as [children]
+/// Shared chrome for dialog content: the section's panel shape, title rule,
+/// and a bottom-aligned action row. Dialogs supply their form fields as [children]
 /// and their buttons as [actions].
 class TcDialogShell extends StatelessWidget {
   const TcDialogShell({
@@ -99,7 +100,7 @@ class TcDialogShell extends StatelessWidget {
     final tc = SectionTheme.of(context);
     // Never wider than the screen minus a margin, so phone viewports fit.
     final maxWidth = MediaQuery.of(context).size.width - 24;
-    return NotchedPanel(
+    return TcPanel(
       notch: TCSpace.notch,
       color: tc.bgSurfaceRaised,
       border: tc.borderDefault,

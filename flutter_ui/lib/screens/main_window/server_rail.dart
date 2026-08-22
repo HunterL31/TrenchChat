@@ -4,12 +4,16 @@ import 'package:flutter/material.dart';
 import '../../theme/effects.dart';
 import '../../theme/glow.dart';
 import '../../theme/section_theme.dart';
+import '../../theme/shape.dart';
 import '../../theme/tokens.dart';
 import '../../widgets/dashed_border.dart';
 import '../../widgets/tc_button.dart';
 import '../../widgets/tc_context_menu.dart';
 import '../../widgets/tc_icon.dart';
 import '../../widgets/tc_tooltip.dart';
+
+/// The square a server tile occupies, and the size its shape is cut to.
+const double _tileSize = 38;
 
 class ServerRailEntry {
   const ServerRailEntry({
@@ -177,8 +181,8 @@ class _ServerTileState extends State<_ServerTile> {
             child: AnimatedContainer(
           duration: TCEffects.durationMed,
           curve: TCEffects.easeTerminal,
-          width: 38,
-          height: 38,
+          width: _tileSize,
+          height: _tileSize,
           alignment: Alignment.center,
           decoration: BoxDecoration(
             color: selected ? tc.bgSelected : tc.bgInset,
@@ -187,6 +191,7 @@ class _ServerTileState extends State<_ServerTile> {
                   ? tc.borderAccent
                   : (_hover ? tc.borderStrong : tc.borderDefault),
             ),
+            borderRadius: tcAvatarCorners(context, _tileSize),
             boxShadow: selected ? tcBoxGlowSm(context) : null,
           ),
               child: Text(
@@ -229,9 +234,10 @@ class _AddServerTileState extends State<_AddServerTile> {
         onTap: widget.onTap,
         child: DashedBorder(
           color: _hover ? tc.borderStrong : tc.borderDefault,
+          borderRadius: tcAvatarCorners(context, _tileSize) ?? BorderRadius.zero,
           child: SizedBox(
-            width: 38,
-            height: 38,
+            width: _tileSize,
+            height: _tileSize,
             child: Center(
               child: Text(
                 '+',

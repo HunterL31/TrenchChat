@@ -313,7 +313,10 @@ void main() {
     await tester.tap(find.text('CONTENT'));
     await tester.pump();
     // The scope's own font override goes back to the inherited value...
-    await tester.tap(find.text('INHERIT').last);
+    await tester.tap(find.descendant(
+      of: find.byKey(appearanceDisplayFontRowKey),
+      matching: find.text('INHERIT'),
+    ));
     await tester.pump();
     expect(find.text('RESET SECTION'), findsOneWidget);
 
@@ -327,6 +330,61 @@ void main() {
     expect(styles['base'], {'glow': false}, reason: 'the base scope is untouched');
     expect(state.themeSpec.resolveStyle(TCSection.content).textScale, 1.0);
     expect(state.themeSpec.resolveStyle(TCSection.content).glow, isFalse);
+  });
+
+  testWidgets('the shape rows write corners, avatars and the panel edge', (tester) async {
+    await openEditor(tester);
+
+    await tester.tap(find.descendant(
+      of: find.byKey(appearanceCornerRowKey),
+      matching: find.text('ROUND'),
+    ));
+    await tester.pump();
+    await tester.tap(find.descendant(
+      of: find.byKey(appearanceAvatarShapeRowKey),
+      matching: find.text('CIRCLE'),
+    ));
+    await tester.pump();
+    await tester.tap(find.descendant(
+      of: find.byKey(appearancePanelEdgeRowKey),
+      matching: find.text('PLAIN'),
+    ));
+    await tester.pump();
+    await tester.tap(find.text('APPLY'));
+    await settle(tester);
+
+    expect((lastPostedTheme()['styles'] as Map)['base'], {
+      'cornerRadius': 8.0,
+      'avatarShape': 'circle',
+      'panelEdge': 'plain',
+    });
+
+    final style = state.themeSpec.resolveStyle(TCSection.content);
+    expect(style.cornerRadius, 8.0);
+    expect(style.avatarShape, 'circle');
+    expect(style.panelEdge, 'plain');
+  });
+
+  testWidgets('a section can round more than the base scope does', (tester) async {
+    await openEditor(tester);
+
+    await tester.tap(find.descendant(
+      of: find.byKey(appearanceCornerRowKey),
+      matching: find.text('SOFT'),
+    ));
+    await tester.pump();
+    await tester.tap(find.text('SERVER RAIL'));
+    await tester.pump();
+    await tester.tap(find.descendant(
+      of: find.byKey(appearanceCornerRowKey),
+      matching: find.text('PILL'),
+    ));
+    await tester.pump();
+    await tester.tap(find.text('APPLY'));
+    await settle(tester);
+
+    expect(state.themeSpec.resolveStyle(TCSection.serverRail).cornerRadius, 14.0);
+    expect(state.themeSpec.resolveStyle(TCSection.content).cornerRadius, 4.0);
   });
 
   testWidgets('a text scale the editor does not offer selects nothing and survives',

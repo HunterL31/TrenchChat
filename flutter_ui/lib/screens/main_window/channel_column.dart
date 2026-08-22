@@ -9,6 +9,7 @@ import '../../api/models/server.dart';
 import '../../api/models/voice.dart';
 import '../../theme/effects.dart';
 import '../../theme/section_theme.dart';
+import '../../theme/shape.dart';
 import '../../theme/theme_spec.dart';
 import '../../theme/tokens.dart';
 import '../../widgets/status_dot.dart';
@@ -458,8 +459,12 @@ class _InviteRowState extends State<_InviteRow> {
         child: AnimatedContainer(
           duration: TCEffects.durationMed,
           curve: TCEffects.easeTerminal,
+          margin: EdgeInsets.symmetric(horizontal: tcRadius(context, scale: 0.75)),
           padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
-          color: _hover ? tc.bgHover : Colors.transparent,
+          decoration: BoxDecoration(
+            color: _hover ? tc.bgHover : Colors.transparent,
+            borderRadius: tcCorners(context, scale: 0.75),
+          ),
           child: Row(
             children: [
               TcIcon(TcIcons.join,
@@ -517,15 +522,21 @@ class _ChannelRowState extends State<_ChannelRow> {
           child: AnimatedContainer(
             duration: TCEffects.durationMed,
             curve: TCEffects.easeTerminal,
+            // A rounded row cannot run edge to edge and still read as
+            // rounded, so the radius pays for its own margin.
+            margin: EdgeInsets.symmetric(horizontal: tcRadius(context, scale: 0.75)),
             padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
             decoration: BoxDecoration(
               color: selected ? tc.bgSelected : (_hover ? tc.bgHover : Colors.transparent),
               border: Border(
                 left: BorderSide(
-                  color: selected ? tc.accentPrimary : Colors.transparent,
+                  color: selected && !tcIsRounded(context)
+                      ? tc.accentPrimary
+                      : Colors.transparent,
                   width: 2,
                 ),
               ),
+              borderRadius: tcCorners(context, scale: 0.75),
             ),
             child: Row(
               children: [
