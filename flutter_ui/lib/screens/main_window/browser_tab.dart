@@ -8,6 +8,7 @@ import 'package:flutter/material.dart';
 import '../../api/models/nomad.dart';
 import '../../app_state.dart';
 import '../../format.dart';
+import '../../micron/micron_view.dart';
 import '../../theme/section_theme.dart';
 import '../../theme/theme_spec.dart';
 import '../../theme/tokens.dart';
@@ -428,16 +429,17 @@ class _BrowserTabState extends State<BrowserTab> {
     return SelectionArea(
       child: SingleChildScrollView(
         padding: const EdgeInsets.all(16),
-        child: Text(
-          page.source,
-          style: TextStyle(
-            fontSize: TCType.textBodySm,
-            color: tc.textPrimary,
-            height: 1.45,
-          ),
-        ),
+        child: MicronView(source: page.source, onLinkTap: _onMicronLink),
       ),
     );
+  }
+
+  void _onMicronLink(String url) {
+    if (url.contains(':/file/') || url.startsWith('/file/')) {
+      setState(() => _error = 'File downloads are not supported yet.');
+      return;
+    }
+    _go(url);
   }
 
   String _shortHash(String hash) =>
