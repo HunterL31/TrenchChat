@@ -77,7 +77,7 @@ class ChannelHeader extends StatelessWidget {
       BuildContext context, TCSectionColors tc, String hopsLabel, bool dense) {
     return Container(
       height: 42,
-      padding: const EdgeInsets.symmetric(horizontal: 18),
+      padding: const EdgeInsets.symmetric(horizontal: 12),
       decoration: BoxDecoration(
         color: tc.bgSurfaceRaised,
         border: Border(bottom: BorderSide(color: tc.borderSubtle)),
@@ -118,7 +118,7 @@ class ChannelHeader extends StatelessWidget {
             const SizedBox(width: 8),
           ],
           Container(
-            padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 3),
+            padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
             decoration: BoxDecoration(
               color: tc.bgInset,
               border: Border.all(color: tc.borderSubtle),
@@ -128,7 +128,7 @@ class ChannelHeader extends StatelessWidget {
               children: [
                 SignalMeter(level: linkQuality.level, size: 12),
                 if (!dense) ...[
-                  const SizedBox(width: 7),
+                  const SizedBox(width: 5),
                   Text(
                     '$_levelLabel · $hopsLabel',
                     style: TextStyle(
@@ -197,7 +197,7 @@ class _ConnectionPill extends StatelessWidget {
       message: 'Backend connection $label — live updates '
           '${state == TcConnState.connected ? 'flowing' : 'paused'}',
       child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 3),
+        padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
         decoration: BoxDecoration(
           color: tc.bgInset,
           border: Border.all(color: color),
@@ -211,7 +211,7 @@ class _ConnectionPill extends StatelessWidget {
               decoration: BoxDecoration(color: color, shape: BoxShape.circle),
             ),
             if (!compact) ...[
-              const SizedBox(width: 7),
+              const SizedBox(width: 5),
               Text(
                 label,
                 style: TextStyle(
@@ -261,7 +261,7 @@ class _HeaderTab extends StatelessWidget {
           message: compact ? label : '',
           child: Container(
             margin: const EdgeInsets.only(left: 2),
-            padding: EdgeInsets.symmetric(horizontal: compact ? 7 : 10, vertical: 4),
+            padding: EdgeInsets.symmetric(horizontal: compact ? 7 : 8, vertical: 4),
             decoration: BoxDecoration(
               color: selected ? tc.bgSelected : Colors.transparent,
               border: Border.all(color: selected ? tc.borderAccent : tc.borderSubtle),
