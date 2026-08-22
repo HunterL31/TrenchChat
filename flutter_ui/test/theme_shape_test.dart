@@ -5,7 +5,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:flutter_ui/api/models/link_quality.dart';
+import 'package:flutter_ui/screens/main_window/map_tab.dart';
 import 'package:flutter_ui/theme/notch.dart';
+import 'package:flutter_ui/theme/quality_tiers.dart';
 import 'package:flutter_ui/theme/section_theme.dart';
 import 'package:flutter_ui/theme/shape.dart';
 import 'package:flutter_ui/theme/theme_spec.dart';
@@ -214,6 +216,19 @@ void main() {
       final online = HSLColor.fromColor(const Color(0xFF23A55A));
       final stockOnline = HSLColor.fromColor(TCColors.statusOnline);
       expect(moved.hue, closeTo(stock.hue + (online.hue - stockOnline.hue), 0.5));
+    });
+
+    testWidgets('the map draws the same tier the meter does', (tester) async {
+      final spec = ThemeSpec(base: {'statusOnline': const Color(0xFF00A884)});
+      final context = await _pumpSection(tester, spec: spec);
+      final colors = SectionTheme.of(context);
+      final bars = await _meterBarColors(tester, context, LinkQualityLevel.good);
+
+      expect(mapQualityColor(3, colors: colors), bars.first,
+          reason: 'the map and the meter must never disagree about good');
+      expect(mapQualityColor(3, colors: colors), isNot(stockGoodQuality));
+      expect(mapQualityColor(3), stockGoodQuality,
+          reason: 'the stock palette still draws it as the design system did');
     });
 
     testWidgets('tooltips wear the section palette, not Material grey',

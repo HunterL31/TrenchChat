@@ -14,6 +14,7 @@ import '../../api/client.dart';
 import '../../api/models/network_map.dart';
 import '../../app_state.dart';
 import '../../theme/glow.dart';
+import '../../theme/quality_tiers.dart';
 import '../../theme/section_theme.dart';
 import '../../theme/theme_spec.dart';
 import '../../theme/tokens.dart';
@@ -25,16 +26,8 @@ import '../../widgets/tc_icon.dart';
 /// agrees with the header's link chip: 4=excellent .. 1=poor, 0=unknown.
 /// [colors] defaults to the stock palette so the tear-off stays a
 /// `Color Function(int)`.
-Color mapQualityColor(int quality, {TCSectionColors? colors}) {
-  final tc = colors ?? TCSectionColors.stock;
-  return switch (quality) {
-    4 => tc.statusOnline,
-    3 => HSLColor.fromAHSL(1, 70, 0.85, 0.55).toColor(),
-    2 => tc.statusWarn,
-    1 => tc.statusDanger,
-    _ => tc.statusOffline,
-  };
-}
+Color mapQualityColor(int quality, {TCSectionColors? colors}) =>
+    tcQualityColor(quality, colors ?? TCSectionColors.stock);
 
 /// Nodes kept by the "peers only" filter: real TrenchChat identities, not
 /// infrastructure (interfaces, transports, unresolved hashes).
