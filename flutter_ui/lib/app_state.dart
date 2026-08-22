@@ -26,6 +26,10 @@ import 'theme/theme_spec.dart';
 /// channel's messages are re-fetched.
 const Duration _reactionRefreshWindow = Duration(milliseconds: 250);
 
+/// How many messages a single history page holds. A full page back means
+/// there may be more; a short page is the end of history.
+const int messagePageSize = 50;
+
 class AppState extends ChangeNotifier {
   /// [httpClient] lets tests inject a mock transport; the real app leaves it
   /// null and gets a standard IO client.
@@ -56,6 +60,21 @@ class AppState extends ChangeNotifier {
   final Map<String, ChannelLinkQuality> linkQualityByChannel = {};
   final Map<String, ChannelPermissions> permissionsByChannel = {};
 
+  /// This reader's permissions on each server, gating the server-rail menu's
+  /// Invite / Edit permissions items. Loaded in [init].
+  final Map<String, ChannelPermissions> serverPermissionsByHash = {};
+
+  /// Per-channel history paging. `true` in [hasMoreOlderByChannel] means an
+  /// older page may still exist; [loadingOlderByChannel] guards against firing
+  /// overlapping older-page fetches while one is in flight.
+  final Map<String, bool> hasMoreOlderByChannel = {};
+  final Map<String, bool> loadingOlderByChannel = {};
+
+  /// The backend event socket's state, separate from mesh link quality: this
+  /// says whether live updates are flowing. Optimistic default so a client
+  /// that never opens the socket (widget tests) reads as connected.
+  TcConnState connectionState = TcConnState.connected;
+
   /// Per-channel sync state from the backend's SyncStatusTracker. "incomplete"
   /// means history is known to be missing -- including rows a peer served that
   /// we refused as unverifiable, which would otherwise be silent.
@@ -85,6 +104,10 @@ class AppState extends ChangeNotifier {
   /// message re-fetch per reaction.
   final Map<String, Timer> _reactionRefreshTimers = {};
 
+  /// Channels whose permissions/sync-state preload is in flight, so
+  /// [ensureChannelMeta] never launches a duplicate fetch for one.
+  final Set<String> _channelMetaLoading = {};
+
   String? get voiceChannelHash => voiceStatus.channel;
   LinkQualityLevel get voiceQualityLevel => voiceOverallLevel(voiceStatus);
 
@@ -96,6 +119,11 @@ class AppState extends ChangeNotifier {
   /// Locally saved contacts. Tab-only: never used as the display name in
   /// message bubbles or the presence roster (see friends_tab.dart).
   List<Friend> friends = [];
+
+  /// Peers heard via trenchchat.user announces, from the last [loadDirectory]
+  /// query. Kept live on [DirectoryUpdatedEvent] so the invite picker reflects
+  /// a peer's renamed self without a reload.
+  List<DirectoryEntry> directory = [];
 
   /// The saved per-section color theme. Empty means every section renders
   /// stock; the shell resolves it per region via SectionTheme.
@@ -157,13 +185,8 @@ class AppState extends ChangeNotifier {
       meHashHex = me['hash_hex'] as String;
       meDisplayName = me['display_name'] as String;
 
-      servers = await api.getServers();
-      standaloneChannels = await api.getChannels();
+      await _reloadServersAndChannels();
       pendingInvites = await api.getInvites();
-      for (final s in servers) {
-        channelsByServer[s.hash] = await api.getServerChannels(s.hash);
-        serverMemberCounts[s.hash] = (await api.getServerMembers(s.hash)).length;
-      }
 
       selectedServerHash = servers.isNotEmpty ? servers.first.hash : null;
       final initialChannels = selectedServerHash != null
@@ -185,6 +208,7 @@ class AppState extends ChangeNotifier {
       notifyListeners();
 
       _socket.onReconnected = _onSocketReconnected;
+      _socket.onConnStateChanged = _onConnStateChanged;
       _sub = _socket.events.listen(_onEvent);
       unawaited(ensureEmojiLoaded());
       // The backend session outlives client restarts; pick it up if live.
@@ -201,7 +225,7 @@ class AppState extends ChangeNotifier {
     try {
       final results = await Future.wait([
         api.getMembers(channelHashHex),
-        api.getMessages(channelHashHex),
+        api.getMessages(channelHashHex, limit: messagePageSize),
         api.getChannelPresence(channelHashHex),
         api.getChannelLinkQuality(channelHashHex),
         api.getMyPermissions(channelHashHex),
@@ -209,7 +233,9 @@ class AppState extends ChangeNotifier {
         api.getSyncState(channelHashHex),
       ]);
       membersByChannel[channelHashHex] = results[0] as List<Member>;
-      messagesByChannel[channelHashHex] = results[1] as List<Message>;
+      final page = results[1] as List<Message>;
+      messagesByChannel[channelHashHex] = page;
+      hasMoreOlderByChannel[channelHashHex] = page.length >= messagePageSize;
       presenceByChannel[channelHashHex] = results[2] as List<PresenceEntry>;
       linkQualityByChannel[channelHashHex] = results[3] as ChannelLinkQuality;
       permissionsByChannel[channelHashHex] = results[4] as ChannelPermissions;
@@ -219,6 +245,35 @@ class AppState extends ChangeNotifier {
     } catch (e) {
       _reportActionError(e);
     }
+  }
+
+  /// Loads a listed channel's permissions and sync state without opening it,
+  /// so the row's context menu (Invite / Edit permissions) and sync badge are
+  /// right before the channel has ever been visited. Idempotent and cheap:
+  /// skips channels already loaded or already loading, and swallows failures
+  /// (the menu simply hides perm-gated items until a later visit fills them).
+  Future<void> ensureChannelMeta(Iterable<String> channelHashHexes) async {
+    final missing = channelHashHexes
+        .where((h) =>
+            !permissionsByChannel.containsKey(h) && !_channelMetaLoading.contains(h))
+        .toSet();
+    if (missing.isEmpty) return;
+    _channelMetaLoading.addAll(missing);
+    await Future.wait(missing.map((h) async {
+      try {
+        final results = await Future.wait([
+          api.getMyPermissions(h),
+          api.getSyncState(h),
+        ]);
+        permissionsByChannel[h] = results[0] as ChannelPermissions;
+        syncStateByChannel[h] = results[1] as String;
+      } catch (_) {
+        // Non-fatal: a later loadChannel fills these in.
+      } finally {
+        _channelMetaLoading.remove(h);
+      }
+    }));
+    notifyListeners();
   }
 
   Future<void> selectServer(String serverHashHex) async {
@@ -250,20 +305,49 @@ class AppState extends ChangeNotifier {
     return data;
   }
 
+  /// Refetches the server and channel lists (and each server's channels,
+  /// member count and permissions) -- the same set the initial load builds.
+  /// Shared by [init], reconnect resync, and [ChannelJoinedEvent].
+  Future<void> _reloadServersAndChannels() async {
+    servers = await api.getServers();
+    standaloneChannels = await api.getChannels();
+    for (final s in servers) {
+      channelsByServer[s.hash] = await api.getServerChannels(s.hash);
+      serverMemberCounts[s.hash] = (await api.getServerMembers(s.hash)).length;
+      serverPermissionsByHash[s.hash] = await api.getMyServerPermissions(s.hash);
+    }
+  }
+
   /// Anything whose WS events may have been missed while the socket was down.
+  /// The server/channel/friend lists are refetched too: a channel joined or a
+  /// friend changed while the socket was down would otherwise stay stale until
+  /// a full reload.
   void _onSocketReconnected() {
+    unawaited(_resyncAfterReconnect());
+  }
+
+  Future<void> _resyncAfterReconnect() async {
+    try {
+      await _reloadServersAndChannels();
+      notifyListeners();
+    } catch (_) {
+      // Non-fatal: the individual refreshes below still run, and a later
+      // reconnect or reload catches the rest up.
+    }
     final channelHash = selectedChannelHash;
     if (channelHash != null) unawaited(loadChannel(channelHash));
     unawaited(refreshInvites());
+    unawaited(loadFriends());
     unawaited(refreshEmoji());
     unawaited(refreshVoiceStatus());
   }
 
-  Future<bool> sendMessage(String content) async {
+  Future<bool> sendMessage(String content, {String? replyTo}) async {
     final channelHashHex = selectedChannelHash;
     if (channelHashHex == null || content.trim().isEmpty) return false;
     try {
-      final result = await api.sendMessage(channelHashHex, content.trim());
+      final result =
+          await api.sendMessage(channelHashHex, content.trim(), replyTo: replyTo);
       if (result.ok) {
         // The WS event echoes it too; this covers a dropped socket so the
         // sender always sees their own message land.
@@ -286,11 +370,51 @@ class AppState extends ChangeNotifier {
 
   Future<void> refreshMessages(String channelHashHex) async {
     try {
-      messagesByChannel[channelHashHex] = await api.getMessages(channelHashHex);
+      // Cover everything already on screen, not just the newest page, so a
+      // live refresh never drops older pages the reader scrolled in.
+      final loaded = messagesByChannel[channelHashHex]?.length ?? 0;
+      final limit = loaded > messagePageSize ? loaded : messagePageSize;
+      messagesByChannel[channelHashHex] =
+          await api.getMessages(channelHashHex, limit: limit);
       notifyListeners();
     } catch (_) {
       // Next WS event or channel reload will catch it up.
     }
+  }
+
+  bool hasMoreOlder(String channelHashHex) => hasMoreOlderByChannel[channelHashHex] ?? false;
+  bool loadingOlder(String channelHashHex) => loadingOlderByChannel[channelHashHex] ?? false;
+
+  /// Fetches the next older page for [channelHashHex] and prepends it. No-op
+  /// when a fetch is already running or the start of history is reached.
+  Future<void> loadOlderMessages(String channelHashHex) async {
+    if (loadingOlder(channelHashHex) || !hasMoreOlder(channelHashHex)) return;
+    final current = messagesByChannel[channelHashHex] ?? const [];
+    if (current.isEmpty) return;
+    final oldestTs = current.map((m) => m.timestamp).reduce((a, b) => a < b ? a : b);
+
+    loadingOlderByChannel[channelHashHex] = true;
+    notifyListeners();
+    try {
+      final older = await api.getMessages(channelHashHex,
+          limit: messagePageSize, beforeTs: oldestTs);
+      final known = current.map((m) => m.messageId).toSet();
+      final fresh = older.where((m) => !known.contains(m.messageId)).toList();
+      if (fresh.isNotEmpty) {
+        messagesByChannel[channelHashHex] = [...fresh, ...current];
+      }
+      hasMoreOlderByChannel[channelHashHex] = older.length >= messagePageSize;
+    } catch (e) {
+      _reportActionError(e);
+    } finally {
+      loadingOlderByChannel[channelHashHex] = false;
+      notifyListeners();
+    }
+  }
+
+  void _onConnStateChanged(TcConnState state) {
+    connectionState = state;
+    notifyListeners();
   }
 
   /// Standalone channels announced on the mesh but not yet joined. Refreshed
@@ -302,6 +426,17 @@ class AppState extends ChangeNotifier {
     } catch (e) {
       _reportActionError(e);
     }
+  }
+
+  /// Discovered channels the Join dialog can actually offer: open-join and not
+  /// already joined. Invite-only channels need an invite, so listing one here
+  /// is a dead end -- a channel the user already left surfaces in discovery as
+  /// an invite-only local row and can never be re-joined this way.
+  List<Channel> get joinableDiscoveredChannels {
+    final joined = standaloneChannels.map((c) => c.hash).toSet();
+    return discoveredChannels
+        .where((c) => c.openJoin && !joined.contains(c.hash))
+        .toList();
   }
 
   /// Returns the new server's hash, or null (with [actionError] set) on failure.
@@ -377,12 +512,24 @@ class AppState extends ChangeNotifier {
     try {
       final ok = await api.leaveChannel(channelHashHex);
       if (!ok) return false;
+      // Leaving the channel also ends its voice call, rather than stranding a
+      // live session whose channel is gone in the voice panel.
+      if (voiceStatus.channel == channelHashHex) {
+        await leaveVoice();
+      }
       standaloneChannels = await api.getChannels();
       if (selectedChannelHash == channelHashHex) {
-        final visible = selectedServerHash != null
-            ? channelsByServer[selectedServerHash] ?? const <Channel>[]
-            : standaloneChannels;
-        final next = visible.isNotEmpty ? visible.first.hash : null;
+        // The channel left is always standalone, so prefer another standalone
+        // channel; fall back to the selected server's channels, then to the
+        // empty/home state. Never keep a hash whose channel is gone, which
+        // would leave a bare header with compose still enabled.
+        final serverChannels =
+            selectedServerHash != null ? channelsByServer[selectedServerHash] : null;
+        final next = standaloneChannels.isNotEmpty
+            ? standaloneChannels.first.hash
+            : (serverChannels != null && serverChannels.isNotEmpty
+                ? serverChannels.first.hash
+                : null);
         selectedChannelHash = next;
         notifyListeners();
         if (next != null) await loadChannel(next);
@@ -390,6 +537,64 @@ class AppState extends ChangeNotifier {
       }
       notifyListeners();
       return true;
+    } catch (e) {
+      _reportActionError(e);
+      return false;
+    }
+  }
+
+  /// Deselects the current server and returns to the plain DIRECT CHANNELS
+  /// view, selecting the first direct channel if there is one.
+  Future<void> selectHome() async {
+    selectedServerHash = null;
+    final next = standaloneChannels.isNotEmpty ? standaloneChannels.first.hash : null;
+    selectedChannelHash = next;
+    notifyListeners();
+    if (next != null && !messagesByChannel.containsKey(next)) {
+      await loadChannel(next);
+    }
+  }
+
+  /// Leaves a server: drops the membership and removes it from the rail. When
+  /// it was the selected server, falls back to the DIRECT CHANNELS view.
+  Future<bool> leaveServer(String serverHashHex) async {
+    try {
+      final ok = await api.leaveServer(serverHashHex);
+      if (!ok) return false;
+      servers = servers.where((s) => s.hash != serverHashHex).toList();
+      channelsByServer.remove(serverHashHex);
+      serverMemberCounts.remove(serverHashHex);
+      serverPermissionsByHash.remove(serverHashHex);
+      if (selectedServerHash == serverHashHex) {
+        await selectHome();
+      } else {
+        notifyListeners();
+      }
+      return true;
+    } catch (e) {
+      _reportActionError(e);
+      return false;
+    }
+  }
+
+  /// Sends an invite to a server. Returns true on success; on failure
+  /// [actionError] is set.
+  Future<bool> inviteToServer(String serverHashHex, String peerHashHex) async {
+    try {
+      await api.inviteToServer(serverHashHex, peerHashHex);
+      return true;
+    } catch (e) {
+      _reportActionError(e);
+      return false;
+    }
+  }
+
+  /// Replaces a server's role-permission matrix. Returns false when the
+  /// backend's MANAGE_CHANNEL gate dropped the change.
+  Future<bool> updateServerPermissions(
+      String serverHashHex, List<String> admin, List<String> member) async {
+    try {
+      return await api.updateServerPermissions(serverHashHex, admin, member);
     } catch (e) {
       _reportActionError(e);
       return false;
@@ -502,6 +707,49 @@ class AppState extends ChangeNotifier {
     } catch (e) {
       _reportActionError(e);
     }
+  }
+
+  /// Runs a directory search and caches the result in [directory] so live
+  /// [DirectoryUpdatedEvent]s can patch it in place.
+  Future<void> loadDirectory(String query) async {
+    try {
+      directory = await api.searchDirectory(query);
+    } catch (_) {
+      // Directory unavailable is not fatal; the manual-hash path still works.
+      directory = [];
+    }
+    notifyListeners();
+  }
+
+  /// Best-effort display name for a peer, resolved across the directory,
+  /// friends, presence rosters, and recent message authors. Returns null when
+  /// nothing but the raw hash is known. Read-only; callers own the fallback.
+  String? resolvePeerName(String identityHashHex) {
+    for (final e in directory) {
+      if (e.identityHash == identityHashHex && e.displayName.isNotEmpty) {
+        return e.displayName;
+      }
+    }
+    for (final f in friends) {
+      if (f.identityHash == identityHashHex && f.displayName.isNotEmpty) {
+        return f.displayName;
+      }
+    }
+    for (final list in presenceByChannel.values) {
+      for (final p in list) {
+        if (p.identityHash == identityHashHex && (p.displayName?.isNotEmpty ?? false)) {
+          return p.displayName;
+        }
+      }
+    }
+    for (final list in messagesByChannel.values) {
+      for (final m in list) {
+        if (m.senderHash == identityHashHex && m.senderName.isNotEmpty) {
+          return m.senderName;
+        }
+      }
+    }
+    return null;
   }
 
   /// Accepts a pending invite and joins its channel/server. Returns true on
@@ -773,6 +1021,11 @@ class AppState extends ChangeNotifier {
   @visibleForTesting
   void applyEvent(TcEvent event) => _onEvent(event);
 
+  /// Runs the reconnect resync directly, so tests can exercise it without a
+  /// live WebSocket dropping and coming back.
+  @visibleForTesting
+  void simulateReconnect() => _onSocketReconnected();
+
   void _onEvent(TcEvent event) {
     switch (event) {
       case MessageEvent(:final channelHash, :final message):
@@ -789,7 +1042,11 @@ class AppState extends ChangeNotifier {
           final list = entry.value;
           final idx = list.indexWhere((p) => p.identityHash == identityHash);
           if (idx >= 0) {
-            list[idx] = PresenceEntry(identityHash: identityHash, isOnline: isOnline);
+            list[idx] = PresenceEntry(
+              identityHash: identityHash,
+              isOnline: isOnline,
+              displayName: list[idx].displayName,
+            );
           }
         }
         final friendIdx = friends.indexWhere((f) => f.identityHash == identityHash);
@@ -813,10 +1070,19 @@ class AppState extends ChangeNotifier {
             notifyListeners();
           }));
         }
+      case DeliveryStatusEvent(:final channelHash, :final messageId, :final deliveryState):
+        final list = messagesByChannel[channelHash];
+        if (list != null) {
+          final idx = list.indexWhere((m) => m.messageId == messageId);
+          if (idx >= 0) {
+            list[idx] = list[idx].withDeliveryState(deliveryState);
+            notifyListeners();
+          }
+        }
       case ReactionUpdatedEvent(:final channelHash):
         _scheduleReactionRefresh(channelHash);
       case ChannelJoinedEvent():
-        break;
+        unawaited(_applyChannelJoined());
       case ChannelDiscoveredEvent():
         unawaited(refreshDiscoveredChannels());
       case InviteReceivedEvent():
@@ -828,6 +1094,10 @@ class AppState extends ChangeNotifier {
         unawaited(refreshEmoji());
       case FriendUpdatedEvent():
         unawaited(loadFriends());
+      case AvatarUpdatedEvent(:final identityHash, :final avatarVersion):
+        unawaited(_applyAvatarUpdated(identityHash, avatarVersion));
+      case DirectoryUpdatedEvent(:final identityHash, :final displayName):
+        _applyDirectoryUpdated(identityHash, displayName);
       case VoiceRosterEvent(:final channelHash):
         if (channelHash == selectedChannelHash ||
             channelHash == voiceStatus.channel ||
@@ -869,6 +1139,61 @@ class AppState extends ChangeNotifier {
             notifyListeners();
         }
     }
+  }
+
+  /// A channel was joined (accepted invite, or a join that completed on the
+  /// backend) -- refetch the server and channel lists so it appears without a
+  /// full reload.
+  Future<void> _applyChannelJoined() async {
+    try {
+      await _reloadServersAndChannels();
+      notifyListeners();
+    } catch (_) {
+      // Non-fatal: a later reconnect or reload catches it up.
+    }
+  }
+
+  /// Busts the avatar cache for a peer whose avatar changed: a non-null
+  /// version re-fetches with the version as a cache-buster; a null version
+  /// drops the cached image so the initials fallback shows.
+  Future<void> _applyAvatarUpdated(String identityHashHex, int? version) async {
+    if (version == null) {
+      avatarCache[identityHashHex] = null;
+      notifyListeners();
+      return;
+    }
+    final data = await api.getPeerAvatar(identityHashHex, version: version);
+    avatarCache[identityHashHex] = data;
+    notifyListeners();
+  }
+
+  /// Patches a peer's cached name in the directory and in any saved friend
+  /// record, so both the invite picker and the FRIENDS tab reflect a rename
+  /// live without a reload.
+  void _applyDirectoryUpdated(String identityHashHex, String displayName) {
+    final dirIdx = directory.indexWhere((e) => e.identityHash == identityHashHex);
+    if (dirIdx >= 0) {
+      final e = directory[dirIdx];
+      directory[dirIdx] = DirectoryEntry(
+        identityHash: e.identityHash,
+        displayName: displayName,
+        isOnline: e.isOnline,
+      );
+    }
+    final friendIdx = friends.indexWhere((f) => f.identityHash == identityHashHex);
+    if (friendIdx >= 0) {
+      final f = friends[friendIdx];
+      friends[friendIdx] = Friend(
+        identityHash: f.identityHash,
+        nickname: f.nickname,
+        note: f.note,
+        displayName: displayName,
+        addedAt: f.addedAt,
+        lastSeenAt: f.lastSeenAt,
+        isOnline: f.isOnline,
+      );
+    }
+    notifyListeners();
   }
 
   /// Re-fetch a channel's messages so updated reaction chips render, at most

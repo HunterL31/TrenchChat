@@ -887,6 +887,34 @@ class TestAdversarialTenure:
             ch_hash, bob.identity.hash_hex, kick_published_at
         )
 
+    def test_kick_reaches_the_removed_member(self, peer_factory):
+        """The removal doc must be sent to the peer being removed.
+
+        _broadcast_member_list iterates the members table, but _accept_document
+        has already dropped the kicked peer from it -- so the one peer who needs
+        to learn they were removed (and drop the channel and its stale role) got
+        nothing. They must be a recipient of this broadcast.
+        """
+        alice, bob, ch_hash = _setup_channel_with_member(
+            peer_factory, member_perms=[SEND_MESSAGE]
+        )
+
+        sent_to = []
+        original = alice.invite_mgr._send_raw
+
+        def recording_send_raw(dest_hex, fields):
+            if fields.get(F_MSG_TYPE) == MT_MEMBER_LIST_UPDATE:
+                sent_to.append(dest_hex)
+            return original(dest_hex, fields)
+
+        alice.invite_mgr._send_raw = recording_send_raw
+        alice.invite_mgr.publish_member_list(
+            ch_hash, remove_members=[bob.identity.hash]
+        )
+
+        assert bob.identity.hash_hex in sent_to, \
+            "the removal document was never sent to the kicked member"
+
     def test_forged_joined_at_claim_from_untrusted_signer_rejected(self, peer_factory):
         """
         Bob crafts a raw MT_MEMBER_LIST_UPDATE doc claiming he joined the
@@ -1334,19 +1362,22 @@ class TestAdversarialSyncInjection:
         )
         ts = time.time() - 60
 
+        first_id = _compute_message_id("first", alice.identity.hash_hex, ts)
+        second_id = _compute_message_id("second", alice.identity.hash_hex, ts)
+
         bob.sync_mgr._record_pending_request(ch_hash, alice.identity.hash_hex)
         bob.sync_mgr._handle_sync_response(
-            self._payload(alice.identity.hash_hex, "first", ts, "replay-1", ch_hash),
+            self._payload(alice.identity.hash_hex, "first", ts, first_id, ch_hash),
             ch_hash, alice.identity.hash_hex,
         )
         bob.sync_mgr._handle_sync_response(
-            self._payload(alice.identity.hash_hex, "second", ts, "replay-2", ch_hash),
+            self._payload(alice.identity.hash_hex, "second", ts, second_id, ch_hash),
             ch_hash, alice.identity.hash_hex,
         )
 
-        assert bob.storage.message_exists("replay-1"), \
+        assert bob.storage.message_exists(first_id), \
             "The solicited response was rejected"
-        assert not bob.storage.message_exists("replay-2"), \
+        assert not bob.storage.message_exists(second_id), \
             "A second response was accepted against a single consumed request"
 
     def test_unsolicited_empty_response_cannot_claim_we_are_synced(self, peer_factory):
@@ -2631,6 +2662,7 @@ class TestGoodbyeSpoofing:
 from tests.test_voice import _craft_voice_message, _setup_invite_channel
 from tests.test_voice_transport import _join_both
 from trenchchat.core.permissions import VOICE_CHAT
+from trenchchat.core.voice import MAX_VOICE_PARTICIPANTS
 from trenchchat.core.protocol import (
     F_VOICE_JOINED_AT, F_VOICE_MUTED, MT_VOICE_JOIN, MT_VOICE_STATE,
 )
@@ -2666,6 +2698,25 @@ class TestAdversarialVoice:
         time.sleep(0.3)
         assert alice.voice_mgr.get_roster(ch_hash) == [], \
             "Alice accepted a voice join from a non-member"
+
+    def test_signalled_roster_flood_cannot_lock_out_a_legit_join(self, peer_factory):
+        """The join cap counts real links, not the signalled roster.
+
+        voice_join is unauthenticated, so an attacker can mint any number of
+        roster entries from distinct hashes. If the local join cap trusted the
+        signalled roster, that flood would fill it and refuse every legitimate
+        member. Counting only real occupancy (established links) closes that.
+        """
+        alice, bob, ch_hash = _setup_invite_channel(peer_factory)
+
+        now = time.time()
+        with alice.voice_mgr._lock:
+            for i in range(MAX_VOICE_PARTICIPANTS):
+                alice.voice_mgr._upsert_entry(
+                    ch_hash, f"{i:032x}", muted=False, joined_at=now, now=now)
+
+        assert alice.voice_mgr.join_voice(ch_hash) is True, \
+            "a forged-roster flood locked a legitimate member out of voice"
 
     def test_forged_voice_join_dropped(self, peer_factory):
         """A join whose LXMF signature fails validation dies at the router."""
@@ -2761,7 +2812,8 @@ class TestAdversarialRelayTampering:
         carol.storage.subscribe(ch_hash)
         return alice, bob, carol, ch_hash
 
-    def _row(self, author_hex, ch_hash, msg_id, ts, content, sig=None):
+    def _row(self, author_hex, ch_hash, ts, content, sig=None):
+        msg_id = _compute_message_id(content, author_hex, ts)
         return {
             "sender_hash":  author_hex,
             "sender_name":  "Alice",
@@ -2786,7 +2838,7 @@ class TestAdversarialRelayTampering:
     def test_relay_cannot_edit_the_text_of_a_message_it_relays(self, peer_factory):
         alice, bob, carol, ch_hash = self._seed(peer_factory)
         ts = time.time() - 60
-        genuine = self._row(alice.identity.hash_hex, ch_hash, "tamper-1", ts,
+        genuine = self._row(alice.identity.hash_hex, ch_hash, ts,
                             "transfer approved")
 
         # Carol relays Alice's message with the text changed but everything
@@ -2795,7 +2847,7 @@ class TestAdversarialRelayTampering:
         tampered["content"] = "transfer denied"
         self._serve(bob, carol, ch_hash, [tampered])
 
-        assert not bob.storage.message_exists("tamper-1"), \
+        assert not bob.storage.message_exists(genuine["message_id"]), \
             "a relay edited the text of a message it was only relaying"
 
     def test_tampered_copy_cannot_squat_a_genuine_message_id(self, peer_factory):
@@ -2806,18 +2858,21 @@ class TestAdversarialRelayTampering:
         """
         alice, bob, carol, ch_hash = self._seed(peer_factory)
         ts = time.time() - 60
-        genuine = self._row(alice.identity.hash_hex, ch_hash, "squat-1", ts,
+        genuine = self._row(alice.identity.hash_hex, ch_hash, ts,
                             "the real text")
 
+        # Carol keeps the genuine id but swaps the body: the id no longer
+        # hashes its own content, so the receiver refuses it before it can
+        # squat the genuine copy's slot.
         tampered = dict(genuine)
         tampered["content"] = "the substituted text"
         self._serve(bob, carol, ch_hash, [tampered])
-        assert not bob.storage.message_exists("squat-1")
+        assert not bob.storage.message_exists(genuine["message_id"])
 
         # The genuine message still lands afterwards, with its real text.
         self._serve(bob, alice, ch_hash, [genuine])
         rows = [m for m in bob.storage.get_messages(ch_hash)
-                if m["message_id"] == "squat-1"]
+                if m["message_id"] == genuine["message_id"]]
         assert rows, "the genuine message was blocked by the tampered copy"
         assert rows[0]["content"] == "the real text"
 
@@ -2825,33 +2880,54 @@ class TestAdversarialRelayTampering:
         """Re-pointing reply_to grafts real words onto another conversation."""
         alice, bob, carol, ch_hash = self._seed(peer_factory)
         ts = time.time() - 60
-        row = self._row(alice.identity.hash_hex, ch_hash, "thread-1", ts, "agreed")
+        row = self._row(alice.identity.hash_hex, ch_hash, ts, "agreed")
         row["reply_to"] = "some-other-message"
 
         self._serve(bob, carol, ch_hash, [row])
-        assert not bob.storage.message_exists("thread-1"), \
+        assert not bob.storage.message_exists(row["message_id"]), \
             "a relay re-pointed a message at a different conversation"
 
     def test_relay_cannot_invent_a_message_from_another_member(self, peer_factory):
         alice, bob, carol, ch_hash = self._seed(peer_factory)
         ts = time.time() - 60
-        forged = self._row(alice.identity.hash_hex, ch_hash, "forge-1", ts,
+        forged = self._row(alice.identity.hash_hex, ch_hash, ts,
                            "I never said this", sig=b"\x00" * 64)
 
         self._serve(bob, carol, ch_hash, [forged])
-        assert not bob.storage.message_exists("forge-1"), \
+        assert not bob.storage.message_exists(forged["message_id"]), \
             "a relay invented a message attributed to another member"
 
     def test_a_genuine_relayed_message_is_still_accepted(self, peer_factory):
         """Positive control: a handler that rejected everything would pass above."""
         alice, bob, carol, ch_hash = self._seed(peer_factory)
         ts = time.time() - 60
-        genuine = self._row(alice.identity.hash_hex, ch_hash, "relay-ok-1", ts,
+        genuine = self._row(alice.identity.hash_hex, ch_hash, ts,
                             "relayed intact")
 
         self._serve(bob, carol, ch_hash, [genuine])
-        assert bob.storage.message_exists("relay-ok-1"), \
+        assert bob.storage.message_exists(genuine["message_id"]), \
             "a genuine message relayed by a third peer was rejected"
+
+    def test_relay_cannot_forge_an_id_squatting_another_message(self, peer_factory):
+        """A synced row whose id belongs to a different message is refused.
+
+        The id *is* the hash of its own content, recomputed on receipt exactly
+        as the direct path does. A relay that hands over a row carrying some
+        other message's id (to suppress the genuine copy as a duplicate) can no
+        longer make that id land -- the recomputed hash won't match.
+        """
+        alice, bob, carol, ch_hash = self._seed(peer_factory)
+        ts = time.time() - 60
+        victim_id = _compute_message_id("the real thing", alice.identity.hash_hex, ts)
+
+        forged = self._row(alice.identity.hash_hex, ch_hash, ts, "not the real thing")
+        forged["message_id"] = victim_id
+        forged["author_sig"] = sign_as(alice.identity.hash_hex, ch_hash, victim_id,
+                                       ts, "not the real thing")
+
+        self._serve(bob, carol, ch_hash, [forged])
+        assert not bob.storage.message_exists(victim_id), \
+            "a synced row squatted another message's id"
 
     def test_a_rejected_batch_does_not_report_the_channel_as_caught_up(
             self, peer_factory):
@@ -2864,14 +2940,14 @@ class TestAdversarialRelayTampering:
 
         alice, bob, carol, ch_hash = self._seed(peer_factory)
         ts = time.time() - 60
-        genuine = self._row(alice.identity.hash_hex, ch_hash, "status-1", ts,
+        genuine = self._row(alice.identity.hash_hex, ch_hash, ts,
                             "the real text")
         tampered = dict(genuine)
         tampered["content"] = "rewritten"
 
         self._serve(bob, carol, ch_hash, [tampered])
 
-        assert not bob.storage.message_exists("status-1")
+        assert not bob.storage.message_exists(genuine["message_id"])
         status = bob.sync_mgr.status.get_status(ch_hash)
         assert status["state"] != SyncState.SYNCED.value, \
             "a channel whose only answer was rejected reported itself synced"

@@ -12,6 +12,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../../theme/section_theme.dart';
+import '../../theme/theme_spec.dart';
 import '../../theme/tokens.dart';
 import '../../widgets/emoji_text.dart';
 import '../../widgets/tc_button.dart';
@@ -103,6 +104,8 @@ class ComposeBar extends StatefulWidget {
     this.pickEmoji,
     this.pendingThemeShare,
     this.onThemeShareConsumed,
+    this.replyPreview,
+    this.onCancelReply,
     this.compact = false,
   });
 
@@ -135,6 +138,13 @@ class ComposeBar extends StatefulWidget {
   final ({String name, String code})? pendingThemeShare;
 
   final VoidCallback? onThemeShareConsumed;
+
+  /// When set, the "replying to X" banner shows above the input; sending
+  /// carries the reply through [onSend]'s caller. Null hides the banner.
+  final ({String author, String snippet})? replyPreview;
+
+  /// Clears the pending reply from the banner's cancel affordance.
+  final VoidCallback? onCancelReply;
 
   @override
   State<ComposeBar> createState() => _ComposeBarState();
@@ -353,7 +363,12 @@ class _ComposeBarState extends State<ComposeBar> {
         border: Border(top: BorderSide(color: tc.borderSubtle)),
       ),
       padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
-      child: Row(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (widget.replyPreview != null) _replyBanner(tc),
+          Row(
         crossAxisAlignment: CrossAxisAlignment.center,
         children: [
           TcIcon(TcIcons.plus, size: 15, color: tc.textTertiary),
@@ -401,6 +416,61 @@ class _ComposeBarState extends State<ComposeBar> {
                 letterSpacing: TCType.letterSpacingFor(TCType.textMicro, TCType.trackingWide),
               ),
             ),
+        ],
+      ),
+        ],
+      ),
+    );
+  }
+
+  Widget _replyBanner(TCSectionColors tc) {
+    final preview = widget.replyPreview!;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Row(
+        children: [
+          Container(width: 2, height: 26, color: tc.borderAccent),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  'Replying to ${preview.author}',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: TCType.textMicro,
+                    fontWeight: FontWeight.w600,
+                    color: tc.accentPrimary,
+                  ),
+                ),
+                Text(
+                  preview.snippet,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(fontSize: TCType.textMicro, color: tc.textTertiary),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 8),
+          MouseRegion(
+            cursor: SystemMouseCursors.click,
+            child: GestureDetector(
+              onTap: widget.onCancelReply,
+              child: Text(
+                'CANCEL',
+                style: TextStyle(
+                  fontSize: TCType.textMicro,
+                  color: tc.textTertiary,
+                  letterSpacing:
+                      TCType.letterSpacingFor(TCType.textMicro, TCType.trackingWide),
+                ),
+              ),
+            ),
+          ),
         ],
       ),
     );

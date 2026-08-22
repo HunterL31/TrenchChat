@@ -11,6 +11,7 @@ Like test_api_theme.py these need no peer -- the backend is stubbed down to
 what the create actions touch.
 """
 
+import json
 import sys
 import warnings
 from pathlib import Path
@@ -19,6 +20,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from trenchchat.core.naming import NameInUseError
+from trenchchat.core.permissions import PRESET_OPEN, PRESET_PRIVATE
 
 _TESTENV_DIR = Path(__file__).resolve().parents[1] / "devtools" / "testenv"
 if str(_TESTENV_DIR) not in sys.path:
@@ -116,3 +118,38 @@ class TestCreateServerConflict:
 
         assert res.status_code == 200
         assert res.json() == {"hash": "d" * 32}
+
+
+@needs_backend
+class TestMyPermissionsSendMessage:
+    def test_open_join_channel_reports_send_message_true(self, client, backend):
+        backend.storage.get_channel.return_value = {
+            "permissions": json.dumps(dict(PRESET_OPEN))
+        }
+        # Even with the role check denied, an open-join channel accepts anyone.
+        backend.storage.has_permission.return_value = False
+
+        res = client.get("/channels/deadbeef/my_permissions", headers=AUTH)
+
+        assert res.status_code == 200
+        assert res.json()["send_message"] is True
+
+    def test_member_with_permission_reports_send_message_true(self, client, backend):
+        backend.storage.get_channel.return_value = {
+            "permissions": json.dumps(dict(PRESET_PRIVATE))
+        }
+        backend.storage.has_permission.return_value = True
+
+        res = client.get("/channels/deadbeef/my_permissions", headers=AUTH)
+
+        assert res.json()["send_message"] is True
+
+    def test_denied_role_reports_send_message_false(self, client, backend):
+        backend.storage.get_channel.return_value = {
+            "permissions": json.dumps(dict(PRESET_PRIVATE))
+        }
+        backend.storage.has_permission.return_value = False
+
+        res = client.get("/channels/deadbeef/my_permissions", headers=AUTH)
+
+        assert res.json()["send_message"] is False

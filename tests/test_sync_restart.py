@@ -659,20 +659,21 @@ class TestContinuationBudgetResetByStrayRequest:
 
         bob.sync_mgr._send_raw = counting_send_raw
 
-        def _synthetic_response(msg_id, ts):
+        def _synthetic_response(content, ts):
+            msg_id = _compute_message_id(content, carol.identity.hash_hex, ts)
             return {
                 F_MSG_TYPE:       MT_SYNC_RESPONSE,
                 F_CHANNEL_HASH:   bytes.fromhex(ch_hash),
                 F_SYNC_MESSAGES:  msgpack.packb([{
                     "sender_hash":  carol.identity.hash_hex,
                     "sender_name":  "Carol",
-                    "content":      msg_id,
+                    "content":      content,
                     "timestamp":    ts,
                     "message_id":   msg_id,
                     "reply_to":     None,
                     "last_seen_id": None,
                     "author_sig":   sign_as(carol.identity.hash_hex, ch_hash,
-                                            msg_id, ts, msg_id),
+                                            msg_id, ts, content),
                 }], use_bin_type=True),
                 F_SYNC_TRUNCATED: True,
             }
@@ -832,9 +833,9 @@ class TestWatermarkAdvancesPastFailedInsert:
         _seed_channel_on_peer(bob, ch_hash, "watermark-insert-fail", alice.identity.hash_hex)
 
         ts = time.time()
-        ok_id_1 = "aa" * 32
-        boom_id = "bb" * 32
-        ok_id_2 = "cc" * 32
+        ok_id_1 = _compute_message_id("ok 1", alice.identity.hash_hex, ts + 1)
+        boom_id = _compute_message_id("boom", alice.identity.hash_hex, ts + 2)
+        ok_id_2 = _compute_message_id("ok 2", alice.identity.hash_hex, ts + 3)
 
         original_insert = bob.storage.insert_message
 

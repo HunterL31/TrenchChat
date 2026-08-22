@@ -24,6 +24,12 @@ sealed class TcEvent {
         return MessageEvent(channelHash, Message.fromJson(messageJson));
       case 'presence':
         return PresenceEvent(json['identity_hash'] as String, json['is_online'] as bool);
+      case 'delivery_status':
+        return DeliveryStatusEvent(
+          json['channel_hash'] as String,
+          json['message_id'] as String,
+          json['delivery_state'] as String?,
+        );
       case 'reaction_updated':
         return ReactionUpdatedEvent(
           json['channel_hash'] as String,
@@ -57,6 +63,16 @@ sealed class TcEvent {
         return EmojiReceivedEvent(json['emoji_hash'] as String);
       case 'friend_updated':
         return FriendUpdatedEvent(json['identity_hash'] as String);
+      case 'avatar_updated':
+        return AvatarUpdatedEvent(
+          json['identity_hash'] as String,
+          json['avatar_version'] as int?,
+        );
+      case 'directory_updated':
+        return DirectoryUpdatedEvent(
+          json['identity_hash'] as String,
+          json['display_name'] as String? ?? '',
+        );
       case 'voice_roster':
         return VoiceRosterEvent(json['channel_hash'] as String);
       case 'voice_speaking':
@@ -95,6 +111,16 @@ class PresenceEvent extends TcEvent {
   const PresenceEvent(this.identityHash, this.isOnline);
   final String identityHash;
   final bool isOnline;
+}
+
+/// A message's aggregate delivery state changed (pending -> delivered after a
+/// queued send flushed, or delivered -> failed). Applied in place to the
+/// matching message; only the local user's own messages carry a state.
+class DeliveryStatusEvent extends TcEvent {
+  const DeliveryStatusEvent(this.channelHash, this.messageId, this.deliveryState);
+  final String channelHash;
+  final String messageId;
+  final String? deliveryState;
 }
 
 class ReactionUpdatedEvent extends TcEvent {
@@ -144,6 +170,23 @@ class EmojiReceivedEvent extends TcEvent {
 class FriendUpdatedEvent extends TcEvent {
   const FriendUpdatedEvent(this.identityHash);
   final String identityHash;
+}
+
+/// A peer's avatar was set, changed, or removed. [avatarVersion] is the new
+/// version to fetch with as a cache-buster, or null when the avatar was
+/// removed and the cached image should be dropped for the initials fallback.
+class AvatarUpdatedEvent extends TcEvent {
+  const AvatarUpdatedEvent(this.identityHash, this.avatarVersion);
+  final String identityHash;
+  final int? avatarVersion;
+}
+
+/// A peer's directory display name was learned or changed. Fires only on a
+/// genuine change, so handlers can treat it as "this name is now [displayName]".
+class DirectoryUpdatedEvent extends TcEvent {
+  const DirectoryUpdatedEvent(this.identityHash, this.displayName);
+  final String identityHash;
+  final String displayName;
 }
 
 /// A channel's voice roster changed. Carries only the hash; handlers

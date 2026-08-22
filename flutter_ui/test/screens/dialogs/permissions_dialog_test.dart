@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:flutter_ui/api/models/server.dart';
 import 'package:flutter_ui/app_state.dart';
 import 'package:flutter_ui/screens/dialogs/permissions_dialog.dart';
 import 'package:flutter_ui/widgets/tc_checkbox.dart';
@@ -87,5 +88,40 @@ void main() {
     final body = jsonDecode(post.body) as Map<String, dynamic>;
     expect((body['member'] as List).toSet(), {'send_message', 'invite'});
     expect((body['admin'] as List).toSet(), {'send_message', 'invite', 'kick'});
+  });
+
+  Channel channel(String hash, {String? serverHash}) => Channel(
+        hash: hash,
+        name: 'ops',
+        description: '',
+        creatorHash: 'creator',
+        openJoin: false,
+        createdAt: 0,
+        serverHash: serverHash,
+      );
+
+  testWidgets('standalone channel omits the create-channels row', (tester) async {
+    backend.routes['GET /channels/$_channelHash/permissions'] = {
+      'all_permissions': ['send_message', 'create_channel'],
+      'admin': ['send_message', 'create_channel'],
+      'member': ['send_message'],
+    };
+    state.standaloneChannels = [channel(_channelHash)];
+    await open(tester);
+
+    expect(find.text('Create channels in this server'), findsNothing);
+  });
+
+  testWidgets('server channel keeps the create-channels row', (tester) async {
+    backend.routes['GET /channels/$_channelHash/permissions'] = {
+      'all_permissions': ['send_message', 'create_channel'],
+      'admin': ['send_message', 'create_channel'],
+      'member': ['send_message'],
+    };
+    state.channelsByServer['server-1'] =
+        [channel(_channelHash, serverHash: 'server-1')];
+    await open(tester);
+
+    expect(find.text('Create channels in this server'), findsWidgets);
   });
 }

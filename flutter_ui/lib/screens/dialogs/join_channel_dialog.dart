@@ -70,7 +70,7 @@ class _JoinChannelDialogContentState extends State<_JoinChannelDialogContent> {
     return AnimatedBuilder(
       animation: widget.state,
       builder: (context, _) {
-        final channels = widget.state.discoveredChannels;
+        final channels = widget.state.joinableDiscoveredChannels;
         // A discovered channel can disappear from the list (joined elsewhere,
         // announce aged out) without this dialog's setState firing -- fall
         // back to "nothing selected" for this build rather than mutate state

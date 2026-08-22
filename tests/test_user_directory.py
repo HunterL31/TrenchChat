@@ -263,3 +263,51 @@ def test_custom_ttl_respected():
         results = d.get_all()
 
     assert results == []
+
+
+# ---------------------------------------------------------------------------
+# directory callbacks (BUG 26)
+# ---------------------------------------------------------------------------
+
+def test_callback_fires_for_new_peer():
+    d = make_dir()
+    seen: list[tuple[str, str]] = []
+    d.add_directory_callback(lambda peer, name: seen.append((peer, name)))
+    d.record_user(PEER_A, "Alice")
+    assert seen == [(PEER_A, "Alice")]
+
+
+def test_callback_fires_on_name_change():
+    d = make_dir()
+    seen: list[tuple[str, str]] = []
+    d.add_directory_callback(lambda peer, name: seen.append((peer, name)))
+    d.record_user(PEER_A, "Alice")
+    d.record_user(PEER_A, "Alice Updated")
+    assert seen == [(PEER_A, "Alice"), (PEER_A, "Alice Updated")]
+
+
+def test_callback_not_fired_when_name_unchanged():
+    d = make_dir()
+    seen: list[tuple[str, str]] = []
+    d.add_directory_callback(lambda peer, name: seen.append((peer, name)))
+    d.record_user(PEER_A, "Alice")
+    d.record_user(PEER_A, "Alice")
+    d.record_user(PEER_A, "Alice")
+    assert seen == [(PEER_A, "Alice")]
+
+
+def test_callback_not_fired_for_self():
+    d = make_dir()
+    seen: list[tuple[str, str]] = []
+    d.add_directory_callback(lambda peer, name: seen.append((peer, name)))
+    d.record_user(SELF_HEX, "Me")
+    assert seen == []
+
+
+def test_callback_error_does_not_break_recording():
+    d = make_dir()
+    def boom(peer, name):
+        raise RuntimeError("callback failure")
+    d.add_directory_callback(boom)
+    d.record_user(PEER_A, "Alice")
+    assert d.contains(PEER_A)

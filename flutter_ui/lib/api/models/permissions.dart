@@ -15,8 +15,8 @@ class ChannelPermissions {
   final bool manageRoles;
   final bool manageChannel;
 
-  /// TODO(phase-b): GET /channels/{h}/my_permissions doesn't return
-  /// `send_message` yet -- until it does, compose stays enabled for everyone.
+  /// Defaults to true when the backend omits the key, so an older backend
+  /// keeps compose enabled rather than locking everyone out.
   final bool sendMessage;
 
   /// Fails closed against an older backend that doesn't report it.
@@ -27,7 +27,7 @@ class ChannelPermissions {
         kick: json['kick'] as bool? ?? false,
         manageRoles: json['manage_roles'] as bool? ?? false,
         manageChannel: json['manage_channel'] as bool? ?? false,
-        sendMessage: true,
+        sendMessage: json['send_message'] as bool? ?? true,
         voiceChat: json['voice_chat'] as bool? ?? false,
       );
 }

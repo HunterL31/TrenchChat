@@ -19,6 +19,27 @@ const _identityHashHexLength = 32;
 
 Future<void> showInviteDialog(BuildContext context, AppState state,
     {required String channelHashHex, required String channelName}) {
+  return _showInviteDialog(
+    context,
+    state,
+    title: 'Invite to #$channelName',
+    onSubmit: (peer) => state.inviteToChannel(channelHashHex, peer),
+  );
+}
+
+/// The same peer-picker, targeting a server instead of a channel.
+Future<void> showServerInviteDialog(BuildContext context, AppState state,
+    {required String serverHashHex, required String serverName}) {
+  return _showInviteDialog(
+    context,
+    state,
+    title: 'Invite to $serverName',
+    onSubmit: (peer) => state.inviteToServer(serverHashHex, peer),
+  );
+}
+
+Future<void> _showInviteDialog(BuildContext context, AppState state,
+    {required String title, required Future<bool> Function(String) onSubmit}) {
   return showTcDialog<void>(
     context: context,
     builder: (context) => SectionTheme(
@@ -26,8 +47,8 @@ Future<void> showInviteDialog(BuildContext context, AppState state,
       section: TCSection.dialogs,
       child: _InviteDialogContent(
         state: state,
-        channelHashHex: channelHashHex,
-        channelName: channelName,
+        title: title,
+        onSubmit: onSubmit,
       ),
     ),
   );
@@ -36,13 +57,13 @@ Future<void> showInviteDialog(BuildContext context, AppState state,
 class _InviteDialogContent extends StatefulWidget {
   const _InviteDialogContent({
     required this.state,
-    required this.channelHashHex,
-    required this.channelName,
+    required this.title,
+    required this.onSubmit,
   });
 
   final AppState state;
-  final String channelHashHex;
-  final String channelName;
+  final String title;
+  final Future<bool> Function(String) onSubmit;
 
   @override
   State<_InviteDialogContent> createState() => _InviteDialogContentState();
@@ -52,10 +73,11 @@ class _InviteDialogContentState extends State<_InviteDialogContent> {
   final _search = TextEditingController();
   final _manualHash = TextEditingController();
 
-  List<DirectoryEntry> _entries = [];
   String? _selectedHash;
   String? _error;
   bool _busy = false;
+
+  List<DirectoryEntry> get _entries => widget.state.directory;
 
   @override
   void initState() {
@@ -75,21 +97,14 @@ class _InviteDialogContentState extends State<_InviteDialogContent> {
   void _onSearchChanged() => _query(_search.text.trim());
 
   Future<void> _query(String q) async {
-    try {
-      final entries = await widget.state.api.searchDirectory(q);
-      if (!mounted) return;
-      setState(() {
-        _entries = entries;
-        if (_selectedHash != null &&
-            !entries.any((e) => e.identityHash == _selectedHash)) {
-          _selectedHash = null;
-        }
-      });
-    } catch (_) {
-      // Directory unavailable is not fatal -- the manual hash path still works.
-      if (!mounted) return;
-      setState(() => _entries = []);
-    }
+    await widget.state.loadDirectory(q);
+    if (!mounted) return;
+    setState(() {
+      if (_selectedHash != null &&
+          !_entries.any((e) => e.identityHash == _selectedHash)) {
+        _selectedHash = null;
+      }
+    });
   }
 
   String get _manualNormalized =>
@@ -102,6 +117,12 @@ class _InviteDialogContentState extends State<_InviteDialogContent> {
   String? get _inviteeHash =>
       _selectedHash ?? (_manualValid ? _manualNormalized : null);
 
+  bool get _isSelf {
+    final invitee = _inviteeHash;
+    return invitee != null &&
+        invitee.toLowerCase() == widget.state.meHashHex.toLowerCase();
+  }
+
   Future<void> _submit() async {
     final invitee = _inviteeHash;
     if (invitee == null) return;
@@ -109,7 +130,7 @@ class _InviteDialogContentState extends State<_InviteDialogContent> {
       _busy = true;
       _error = null;
     });
-    final ok = await widget.state.inviteToChannel(widget.channelHashHex, invitee);
+    final ok = await widget.onSubmit(invitee);
     if (!mounted) return;
     if (!ok) {
       setState(() {
@@ -123,16 +144,23 @@ class _InviteDialogContentState extends State<_InviteDialogContent> {
 
   @override
   Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: widget.state,
+      builder: (context, _) => _buildContent(context),
+    );
+  }
+
+  Widget _buildContent(BuildContext context) {
     final tc = SectionTheme.of(context);
     return TcDialogShell(
-      title: 'Invite to #${widget.channelName}',
+      title: widget.title,
       width: 440,
       errorText: _error,
       actions: [
         TcGhostButton(label: 'CANCEL', onPressed: () => Navigator.pop(context)),
         TcPrimaryButton(
           label: _busy ? 'INVITING…' : 'INVITE',
-          onPressed: _busy || _inviteeHash == null ? null : _submit,
+          onPressed: _busy || _inviteeHash == null || _isSelf ? null : _submit,
         ),
       ],
       children: [
@@ -172,6 +200,13 @@ class _InviteDialogContentState extends State<_InviteDialogContent> {
           controller: _manualHash,
           hintText: 'e.g. a3f1c2d4e5b6a7f8…  (hex, 32 chars)',
         ),
+        if (_isSelf) ...[
+          const SizedBox(height: 8),
+          Text(
+            "You can't invite yourself.",
+            style: TextStyle(fontSize: TCType.textCaption, color: tc.statusDanger),
+          ),
+        ],
       ],
     );
   }

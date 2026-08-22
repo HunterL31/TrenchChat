@@ -105,6 +105,49 @@ void main() {
     expect(TcEvent.tryParse(jsonEncode({'type': 'ui_theme_library'})), isNull);
   });
 
+  test('avatar_updated parses a version into AvatarUpdatedEvent', () {
+    final event = TcEvent.tryParse(jsonEncode({
+      'type': 'avatar_updated',
+      'identity_hash': 'abc123',
+      'avatar_version': 7,
+    }));
+
+    expect(
+      event,
+      isA<AvatarUpdatedEvent>()
+          .having((e) => e.identityHash, 'identityHash', 'abc123')
+          .having((e) => e.avatarVersion, 'avatarVersion', 7),
+    );
+  });
+
+  test('avatar_updated with a null version parses as a removal', () {
+    final event = TcEvent.tryParse(jsonEncode({
+      'type': 'avatar_updated',
+      'identity_hash': 'abc123',
+      'avatar_version': null,
+    }));
+
+    expect(
+      event,
+      isA<AvatarUpdatedEvent>().having((e) => e.avatarVersion, 'avatarVersion', isNull),
+    );
+  });
+
+  test('directory_updated parses into DirectoryUpdatedEvent', () {
+    final event = TcEvent.tryParse(jsonEncode({
+      'type': 'directory_updated',
+      'identity_hash': 'abc123',
+      'display_name': 'Alicia',
+    }));
+
+    expect(
+      event,
+      isA<DirectoryUpdatedEvent>()
+          .having((e) => e.identityHash, 'identityHash', 'abc123')
+          .having((e) => e.displayName, 'displayName', 'Alicia'),
+    );
+  });
+
   test('unknown event types are ignored', () {
     expect(TcEvent.tryParse(jsonEncode({'type': 'sync_status'})), isNull);
   });

@@ -7,12 +7,27 @@ import '../../theme/section_theme.dart';
 import '../../theme/tokens.dart';
 import '../../widgets/dashed_border.dart';
 import '../../widgets/tc_button.dart';
+import '../../widgets/tc_context_menu.dart';
 import '../../widgets/tc_icon.dart';
+import '../../widgets/tc_tooltip.dart';
 
 class ServerRailEntry {
-  const ServerRailEntry({required this.hash, required this.name});
+  const ServerRailEntry({
+    required this.hash,
+    required this.name,
+    this.canInvite = false,
+    this.canManage = false,
+  });
+
   final String hash;
   final String name;
+
+  /// This reader's INVITE permission on the server, gating the rail menu's
+  /// "Invite…" item.
+  final bool canInvite;
+
+  /// This reader's MANAGE_CHANNEL permission, gating "Edit permissions…".
+  final bool canManage;
 }
 
 class ServerRail extends StatelessWidget {
@@ -21,15 +36,40 @@ class ServerRail extends StatelessWidget {
     required this.servers,
     required this.selectedHash,
     required this.onSelect,
+    this.onHome,
     this.onAddServer,
     this.onSettings,
+    this.onLeaveServer,
+    this.onInviteServer,
+    this.onEditServerPermissions,
   });
 
   final List<ServerRailEntry> servers;
   final String? selectedHash;
   final ValueChanged<String> onSelect;
+
+  /// Deselects the current server and returns to the DIRECT CHANNELS view;
+  /// wired to the >_ logo so an owner of a server can always get back home.
+  final VoidCallback? onHome;
+
   final VoidCallback? onAddServer;
   final VoidCallback? onSettings;
+
+  /// Server-tile right-click actions, each handed the server's hash. A null
+  /// callback, or a false permission flag, leaves that item out of the menu.
+  final ValueChanged<String>? onLeaveServer;
+  final ValueChanged<String>? onInviteServer;
+  final ValueChanged<String>? onEditServerPermissions;
+
+  List<TcContextMenuItem> _menuFor(ServerRailEntry s) => [
+        if (onInviteServer != null && s.canInvite)
+          TcContextMenuItem(label: 'Invite…', onTap: () => onInviteServer!(s.hash)),
+        if (onEditServerPermissions != null && s.canManage)
+          TcContextMenuItem(
+              label: 'Edit permissions…', onTap: () => onEditServerPermissions!(s.hash)),
+        if (onLeaveServer != null)
+          TcContextMenuItem(label: 'Leave server', onTap: () => onLeaveServer!(s.hash)),
+      ];
 
   String _initials(String name) {
     final trimmed = name.trim();
@@ -50,14 +90,23 @@ class ServerRail extends StatelessWidget {
       child: Column(
         children: [
           const SizedBox(height: 12),
-          Text(
-            '>_',
-            style: TextStyle(
-              fontFamily: SectionTheme.styleOf(context).displayFont,
-              fontSize: 26,
-              height: 1,
-              color: tc.accentPrimary,
-              shadows: tcTextGlow(context),
+          TcTooltip(
+            message: onHome != null ? 'Home — direct channels' : '',
+            child: MouseRegion(
+              cursor: onHome != null ? SystemMouseCursors.click : SystemMouseCursors.basic,
+              child: GestureDetector(
+                onTap: onHome,
+                child: Text(
+                  '>_',
+                  style: TextStyle(
+                    fontFamily: SectionTheme.styleOf(context).displayFont,
+                    fontSize: 26,
+                    height: 1,
+                    color: tc.accentPrimary,
+                    shadows: tcTextGlow(context),
+                  ),
+                ),
+              ),
             ),
           ),
           const SizedBox(height: 12),
@@ -66,8 +115,10 @@ class ServerRail extends StatelessWidget {
           for (final s in servers) ...[
             _ServerTile(
               label: _initials(s.name),
+              tooltip: s.name,
               selected: s.hash == selectedHash,
               onTap: () => onSelect(s.hash),
+              menuItems: _menuFor(s),
             ),
             const SizedBox(height: 12),
           ],
@@ -88,11 +139,19 @@ class ServerRail extends StatelessWidget {
 }
 
 class _ServerTile extends StatefulWidget {
-  const _ServerTile({required this.label, required this.selected, required this.onTap});
+  const _ServerTile({
+    required this.label,
+    required this.tooltip,
+    required this.selected,
+    required this.onTap,
+    this.menuItems = const [],
+  });
 
   final String label;
+  final String tooltip;
   final bool selected;
   final VoidCallback onTap;
+  final List<TcContextMenuItem> menuItems;
 
   @override
   State<_ServerTile> createState() => _ServerTileState();
@@ -105,13 +164,17 @@ class _ServerTileState extends State<_ServerTile> {
   Widget build(BuildContext context) {
     final tc = SectionTheme.of(context);
     final selected = widget.selected;
-    return MouseRegion(
-      cursor: SystemMouseCursors.click,
-      onEnter: (_) => setState(() => _hover = true),
-      onExit: (_) => setState(() => _hover = false),
-      child: GestureDetector(
-        onTap: widget.onTap,
-        child: AnimatedContainer(
+    return TcContextMenuRegion(
+      items: widget.menuItems,
+      child: TcTooltip(
+        message: widget.tooltip,
+        child: MouseRegion(
+          cursor: SystemMouseCursors.click,
+          onEnter: (_) => setState(() => _hover = true),
+          onExit: (_) => setState(() => _hover = false),
+          child: GestureDetector(
+            onTap: widget.onTap,
+            child: AnimatedContainer(
           duration: TCEffects.durationMed,
           curve: TCEffects.easeTerminal,
           width: 38,
@@ -126,12 +189,14 @@ class _ServerTileState extends State<_ServerTile> {
             ),
             boxShadow: selected ? tcBoxGlowSm(context) : null,
           ),
-          child: Text(
-            widget.label,
-            style: TextStyle(
-              fontSize: 13,
-              letterSpacing: TCType.letterSpacingFor(13, 0.04),
-              color: selected ? tc.accentPrimary : tc.textSecondary,
+              child: Text(
+                widget.label,
+                style: TextStyle(
+                  fontSize: 13,
+                  letterSpacing: TCType.letterSpacingFor(13, 0.04),
+                  color: selected ? tc.accentPrimary : tc.textSecondary,
+                ),
+              ),
             ),
           ),
         ),

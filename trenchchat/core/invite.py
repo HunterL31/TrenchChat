@@ -1233,8 +1233,13 @@ class InviteManager:
                                    owners=owners, permissions=perms,
                                    joined_at=joined_at, departed=departed,
                                    channels_blob=channels_blob)
+        # Captured before _accept_document drops them from the local members
+        # table: the removal doc has to reach the very peers it removes, or a
+        # kicked member keeps the channel with a stale admin role forever.
+        removed_hex = [m.hex() for m in (remove_members or [])]
         self._accept_document(doc, channel_hash_hex)
-        self._broadcast_member_list(channel_hash_hex, doc)
+        self._broadcast_member_list(channel_hash_hex, doc,
+                                    extra_recipients=removed_hex)
 
     def _roster_blob(self, server_hash_hex: str) -> bytes:
         """The server's channel roster, filtered by the local CREATE_CHANNEL grant.
@@ -1353,7 +1358,8 @@ class InviteManager:
         )
         self._broadcast_member_list(channel_hash_hex, doc)
 
-    def _broadcast_member_list(self, channel_hash_hex: str, doc: dict):
+    def _broadcast_member_list(self, channel_hash_hex: str, doc: dict,
+                               extra_recipients: list[str] | None = None):
         blob = msgpack.packb(doc, use_bin_type=True)
         scope = self._storage.get_server(channel_hash_hex)
         is_server = scope is not None
@@ -1373,9 +1379,15 @@ class InviteManager:
             fields[F_CHANNEL_PERMISSIONS] = scope["permissions"]
             fields[F_CHANNEL_CREATED_AT]  = scope["created_at"]
         # get_members resolves to the server scope, so this is one document per
-        # server member rather than one per member per channel.
-        for row in self._storage.get_members(channel_hash_hex):
-            dest_hex = row["identity_hash"]
+        # server member rather than one per member per channel. Just-removed
+        # peers are no longer in that table, so they are unioned in explicitly
+        # -- they are exactly who needs to learn they were removed.
+        recipients = [row["identity_hash"]
+                      for row in self._storage.get_members(channel_hash_hex)]
+        for dest_hex in extra_recipients or []:
+            if dest_hex not in recipients:
+                recipients.append(dest_hex)
+        for dest_hex in recipients:
             if dest_hex == self._identity.hash_hex:
                 continue
             self._send_raw(dest_hex, fields)

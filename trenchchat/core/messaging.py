@@ -61,10 +61,21 @@ __all__ = [
     "F_REPLY_TO", "F_LAST_SEEN_ID", "F_SYNC_WINDOW_START", "F_SYNC_MESSAGES",
     "F_MISSED_FOR", "F_MISSED_MSG_ID", "F_MSG_TYPE", "F_IMAGE_DATA",
     "CAUSAL_WINDOW_SECS", "Messaging", "cancel_pending_for_channel",
+    "DELIVERY_PENDING", "DELIVERY_DELIVERED", "DELIVERY_FAILED",
 ]
 
 # Threshold in seconds within which last_seen_id causal ordering is applied
 CAUSAL_WINDOW_SECS = 5.0
+
+# Delivery state of one of the local user's own outbound messages, aggregated
+# across a group fan-out (see Messaging.get_delivery_state). Not a wire value:
+# these are UI hints, never sent to a peer.
+DELIVERY_PENDING = "pending"      # a recipient is queued: path unknown, or awaiting retry
+DELIVERY_DELIVERED = "delivered"  # handed to the transport for every recipient, no failures
+DELIVERY_FAILED = "failed"        # a recipient's delivery failed and cannot be retried
+
+# Outbound messages whose delivery state is tracked before the oldest is dropped.
+MAX_TRACKED_DELIVERIES = 200
 
 
 def _compute_message_id(content: str, sender_hex: str, timestamp: float) -> str:
@@ -86,12 +97,18 @@ class Messaging:
         self._storage = storage
         self._router = router
         self._message_callbacks: list = []
+        self._delivery_status_callbacks: list = []
         self._missed_delivery_callback = None
 
         # dest_hex → list of message param dicts queued for offline peers
         self._pending: dict[str, list[dict]] = {}
         # msg_id → msg_params, kept so failed deliveries can be re-queued
         self._params_by_id: dict[str, dict] = {}
+        # msg_id → {"channel": str, "recipients": {dest_hex: state}, "aggregate": str|None}
+        # for our own outbound messages, so the UI can show a per-message
+        # delivered/pending/failed indicator. In-memory only, like _pending:
+        # it tracks live sends, not history, and is meaningless after a restart.
+        self._delivery: dict[str, dict] = {}
 
         router.add_delivery_callback(self._on_lxmf_message)
 
@@ -161,15 +178,21 @@ class Messaging:
                 if dest_identity is None:
                     RNS.Transport.request_path(delivery_dest_hash)
                     self._queue_pending(dest_hex, msg_params)
+                    self._track_delivery(msg_id, channel_hash_hex, dest_hex, DELIVERY_PENDING)
                     self._notify_missed(channel_hash_hex, dest_hex, msg_id, subscriber_hashes)
                     continue
 
                 lxm = self._build_lxm(dest_identity, msg_params)
+                lxm.register_delivery_callback(
+                    lambda m, d=dest_hex, c=channel_hash_hex, mi=msg_id:
+                        self._track_delivery(mi, c, d, DELIVERY_DELIVERED)
+                )
                 lxm.register_failed_callback(
                     lambda m, d=dest_hex, c=channel_hash_hex, mi=msg_id, subs=subscriber_hashes:
                         self._on_delivery_failed(d, c, mi, subs)
                 )
                 self._router.send(lxm)
+                self._track_delivery(msg_id, channel_hash_hex, dest_hex, DELIVERY_DELIVERED)
             except Exception as e:
                 RNS.log(f"TrenchChat: failed to send to {dest_hex}: {e}", RNS.LOG_WARNING)
 
@@ -253,14 +276,18 @@ class Messaging:
                         continue
                     lxm = self._build_lxm(dest_identity, params)
                     subs = params.get("subscriber_hashes", [])
+                    channel = params["channel_hash_hex"]
+                    mid = params["msg_id"]
+                    lxm.register_delivery_callback(
+                        lambda m, d=dest_hex, c=channel, mi=mid:
+                            self._track_delivery(mi, c, d, DELIVERY_DELIVERED)
+                    )
                     lxm.register_failed_callback(
-                        lambda m, d=dest_hex,
-                               c=params["channel_hash_hex"],
-                               mi=params["msg_id"],
-                               s=subs:
+                        lambda m, d=dest_hex, c=channel, mi=mid, s=subs:
                             self._on_delivery_failed(d, c, mi, s)
                     )
                     self._router.send(lxm)
+                    self._track_delivery(mid, channel, dest_hex, DELIVERY_DELIVERED)
                 except Exception as e:
                     RNS.log(f"TrenchChat: flush_pending send error to {dest_hex}: {e}",
                             RNS.LOG_WARNING)
@@ -299,7 +326,12 @@ class Messaging:
 
     def _on_delivery_failed(self, dest_hex: str, channel_hash_hex: str,
                              msg_id: str, subscriber_hashes: list[str]):
-        """Re-queue the message for retry when the peer's path returns, and record a missed hint."""
+        """Re-queue the message for retry when the peer's path returns, and record a missed hint.
+
+        A failure is retriable only while its params are still held; once they
+        have aged out of _params_by_id there is nothing left to resend, so the
+        recipient is marked failed rather than pending.
+        """
         params = self._params_by_id.get(msg_id)
         if params:
             RNS.log(
@@ -314,7 +346,72 @@ class Messaging:
             pending_ids = {p["msg_id"] for p in self._pending.get(dest_hex, [])}
             if msg_id not in pending_ids:
                 self._queue_pending(dest_hex, params)
+            self._track_delivery(msg_id, channel_hash_hex, dest_hex, DELIVERY_PENDING)
+        else:
+            self._track_delivery(msg_id, channel_hash_hex, dest_hex, DELIVERY_FAILED)
         self._notify_missed(channel_hash_hex, dest_hex, msg_id, subscriber_hashes)
+
+    # --- delivery state ---
+
+    def get_delivery_state(self, msg_id: str) -> str | None:
+        """Aggregate delivery state of one of our own outbound messages.
+
+        DELIVERY_PENDING if any recipient is still queued, DELIVERY_FAILED if a
+        recipient failed with nothing left to retry, DELIVERY_DELIVERED once
+        every recipient has been handed to the transport (or confirmed), or None
+        if this message is not tracked -- not sent by us this session, or it had
+        no recipients other than ourselves.
+        """
+        entry = self._delivery.get(msg_id)
+        return self._aggregate(entry) if entry is not None else None
+
+    @staticmethod
+    def _aggregate(entry: dict) -> str | None:
+        states = entry["recipients"].values()
+        if not states:
+            return None
+        if any(s == DELIVERY_PENDING for s in states):
+            return DELIVERY_PENDING
+        if any(s == DELIVERY_FAILED for s in states):
+            return DELIVERY_FAILED
+        return DELIVERY_DELIVERED
+
+    def _track_delivery(self, msg_id: str, channel_hash_hex: str,
+                        dest_hex: str, state: str) -> None:
+        """Record one recipient's delivery state and fire the status callback if
+        the message's aggregate state changed."""
+        entry = self._delivery.get(msg_id)
+        if entry is None:
+            entry = {"channel": channel_hash_hex, "recipients": {}, "aggregate": None}
+            self._delivery[msg_id] = entry
+            while len(self._delivery) > MAX_TRACKED_DELIVERIES:
+                del self._delivery[next(iter(self._delivery))]
+        entry["recipients"][dest_hex] = state
+        new_state = self._aggregate(entry)
+        if new_state is not None and new_state != entry["aggregate"]:
+            entry["aggregate"] = new_state
+            self._fire_delivery_status(channel_hash_hex, msg_id, new_state)
+
+    def add_delivery_status_callback(self, callback):
+        """callback(channel_hash_hex: str, message_id: str, delivery_state: str)
+
+        Fired when the aggregate delivery state of one of our own messages
+        changes (pending → delivered, delivered → failed, and so on).
+        """
+        if callback not in self._delivery_status_callbacks:
+            self._delivery_status_callbacks.append(callback)
+
+    def remove_delivery_status_callback(self, callback):
+        if callback in self._delivery_status_callbacks:
+            self._delivery_status_callbacks.remove(callback)
+
+    def _fire_delivery_status(self, channel_hash_hex: str, msg_id: str,
+                             state: str) -> None:
+        for cb in self._delivery_status_callbacks:
+            try:
+                cb(channel_hash_hex, msg_id, state)
+            except Exception as e:
+                RNS.log(f"TrenchChat: delivery status callback error: {e}", RNS.LOG_ERROR)
 
     def _notify_missed(self, channel_hash_hex: str, missed_peer_hex: str,
                        msg_id: str, subscriber_hashes: list[str]):

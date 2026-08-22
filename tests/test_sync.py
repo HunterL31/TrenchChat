@@ -305,6 +305,8 @@ class TestSyncRequestResponse:
         bob.sync_mgr._send_sync_request(carol.identity.hash_hex, ch_hash, ts)
         for i in range(MAX_SYNC_CONTINUATIONS + 5):
             ts += 10
+            content = f"chain {i}"
+            msg_id = _compute_message_id(content, alice.identity.hash_hex, ts)
             bob.sync_mgr._handle_sync_response(
                 {
                     F_MSG_TYPE:       MT_SYNC_RESPONSE,
@@ -312,13 +314,13 @@ class TestSyncRequestResponse:
                     F_SYNC_MESSAGES:  msgpack.packb([{
                         "sender_hash":  alice.identity.hash_hex,
                         "sender_name":  "Alice",
-                        "content":      f"chain {i}",
+                        "content":      content,
                         "timestamp":    ts,
-                        "message_id":   f"chain-{i}",
+                        "message_id":   msg_id,
                         "reply_to":     None,
                         "last_seen_id": None,
                         "author_sig":   sign_as(alice.identity.hash_hex, ch_hash,
-                                                f"chain-{i}", ts, f"chain {i}"),
+                                                msg_id, ts, content),
                     }], use_bin_type=True),
                     F_SYNC_TRUNCATED: True,
                 },
@@ -1662,7 +1664,7 @@ class TestImageSync:
         # (Alice sending in a channel before it existed) and gets correctly
         # rejected as untenured by the sync tenure filter.
         ts = time.time()
-        msg_id = alice.storage.get_messages(ch_hash)
+        img_id = _compute_message_id("synced image", alice.identity.hash_hex, ts)
         # Insert directly with image data
         alice.storage.insert_message(
             channel_hash=ch_hash,
@@ -1670,22 +1672,22 @@ class TestImageSync:
             sender_name="Alice",
             content="synced image",
             timestamp=ts,
-            message_id="sync_img_001",
+            message_id=img_id,
             reply_to=None,
             last_seen_id=None,
             received_at=ts,
             image_data=_FAKE_JPEG,
-            author_sig=sign_as(alice.identity.hash_hex, ch_hash, "sync_img_001",
+            author_sig=sign_as(alice.identity.hash_hex, ch_hash, img_id,
                                ts, "synced image", image_data=_FAKE_JPEG),
         )
 
         bob.sync_mgr._send_sync_request(alice.identity.hash_hex, ch_hash, ts - 100)
 
-        assert wait_for_message(bob.storage, ch_hash, "sync_img_001", timeout=5), \
+        assert wait_for_message(bob.storage, ch_hash, img_id, timeout=5), \
             "Bob did not receive the synced image message"
 
         bob_msgs = bob.storage.get_messages(ch_hash)
-        synced = next(m for m in bob_msgs if m["message_id"] == "sync_img_001")
+        synced = next(m for m in bob_msgs if m["message_id"] == img_id)
         assert bytes(synced["image_data"]) == _FAKE_JPEG
 
 
@@ -1763,24 +1765,25 @@ class TestReactionSync:
         _seed_channel_on_peer(bob, ch_hash, "reaction-sync", alice.identity.hash_hex)
 
         ts = time.time()
-        self._seed_message(alice, ch_hash, "sync_rx_001", ts)
-        alice.storage.insert_reaction("sync_rx_001", "\U0001F44D",
+        rx_id = _compute_message_id("reacted message", alice.identity.hash_hex, ts)
+        self._seed_message(alice, ch_hash, rx_id, ts)
+        alice.storage.insert_reaction(rx_id, "\U0001F44D",
                                       alice.identity.hash_hex, ch_hash, ts)
-        alice.storage.insert_reaction("sync_rx_001", "e3" * 32,
+        alice.storage.insert_reaction(rx_id, "e3" * 32,
                                       alice.identity.hash_hex, ch_hash, ts)
 
         bob.sync_mgr._send_sync_request(alice.identity.hash_hex, ch_hash, ts - 100)
 
-        assert wait_for_message(bob.storage, ch_hash, "sync_rx_001", timeout=5), \
+        assert wait_for_message(bob.storage, ch_hash, rx_id, timeout=5), \
             "Bob did not receive the synced message"
         assert wait_for(
-            lambda: len(bob.storage.get_reactions("sync_rx_001")) == 2, timeout=5
+            lambda: len(bob.storage.get_reactions(rx_id)) == 2, timeout=5
         ), "Bob received the message but not its reactions"
 
-        keys = {r["emoji_hash"] for r in bob.storage.get_reactions("sync_rx_001")}
+        keys = {r["emoji_hash"] for r in bob.storage.get_reactions(rx_id)}
         assert keys == {"\U0001F44D", "e3" * 32}
         assert all(r["reactor_hash"] == alice.identity.hash_hex
-                   for r in bob.storage.get_reactions("sync_rx_001"))
+                   for r in bob.storage.get_reactions(rx_id))
 
     def test_message_with_no_reactions_omits_the_key(self, peer_factory):
         """The payload only grows for messages that actually carry reactions."""

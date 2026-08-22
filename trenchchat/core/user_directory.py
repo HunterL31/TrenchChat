@@ -41,14 +41,25 @@ class UserDirectory:
         # identity_hash_hex -> (display_name, last_seen_timestamp)
         self._entries: dict[str, tuple[str, float]] = {}
         self._lock = threading.Lock()
+        self._callbacks: list = []
 
     # --- public API ---
+
+    def add_directory_callback(self, cb) -> None:
+        """Register a callback invoked with (peer_hex, display_name) whenever a
+        peer is first recorded or their display name changes.
+
+        Fired only on a genuine change, not on every announce refresh, so a
+        periodic reannounce heartbeat does not flood consumers.
+        """
+        self._callbacks.append(cb)
 
     def record_user(self, peer_hex: str, display_name: str) -> None:
         """Record or refresh a TrenchChat peer from a trenchchat.user announce.
 
         Skips the local user's own identity.  Updates the display name and
-        resets the TTL clock on each call.
+        resets the TTL clock on each call.  Fires directory callbacks when the
+        peer is new or their display name changed.
         """
         if peer_hex == self._self_hex:
             return
@@ -60,12 +71,26 @@ class UserDirectory:
                     and peer_hex not in self._entries):
                 oldest = min(self._entries, key=lambda k: self._entries[k][1])
                 del self._entries[oldest]
+            previous = self._entries.get(peer_hex)
+            changed = previous is None or previous[0] != display_name
             self._entries[peer_hex] = (display_name, time.time())
         RNS.log(
             f"TrenchChat [user_directory]: recorded peer {peer_hex[:12]}… "
             f"name={display_name!r}",
             RNS.LOG_DEBUG,
         )
+        if changed:
+            self._fire_callbacks(peer_hex, display_name)
+
+    def _fire_callbacks(self, peer_hex: str, display_name: str) -> None:
+        for cb in self._callbacks:
+            try:
+                cb(peer_hex, display_name)
+            except Exception as e:
+                RNS.log(
+                    f"TrenchChat [user_directory]: callback error: {e}",
+                    RNS.LOG_ERROR,
+                )
 
     def search(self, query: str) -> list[dict]:
         """Return non-expired entries matching query (case-insensitive substring).

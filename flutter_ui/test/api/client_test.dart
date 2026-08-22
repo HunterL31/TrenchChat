@@ -116,6 +116,74 @@ void main() {
     expect(await client.leaveChannel('chan-hash'), isTrue);
   });
 
+  test('getChannelPresence reads the channel presence endpoint with names', () async {
+    final client = ApiClient(
+      baseUrl: 'http://example.test',
+      client: MockClient((request) async {
+        expect(request.method, 'GET');
+        expect(request.url.path, '/channels/chan-hash/presence');
+        return http.Response(
+          jsonEncode([
+            {'identity_hash': 'aa', 'display_name': 'Alice', 'is_online': true},
+            {'identity_hash': 'bb', 'display_name': '', 'is_online': false},
+          ]),
+          200,
+        );
+      }),
+    );
+
+    final roster = await client.getChannelPresence('chan-hash');
+    expect(roster, hasLength(2));
+    expect(roster.first.identityHash, 'aa');
+    expect(roster.first.displayName, 'Alice');
+    expect(roster.first.isOnline, isTrue);
+    // An empty display name is stored as null, not "".
+    expect(roster.last.displayName, isNull);
+  });
+
+  test('getChannelLinkQuality reads the channel link-quality endpoint', () async {
+    final client = ApiClient(
+      baseUrl: 'http://example.test',
+      client: MockClient((request) async {
+        expect(request.url.path, '/channels/chan-hash/link_quality');
+        return http.Response(jsonEncode({'level': 'good', 'hops': 2}), 200);
+      }),
+    );
+
+    final quality = await client.getChannelLinkQuality('chan-hash');
+    expect(quality.level.name, 'good');
+    expect(quality.hops, 2);
+  });
+
+  test('getMessages passes limit and before_ts as query params', () async {
+    Uri? seen;
+    final client = ApiClient(
+      baseUrl: 'http://example.test',
+      client: MockClient((request) async {
+        seen = request.url;
+        return http.Response(jsonEncode(<Object>[]), 200);
+      }),
+    );
+
+    await client.getMessages('chan-hash', limit: 50, beforeTs: 1234.5);
+    expect(seen!.path, '/channels/chan-hash/messages');
+    expect(seen!.queryParameters['limit'], '50');
+    expect(seen!.queryParameters['before_ts'], '1234.5');
+  });
+
+  test('leaveServer posts to the server leave route', () async {
+    final client = ApiClient(
+      baseUrl: 'http://example.test',
+      client: MockClient((request) async {
+        expect(request.method, 'POST');
+        expect(request.url.path, '/servers/srv-hash/leave');
+        return http.Response(jsonEncode({'ok': true}), 200);
+      }),
+    );
+
+    expect(await client.leaveServer('srv-hash'), isTrue);
+  });
+
   test('getFriends decodes the friend list', () async {
     final client = ApiClient(
       baseUrl: 'http://example.test',

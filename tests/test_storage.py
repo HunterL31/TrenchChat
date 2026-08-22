@@ -134,6 +134,41 @@ class TestMessages:
         assert all(m["timestamp"] < base + 3 for m in msgs)
         assert len(msgs) == 3
 
+    def test_default_fetch_returns_the_newest_page_not_the_oldest(self, db):
+        """A channel with more than *limit* messages must not freeze on its
+        oldest page: the default fetch returns the newest *limit*, ascending."""
+        self._seed_channel(db)
+        base = time.time()
+        for i in range(250):
+            ts = base + i
+            db.insert_message("ch01", "s", "S", f"msg{i}", ts, f"id{i:03d}",
+                              None, None, ts)
+
+        page = db.get_messages("ch01")
+        assert len(page) == 200
+        # The newest 200 are ids 50..249, returned oldest-first for display.
+        assert page[0]["message_id"] == "id050"
+        assert page[-1]["message_id"] == "id249"
+        assert [m["message_id"] for m in page] == sorted(m["message_id"] for m in page)
+
+    def test_before_ts_returns_the_older_page_from_the_newest_end(self, db):
+        """Paging back with before_ts fetches the messages just older than the
+        oldest one shown, still selected from the newest end and ascending."""
+        self._seed_channel(db)
+        base = time.time()
+        for i in range(250):
+            ts = base + i
+            db.insert_message("ch01", "s", "S", f"msg{i}", ts, f"id{i:03d}",
+                              None, None, ts)
+
+        first_page = db.get_messages("ch01")           # ids 50..249
+        oldest_shown = first_page[0]["timestamp"]      # ts of id050
+        older = db.get_messages("ch01", limit=30, before_ts=oldest_shown)
+        assert len(older) == 30
+        # The 30 immediately older than id050 are ids 20..49.
+        assert older[0]["message_id"] == "id020"
+        assert older[-1]["message_id"] == "id049"
+
     def test_get_latest_message_id(self, db):
         self._seed_channel(db)
         base = time.time()

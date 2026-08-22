@@ -6,6 +6,7 @@ frame plane (links, streaming) is covered in test_voice_transport.py.
 """
 
 import time
+from unittest.mock import MagicMock, patch
 
 import LXMF
 import RNS
@@ -15,7 +16,7 @@ from tests.helpers import (
     wait_for, wait_for_roster, wait_for_subscriber,
 )
 from trenchchat.core import actions
-from trenchchat.core.voice import MAX_VOICE_PARTICIPANTS
+from trenchchat.core.voice import MAX_VOICE_PARTICIPANTS, VOICE_SIGNAL_MAX_AGE_SECS
 from trenchchat.network.voice_transport import PEER_STREAMING
 from trenchchat.core.permissions import (
     PRESET_OPEN, PRESET_PRIVATE, ROLE_MEMBER, ROLE_OWNER, SEND_MESSAGE,
@@ -188,6 +189,56 @@ class TestVoiceSignalling:
         assert alice.voice_mgr.get_roster(ch_hash) == []
 
 
+class TestStaleSignalDiagnostics:
+    """Bug 79: an age-dropped voice signal must be diagnosable -- a clock-drift
+    drop looks identical to packet loss otherwise."""
+
+    def _deliver(self, mgr, sender_hex, fields):
+        lxm = MagicMock()
+        lxm.fields = fields
+        lxm.source_hash = bytes.fromhex(sender_hex)
+        ident = MagicMock()
+        ident.hash = bytes.fromhex(sender_hex)
+        with patch("trenchchat.core.voice.RNS.Identity.recall", return_value=ident), \
+                patch("trenchchat.core.voice.RNS.log") as log:
+            mgr._on_lxmf_message(lxm)
+        return log
+
+    def test_past_skew_logs_clock_skew_warning(self, peer_factory):
+        alice, bob, ch_hash = _setup_invite_channel(peer_factory)
+        now = time.time()
+        log = self._deliver(alice.voice_mgr, bob.identity.hash_hex, {
+            F_MSG_TYPE: MT_VOICE_JOIN,
+            F_CHANNEL_HASH: bytes.fromhex(ch_hash),
+            F_TIMESTAMP: now - VOICE_SIGNAL_MAX_AGE_SECS - 60,
+            F_VOICE_MUTED: False,
+        })
+        messages = " ".join(str(c.args[0]) for c in log.call_args_list)
+        assert "clock skew" in messages and "past" in messages
+
+    def test_future_skew_logs_direction(self, peer_factory):
+        alice, bob, ch_hash = _setup_invite_channel(peer_factory)
+        now = time.time()
+        log = self._deliver(alice.voice_mgr, bob.identity.hash_hex, {
+            F_MSG_TYPE: MT_VOICE_JOIN,
+            F_CHANNEL_HASH: bytes.fromhex(ch_hash),
+            F_TIMESTAMP: now + VOICE_SIGNAL_MAX_AGE_SECS + 60,
+            F_VOICE_MUTED: False,
+        })
+        messages = " ".join(str(c.args[0]) for c in log.call_args_list)
+        assert "clock skew" in messages and "future" in messages
+
+    def test_missing_timestamp_logged_distinctly(self, peer_factory):
+        alice, bob, ch_hash = _setup_invite_channel(peer_factory)
+        log = self._deliver(alice.voice_mgr, bob.identity.hash_hex, {
+            F_MSG_TYPE: MT_VOICE_JOIN,
+            F_CHANNEL_HASH: bytes.fromhex(ch_hash),
+            F_VOICE_MUTED: False,
+        })
+        messages = " ".join(str(c.args[0]) for c in log.call_args_list)
+        assert "missing or invalid timestamp" in messages
+
+
 class TestVoiceJoinGuards:
     def test_join_denied_without_permission(self, peer_factory):
         alice, bob, ch_hash = _setup_invite_channel(
@@ -219,7 +270,14 @@ class TestVoiceJoinGuards:
         assert alice.voice_mgr.join_voice(other) is False
         assert alice.voice_mgr.current_channel == ch_hash
 
-    def test_participant_cap_enforced(self, peer_factory, monkeypatch):
+    def test_participant_cap_enforced_at_the_link_layer(self, peer_factory, monkeypatch):
+        """Occupancy is counted where it is real -- the inbound link handshake.
+
+        A local join can't observe remote links, so it admits optimistically;
+        the over-cap peer is turned away when it tries to establish a link into
+        the full session. (A local cap keyed on the signalled roster instead
+        would be spoofable -- see the flood test in test_adversarial.py.)
+        """
         monkeypatch.setattr("trenchchat.core.voice.MAX_VOICE_PARTICIPANTS", 2)
         (alice, bob, carol), ch_hash = _setup_open_channel(
             peer_factory, names=("alice", "bob", "carol"))
@@ -227,10 +285,12 @@ class TestVoiceJoinGuards:
         assert alice.voice_mgr.join_voice(ch_hash) is True
         assert wait_for_roster(bob, ch_hash, alice.identity.hash_hex)
         assert bob.voice_mgr.join_voice(ch_hash) is True
-        assert wait_for_roster(carol, ch_hash, alice.identity.hash_hex)
-        assert wait_for_roster(carol, ch_hash, bob.identity.hash_hex)
+        assert wait_for_roster(alice, ch_hash, bob.identity.hash_hex)
 
-        assert carol.voice_mgr.join_voice(ch_hash) is False
+        # The session is genuinely full (two real, signalling members).
+        assert alice.voice_mgr._authorize_link(
+            carol.identity.hash_hex, ch_hash) is False, \
+            "a third participant was admitted past the cap at the link layer"
 
     def test_leave_when_not_in_session_is_noop(self, peer_factory):
         bob = peer_factory("bob")

@@ -11,6 +11,10 @@ import 'events.dart';
 const Duration _reconnectBaseDelay = Duration(seconds: 1);
 const Duration _reconnectMaxDelay = Duration(seconds: 30);
 
+/// The backend event socket's state, distinct from the mesh link quality:
+/// this says whether live updates are flowing, not how the radio is doing.
+enum TcConnState { connected, reconnecting, disconnected }
+
 class TcSocket {
   /// The token goes in the query string because a browser cannot set headers
   /// on a WebSocket handshake, and this socket carries every inbound message.
@@ -32,6 +36,20 @@ class TcSocket {
   /// layer uses it to re-fetch anything whose events were missed while down.
   void Function()? onReconnected;
 
+  /// Fired whenever the backend-socket connection state changes. The state
+  /// layer surfaces it so the UI can show a "reconnecting…/offline" hint,
+  /// separate from the mesh link pill.
+  void Function(TcConnState)? onConnStateChanged;
+
+  TcConnState _connState = TcConnState.disconnected;
+  TcConnState get connState => _connState;
+
+  void _setConnState(TcConnState state) {
+    if (_connState == state) return;
+    _connState = state;
+    onConnStateChanged?.call(state);
+  }
+
   // Connecting lazily keeps constructing an AppState free of network side
   // effects, which is what lets widget tests build one without hanging.
   Stream<TcEvent> get events {
@@ -48,6 +66,7 @@ class TcSocket {
     void onConnectionLost() {
       if (lost || _closed) return;
       lost = true;
+      _setConnState(TcConnState.reconnecting);
       _scheduleReconnect();
     }
 
@@ -56,6 +75,7 @@ class TcSocket {
     channel.ready.then((_) {
       if (_closed) return;
       _attempt = 0;
+      _setConnState(TcConnState.connected);
       final isReconnect = _everConnected;
       _everConnected = true;
       if (isReconnect) onReconnected?.call();
@@ -84,6 +104,7 @@ class TcSocket {
 
   void close() {
     _closed = true;
+    _setConnState(TcConnState.disconnected);
     _reconnectTimer?.cancel();
     _channel?.sink.close();
     _events.close();

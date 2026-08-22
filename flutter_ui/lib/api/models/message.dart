@@ -24,6 +24,7 @@ class Message {
     required this.reactions,
     this.receivedAt,
     this.imageStripped = false,
+    this.deliveryState,
   });
 
   final String messageId;
@@ -45,6 +46,27 @@ class Message {
   /// the "received late" marker never lights -- see ApiClient.messageIsLate.
   final double? receivedAt;
 
+  /// Delivery state of the local user's own outbound message: "pending",
+  /// "delivered", "failed", or null (not tracked -- a peer's message, or one
+  /// aged out of the backend's tracker). Drives the per-row status glyph.
+  final String? deliveryState;
+
+  /// A [Message] identical to this one but with a new [deliveryState], for
+  /// applying a live delivery_status event in place.
+  Message withDeliveryState(String? state) => Message(
+        messageId: messageId,
+        senderHash: senderHash,
+        senderName: senderName,
+        content: content,
+        timestamp: timestamp,
+        replyTo: replyTo,
+        hasImage: hasImage,
+        reactions: reactions,
+        receivedAt: receivedAt,
+        imageStripped: imageStripped,
+        deliveryState: state,
+      );
+
   factory Message.fromJson(Map<String, dynamic> json) => Message(
         messageId: json['message_id'] as String,
         senderHash: json['sender_hash'] as String,
@@ -59,5 +81,6 @@ class Message {
             .toList(),
         // TODO(phase-b): populate once `received_at` ships on _message_to_dict.
         receivedAt: null,
+        deliveryState: json['delivery_state'] as String?,
       );
 }

@@ -141,7 +141,14 @@ class VoiceManager:
         now = time.time()
         with self._lock:
             roster = self._live_roster(channel_hash_hex, now)
-            if len(roster) >= MAX_VOICE_PARTICIPANTS:
+            # Real occupancy is established links, never the signalled roster:
+            # voice_join is unauthenticated, so a flood of forged ones would
+            # otherwise fill the roster and lock every legit member out. Links
+            # are what actually drive fan-out, which is why the cap exists;
+            # _authorize_link enforces the same cap per inbound link.
+            real_occupancy = (self._transport.connected_peers()
+                              if self._transport is not None else set())
+            if len(real_occupancy) >= MAX_VOICE_PARTICIPANTS:
                 RNS.log(
                     f"TrenchChat [voice]: session for "
                     f"{channel_hash_hex[:12]}… is full",
@@ -407,11 +414,22 @@ class VoiceManager:
 
         now = time.time()
         timestamp = fields.get(F_TIMESTAMP)
-        if not isinstance(timestamp, (int, float)) or \
-                abs(now - timestamp) > VOICE_SIGNAL_MAX_AGE_SECS:
+        if not isinstance(timestamp, (int, float)):
             RNS.log(
-                f"TrenchChat [voice]: dropped stale {msg_type} from "
-                f"{sender_hex[:12]}…",
+                f"TrenchChat [voice]: dropped {msg_type} from "
+                f"{sender_hex[:12]}… — missing or invalid timestamp",
+                RNS.LOG_WARNING,
+            )
+            return
+        skew = now - timestamp
+        if abs(skew) > VOICE_SIGNAL_MAX_AGE_SECS:
+            # Distinguishable from packet loss for a clock-drifting mesh node:
+            # name the skew and its direction so it is diagnosable.
+            direction = "past" if skew > 0 else "future"
+            RNS.log(
+                f"TrenchChat [voice]: dropped {msg_type} from "
+                f"{sender_hex[:12]}… — clock skew {abs(skew):.0f}s ({direction}) "
+                f"exceeds {VOICE_SIGNAL_MAX_AGE_SECS:.0f}s; check clock sync",
                 RNS.LOG_WARNING,
             )
             return

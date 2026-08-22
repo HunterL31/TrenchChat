@@ -43,10 +43,13 @@ from trenchchat.core.interfaces_config import (
 from trenchchat.core.naming import NameInUseError
 from trenchchat.core.permissions import (
     ALL_PERMISSIONS, CREATE_CHANNEL, INVITE, KICK, MANAGE_CHANNEL, MANAGE_ROLES,
-    ROLE_ADMIN, ROLE_MEMBER, PRESET_OPEN, PRESET_PRIVATE, VOICE_CHAT,
+    ROLE_ADMIN, ROLE_MEMBER, PRESET_OPEN, PRESET_PRIVATE, SEND_MESSAGE, VOICE_CHAT,
     is_open_join, offered_permissions, permissions_from_json,
 )
 from trenchchat.core.presence import resolve_display_name
+from trenchchat.core.link_quality import (
+    LinkQuality, quality_label, score_path,
+)
 
 from backend_core import Backend
 
@@ -204,7 +207,8 @@ def _reactions_summary(storage, message_id: str, self_hex: str) -> list[dict[str
     return list(by_emoji.values())
 
 
-def _message_to_dict(row, reactions: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+def _message_to_dict(row, reactions: list[dict[str, Any]] | None = None,
+                     delivery_state: str | None = None) -> dict[str, Any]:
     return {
         "message_id": row["message_id"],
         "sender_hash": row["sender_hash"],
@@ -215,6 +219,9 @@ def _message_to_dict(row, reactions: list[dict[str, Any]] | None = None) -> dict
         "has_image": bool(row["image_data"]) if "image_data" in row.keys() else False,
         "image_stripped": bool(row["image_stripped"]) if "image_stripped" in row.keys() else False,
         "reactions": reactions or [],
+        # Only our own outbound messages carry a delivery state; None for
+        # everyone else's (and for our own once it ages out of the tracker).
+        "delivery_state": delivery_state,
     }
 
 
@@ -415,12 +422,23 @@ def create_app(backend: Backend, *, token: str | None = None,
 
     # --- wire backend callbacks (RNS/LXMF background threads) to the bus ---
 
+    def _delivery_state_for(row) -> str | None:
+        """The delivery state of a row, but only for our own outbound messages."""
+        if row is None or row["sender_hash"] != backend.identity.hash_hex:
+            return None
+        return backend.messaging.get_delivery_state(row["message_id"])
+
     def _on_message(channel_hash_hex: str, message_id: str):
         msgs = backend.storage.get_messages(channel_hash_hex)
         row = next((m for m in msgs if m["message_id"] == message_id), None)
         reactions = _reactions_summary(backend.storage, message_id, backend.identity.hash_hex) if row else None
         bus.emit("message", channel_hash=channel_hash_hex,
-                message=_message_to_dict(row, reactions) if row else None)
+                message=_message_to_dict(row, reactions, _delivery_state_for(row)) if row else None)
+
+    def _on_delivery_status(channel_hash_hex: str, message_id: str,
+                            delivery_state: str):
+        bus.emit("delivery_status", channel_hash=channel_hash_hex,
+                 message_id=message_id, delivery_state=delivery_state)
 
     # Pending invites, exactly like MainWindow._pending_invites -- nothing
     # is sent to the network until the user explicitly accepts or declines.
@@ -462,10 +480,25 @@ def create_app(backend: Backend, *, token: str | None = None,
         bus.emit("presence", identity_hash=peer_hash_hex, is_online=is_online)
 
     def _on_avatar_changed(identity_hash_hex: str):
-        bus.emit("avatar_updated", identity_hash=identity_hash_hex)
+        # Carry the version so a running client can bust its avatar cache
+        # (fetch /peers/{hash}/avatar?v=version) instead of serving a stale
+        # image from the old URL. None means the avatar was removed.
+        if identity_hash_hex == backend.identity.hash_hex:
+            version = backend.config.avatar_version
+        else:
+            row = backend.storage.get_peer_avatar(identity_hash_hex)
+            version = row["avatar_version"] if row else None
+        bus.emit("avatar_updated", identity_hash=identity_hash_hex,
+                 avatar_version=version)
 
     def _on_friend_updated(identity_hash_hex: str):
         bus.emit("friend_updated", identity_hash=identity_hash_hex)
+
+    def _on_directory_updated(identity_hash_hex: str, display_name: str):
+        # A peer's display name changed (via their announce, or a message they
+        # sent), so a running client can refresh /directory without a reload.
+        bus.emit("directory_updated", identity_hash=identity_hash_hex,
+                 display_name=display_name)
 
     def _on_reaction_changed(channel_hash_hex: str, message_id: str):
         bus.emit("reaction_updated", channel_hash=channel_hash_hex, message_id=message_id)
@@ -491,6 +524,7 @@ def create_app(backend: Backend, *, token: str | None = None,
         bus.emit("voice_session", state=state)
 
     backend.messaging.add_message_callback(_on_message)
+    backend.messaging.add_delivery_status_callback(_on_delivery_status)
     backend.invite_mgr.add_invite_callback(_on_invite)
     backend.invite_mgr.add_channel_joined_callback(_on_channel_joined)
     backend.invite_mgr.add_member_list_callback(_on_member_list_updated)
@@ -498,6 +532,7 @@ def create_app(backend: Backend, *, token: str | None = None,
     backend.presence_mgr.add_presence_callback(_on_presence_changed)
     backend.avatar_mgr.add_avatar_callback(_on_avatar_changed)
     backend.friends_mgr.add_friends_callback(_on_friend_updated)
+    backend.user_directory.add_directory_callback(_on_directory_updated)
     backend.reaction_mgr.add_reaction_callback(_on_reaction_changed)
     backend.reaction_mgr.add_emoji_callback(_on_emoji_received)
     backend.sync_mgr.status.add_status_callback(_on_sync_status)
@@ -517,11 +552,10 @@ def create_app(backend: Backend, *, token: str | None = None,
 
     @app.post("/me/display_name")
     def set_display_name(req: SetDisplayNameRequest):
-        # Same call the real Settings dialog makes.
-        backend.router.set_display_name(req.display_name)
-        # Propagate promptly rather than waiting for the periodic
-        # heartbeat's next reannounce cycle.
-        backend.router.announce_user()
+        # Same multi-step action the real Settings dialog drives: set the name
+        # and re-announce both destinations so peers update their recall and
+        # directory promptly, rather than waiting for the next heartbeat.
+        actions.set_display_name(backend.router, req.display_name)
         return {"ok": True}
 
     @app.get("/settings")
@@ -935,7 +969,8 @@ def create_app(backend: Backend, *, token: str | None = None,
     @app.post("/servers/{server_hash}/leave")
     def leave_server(server_hash: str):
         return {"ok": actions.leave_server(
-            backend.storage, backend.subscription_mgr, server_hash)}
+            backend.storage, backend.subscription_mgr, server_hash,
+            backend.identity.hash_hex)}
 
     # --- channels ---
 
@@ -995,6 +1030,54 @@ def create_app(backend: Backend, *, token: str | None = None,
         # owner last broadcast, so the two views can legitimately differ.
         return sorted(backend.subscription_mgr.get_subscribers(channel_hash))
 
+    def _peer_link_quality(peer_hex: str) -> LinkQuality:
+        if peer_hex == backend.identity.hash_hex:
+            return LinkQuality.EXCELLENT
+        try:
+            delivery = RNS.Destination.hash(bytes.fromhex(peer_hex), "lxmf", "delivery")
+            for entry in backend.rns.get_path_table():
+                dest_h = entry.get("hash")
+                if isinstance(dest_h, bytes) and dest_h == delivery:
+                    via = entry.get("via")
+                    via_hex = via.hex() if isinstance(via, bytes) else None
+                    return score_path(delivery.hex(), entry.get("hops", 0), via_hex)
+        except Exception:
+            pass
+        return LinkQuality.UNKNOWN
+
+    @app.get("/channels/{channel_hash}/presence")
+    def channel_presence(channel_hash: str):
+        # Roster source follows the channel kind: subscribers for open-join
+        # (no members table), members for invite-only. Same shape either way.
+        return [
+            {
+                "identity_hash": peer_hex,
+                "display_name": resolve_display_name(
+                    peer_hex, backend.identity.hash_hex, backend.storage,
+                    backend.config),
+                "is_online": backend.presence_mgr.is_online(peer_hex),
+                "last_seen": backend.presence_mgr.last_seen_at(peer_hex),
+            }
+            for peer_hex in actions.channel_roster_hexes(
+                backend.storage, backend.subscription_mgr, channel_hash)
+        ]
+
+    @app.get("/channels/{channel_hash}/link_quality")
+    def channel_link_quality(channel_hash: str):
+        entries = []
+        for peer_hex in actions.channel_roster_hexes(
+                backend.storage, backend.subscription_mgr, channel_hash):
+            quality = _peer_link_quality(peer_hex)
+            entries.append({
+                "identity_hash": peer_hex,
+                "display_name": resolve_display_name(
+                    peer_hex, backend.identity.hash_hex, backend.storage,
+                    backend.config),
+                "quality": int(quality),
+                "quality_label": quality_label(quality),
+            })
+        return entries
+
     @app.get("/channels/{channel_hash}/sync_status")
     def get_sync_status(channel_hash: str):
         # Same tracker the GUI will read: who we asked for history, who
@@ -1013,7 +1096,16 @@ def create_app(backend: Backend, *, token: str | None = None,
         # main_window.py's _on_view_members does -- server-side enforcement
         # in actions.update_membership is the real boundary regardless.
         my_hex = backend.identity.hash_hex
+        # send_message mirrors messaging._on_lxmf_message: open-join channels
+        # accept anyone, so it is effectively true; otherwise it is the role
+        # check the delivery path applies.
+        channel = backend.storage.get_channel(channel_hash)
+        perms = permissions_from_json(channel["permissions"]) if channel else {}
+        send_message = True
+        if channel and not is_open_join(perms):
+            send_message = backend.storage.has_permission(channel_hash, my_hex, SEND_MESSAGE)
         return {
+            "send_message": send_message,
             "invite": backend.storage.has_permission(channel_hash, my_hex, INVITE),
             "kick": backend.storage.has_permission(channel_hash, my_hex, KICK),
             "manage_roles": backend.storage.has_permission(channel_hash, my_hex, MANAGE_ROLES),
@@ -1113,18 +1205,21 @@ def create_app(backend: Backend, *, token: str | None = None,
     # --- messages ---
 
     @app.get("/channels/{channel_hash}/messages")
-    def list_messages(channel_hash: str):
+    def list_messages(channel_hash: str, limit: int = 200,
+                      before_ts: float | None = None):
         return [
             _message_to_dict(
-                m, _reactions_summary(backend.storage, m["message_id"], backend.identity.hash_hex)
+                m,
+                _reactions_summary(backend.storage, m["message_id"], backend.identity.hash_hex),
+                _delivery_state_for(m),
             )
-            for m in backend.storage.get_messages(channel_hash)
+            for m in backend.storage.get_messages(
+                channel_hash, limit=limit, before_ts=before_ts)
         ]
 
     @app.get("/channels/{channel_hash}/messages/{message_id}/image")
     def get_message_image(channel_hash: str, message_id: str):
-        msgs = backend.storage.get_messages(channel_hash)
-        row = next((m for m in msgs if m["message_id"] == message_id), None)
+        row = backend.storage.get_message(channel_hash, message_id)
         if row is None or not row["image_data"]:
             return JSONResponse({"error": "no image"}, status_code=404)
         data = bytes(row["image_data"])

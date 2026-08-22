@@ -6,6 +6,7 @@
 // server-side regardless.
 import 'package:flutter/material.dart';
 
+import '../../api/models/emoji.dart';
 import '../../app_state.dart';
 import '../../theme/section_theme.dart';
 import '../../theme/theme_spec.dart';
@@ -13,6 +14,8 @@ import '../../theme/tokens.dart';
 import '../../widgets/tc_button.dart';
 import '../../widgets/tc_checkbox.dart';
 import '../../widgets/tc_dialog.dart';
+
+const _createChannelPerm = 'create_channel';
 
 const Map<String, String> _permissionLabels = {
   'send_message': 'Send messages',
@@ -27,15 +30,53 @@ const Map<String, String> _permissionLabels = {
 
 Future<void> showPermissionsDialog(BuildContext context, AppState state,
     {required String channelHashHex, required String channelName}) {
+  // CREATE_CHANNEL only means something inside a server; a standalone channel
+  // has nowhere to create channels, so the row is hidden there.
+  final belongsToServer = state.channelByHash(channelHashHex)?.serverHash != null;
+  return _showPermissionsDialog(
+    context,
+    state,
+    title: 'Permissions — #$channelName',
+    load: () => state.api.getChannelPermissions(channelHashHex),
+    save: (admin, member) =>
+        state.updateChannelPermissions(channelHashHex, admin, member),
+    showCreateChannel: belongsToServer,
+  );
+}
+
+/// The same role matrix, editing a server's permissions instead of a
+/// channel's.
+Future<void> showServerPermissionsDialog(BuildContext context, AppState state,
+    {required String serverHashHex, required String serverName}) {
+  return _showPermissionsDialog(
+    context,
+    state,
+    title: 'Permissions — $serverName',
+    load: () => state.api.getServerPermissions(serverHashHex),
+    save: (admin, member) =>
+        state.updateServerPermissions(serverHashHex, admin, member),
+    showCreateChannel: true,
+  );
+}
+
+Future<void> _showPermissionsDialog(
+  BuildContext context,
+  AppState state, {
+  required String title,
+  required Future<ScopePermissions> Function() load,
+  required Future<bool> Function(List<String>, List<String>) save,
+  required bool showCreateChannel,
+}) {
   return showTcDialog<void>(
     context: context,
     builder: (context) => SectionTheme(
       spec: state.themeSpec,
       section: TCSection.dialogs,
       child: _PermissionsDialogContent(
-        state: state,
-        channelHashHex: channelHashHex,
-        channelName: channelName,
+        title: title,
+        load: load,
+        save: save,
+        showCreateChannel: showCreateChannel,
       ),
     ),
   );
@@ -43,14 +84,16 @@ Future<void> showPermissionsDialog(BuildContext context, AppState state,
 
 class _PermissionsDialogContent extends StatefulWidget {
   const _PermissionsDialogContent({
-    required this.state,
-    required this.channelHashHex,
-    required this.channelName,
+    required this.title,
+    required this.load,
+    required this.save,
+    required this.showCreateChannel,
   });
 
-  final AppState state;
-  final String channelHashHex;
-  final String channelName;
+  final String title;
+  final Future<ScopePermissions> Function() load;
+  final Future<bool> Function(List<String>, List<String>) save;
+  final bool showCreateChannel;
 
   @override
   State<_PermissionsDialogContent> createState() => _PermissionsDialogContentState();
@@ -75,7 +118,7 @@ class _PermissionsDialogContentState extends State<_PermissionsDialogContent> {
 
   Future<void> _load() async {
     try {
-      final perms = await widget.state.api.getChannelPermissions(widget.channelHashHex);
+      final perms = await widget.load();
       if (!mounted) return;
       setState(() {
         _allPermissions = perms.allPermissions;
@@ -101,15 +144,14 @@ class _PermissionsDialogContentState extends State<_PermissionsDialogContent> {
     });
     // Send only what each role may hold: the core drops the rest anyway, and
     // submitting a grant it will discard makes the dialog look like it worked.
-    final ok = await widget.state.updateChannelPermissions(
-        widget.channelHashHex,
+    final ok = await widget.save(
         _admin.where(_adminGrantable.contains).toList(),
         _member.where(_memberGrantable.contains).toList());
     if (!mounted) return;
     if (!ok) {
       setState(() {
         _busy = false;
-        _error = widget.state.takeActionError() ?? 'The backend rejected the change.';
+        _error = 'The backend rejected the change.';
       });
       return;
     }
@@ -118,11 +160,15 @@ class _PermissionsDialogContentState extends State<_PermissionsDialogContent> {
 
   String _labelFor(String perm) => _permissionLabels[perm] ?? perm;
 
+  List<String> _visible(List<String> perms) => widget.showCreateChannel
+      ? perms
+      : perms.where((p) => p != _createChannelPerm).toList();
+
   @override
   Widget build(BuildContext context) {
     final tc = SectionTheme.of(context);
     return TcDialogShell(
-      title: 'Permissions — #${widget.channelName}',
+      title: widget.title,
       width: 440,
       errorText: _error,
       actions: [
@@ -151,7 +197,7 @@ class _PermissionsDialogContentState extends State<_PermissionsDialogContent> {
               children: [
                 _roleLabel('OWNER', note: 'always has all permissions'),
                 const SizedBox(height: 6),
-                for (final perm in _allPermissions)
+                for (final perm in _visible(_allPermissions))
                   Padding(
                     padding: const EdgeInsets.symmetric(vertical: 3),
                     child: TcCheckbox(value: true, label: _labelFor(perm), onChanged: null),
@@ -159,7 +205,7 @@ class _PermissionsDialogContentState extends State<_PermissionsDialogContent> {
                 const SizedBox(height: 12),
                 _roleLabel('ADMIN'),
                 const SizedBox(height: 6),
-                for (final perm in _adminGrantable)
+                for (final perm in _visible(_adminGrantable))
                   Padding(
                     padding: const EdgeInsets.symmetric(vertical: 3),
                     child: TcCheckbox(
@@ -172,7 +218,7 @@ class _PermissionsDialogContentState extends State<_PermissionsDialogContent> {
                 const SizedBox(height: 12),
                 _roleLabel('MEMBER'),
                 const SizedBox(height: 6),
-                for (final perm in _memberGrantable)
+                for (final perm in _visible(_memberGrantable))
                   Padding(
                     padding: const EdgeInsets.symmetric(vertical: 3),
                     child: TcCheckbox(

@@ -1,5 +1,5 @@
 // 1b: 206px channel column -- server header, CHANNELS, DIRECT CHANNELS,
-// ONLINE roster footer, +CHANNEL / JOIN ghost buttons.
+// ONLINE roster footer, NEW CHANNEL / JOIN CHANNEL ghost buttons.
 import 'package:flutter/material.dart';
 
 import '../../api/models/invite.dart';
@@ -26,6 +26,7 @@ class ChannelColumn extends StatelessWidget {
     required this.selectedChannelHash,
     required this.onSelectChannel,
     required this.onlinePresence,
+    this.meHashHex = '',
     this.pendingInvites = const [],
     this.onTapInvite,
     this.onCreateChannel,
@@ -50,6 +51,11 @@ class ChannelColumn extends StatelessWidget {
   final String? selectedChannelHash;
   final ValueChanged<String> onSelectChannel;
   final List<PresenceEntry> onlinePresence;
+
+  /// The local user's identity hash, so the ONLINE roster never lists the
+  /// reader as one of their own peers.
+  final String meHashHex;
+
   final List<PendingInvite> pendingInvites;
   final ValueChanged<PendingInvite>? onTapInvite;
   final VoidCallback? onCreateChannel;
@@ -119,7 +125,9 @@ class ChannelColumn extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final tc = SectionTheme.of(context);
-    final online = onlinePresence.where((p) => p.isOnline).toList();
+    final online = onlinePresence
+        .where((p) => p.isOnline && p.identityHash != meHashHex)
+        .toList();
     return Container(
       width: 206,
       color: tc.bgSurface,
@@ -227,15 +235,14 @@ class ChannelColumn extends StatelessWidget {
               border: Border(top: BorderSide(color: tc.borderSubtle)),
             ),
             padding: const EdgeInsets.all(10),
-            child: Row(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                Expanded(
-                  child: TcGhostButton(icon: TcIcons.plus, label: 'CHANNEL', onPressed: onCreateChannel),
-                ),
-                const SizedBox(width: 6),
-                Expanded(
-                  child: TcGhostButton(icon: TcIcons.join, label: 'JOIN', onPressed: onJoinChannel),
-                ),
+                TcGhostButton(
+                    icon: TcIcons.plus, label: 'NEW CHANNEL', onPressed: onCreateChannel),
+                const SizedBox(height: 6),
+                TcGhostButton(
+                    icon: TcIcons.join, label: 'JOIN CHANNEL', onPressed: onJoinChannel),
               ],
             ),
           ),
@@ -318,7 +325,9 @@ class _PresenceRoster extends StatelessWidget {
                         const SizedBox(width: 9),
                         Expanded(
                           child: Text(
-                            _shortHash(p.identityHash),
+                            p.displayName?.isNotEmpty == true
+                                ? p.displayName!
+                                : _shortHash(p.identityHash),
                             overflow: TextOverflow.ellipsis,
                             style: TextStyle(fontSize: 12, color: tc.textSecondary),
                           ),
@@ -453,13 +462,14 @@ class _InviteRowState extends State<_InviteRow> {
           color: _hover ? tc.bgHover : Colors.transparent,
           child: Row(
             children: [
-              TcIcon(TcIcons.join, size: 12, color: tc.accentSecondary),
+              TcIcon(TcIcons.join,
+                  size: 12, color: _hover ? tc.accentSecondaryHover : tc.accentSecondary),
               const SizedBox(width: 6),
               Expanded(
                 child: Text(
                   widget.invite.channelName,
                   overflow: TextOverflow.ellipsis,
-                  style: TextStyle(fontSize: 13, color: TCColors.amber300),
+                  style: TextStyle(fontSize: 13, color: tc.accentSecondaryHover),
                 ),
               ),
             ],

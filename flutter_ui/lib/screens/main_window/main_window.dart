@@ -1,6 +1,7 @@
 // The three-column shell: server rail (1b) + channel column (1b) +
 // [channel header (1b) / message list (1a) / compose bar (1a)].
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../../api/models/link_quality.dart';
 import '../../api/models/member.dart';
@@ -47,6 +48,11 @@ class MainWindow extends StatefulWidget {
 class _MainWindowState extends State<MainWindow> {
   ChannelTab _tab = ChannelTab.chat;
   final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
+
+  /// The message the compose bar is replying to, and the channel it belongs
+  /// to -- so a reply started in one channel is dropped on switching away.
+  Message? _replyTarget;
+  String? _replyChannelHash;
 
   // Dialogs show their own inline error text for a failed submit and claim it
   // with AppState.takeActionError(); this is the catch-all for actions with no
@@ -115,6 +121,27 @@ class _MainWindowState extends State<MainWindow> {
     await widget.state.leaveChannel(channel.hash);
   }
 
+  String _serverName(AppState state, String hash) =>
+      state.servers.firstWhere((s) => s.hash == hash,
+          orElse: () => state.servers.isNotEmpty
+              ? state.servers.first
+              : throw StateError('no server')).name;
+
+  /// Leaves a server from its rail menu, once confirmed.
+  Future<void> _leaveServer(String hash) async {
+    final name = _serverName(widget.state, hash);
+    final confirmed = await showTcConfirmDialog(
+      context,
+      widget.state,
+      title: 'Leave $name',
+      message: 'You will stop receiving this server’s channels. '
+          'You can be invited back later.',
+      confirmLabel: 'LEAVE',
+    );
+    if (!confirmed) return;
+    await widget.state.leaveServer(hash);
+  }
+
   /// Adds the reaction if the viewer hasn't reacted with [emojiKey] yet,
   /// removes it if they have -- same toggle the chips use.
   void _toggleReaction(String channelHash, String messageId, String emojiKey) {
@@ -129,6 +156,21 @@ class _MainWindowState extends State<MainWindow> {
     } else {
       state.api.addReaction(channelHash, messageId, emojiKey);
     }
+  }
+
+  /// Interim link action: url_launcher is not a dependency, so a tapped link
+  /// is copied to the clipboard rather than opened. Wire launchUrl here once
+  /// the dependency is added.
+  Future<void> _openLink(String url) async {
+    await Clipboard.setData(ClipboardData(text: url));
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('Link copied: $url'),
+        behavior: SnackBarBehavior.floating,
+        duration: const Duration(seconds: 2),
+      ),
+    );
   }
 
   String _displayNameFor(String identityHashHex, String fallback) {
@@ -177,10 +219,26 @@ class _MainWindowState extends State<MainWindow> {
             : null;
         final List<Channel> channels =
             selectedServer != null ? state.channelsByServer[selectedServer] ?? [] : [];
+        // Preload permissions/sync state for every listed channel so the row
+        // context menu and sync badge are correct without a prior visit. The
+        // guard keeps this to one fetch per channel: once loaded, nothing is
+        // missing and no callback is scheduled.
+        final listedHashes = [
+          for (final c in channels) c.hash,
+          for (final c in state.standaloneChannels) c.hash,
+        ];
+        if (listedHashes.any((h) => !state.permissionsByChannel.containsKey(h))) {
+          WidgetsBinding.instance
+              .addPostFrameCallback((_) => state.ensureChannelMeta(listedHashes));
+        }
         final channel = state.selectedChannel;
         final channelHash = state.selectedChannelHash;
         final List<Message> messages =
             channelHash != null ? state.messagesByChannel[channelHash] ?? [] : [];
+        if (_replyTarget != null && _replyChannelHash != channelHash) {
+          _replyTarget = null;
+          _replyChannelHash = null;
+        }
         final List<PresenceEntry> presence =
             channelHash != null ? state.presenceByChannel[channelHash] ?? [] : [];
         final linkQuality = channelHash != null
@@ -208,12 +266,26 @@ class _MainWindowState extends State<MainWindow> {
           section: TCSection.serverRail,
           child: ServerRail(
             servers: [
-              for (final s in state.servers) ServerRailEntry(hash: s.hash, name: s.name),
+              for (final s in state.servers)
+                ServerRailEntry(
+                  hash: s.hash,
+                  name: s.name,
+                  canInvite: state.serverPermissionsByHash[s.hash]?.invite ?? false,
+                  canManage: state.serverPermissionsByHash[s.hash]?.manageChannel ?? false,
+                ),
             ],
             selectedHash: state.selectedServerHash,
             onSelect: (hash) => state.selectServer(hash),
+            onHome: () => state.selectHome(),
             onAddServer: () => showNewServerDialog(context, state),
             onSettings: () => showSettingsDialog(context, state),
+            onLeaveServer: _leaveServer,
+            onInviteServer: (hash) => showServerInviteDialog(
+                context, state,
+                serverHashHex: hash, serverName: _serverName(state, hash)),
+            onEditServerPermissions: (hash) => showServerPermissionsDialog(
+                context, state,
+                serverHashHex: hash, serverName: _serverName(state, hash)),
           ),
         );
 
@@ -231,6 +303,7 @@ class _MainWindowState extends State<MainWindow> {
             }
           },
           onlinePresence: presence,
+          meHashHex: state.meHashHex,
           pendingInvites: state.pendingInvites,
           onTapInvite: (invite) => showIncomingInviteDialog(context, state, invite),
           onCreateChannel: () =>
@@ -285,6 +358,7 @@ class _MainWindowState extends State<MainWindow> {
                       channelName: channel?.name ?? '',
                       topic: channel?.description ?? '',
                       linkQuality: linkQuality,
+                      connectionState: state.connectionState,
                       activeTab: _tab,
                       onTabSelected: (t) => setState(() => _tab = t),
                       compact: compact,
@@ -325,6 +399,13 @@ class _MainWindowState extends State<MainWindow> {
                                     _toggleReaction(
                                         channelHash, messageId, selection.reactionKey);
                                   },
+                            onReply: channelHash == null
+                                ? null
+                                : (m) => setState(() {
+                                      _replyTarget = m;
+                                      _replyChannelHash = channelHash;
+                                    }),
+                            onOpenLink: _openLink,
                             friendHashes: friendHashes,
                             onAddFriend: (hash) =>
                                 showAddFriendDialog(context, state, identityHash: hash),
@@ -334,6 +415,13 @@ class _MainWindowState extends State<MainWindow> {
                               return state.themeSpec == spec;
                             },
                             themeLibrary: state.themeLibrary,
+                            onLoadOlder: channelHash == null
+                                ? null
+                                : () => state.loadOlderMessages(channelHash),
+                            hasMoreOlder:
+                                channelHash != null && state.hasMoreOlder(channelHash),
+                            loadingOlder:
+                                channelHash != null && state.loadingOlder(channelHash),
                           ),
                     },
                   ),
@@ -350,9 +438,27 @@ class _MainWindowState extends State<MainWindow> {
                       channelName: channel?.name ?? '',
                       channelHash: channelHash,
                       enabled: channelHash != null && (permissions?.sendMessage ?? true),
-                      onSend: (content) => state.sendMessage(content),
+                      replyPreview: _replyTarget == null
+                          ? null
+                          : (
+                              author: _replyTarget!.senderHash == state.meHashHex
+                                  ? 'you'
+                                  : _displayNameFor(
+                                      _replyTarget!.senderHash, _replyTarget!.senderName),
+                              snippet: _replyTarget!.content.replaceAll('\n', ' '),
+                            ),
+                      onCancelReply: () => setState(() => _replyTarget = null),
+                      onSend: (content) async {
+                        final replyTo = _replyTarget?.messageId;
+                        final ok = await state.sendMessage(content, replyTo: replyTo);
+                        if (ok && _replyTarget != null) {
+                          setState(() => _replyTarget = null);
+                        }
+                        return ok;
+                      },
                       pickEmoji: () async =>
-                          (await showEmojiPickerDialog(context, state))?.composeToken,
+                          (await showEmojiPickerDialog(context, state, title: 'Add emoji'))
+                              ?.composeToken,
                       pendingThemeShare: state.pendingThemeShare,
                       onThemeShareConsumed: state.consumePendingThemeShare,
                       compact: compact,
@@ -378,13 +484,16 @@ class _MainWindowState extends State<MainWindow> {
           );
         }
 
-        return Row(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            rail,
-            SizedBox(width: 206, child: channelPane),
-            Expanded(child: content),
-          ],
+        return Scaffold(
+          backgroundColor: baseColors.bgApp,
+          body: Row(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              rail,
+              SizedBox(width: 206, child: channelPane),
+              Expanded(child: content),
+            ],
+          ),
         );
       },
     );

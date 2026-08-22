@@ -456,3 +456,33 @@ class TestPropagationFilterIsApplied:
         alice.config.channel_filter_mode = "all"
         alice.router._router.lxmf_propagation(b"\x00" * 8)
         assert len(calls) == 1, "an allowed message was not stored"
+
+
+# ---------------------------------------------------------------------------
+# set_display_name (BUG 26): a name change must re-announce both destinations
+# ---------------------------------------------------------------------------
+
+class _RecordingRouter:
+    """Records the calls set_display_name drives, in order."""
+
+    def __init__(self):
+        self.calls: list = []
+
+    def set_display_name(self, name):
+        self.calls.append(("set_display_name", name))
+
+    def announce(self, attached_interface=None):
+        self.calls.append(("announce",))
+
+    def announce_user(self, attached_interface=None):
+        self.calls.append(("announce_user",))
+
+
+def test_set_display_name_reannounces_both_destinations():
+    router = _RecordingRouter()
+    actions.set_display_name(router, "Zephyr")
+    assert router.calls == [
+        ("set_display_name", "Zephyr"),
+        ("announce",),
+        ("announce_user",),
+    ]

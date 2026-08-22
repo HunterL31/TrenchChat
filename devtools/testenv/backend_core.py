@@ -31,7 +31,10 @@ from trenchchat.core.messaging import Messaging
 from trenchchat.core.subscription import SubscriptionManager
 from trenchchat.core.invite import InviteManager
 from trenchchat.core.sync import SyncManager
-from trenchchat.core.presence import PresenceBeacon, PresenceManager
+from trenchchat.core.presence import (
+    PresenceBeacon, PresenceManager, resolve_display_name,
+)
+from trenchchat.core.protocol import F_DISPLAY_NAME, F_MSG_TYPE
 from trenchchat.core.user_directory import UserDirectory
 from trenchchat.core.avatar import AvatarManager
 from trenchchat.core.friends import FriendsManager
@@ -200,16 +203,22 @@ class Backend:
         self.identity = Identity(self.config)
         self.storage = Storage()
         self.router = Router(self.config, self.identity)
-        self._wire_managers()
+        self._wire_managers(use_tone_audio=False)
         return self
 
     def _wire_managers(self, presence_timeout_secs: float | None = None,
                        presence_beacon_after_secs: float | None = None,
                        voice_state_refresh_secs: float | None = None,
-                       voice_roster_ttl_secs: float | None = None) -> None:
+                       voice_roster_ttl_secs: float | None = None,
+                       use_tone_audio: bool = True) -> None:
         """Managers and announce handlers shared by both constructors,
         mirroring main.py. The presence overrides shorten the testenv's
-        observation windows; None keeps the production defaults."""
+        observation windows; None keeps the production defaults.
+
+        use_tone_audio drives the tone pipeline for headless testers (no sound
+        devices); a real profile passes False so VoiceManager builds the same
+        real AudioPipeline main.py does, degrading to receive-only when the
+        machine has no audio libraries or devices."""
         self.channel_mgr = ChannelManager(self.identity, self.storage)
         self.server_mgr = ServerManager(self.identity, self.storage)
         self.messaging = Messaging(self.identity, self.storage, self.router)
@@ -237,18 +246,21 @@ class Backend:
         self.friends_mgr = FriendsManager(self.storage, self.identity.hash_hex, self.presence_mgr)
         self.presence_mgr.add_seen_callback(self.friends_mgr.record_seen)
         self.presence_mgr.add_presence_callback(self.friends_mgr.record_presence)
-        # Headless workers have no sound devices; the tone pipeline feeds the
-        # real encode/transmit path with a generated signal instead.
+        # Headless testers have no sound devices; the tone pipeline feeds the
+        # real encode/transmit path with a generated signal instead. A real
+        # profile uses no factory, so VoiceManager builds the real
+        # AudioPipeline (mic capture + playback), exactly as main.py does.
         voice_kwargs = {}
         if voice_state_refresh_secs is not None:
             voice_kwargs["state_refresh_secs"] = voice_state_refresh_secs
         if voice_roster_ttl_secs is not None:
             voice_kwargs["roster_ttl_secs"] = voice_roster_ttl_secs
+        if use_tone_audio:
+            voice_kwargs["audio_factory"] = make_tone_pipeline
         self.voice_transport = RNSVoiceTransport(self.identity)
         self.voice_mgr = VoiceManager(
             self.identity, self.storage, self.router, self.subscription_mgr,
-            self.config, transport=self.voice_transport,
-            audio_factory=make_tone_pipeline, **voice_kwargs,
+            self.config, transport=self.voice_transport, **voice_kwargs,
         )
 
         # Mirrors main.py's _on_user_announced: a trenchchat.user announce is
@@ -270,6 +282,7 @@ class Backend:
         def _on_peer_appeared(peer_hex: str, iface) -> None:
             self.sync_mgr.on_peer_appeared(peer_hex)
             self.presence_mgr.record_seen(peer_hex)
+            self._seed_user_directory(peer_hex)
             self.avatar_mgr.flush_avatar(peer_hex)
             self.reaction_mgr.flush_pending_emoji(peer_hex)
             self.subscription_mgr.flush_pending(peer_hex)
@@ -279,10 +292,12 @@ class Backend:
             PeerAnnounceHandler(_on_peer_appeared)
         )
 
-        # Also update presence from any inbound LXMF message, covering peers
-        # reached via a backchannel link without a prior announce, and peers
-        # signing off (same rationale as main_window.py's _on_inbound_message).
-        self.router.add_delivery_callback(self.presence_mgr.record_inbound)
+        # Also update presence and the user directory from any inbound LXMF
+        # message, covering peers reached via a backchannel link without a
+        # prior announce, peers signing off, and a peer's display name
+        # travelling on a chat message (same rationale as main_window.py's
+        # _on_inbound_message).
+        self.router.add_delivery_callback(self._on_inbound_message)
 
         # Nothing else notices *our own* link returning: every catch-up path
         # is driven by hearing from a remote peer.
@@ -291,6 +306,42 @@ class Backend:
 
         self.channel_mgr.restore_owned_channels()
         self.server_mgr.restore_owned_servers()
+
+    def _on_inbound_message(self, message) -> None:
+        """Record presence and directory state from an inbound LXMF message.
+
+        A chat message carries the sender's display name in F_DISPLAY_NAME, so
+        record it straight into the directory; a control message only seeds the
+        directory for an already-confirmed TrenchChat peer.
+        """
+        sender_hex = self.presence_mgr.record_inbound(message)
+        if not sender_hex:
+            return
+        fields = message.fields or {}
+        if F_MSG_TYPE in fields:
+            self._seed_user_directory(sender_hex)
+            return
+        name = fields.get(F_DISPLAY_NAME, "")
+        if isinstance(name, bytes):
+            name = name.decode(errors="replace")
+        if name:
+            self.user_directory.record_user(sender_hex, name)
+        else:
+            self._seed_user_directory(sender_hex)
+
+    def _seed_user_directory(self, peer_hex: str) -> None:
+        """Refresh a confirmed TrenchChat peer's directory entry.
+
+        Mirrors main_window._seed_user_directory: a peer is confirmed if they
+        are already in the directory (from a prior trenchchat.user announce) or
+        appear in any channel's members table. Resolves the best available name.
+        """
+        if (self.user_directory.contains(peer_hex)
+                or peer_hex in self.storage.get_trenchchat_peer_identities()):
+            name = resolve_display_name(
+                peer_hex, self.identity.hash_hex, self.storage, self.config
+            )
+            self.user_directory.record_user(peer_hex, name)
 
     def accept_invite(self, channel_hash_hex: str, token: bytes, expiry: float,
                       admin_hex: str) -> None:

@@ -22,12 +22,15 @@ Future<String> _pngB64() async {
   return base64Encode(Uint8List.view(data!.buffer));
 }
 
-Widget _harness(AppState state, void Function(EmojiSelection?) onPicked) {
+Widget _harness(AppState state, void Function(EmojiSelection?) onPicked,
+    {String? title}) {
   return MaterialApp(
     home: Scaffold(
       body: Builder(
         builder: (context) => ElevatedButton(
-          onPressed: () async => onPicked(await showEmojiPickerDialog(context, state)),
+          onPressed: () async => onPicked(title == null
+              ? await showEmojiPickerDialog(context, state)
+              : await showEmojiPickerDialog(context, state, title: title)),
           child: const Text('open'),
         ),
       ),
@@ -61,6 +64,25 @@ void main() {
     expect(picked, isNotNull);
     expect(picked!.reactionKey, '👍');
     expect(picked!.composeToken, '👍');
+  });
+
+  testWidgets('defaults to the React title but honors a custom one', (tester) async {
+    backend.routes['GET /emoji'] = [];
+    await tester.pumpWidget(_harness(state, (_) {}));
+    await tester.tap(find.text('open'));
+    await tester.pump();
+    await settle(tester);
+    expect(find.text('React'), findsOneWidget);
+
+    await tester.tap(find.text('👍'));
+    await tester.pumpAndSettle();
+
+    await tester.pumpWidget(_harness(state, (_) {}, title: 'Add emoji'));
+    await tester.tap(find.text('open'));
+    await tester.pump();
+    await settle(tester);
+    expect(find.text('Add emoji'), findsOneWidget);
+    expect(find.text('React'), findsNothing);
   });
 
   testWidgets('a custom pick returns the hash key and a :name@hash: token', (tester) async {

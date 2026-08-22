@@ -345,12 +345,17 @@ class TestPendingRequestKeyCollision:
         bob.sync_mgr._record_pending_request(ch_hash, carol.identity.hash_hex, ts)
         bob.sync_mgr._record_pending_request(ch_hash, carol.identity.hash_hex, ts + 0.5)
 
+        msg_one_id = _compute_message_id("answers the first request",
+                                         alice.identity.hash_hex, ts + 1)
+        msg_two_id = _compute_message_id("answers the second request",
+                                         alice.identity.hash_hex, ts + 2)
+
         fields_1 = _sync_response_fields([{
             "sender_hash":  alice.identity.hash_hex,
             "sender_name":  "Alice",
             "content":      "answers the first request",
             "timestamp":    ts + 1,
-            "message_id":   "g1-msg-one",
+            "message_id":   msg_one_id,
             "reply_to":     None,
             "last_seen_id": None,
         }], channel_hash_hex=ch_hash)
@@ -361,7 +366,7 @@ class TestPendingRequestKeyCollision:
             "sender_name":  "Alice",
             "content":      "answers the second request",
             "timestamp":    ts + 2,
-            "message_id":   "g1-msg-two",
+            "message_id":   msg_two_id,
             "reply_to":     None,
             "last_seen_id": None,
         }], channel_hash_hex=ch_hash)
@@ -370,9 +375,9 @@ class TestPendingRequestKeyCollision:
         bob.sync_mgr._handle_sync_response(fields_1, ch_hash, carol.identity.hash_hex)
         bob.sync_mgr._handle_sync_response(fields_2, ch_hash, carol.identity.hash_hex)
 
-        assert wait_for_message(bob.storage, ch_hash, "g1-msg-one", timeout=3), \
+        assert wait_for_message(bob.storage, ch_hash, msg_one_id, timeout=3), \
             "the first legitimate response never landed"
-        assert wait_for_message(bob.storage, ch_hash, "g1-msg-two", timeout=3), (
+        assert wait_for_message(bob.storage, ch_hash, msg_two_id, timeout=3), (
             "the second legitimate response was dropped as unsolicited because "
             "_record_pending_request's (channel, peer) key overwrote the first "
             "request's entry before either could be claimed"
@@ -574,12 +579,14 @@ class TestOversizedImageViaSync:
         bob.sync_mgr._send_sync_request(carol.identity.hash_hex, ch_hash, ts)
 
         oversized = b"\x00" * (MAX_IMAGE_BYTES + 1)
+        oversized_id = _compute_message_id("picture attached",
+                                           alice.identity.hash_hex, ts + 1)
         fields = _sync_response_fields([{
             "sender_hash":  alice.identity.hash_hex,
             "sender_name":  "Alice",
             "content":      "picture attached",
             "timestamp":    ts + 1,
-            "message_id":   "g4-oversized-1",
+            "message_id":   oversized_id,
             "reply_to":     None,
             "last_seen_id": None,
             "image_data":   oversized,
@@ -588,11 +595,11 @@ class TestOversizedImageViaSync:
 
         bob.sync_mgr._handle_sync_response(fields, ch_hash, carol.identity.hash_hex)
 
-        assert wait_for_message(bob.storage, ch_hash, "g4-oversized-1", timeout=5), \
+        assert wait_for_message(bob.storage, ch_hash, oversized_id, timeout=5), \
             "the message itself should still be delivered via sync"
 
         rows = [m for m in bob.storage.get_messages(ch_hash)
-                if m["message_id"] == "g4-oversized-1"]
+                if m["message_id"] == oversized_id]
         assert rows, "message missing entirely"
         assert not rows[0]["image_data"], "an over-cap image was stored instead of cleared"
         assert rows[0]["content"] == "picture attached", \

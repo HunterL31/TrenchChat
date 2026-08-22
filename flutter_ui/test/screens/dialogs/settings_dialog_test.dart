@@ -112,6 +112,41 @@ void main() {
     expect((list.padding! as EdgeInsets).right, 0);
   });
 
+  testWidgets('with a session PIN set, no copy claims at-rest protection',
+      (tester) async {
+    await open(tester);
+
+    Finder pinField(String hint) => find.byWidgetPredicate(
+        (w) => w is TextField && w.decoration?.hintText == hint);
+
+    await tester.dragUntilVisible(
+      find.text('SET PIN…'),
+      find.byType(ListView),
+      const Offset(0, -80),
+    );
+    // Before a PIN is set the copy is already honest (stored unencrypted).
+    expect(find.textContaining('protected by a PIN'), findsNothing);
+
+    await tester.tap(find.text('SET PIN…'));
+    await settle(tester);
+    await tester.enterText(pinField('New PIN'), '1234');
+    await tester.enterText(pinField('Confirm PIN'), '1234');
+    await tester.tap(find.text('SET PIN'));
+    await settle(tester);
+
+    // Now that a PIN is set, the headline must not claim at-rest protection.
+    expect(find.textContaining('protected by a PIN'), findsNothing);
+    expect(find.textContaining('does not encrypt your identity or message database'),
+        findsOneWidget);
+    // No visible text asserts the database is encrypted/protected at rest.
+    final claimsAtRest = find.byWidgetPredicate((w) =>
+        w is Text &&
+        w.data != null &&
+        (w.data!.contains('are protected by a PIN') ||
+            RegExp(r'\bis encrypted\b').hasMatch(w.data!)));
+    expect(claimsAtRest, findsNothing);
+  });
+
   testWidgets('Enter in a settings field saves', (tester) async {
     await open(tester);
 

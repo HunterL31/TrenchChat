@@ -38,6 +38,43 @@ _DEFAULTS = {
     },
 }
 
+# Opus bitrate bounds. The upper bound keeps VBR peaks under the 255-byte
+# voice_wire frame cap (VOICE_MAX_FRAME_BYTES); the lower is Opus's practical
+# floor for intelligible speech.
+VOICE_MIN_BITRATE = 6000
+VOICE_MAX_BITRATE = 64000
+
+# A propagation-node storage limit below zero is meaningless.
+MIN_PROPAGATION_STORAGE_MB = 0
+
+# Caps on the opaquely-stored UI theme data. config.json is re-serialised on
+# every setter write, so without these a misbehaving client could grow it
+# without bound.
+MAX_THEME_BYTES = 64 * 1024
+MAX_THEME_LIBRARY_ENTRIES = 100
+
+
+def _type_matches(default, value) -> bool:
+    """Whether an on-disk value may stand in for a default of a known type.
+
+    None defaults are unconstrained (the field is genuinely X | None).
+    Numeric defaults accept int or float but not bool; bool defaults accept
+    only bool.
+    """
+    if default is None:
+        return True
+    if isinstance(default, bool):
+        return isinstance(value, bool)
+    if isinstance(default, (int, float)):
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+    if isinstance(default, str):
+        return isinstance(value, str)
+    if isinstance(default, list):
+        return isinstance(value, list)
+    if isinstance(default, dict):
+        return isinstance(value, dict)
+    return True
+
 
 def _deep_merge(base: dict, override: dict) -> dict:
     # Must deep-copy: setters mutate nested dicts (e.g. "propagation_node")
@@ -45,10 +82,20 @@ def _deep_merge(base: dict, override: dict) -> dict:
     # to _DEFAULTS -- and to every other Config instance's data.
     result = copy.deepcopy(base)
     for key, value in override.items():
-        if key in result and isinstance(result[key], dict) and isinstance(value, dict):
-            result[key] = _deep_merge(result[key], value)
-        else:
+        if key not in result:
             result[key] = value
+            continue
+        default = result[key]
+        if isinstance(default, dict) and isinstance(value, dict):
+            result[key] = _deep_merge(default, value)
+        elif _type_matches(default, value):
+            result[key] = value
+        else:
+            RNS.log(
+                f"TrenchChat: ignoring config value of wrong type for {key!r} "
+                f"(expected {type(default).__name__}, got {type(value).__name__})",
+                RNS.LOG_WARNING,
+            )
     return result
 
 
@@ -63,7 +110,14 @@ class Config:
         if self._config_path.exists():
             try:
                 with open(self._config_path, "r") as f:
-                    return json.load(f)
+                    data = json.load(f)
+                if not isinstance(data, dict):
+                    RNS.log(
+                        "TrenchChat: config on disk is not an object, ignoring",
+                        RNS.LOG_WARNING,
+                    )
+                    return {}
+                return data
             except (json.JSONDecodeError, OSError) as e:
                 RNS.log(f"TrenchChat: failed to load config from disk: {e}", RNS.LOG_WARNING)
         return {}
@@ -139,7 +193,13 @@ class Config:
 
     @propagation_storage_limit_mb.setter
     def propagation_storage_limit_mb(self, value: int):
-        self._data["propagation_node"]["storage_limit_mb"] = value
+        limit = int(value)
+        if limit < MIN_PROPAGATION_STORAGE_MB:
+            raise ValueError(
+                f"propagation_storage_limit_mb must be >= "
+                f"{MIN_PROPAGATION_STORAGE_MB}, got {limit}"
+            )
+        self._data["propagation_node"]["storage_limit_mb"] = limit
         self.save()
 
     @property
@@ -215,7 +275,13 @@ class Config:
 
     @voice_bitrate.setter
     def voice_bitrate(self, value: int):
-        self._data["voice"]["bitrate"] = int(value)
+        bitrate = int(value)
+        if not VOICE_MIN_BITRATE <= bitrate <= VOICE_MAX_BITRATE:
+            raise ValueError(
+                f"voice_bitrate must be between {VOICE_MIN_BITRATE} and "
+                f"{VOICE_MAX_BITRATE}, got {bitrate}"
+            )
+        self._data["voice"]["bitrate"] = bitrate
         self.save()
 
     @property
@@ -247,6 +313,7 @@ class Config:
 
     @ui_theme.setter
     def ui_theme(self, value: dict):
+        self._check_theme_size(value, "ui_theme")
         self._data["ui_theme"] = value
         self.save()
 
@@ -258,10 +325,40 @@ class Config:
         return self._data.get("ui_theme_library", {})
 
     def save_ui_theme(self, name: str, theme: dict) -> None:
-        """Store a theme under a name, replacing any theme already saved there."""
+        """Store a theme under a name, replacing any theme already saved there.
+
+        Rejects a theme larger than MAX_THEME_BYTES, or a new name once the
+        library holds MAX_THEME_LIBRARY_ENTRIES, logging a warning in both cases.
+        """
+        self._check_theme_size(theme, f"theme {name!r}")
         library = self._data.setdefault("ui_theme_library", {})
+        if name not in library and len(library) >= MAX_THEME_LIBRARY_ENTRIES:
+            RNS.log(
+                f"TrenchChat: rejecting theme {name!r} — library at capacity "
+                f"({MAX_THEME_LIBRARY_ENTRIES})",
+                RNS.LOG_WARNING,
+            )
+            raise ValueError(
+                f"theme library is full (max {MAX_THEME_LIBRARY_ENTRIES})"
+            )
         library[name] = theme
         self.save()
+
+    def _check_theme_size(self, theme: dict, label: str) -> None:
+        """Reject a theme whose JSON encoding exceeds MAX_THEME_BYTES."""
+        try:
+            size = len(json.dumps(theme).encode("utf-8"))
+        except (TypeError, ValueError) as e:
+            raise ValueError(f"{label} is not JSON-serialisable: {e}") from e
+        if size > MAX_THEME_BYTES:
+            RNS.log(
+                f"TrenchChat: rejecting {label} — {size} bytes exceeds "
+                f"{MAX_THEME_BYTES}",
+                RNS.LOG_WARNING,
+            )
+            raise ValueError(
+                f"{label} is {size} bytes, exceeds {MAX_THEME_BYTES} limit"
+            )
 
     def delete_ui_theme(self, name: str) -> bool:
         """Remove a saved theme. False when no theme is stored under that name."""
