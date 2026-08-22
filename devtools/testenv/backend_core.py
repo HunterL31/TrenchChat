@@ -43,9 +43,13 @@ from trenchchat.core.friends import FriendsManager
 from trenchchat.core.reaction import ReactionManager
 from trenchchat.core.voice import VoiceManager
 from trenchchat.core.audio.engine import make_tone_pipeline
+from trenchchat.core.node_browser import NodeBrowserManager
 from trenchchat.network.router import Router
+from trenchchat.network.node_transport import RNSNodeTransport
 from trenchchat.network.voice_transport import RNSVoiceTransport
-from trenchchat.network.announce import PeerAnnounceHandler, UserAnnounceHandler
+from trenchchat.network.announce import (
+    NodeAnnounceHandler, PeerAnnounceHandler, UserAnnounceHandler,
+)
 from trenchchat.version import record_launch
 
 _LINK_INTERFACE_NAME = "TesterLink"
@@ -272,6 +276,19 @@ class Backend:
             self.config, transport=self.voice_transport, **voice_kwargs,
         )
 
+        self.node_transport = RNSNodeTransport(self.identity)
+        self.node_browser = NodeBrowserManager(
+            self.identity, self.storage, self.config,
+            transport=self.node_transport,
+        )
+
+        def _on_node_discovered(node_hex: str, display_name: str, iface) -> None:
+            self.node_browser.record_node_announce(node_hex, display_name, iface)
+
+        RNS.Transport.register_announce_handler(
+            NodeAnnounceHandler(_on_node_discovered)
+        )
+
         # Mirrors main.py's _on_user_announced: a trenchchat.user announce is
         # the strongest signal a peer is a TrenchChat client (not just any
         # LXMF client), so it feeds both the directory and presence.
@@ -402,6 +419,10 @@ class Backend:
                     self.voice_mgr.tick()
                 except Exception as e:
                     RNS.log(f"TesterBackend: voice tick failed: {e}", RNS.LOG_WARNING)
+                try:
+                    self.node_browser.tick()
+                except Exception as e:
+                    RNS.log(f"TesterBackend: node tick failed: {e}", RNS.LOG_WARNING)
                 now = time.time()
                 if now - last_sync_tick >= SYNC_TICK_SECS:
                     last_sync_tick = now
