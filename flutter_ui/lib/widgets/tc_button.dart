@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 
 import '../theme/effects.dart';
 import '../theme/section_theme.dart';
+import '../theme/shape.dart';
 import '../theme/tokens.dart';
 import 'tc_icon.dart';
 import 'tc_tooltip.dart';
@@ -66,6 +67,7 @@ class _TcGhostButtonState extends State<TcGhostButton> {
           decoration: BoxDecoration(
             color: bg,
             border: Border.all(color: border),
+            borderRadius: tcCorners(context, scale: 0.5),
           ),
           child: Row(
             mainAxisSize: MainAxisSize.min,
@@ -144,7 +146,7 @@ class _TcPrimaryButtonState extends State<TcPrimaryButton> {
           duration: TCEffects.durationMed,
           curve: TCEffects.easeTerminal,
           padding: const EdgeInsets.symmetric(horizontal: TCSpace.space4, vertical: 8),
-          decoration: BoxDecoration(color: bg),
+          decoration: BoxDecoration(color: bg, borderRadius: tcCorners(context, scale: 0.5)),
           child: Text(
             widget.label,
             style: TextStyle(
@@ -200,6 +202,7 @@ class _TcIconButtonState extends State<TcIconButton> {
             decoration: BoxDecoration(
               color: _hover ? tc.bgHover : Colors.transparent,
               border: Border.all(color: _hover ? tc.borderStrong : tc.borderDefault),
+              borderRadius: tcCorners(context, scale: 0.5),
             ),
             child: TcIcon(
               widget.icon,

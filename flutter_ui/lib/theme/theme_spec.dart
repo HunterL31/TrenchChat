@@ -358,29 +358,48 @@ class TCSectionColors {
 }
 
 /// The non-color half of one section's look: how large its text renders,
-/// whether it glows, and which display face its headings use.
+/// whether it glows, which display face its headings use, and what shape
+/// its panels, controls and avatars are cut to.
 ///
 /// The unnamed constructor defaults every field, so `TCSectionStyle()` is
 /// the stock style and passing only the fields a theme overrides is enough.
-/// A text scale out of range is clamped; any other unusable value -- an
-/// unknown font name, a scale that is not a number -- falls back to the
-/// default.
+/// A text scale or corner radius out of range is clamped; any other unusable
+/// value -- an unknown font name, a scale that is not a number -- falls back
+/// to the default.
 class TCSectionStyle {
-  TCSectionStyle({double? textScale, bool? glow, String? displayFont})
-      : textScale = (normalizeStyleValue(keyTextScale, textScale) as double?) ?? defaultTextScale,
+  TCSectionStyle({
+    double? textScale,
+    bool? glow,
+    String? displayFont,
+    double? cornerRadius,
+    String? avatarShape,
+    String? panelEdge,
+  })  : textScale = (normalizeStyleValue(keyTextScale, textScale) as double?) ?? defaultTextScale,
         glow = (normalizeStyleValue(keyGlow, glow) as bool?) ?? defaultGlow,
         displayFont =
-            (normalizeStyleValue(keyDisplayFont, displayFont) as String?) ?? defaultDisplayFont;
+            (normalizeStyleValue(keyDisplayFont, displayFont) as String?) ?? defaultDisplayFont,
+        cornerRadius =
+            (normalizeStyleValue(keyCornerRadius, cornerRadius) as double?) ?? defaultCornerRadius,
+        avatarShape =
+            (normalizeStyleValue(keyAvatarShape, avatarShape) as String?) ?? defaultAvatarShape,
+        panelEdge =
+            (normalizeStyleValue(keyPanelEdge, panelEdge) as String?) ?? defaultPanelEdge;
 
   /// Builds a style from a style-key -> value map, ignoring unknown keys.
   factory TCSectionStyle.fromOverrides(Map<String, Object> overrides) {
     final scale = overrides[keyTextScale];
     final glow = overrides[keyGlow];
     final font = overrides[keyDisplayFont];
+    final radius = overrides[keyCornerRadius];
+    final avatar = overrides[keyAvatarShape];
+    final edge = overrides[keyPanelEdge];
     return TCSectionStyle(
       textScale: scale is num ? scale.toDouble() : null,
       glow: glow is bool ? glow : null,
       displayFont: font is String ? font : null,
+      cornerRadius: radius is num ? radius.toDouble() : null,
+      avatarShape: avatar is String ? avatar : null,
+      panelEdge: edge is String ? edge : null,
     );
   }
 
@@ -393,12 +412,34 @@ class TCSectionStyle {
   /// The family headings render in, one of [displayFonts].
   final String displayFont;
 
+  /// How far panels, controls and rows round their corners, in logical
+  /// pixels. Zero is the stock hard corner, and every widget reading this
+  /// treats zero as "leave my stock shape alone" -- see theme/shape.dart.
+  final double cornerRadius;
+
+  /// The shape avatars and server tiles are cut to, one of [avatarShapes].
+  final String avatarShape;
+
+  /// How an emphasis panel's outline is cut, one of [panelEdges]: the
+  /// angular notch, or a plain rectangle rounded by [cornerRadius].
+  final String panelEdge;
+
   static const String keyTextScale = 'textScale';
   static const String keyGlow = 'glow';
   static const String keyDisplayFont = 'displayFont';
+  static const String keyCornerRadius = 'cornerRadius';
+  static const String keyAvatarShape = 'avatarShape';
+  static const String keyPanelEdge = 'panelEdge';
 
   /// Every style key a theme document may carry, in declaration order.
-  static const List<String> styleKeys = [keyTextScale, keyGlow, keyDisplayFont];
+  static const List<String> styleKeys = [
+    keyTextScale,
+    keyGlow,
+    keyDisplayFont,
+    keyCornerRadius,
+    keyAvatarShape,
+    keyPanelEdge,
+  ];
 
   static const double minTextScale = 0.7;
   static const double maxTextScale = 1.5;
@@ -406,8 +447,27 @@ class TCSectionStyle {
   static const bool defaultGlow = true;
   static const String defaultDisplayFont = TCType.fontDisplay;
 
+  static const double minCornerRadius = 0.0;
+  static const double maxCornerRadius = 24.0;
+  static const double defaultCornerRadius = 0.0;
+
+  static const String avatarSquare = 'square';
+  static const String avatarRounded = 'rounded';
+  static const String avatarCircle = 'circle';
+  static const String defaultAvatarShape = avatarSquare;
+
+  static const String panelNotch = 'notch';
+  static const String panelPlain = 'plain';
+  static const String defaultPanelEdge = panelNotch;
+
   /// The families bundled with the app, in the order the editor offers them.
   static const List<String> displayFonts = [TCType.fontDisplay, TCType.fontMono];
+
+  /// The avatar shapes, in the order the editor offers them.
+  static const List<String> avatarShapes = [avatarSquare, avatarRounded, avatarCircle];
+
+  /// The panel edges, in the order the editor offers them.
+  static const List<String> panelEdges = [panelNotch, panelPlain];
 
   /// The stock style: every key at its default.
   static final TCSectionStyle stock = TCSectionStyle();
@@ -426,6 +486,15 @@ class TCSectionStyle {
         return raw is bool ? raw : null;
       case keyDisplayFont:
         return raw is String && displayFonts.contains(raw) ? raw : null;
+      case keyCornerRadius:
+        if (raw is! num) return null;
+        final radius = raw.toDouble();
+        if (!radius.isFinite) return null;
+        return radius.clamp(minCornerRadius, maxCornerRadius).toDouble();
+      case keyAvatarShape:
+        return raw is String && avatarShapes.contains(raw) ? raw : null;
+      case keyPanelEdge:
+        return raw is String && panelEdges.contains(raw) ? raw : null;
     }
     return null;
   }
@@ -438,6 +507,9 @@ class TCSectionStyle {
         keyTextScale: textScale,
         keyGlow: glow,
         keyDisplayFont: displayFont,
+        keyCornerRadius: cornerRadius,
+        keyAvatarShape: avatarShape,
+        keyPanelEdge: panelEdge,
       };
 
   @override
@@ -446,14 +518,19 @@ class TCSectionStyle {
       other is TCSectionStyle &&
           other.textScale == textScale &&
           other.glow == glow &&
-          other.displayFont == displayFont;
+          other.displayFont == displayFont &&
+          other.cornerRadius == cornerRadius &&
+          other.avatarShape == avatarShape &&
+          other.panelEdge == panelEdge;
 
   @override
-  int get hashCode => Object.hash(textScale, glow, displayFont);
+  int get hashCode =>
+      Object.hash(textScale, glow, displayFont, cornerRadius, avatarShape, panelEdge);
 
   @override
-  String toString() =>
-      'TCSectionStyle(textScale: $textScale, glow: $glow, displayFont: $displayFont)';
+  String toString() => 'TCSectionStyle(textScale: $textScale, glow: $glow, '
+      'displayFont: $displayFont, cornerRadius: $cornerRadius, '
+      'avatarShape: $avatarShape, panelEdge: $panelEdge)';
 }
 
 /// A theme document: base overrides plus per-section overrides, for colors

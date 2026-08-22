@@ -563,7 +563,7 @@ class ApiClient {
   /// The channel's overall mesh link quality, computed over its subscribers.
   Future<ChannelLinkQuality> getChannelLinkQuality(String channelHashHex) async {
     final res = await _http.get(_u('/channels/$channelHashHex/link_quality'));
-    return ChannelLinkQuality.fromJson(_decode(res) as Map<String, dynamic>);
+    return ChannelLinkQuality.fromRoster(_decode(res) as List<dynamic>);
   }
 
   /// Leaves a server: drops the membership so the server disappears from

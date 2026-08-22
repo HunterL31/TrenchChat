@@ -101,6 +101,21 @@ class TestOpenJoinPresence:
         for e in entries:
             assert isinstance(e["quality"], int)
             assert isinstance(e["quality_label"], str)
+            # The client scores the roster and shows the winning peer's hop
+            # count, so every entry carries one (null when there is no path).
+            assert "hops" in e
+
+    def test_link_quality_leaves_the_local_identity_out(self, client, backend):
+        backend.storage.get_channel.return_value = {
+            "permissions": permissions_to_json(PRESET_OPEN)}
+        backend.subscription_mgr.get_subscribers.return_value = {
+            PEER_A, backend.identity.hash_hex}
+
+        res = client.get(f"/channels/{CH}/link_quality", headers=AUTH)
+        assert res.status_code == 200
+        # A link to yourself always scores EXCELLENT; including it would pin
+        # the client's meter to full bars whatever the mesh is doing.
+        assert {e["identity_hash"] for e in res.json()} == {PEER_A}
 
 
 @needs_backend

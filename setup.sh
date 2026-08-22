@@ -82,7 +82,14 @@ log "installing Python dependencies..."
 "$REPO_ROOT/.venv/bin/pip" install -r "$REPO_ROOT/devtools/testenv/requirements.txt" --quiet
 
 # --- system libraries for voice (libopus + PortAudio) ---
-have_lib() { ldconfig -p 2>/dev/null | grep -q "$1"; }
+# Captured once rather than piped into grep: `grep -q` exits on its first
+# match and SIGPIPEs ldconfig, which `set -o pipefail` reads as "missing" --
+# so a host that already has the libraries still gets offered the install.
+have_lib() {
+    local cache
+    cache="$(ldconfig -p 2>/dev/null || true)"
+    case "$cache" in *"$1"*) return 0 ;; *) return 1 ;; esac
+}
 
 voice_libs_present() { have_lib libopus && have_lib libportaudio; }
 

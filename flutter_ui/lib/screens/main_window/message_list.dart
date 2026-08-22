@@ -10,6 +10,7 @@ import '../../format.dart';
 import '../../grouping.dart';
 import '../../name_color.dart';
 import '../../theme/section_theme.dart';
+import '../../theme/shape.dart';
 import '../../theme/theme_spec.dart';
 import '../../theme/tokens.dart';
 import '../../widgets/avatar.dart';
@@ -18,6 +19,7 @@ import '../../widgets/emoji_text.dart';
 import '../../widgets/tc_button.dart';
 import '../../widgets/tc_context_menu.dart';
 import '../../widgets/tc_icon.dart';
+import '../../widgets/tc_tooltip.dart';
 import '../../widgets/theme_share.dart';
 
 sealed class _Row {}
@@ -363,6 +365,7 @@ class _NewMessagesPill extends StatelessWidget {
           decoration: BoxDecoration(
             color: tc.accentPrimary,
             border: Border.all(color: tc.borderAccent),
+            borderRadius: tcCorners(context, scale: 1.5),
           ),
           child: Text(
             '↓ NEW MESSAGES',
@@ -833,6 +836,8 @@ class _DeliveryIndicator extends StatelessWidget {
     return Padding(
       padding: const EdgeInsets.only(left: 8, top: 4),
       child: Tooltip(
+        decoration: tcTooltipDecoration(context),
+        textStyle: tcTooltipTextStyle(context),
         message: tip,
         child: Text(
           glyph,

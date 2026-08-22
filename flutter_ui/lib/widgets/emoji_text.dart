@@ -10,6 +10,7 @@ import 'package:flutter/material.dart';
 
 import '../api/models/emoji.dart';
 import 'peer_image.dart';
+import 'tc_tooltip.dart';
 
 final RegExp emojiTokenRe = RegExp(r':([a-zA-Z0-9_-]+)(?:@([0-9a-fA-F]{64}))?:');
 
@@ -119,9 +120,15 @@ List<InlineSpan> emojiSpans(
     }
     spans.add(WidgetSpan(
       alignment: PlaceholderAlignment.middle,
-      child: Tooltip(
-        message: ':${emoji.name}:',
-        child: peerImage(emoji.imageBytes, size: _inlineEmojiSize),
+      // A span has no context of its own; the Builder borrows the one the
+      // surrounding text renders under, so the tip can read the section.
+      child: Builder(
+        builder: (context) => Tooltip(
+          decoration: tcTooltipDecoration(context),
+          textStyle: tcTooltipTextStyle(context),
+          message: ':${emoji.name}:',
+          child: peerImage(emoji.imageBytes, size: _inlineEmojiSize),
+        ),
       ),
     ));
     last = m.end;

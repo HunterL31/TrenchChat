@@ -4,6 +4,7 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 
 import '../theme/section_theme.dart';
+import '../theme/shape.dart';
 import '../theme/tokens.dart';
 import 'peer_image.dart';
 import 'status_dot.dart';
@@ -27,6 +28,7 @@ class Avatar extends StatelessWidget {
     final tc = SectionTheme.of(context);
     final trimmed = name.trim();
     final initial = trimmed.isEmpty ? '?' : trimmed[0].toUpperCase();
+    final corners = tcAvatarCorners(context, size, stock: TCSpace.radiusSm)!;
 
     return SizedBox(
       width: size,
@@ -36,7 +38,7 @@ class Avatar extends StatelessWidget {
         children: [
           if (imageBytes != null)
             ClipRRect(
-              borderRadius: BorderRadius.circular(TCSpace.radiusSm),
+              borderRadius: corners,
               child: peerImage(imageBytes!, size: size, fit: BoxFit.cover),
             )
           else
@@ -47,7 +49,7 @@ class Avatar extends StatelessWidget {
               decoration: BoxDecoration(
                 color: tc.bgInset,
                 border: Border.all(color: tc.borderDefault),
-                borderRadius: BorderRadius.circular(TCSpace.radiusSm),
+                borderRadius: corners,
               ),
               child: Text(
                 initial,

@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 
 import '../theme/effects.dart';
 import '../theme/section_theme.dart';
+import '../theme/shape.dart';
 import '../theme/tokens.dart';
 import 'peer_image.dart';
 
@@ -57,7 +58,7 @@ class _ReactionChipState extends State<ReactionChip> {
           decoration: BoxDecoration(
             color: bg,
             border: Border.all(color: _hover ? tc.accentPrimary : border),
-            borderRadius: BorderRadius.circular(TCSpace.radiusSm),
+            borderRadius: tcCorners(context, stock: TCSpace.radiusSm, scale: 0.5),
           ),
           child: Row(
             mainAxisSize: MainAxisSize.min,

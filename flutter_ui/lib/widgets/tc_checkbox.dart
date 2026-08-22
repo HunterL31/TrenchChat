@@ -1,9 +1,11 @@
-// Square checkbox in the terminal design language: hard corners, hairline
-// border, solid green inner square when checked. No Material ripple.
+// Checkbox in the terminal design language: hairline border, solid green
+// inner square when checked, hard corners until a theme rounds them. No
+// Material ripple.
 import 'package:flutter/material.dart';
 
 import '../theme/effects.dart';
 import '../theme/section_theme.dart';
+import '../theme/shape.dart';
 import '../theme/tokens.dart';
 
 class TcCheckbox extends StatefulWidget {
@@ -42,9 +44,15 @@ class _TcCheckboxState extends State<TcCheckbox> {
               ? tc.borderAccent
               : (_hover && !disabled ? tc.borderStrong : tc.borderDefault),
         ),
+        borderRadius: tcCorners(context, scale: 0.3),
       ),
       child: widget.value
-          ? Container(color: disabled ? tc.textDisabled : tc.accentPrimary)
+          ? Container(
+              decoration: BoxDecoration(
+                color: disabled ? tc.textDisabled : tc.accentPrimary,
+                borderRadius: tcCorners(context, scale: 0.2),
+              ),
+            )
           : null,
     );
 
@@ -134,6 +142,7 @@ class _ChoiceChip extends StatelessWidget {
             border: Border.all(
               color: selected ? tc.borderAccent : tc.borderDefault,
             ),
+            borderRadius: tcCorners(context, scale: 0.5),
           ),
           child: Text(
             label,

@@ -10,6 +10,7 @@
 import 'package:flutter/material.dart';
 
 import '../theme/section_theme.dart';
+import '../theme/shape.dart';
 import '../theme/theme_spec.dart';
 import '../theme/tokens.dart';
 import 'tc_button.dart';
@@ -131,6 +132,7 @@ class _TcColorFieldState extends State<TcColorField> {
                   decoration: BoxDecoration(
                     color: widget.color,
                     border: Border.all(color: tc.borderStrong),
+                    borderRadius: tcCorners(context, scale: 0.25),
                   ),
                 ),
               ),
@@ -139,6 +141,8 @@ class _TcColorFieldState extends State<TcColorField> {
           const SizedBox(width: 8),
           Expanded(
             child: Tooltip(
+              decoration: tcTooltipDecoration(context),
+              textStyle: tcTooltipTextStyle(context),
               message: widget.label,
               child: Text(
                 widget.displayLabel ?? widget.label,
@@ -157,6 +161,7 @@ class _TcColorFieldState extends State<TcColorField> {
             decoration: BoxDecoration(
               color: tc.bgInset,
               border: Border.all(color: tc.borderDefault),
+              borderRadius: tcCorners(context, scale: 0.5),
             ),
             padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
             child: TextField(

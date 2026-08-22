@@ -12,6 +12,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../../theme/section_theme.dart';
+import '../../theme/shape.dart';
 import '../../theme/theme_spec.dart';
 import '../../theme/tokens.dart';
 import '../../widgets/emoji_text.dart';
@@ -357,6 +358,58 @@ class _ComposeBarState extends State<ComposeBar> {
   @override
   Widget build(BuildContext context) {
     final tc = SectionTheme.of(context);
+    // A rounded theme puts the composer in a filled field of its own, the
+    // way every rounded chat client does; a square one keeps the bare row.
+    final rounded = tcIsRounded(context);
+    final row = Row(
+      crossAxisAlignment: CrossAxisAlignment.center,
+      children: [
+        TcIcon(TcIcons.plus, size: 15, color: tc.textTertiary),
+        const SizedBox(width: 10),
+        Expanded(
+          child: TextField(
+            controller: _controller,
+            focusNode: _focusNode,
+            enabled: widget.enabled,
+            minLines: 1,
+            maxLines: 6,
+            style: TextStyle(fontSize: TCType.textBodyMd, color: tc.textPrimary),
+            decoration: InputDecoration(
+              isDense: true,
+              border: InputBorder.none,
+              hintText: 'Message #${widget.channelName}…',
+              hintStyle: TextStyle(fontSize: TCType.textBodyMd, color: tc.textTertiary),
+            ),
+          ),
+        ),
+        const SizedBox(width: 10),
+        MouseRegion(
+          cursor:
+              widget.pickEmoji == null ? SystemMouseCursors.basic : SystemMouseCursors.click,
+          child: GestureDetector(
+            onTap: widget.pickEmoji == null ? null : _insertEmoji,
+            child: TcIcon(TcIcons.emoji, size: 15, color: tc.textTertiary),
+          ),
+        ),
+        const SizedBox(width: 10),
+        if (widget.compact)
+          TcIconButton(
+            icon: TcIcons.send,
+            tooltip: 'Send',
+            size: 30,
+            onPressed: widget.enabled ? _submit : null,
+          )
+        else
+          Text(
+            'ENTER TO SEND · SHIFT+ENTER NEWLINE',
+            style: TextStyle(
+              fontSize: TCType.textMicro,
+              color: tc.textTertiary,
+              letterSpacing: TCType.letterSpacingFor(TCType.textMicro, TCType.trackingWide),
+            ),
+          ),
+      ],
+    );
     return Container(
       decoration: BoxDecoration(
         color: tc.bgSurface,
@@ -368,56 +421,14 @@ class _ComposeBarState extends State<ComposeBar> {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           if (widget.replyPreview != null) _replyBanner(tc),
-          Row(
-        crossAxisAlignment: CrossAxisAlignment.center,
-        children: [
-          TcIcon(TcIcons.plus, size: 15, color: tc.textTertiary),
-          const SizedBox(width: 10),
-          Expanded(
-            child: TextField(
-              controller: _controller,
-              focusNode: _focusNode,
-              enabled: widget.enabled,
-              minLines: 1,
-              maxLines: 6,
-              style: TextStyle(fontSize: TCType.textBodyMd, color: tc.textPrimary),
-              decoration: InputDecoration(
-                isDense: true,
-                border: InputBorder.none,
-                hintText: 'Message #${widget.channelName}…',
-                hintStyle: TextStyle(fontSize: TCType.textBodyMd, color: tc.textTertiary),
-              ),
-            ),
-          ),
-          const SizedBox(width: 10),
-          MouseRegion(
-            cursor: widget.pickEmoji == null
-                ? SystemMouseCursors.basic
-                : SystemMouseCursors.click,
-            child: GestureDetector(
-              onTap: widget.pickEmoji == null ? null : _insertEmoji,
-              child: TcIcon(TcIcons.emoji, size: 15, color: tc.textTertiary),
-            ),
-          ),
-          const SizedBox(width: 10),
-          if (widget.compact)
-            TcIconButton(
-              icon: TcIcons.send,
-              tooltip: 'Send',
-              size: 30,
-              onPressed: widget.enabled ? _submit : null,
+          if (rounded)
+            Container(
+              decoration: BoxDecoration(color: tc.bgInset, borderRadius: tcCorners(context)),
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
+              child: row,
             )
           else
-            Text(
-              'ENTER TO SEND · SHIFT+ENTER NEWLINE',
-              style: TextStyle(
-                fontSize: TCType.textMicro,
-                color: tc.textTertiary,
-                letterSpacing: TCType.letterSpacingFor(TCType.textMicro, TCType.trackingWide),
-              ),
-            ),
-        ],
-      ),
+            row,
         ],
       ),
     );

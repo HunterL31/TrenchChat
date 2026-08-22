@@ -113,7 +113,7 @@ void main() {
     backend.routes['GET /channels/$_channelHash/members'] = <Object>[];
     backend.routes['GET /channels/$_channelHash/messages'] = <Object>[];
     backend.routes['GET /channels/$_channelHash/presence'] = <Object>[];
-    backend.routes['GET /channels/$_channelHash/link_quality'] = {'level': 'unknown'};
+    backend.routes['GET /channels/$_channelHash/link_quality'] = <Object>[];
     backend.routes['GET /channels/$_channelHash/my_permissions'] = {
       'kick': false,
       'manage_roles': false,

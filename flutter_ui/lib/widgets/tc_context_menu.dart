@@ -12,6 +12,7 @@ import 'package:flutter/material.dart';
 
 import '../theme/effects.dart';
 import '../theme/section_theme.dart';
+import '../theme/shape.dart';
 import '../theme/tokens.dart';
 
 class TcContextMenuItem {
@@ -126,6 +127,7 @@ class _TcContextMenuPanel extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final tc = SectionTheme.of(context);
+    final corners = tcCorners(context, scale: 0.5);
     // A Stack child positioned by left/top alone is laid out unbounded, so the
     // stretched rows below need an explicit width to resolve against.
     return Material(
@@ -134,9 +136,11 @@ class _TcContextMenuPanel extends StatelessWidget {
         constraints: const BoxConstraints(minWidth: 160, maxWidth: 320),
         child: IntrinsicWidth(
           child: Container(
+            clipBehavior: corners == null ? Clip.none : Clip.antiAlias,
             decoration: BoxDecoration(
               color: tc.bgSurfaceRaised,
               border: Border.all(color: tc.borderDefault),
+              borderRadius: corners,
               boxShadow: TCEffects.shadowModal,
             ),
             padding: const EdgeInsets.symmetric(vertical: 4),

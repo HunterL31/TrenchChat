@@ -1,6 +1,8 @@
 // The per-section theming foundation: parsing a theme document written by
 // anyone (including a newer client), resolving it per section, and reading
 // the result out of the tree.
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -444,6 +446,73 @@ void main() {
       expect(spec.clearBase().styles.keys, ['topBar']);
       expect(spec.clearBase().base, isEmpty);
       expect(spec.clearBase().clearSection(TCSection.topBar).isEmpty, isTrue);
+    });
+  });
+
+  group('shape styles', () {
+    test('an unset document resolves every section to the stock shape', () {
+      expect(TCSectionStyle.stock.cornerRadius, 0.0);
+      expect(TCSectionStyle.stock.avatarShape, 'square');
+      expect(TCSectionStyle.stock.panelEdge, 'notch');
+      for (final section in TCSection.values) {
+        expect(ThemeSpec.empty.resolveStyle(section).cornerRadius, 0.0);
+        expect(ThemeSpec.empty.resolveStyle(section).avatarShape, 'square');
+        expect(ThemeSpec.empty.resolveStyle(section).panelEdge, 'notch');
+      }
+    });
+
+    test('a shape document survives parse -> serialize -> parse', () {
+      final spec = ThemeSpec(styles: {
+        ThemeSpec.baseStyleScope: {
+          'cornerRadius': 8.0,
+          'avatarShape': 'circle',
+          'panelEdge': 'plain',
+        },
+        TCSection.serverRail.wireId: {'cornerRadius': 12.0},
+      });
+
+      final round = ThemeSpec.fromJson(jsonDecode(jsonEncode(spec.toJson())));
+      final rail = round.resolveStyle(TCSection.serverRail);
+      expect(rail.cornerRadius, 12.0);
+      expect(rail.avatarShape, 'circle', reason: 'base still applies');
+      expect(rail.panelEdge, 'plain');
+      expect(round.resolveStyle(TCSection.content).cornerRadius, 8.0);
+    });
+
+    test('a corner radius out of range is clamped', () {
+      final spec = ThemeSpec.fromJson(const {
+        'styles': {
+          'base': {'cornerRadius': 999},
+          'content': {'cornerRadius': -4},
+        },
+      });
+      expect(spec.resolveBaseStyle().cornerRadius, TCSectionStyle.maxCornerRadius);
+      expect(spec.resolveStyle(TCSection.content).cornerRadius,
+          TCSectionStyle.minCornerRadius);
+    });
+
+    test('an unknown avatar shape or panel edge is dropped', () {
+      final spec = ThemeSpec.fromJson(const {
+        'styles': {
+          'base': {
+            'avatarShape': 'hexagon',
+            'panelEdge': 'scalloped',
+            'cornerRadius': 'round-ish',
+          },
+        },
+      });
+      expect(spec.isEmpty, isTrue);
+      expect(spec.resolveBaseStyle(), TCSectionStyle.stock);
+    });
+
+    test('shape keys take part in equality', () {
+      final square = ThemeSpec.empty.withStyleOverride(null, 'cornerRadius', 8.0);
+      final round = ThemeSpec.empty.withStyleOverride(null, 'cornerRadius', 8.0);
+      expect(square, round);
+      expect(square, isNot(ThemeSpec.empty.withStyleOverride(null, 'cornerRadius', 4.0)));
+      expect(TCSectionStyle(cornerRadius: 8), isNot(TCSectionStyle()));
+      expect(TCSectionStyle(avatarShape: 'circle'), isNot(TCSectionStyle()));
+      expect(TCSectionStyle(panelEdge: 'plain'), isNot(TCSectionStyle()));
     });
   });
 

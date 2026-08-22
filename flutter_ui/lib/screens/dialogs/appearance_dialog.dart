@@ -1,5 +1,6 @@
 // Appearance editor: the whole per-section theme, one scope at a time --
-// the style block (text size, glow, display font) first, then every color.
+// the style block (text size, glow, display font), then the shape block
+// (corners, avatars, panel edge), then every color.
 //
 // Scope is either Base -- the overrides every section inherits -- or one of
 // the six sections, whose overrides win over base for that region only. The
@@ -61,6 +62,27 @@ const Map<String, String> appearanceDisplayFontLabels = {
   'IBM Plex Mono': 'PLEX MONO',
 };
 
+/// The corner radii the editor offers, keyed by the value they store.
+const Map<String, String> appearanceCornerOptions = {
+  '0.0': 'SQUARE',
+  '4.0': 'SOFT',
+  '8.0': 'ROUND',
+  '14.0': 'PILL',
+};
+
+/// Label per avatar shape, in the order the editor offers them.
+const Map<String, String> appearanceAvatarShapeLabels = {
+  TCSectionStyle.avatarSquare: 'SQUARE',
+  TCSectionStyle.avatarRounded: 'ROUNDED',
+  TCSectionStyle.avatarCircle: 'CIRCLE',
+};
+
+/// Label per panel edge, in the order the editor offers them.
+const Map<String, String> appearancePanelEdgeLabels = {
+  TCSectionStyle.panelNotch: 'NOTCH',
+  TCSectionStyle.panelPlain: 'PLAIN',
+};
+
 /// The option key standing for "this scope sets nothing here".
 const String _inheritKey = '';
 
@@ -72,6 +94,15 @@ const Key appearanceSaveAsFieldKey = Key('appearance-save-as');
 
 /// The preset chip row; its selected value is the preset the draft matches.
 const Key appearancePresetRowKey = Key('appearance-presets');
+
+/// The STYLE block's chip rows.
+const Key appearanceTextScaleRowKey = Key('appearance-text-scale');
+const Key appearanceDisplayFontRowKey = Key('appearance-display-font');
+
+/// The SHAPE block's chip rows.
+const Key appearanceCornerRowKey = Key('appearance-corners');
+const Key appearanceAvatarShapeRowKey = Key('appearance-avatar-shape');
+const Key appearancePanelEdgeRowKey = Key('appearance-panel-edge');
 
 /// Keys of one saved theme's row controls. The row's APPLY carries the same
 /// label as the dialog's own, so these are how a caller tells them apart.
@@ -203,6 +234,27 @@ class _AppearanceDialogContentState extends State<_AppearanceDialogContent> {
 
   String get _selectedDisplayFont {
     final own = _ownStyles[TCSectionStyle.keyDisplayFont];
+    return own is String ? own : _inheritKey;
+  }
+
+  /// The corner option this scope selects, on the same terms as
+  /// [_selectedTextScale].
+  String get _selectedCornerRadius {
+    final own = _ownStyles[TCSectionStyle.keyCornerRadius];
+    if (own is! num) return _inheritKey;
+    for (final key in appearanceCornerOptions.keys) {
+      if (double.parse(key) == own.toDouble()) return key;
+    }
+    return 'custom';
+  }
+
+  String get _selectedAvatarShape {
+    final own = _ownStyles[TCSectionStyle.keyAvatarShape];
+    return own is String ? own : _inheritKey;
+  }
+
+  String get _selectedPanelEdge {
+    final own = _ownStyles[TCSectionStyle.keyPanelEdge];
     return own is String ? own : _inheritKey;
   }
 
@@ -493,7 +545,6 @@ class _AppearanceDialogContentState extends State<_AppearanceDialogContent> {
 
   Widget _buildContent(BuildContext context) {
     final tc = SectionTheme.of(context);
-    final resolved = _resolved.asMap();
     final own = _ownOverrides;
     final scopeLabel = appearanceScopeLabels[_scope] ?? _scope;
 
@@ -595,11 +646,46 @@ class _AppearanceDialogContentState extends State<_AppearanceDialogContent> {
         const SizedBox(height: 12),
         Container(height: 1, color: tc.borderSubtle),
         const SizedBox(height: 12),
+        _editorBody(tc),
+        const SizedBox(height: 12),
+        Container(height: 1, color: tc.borderSubtle),
+        const SizedBox(height: 12),
+        Row(
+          children: [
+            TcGhostButton(
+              label: _scope == 'base' ? 'RESET BASE' : 'RESET SECTION',
+              onPressed: own.isEmpty && _ownStyles.isEmpty ? null : _resetScope,
+            ),
+            const SizedBox(width: 6),
+            TcGhostButton(
+              label: 'RESET ALL',
+              onPressed: _hasResettableOverrides ? _resetAll : null,
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+
+  /// STYLE, SHAPE and every color in one scrolling region. Keeping them
+  /// inside a bounded box is what stops the modal growing past the viewport
+  /// as style keys are added -- it already overflowed a laptop screen with
+  /// the colors alone.
+  Widget _editorBody(TCSectionColors tc) {
+    final resolved = _resolved.asMap();
+    final own = _ownOverrides;
+    return Container(
+      constraints: BoxConstraints(maxHeight: _editorBodyHeight(context)),
+      child: SingleChildScrollView(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
         _caption(tc, 'STYLE'),
         const SizedBox(height: 8),
         _styleLabel(tc, 'TEXT SIZE'),
         const SizedBox(height: 4),
         TcChoiceRow(
+          key: appearanceTextScaleRowKey,
           options: {_inheritKey: _inheritLabel, ...appearanceTextScaleOptions},
           value: _selectedTextScale,
           onSelected: (v) => _setStyle(
@@ -630,6 +716,7 @@ class _AppearanceDialogContentState extends State<_AppearanceDialogContent> {
         _styleLabel(tc, 'DISPLAY FONT'),
         const SizedBox(height: 4),
         TcChoiceRow(
+          key: appearanceDisplayFontRowKey,
           options: {_inheritKey: _inheritLabel, ...appearanceDisplayFontLabels},
           value: _selectedDisplayFont,
           onSelected: (v) => _setStyle(
@@ -640,43 +727,73 @@ class _AppearanceDialogContentState extends State<_AppearanceDialogContent> {
         const SizedBox(height: 12),
         Container(height: 1, color: tc.borderSubtle),
         const SizedBox(height: 12),
-        Container(
-          constraints: const BoxConstraints(maxHeight: 300),
-          child: SingleChildScrollView(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                for (final key in TCSectionColors.tokenKeys)
-                  TcColorField(
-                    key: ValueKey('$_scope/$key'),
-                    label: key,
-                    displayLabel: tokenLabels[key],
-                    color: resolved[key]!,
-                    overridden: own.containsKey(key),
-                    onChanged: (color) => _setToken(key, color),
-                    onClear: () => _setToken(key, null),
-                  ),
-              ],
-            ),
+        _caption(tc, 'SHAPE'),
+        const SizedBox(height: 8),
+        _styleLabel(tc, 'CORNERS'),
+        const SizedBox(height: 4),
+        TcChoiceRow(
+          key: appearanceCornerRowKey,
+          options: {_inheritKey: _inheritLabel, ...appearanceCornerOptions},
+          value: _selectedCornerRadius,
+          onSelected: (v) => _setStyle(
+            TCSectionStyle.keyCornerRadius,
+            v == _inheritKey ? null : double.parse(v),
+          ),
+        ),
+        const SizedBox(height: 10),
+        _styleLabel(tc, 'AVATARS'),
+        const SizedBox(height: 4),
+        TcChoiceRow(
+          key: appearanceAvatarShapeRowKey,
+          options: {_inheritKey: _inheritLabel, ...appearanceAvatarShapeLabels},
+          value: _selectedAvatarShape,
+          onSelected: (v) => _setStyle(
+            TCSectionStyle.keyAvatarShape,
+            v == _inheritKey ? null : v,
+          ),
+        ),
+        const SizedBox(height: 10),
+        _styleLabel(tc, 'PANEL EDGE'),
+        const SizedBox(height: 4),
+        TcChoiceRow(
+          key: appearancePanelEdgeRowKey,
+          options: {_inheritKey: _inheritLabel, ...appearancePanelEdgeLabels},
+          value: _selectedPanelEdge,
+          onSelected: (v) => _setStyle(
+            TCSectionStyle.keyPanelEdge,
+            v == _inheritKey ? null : v,
           ),
         ),
         const SizedBox(height: 12),
         Container(height: 1, color: tc.borderSubtle),
         const SizedBox(height: 12),
-        Row(
-          children: [
-            TcGhostButton(
-              label: _scope == 'base' ? 'RESET BASE' : 'RESET SECTION',
-              onPressed: own.isEmpty && _ownStyles.isEmpty ? null : _resetScope,
-            ),
-            const SizedBox(width: 6),
-            TcGhostButton(
-              label: 'RESET ALL',
-              onPressed: _hasResettableOverrides ? _resetAll : null,
-            ),
+        for (final key in TCSectionColors.tokenKeys)
+          TcColorField(
+            key: ValueKey('$_scope/$key'),
+            label: key,
+            displayLabel: tokenLabels[key],
+            color: resolved[key]!,
+            overridden: own.containsKey(key),
+            onChanged: (color) => _setToken(key, color),
+            onClear: () => _setToken(key, null),
+          ),
           ],
         ),
-      ],
+      ),
     );
   }
 }
+
+/// How tall the editor's scrolling body may be: whatever the viewport has
+/// left once the modal's fixed chrome -- title, presets, library, scope
+/// picker, reset row, actions -- has taken its share.
+double _editorBodyHeight(BuildContext context) =>
+    (MediaQuery.sizeOf(context).height - _editorChromeHeight)
+        .clamp(_minEditorBodyHeight, _maxEditorBodyHeight);
+
+/// Measured from the rendered modal: everything outside the scrolling body,
+/// with room for the rows that only appear sometimes -- an error, a library
+/// notice, the overwrite warning.
+const double _editorChromeHeight = 680;
+const double _minEditorBodyHeight = 200;
+const double _maxEditorBodyHeight = 900;

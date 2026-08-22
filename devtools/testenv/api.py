@@ -1030,9 +1030,10 @@ def create_app(backend: Backend, *, token: str | None = None,
         # owner last broadcast, so the two views can legitimately differ.
         return sorted(backend.subscription_mgr.get_subscribers(channel_hash))
 
-    def _peer_link_quality(peer_hex: str) -> LinkQuality:
+    def _peer_link_quality(peer_hex: str) -> tuple[LinkQuality, int | None]:
+        """This peer's link quality and the hop count it was scored from."""
         if peer_hex == backend.identity.hash_hex:
-            return LinkQuality.EXCELLENT
+            return LinkQuality.EXCELLENT, 0
         try:
             delivery = RNS.Destination.hash(bytes.fromhex(peer_hex), "lxmf", "delivery")
             for entry in backend.rns.get_path_table():
@@ -1040,10 +1041,11 @@ def create_app(backend: Backend, *, token: str | None = None,
                 if isinstance(dest_h, bytes) and dest_h == delivery:
                     via = entry.get("via")
                     via_hex = via.hex() if isinstance(via, bytes) else None
-                    return score_path(delivery.hex(), entry.get("hops", 0), via_hex)
+                    hops = entry.get("hops", 0)
+                    return score_path(delivery.hex(), hops, via_hex), hops
         except Exception:
             pass
-        return LinkQuality.UNKNOWN
+        return LinkQuality.UNKNOWN, None
 
     @app.get("/channels/{channel_hash}/presence")
     def channel_presence(channel_hash: str):
@@ -1064,10 +1066,18 @@ def create_app(backend: Backend, *, token: str | None = None,
 
     @app.get("/channels/{channel_hash}/link_quality")
     def channel_link_quality(channel_hash: str):
+        """This node's link quality to each other member of the channel.
+
+        The local identity is left out: a link to yourself always scores
+        EXCELLENT, and a reading that includes it says nothing about how
+        well this node reaches the channel.
+        """
         entries = []
         for peer_hex in actions.channel_roster_hexes(
                 backend.storage, backend.subscription_mgr, channel_hash):
-            quality = _peer_link_quality(peer_hex)
+            if peer_hex == backend.identity.hash_hex:
+                continue
+            quality, hops = _peer_link_quality(peer_hex)
             entries.append({
                 "identity_hash": peer_hex,
                 "display_name": resolve_display_name(
@@ -1075,6 +1085,7 @@ def create_app(backend: Backend, *, token: str | None = None,
                     backend.config),
                 "quality": int(quality),
                 "quality_label": quality_label(quality),
+                "hops": hops,
             })
         return entries
 

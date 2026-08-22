@@ -10,6 +10,7 @@ class DashedBorder extends StatelessWidget {
     this.dashWidth = 3,
     this.dashGap = 2,
     this.strokeWidth = 1,
+    this.borderRadius = BorderRadius.zero,
   });
 
   final Color color;
@@ -17,6 +18,10 @@ class DashedBorder extends StatelessWidget {
   final double dashWidth;
   final double dashGap;
   final double strokeWidth;
+
+  /// Rounds the dashed outline, so a themed tile's dashes follow the same
+  /// corners its filled neighbours do.
+  final BorderRadius borderRadius;
 
   @override
   Widget build(BuildContext context) {
@@ -26,6 +31,7 @@ class DashedBorder extends StatelessWidget {
         dashWidth: dashWidth,
         dashGap: dashGap,
         strokeWidth: strokeWidth,
+        borderRadius: borderRadius,
       ),
       child: child,
     );
@@ -38,12 +44,14 @@ class _DashedBorderPainter extends CustomPainter {
     required this.dashWidth,
     required this.dashGap,
     required this.strokeWidth,
+    required this.borderRadius,
   });
 
   final Color color;
   final double dashWidth;
   final double dashGap;
   final double strokeWidth;
+  final BorderRadius borderRadius;
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -51,7 +59,13 @@ class _DashedBorderPainter extends CustomPainter {
       ..color = color
       ..style = PaintingStyle.stroke
       ..strokeWidth = strokeWidth;
-    final path = Path()..addRect(Rect.fromLTWH(0, 0, size.width, size.height));
+    final rect = Rect.fromLTWH(0, 0, size.width, size.height);
+    final path = Path();
+    if (borderRadius == BorderRadius.zero) {
+      path.addRect(rect);
+    } else {
+      path.addRRect(borderRadius.toRRect(rect));
+    }
     for (final metric in path.computeMetrics()) {
       double distance = 0;
       while (distance < metric.length) {
@@ -64,5 +78,5 @@ class _DashedBorderPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant _DashedBorderPainter oldDelegate) =>
-      oldDelegate.color != color;
+      oldDelegate.color != color || oldDelegate.borderRadius != borderRadius;
 }
