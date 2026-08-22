@@ -72,8 +72,7 @@ ensure_std_streams()
 
 _DEFAULT_PORT = 8810
 
-# Mirrors main.py's minute reannounce and main_window.py's startup sync delay.
-_REANNOUNCE_SECS = 60.0
+# Mirrors main.py's reannounce cadence and main_window.py's startup sync delay.
 _STARTUP_SYNC_DELAY_SECS = 3.0
 
 _DESKTOP_BINARIES = {
@@ -138,9 +137,11 @@ def main():
 
     # Same startup sequence as main.py: announce everything, pull from the
     # propagation node if one is configured, then keep reannouncing.
+    from trenchchat.network.router import REANNOUNCE_INTERVAL_SECS
+
     backend.announce()
     backend.router.sync_from_propagation_node()
-    backend.start_heartbeat(interval=_REANNOUNCE_SECS)
+    backend.start_heartbeat(interval=REANNOUNCE_INTERVAL_SECS)
     backend.start_presence_pruner()
     backend.start_voice_ticker()
     threading.Timer(_STARTUP_SYNC_DELAY_SECS, backend.sync_mgr.request_sync_all).start()

@@ -50,6 +50,14 @@ PATH_REQUEST_MAX_SOURCES = 256
 # actually holds; the per-source one only paces a single honest peer.
 PATH_REQUEST_GLOBAL_BURST = 60
 
+# How often every entrypoint re-announces (delivery + user + owned channels).
+# Transport nodes cap forwarded announces at 2% of interface bitrate and drop
+# repeats, so a fast heartbeat mostly burns first-hop airtime: at the old 60s
+# it cost ~41 kB/h idle (~8% duty cycle on 1.2 kbps LoRa) against Sideband's
+# 90-300 min and NomadNet's 6 h cadence. Reconnect catch-up does not depend on
+# it -- peer announces, inbound messages, and LinkWatcher all drive that.
+REANNOUNCE_INTERVAL_SECS = 900.0
+
 
 def delivery_hash_for_identity(identity_hash: bytes) -> bytes:
     """Return the LXMF delivery destination hash for an identity hash."""

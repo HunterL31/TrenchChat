@@ -1920,3 +1920,68 @@ class TestResponseByteBudget:
         kept, _ = _truncate_at_group_boundary(rows)
 
         assert len(kept) in (0, len(rows)), "a tied-timestamp group was split"
+
+
+# ---------------------------------------------------------------------------
+# Announce-driven sync cooldown
+# ---------------------------------------------------------------------------
+
+class TestAnnounceSyncCooldown:
+    def _shared_channel(self, peer_factory):
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+        ch_hash = alice.channel_mgr.create_channel("announce-cooldown", "", "public")
+        _seed_channel_on_peer(bob, ch_hash, "announce-cooldown",
+                              alice.identity.hash_hex)
+        bob.subscription_mgr._subscribers[ch_hash] = {alice.identity.hash_hex}
+        return alice, bob, ch_hash
+
+    def _spy_requests(self, peer):
+        seen = []
+        orig = peer.sync_mgr._send_sync_request
+
+        def spy(dest_hex, channel_hash_hex, since_ts, continuation=False):
+            seen.append((dest_hex, channel_hash_hex))
+            return orig(dest_hex, channel_hash_hex, since_ts, continuation)
+
+        peer.sync_mgr._send_sync_request = spy
+        return seen
+
+    def test_repeat_announce_within_cooldown_sends_one_request(self, peer_factory):
+        """Announces repeat on a heartbeat; only the first within the
+        cooldown may cost a sync request round trip."""
+        alice, bob, ch_hash = self._shared_channel(peer_factory)
+        seen = self._spy_requests(bob)
+
+        bob.sync_mgr.on_peer_appeared(alice.identity.hash_hex)
+        bob.sync_mgr.on_peer_appeared(alice.identity.hash_hex)
+
+        assert seen.count((alice.identity.hash_hex, ch_hash)) == 1, \
+            "a repeat announce within the cooldown re-triggered a sync request"
+
+    def test_announce_after_cooldown_sends_again(self, peer_factory, monkeypatch):
+        from trenchchat.core import sync as sync_module
+        monkeypatch.setattr(sync_module, "ANNOUNCE_SYNC_COOLDOWN_SECS", 0.2)
+
+        alice, bob, ch_hash = self._shared_channel(peer_factory)
+        seen = self._spy_requests(bob)
+
+        bob.sync_mgr.on_peer_appeared(alice.identity.hash_hex)
+        time.sleep(0.3)
+        bob.sync_mgr.on_peer_appeared(alice.identity.hash_hex)
+
+        assert seen.count((alice.identity.hash_hex, ch_hash)) == 2, \
+            "an announce after the cooldown elapsed did not send a fresh request"
+
+    def test_cooldown_is_per_peer(self, peer_factory):
+        """One peer's cooldown must not swallow another peer's first request."""
+        alice, bob, ch_hash = self._shared_channel(peer_factory)
+        carol = peer_factory("carol")
+        bob.subscription_mgr._subscribers[ch_hash].add(carol.identity.hash_hex)
+        seen = self._spy_requests(bob)
+
+        bob.sync_mgr.on_peer_appeared(alice.identity.hash_hex)
+        bob.sync_mgr.on_peer_appeared(carol.identity.hash_hex)
+
+        assert seen.count((alice.identity.hash_hex, ch_hash)) == 1
+        assert seen.count((carol.identity.hash_hex, ch_hash)) == 1

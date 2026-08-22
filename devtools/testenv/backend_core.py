@@ -457,10 +457,9 @@ class Backend:
         """
         Re-announce periodically until the link to the peer is confirmed
         (or timeout). Mirrors the natural delay a human has before their
-        first action in the GUI, during which the periodic 60s reannounce
-        timer would normally have had time to fire at least once; here we
-        deliberately shorten that interval since we don't want the smoke
-        test to take a full minute.
+        first action in the GUI, during which the periodic reannounce
+        timer would normally have had time to fire; here we deliberately
+        shorten that interval so the smoke test doesn't have to wait it out.
 
         Returns True once peer_hash_hex's path is known (or immediately if
         no peer_hash_hex is given -- just re-announces on a timer).

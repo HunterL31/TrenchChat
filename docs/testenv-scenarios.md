@@ -66,13 +66,16 @@ for a channel.
 Getting these wrong produces phantom failures.
 
 - **The testenv announces far more often than the real app.** `worker.py` — what
-  the orchestrator launches — runs the heartbeat at 10s; `main.py` re-announces
-  every 60s. (`backend_core.start_heartbeat` defaults to 1.5s, which only
+  the orchestrator launches — runs the heartbeat at 10s; the real entrypoints
+  re-announce every `REANNOUNCE_INTERVAL_SECS` (900s, `trenchchat/network/
+  router.py`). (`backend_core.start_heartbeat` defaults to 1.5s, which only
   `smoke_test.py` uses.) `PeerAnnounceHandler` fires `on_peer_appeared` on
   *every* announce, not just transitions, so anything piggybacking on a peer
-  announce — pending flush, sync request — happens ~6× faster here than in
-  production. Any scenario whose result depends on that trigger must record
-  time-to-converge, not just convergence, and be read against a 60s worst case.
+  announce — pending flush, sync request — happens ~90× faster here than in
+  production, and announce-driven sync requests are additionally spaced by
+  `ANNOUNCE_SYNC_COOLDOWN_SECS` (120s) per (channel, peer). Any scenario whose
+  result depends on that trigger must record time-to-converge, not just
+  convergence, and be read against a 15-minute worst case.
 - **Warm up before inviting.** `invite.py`'s `_send_raw` has no retry queue. If
   the path isn't resolved when the invite is sent, it is dropped silently. The
   harness resolves paths first (`Backend.warm_up`) before any invite step.
