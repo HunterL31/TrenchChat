@@ -101,6 +101,33 @@ class UpdateFriendRequest(BaseModel):
     note: str | None = None
 
 
+class NomadBrowseRequest(BaseModel):
+    url: str
+    current_node: str | None = None
+
+
+class NomadFetchRequest(BaseModel):
+    node_hash: str
+    path: str = "/page/index.mu"
+
+
+class NomadBookmarkRequest(BaseModel):
+    node_hash: str
+    path: str
+    label: str = ""
+
+
+class NomadBookmarkDeleteRequest(BaseModel):
+    # The path contains '/', so deletion takes a body rather than a URL segment.
+    node_hash: str
+    path: str
+
+
+class NomadHostingRequest(BaseModel):
+    enabled: bool | None = None
+    node_name: str | None = None
+
+
 class SendMessageRequest(BaseModel):
     content: str
     reply_to: str | None = None
@@ -547,9 +574,22 @@ def create_app(backend: Backend, *, token: str | None = None,
     backend.reaction_mgr.add_emoji_callback(_on_emoji_received)
     backend.sync_mgr.status.add_status_callback(_on_sync_status)
     backend.add_link_callback(_on_link_status)
+    def _on_nomad_node(node_hash_hex: str, display_name: str):
+        bus.emit("nomad_node", node_hash=node_hash_hex,
+                 display_name=display_name)
+
+    def _on_nomad_fetch(fetch_id: str, node_hash_hex: str, path: str,
+                        status: str, progress: float, reason):
+        # Page content deliberately travels over REST after the "done"
+        # event, not in the WS frame -- pages can be 512 KiB.
+        bus.emit("nomad_fetch", fetch_id=fetch_id, node_hash=node_hash_hex,
+                 path=path, status=status, progress=progress, reason=reason)
+
     backend.voice_mgr.add_roster_callback(_on_voice_roster)
     backend.voice_mgr.add_speaking_callback(_on_voice_speaking)
     backend.voice_mgr.add_session_callback(_on_voice_session)
+    backend.node_browser.add_node_callback(_on_nomad_node)
+    backend.node_browser.add_fetch_callback(_on_nomad_fetch)
 
     # --- identity ---
 
@@ -941,6 +981,109 @@ def create_app(backend: Backend, *, token: str | None = None,
     def remove_friend(identity_hash: str):
         backend.friends_mgr.remove_friend(identity_hash)
         return {"ok": True}
+
+    # --- nomad network page browsing ---
+
+    @app.get("/nomad/nodes")
+    def list_nomad_nodes():
+        return [
+            {
+                "node_hash": row["node_hash"],
+                "display_name": row["display_name"],
+                "first_seen": row["first_seen"],
+                "last_seen": row["last_seen"],
+            }
+            for row in backend.node_browser.known_nodes()
+        ]
+
+    @app.post("/nomad/browse")
+    def nomad_browse(req: NomadBrowseRequest):
+        result = actions.browse_nomad_url(
+            backend.node_browser, req.url, current_node_hex=req.current_node)
+        return {"ok": True, **result}
+
+    @app.post("/nomad/fetch")
+    def nomad_fetch(req: NomadFetchRequest):
+        if req.path.startswith("/file/"):
+            fetch_id = backend.node_browser.fetch_file(req.node_hash, req.path)
+            kind = "file"
+        else:
+            fetch_id = backend.node_browser.fetch_page(req.node_hash, req.path)
+            kind = "page"
+        return {"ok": True, "fetch_id": fetch_id, "node_hash": req.node_hash,
+                "path": req.path, "kind": kind}
+
+    @app.get("/nomad/page/{node_hash}")
+    def get_nomad_page(node_hash: str, path: str = "/page/index.mu"):
+        row = backend.node_browser.get_cached_page(node_hash, path)
+        if row is None:
+            return JSONResponse(
+                {"ok": False, "error": "not cached", "reason": "not_cached"},
+                status_code=404,
+            )
+        return {
+            "ok": True,
+            "content_b64": base64.b64encode(bytes(row["content"])).decode("ascii"),
+            "fetched_at": row["fetched_at"],
+        }
+
+    @app.get("/nomad/file/{node_hash}")
+    def get_nomad_file(node_hash: str, path: str):
+        row = backend.node_browser.get_cached_file(node_hash, path)
+        if row is None:
+            return JSONResponse(
+                {"ok": False, "error": "not cached", "reason": "not_cached"},
+                status_code=404,
+            )
+        basename = path.rsplit("/", 1)[-1] or "download"
+        safe_name = "".join(
+            c for c in basename if c.isprintable() and c not in '"\\')[:128]
+        return Response(
+            content=bytes(row["content"]),
+            media_type="application/octet-stream",
+            # Peer bytes served verbatim: force download, forbid sniffing.
+            headers={
+                "X-Content-Type-Options": "nosniff",
+                "Content-Disposition":
+                    f'attachment; filename="{safe_name or "download"}"',
+            },
+        )
+
+    @app.get("/nomad/bookmarks")
+    def list_nomad_bookmarks():
+        return [
+            {
+                "node_hash": row["node_hash"],
+                "path": row["path"],
+                "label": row["label"],
+                "added_at": row["added_at"],
+            }
+            for row in backend.node_browser.bookmarks()
+        ]
+
+    @app.post("/nomad/bookmarks")
+    def add_nomad_bookmark(req: NomadBookmarkRequest):
+        backend.node_browser.add_bookmark(req.node_hash, req.path, req.label)
+        return {"ok": True}
+
+    @app.post("/nomad/bookmarks/delete")
+    def delete_nomad_bookmark(req: NomadBookmarkDeleteRequest):
+        return {"ok": backend.node_browser.remove_bookmark(req.node_hash,
+                                                           req.path)}
+
+    @app.get("/nomad/hosting")
+    def get_nomad_hosting():
+        return backend.node_browser.hosting_status()
+
+    @app.post("/nomad/hosting")
+    def set_nomad_hosting(req: NomadHostingRequest):
+        status = actions.set_node_hosting(
+            backend.node_browser, enabled=req.enabled, node_name=req.node_name)
+        return {"ok": True, **status}
+
+    @app.post("/nomad/hosting/refresh")
+    def refresh_nomad_hosting():
+        return {"ok": True, **backend.node_browser.refresh_hosted_pages()}
 
     # --- servers ---
 
