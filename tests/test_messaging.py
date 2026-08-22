@@ -7,12 +7,16 @@ Uses TestTransport (from conftest) for in-process delivery.
 import time
 
 import pytest
+import RNS
 
 from tests.helpers import (
     wait_for,
     wait_for_message,
 )
-from trenchchat.core.messaging import _compute_message_id
+from trenchchat.core.messaging import (
+    _compute_message_id,
+    DELIVERY_PENDING, DELIVERY_DELIVERED, DELIVERY_FAILED,
+)
 from trenchchat.core.permissions import PRESET_PRIVATE, SEND_MESSAGE
 
 
@@ -385,6 +389,128 @@ class TestImageMessages:
         bob_msgs = bob.storage.get_messages(ch_hash)
         assert bob_msgs[0]["content"] == "Just text"
         assert bob_msgs[0]["image_data"] is None
+
+
+class TestDeliveryState:
+    """A message sent to an unreachable peer must be distinguishable from a
+    delivered one -- the sender tracks a per-message delivery state the client
+    can read (catalogue #35)."""
+
+    def test_message_to_unknown_path_is_pending_not_delivered(self, peer_factory):
+        alice = peer_factory("alice")
+        ch_hash = alice.channel_mgr.create_channel("pending", "", "public")
+
+        # A recipient no identity was ever created for: recall() returns None,
+        # so the message is queued rather than sent.
+        unreachable = "ab" * 16
+        alice.messaging.send_message(
+            channel_hash_hex=ch_hash,
+            content="Nobody home",
+            subscriber_hashes=[unreachable],
+        )
+
+        msg_id = alice.storage.get_messages(ch_hash)[0]["message_id"]
+        assert alice.messaging.get_delivery_state(msg_id) == DELIVERY_PENDING
+
+    def test_pending_message_becomes_delivered_when_flushed(self, peer_factory, monkeypatch):
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+
+        ch_hash = alice.channel_mgr.create_channel("flush-state", "", "public")
+        bob.storage.upsert_channel(ch_hash, "flush-state", "", alice.identity.hash_hex,
+                                   "public", time.time())
+        bob.storage.subscribe(ch_hash)
+
+        # Force the path to be unknown at send time so the message is queued.
+        monkeypatch.setattr(RNS.Identity, "recall", staticmethod(lambda *a, **k: None))
+        alice.messaging.send_message(
+            channel_hash_hex=ch_hash,
+            content="Reaches Bob later",
+            subscriber_hashes=[bob.identity.hash_hex],
+        )
+        msg_id = alice.storage.get_messages(ch_hash)[0]["message_id"]
+        assert alice.messaging.get_delivery_state(msg_id) == DELIVERY_PENDING
+
+        # Path resolves; flushing hands the message to the transport.
+        monkeypatch.undo()
+        alice.messaging.flush_pending(bob.identity.hash_hex)
+
+        assert wait_for(
+            lambda: alice.messaging.get_delivery_state(msg_id) == DELIVERY_DELIVERED,
+            timeout=5,
+        ), "delivery state did not upgrade to delivered after flush"
+        assert wait_for_message(bob.storage, ch_hash, msg_id, timeout=5)
+
+    def test_reachable_recipient_is_delivered(self, peer_factory):
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+
+        ch_hash = alice.channel_mgr.create_channel("reachable", "", "public")
+        bob.storage.upsert_channel(ch_hash, "reachable", "", alice.identity.hash_hex,
+                                   "public", time.time())
+        bob.storage.subscribe(ch_hash)
+
+        alice.messaging.send_message(
+            channel_hash_hex=ch_hash,
+            content="Straight through",
+            subscriber_hashes=[bob.identity.hash_hex],
+        )
+        msg_id = alice.storage.get_messages(ch_hash)[0]["message_id"]
+        assert alice.messaging.get_delivery_state(msg_id) == DELIVERY_DELIVERED
+
+    def test_unretriable_failure_is_marked_failed(self, peer_factory):
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+
+        ch_hash = alice.channel_mgr.create_channel("failed-state", "", "public")
+        bob.storage.upsert_channel(ch_hash, "failed-state", "", alice.identity.hash_hex,
+                                   "public", time.time())
+        bob.storage.subscribe(ch_hash)
+
+        alice.messaging.send_message(
+            channel_hash_hex=ch_hash,
+            content="Will fail with no retry",
+            subscriber_hashes=[bob.identity.hash_hex],
+        )
+        msg_id = alice.storage.get_messages(ch_hash)[0]["message_id"]
+
+        # Drop the retry params so the failure cannot be re-queued, then fire
+        # the failed callback as LXMF would on a delivery failure.
+        alice.messaging._params_by_id.pop(msg_id, None)
+        alice.messaging._on_delivery_failed(
+            bob.identity.hash_hex, ch_hash, msg_id, [bob.identity.hash_hex]
+        )
+        assert alice.messaging.get_delivery_state(msg_id) == DELIVERY_FAILED
+
+    def test_delivery_status_callback_fires_on_change(self, peer_factory):
+        alice = peer_factory("alice")
+        ch_hash = alice.channel_mgr.create_channel("cb-state", "", "public")
+
+        events = []
+        alice.messaging.add_delivery_status_callback(
+            lambda ch, mid, state: events.append((ch, mid, state))
+        )
+
+        unreachable = "cd" * 16
+        alice.messaging.send_message(
+            channel_hash_hex=ch_hash,
+            content="Fires a status event",
+            subscriber_hashes=[unreachable],
+        )
+        msg_id = alice.storage.get_messages(ch_hash)[0]["message_id"]
+        assert (ch_hash, msg_id, DELIVERY_PENDING) in events
+
+    def test_own_only_message_has_no_delivery_state(self, peer_factory):
+        alice = peer_factory("alice")
+        ch_hash = alice.channel_mgr.create_channel("self-only", "", "public")
+
+        alice.messaging.send_message(
+            channel_hash_hex=ch_hash,
+            content="Just me",
+            subscriber_hashes=[alice.identity.hash_hex],
+        )
+        msg_id = alice.storage.get_messages(ch_hash)[0]["message_id"]
+        assert alice.messaging.get_delivery_state(msg_id) is None
 
 
 class TestPendingQueueIsBounded:

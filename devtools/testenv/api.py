@@ -207,7 +207,8 @@ def _reactions_summary(storage, message_id: str, self_hex: str) -> list[dict[str
     return list(by_emoji.values())
 
 
-def _message_to_dict(row, reactions: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+def _message_to_dict(row, reactions: list[dict[str, Any]] | None = None,
+                     delivery_state: str | None = None) -> dict[str, Any]:
     return {
         "message_id": row["message_id"],
         "sender_hash": row["sender_hash"],
@@ -218,6 +219,9 @@ def _message_to_dict(row, reactions: list[dict[str, Any]] | None = None) -> dict
         "has_image": bool(row["image_data"]) if "image_data" in row.keys() else False,
         "image_stripped": bool(row["image_stripped"]) if "image_stripped" in row.keys() else False,
         "reactions": reactions or [],
+        # Only our own outbound messages carry a delivery state; None for
+        # everyone else's (and for our own once it ages out of the tracker).
+        "delivery_state": delivery_state,
     }
 
 
@@ -418,12 +422,23 @@ def create_app(backend: Backend, *, token: str | None = None,
 
     # --- wire backend callbacks (RNS/LXMF background threads) to the bus ---
 
+    def _delivery_state_for(row) -> str | None:
+        """The delivery state of a row, but only for our own outbound messages."""
+        if row is None or row["sender_hash"] != backend.identity.hash_hex:
+            return None
+        return backend.messaging.get_delivery_state(row["message_id"])
+
     def _on_message(channel_hash_hex: str, message_id: str):
         msgs = backend.storage.get_messages(channel_hash_hex)
         row = next((m for m in msgs if m["message_id"] == message_id), None)
         reactions = _reactions_summary(backend.storage, message_id, backend.identity.hash_hex) if row else None
         bus.emit("message", channel_hash=channel_hash_hex,
-                message=_message_to_dict(row, reactions) if row else None)
+                message=_message_to_dict(row, reactions, _delivery_state_for(row)) if row else None)
+
+    def _on_delivery_status(channel_hash_hex: str, message_id: str,
+                            delivery_state: str):
+        bus.emit("delivery_status", channel_hash=channel_hash_hex,
+                 message_id=message_id, delivery_state=delivery_state)
 
     # Pending invites, exactly like MainWindow._pending_invites -- nothing
     # is sent to the network until the user explicitly accepts or declines.
@@ -509,6 +524,7 @@ def create_app(backend: Backend, *, token: str | None = None,
         bus.emit("voice_session", state=state)
 
     backend.messaging.add_message_callback(_on_message)
+    backend.messaging.add_delivery_status_callback(_on_delivery_status)
     backend.invite_mgr.add_invite_callback(_on_invite)
     backend.invite_mgr.add_channel_joined_callback(_on_channel_joined)
     backend.invite_mgr.add_member_list_callback(_on_member_list_updated)
@@ -1193,7 +1209,9 @@ def create_app(backend: Backend, *, token: str | None = None,
                       before_ts: float | None = None):
         return [
             _message_to_dict(
-                m, _reactions_summary(backend.storage, m["message_id"], backend.identity.hash_hex)
+                m,
+                _reactions_summary(backend.storage, m["message_id"], backend.identity.hash_hex),
+                _delivery_state_for(m),
             )
             for m in backend.storage.get_messages(
                 channel_hash, limit=limit, before_ts=before_ts)
