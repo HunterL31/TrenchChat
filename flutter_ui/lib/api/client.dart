@@ -242,13 +242,16 @@ class ApiClient {
     return PresenceEntry.fromJson(_decode(res) as Map<String, dynamic>);
   }
 
-  Future<Uint8List?> getPeerAvatar(String peerHashHex) async {
+  Future<Uint8List?> getPeerAvatar(String peerHashHex, {int? version}) async {
     // A peer with no avatar is routine, and an unreachable backend must not
     // throw out of a widget build -- treat any decode/status failure as
     // "no avatar" rather than propagating.
+    final path = version == null
+        ? '/peers/$peerHashHex/avatar'
+        : '/peers/$peerHashHex/avatar?v=$version';
     final Map<String, dynamic> body;
     try {
-      final res = await _http.get(_u('/peers/$peerHashHex/avatar'));
+      final res = await _http.get(_u(path));
       body = _decode(res) as Map<String, dynamic>;
     } catch (_) {
       return null;

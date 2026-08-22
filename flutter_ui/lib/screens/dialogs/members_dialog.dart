@@ -77,6 +77,8 @@ class _MembersDialogContentState extends State<_MembersDialogContent> {
 
   String _label(Member m) {
     if (m.displayName.isNotEmpty) return m.displayName;
+    final resolved = widget.state.resolvePeerName(m.identityHash);
+    if (resolved != null && resolved.isNotEmpty) return resolved;
     final h = m.identityHash;
     return h.length > 12 ? '${h.substring(0, 12)}…' : h;
   }

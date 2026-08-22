@@ -73,10 +73,11 @@ class _InviteDialogContentState extends State<_InviteDialogContent> {
   final _search = TextEditingController();
   final _manualHash = TextEditingController();
 
-  List<DirectoryEntry> _entries = [];
   String? _selectedHash;
   String? _error;
   bool _busy = false;
+
+  List<DirectoryEntry> get _entries => widget.state.directory;
 
   @override
   void initState() {
@@ -96,21 +97,14 @@ class _InviteDialogContentState extends State<_InviteDialogContent> {
   void _onSearchChanged() => _query(_search.text.trim());
 
   Future<void> _query(String q) async {
-    try {
-      final entries = await widget.state.api.searchDirectory(q);
-      if (!mounted) return;
-      setState(() {
-        _entries = entries;
-        if (_selectedHash != null &&
-            !entries.any((e) => e.identityHash == _selectedHash)) {
-          _selectedHash = null;
-        }
-      });
-    } catch (_) {
-      // Directory unavailable is not fatal -- the manual hash path still works.
-      if (!mounted) return;
-      setState(() => _entries = []);
-    }
+    await widget.state.loadDirectory(q);
+    if (!mounted) return;
+    setState(() {
+      if (_selectedHash != null &&
+          !_entries.any((e) => e.identityHash == _selectedHash)) {
+        _selectedHash = null;
+      }
+    });
   }
 
   String get _manualNormalized =>
@@ -150,6 +144,13 @@ class _InviteDialogContentState extends State<_InviteDialogContent> {
 
   @override
   Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: widget.state,
+      builder: (context, _) => _buildContent(context),
+    );
+  }
+
+  Widget _buildContent(BuildContext context) {
     final tc = SectionTheme.of(context);
     return TcDialogShell(
       title: widget.title,

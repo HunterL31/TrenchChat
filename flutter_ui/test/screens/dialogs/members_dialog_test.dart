@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:flutter_ui/api/models/invite.dart';
 import 'package:flutter_ui/api/models/member.dart';
 import 'package:flutter_ui/api/models/permissions.dart';
 import 'package:flutter_ui/app_state.dart';
@@ -77,6 +78,30 @@ void main() {
     expect(find.text('OWNER'), findsOneWidget);
     expect(find.text('operator  (you)'), findsOneWidget);
     expect(find.text('Bob'), findsOneWidget);
+  });
+
+  testWidgets('a member with no display name resolves via the directory, not a raw hash',
+      (tester) async {
+    state.membersByChannel[_channelHash] = [
+      _member(_bobHash, '', 'member'),
+    ];
+    state.directory = const [
+      DirectoryEntry(identityHash: _bobHash, displayName: 'Bob Announced', isOnline: false),
+    ];
+    await open(tester);
+
+    expect(find.text('Bob Announced'), findsOneWidget);
+    expect(find.textContaining(_bobHash.substring(0, 12)), findsNothing);
+  });
+
+  testWidgets('a member with no name anywhere falls back to a truncated hash',
+      (tester) async {
+    state.membersByChannel[_channelHash] = [
+      _member(_bobHash, '', 'member'),
+    ];
+    await open(tester);
+
+    expect(find.text('${_bobHash.substring(0, 12)}…'), findsOneWidget);
   });
 
   testWidgets('kick and admin controls are hidden without permissions', (tester) async {

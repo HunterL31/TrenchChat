@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:flutter_ui/api/events.dart';
 import 'package:flutter_ui/app_state.dart';
 import 'package:flutter_ui/screens/dialogs/invite_dialog.dart';
 import 'package:flutter_ui/widgets/tc_button.dart';
@@ -80,6 +81,18 @@ void main() {
     final post = backend.requests
         .singleWhere((r) => r.method == 'POST' && r.path.endsWith('/invite'));
     expect(post.body, contains(_peerHash));
+  });
+
+  testWidgets('a directory_updated event refreshes the shown name live',
+      (tester) async {
+    await open(tester);
+    expect(find.text('Alice'), findsOneWidget);
+
+    state.applyEvent(const DirectoryUpdatedEvent(_peerHash, 'Alicia'));
+    await tester.pump();
+
+    expect(find.text('Alicia'), findsOneWidget);
+    expect(find.text('Alice'), findsNothing);
   });
 
   testWidgets('manual hash entry enables INVITE only for a valid 32-char hex',

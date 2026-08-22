@@ -116,6 +116,11 @@ class AppState extends ChangeNotifier {
   /// message bubbles or the presence roster (see friends_tab.dart).
   List<Friend> friends = [];
 
+  /// Peers heard via trenchchat.user announces, from the last [loadDirectory]
+  /// query. Kept live on [DirectoryUpdatedEvent] so the invite picker reflects
+  /// a peer's renamed self without a reload.
+  List<DirectoryEntry> directory = [];
+
   /// The saved per-section color theme. Empty means every section renders
   /// stock; the shell resolves it per region via SectionTheme.
   ThemeSpec themeSpec = ThemeSpec.empty;
@@ -626,6 +631,49 @@ class AppState extends ChangeNotifier {
     }
   }
 
+  /// Runs a directory search and caches the result in [directory] so live
+  /// [DirectoryUpdatedEvent]s can patch it in place.
+  Future<void> loadDirectory(String query) async {
+    try {
+      directory = await api.searchDirectory(query);
+    } catch (_) {
+      // Directory unavailable is not fatal; the manual-hash path still works.
+      directory = [];
+    }
+    notifyListeners();
+  }
+
+  /// Best-effort display name for a peer, resolved across the directory,
+  /// friends, presence rosters, and recent message authors. Returns null when
+  /// nothing but the raw hash is known. Read-only; callers own the fallback.
+  String? resolvePeerName(String identityHashHex) {
+    for (final e in directory) {
+      if (e.identityHash == identityHashHex && e.displayName.isNotEmpty) {
+        return e.displayName;
+      }
+    }
+    for (final f in friends) {
+      if (f.identityHash == identityHashHex && f.displayName.isNotEmpty) {
+        return f.displayName;
+      }
+    }
+    for (final list in presenceByChannel.values) {
+      for (final p in list) {
+        if (p.identityHash == identityHashHex && (p.displayName?.isNotEmpty ?? false)) {
+          return p.displayName;
+        }
+      }
+    }
+    for (final list in messagesByChannel.values) {
+      for (final m in list) {
+        if (m.senderHash == identityHashHex && m.senderName.isNotEmpty) {
+          return m.senderName;
+        }
+      }
+    }
+    return null;
+  }
+
   /// Accepts a pending invite and joins its channel/server. Returns true on
   /// success; on failure [actionError] is set.
   Future<bool> acceptInvite(String channelHashHex) async {
@@ -954,6 +1002,10 @@ class AppState extends ChangeNotifier {
         unawaited(refreshEmoji());
       case FriendUpdatedEvent():
         unawaited(loadFriends());
+      case AvatarUpdatedEvent(:final identityHash, :final avatarVersion):
+        unawaited(_applyAvatarUpdated(identityHash, avatarVersion));
+      case DirectoryUpdatedEvent(:final identityHash, :final displayName):
+        _applyDirectoryUpdated(identityHash, displayName);
       case VoiceRosterEvent(:final channelHash):
         if (channelHash == selectedChannelHash ||
             channelHash == voiceStatus.channel ||
@@ -995,6 +1047,49 @@ class AppState extends ChangeNotifier {
             notifyListeners();
         }
     }
+  }
+
+  /// Busts the avatar cache for a peer whose avatar changed: a non-null
+  /// version re-fetches with the version as a cache-buster; a null version
+  /// drops the cached image so the initials fallback shows.
+  Future<void> _applyAvatarUpdated(String identityHashHex, int? version) async {
+    if (version == null) {
+      avatarCache[identityHashHex] = null;
+      notifyListeners();
+      return;
+    }
+    final data = await api.getPeerAvatar(identityHashHex, version: version);
+    avatarCache[identityHashHex] = data;
+    notifyListeners();
+  }
+
+  /// Patches a peer's cached name in the directory and in any saved friend
+  /// record, so both the invite picker and the FRIENDS tab reflect a rename
+  /// live without a reload.
+  void _applyDirectoryUpdated(String identityHashHex, String displayName) {
+    final dirIdx = directory.indexWhere((e) => e.identityHash == identityHashHex);
+    if (dirIdx >= 0) {
+      final e = directory[dirIdx];
+      directory[dirIdx] = DirectoryEntry(
+        identityHash: e.identityHash,
+        displayName: displayName,
+        isOnline: e.isOnline,
+      );
+    }
+    final friendIdx = friends.indexWhere((f) => f.identityHash == identityHashHex);
+    if (friendIdx >= 0) {
+      final f = friends[friendIdx];
+      friends[friendIdx] = Friend(
+        identityHash: f.identityHash,
+        nickname: f.nickname,
+        note: f.note,
+        displayName: displayName,
+        addedAt: f.addedAt,
+        lastSeenAt: f.lastSeenAt,
+        isOnline: f.isOnline,
+      );
+    }
+    notifyListeners();
   }
 
   /// Re-fetch a channel's messages so updated reaction chips render, at most
