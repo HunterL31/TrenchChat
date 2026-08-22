@@ -71,8 +71,15 @@ print(next(r['archive'] for r in d['releases'] if r['hash'] == stable))
         curl -sSL "$FLUTTER_RELEASES_URL/$archive" | tar xJ -C "$SDK_DIR"
     fi
     # The SDK ships as a git checkout; git refuses to run in it when the
-    # ownership check trips, which it does in a container. Scoped to the SDK.
-    git config --global --add safe.directory "$SDK_DIR/flutter" 2>/dev/null || true
+    # ownership check trips, which it does in a container. Scoped to the SDK,
+    # and only once -- --add does not deduplicate, and this hook re-runs on
+    # every resume and compact.
+    local trusted
+    trusted="$(git config --global --get-all safe.directory 2>/dev/null || true)"
+    case "$trusted" in
+        *"$SDK_DIR/flutter"*) ;;
+        *) git config --global --add safe.directory "$SDK_DIR/flutter" 2>/dev/null || true ;;
+    esac
     "$FLUTTER_BIN/flutter" --disable-analytics >/dev/null 2>&1 || true
     log "warming the pub cache..."
     (cd "$REPO_ROOT/flutter_ui" && "$FLUTTER_BIN/flutter" pub get >/dev/null)
