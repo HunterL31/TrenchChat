@@ -1,6 +1,7 @@
 // 1a: avatar message rows, author grouping, date dividers, reaction chips.
 import 'dart:typed_data';
 
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 
 import '../../api/models/emoji.dart';
@@ -13,6 +14,7 @@ import '../../theme/theme_spec.dart';
 import '../../theme/tokens.dart';
 import '../../widgets/avatar.dart';
 import '../../widgets/badge.dart';
+import '../../widgets/emoji_text.dart';
 import '../../widgets/tc_button.dart';
 import '../../widgets/tc_context_menu.dart';
 import '../../widgets/tc_icon.dart';
@@ -68,11 +70,19 @@ class MessageList extends StatefulWidget {
     this.onLoadOlder,
     this.hasMoreOlder = false,
     this.loadingOlder = false,
+    this.onReply,
+    this.onOpenLink,
   });
 
   final List<Message> messages;
   final String meHashHex;
   final String Function(String identityHashHex, String fallback) displayNameFor;
+
+  /// Starts a reply to a message, from its row menu. Null hides the action.
+  final void Function(Message message)? onReply;
+
+  /// Opens a tapped URL in message content. Null leaves links styled but inert.
+  final void Function(String url)? onOpenLink;
 
   /// Fetches the next older page when the reader scrolls to the top. Null
   /// disables load-on-scroll (e.g. isolated widget tests).
@@ -127,46 +137,121 @@ class MessageList extends StatefulWidget {
 /// before the reader reaches blank space.
 const double _loadOlderThreshold = 120;
 
+/// How close to the bottom (in pixels) still counts as "at the bottom", so a
+/// new message auto-scrolls; past this the reader is reading history and the
+/// view is left put.
+const double _nearBottomThreshold = 80;
+
 class _MessageListState extends State<MessageList> {
   final ScrollController _controller = ScrollController();
+
+  /// What the message set looked like last time we reacted to it, so a change
+  /// is detected even when the parent mutates the same list instance in place.
+  int _trackedCount = 0;
+  String? _trackedNewestId;
+  double? _trackedOldestTs;
+
+  /// A new message arrived while the reader was scrolled up: the affordance
+  /// that jumps them back to the newest.
+  bool _showNewPill = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller.addListener(_onScroll);
+    _updateTracked(widget.messages);
+    WidgetsBinding.instance.addPostFrameCallback((_) => _jumpToBottom());
+  }
 
   @override
   void didUpdateWidget(covariant MessageList oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.messages.length == widget.messages.length) return;
-    if (_isOlderPagePrepend(oldWidget.messages, widget.messages)) {
-      // Keep the reader's view anchored to the same message when an older
-      // page lands at the top, rather than jerking the list.
+    _reactToMessageChange();
+  }
+
+  void _reactToMessageChange() {
+    final msgs = widget.messages;
+    final newestMsg = _newest(msgs);
+    final newestId = newestMsg?.messageId;
+    final oldestTs = _oldestTs(msgs);
+    final count = msgs.length;
+
+    // A rebuild that left the message set alone (a reaction or presence
+    // update) -- nothing to scroll.
+    if (count == _trackedCount && newestId == _trackedNewestId) return;
+
+    final prevCount = _trackedCount;
+    final prevNewestId = _trackedNewestId;
+    final prevOldestTs = _trackedOldestTs;
+    _trackedCount = count;
+    _trackedNewestId = newestId;
+    _trackedOldestTs = oldestTs;
+
+    // An older page landed at the top: hold the view on the same message
+    // rather than jerking it.
+    final isPrepend = prevNewestId != null &&
+        count > prevCount &&
+        newestId == prevNewestId &&
+        prevOldestTs != null &&
+        oldestTs != null &&
+        oldestTs < prevOldestTs;
+    if (isPrepend) {
       final before = _controller.hasClients ? _controller.position.maxScrollExtent : 0.0;
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!_controller.hasClients) return;
         final after = _controller.position.maxScrollExtent;
         _controller.jumpTo(_controller.position.pixels + (after - before));
       });
-    } else {
+      return;
+    }
+
+    // A wholesale swap (channel switch, first load) always shows the newest;
+    // an incremental arrival only does when the reader is at the bottom or it
+    // is their own message. Otherwise raise the "new messages" affordance.
+    final isIncremental =
+        prevNewestId != null && msgs.any((m) => m.messageId == prevNewestId);
+    final newestIsOwn = newestMsg != null && newestMsg.senderHash == widget.meHashHex;
+    if (!isIncremental || newestIsOwn || _isNearBottom()) {
+      if (_showNewPill) setState(() => _showNewPill = false);
       WidgetsBinding.instance.addPostFrameCallback((_) => _jumpToBottom());
+    } else if (!_showNewPill) {
+      setState(() => _showNewPill = true);
     }
   }
 
-  /// True when [next] is [prev] with older messages added at the top and the
-  /// newest message unchanged -- the load-older case, as opposed to a new
-  /// message arriving at the bottom.
-  bool _isOlderPagePrepend(List<Message> prev, List<Message> next) {
-    if (prev.isEmpty || next.length <= prev.length) return false;
-    double newest(List<Message> m) => m.map((e) => e.timestamp).reduce((a, b) => a > b ? a : b);
-    double oldest(List<Message> m) => m.map((e) => e.timestamp).reduce((a, b) => a < b ? a : b);
-    return newest(next) == newest(prev) && oldest(next) < oldest(prev);
+  void _updateTracked(List<Message> msgs) {
+    _trackedCount = msgs.length;
+    _trackedNewestId = _newest(msgs)?.messageId;
+    _trackedOldestTs = _oldestTs(msgs);
   }
 
-  @override
-  void initState() {
-    super.initState();
-    _controller.addListener(_onScroll);
-    WidgetsBinding.instance.addPostFrameCallback((_) => _jumpToBottom());
+  Message? _newest(List<Message> m) {
+    if (m.isEmpty) return null;
+    var best = m.first;
+    for (final e in m) {
+      if (e.timestamp > best.timestamp) best = e;
+    }
+    return best;
+  }
+
+  double? _oldestTs(List<Message> m) {
+    if (m.isEmpty) return null;
+    var v = m.first.timestamp;
+    for (final e in m) {
+      if (e.timestamp < v) v = e.timestamp;
+    }
+    return v;
+  }
+
+  bool _isNearBottom() {
+    if (!_controller.hasClients) return true;
+    final pos = _controller.position;
+    return (pos.maxScrollExtent - pos.pixels) <= _nearBottomThreshold;
   }
 
   void _onScroll() {
     if (!_controller.hasClients) return;
+    if (_showNewPill && _isNearBottom()) setState(() => _showNewPill = false);
     if (widget.onLoadOlder == null || !widget.hasMoreOlder || widget.loadingOlder) return;
     if (_controller.position.pixels <= _loadOlderThreshold) {
       widget.onLoadOlder!();
@@ -184,6 +269,16 @@ class _MessageListState extends State<MessageList> {
     _controller.jumpTo(_controller.position.maxScrollExtent);
   }
 
+  void _animateToBottom() {
+    setState(() => _showNewPill = false);
+    if (!_controller.hasClients) return;
+    _controller.animateTo(
+      _controller.position.maxScrollExtent,
+      duration: const Duration(milliseconds: 200),
+      curve: Curves.easeOut,
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final rows = _buildRows(widget.messages);
@@ -197,7 +292,8 @@ class _MessageListState extends State<MessageList> {
         ),
       );
     }
-    return ListView.builder(
+    final byId = {for (final m in widget.messages) m.messageId: m};
+    final list = ListView.builder(
       controller: _controller,
       padding: const EdgeInsets.symmetric(vertical: 12),
       itemCount: rows.length + (showLoader ? 1 : 0),
@@ -211,10 +307,21 @@ class _MessageListState extends State<MessageList> {
               isContinuation: row.isContinuation,
               isOwn: row.message.senderHash == widget.meHashHex,
               displayName: widget.displayNameFor(row.message.senderHash, row.message.senderName),
+              parent: row.message.replyTo == null ? null : byId[row.message.replyTo!],
+              parentDisplayName: () {
+                final p = row.message.replyTo == null ? null : byId[row.message.replyTo!];
+                return p == null ? '' : widget.displayNameFor(p.senderHash, p.senderName);
+              }(),
+              parentIsOwn: () {
+                final p = row.message.replyTo == null ? null : byId[row.message.replyTo!];
+                return p != null && p.senderHash == widget.meHashHex;
+              }(),
               avatarBytes: widget.avatarBytesFor?.call(row.message.senderHash),
               ensureAvatarLoaded: widget.ensureAvatarLoaded,
               onToggleReaction: widget.onToggleReaction,
               onReact: widget.onReact,
+              onReply: widget.onReply,
+              onOpenLink: widget.onOpenLink,
               emojiLibrary: widget.emojiLibrary,
               friendHashes: widget.friendHashes,
               onAddFriend: widget.onAddFriend,
@@ -224,6 +331,50 @@ class _MessageListState extends State<MessageList> {
             ),
         };
       },
+    );
+    return Stack(
+      children: [
+        Positioned.fill(child: list),
+        if (_showNewPill)
+          Positioned(
+            left: 0,
+            right: 0,
+            bottom: 12,
+            child: Center(child: _NewMessagesPill(onTap: _animateToBottom)),
+          ),
+      ],
+    );
+  }
+}
+
+class _NewMessagesPill extends StatelessWidget {
+  const _NewMessagesPill({required this.onTap});
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final tc = SectionTheme.of(context);
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      child: GestureDetector(
+        onTap: onTap,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+          decoration: BoxDecoration(
+            color: tc.accentPrimary,
+            border: Border.all(color: tc.borderAccent),
+          ),
+          child: Text(
+            '↓ NEW MESSAGES',
+            style: TextStyle(
+              fontSize: TCType.textMicro,
+              color: tc.textOnAccent,
+              fontWeight: FontWeight.w600,
+              letterSpacing: TCType.letterSpacingFor(TCType.textMicro, TCType.trackingWide),
+            ),
+          ),
+        ),
+      ),
     );
   }
 }
@@ -286,10 +437,15 @@ class _MessageRowWidget extends StatefulWidget {
     required this.isContinuation,
     required this.isOwn,
     required this.displayName,
+    this.parent,
+    this.parentDisplayName = '',
+    this.parentIsOwn = false,
     this.avatarBytes,
     this.ensureAvatarLoaded,
     this.onToggleReaction,
     this.onReact,
+    this.onReply,
+    this.onOpenLink,
     this.emojiLibrary = const {},
     this.friendHashes = const {},
     this.onAddFriend,
@@ -302,10 +458,19 @@ class _MessageRowWidget extends StatefulWidget {
   final bool isContinuation;
   final bool isOwn;
   final String displayName;
+
+  /// The message this one replies to, if it is loaded; null when this is not a
+  /// reply, or the parent is not on screen.
+  final Message? parent;
+  final String parentDisplayName;
+  final bool parentIsOwn;
+
   final Uint8List? avatarBytes;
   final void Function(String identityHashHex)? ensureAvatarLoaded;
   final void Function(String messageId, String emojiHash)? onToggleReaction;
   final void Function(String messageId)? onReact;
+  final void Function(Message message)? onReply;
+  final void Function(String url)? onOpenLink;
   final Map<String, CustomEmoji> emojiLibrary;
 
   /// Identity hashes already saved as a friend -- drives the "Add friend…"
@@ -332,6 +497,21 @@ class _MessageRowWidget extends StatefulWidget {
 
 class _MessageRowWidgetState extends State<_MessageRowWidget> {
   bool _hover = false;
+
+  /// Tap recognizers for the link spans in the current build; rebuilt and
+  /// disposed each build so none leak.
+  final List<TapGestureRecognizer> _linkRecognizers = [];
+
+  /// The URL currently under the pointer, painted with linkHoverColor.
+  String? _hoveredLink;
+
+  @override
+  void dispose() {
+    for (final r in _linkRecognizers) {
+      r.dispose();
+    }
+    super.dispose();
+  }
 
   Message get message => widget.message;
   bool get isContinuation => widget.isContinuation;
@@ -375,16 +555,31 @@ class _MessageRowWidgetState extends State<_MessageRowWidget> {
     }
     final tc = SectionTheme.of(context);
     final bg = isOwn ? const Color.fromRGBO(255, 255, 255, 0.02) : Colors.transparent;
+    final baseStyle = TextStyle(
+      fontSize: TCType.textBodyMd,
+      height: TCType.leadingBody,
+      color: tc.textPrimary,
+    );
+    for (final r in _linkRecognizers) {
+      r.dispose();
+    }
+    _linkRecognizers.clear();
+    final links = InlineLinkConfig(
+      style: baseStyle.copyWith(color: tc.linkColor, decoration: TextDecoration.underline),
+      hoverStyle:
+          baseStyle.copyWith(color: tc.linkHoverColor, decoration: TextDecoration.underline),
+      recognizers: _linkRecognizers,
+      onTap: widget.onOpenLink,
+      hoveredUrl: _hoveredLink,
+      onHover: (url) => setState(() => _hoveredLink = url),
+    );
     final bodyText = Text.rich(
       TextSpan(
         children: messageContentSpans(
           message.content,
           widget.emojiLibrary,
-          TextStyle(
-            fontSize: TCType.textBodyMd,
-            height: TCType.leadingBody,
-            color: tc.textPrimary,
-          ),
+          baseStyle,
+          links: links,
         ),
       ),
     );
@@ -421,6 +616,14 @@ class _MessageRowWidgetState extends State<_MessageRowWidget> {
           )
         : bodyText;
 
+    final Widget? replyPreview = message.replyTo == null
+        ? null
+        : _ReplyPreview(
+            parent: widget.parent,
+            authorName: widget.parentDisplayName,
+            isOwn: widget.parentIsOwn,
+          );
+
     // TODO(phase-b): message.receivedAt is always null until `received_at`
     // ships on _message_to_dict, so this marker never fires today.
     final isLate = message.receivedAt != null &&
@@ -450,6 +653,7 @@ class _MessageRowWidgetState extends State<_MessageRowWidget> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
+                  ?replyPreview,
                   body,
                   if (message.reactions.isNotEmpty)
                     _ReactionRow(
@@ -507,6 +711,7 @@ class _MessageRowWidgetState extends State<_MessageRowWidget> {
                       ],
                     ],
                   ),
+                  ?replyPreview,
                   body,
                   if (message.reactions.isNotEmpty)
                     _ReactionRow(
@@ -523,6 +728,11 @@ class _MessageRowWidgetState extends State<_MessageRowWidget> {
 
     return _withReactButton(TcContextMenuRegion(
       items: [
+        if (widget.onReply != null)
+          TcContextMenuItem(
+            label: 'Reply…',
+            onTap: () => widget.onReply!(message),
+          ),
         // The hover-only react button above is unreachable without a mouse,
         // so touch users get the same action from the long-press menu.
         if (widget.onReact != null)
@@ -540,6 +750,61 @@ class _MessageRowWidgetState extends State<_MessageRowWidget> {
       ],
       child: content,
     ));
+  }
+}
+
+/// The quoted line above a reply: the parent's author and a one-line snippet,
+/// or a graceful fallback when the parent is not loaded locally.
+class _ReplyPreview extends StatelessWidget {
+  const _ReplyPreview({required this.parent, required this.authorName, required this.isOwn});
+  final Message? parent;
+  final String authorName;
+  final bool isOwn;
+
+  @override
+  Widget build(BuildContext context) {
+    final tc = SectionTheme.of(context);
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 3),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(width: 2, height: 14, color: tc.borderStrong),
+          const SizedBox(width: 6),
+          Expanded(
+            child: parent == null
+                ? Text(
+                    '↩ original message',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: TCType.textMicro,
+                      color: tc.textTertiary,
+                      fontStyle: FontStyle.italic,
+                    ),
+                  )
+                : RichText(
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    text: TextSpan(children: [
+                      TextSpan(
+                        text: '${isOwn ? 'you' : authorName} ',
+                        style: TextStyle(
+                          fontSize: TCType.textMicro,
+                          fontWeight: FontWeight.w600,
+                          color: nameColor(parent!.senderHash, isOwn: isOwn),
+                        ),
+                      ),
+                      TextSpan(
+                        text: parent!.content.replaceAll('\n', ' '),
+                        style: TextStyle(fontSize: TCType.textMicro, color: tc.textTertiary),
+                      ),
+                    ]),
+                  ),
+          ),
+        ],
+      ),
+    );
   }
 }
 

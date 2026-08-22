@@ -1,30 +1,37 @@
 // Verifies author grouping collapses at the GROUP_WINDOW_SECS (300s)
 // boundary, and that a date divider appears exactly on a day change --
 // mirroring trenchchat/gui/channel_view.py's grouping contract.
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:flutter_ui/api/models/message.dart';
 import 'package:flutter_ui/format.dart';
 import 'package:flutter_ui/screens/main_window/message_list.dart';
+import 'package:flutter_ui/theme/tokens.dart';
 import 'package:flutter_ui/widgets/avatar.dart';
 
 Message _msg(String sender, double ts, String content,
-        {bool imageStripped = false}) =>
+        {bool imageStripped = false, String? replyTo}) =>
     Message(
       messageId: '$sender-$ts',
       senderHash: sender,
       senderName: sender,
       content: content,
       timestamp: ts,
-      replyTo: null,
+      replyTo: replyTo,
       hasImage: false,
       reactions: const [],
       imageStripped: imageStripped,
     );
 
 Widget _harness(List<Message> messages,
-        {VoidCallback? onLoadOlder, bool hasMoreOlder = false, bool loadingOlder = false}) =>
+        {VoidCallback? onLoadOlder,
+        bool hasMoreOlder = false,
+        bool loadingOlder = false,
+        String meHashHex = 'me',
+        void Function(Message)? onReply,
+        void Function(String)? onOpenLink}) =>
     MaterialApp(
       home: Scaffold(
         body: SizedBox(
@@ -32,11 +39,13 @@ Widget _harness(List<Message> messages,
           height: 400,
           child: MessageList(
             messages: messages,
-            meHashHex: 'me',
+            meHashHex: meHashHex,
             displayNameFor: (hash, fallback) => fallback,
             onLoadOlder: onLoadOlder,
             hasMoreOlder: hasMoreOlder,
             loadingOlder: loadingOlder,
+            onReply: onReply,
+            onOpenLink: onOpenLink,
           ),
         ),
       ),
@@ -188,6 +197,157 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('No messages yet — say something.'), findsOneWidget);
+  });
+
+  testWidgets('a new message auto-scrolls to the bottom when the reader is already there',
+      (tester) async {
+    const base = 1_700_000_000.0;
+    final messages = [for (var i = 0; i < 40; i++) _msg('alice', base + i * 400, 'm$i')];
+
+    await tester.pumpWidget(_harness(messages));
+    await tester.pumpAndSettle();
+
+    final controller = tester.widget<Scrollable>(find.byType(Scrollable)).controller!;
+    expect(controller.position.pixels, closeTo(controller.position.maxScrollExtent, 1));
+
+    // A new message arrives on the same (in-place mutated) list instance.
+    messages.add(_msg('alice', base + 40 * 400, 'brand new'));
+    await tester.pumpWidget(_harness(messages));
+    await tester.pumpAndSettle();
+
+    expect(controller.position.pixels, closeTo(controller.position.maxScrollExtent, 1));
+    expect(find.text('brand new'), findsOneWidget);
+    expect(find.text('↓ NEW MESSAGES'), findsNothing);
+  });
+
+  testWidgets('a new message does not yank the view down while the reader is scrolled up',
+      (tester) async {
+    const base = 1_700_000_000.0;
+    final messages = [for (var i = 0; i < 40; i++) _msg('alice', base + i * 400, 'm$i')];
+
+    await tester.pumpWidget(_harness(messages));
+    await tester.pumpAndSettle();
+
+    final controller = tester.widget<Scrollable>(find.byType(Scrollable)).controller!;
+    controller.jumpTo(controller.position.maxScrollExtent - 300);
+    await tester.pump();
+    final before = controller.position.pixels;
+
+    messages.add(_msg('bob', base + 40 * 400, 'incoming'));
+    await tester.pumpWidget(_harness(messages));
+    await tester.pumpAndSettle();
+
+    // The view stayed put rather than jumping to the newest message.
+    expect(controller.position.pixels, closeTo(before, 1));
+    expect(controller.position.pixels, lessThan(controller.position.maxScrollExtent));
+    // ...and the affordance appeared.
+    expect(find.text('↓ NEW MESSAGES'), findsOneWidget);
+  });
+
+  testWidgets('tapping the new-messages affordance scrolls to the newest message',
+      (tester) async {
+    const base = 1_700_000_000.0;
+    final messages = [for (var i = 0; i < 40; i++) _msg('alice', base + i * 400, 'm$i')];
+
+    await tester.pumpWidget(_harness(messages));
+    await tester.pumpAndSettle();
+
+    final controller = tester.widget<Scrollable>(find.byType(Scrollable)).controller!;
+    controller.jumpTo(controller.position.maxScrollExtent - 300);
+    await tester.pump();
+
+    messages.add(_msg('bob', base + 40 * 400, 'incoming'));
+    await tester.pumpWidget(_harness(messages));
+    await tester.pumpAndSettle();
+
+    expect(find.text('↓ NEW MESSAGES'), findsOneWidget);
+    await tester.tap(find.text('↓ NEW MESSAGES'));
+    await tester.pumpAndSettle();
+
+    expect(controller.position.pixels, closeTo(controller.position.maxScrollExtent, 1));
+    expect(find.text('↓ NEW MESSAGES'), findsNothing);
+  });
+
+  testWidgets('a reply renders a quoted preview of its parent', (tester) async {
+    const base = 1_700_000_000.0;
+    final parent = _msg('alice', base, 'the original text');
+    final reply = _msg('bob', base + 10, 'my answer', replyTo: parent.messageId);
+
+    await tester.pumpWidget(_harness([parent, reply]));
+    await tester.pumpAndSettle();
+
+    // The quoted preview names the parent's author and its content.
+    final previewFinder = find.byWidgetPredicate(
+      (w) => w is RichText && w.text.toPlainText() == 'alice the original text',
+    );
+    expect(previewFinder, findsOneWidget);
+    expect(find.text('my answer'), findsOneWidget);
+  });
+
+  testWidgets('a reply whose parent is not loaded falls back gracefully', (tester) async {
+    const base = 1_700_000_000.0;
+    final reply = _msg('bob', base, 'orphan reply', replyTo: 'not-on-screen');
+
+    await tester.pumpWidget(_harness([reply]));
+    await tester.pumpAndSettle();
+
+    expect(find.text('↩ original message'), findsOneWidget);
+  });
+
+  testWidgets('a message row offers Reply… and fires onReply with the message',
+      (tester) async {
+    const base = 1_700_000_000.0;
+    Message? replied;
+
+    await tester.pumpWidget(_harness(
+      [_msg('alice', base, 'hello there')],
+      onReply: (m) => replied = m,
+    ));
+    await tester.pumpAndSettle();
+
+    await tester.longPress(find.text('hello there'));
+    await tester.pump();
+
+    expect(find.text('Reply…'), findsOneWidget);
+    await tester.tap(find.text('Reply…'));
+    await tester.pump();
+
+    expect(replied, isNotNull);
+    expect(replied!.content, 'hello there');
+  });
+
+  testWidgets('a URL in message content renders with linkColor and is tappable',
+      (tester) async {
+    const base = 1_700_000_000.0;
+    String? opened;
+
+    await tester.pumpWidget(_harness(
+      [_msg('alice', base, 'see https://example.com/docs now')],
+      onOpenLink: (url) => opened = url,
+    ));
+    await tester.pumpAndSettle();
+
+    final richText = tester.widget<RichText>(
+      find.byWidgetPredicate((w) =>
+          w is RichText && w.text.toPlainText().contains('https://example.com/docs')),
+    );
+
+    // Find the link span and confirm it carries linkColor + a tap recognizer.
+    TextSpan? linkSpan;
+    richText.text.visitChildren((span) {
+      if (span is TextSpan && span.text == 'https://example.com/docs') {
+        linkSpan = span;
+        return false;
+      }
+      return true;
+    });
+
+    expect(linkSpan, isNotNull);
+    expect(linkSpan!.style!.color, TCColors.linkColor);
+    expect(linkSpan!.recognizer, isA<TapGestureRecognizer>());
+
+    (linkSpan!.recognizer as TapGestureRecognizer).onTap!();
+    expect(opened, 'https://example.com/docs');
   });
 
   testWidgets('a stripped attachment is marked, an intact message is not',

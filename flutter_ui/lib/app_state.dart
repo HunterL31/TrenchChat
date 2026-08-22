@@ -282,11 +282,12 @@ class AppState extends ChangeNotifier {
     unawaited(refreshVoiceStatus());
   }
 
-  Future<bool> sendMessage(String content) async {
+  Future<bool> sendMessage(String content, {String? replyTo}) async {
     final channelHashHex = selectedChannelHash;
     if (channelHashHex == null || content.trim().isEmpty) return false;
     try {
-      final result = await api.sendMessage(channelHashHex, content.trim());
+      final result =
+          await api.sendMessage(channelHashHex, content.trim(), replyTo: replyTo);
       if (result.ok) {
         // The WS event echoes it too; this covers a dropped socket so the
         // sender always sees their own message land.

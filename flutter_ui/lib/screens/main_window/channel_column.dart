@@ -462,13 +462,14 @@ class _InviteRowState extends State<_InviteRow> {
           color: _hover ? tc.bgHover : Colors.transparent,
           child: Row(
             children: [
-              TcIcon(TcIcons.join, size: 12, color: tc.accentSecondary),
+              TcIcon(TcIcons.join,
+                  size: 12, color: _hover ? tc.accentSecondaryHover : tc.accentSecondary),
               const SizedBox(width: 6),
               Expanded(
                 child: Text(
                   widget.invite.channelName,
                   overflow: TextOverflow.ellipsis,
-                  style: TextStyle(fontSize: 13, color: TCColors.amber300),
+                  style: TextStyle(fontSize: 13, color: tc.accentSecondaryHover),
                 ),
               ),
             ],

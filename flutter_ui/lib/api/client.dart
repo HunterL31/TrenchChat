@@ -210,11 +210,14 @@ class ApiClient {
   /// [reason] is the backend's machine-readable cause when [ok] is false
   /// (`no_send_permission`, `no_recipients`).
   Future<({bool ok, String? reason})> sendMessage(
-      String channelHashHex, String content) async {
+      String channelHashHex, String content, {String? replyTo}) async {
     final res = await _http.post(
       _u('/channels/$channelHashHex/messages'),
       headers: _jsonHeaders,
-      body: jsonEncode({'content': content}),
+      body: jsonEncode({
+        'content': content,
+        'reply_to': ?replyTo,
+      }),
     );
     final body = _decode(res) as Map<String, dynamic>;
     return (ok: body['ok'] as bool? ?? false, reason: body['reason'] as String?);

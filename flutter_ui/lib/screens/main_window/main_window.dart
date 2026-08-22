@@ -1,6 +1,7 @@
 // The three-column shell: server rail (1b) + channel column (1b) +
 // [channel header (1b) / message list (1a) / compose bar (1a)].
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../../api/models/link_quality.dart';
 import '../../api/models/member.dart';
@@ -47,6 +48,11 @@ class MainWindow extends StatefulWidget {
 class _MainWindowState extends State<MainWindow> {
   ChannelTab _tab = ChannelTab.chat;
   final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
+
+  /// The message the compose bar is replying to, and the channel it belongs
+  /// to -- so a reply started in one channel is dropped on switching away.
+  Message? _replyTarget;
+  String? _replyChannelHash;
 
   // Dialogs show their own inline error text for a failed submit and claim it
   // with AppState.takeActionError(); this is the catch-all for actions with no
@@ -152,6 +158,21 @@ class _MainWindowState extends State<MainWindow> {
     }
   }
 
+  /// Interim link action: url_launcher is not a dependency, so a tapped link
+  /// is copied to the clipboard rather than opened. Wire launchUrl here once
+  /// the dependency is added.
+  Future<void> _openLink(String url) async {
+    await Clipboard.setData(ClipboardData(text: url));
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('Link copied: $url'),
+        behavior: SnackBarBehavior.floating,
+        duration: const Duration(seconds: 2),
+      ),
+    );
+  }
+
   String _displayNameFor(String identityHashHex, String fallback) {
     final channelHash = widget.state.selectedChannelHash;
     if (channelHash != null) {
@@ -202,6 +223,10 @@ class _MainWindowState extends State<MainWindow> {
         final channelHash = state.selectedChannelHash;
         final List<Message> messages =
             channelHash != null ? state.messagesByChannel[channelHash] ?? [] : [];
+        if (_replyTarget != null && _replyChannelHash != channelHash) {
+          _replyTarget = null;
+          _replyChannelHash = null;
+        }
         final List<PresenceEntry> presence =
             channelHash != null ? state.presenceByChannel[channelHash] ?? [] : [];
         final linkQuality = channelHash != null
@@ -362,6 +387,13 @@ class _MainWindowState extends State<MainWindow> {
                                     _toggleReaction(
                                         channelHash, messageId, selection.reactionKey);
                                   },
+                            onReply: channelHash == null
+                                ? null
+                                : (m) => setState(() {
+                                      _replyTarget = m;
+                                      _replyChannelHash = channelHash;
+                                    }),
+                            onOpenLink: _openLink,
                             friendHashes: friendHashes,
                             onAddFriend: (hash) =>
                                 showAddFriendDialog(context, state, identityHash: hash),
@@ -394,7 +426,24 @@ class _MainWindowState extends State<MainWindow> {
                       channelName: channel?.name ?? '',
                       channelHash: channelHash,
                       enabled: channelHash != null && (permissions?.sendMessage ?? true),
-                      onSend: (content) => state.sendMessage(content),
+                      replyPreview: _replyTarget == null
+                          ? null
+                          : (
+                              author: _replyTarget!.senderHash == state.meHashHex
+                                  ? 'you'
+                                  : _displayNameFor(
+                                      _replyTarget!.senderHash, _replyTarget!.senderName),
+                              snippet: _replyTarget!.content.replaceAll('\n', ' '),
+                            ),
+                      onCancelReply: () => setState(() => _replyTarget = null),
+                      onSend: (content) async {
+                        final replyTo = _replyTarget?.messageId;
+                        final ok = await state.sendMessage(content, replyTo: replyTo);
+                        if (ok && _replyTarget != null) {
+                          setState(() => _replyTarget = null);
+                        }
+                        return ok;
+                      },
                       pickEmoji: () async =>
                           (await showEmojiPickerDialog(context, state, title: 'Add emoji'))
                               ?.composeToken,
