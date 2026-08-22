@@ -104,6 +104,10 @@ class AppState extends ChangeNotifier {
   /// message re-fetch per reaction.
   final Map<String, Timer> _reactionRefreshTimers = {};
 
+  /// Channels whose permissions/sync-state preload is in flight, so
+  /// [ensureChannelMeta] never launches a duplicate fetch for one.
+  final Set<String> _channelMetaLoading = {};
+
   String? get voiceChannelHash => voiceStatus.channel;
   LinkQualityLevel get voiceQualityLevel => voiceOverallLevel(voiceStatus);
 
@@ -249,6 +253,35 @@ class AppState extends ChangeNotifier {
     }
   }
 
+  /// Loads a listed channel's permissions and sync state without opening it,
+  /// so the row's context menu (Invite / Edit permissions) and sync badge are
+  /// right before the channel has ever been visited. Idempotent and cheap:
+  /// skips channels already loaded or already loading, and swallows failures
+  /// (the menu simply hides perm-gated items until a later visit fills them).
+  Future<void> ensureChannelMeta(Iterable<String> channelHashHexes) async {
+    final missing = channelHashHexes
+        .where((h) =>
+            !permissionsByChannel.containsKey(h) && !_channelMetaLoading.contains(h))
+        .toSet();
+    if (missing.isEmpty) return;
+    _channelMetaLoading.addAll(missing);
+    await Future.wait(missing.map((h) async {
+      try {
+        final results = await Future.wait([
+          api.getMyPermissions(h),
+          api.getSyncState(h),
+        ]);
+        permissionsByChannel[h] = results[0] as ChannelPermissions;
+        syncStateByChannel[h] = results[1] as String;
+      } catch (_) {
+        // Non-fatal: a later loadChannel fills these in.
+      } finally {
+        _channelMetaLoading.remove(h);
+      }
+    }));
+    notifyListeners();
+  }
+
   Future<void> selectServer(String serverHashHex) async {
     selectedServerHash = serverHashHex;
     final chans = channelsByServer[serverHashHex] ?? [];
@@ -373,6 +406,17 @@ class AppState extends ChangeNotifier {
     }
   }
 
+  /// Discovered channels the Join dialog can actually offer: open-join and not
+  /// already joined. Invite-only channels need an invite, so listing one here
+  /// is a dead end -- a channel the user already left surfaces in discovery as
+  /// an invite-only local row and can never be re-joined this way.
+  List<Channel> get joinableDiscoveredChannels {
+    final joined = standaloneChannels.map((c) => c.hash).toSet();
+    return discoveredChannels
+        .where((c) => c.openJoin && !joined.contains(c.hash))
+        .toList();
+  }
+
   /// Returns the new server's hash, or null (with [actionError] set) on failure.
   Future<String?> createServer(String name, String description) async {
     try {
@@ -446,12 +490,24 @@ class AppState extends ChangeNotifier {
     try {
       final ok = await api.leaveChannel(channelHashHex);
       if (!ok) return false;
+      // Leaving the channel also ends its voice call, rather than stranding a
+      // live session whose channel is gone in the voice panel.
+      if (voiceStatus.channel == channelHashHex) {
+        await leaveVoice();
+      }
       standaloneChannels = await api.getChannels();
       if (selectedChannelHash == channelHashHex) {
-        final visible = selectedServerHash != null
-            ? channelsByServer[selectedServerHash] ?? const <Channel>[]
-            : standaloneChannels;
-        final next = visible.isNotEmpty ? visible.first.hash : null;
+        // The channel left is always standalone, so prefer another standalone
+        // channel; fall back to the selected server's channels, then to the
+        // empty/home state. Never keep a hash whose channel is gone, which
+        // would leave a bare header with compose still enabled.
+        final serverChannels =
+            selectedServerHash != null ? channelsByServer[selectedServerHash] : null;
+        final next = standaloneChannels.isNotEmpty
+            ? standaloneChannels.first.hash
+            : (serverChannels != null && serverChannels.isNotEmpty
+                ? serverChannels.first.hash
+                : null);
         selectedChannelHash = next;
         notifyListeners();
         if (next != null) await loadChannel(next);

@@ -219,6 +219,18 @@ class _MainWindowState extends State<MainWindow> {
             : null;
         final List<Channel> channels =
             selectedServer != null ? state.channelsByServer[selectedServer] ?? [] : [];
+        // Preload permissions/sync state for every listed channel so the row
+        // context menu and sync badge are correct without a prior visit. The
+        // guard keeps this to one fetch per channel: once loaded, nothing is
+        // missing and no callback is scheduled.
+        final listedHashes = [
+          for (final c in channels) c.hash,
+          for (final c in state.standaloneChannels) c.hash,
+        ];
+        if (listedHashes.any((h) => !state.permissionsByChannel.containsKey(h))) {
+          WidgetsBinding.instance
+              .addPostFrameCallback((_) => state.ensureChannelMeta(listedHashes));
+        }
         final channel = state.selectedChannel;
         final channelHash = state.selectedChannelHash;
         final List<Message> messages =
