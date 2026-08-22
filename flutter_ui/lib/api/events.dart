@@ -95,6 +95,20 @@ sealed class TcEvent {
             if (entry.value is Map<String, dynamic>)
               entry.key: ThemeSpec.fromJson(entry.value as Map<String, dynamic>),
         });
+      case 'nomad_node':
+        return NomadNodeEvent(
+          json['node_hash'] as String,
+          json['display_name'] as String? ?? '',
+        );
+      case 'nomad_fetch':
+        return NomadFetchEvent(
+          json['fetch_id'] as String,
+          json['node_hash'] as String,
+          json['path'] as String,
+          json['status'] as String? ?? 'failed',
+          (json['progress'] as num?)?.toDouble() ?? 0.0,
+          json['reason'] as String?,
+        );
       default:
         return null;
     }
@@ -236,4 +250,25 @@ class SyncStatusEvent extends TcEvent {
 
   final String channelHash;
   final String state;
+}
+
+/// A Nomad Network node announced itself (or refreshed its name).
+class NomadNodeEvent extends TcEvent {
+  const NomadNodeEvent(this.nodeHash, this.displayName);
+  final String nodeHash;
+  final String displayName;
+}
+
+/// A page/file fetch changed state. 'done' means the content is cached and
+/// fetchable via GET /nomad/page (or /nomad/file) -- content never rides on
+/// the event itself.
+class NomadFetchEvent extends TcEvent {
+  const NomadFetchEvent(this.fetchId, this.nodeHash, this.path, this.status,
+      this.progress, this.reason);
+  final String fetchId;
+  final String nodeHash;
+  final String path;
+  final String status;
+  final double progress;
+  final String? reason;
 }

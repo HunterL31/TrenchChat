@@ -17,6 +17,7 @@ import 'models/link_quality.dart';
 import 'models/member.dart';
 import 'models/message.dart';
 import 'models/network_map.dart';
+import 'models/nomad.dart';
 import 'models/permissions.dart';
 import 'models/server.dart';
 import 'models/settings.dart';
@@ -59,11 +60,13 @@ class _TokenClient extends http.BaseClient {
 
 class ApiClient {
   ApiClient({required this.baseUrl, http.Client? client, String token = ''})
-      : _http = token.isEmpty
+      : _token = token,
+        _http = token.isEmpty
             ? (client ?? http.Client())
             : _TokenClient(client ?? http.Client(), token);
 
   final String baseUrl;
+  final String _token;
   final http.Client _http;
 
   static const Map<String, String> _jsonHeaders = {'content-type': 'application/json'};
@@ -677,6 +680,95 @@ class ApiClient {
       body: jsonEncode({'admin': admin, 'member': member}),
     );
     return (_decode(res) as Map<String, dynamic>)['ok'] as bool? ?? false;
+  }
+
+  // --- nomad network page browsing ---
+
+  Future<List<NomadNode>> getNomadNodes() async {
+    final res = await _http.get(_u('/nomad/nodes'));
+    return (_decode(res) as List<dynamic>)
+        .map((e) => NomadNode.fromJson(e as Map<String, dynamic>))
+        .toList();
+  }
+
+  Future<({bool ok, String? fetchId, String? nodeHash, String? path})>
+      browseNomad(String url, {String? currentNode}) async {
+    final res = await _http.post(
+      _u('/nomad/browse'),
+      headers: _jsonHeaders,
+      body: jsonEncode({'url': url, 'current_node': currentNode}),
+    );
+    final body = _decode(res) as Map<String, dynamic>;
+    return (
+      ok: body['ok'] as bool? ?? false,
+      fetchId: body['fetch_id'] as String?,
+      nodeHash: body['node_hash'] as String?,
+      path: body['path'] as String?,
+    );
+  }
+
+  /// The cached copy of a fetched page, or null when nothing is cached yet.
+  Future<NomadPage?> getNomadPage(String nodeHash, String path) async {
+    final res = await _http
+        .get(_u('/nomad/page/$nodeHash?path=${Uri.encodeQueryComponent(path)}'));
+    if (res.statusCode == 404) return null;
+    return NomadPage.fromJson(_decode(res) as Map<String, dynamic>);
+  }
+
+  Future<List<NomadBookmark>> getNomadBookmarks() async {
+    final res = await _http.get(_u('/nomad/bookmarks'));
+    return (_decode(res) as List<dynamic>)
+        .map((e) => NomadBookmark.fromJson(e as Map<String, dynamic>))
+        .toList();
+  }
+
+  Future<bool> addNomadBookmark(
+      String nodeHash, String path, String label) async {
+    final res = await _http.post(
+      _u('/nomad/bookmarks'),
+      headers: _jsonHeaders,
+      body: jsonEncode({'node_hash': nodeHash, 'path': path, 'label': label}),
+    );
+    return (_decode(res) as Map<String, dynamic>)['ok'] as bool? ?? false;
+  }
+
+  Future<bool> removeNomadBookmark(String nodeHash, String path) async {
+    final res = await _http.post(
+      _u('/nomad/bookmarks/delete'),
+      headers: _jsonHeaders,
+      body: jsonEncode({'node_hash': nodeHash, 'path': path}),
+    );
+    return (_decode(res) as Map<String, dynamic>)['ok'] as bool? ?? false;
+  }
+
+  Future<NomadHosting> getNomadHosting() async {
+    final res = await _http.get(_u('/nomad/hosting'));
+    return NomadHosting.fromJson(_decode(res) as Map<String, dynamic>);
+  }
+
+  Future<NomadHosting> setNomadHosting({bool? enabled, String? nodeName}) async {
+    final res = await _http.post(
+      _u('/nomad/hosting'),
+      headers: _jsonHeaders,
+      body: jsonEncode({'enabled': enabled, 'node_name': nodeName}),
+    );
+    return NomadHosting.fromJson(_decode(res) as Map<String, dynamic>);
+  }
+
+  Future<NomadHosting> refreshNomadHosting() async {
+    final res = await _http.post(_u('/nomad/hosting/refresh'));
+    return NomadHosting.fromJson(_decode(res) as Map<String, dynamic>);
+  }
+
+  /// A browser-openable URL for a cached /file/ download. Carries the token
+  /// as a query parameter because the browser can't set headers on a plain
+  /// navigation -- the same reason the WS handshake uses ?token=.
+  Uri nomadFileUri(String nodeHash, String path) {
+    final query = _token.isEmpty
+        ? 'path=${Uri.encodeQueryComponent(path)}'
+        : 'path=${Uri.encodeQueryComponent(path)}'
+            '&token=${Uri.encodeQueryComponent(_token)}';
+    return Uri.parse('$baseUrl/nomad/file/$nodeHash?$query');
   }
 
   void close() => _http.close();

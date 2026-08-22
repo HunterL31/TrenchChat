@@ -30,6 +30,7 @@ import '../dialogs/permissions_dialog.dart';
 import '../dialogs/settings_dialog.dart';
 import 'channel_column.dart';
 import 'channel_header.dart';
+import 'browser_tab.dart';
 import 'compose_bar.dart';
 import 'friends_tab.dart';
 import 'iface_tab.dart';
@@ -410,6 +411,7 @@ class _MainWindowState extends State<MainWindow> {
                       ChannelTab.map => MapTab(state: state),
                       ChannelTab.iface => IfaceTab(state: state),
                       ChannelTab.friends => FriendsTab(state: state),
+                      ChannelTab.browse => BrowserTab(state: state),
                       ChannelTab.chat => MessageList(
                             messages: messages,
                             meHashHex: state.meHashHex,
