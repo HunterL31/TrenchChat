@@ -476,7 +476,31 @@ display name arrives under a different hash.
 
 ---
 
-### 3. Minor residue
+### 3. Reactor spoofing on the synced path
+
+A directly delivered reaction cannot be spoofed: `reaction.py` keys the reactor
+to the LXMF-authenticated sender and ignores any payload-supplied identity. The
+synced path is weaker. `sync.py::_apply_synced_reactions` trusts the payload's
+`reactor` field, authorised only by `may_react` — is that identity a member who
+*could* react — not that the identity actually did. So a relaying peer serving a
+sync response can attribute a reaction to any other member. The blast radius is
+small (a forged reaction decorating an existing message; no message forgery, no
+deletion), which is why it is filed here rather than as a fix.
+
+`test_adversarial.py::test_a_reaction_from_a_real_member_is_kept` currently pins
+third-party reaction backfill as *intended* — a member's reaction propagates
+even when relayed by someone else — so this gap is the price of that feature as
+built. Closing it without losing backfill needs per-reaction signatures (the
+reactor signs `(channel_hash, message_id, emoji, reactor, at)`, verified on
+sync-apply): a wire-format addition, forward-compatible but a protocol change.
+The cheaper alternative — trust a synced reaction only when the relayer is the
+reactor — closes the gap but drops offline backfill of other members' reactions.
+Left open pending that product/protocol call. The earlier
+`security-audit-2026-08.md` wrongly listed this as closed; corrected there.
+
+---
+
+### 4. Minor residue
 
 None of these are exploitable on their own; recorded so they are not
 rediscovered as findings.

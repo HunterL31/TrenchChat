@@ -112,8 +112,14 @@ page — to fully impersonate the user's cryptographic identity.
 - **Presence / goodbye / unsubscribe**: mutate only the authenticated sender's own
   state; no field lets a peer forge presence or unsubscribe a third party; sync is
   driven by RNS-signed announces, not presence content.
-- **Reaction remove path** keyed to authenticated `sender_hex` — no cross-user
-  deletion or reactor spoofing.
+- **Reaction direct/remove paths** keyed to authenticated `sender_hex` — no
+  cross-user deletion, and a directly delivered reaction cannot be spoofed
+  (its reactor is the LXMF-authenticated sender, not a payload field). The
+  *synced* path is weaker: `_apply_synced_reactions` trusts the payload's
+  `reactor` field, authorised only by `may_react` (is that identity a member
+  who could react), so a relaying peer can attribute a reaction to any other
+  member. Recorded as a known application-layer gap in `security-improvements.md`;
+  closing it fully needs per-reaction signatures (a wire-format change).
 - **Subscriber-list signatures**: non-owner rejected, unsigned rejected, Ed25519
   verified over `(channel_hash, version, packed_list)`, entries filtered to
   well-formed hex. (The gap was version *persistence*, not the signature.)
