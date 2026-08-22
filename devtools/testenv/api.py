@@ -133,7 +133,6 @@ class SettingsUpdateRequest(BaseModel):
     propagation_enabled: bool | None = None
     propagation_node_name: str | None = None
     propagation_storage_limit_mb: int | None = None
-    outbound_propagation_node: str | None = None
 
 
 class SetUiThemeRequest(BaseModel):

@@ -324,17 +324,16 @@ def read_settings(config) -> dict:
         "propagation_enabled": config.propagation_enabled,
         "propagation_node_name": config.propagation_node_name,
         "propagation_storage_limit_mb": config.propagation_storage_limit_mb,
-        "outbound_propagation_node": config.outbound_propagation_node,
     }
 
 
 def apply_settings(config, router, updates: dict) -> None:
     """
     Apply a partial settings update, same order as the Settings dialog's
-    _on_accept: plain config writes first, then the two router-backed fields
-    (outbound_propagation_node, propagation_enabled) last, so a router
-    failure doesn't leave the simple fields unwritten. There is no rollback
-    on a partial failure, matching Config's save-per-setter behaviour.
+    _on_accept: plain config writes first, then the router-backed field
+    (propagation_enabled) last, so a router failure doesn't leave the simple
+    fields unwritten. There is no rollback on a partial failure, matching
+    Config's save-per-setter behaviour.
 
     Only keys present in updates are touched.
     """
@@ -342,9 +341,6 @@ def apply_settings(config, router, updates: dict) -> None:
         config.propagation_node_name = updates["propagation_node_name"]
     if "propagation_storage_limit_mb" in updates:
         config.propagation_storage_limit_mb = updates["propagation_storage_limit_mb"]
-
-    if "outbound_propagation_node" in updates:
-        router.set_outbound_propagation_node(updates["outbound_propagation_node"])
 
     if "propagation_enabled" in updates:
         enabled = updates["propagation_enabled"]

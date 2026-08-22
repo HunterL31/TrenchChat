@@ -1015,7 +1015,7 @@ class AppState extends ChangeNotifier {
     }
   }
 
-  /// Saves the propagation/outbound settings. Returns true on success; on
+  /// Saves the propagation-node settings. Returns true on success; on
   /// failure [actionError] is set.
   Future<bool> saveSettings(TcSettings settings) async {
     try {

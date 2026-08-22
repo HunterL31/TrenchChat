@@ -70,7 +70,6 @@ class Router:
         storagepath: override for the LXMF message store directory
         """
         self._config = config
-        self._identity = identity
         self._delivery_callbacks: list = []
         self._outbound_callbacks: list = []
         # source_hash hex -> list of (received_at, LXMessage) awaiting identity
@@ -109,15 +108,6 @@ class Router:
         )
 
         self._router.register_delivery_callback(self._on_message_received)
-
-        # Configure outbound propagation node if set.
-        if config.outbound_propagation_node:
-            try:
-                node_hash = bytes.fromhex(config.outbound_propagation_node)
-                self._router.set_outbound_propagation_node(node_hash)
-            except ValueError:
-                RNS.log("TrenchChat: invalid outbound propagation node hash in config",
-                        RNS.LOG_WARNING)
 
         # Enable propagation node mode if configured.
         if config.propagation_enabled:
@@ -385,29 +375,6 @@ class Router:
         self._router.disable_propagation()
         self._config.propagation_enabled = False
         RNS.log("TrenchChat: propagation node disabled", RNS.LOG_NOTICE)
-
-    def set_outbound_propagation_node(self, hex_hash: str | None):
-        self._config.outbound_propagation_node = hex_hash
-        if hex_hash:
-            node_hash = bytes.fromhex(hex_hash)
-            self._router.set_outbound_propagation_node(node_hash)
-            self._router.request_messages_from_propagation_node(
-                self._identity.rns_identity
-            )
-        else:
-            # LXMF's own setter rejects anything that isn't a valid
-            # destination hash, so it has no way to clear the node.
-            self._router.outbound_propagation_node = None
-            if self._router.outbound_propagation_link is not None:
-                self._router.outbound_propagation_link.teardown()
-                self._router.outbound_propagation_link = None
-
-    def sync_from_propagation_node(self):
-        """Manually trigger a sync pull from the configured propagation node."""
-        if self._config.outbound_propagation_node:
-            self._router.request_messages_from_propagation_node(
-                self._identity.rns_identity
-            )
 
     def set_display_name(self, display_name: str) -> None:
         """Update the display name broadcast in LXMF delivery announces."""

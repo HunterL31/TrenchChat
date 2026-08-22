@@ -146,9 +146,6 @@ def main():
     router.announce_user()
     channel_mgr.announce_all_owned()
 
-    # Sync from propagation node on startup if configured
-    router.sync_from_propagation_node()
-
     # Re-announce every minute so newly connected peers can discover us.
     # Also fires a second announce shortly after startup in case the TCP
     # interface to the hub wasn't ready when the first announce fired.

@@ -33,7 +33,6 @@ class _SettingsDialogContent extends StatefulWidget {
 
 class _SettingsDialogContentState extends State<_SettingsDialogContent> {
   final _displayName = TextEditingController();
-  final _outboundNode = TextEditingController();
   final _nodeName = TextEditingController();
   final _storageLimit = TextEditingController();
 
@@ -57,7 +56,6 @@ class _SettingsDialogContentState extends State<_SettingsDialogContent> {
   @override
   void dispose() {
     _displayName.dispose();
-    _outboundNode.dispose();
     _nodeName.dispose();
     _storageLimit.dispose();
     super.dispose();
@@ -69,7 +67,6 @@ class _SettingsDialogContentState extends State<_SettingsDialogContent> {
       if (!mounted) return;
       setState(() {
         _displayName.text = widget.state.meDisplayName;
-        _outboundNode.text = settings.outboundPropagationNode ?? '';
         _propEnabled = settings.propagationEnabled;
         _nodeName.text = settings.propagationNodeName;
         _storageLimit.text = '${settings.propagationStorageLimitMb}';
@@ -106,7 +103,6 @@ class _SettingsDialogContentState extends State<_SettingsDialogContent> {
       propagationEnabled: _propEnabled,
       propagationNodeName: _nodeName.text.trim(),
       propagationStorageLimitMb: storageMb,
-      outboundPropagationNode: _outboundNode.text.trim(),
     ));
 
     if (!mounted) return;
@@ -177,13 +173,6 @@ class _SettingsDialogContentState extends State<_SettingsDialogContent> {
                     ),
                     const SizedBox(height: 10),
                     _readonlyRow(tc, 'Identity hash', widget.state.meHashHex),
-                    const SizedBox(height: 10),
-                    TcTextField(
-                      label: 'Propagation node',
-                      controller: _outboundNode,
-                      hintText: 'Leave blank to use direct delivery only',
-                      onSubmitted: (_) => _submit(),
-                    ),
                     const SizedBox(height: 16),
                     Container(height: 1, color: tc.borderSubtle),
                     const SizedBox(height: 12),

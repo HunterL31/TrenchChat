@@ -22,7 +22,6 @@ _DEFAULTS = {
         "node_name": "",
         "storage_limit_mb": 256,
     },
-    "outbound_propagation_node": None,
     "ui_theme": {},
     "ui_theme_library": {},
     "voice": {
@@ -110,6 +109,7 @@ class Config:
         retired setting would otherwise be rewritten on every save forever.
         """
         self._data.get("propagation_node", {}).pop("channel_filter", None)
+        self._data.pop("outbound_propagation_node", None)
 
     def _load_from_disk(self) -> dict:
         if self._config_path.exists():
@@ -261,17 +261,6 @@ class Config:
     @voice_vad_threshold_db.setter
     def voice_vad_threshold_db(self, value: float):
         self._data["voice"]["vad_threshold_db"] = float(value)
-        self.save()
-
-    # --- outbound propagation node ---
-
-    @property
-    def outbound_propagation_node(self) -> str | None:
-        return self._data.get("outbound_propagation_node")
-
-    @outbound_propagation_node.setter
-    def outbound_propagation_node(self, value: str | None):
-        self._data["outbound_propagation_node"] = value
         self.save()
 
     # --- ui theme ---

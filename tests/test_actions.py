@@ -150,7 +150,6 @@ class TestSettings:
             "propagation_enabled": False,
             "propagation_node_name": "",
             "propagation_storage_limit_mb": 256,
-            "outbound_propagation_node": None,
         }
 
     def test_apply_settings_writes_simple_fields(self, peer_factory):
@@ -201,26 +200,20 @@ class TestSettings:
 
         assert alice.config.propagation_enabled is True
 
-    def test_apply_settings_sets_outbound_propagation_node(self, peer_factory):
+    def test_apply_settings_ignores_a_setting_that_no_longer_exists(self, peer_factory):
+        """An outbound propagation node was configurable while nothing sent
+        PROPAGATED, so it only ever pulled from a store nothing filled. A
+        client still sending the old key must not break the rest of the
+        update."""
         alice = peer_factory("alice")
-        bob = peer_factory("bob")
 
         actions.apply_settings(alice.config, alice.router, {
-            "outbound_propagation_node": bob.identity.hash_hex,
+            "outbound_propagation_node": "ab" * 16,
+            "propagation_node_name": "still-applied",
         })
 
-        assert alice.config.outbound_propagation_node == bob.identity.hash_hex
-
-    def test_apply_settings_clears_outbound_propagation_node(self, peer_factory):
-        alice = peer_factory("alice")
-        bob = peer_factory("bob")
-        alice.router.set_outbound_propagation_node(bob.identity.hash_hex)
-
-        actions.apply_settings(alice.config, alice.router, {
-            "outbound_propagation_node": None,
-        })
-
-        assert alice.config.outbound_propagation_node is None
+        assert alice.config.propagation_node_name == "still-applied"
+        assert "outbound_propagation_node" not in actions.read_settings(alice.config)
 
 
 class TestUiTheme:

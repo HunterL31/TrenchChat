@@ -356,10 +356,6 @@ class SettingsDialog(QDialog):
         id_label.setStyleSheet("color: #888; font-family: monospace; font-size: 11px;")
         form.addRow("Identity hash:", id_label)
 
-        self._outbound_edit = QLineEdit(self._config.outbound_propagation_node or "")
-        self._outbound_edit.setPlaceholderText("Leave blank to use direct delivery only")
-        form.addRow("Propagation node:", self._outbound_edit)
-
         layout.addLayout(form)
         layout.addStretch()
         return widget
@@ -618,11 +614,8 @@ class SettingsDialog(QDialog):
     # --- accept ---
 
     def _on_accept(self):
-        # Identity / outbound
+        # Identity
         self._config.display_name = self._display_name_edit.text().strip() or "Anonymous"
-        outbound = self._outbound_edit.text().strip()
-        if outbound != (self._config.outbound_propagation_node or ""):
-            self._router.set_outbound_propagation_node(outbound or None)
 
         # Avatar
         if self._avatar_changed and self._avatar_mgr is not None:
