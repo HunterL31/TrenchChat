@@ -133,8 +133,6 @@ class SettingsUpdateRequest(BaseModel):
     propagation_enabled: bool | None = None
     propagation_node_name: str | None = None
     propagation_storage_limit_mb: int | None = None
-    channel_filter_mode: str | None = None
-    channel_filter_hashes: list[str] | None = None
     outbound_propagation_node: str | None = None
 
 

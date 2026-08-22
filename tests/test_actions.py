@@ -7,7 +7,9 @@ from a silently-filtered request.
 
 import time
 
+import LXMF
 import pytest
+import RNS
 
 from tests.helpers import wait_for_member
 from trenchchat.config import Config
@@ -148,8 +150,6 @@ class TestSettings:
             "propagation_enabled": False,
             "propagation_node_name": "",
             "propagation_storage_limit_mb": 256,
-            "channel_filter_mode": "allowlist",
-            "channel_filter_hashes": [],
             "outbound_propagation_node": None,
         }
 
@@ -159,14 +159,10 @@ class TestSettings:
         actions.apply_settings(alice.config, alice.router, {
             "propagation_node_name": "my-node",
             "propagation_storage_limit_mb": 512,
-            "channel_filter_mode": "all",
-            "channel_filter_hashes": ["aa", "bb"],
         })
 
         assert alice.config.propagation_node_name == "my-node"
         assert alice.config.propagation_storage_limit_mb == 512
-        assert alice.config.channel_filter_mode == "all"
-        assert alice.config.channel_filter_hashes == ["aa", "bb"]
 
     def test_apply_settings_only_touches_provided_keys(self, peer_factory):
         alice = peer_factory("alice")
@@ -225,14 +221,6 @@ class TestSettings:
         })
 
         assert alice.config.outbound_propagation_node is None
-
-    def test_apply_settings_rejects_invalid_channel_filter_mode(self, peer_factory):
-        alice = peer_factory("alice")
-
-        with pytest.raises(ValueError):
-            actions.apply_settings(alice.config, alice.router, {
-                "channel_filter_mode": "bogus",
-            })
 
 
 class TestUiTheme:
@@ -399,63 +387,57 @@ class TestVoiceActions:
 
 
 # ---------------------------------------------------------------------------
-# The channel filter has to act where messages enter the propagation store
+# A propagation node cannot select what it relays
 # ---------------------------------------------------------------------------
 
-class TestPropagationFilterIsApplied:
-    """Settings presents this as controlling what the node relays for other
-    people. Its verdict used to be returned from the delivery callback, whose
-    return value LXMF ignores, so it controlled nothing.
+def _propagated_wire_bytes(sender, recipient, channel_hash_hex: str) -> bytes:
+    """The exact bytes a propagation node ingests for a message.
+
+    LXMF hands a node `destination_hash + destination.encrypt(rest)`; only the
+    first field is in the clear.
+    """
+    dest = RNS.Destination(
+        recipient.identity.rns_identity, RNS.Destination.OUT,
+        RNS.Destination.SINGLE, "lxmf", "delivery",
+    )
+    lxm = LXMF.LXMessage(
+        dest, sender.router.delivery_destination, "hello",
+        desired_method=LXMF.LXMessage.PROPAGATED,
+    )
+    lxm.fields = {F_CHANNEL_HASH: bytes.fromhex(channel_hash_hex)}
+    lxm.pack()
+    header = LXMF.LXMessage.DESTINATION_LENGTH
+    return lxm.packed[:header] + dest.encrypt(lxm.packed[header:])
+
+
+class TestPropagationRelayCannotBeFiltered:
+    """A per-channel relay allowlist was offered in Settings for a while. It
+    could never have worked, and this is why: the channel field a filter would
+    read is inside the part only the recipient can decrypt.
     """
 
-    def _filter(self, mode, hashes):
-        from trenchchat.network.prop_filter import PropagationFilter
-
-        class _Cfg:
-            channel_filter_mode = mode
-            channel_filter_hashes = hashes
-
-        return PropagationFilter(_Cfg())
-
-    def test_allow_all_mode_passes_anything(self):
-        assert self._filter("all", []).allows_packed(b"not even a message")
-
-    def test_allowlist_refuses_unreadable_bytes(self):
-        """Allowlist means "relay these channels"; bytes we cannot read are
-        not one of them."""
-        assert not self._filter("allowlist", ["aa" * 16]).allows_packed(b"\x00" * 8)
-
-    def test_allowlist_admits_a_named_channel(self):
-        allowed = "aa" * 16
-
-        class _Msg:
-            fields = {F_CHANNEL_HASH: bytes.fromhex(allowed)}
-
-        assert self._filter("allowlist", [allowed]).allows(_Msg())
-
-    def test_allowlist_refuses_an_unnamed_channel(self):
-        class _Msg:
-            fields = {F_CHANNEL_HASH: bytes.fromhex("bb" * 16)}
-
-        assert not self._filter("allowlist", ["aa" * 16]).allows(_Msg())
-
-    def test_the_filter_is_wired_into_the_propagation_ingest(self, peer_factory):
-        """The point of the fix: refusing has to keep a message out of the
-        store, which only the ingest LXMF actually calls can do."""
+    def test_the_channel_field_is_unreadable_from_the_wire(self, peer_factory):
         alice = peer_factory("alice")
-        alice.config.channel_filter_mode = "allowlist"
-        alice.config.set_channel_filter_hashes([])
+        bob = peer_factory("bob")
+        channel_hex = "ab" * 16
 
-        calls = []
-        alice.router._router.lxmf_propagation = lambda data, *a, **k: calls.append(data)
-        alice.router._install_propagation_filter()
+        wire = _propagated_wire_bytes(alice, bob, channel_hex)
 
-        alice.router._router.lxmf_propagation(b"\x00" * 8)
-        assert calls == [], "a refused message still reached the propagation store"
+        assert bytes.fromhex(channel_hex) not in wire
+        with pytest.raises(Exception):
+            LXMF.LXMessage.unpack_from_bytes(wire)
 
-        alice.config.channel_filter_mode = "all"
-        alice.router._router.lxmf_propagation(b"\x00" * 8)
-        assert len(calls) == 1, "an allowed message was not stored"
+    def test_enabling_a_node_leaves_the_ingest_unwrapped(self, peer_factory):
+        """Nothing may sit in front of lxmf_propagation. It is also the path
+        for our own mail arriving from an outbound node, and a refusal there
+        drops the message while the node still deletes its copy."""
+        alice = peer_factory("alice")
+
+        alice.router.enable_propagation()
+
+        ingest = alice.router.lxmf_router.lxmf_propagation
+        assert getattr(ingest, "__func__", None) is LXMF.LXMRouter.lxmf_propagation, \
+            f"something is wrapping the propagation ingest: {ingest!r}"
 
 
 # ---------------------------------------------------------------------------

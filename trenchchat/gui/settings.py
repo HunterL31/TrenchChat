@@ -1,6 +1,6 @@
 """
-Settings dialog: identity, propagation node configuration, channel filter,
-and security (PIN lock).
+Settings dialog: identity, propagation node configuration, and security
+(PIN lock).
 """
 
 import io
@@ -9,8 +9,7 @@ from pathlib import Path
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QFormLayout,
     QLabel, QLineEdit, QPushButton, QCheckBox, QSpinBox,
-    QComboBox, QListWidget, QListWidgetItem, QGroupBox,
-    QDialogButtonBox, QWidget, QTabWidget, QMessageBox,
+    QGroupBox, QDialogButtonBox, QWidget, QTabWidget, QMessageBox,
     QFileDialog, QScrollArea, QSizePolicy,
 )
 from PyQt6.QtCore import Qt, QPoint, QRect, QSize
@@ -442,48 +441,23 @@ class SettingsDialog(QDialog):
         self._storage_limit_spin.setValue(self._config.propagation_storage_limit_mb)
         form.addRow("Storage limit:", self._storage_limit_spin)
 
-        self._filter_mode_combo = QComboBox()
-        self._filter_mode_combo.addItems(["allowlist", "all"])
-        self._filter_mode_combo.setCurrentText(self._config.channel_filter_mode)
-        self._filter_mode_combo.currentTextChanged.connect(self._on_filter_mode_change)
-        form.addRow("Channel filter:", self._filter_mode_combo)
-
         layout.addWidget(self._prop_group)
 
-        # Channel checklist
-        self._channel_group = QGroupBox("Channels to propagate")
-        self._channel_group.setEnabled(
-            self._config.propagation_enabled
-            and self._config.channel_filter_mode == "allowlist"
+        note = QLabel(
+            "A propagation node stores and forwards mail for the wider LXMF "
+            "network. It does not carry TrenchChat's own messages, and what it "
+            "relays cannot be filtered — propagated messages are encrypted end "
+            "to end, so a node cannot read what is in them."
         )
-        ch_layout = QVBoxLayout(self._channel_group)
+        note.setWordWrap(True)
+        note.setStyleSheet("color: #888; font-size: 11px;")
+        layout.addWidget(note)
 
-        self._channel_list = QListWidget()
-        allowed = set(self._config.channel_filter_hashes)
-        for row in self._storage.get_all_channels():
-            item = QListWidgetItem(f"{row['name']}  ({row['hash'][:12]}…)")
-            item.setData(Qt.ItemDataRole.UserRole, row["hash"])
-            item.setCheckState(
-                Qt.CheckState.Checked if row["hash"] in allowed
-                else Qt.CheckState.Unchecked
-            )
-            self._channel_list.addItem(item)
-
-        ch_layout.addWidget(self._channel_list)
-        layout.addWidget(self._channel_group)
         layout.addStretch()
         return widget
 
     def _on_prop_toggle(self, enabled: bool):
         self._prop_group.setEnabled(enabled)
-        self._channel_group.setEnabled(
-            enabled and self._filter_mode_combo.currentText() == "allowlist"
-        )
-
-    def _on_filter_mode_change(self, mode: str):
-        self._channel_group.setEnabled(
-            self._prop_enabled.isChecked() and mode == "allowlist"
-        )
 
     # --- security tab ---
 
@@ -668,15 +642,6 @@ class SettingsDialog(QDialog):
         new_enabled = self._prop_enabled.isChecked()
         self._config.propagation_node_name = self._node_name_edit.text().strip()
         self._config.propagation_storage_limit_mb = self._storage_limit_spin.value()
-        self._config.channel_filter_mode = self._filter_mode_combo.currentText()
-
-        # Channel filter hashes
-        selected = []
-        for i in range(self._channel_list.count()):
-            item = self._channel_list.item(i)
-            if item.checkState() == Qt.CheckState.Checked:
-                selected.append(item.data(Qt.ItemDataRole.UserRole))
-        self._config.set_channel_filter_hashes(selected)
 
         # Toggle propagation node
         if new_enabled and not self._config.propagation_enabled:

@@ -153,7 +153,6 @@ trenchchat/
   network/
     router.py               LXMFRouter lifecycle and propagation node
     announce.py             Reticulum announce handlers
-    prop_filter.py          Propagation allowlist filter
   gui/                      Legacy Qt client
 devtools/
   testenv/                  Two-process local dev/test environment (see its README);

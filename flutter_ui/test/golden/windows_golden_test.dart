@@ -81,8 +81,6 @@ void main() {
       'propagation_enabled': true,
       'propagation_node_name': 'ridge-relay',
       'propagation_storage_limit_mb': 512,
-      'channel_filter_mode': 'allowlist',
-      'channel_filter_hashes': [kGeneralHash],
       'outbound_propagation_node': '',
     };
     state.standaloneChannels = fixtureDirectChannels();

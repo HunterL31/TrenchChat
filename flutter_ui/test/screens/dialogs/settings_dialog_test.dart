@@ -33,8 +33,6 @@ void main() {
       'propagation_enabled': true,
       'propagation_node_name': 'my-relay',
       'propagation_storage_limit_mb': 512,
-      'channel_filter_mode': 'allowlist',
-      'channel_filter_hashes': <String>[],
       'outbound_propagation_node': 'relay.example',
     };
     backend.routes['POST /settings'] = {'ok': true};

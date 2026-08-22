@@ -21,10 +21,6 @@ _DEFAULTS = {
         "enabled": False,
         "node_name": "",
         "storage_limit_mb": 256,
-        "channel_filter": {
-            "mode": "allowlist",
-            "channel_hashes": [],
-        },
     },
     "outbound_propagation_node": None,
     "ui_theme": {},
@@ -105,6 +101,15 @@ class Config:
         self._config_path = self._data_dir / "config.json"
         self._data_dir.mkdir(parents=True, exist_ok=True)
         self._data: dict = _deep_merge(_DEFAULTS, self._load_from_disk())
+        self._drop_retired_keys()
+
+    def _drop_retired_keys(self) -> None:
+        """Discard settings that no longer exist.
+
+        _deep_merge carries unknown on-disk keys through untouched, so a
+        retired setting would otherwise be rewritten on every save forever.
+        """
+        self._data.get("propagation_node", {}).pop("channel_filter", None)
 
     def _load_from_disk(self) -> dict:
         if self._config_path.exists():
@@ -200,41 +205,6 @@ class Config:
                 f"{MIN_PROPAGATION_STORAGE_MB}, got {limit}"
             )
         self._data["propagation_node"]["storage_limit_mb"] = limit
-        self.save()
-
-    @property
-    def channel_filter_mode(self) -> str:
-        return self._data["propagation_node"]["channel_filter"]["mode"]
-
-    @channel_filter_mode.setter
-    def channel_filter_mode(self, value: str):
-        # Not an assert: stripped under `python -O`.
-        if value not in ("allowlist", "all"):
-            raise ValueError(
-                f"channel_filter_mode must be 'allowlist' or 'all', got {value!r}"
-            )
-        self._data["propagation_node"]["channel_filter"]["mode"] = value
-        self.save()
-
-    @property
-    def channel_filter_hashes(self) -> list[str]:
-        return self._data["propagation_node"]["channel_filter"]["channel_hashes"]
-
-    def add_channel_filter_hash(self, hex_hash: str):
-        hashes = self.channel_filter_hashes
-        if hex_hash not in hashes:
-            hashes.append(hex_hash)
-            self.save()
-
-    def remove_channel_filter_hash(self, hex_hash: str):
-        hashes = self.channel_filter_hashes
-        if hex_hash in hashes:
-            hashes.remove(hex_hash)
-            self.save()
-
-    def set_channel_filter_hashes(self, hashes: list[str]) -> None:
-        """Replace the full set of channel filter hashes."""
-        self._data["propagation_node"]["channel_filter"]["channel_hashes"] = hashes
         self.save()
 
     # --- voice ---

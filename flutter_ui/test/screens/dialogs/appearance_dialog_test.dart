@@ -211,8 +211,6 @@ void main() {
       'propagation_enabled': false,
       'propagation_node_name': '',
       'propagation_storage_limit_mb': 512,
-      'channel_filter_mode': 'all',
-      'channel_filter_hashes': <String>[],
       'outbound_propagation_node': '',
     };
     useTallSurface(tester);
@@ -241,8 +239,6 @@ void main() {
       'propagation_enabled': false,
       'propagation_node_name': '',
       'propagation_storage_limit_mb': 512,
-      'channel_filter_mode': 'all',
-      'channel_filter_hashes': <String>[],
       'outbound_propagation_node': '',
     };
     state.themeSpec = ThemeSpec.fromJson({
@@ -650,8 +646,6 @@ void main() {
       'propagation_enabled': false,
       'propagation_node_name': '',
       'propagation_storage_limit_mb': 512,
-      'channel_filter_mode': 'all',
-      'channel_filter_hashes': <String>[],
       'outbound_propagation_node': '',
     };
     state.themeLibrary = {'Deep': ThemeSpec.empty};
