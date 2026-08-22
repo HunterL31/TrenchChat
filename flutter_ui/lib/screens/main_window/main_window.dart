@@ -17,6 +17,7 @@ import '../../clipboard_paste.dart';
 import '../../theme/section_theme.dart';
 import '../../theme/theme_spec.dart';
 import '../../theme/tokens.dart';
+import '../../widgets/emoji_text.dart' show nomadUrlRe;
 import '../dialogs/add_friend_dialog.dart';
 import '../dialogs/confirm_dialog.dart';
 import '../dialogs/emoji_picker_dialog.dart';
@@ -190,10 +191,15 @@ class _MainWindowState extends State<MainWindow> {
     });
   }
 
-  /// Interim link action: url_launcher is not a dependency, so a tapped link
-  /// is copied to the clipboard rather than opened. Wire launchUrl here once
-  /// the dependency is added.
+  /// Nomad page links open in the NET tab; anything else is the interim
+  /// clipboard action (url_launcher is not a dependency -- wire launchUrl
+  /// here once it is).
   Future<void> _openLink(String url) async {
+    if (nomadUrlRe.matchAsPrefix(url) != null) {
+      setState(() => _tab = ChannelTab.browse);
+      widget.state.openNomadUrl(url);
+      return;
+    }
     await Clipboard.setData(ClipboardData(text: url));
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(

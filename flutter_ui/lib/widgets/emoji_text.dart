@@ -17,6 +17,11 @@ final RegExp emojiTokenRe = RegExp(r':([a-zA-Z0-9_-]+)(?:@([0-9a-fA-F]{64}))?:')
 /// Bare http/https URLs in message text.
 final RegExp urlRe = RegExp(r'https?://[^\s<>]+', caseSensitive: false);
 
+/// Nomad Network page/file URLs (node hash + request path), so pages shared
+/// in chat open in the NET tab.
+final RegExp nomadUrlRe =
+    RegExp(r'\b[0-9a-fA-F]{32}:/(?:page|file)/[^\s<>]+');
+
 /// Trailing characters stripped off a detected URL, so a sentence-final period
 /// or a wrapping bracket is not swept into the link.
 const String _urlTrailingTrim = '.,;:!?)]}\'"';
@@ -58,12 +63,16 @@ class InlineLinkConfig {
 /// Splits a plain-text run into text and styled link spans. Returns a single
 /// text span when there is nothing to link.
 List<InlineSpan> _linkifyRun(String text, TextStyle style, InlineLinkConfig? links) {
-  if (links == null || !text.contains('://')) {
+  // ':/'' covers both web ('://') and nomad ('<hash>:/page/') URL shapes.
+  if (links == null || !text.contains(':/')) {
     return [TextSpan(text: text, style: style)];
   }
+  final matches = [...urlRe.allMatches(text), ...nomadUrlRe.allMatches(text)]
+    ..sort((a, b) => a.start.compareTo(b.start));
   final spans = <InlineSpan>[];
   int last = 0;
-  for (final m in urlRe.allMatches(text)) {
+  for (final m in matches) {
+    if (m.start < last) continue;
     var url = m.group(0)!;
     var end = m.end;
     while (url.isNotEmpty && _urlTrailingTrim.contains(url[url.length - 1])) {

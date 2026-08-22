@@ -6,6 +6,8 @@ reads as a sequence of user actions, and every action goes through the same
 api.py -> actions.py path the Flutter client uses.
 """
 
+import base64
+
 import httpx
 
 _ORCH_PORT = 8800
@@ -386,6 +388,49 @@ class Peer:
         """{identity_hash: link_state} for a channel's voice roster."""
         return {e["identity_hash"]: e["link_state"]
                 for e in self.voice_roster(channel_hash)}
+
+    # --- nomad page browsing ---
+
+    def nomad_nodes(self) -> list[dict]:
+        return self._get("/nomad/nodes")
+
+    def nomad_set_hosting(self, *, enabled: bool | None = None,
+                          node_name: str | None = None) -> dict:
+        return self._post("/nomad/hosting",
+                          {"enabled": enabled, "node_name": node_name})
+
+    def nomad_hosting(self) -> dict:
+        return self._get("/nomad/hosting")
+
+    def nomad_refresh_hosting(self) -> dict:
+        return self._post("/nomad/hosting/refresh")
+
+    def nomad_browse(self, url: str, current_node: str | None = None) -> dict:
+        return self._post("/nomad/browse",
+                          {"url": url, "current_node": current_node})
+
+    def nomad_fetch(self, node_hash: str, path: str) -> dict:
+        return self._post("/nomad/fetch",
+                          {"node_hash": node_hash, "path": path})
+
+    def nomad_page(self, node_hash: str, path: str) -> str | None:
+        """The cached page source, or None when nothing is cached yet."""
+        r = self._client.get(f"{self._base}/nomad/page/{node_hash}",
+                             params={"path": path})
+        if r.status_code == 404:
+            return None
+        r.raise_for_status()
+        content = base64.b64decode(r.json()["content_b64"])
+        return content.decode("utf-8", errors="replace")
+
+    def nomad_file(self, node_hash: str, path: str) -> bytes | None:
+        """The cached file bytes, or None when nothing is cached yet."""
+        r = self._client.get(f"{self._base}/nomad/file/{node_hash}",
+                             params={"path": path})
+        if r.status_code == 404:
+            return None
+        r.raise_for_status()
+        return r.content
 
     # --- link control ---
 

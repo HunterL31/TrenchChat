@@ -829,6 +829,22 @@ class AppState extends ChangeNotifier {
     return status;
   }
 
+  /// A nomad URL waiting for the browser tab to open it -- set when a link
+  /// is tapped outside the tab (a chat message). Claimed once with
+  /// [takePendingNomadUrl], the same take-style contract as [actionError].
+  String? pendingNomadUrl;
+
+  void openNomadUrl(String url) {
+    pendingNomadUrl = url;
+    notifyListeners();
+  }
+
+  String? takePendingNomadUrl() {
+    final url = pendingNomadUrl;
+    pendingNomadUrl = null;
+    return url;
+  }
+
   /// Runs a directory search and caches the result in [directory] so live
   /// [DirectoryUpdatedEvent]s can patch it in place.
   Future<void> loadDirectory(String query) async {

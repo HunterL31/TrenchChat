@@ -4,6 +4,7 @@
 // page content itself is pulled from the cache endpoint afterwards, so a
 // previously seen page renders instantly and refreshes in place.
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../../api/models/nomad.dart';
 import '../../app_state.dart';
@@ -14,6 +15,7 @@ import '../../theme/theme_spec.dart';
 import '../../theme/tokens.dart';
 import '../../widgets/tc_button.dart';
 import '../../widgets/tc_icon.dart';
+import '../dialogs/nomad_hosting_dialog.dart';
 
 class BrowserTab extends StatefulWidget {
   const BrowserTab({super.key, required this.state});
@@ -30,8 +32,10 @@ class _BrowserTabState extends State<BrowserTab> {
   int _historyIndex = -1;
 
   String? _activeFetchId;
+  String? _fileFetchId;
   NomadPage? _page;
   String? _error;
+  String? _info;
   double _progress = 0;
   bool _loading = false;
 
@@ -48,6 +52,10 @@ class _BrowserTabState extends State<BrowserTab> {
       widget.state.loadNomadNodes();
     }
     widget.state.loadNomadBookmarks();
+    final pending = widget.state.takePendingNomadUrl();
+    if (pending != null) {
+      Future.microtask(() => _go(pending));
+    }
   }
 
   @override
@@ -57,10 +65,16 @@ class _BrowserTabState extends State<BrowserTab> {
     super.dispose();
   }
 
-  /// Rebuilds on every AppState notification (node list, bookmarks) and
-  /// advances the in-flight fetch when its status changes.
+  /// Rebuilds on every AppState notification (node list, bookmarks),
+  /// advances the in-flight fetches, and opens URLs handed over from other
+  /// tabs (a nomad link tapped in chat).
   void _onStateChanged() {
     if (!mounted) return;
+    final pending = widget.state.takePendingNomadUrl();
+    if (pending != null) {
+      Future.microtask(() => _go(pending));
+    }
+    _advanceFileFetch();
     final fetchId = _activeFetchId;
     final status = fetchId == null ? null : widget.state.nomadFetches[fetchId];
     if (status == null) {
@@ -123,6 +137,7 @@ class _BrowserTabState extends State<BrowserTab> {
       _activeFetchId = fetchId;
       _loading = true;
       _error = null;
+      _info = null;
       _progress = 0;
       _address.text = '$nodeHash:$path';
     });
@@ -157,6 +172,7 @@ class _BrowserTabState extends State<BrowserTab> {
       _historyIndex = -1;
       _page = null;
       _error = null;
+      _info = null;
       _activeFetchId = null;
       _loading = false;
       _address.text = '';
@@ -207,6 +223,7 @@ class _BrowserTabState extends State<BrowserTab> {
               color: tc.borderAccent,
             ),
           if (_error != null) _errorBanner(tc),
+          if (_info != null) _infoBanner(tc),
           Expanded(
             child: _current == null ? _nodeList(tc) : _pageView(tc),
           ),
@@ -275,6 +292,11 @@ class _BrowserTabState extends State<BrowserTab> {
             label: bookmarked ? '★' : '☆',
             onPressed: current == null ? null : _toggleBookmark,
           ),
+          const SizedBox(width: 4),
+          TcGhostButton(
+            label: 'HOST',
+            onPressed: () => showNomadHostingDialog(context, widget.state),
+          ),
         ],
       ),
     );
@@ -298,6 +320,30 @@ class _BrowserTabState extends State<BrowserTab> {
             ),
           ),
           TcGhostButton(label: 'RETRY', onPressed: _reload),
+        ],
+      ),
+    );
+  }
+
+  Widget _infoBanner(TCSectionColors tc) {
+    return Container(
+      margin: const EdgeInsets.fromLTRB(12, 10, 12, 0),
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      decoration: BoxDecoration(
+        color: tc.bgInset,
+        border: Border.all(color: tc.borderAccent),
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: Text(
+              _info!,
+              style: TextStyle(
+                  fontSize: TCType.textCaption, color: tc.textSecondary),
+            ),
+          ),
+          TcGhostButton(
+              label: 'OK', onPressed: () => setState(() => _info = null)),
         ],
       ),
     );
@@ -436,10 +482,47 @@ class _BrowserTabState extends State<BrowserTab> {
 
   void _onMicronLink(String url) {
     if (url.contains(':/file/') || url.startsWith('/file/')) {
-      setState(() => _error = 'File downloads are not supported yet.');
+      _fetchFile(url);
       return;
     }
     _go(url);
+  }
+
+  /// Fetches a /file/ link into the backend cache without leaving the page.
+  /// When it lands, the authenticated download URL goes to the clipboard --
+  /// the same interim answer main_window's _openLink gives for web links.
+  Future<void> _fetchFile(String url) async {
+    final fetchId = await widget.state
+        .browseNomad(url, currentNode: _current?.nodeHash);
+    if (!mounted) return;
+    if (fetchId == null) {
+      setState(() =>
+          _error = widget.state.takeActionError() ?? 'Could not fetch file.');
+      return;
+    }
+    setState(() {
+      _fileFetchId = fetchId;
+      _info = 'Fetching file…';
+    });
+  }
+
+  void _advanceFileFetch() {
+    final fetchId = _fileFetchId;
+    final status = fetchId == null ? null : widget.state.nomadFetches[fetchId];
+    if (status == null || !status.isTerminal) return;
+    widget.state.takeNomadFetch(fetchId!);
+    _fileFetchId = null;
+    if (status.status == 'done') {
+      final uri = widget.state.api.nomadFileUri(status.nodeHash, status.path);
+      Clipboard.setData(ClipboardData(text: uri.toString()));
+      setState(() => _info =
+          'File cached — download URL copied to clipboard.');
+    } else {
+      setState(() {
+        _info = null;
+        _error = _friendlyReason(status.reason);
+      });
+    }
   }
 
   String _shortHash(String hash) =>
