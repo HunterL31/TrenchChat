@@ -16,7 +16,7 @@ Widget _harness({
           channelHash: 'hash-a',
           channelName: 'alpha',
           enabled: true,
-          onSend: (_) async => true,
+          onSend: (_, _) async => true,
           replyPreview: replyPreview,
           onCancelReply: onCancelReply,
           compact: true,

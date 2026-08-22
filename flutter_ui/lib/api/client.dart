@@ -210,17 +210,35 @@ class ApiClient {
   /// [reason] is the backend's machine-readable cause when [ok] is false
   /// (`no_send_permission`, `no_recipients`).
   Future<({bool ok, String? reason})> sendMessage(
-      String channelHashHex, String content, {String? replyTo}) async {
+      String channelHashHex, String content,
+      {String? replyTo, String? imageDataB64}) async {
     final res = await _http.post(
       _u('/channels/$channelHashHex/messages'),
       headers: _jsonHeaders,
       body: jsonEncode({
         'content': content,
         'reply_to': ?replyTo,
+        'image_data_b64': ?imageDataB64,
       }),
     );
     final body = _decode(res) as Map<String, dynamic>;
     return (ok: body['ok'] as bool? ?? false, reason: body['reason'] as String?);
+  }
+
+  /// The image attached to a message, or null when it has none.
+  ///
+  /// Same never-throw contract as [getPeerAvatar], for the same reason: the
+  /// backend stores peer bytes without requiring them to parse, so a missing
+  /// or undecodable attachment is routine rather than exceptional.
+  Future<Uint8List?> getMessageImage(String channelHashHex, String messageId) async {
+    try {
+      final res =
+          await _http.get(_u('/channels/$channelHashHex/messages/$messageId/image'));
+      if (res.statusCode != 200) return null;
+      return res.bodyBytes;
+    } catch (_) {
+      return null;
+    }
   }
 
   Future<ChannelPermissions> getMyPermissions(String channelHashHex) async {

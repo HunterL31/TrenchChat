@@ -3,7 +3,7 @@
 // deletes the token.
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
-
+import 'package:flutter_ui/attachments.dart';
 import 'package:flutter_ui/screens/main_window/compose_bar.dart';
 import 'package:flutter_ui/theme/theme_code.dart';
 import 'package:flutter_ui/theme/theme_spec.dart';
@@ -12,7 +12,7 @@ final ThemeSpec _spec = ThemeSpec(base: {'bgApp': const Color(0xFF221100)});
 final String _code = encodeThemeCode('Deep', _spec);
 
 Widget _harness({
-  required Future<bool> Function(String) onSend,
+  required Future<bool> Function(String, PickedAttachment?) onSend,
   ({String name, String code})? staged,
   VoidCallback? onConsumed,
 }) =>
@@ -42,7 +42,7 @@ void main() {
       (tester) async {
     var consumed = 0;
     await tester.pumpWidget(_harness(
-      onSend: (_) async => true,
+      onSend: (_, _) async => true,
       staged: (name: 'Deep', code: _code),
       onConsumed: () => consumed++,
     ));
@@ -54,7 +54,7 @@ void main() {
   });
 
   testWidgets('nothing is staged when nothing was shared', (tester) async {
-    await tester.pumpWidget(_harness(onSend: (_) async => true));
+    await tester.pumpWidget(_harness(onSend: (_, _) async => true));
     await tester.pumpAndSettle();
 
     expect(find.textContaining('[theme:'), findsNothing);
@@ -63,7 +63,7 @@ void main() {
   testWidgets('sending expands the token to the theme code', (tester) async {
     String? sent;
     await tester.pumpWidget(_harness(
-      onSend: (c) async {
+      onSend: (c, _) async {
         sent = c;
         return true;
       },
@@ -81,7 +81,7 @@ void main() {
   testWidgets('deleting the token sends the message without it', (tester) async {
     String? sent;
     await tester.pumpWidget(_harness(
-      onSend: (c) async {
+      onSend: (c, _) async {
         sent = c;
         return true;
       },
@@ -99,7 +99,7 @@ void main() {
       (tester) async {
     String? sent;
     await tester.pumpWidget(_harness(
-      onSend: (c) async {
+      onSend: (c, _) async {
         sent = c;
         return true;
       },
@@ -124,7 +124,7 @@ void main() {
   testWidgets('a delete inside the name takes the whole token out too',
       (tester) async {
     await tester.pumpWidget(_harness(
-      onSend: (_) async => true,
+      onSend: (_, _) async => true,
       staged: (name: 'Deep', code: _code),
     ));
     await tester.pumpAndSettle();
@@ -139,7 +139,7 @@ void main() {
       (tester) async {
     String? sent;
     await tester.pumpWidget(_harness(
-      onSend: (c) async {
+      onSend: (c, _) async {
         sent = c;
         return true;
       },
@@ -160,7 +160,7 @@ void main() {
       (tester) async {
     String? sent;
     await tester.pumpWidget(_harness(
-      onSend: (c) async {
+      onSend: (c, _) async {
         sent = c;
         return true;
       },
@@ -178,12 +178,12 @@ void main() {
   });
 
   testWidgets('the token is appended after what is already typed', (tester) async {
-    await tester.pumpWidget(_harness(onSend: (_) async => true));
+    await tester.pumpWidget(_harness(onSend: (_, _) async => true));
     await tester.pumpAndSettle();
 
     await tester.enterText(find.byType(TextField), 'look at');
     await tester.pumpWidget(_harness(
-      onSend: (_) async => true,
+      onSend: (_, _) async => true,
       staged: (name: 'Deep', code: _code),
     ));
     await tester.pumpAndSettle();

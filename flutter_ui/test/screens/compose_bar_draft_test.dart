@@ -4,7 +4,7 @@
 // when the reader comes back to finish the message.
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
-
+import 'package:flutter_ui/attachments.dart';
 import 'package:flutter_ui/screens/main_window/compose_bar.dart';
 import 'package:flutter_ui/theme/theme_code.dart';
 import 'package:flutter_ui/theme/theme_spec.dart';
@@ -21,7 +21,7 @@ const _emojiHash =
 class _Host extends StatefulWidget {
   const _Host({super.key, required this.onSend, this.pickEmoji, this.staged});
 
-  final Future<bool> Function(String) onSend;
+  final Future<bool> Function(String, PickedAttachment?) onSend;
   final Future<String?> Function()? pickEmoji;
   final ({String name, String code})? staged;
 
@@ -79,7 +79,7 @@ Future<void> _send(WidgetTester tester) async {
 void main() {
   testWidgets('a draft stays in the channel it was typed in', (tester) async {
     final key = GlobalKey<_HostState>();
-    await tester.pumpWidget(_Host(key: key, onSend: (_) async => true));
+    await tester.pumpWidget(_Host(key: key, onSend: (_, _) async => true));
 
     await tester.enterText(find.byType(TextField), 'half a thought');
     await tester.pump();
@@ -93,7 +93,7 @@ void main() {
 
   testWidgets('each channel keeps its own draft', (tester) async {
     final key = GlobalKey<_HostState>();
-    await tester.pumpWidget(_Host(key: key, onSend: (_) async => true));
+    await tester.pumpWidget(_Host(key: key, onSend: (_, _) async => true));
 
     await tester.enterText(find.byType(TextField), 'for alpha');
     await tester.pump();
@@ -113,7 +113,7 @@ void main() {
     final key = GlobalKey<_HostState>();
     await tester.pumpWidget(_Host(
       key: key,
-      onSend: (content) async {
+      onSend: (content, _) async {
         sent.add(content);
         return true;
       },
@@ -138,7 +138,7 @@ void main() {
     final key = GlobalKey<_HostState>();
     await tester.pumpWidget(_Host(
       key: key,
-      onSend: (content) async {
+      onSend: (content, _) async {
         sent.add(content);
         return true;
       },
@@ -165,7 +165,7 @@ void main() {
     final key = GlobalKey<_HostState>();
     await tester.pumpWidget(_Host(
       key: key,
-      onSend: (content) async {
+      onSend: (content, _) async {
         sent.add(content);
         return true;
       },

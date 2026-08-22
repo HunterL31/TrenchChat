@@ -22,6 +22,13 @@ import '../../widgets/tc_icon.dart';
 import '../../widgets/tc_tooltip.dart';
 import '../../widgets/theme_share.dart';
 
+/// Bounds for an inline attachment. The decode cap keeps the raster tracking
+/// the drawn width rather than whatever dimensions the file declares -- the
+/// same reason peer_image.dart caps its own.
+const double _attachmentMaxWidth = 400;
+const double _attachmentMaxHeight = 300;
+const int _attachmentDecodeCap = 1200;
+
 sealed class _Row {}
 
 class _DateDividerRow extends _Row {
@@ -61,6 +68,8 @@ class MessageList extends StatefulWidget {
     required this.displayNameFor,
     this.avatarBytesFor,
     this.ensureAvatarLoaded,
+    this.attachmentBytesFor,
+    this.ensureAttachmentLoaded,
     this.onToggleReaction,
     this.onReact,
     this.emojiLibrary = const {},
@@ -102,6 +111,11 @@ class MessageList extends StatefulWidget {
 
   /// Fire-and-forget: triggers the async fetch that populates the cache.
   final void Function(String identityHashHex)? ensureAvatarLoaded;
+
+  /// Same pair as the avatar one, for a message's attached image: a
+  /// synchronous cache read and the fetch that fills it.
+  final Uint8List? Function(String messageId)? attachmentBytesFor;
+  final void Function(String messageId)? ensureAttachmentLoaded;
 
   final void Function(String messageId, String emojiHash)? onToggleReaction;
 
@@ -320,6 +334,9 @@ class _MessageListState extends State<MessageList> {
               }(),
               avatarBytes: widget.avatarBytesFor?.call(row.message.senderHash),
               ensureAvatarLoaded: widget.ensureAvatarLoaded,
+              attachmentBytes:
+                  widget.attachmentBytesFor?.call(row.message.messageId),
+              ensureAttachmentLoaded: widget.ensureAttachmentLoaded,
               onToggleReaction: widget.onToggleReaction,
               onReact: widget.onReact,
               onReply: widget.onReply,
@@ -445,6 +462,8 @@ class _MessageRowWidget extends StatefulWidget {
     this.parentIsOwn = false,
     this.avatarBytes,
     this.ensureAvatarLoaded,
+    this.attachmentBytes,
+    this.ensureAttachmentLoaded,
     this.onToggleReaction,
     this.onReact,
     this.onReply,
@@ -470,6 +489,8 @@ class _MessageRowWidget extends StatefulWidget {
 
   final Uint8List? avatarBytes;
   final void Function(String identityHashHex)? ensureAvatarLoaded;
+  final Uint8List? attachmentBytes;
+  final void Function(String messageId)? ensureAttachmentLoaded;
   final void Function(String messageId, String emojiHash)? onToggleReaction;
   final void Function(String messageId)? onReact;
   final void Function(Message message)? onReply;
@@ -527,6 +548,43 @@ class _MessageRowWidgetState extends State<_MessageRowWidget> {
   Set<String> get friendHashes => widget.friendHashes;
   void Function(String identityHashHex)? get onAddFriend => widget.onAddFriend;
 
+  /// The message's attached image, once it has been fetched. Sized to a
+  /// bounded box rather than the file's own dimensions, which are a peer's
+  /// claim about bytes the backend stores without requiring them to parse.
+  Widget _attachment(TCSectionColors tc) {
+    final bytes = widget.attachmentBytes;
+    if (bytes == null) {
+      return Container(
+        width: _attachmentMaxWidth,
+        height: 120,
+        decoration: BoxDecoration(
+          color: tc.bgInset,
+          borderRadius: tcCorners(context),
+        ),
+      );
+    }
+    return ClipRRect(
+      borderRadius: tcCorners(context) ?? BorderRadius.zero,
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(
+          maxWidth: _attachmentMaxWidth,
+          maxHeight: _attachmentMaxHeight,
+        ),
+        child: Image.memory(
+          bytes,
+          fit: BoxFit.contain,
+          alignment: Alignment.topLeft,
+          filterQuality: FilterQuality.medium,
+          cacheWidth: _attachmentDecodeCap,
+          errorBuilder: (context, error, stack) => Text(
+            'Attachment could not be displayed',
+            style: TextStyle(fontSize: TCType.textMicro, color: tc.textTertiary),
+          ),
+        ),
+      ),
+    );
+  }
+
   /// Wraps a row in the hover tracker and the react affordance.
   Widget _withReactButton(Widget row) {
     return MouseRegion(
@@ -555,6 +613,9 @@ class _MessageRowWidgetState extends State<_MessageRowWidget> {
   Widget build(BuildContext context) {
     if (!isContinuation && avatarBytes == null) {
       ensureAvatarLoaded?.call(message.senderHash);
+    }
+    if (message.hasImage && widget.attachmentBytes == null) {
+      widget.ensureAttachmentLoaded?.call(message.messageId);
     }
     final tc = SectionTheme.of(context);
     final bg = isOwn ? const Color.fromRGBO(255, 255, 255, 0.02) : Colors.transparent;
@@ -591,11 +652,15 @@ class _MessageRowWidgetState extends State<_MessageRowWidget> {
 
     // An attachment we refused leaves the text intact, so without this the
     // message reads as though it never had one.
-    final body = message.imageStripped || sharedThemes.isNotEmpty
+    final body = message.hasImage || message.imageStripped || sharedThemes.isNotEmpty
         ? Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              bodyText,
+              if (message.content.isNotEmpty) bodyText,
+              if (message.hasImage) ...[
+                if (message.content.isNotEmpty) const SizedBox(height: 6),
+                _attachment(tc),
+              ],
               if (message.imageStripped) ...[
                 const SizedBox(height: 4),
                 Text(

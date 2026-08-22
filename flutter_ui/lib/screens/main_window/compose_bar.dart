@@ -11,6 +11,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../../attachments.dart';
 import '../../theme/section_theme.dart';
 import '../../theme/shape.dart';
 import '../../theme/theme_spec.dart';
@@ -18,6 +19,7 @@ import '../../theme/tokens.dart';
 import '../../widgets/emoji_text.dart';
 import '../../widgets/tc_button.dart';
 import '../../widgets/tc_icon.dart';
+import '../../widgets/tc_tooltip.dart';
 
 /// The token a staged theme share reads as in the draft.
 String composeThemeToken(String name) => '[theme:$name]';
@@ -86,13 +88,15 @@ int _themeTokenPrefixLength(String text, int start, String token) {
 
 /// One channel's unsent draft: the text plus the token maps that expand it.
 class _ComposeDraft {
-  const _ComposeDraft(this.text, this.emoji, this.themes);
+  const _ComposeDraft(this.text, this.emoji, this.themes, this.attachment);
 
   final String text;
   final Map<String, String> emoji;
   final Map<String, String> themes;
+  final PickedAttachment? attachment;
 
-  bool get isEmpty => text.isEmpty && emoji.isEmpty && themes.isEmpty;
+  bool get isEmpty =>
+      text.isEmpty && emoji.isEmpty && themes.isEmpty && attachment == null;
 }
 
 class ComposeBar extends StatefulWidget {
@@ -103,6 +107,8 @@ class ComposeBar extends StatefulWidget {
     required this.onSend,
     this.channelHash,
     this.pickEmoji,
+    this.pickAttachment,
+    this.watchPastedImages,
     this.pendingThemeShare,
     this.onThemeShareConsumed,
     this.replyPreview,
@@ -120,9 +126,9 @@ class ComposeBar extends StatefulWidget {
 
   final bool enabled;
 
-  /// Returns whether the message was accepted; on false the composed text is
-  /// restored so a failed send never eats the user's words.
-  final Future<bool> Function(String content) onSend;
+  /// Returns whether the message was accepted; on false the composed text and
+  /// any staged attachment are restored, so a failed send never eats them.
+  final Future<bool> Function(String content, PickedAttachment? attachment) onSend;
 
   /// Narrow/touch mode: swaps the keyboard hint for a send button, since
   /// mobile keyboards have no Enter-to-send.
@@ -132,6 +138,15 @@ class ComposeBar extends StatefulWidget {
   /// emoji's `:name@hash:` is shown as just `:name:` and re-expanded on send,
   /// so a 64-char hash never sits in the user's draft.
   final Future<String?> Function()? pickEmoji;
+
+  /// Opens the file picker behind the + button. Null leaves the button inert,
+  /// which is what isolated widget tests want.
+  final Future<PickedAttachment?> Function()? pickAttachment;
+
+  /// Subscribes a handler to the platform's paste events for as long as this
+  /// compose bar lives, returning the disposer. Null disables paste-to-attach.
+  final VoidCallback Function(void Function(PickedAttachment image) onImage)?
+      watchPastedImages;
 
   /// A theme the appearance editor staged: dropped into the draft as
   /// `[theme:<name>]` and sent as [code]. Cleared through
@@ -166,6 +181,9 @@ class _ComposeBarState extends State<ComposeBar> {
   /// Drafts left behind in other channels, keyed by channel hash.
   final Map<String, _ComposeDraft> _stashedDrafts = {};
 
+  /// The image staged for the next send, shown as a chip above the input.
+  PickedAttachment? _attachment;
+
   /// Whether the share currently offered has already been taken. Cleared
   /// when the offer goes away, so a second share still lands.
   bool _shareConsumed = false;
@@ -174,12 +192,23 @@ class _ComposeBarState extends State<ComposeBar> {
   /// not re-enter the listener that is making it.
   bool _rewritingDraft = false;
 
+  /// Stops the paste subscription when this compose bar goes away.
+  VoidCallback? _stopWatchingPastes;
+
   @override
   void initState() {
     super.initState();
     HardwareKeyboard.instance.addHandler(_onKeyEvent);
     _controller.addListener(_onDraftChanged);
+    _stopWatchingPastes = widget.watchPastedImages?.call(_onPastedImage);
     _consumeThemeShare();
+  }
+
+  /// A paste fires wherever the app has focus, so the compose bar takes one
+  /// only when the message field is what the user is typing into.
+  void _onPastedImage(PickedAttachment image) {
+    if (!mounted || !_focusNode.hasFocus || !widget.enabled) return;
+    setState(() => _attachment = image);
   }
 
   /// Keeps a staged theme token all-or-nothing: editing any part of one takes
@@ -231,7 +260,7 @@ class _ComposeBarState extends State<ComposeBar> {
   void _switchDraft(String? leaving) {
     if (leaving != null) {
       final draft = _ComposeDraft(
-          _controller.text, Map.of(_draftEmoji), Map.of(_draftThemes));
+          _controller.text, Map.of(_draftEmoji), Map.of(_draftThemes), _attachment);
       if (draft.isEmpty) {
         _stashedDrafts.remove(leaving);
       } else {
@@ -246,6 +275,7 @@ class _ComposeBarState extends State<ComposeBar> {
     _draftThemes
       ..clear()
       ..addAll(restored?.themes ?? const {});
+    _attachment = restored?.attachment;
     _setDraftText(restored?.text ?? '');
   }
 
@@ -279,6 +309,7 @@ class _ComposeBarState extends State<ComposeBar> {
   @override
   void dispose() {
     HardwareKeyboard.instance.removeHandler(_onKeyEvent);
+    _stopWatchingPastes?.call();
     _controller.removeListener(_onDraftChanged);
     _controller.dispose();
     _focusNode.dispose();
@@ -299,17 +330,32 @@ class _ComposeBarState extends State<ComposeBar> {
 
   Future<void> _submit() async {
     final text = _controller.text;
-    if (text.trim().isEmpty || !widget.enabled) return;
+    final attachment = _attachment;
+    if (!widget.enabled) return;
+    if (text.trim().isEmpty && attachment == null) return;
     final expanded = _expandDraftThemes(_expandDraftEmoji(text));
     _setDraftText('');
-    final ok = await widget.onSend(expanded);
+    if (attachment != null) setState(() => _attachment = null);
+    final ok = await widget.onSend(expanded, attachment);
     if (ok) {
       _draftEmoji.clear();
       _draftThemes.clear();
-    } else if (mounted && _controller.text.isEmpty) {
+    } else if (mounted) {
       // Restore the short form, and keep the mapping so a retry still expands.
-      _setDraftText(text);
+      if (_controller.text.isEmpty) _setDraftText(text);
+      // Independently of the text, since a new draft typed during the send
+      // does not mean the user meant to drop the image with it.
+      if (attachment != null && _attachment == null) {
+        setState(() => _attachment = attachment);
+      }
     }
+  }
+
+  Future<void> _pickAttachment() async {
+    final picked = await widget.pickAttachment?.call();
+    if (picked == null || !mounted) return;
+    setState(() => _attachment = picked);
+    _focusNode.requestFocus();
   }
 
   /// Rewrites each `:name:` picked this draft back to `:name@hash:`. Tokens
@@ -364,7 +410,18 @@ class _ComposeBarState extends State<ComposeBar> {
     final row = Row(
       crossAxisAlignment: CrossAxisAlignment.center,
       children: [
-        TcIcon(TcIcons.plus, size: 15, color: tc.textTertiary),
+        MouseRegion(
+          cursor: widget.pickAttachment == null
+              ? SystemMouseCursors.basic
+              : SystemMouseCursors.click,
+          child: GestureDetector(
+            onTap: widget.pickAttachment == null ? null : _pickAttachment,
+            child: TcTooltip(
+              message: 'Attach an image',
+              child: TcIcon(TcIcons.plus, size: 15, color: tc.textTertiary),
+            ),
+          ),
+        ),
         const SizedBox(width: 10),
         Expanded(
           child: TextField(
@@ -421,6 +478,7 @@ class _ComposeBarState extends State<ComposeBar> {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           if (widget.replyPreview != null) _replyBanner(tc),
+          if (_attachment != null) _attachmentChip(tc, _attachment!),
           if (rounded)
             Container(
               decoration: BoxDecoration(color: tc.bgInset, borderRadius: tcCorners(context)),
@@ -429,6 +487,56 @@ class _ComposeBarState extends State<ComposeBar> {
             )
           else
             row,
+        ],
+      ),
+    );
+  }
+
+  /// The staged image, shown the way the reply banner is: above the input,
+  /// with its own way out. Removing it is the only thing that unstages it.
+  Widget _attachmentChip(TCSectionColors tc, PickedAttachment attachment) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Row(
+        children: [
+          ClipRRect(
+            borderRadius: tcCorners(context) ?? BorderRadius.zero,
+            child: Image.memory(
+              attachment.bytes,
+              width: 40,
+              height: 40,
+              fit: BoxFit.cover,
+              cacheWidth: 120,
+              cacheHeight: 120,
+              errorBuilder: (context, error, stack) =>
+                  Container(width: 40, height: 40, color: tc.bgInset),
+            ),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              attachment.name,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(fontSize: TCType.textMicro, color: tc.textSecondary),
+            ),
+          ),
+          const SizedBox(width: 8),
+          MouseRegion(
+            cursor: SystemMouseCursors.click,
+            child: GestureDetector(
+              onTap: () => setState(() => _attachment = null),
+              child: Text(
+                'REMOVE',
+                style: TextStyle(
+                  fontSize: TCType.textMicro,
+                  color: tc.textTertiary,
+                  letterSpacing:
+                      TCType.letterSpacingFor(TCType.textMicro, TCType.trackingWide),
+                ),
+              ),
+            ),
+          ),
         ],
       ),
     );
