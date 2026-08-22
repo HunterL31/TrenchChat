@@ -300,10 +300,22 @@ def channel_roster_hexes(storage, subscription_mgr,
 # ---------------------------------------------------------------------------
 # Settings
 #
-# display_name and the avatar have their own dedicated entry points
-# (router.set_display_name, AvatarManager.set_avatar) and aren't part of
-# this surface.
+# The avatar has its own dedicated entry point (AvatarManager.set_avatar) and
+# isn't part of the apply_settings surface below.
 # ---------------------------------------------------------------------------
+
+
+def set_display_name(router, display_name: str) -> None:
+    """Change our display name and re-announce so peers learn it promptly.
+
+    Re-announces both the LXMF delivery destination -- whose app_data carries
+    the name peers recall via resolve_display_name -- and the trenchchat.user
+    destination that feeds peer directories, so the change propagates without
+    waiting for the next periodic reannounce.
+    """
+    router.set_display_name(display_name)
+    router.announce()
+    router.announce_user()
 
 
 def read_settings(config) -> dict:

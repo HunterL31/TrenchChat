@@ -31,7 +31,10 @@ from trenchchat.core.messaging import Messaging
 from trenchchat.core.subscription import SubscriptionManager
 from trenchchat.core.invite import InviteManager
 from trenchchat.core.sync import SyncManager
-from trenchchat.core.presence import PresenceBeacon, PresenceManager
+from trenchchat.core.presence import (
+    PresenceBeacon, PresenceManager, resolve_display_name,
+)
+from trenchchat.core.protocol import F_DISPLAY_NAME, F_MSG_TYPE
 from trenchchat.core.user_directory import UserDirectory
 from trenchchat.core.avatar import AvatarManager
 from trenchchat.core.friends import FriendsManager
@@ -279,6 +282,7 @@ class Backend:
         def _on_peer_appeared(peer_hex: str, iface) -> None:
             self.sync_mgr.on_peer_appeared(peer_hex)
             self.presence_mgr.record_seen(peer_hex)
+            self._seed_user_directory(peer_hex)
             self.avatar_mgr.flush_avatar(peer_hex)
             self.reaction_mgr.flush_pending_emoji(peer_hex)
             self.subscription_mgr.flush_pending(peer_hex)
@@ -288,10 +292,12 @@ class Backend:
             PeerAnnounceHandler(_on_peer_appeared)
         )
 
-        # Also update presence from any inbound LXMF message, covering peers
-        # reached via a backchannel link without a prior announce, and peers
-        # signing off (same rationale as main_window.py's _on_inbound_message).
-        self.router.add_delivery_callback(self.presence_mgr.record_inbound)
+        # Also update presence and the user directory from any inbound LXMF
+        # message, covering peers reached via a backchannel link without a
+        # prior announce, peers signing off, and a peer's display name
+        # travelling on a chat message (same rationale as main_window.py's
+        # _on_inbound_message).
+        self.router.add_delivery_callback(self._on_inbound_message)
 
         # Nothing else notices *our own* link returning: every catch-up path
         # is driven by hearing from a remote peer.
@@ -300,6 +306,42 @@ class Backend:
 
         self.channel_mgr.restore_owned_channels()
         self.server_mgr.restore_owned_servers()
+
+    def _on_inbound_message(self, message) -> None:
+        """Record presence and directory state from an inbound LXMF message.
+
+        A chat message carries the sender's display name in F_DISPLAY_NAME, so
+        record it straight into the directory; a control message only seeds the
+        directory for an already-confirmed TrenchChat peer.
+        """
+        sender_hex = self.presence_mgr.record_inbound(message)
+        if not sender_hex:
+            return
+        fields = message.fields or {}
+        if F_MSG_TYPE in fields:
+            self._seed_user_directory(sender_hex)
+            return
+        name = fields.get(F_DISPLAY_NAME, "")
+        if isinstance(name, bytes):
+            name = name.decode(errors="replace")
+        if name:
+            self.user_directory.record_user(sender_hex, name)
+        else:
+            self._seed_user_directory(sender_hex)
+
+    def _seed_user_directory(self, peer_hex: str) -> None:
+        """Refresh a confirmed TrenchChat peer's directory entry.
+
+        Mirrors main_window._seed_user_directory: a peer is confirmed if they
+        are already in the directory (from a prior trenchchat.user announce) or
+        appear in any channel's members table. Resolves the best available name.
+        """
+        if (self.user_directory.contains(peer_hex)
+                or peer_hex in self.storage.get_trenchchat_peer_identities()):
+            name = resolve_display_name(
+                peer_hex, self.identity.hash_hex, self.storage, self.config
+            )
+            self.user_directory.record_user(peer_hex, name)
 
     def accept_invite(self, channel_hash_hex: str, token: bytes, expiry: float,
                       admin_hex: str) -> None:

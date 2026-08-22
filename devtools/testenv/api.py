@@ -465,10 +465,25 @@ def create_app(backend: Backend, *, token: str | None = None,
         bus.emit("presence", identity_hash=peer_hash_hex, is_online=is_online)
 
     def _on_avatar_changed(identity_hash_hex: str):
-        bus.emit("avatar_updated", identity_hash=identity_hash_hex)
+        # Carry the version so a running client can bust its avatar cache
+        # (fetch /peers/{hash}/avatar?v=version) instead of serving a stale
+        # image from the old URL. None means the avatar was removed.
+        if identity_hash_hex == backend.identity.hash_hex:
+            version = backend.config.avatar_version
+        else:
+            row = backend.storage.get_peer_avatar(identity_hash_hex)
+            version = row["avatar_version"] if row else None
+        bus.emit("avatar_updated", identity_hash=identity_hash_hex,
+                 avatar_version=version)
 
     def _on_friend_updated(identity_hash_hex: str):
         bus.emit("friend_updated", identity_hash=identity_hash_hex)
+
+    def _on_directory_updated(identity_hash_hex: str, display_name: str):
+        # A peer's display name changed (via their announce, or a message they
+        # sent), so a running client can refresh /directory without a reload.
+        bus.emit("directory_updated", identity_hash=identity_hash_hex,
+                 display_name=display_name)
 
     def _on_reaction_changed(channel_hash_hex: str, message_id: str):
         bus.emit("reaction_updated", channel_hash=channel_hash_hex, message_id=message_id)
@@ -501,6 +516,7 @@ def create_app(backend: Backend, *, token: str | None = None,
     backend.presence_mgr.add_presence_callback(_on_presence_changed)
     backend.avatar_mgr.add_avatar_callback(_on_avatar_changed)
     backend.friends_mgr.add_friends_callback(_on_friend_updated)
+    backend.user_directory.add_directory_callback(_on_directory_updated)
     backend.reaction_mgr.add_reaction_callback(_on_reaction_changed)
     backend.reaction_mgr.add_emoji_callback(_on_emoji_received)
     backend.sync_mgr.status.add_status_callback(_on_sync_status)
@@ -520,11 +536,10 @@ def create_app(backend: Backend, *, token: str | None = None,
 
     @app.post("/me/display_name")
     def set_display_name(req: SetDisplayNameRequest):
-        # Same call the real Settings dialog makes.
-        backend.router.set_display_name(req.display_name)
-        # Propagate promptly rather than waiting for the periodic
-        # heartbeat's next reannounce cycle.
-        backend.router.announce_user()
+        # Same multi-step action the real Settings dialog drives: set the name
+        # and re-announce both destinations so peers update their recall and
+        # directory promptly, rather than waiting for the next heartbeat.
+        actions.set_display_name(backend.router, req.display_name)
         return {"ok": True}
 
     @app.get("/settings")
