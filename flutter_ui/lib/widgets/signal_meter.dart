@@ -4,12 +4,19 @@ import 'package:flutter/material.dart';
 import '../api/models/link_quality.dart';
 import '../theme/glow.dart';
 import '../theme/section_theme.dart';
+import '../theme/tint.dart';
+import '../theme/tokens.dart';
 
 class _Level {
   const _Level(this.n, this.color);
   final int n;
   final Color color;
 }
+
+/// The good tier as the design system drew it: a yellow-green between online
+/// and warning, the one meter color no token names. Carried onto a theme by
+/// the distance that theme moved its online color (see theme/tint.dart).
+final Color _stockGood = HSLColor.fromAHSL(1, 70, 0.85, 0.55).toColor();
 
 class SignalMeter extends StatelessWidget {
   const SignalMeter({super.key, this.level = LinkQualityLevel.unknown, this.size = 12});
@@ -22,7 +29,8 @@ class SignalMeter extends StatelessWidget {
     final tc = SectionTheme.of(context);
     final levels = <LinkQualityLevel, _Level>{
       LinkQualityLevel.excellent: _Level(4, tc.statusOnline),
-      LinkQualityLevel.good: _Level(3, HSLColor.fromAHSL(1, 70, 0.85, 0.55).toColor()),
+      LinkQualityLevel.good: _Level(
+          3, tcShiftLike(_stockGood, from: TCColors.statusOnline, to: tc.statusOnline)),
       LinkQualityLevel.fair: _Level(2, tc.statusWarn),
       LinkQualityLevel.poor: _Level(1, tc.statusDanger),
       LinkQualityLevel.unknown: _Level(0, tc.statusOffline),

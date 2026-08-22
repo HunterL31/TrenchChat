@@ -9,6 +9,7 @@ import 'package:flutter/widgets.dart';
 
 import 'effects.dart';
 import 'section_theme.dart';
+import 'tint.dart';
 import 'tokens.dart';
 
 /// Text glow for the section [context] sits in, or null when it has glow
@@ -19,7 +20,7 @@ List<Shadow>? tcTextGlow(BuildContext context) {
   final stock = TCEffects.textGlowGreen;
   return [
     Shadow(
-      color: _retint(stock.color, accent),
+      color: _accented(stock.color, accent),
       blurRadius: stock.blurRadius,
       offset: stock.offset,
     ),
@@ -34,7 +35,7 @@ List<BoxShadow>? tcBoxGlowSm(BuildContext context) {
   return [
     for (final shadow in TCEffects.glowGreenSm)
       BoxShadow(
-        color: _retint(shadow.color, accent),
+        color: _accented(shadow.color, accent),
         blurRadius: shadow.blurRadius,
         spreadRadius: shadow.spreadRadius,
         offset: shadow.offset,
@@ -42,25 +43,7 @@ List<BoxShadow>? tcBoxGlowSm(BuildContext context) {
   ];
 }
 
-/// Moves one stock glow layer the same distance in HSL that [accent] sits
-/// from the stock accent, keeping the layer's alpha.
-///
-/// Recoloring straight to the accent would flatten the relationship the
-/// design system encodes -- a glow is brighter and more saturated than the
-/// ink it comes off -- so the layers are shifted rather than replaced, and
-/// a stock accent leaves them exactly as `effects.dart` defines them.
-Color _retint(Color layer, Color accent) {
-  final stock = HSLColor.fromColor(TCColors.accentPrimary);
-  final tinted = HSLColor.fromColor(accent);
-  final dh = tinted.hue - stock.hue;
-  final ds = tinted.saturation - stock.saturation;
-  final dl = tinted.lightness - stock.lightness;
-  if (dh == 0 && ds == 0 && dl == 0) return layer;
-  final source = HSLColor.fromColor(layer);
-  return HSLColor.fromAHSL(
-    source.alpha,
-    (source.hue + dh) % 360,
-    (source.saturation + ds).clamp(0.0, 1.0),
-    (source.lightness + dl).clamp(0.0, 1.0),
-  ).toColor();
-}
+/// One stock glow layer carried onto [accent] -- see tint.dart for why the
+/// layer is moved rather than replaced.
+Color _accented(Color layer, Color accent) =>
+    tcShiftLike(layer, from: TCColors.accentPrimary, to: accent);

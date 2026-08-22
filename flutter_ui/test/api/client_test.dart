@@ -141,18 +141,46 @@ void main() {
     expect(roster.last.displayName, isNull);
   });
 
-  test('getChannelLinkQuality reads the channel link-quality endpoint', () async {
+  test('getChannelLinkQuality folds the roster down to its best link', () async {
+    // The shape api.py really returns: one scored entry per other member.
     final client = ApiClient(
       baseUrl: 'http://example.test',
       client: MockClient((request) async {
         expect(request.url.path, '/channels/chan-hash/link_quality');
-        return http.Response(jsonEncode({'level': 'good', 'hops': 2}), 200);
+        return http.Response(
+          jsonEncode([
+            {'identity_hash': 'aa', 'display_name': 'ada', 'quality': 2,
+             'quality_label': 'Fair', 'hops': 4},
+            {'identity_hash': 'bb', 'display_name': 'grace', 'quality': 3,
+             'quality_label': 'Good', 'hops': 2},
+          ]),
+          200,
+        );
       }),
     );
 
     final quality = await client.getChannelLinkQuality('chan-hash');
     expect(quality.level.name, 'good');
-    expect(quality.hops, 2);
+    expect(quality.hops, 2, reason: 'the hops of the peer whose score won');
+  });
+
+  test('getChannelLinkQuality reads an empty or unscorable roster as unknown',
+      () async {
+    Object body = <Object>[];
+    final client = ApiClient(
+      baseUrl: 'http://example.test',
+      client: MockClient((request) async => http.Response(jsonEncode(body), 200)),
+    );
+
+    expect((await client.getChannelLinkQuality('chan-hash')).level.name, 'unknown');
+
+    body = [
+      {'identity_hash': 'aa', 'quality': 0, 'quality_label': 'Unknown', 'hops': null},
+      'not an entry',
+    ];
+    final quality = await client.getChannelLinkQuality('chan-hash');
+    expect(quality.level.name, 'unknown');
+    expect(quality.hops, isNull);
   });
 
   test('getMessages passes limit and before_ts as query params', () async {

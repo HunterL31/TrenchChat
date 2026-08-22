@@ -141,6 +141,8 @@ class _TcColorFieldState extends State<TcColorField> {
           const SizedBox(width: 8),
           Expanded(
             child: Tooltip(
+              decoration: tcTooltipDecoration(context),
+              textStyle: tcTooltipTextStyle(context),
               message: widget.label,
               child: Text(
                 widget.displayLabel ?? widget.label,

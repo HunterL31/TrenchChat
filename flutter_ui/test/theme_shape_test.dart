@@ -4,12 +4,16 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:flutter_ui/api/models/link_quality.dart';
 import 'package:flutter_ui/theme/notch.dart';
 import 'package:flutter_ui/theme/section_theme.dart';
 import 'package:flutter_ui/theme/shape.dart';
 import 'package:flutter_ui/theme/theme_spec.dart';
+import 'package:flutter_ui/theme/tint.dart';
 import 'package:flutter_ui/theme/tokens.dart';
 import 'package:flutter_ui/widgets/avatar.dart';
+import 'package:flutter_ui/widgets/signal_meter.dart';
+import 'package:flutter_ui/widgets/tc_tooltip.dart';
 
 /// Pumps [child] inside [section] resolved from [spec], and hands the
 /// builder a context that sits under the SectionTheme.
@@ -181,4 +185,81 @@ void main() {
       expect(decoration.borderRadius, BorderRadius.circular(10));
     });
   });
+
+  group('fixed design-system colors follow the theme', () {
+    testWidgets('a section that moves nothing leaves them exactly as drawn',
+        (tester) async {
+      final context = await _pumpSection(tester, spec: ThemeSpec.empty);
+      const drawn = Color(0xFF8BC34A);
+
+      expect(tcShiftLike(drawn, from: TCColors.statusOnline, to: TCColors.statusOnline),
+          drawn);
+
+      // The good tier is the one meter color no token names: unthemed, it is
+      // still the yellow-green the design system drew.
+      final bars = await _meterBarColors(tester, context, LinkQualityLevel.good);
+      expect(bars.first, HSLColor.fromAHSL(1, 70, 0.85, 0.55).toColor());
+    });
+
+    testWidgets('the meter carries its good tier onto the section',
+        (tester) async {
+      final spec = ThemeSpec(base: {'statusOnline': const Color(0xFF23A55A)});
+      final context = await _pumpSection(tester, spec: spec);
+      final bars = await _meterBarColors(tester, context, LinkQualityLevel.good);
+
+      expect(bars.first, isNot(HSLColor.fromAHSL(1, 70, 0.85, 0.55).toColor()),
+          reason: 'a themed online color must move the tier beside it');
+      final moved = HSLColor.fromColor(bars.first);
+      final stock = HSLColor.fromColor(HSLColor.fromAHSL(1, 70, 0.85, 0.55).toColor());
+      final online = HSLColor.fromColor(const Color(0xFF23A55A));
+      final stockOnline = HSLColor.fromColor(TCColors.statusOnline);
+      expect(moved.hue, closeTo(stock.hue + (online.hue - stockOnline.hue), 0.5));
+    });
+
+    testWidgets('tooltips wear the section palette, not Material grey',
+        (tester) async {
+      final spec = ThemeSpec(base: {'bgSurfaceRaised': const Color(0xFF313338)});
+      final context = await _pumpSection(tester, spec: spec);
+
+      final decoration = tcTooltipDecoration(context) as BoxDecoration;
+      expect(decoration.color, const Color(0xFF313338));
+      expect(tcTooltipTextStyle(context).color, isNotNull);
+    });
+
+    testWidgets('a tooltip rounds with its section', (tester) async {
+      final square = await _pumpSection(tester, spec: ThemeSpec.empty);
+      expect((tcTooltipDecoration(square) as BoxDecoration).borderRadius, isNull);
+
+      final round = await _pumpSection(
+        tester,
+        spec: _shaped({TCSectionStyle.keyCornerRadius: 8.0}),
+      );
+      expect((tcTooltipDecoration(round) as BoxDecoration).borderRadius,
+          BorderRadius.circular(4));
+    });
+  });
+}
+
+/// The lit-bar colors a [SignalMeter] paints for [level] under [context]'s
+/// section.
+Future<List<Color>> _meterBarColors(
+    WidgetTester tester, BuildContext context, LinkQualityLevel level) async {
+  final section = SectionTheme.of(context);
+  final style = SectionTheme.styleOf(context);
+  await tester.pumpWidget(SectionTheme.resolved(
+    section: TCSection.topBar,
+    colors: section,
+    style: style,
+    child: Directionality(
+      textDirection: TextDirection.ltr,
+      child: SignalMeter(level: level),
+    ),
+  ));
+  return tester
+      .widgetList<Container>(find.descendant(
+        of: find.byType(SignalMeter),
+        matching: find.byType(Container),
+      ))
+      .map((c) => (c.decoration as BoxDecoration).color!)
+      .toList();
 }

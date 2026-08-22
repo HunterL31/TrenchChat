@@ -545,7 +545,6 @@ class _AppearanceDialogContentState extends State<_AppearanceDialogContent> {
 
   Widget _buildContent(BuildContext context) {
     final tc = SectionTheme.of(context);
-    final resolved = _resolved.asMap();
     final own = _ownOverrides;
     final scopeLabel = appearanceScopeLabels[_scope] ?? _scope;
 
@@ -647,6 +646,40 @@ class _AppearanceDialogContentState extends State<_AppearanceDialogContent> {
         const SizedBox(height: 12),
         Container(height: 1, color: tc.borderSubtle),
         const SizedBox(height: 12),
+        _editorBody(tc),
+        const SizedBox(height: 12),
+        Container(height: 1, color: tc.borderSubtle),
+        const SizedBox(height: 12),
+        Row(
+          children: [
+            TcGhostButton(
+              label: _scope == 'base' ? 'RESET BASE' : 'RESET SECTION',
+              onPressed: own.isEmpty && _ownStyles.isEmpty ? null : _resetScope,
+            ),
+            const SizedBox(width: 6),
+            TcGhostButton(
+              label: 'RESET ALL',
+              onPressed: _hasResettableOverrides ? _resetAll : null,
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+
+  /// STYLE, SHAPE and every color in one scrolling region. Keeping them
+  /// inside a bounded box is what stops the modal growing past the viewport
+  /// as style keys are added -- it already overflowed a laptop screen with
+  /// the colors alone.
+  Widget _editorBody(TCSectionColors tc) {
+    final resolved = _resolved.asMap();
+    final own = _ownOverrides;
+    return Container(
+      constraints: BoxConstraints(maxHeight: _editorBodyHeight(context)),
+      child: SingleChildScrollView(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
         _caption(tc, 'STYLE'),
         const SizedBox(height: 8),
         _styleLabel(tc, 'TEXT SIZE'),
@@ -734,43 +767,33 @@ class _AppearanceDialogContentState extends State<_AppearanceDialogContent> {
         const SizedBox(height: 12),
         Container(height: 1, color: tc.borderSubtle),
         const SizedBox(height: 12),
-        Container(
-          constraints: const BoxConstraints(maxHeight: 300),
-          child: SingleChildScrollView(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                for (final key in TCSectionColors.tokenKeys)
-                  TcColorField(
-                    key: ValueKey('$_scope/$key'),
-                    label: key,
-                    displayLabel: tokenLabels[key],
-                    color: resolved[key]!,
-                    overridden: own.containsKey(key),
-                    onChanged: (color) => _setToken(key, color),
-                    onClear: () => _setToken(key, null),
-                  ),
-              ],
-            ),
+        for (final key in TCSectionColors.tokenKeys)
+          TcColorField(
+            key: ValueKey('$_scope/$key'),
+            label: key,
+            displayLabel: tokenLabels[key],
+            color: resolved[key]!,
+            overridden: own.containsKey(key),
+            onChanged: (color) => _setToken(key, color),
+            onClear: () => _setToken(key, null),
           ),
-        ),
-        const SizedBox(height: 12),
-        Container(height: 1, color: tc.borderSubtle),
-        const SizedBox(height: 12),
-        Row(
-          children: [
-            TcGhostButton(
-              label: _scope == 'base' ? 'RESET BASE' : 'RESET SECTION',
-              onPressed: own.isEmpty && _ownStyles.isEmpty ? null : _resetScope,
-            ),
-            const SizedBox(width: 6),
-            TcGhostButton(
-              label: 'RESET ALL',
-              onPressed: _hasResettableOverrides ? _resetAll : null,
-            ),
           ],
         ),
-      ],
+      ),
     );
   }
 }
+
+/// How tall the editor's scrolling body may be: whatever the viewport has
+/// left once the modal's fixed chrome -- title, presets, library, scope
+/// picker, reset row, actions -- has taken its share.
+double _editorBodyHeight(BuildContext context) =>
+    (MediaQuery.sizeOf(context).height - _editorChromeHeight)
+        .clamp(_minEditorBodyHeight, _maxEditorBodyHeight);
+
+/// Measured from the rendered modal: everything outside the scrolling body,
+/// with room for the rows that only appear sometimes -- an error, a library
+/// notice, the overwrite warning.
+const double _editorChromeHeight = 680;
+const double _minEditorBodyHeight = 200;
+const double _maxEditorBodyHeight = 900;

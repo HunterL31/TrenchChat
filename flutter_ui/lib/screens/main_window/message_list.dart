@@ -19,6 +19,7 @@ import '../../widgets/emoji_text.dart';
 import '../../widgets/tc_button.dart';
 import '../../widgets/tc_context_menu.dart';
 import '../../widgets/tc_icon.dart';
+import '../../widgets/tc_tooltip.dart';
 import '../../widgets/theme_share.dart';
 
 sealed class _Row {}
@@ -835,6 +836,8 @@ class _DeliveryIndicator extends StatelessWidget {
     return Padding(
       padding: const EdgeInsets.only(left: 8, top: 4),
       child: Tooltip(
+        decoration: tcTooltipDecoration(context),
+        textStyle: tcTooltipTextStyle(context),
         message: tip,
         child: Text(
           glyph,

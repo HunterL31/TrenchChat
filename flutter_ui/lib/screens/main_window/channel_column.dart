@@ -16,6 +16,7 @@ import '../../widgets/status_dot.dart';
 import '../../widgets/tc_button.dart';
 import '../../widgets/tc_context_menu.dart';
 import '../../widgets/tc_icon.dart';
+import '../../widgets/tc_tooltip.dart';
 
 class ChannelColumn extends StatelessWidget {
   const ChannelColumn({
@@ -555,6 +556,8 @@ class _ChannelRowState extends State<_ChannelRow> {
                 ),
                 if (widget.incomplete) ...[
                   Tooltip(
+                    decoration: tcTooltipDecoration(context),
+                    textStyle: tcTooltipTextStyle(context),
                     message: 'History incomplete \u2014 some messages could not be synced',
                     child: Text(
                       'INCOMPLETE',
