@@ -1276,6 +1276,11 @@ class AppState extends ChangeNotifier {
           firstSeen: existing?.firstSeen ?? now,
           lastSeen: now,
         );
+        // A first-heard node may belong to a saved friend; re-fetching the
+        // list is what makes their page button appear live.
+        if (existing == null && friends.isNotEmpty) {
+          unawaited(loadFriends());
+        }
         notifyListeners();
       case NomadFetchEvent(
           :final fetchId,

@@ -286,3 +286,34 @@ def test_prune_nomad_files_respects_byte_budget(manager):
                  for i in range(4)]
     assert sum(1 for r in remaining if r is not None) == 2
     assert remaining[3] is not None
+
+
+# ---------------------------------------------------------------------------
+# Friend -> node mapping
+# ---------------------------------------------------------------------------
+
+def test_nomad_node_hash_for_identity_matches_rns_derivation():
+    import RNS
+
+    from trenchchat.core.node_browser import nomad_node_hash_for_identity
+
+    identity_hex = "12" * 16
+    expected = RNS.Destination.hash(
+        bytes.fromhex(identity_hex), "nomadnetwork", "node").hex()
+    assert nomad_node_hash_for_identity(identity_hex) == expected
+
+
+def test_node_for_identity_finds_announced_node(manager):
+    from trenchchat.core.node_browser import nomad_node_hash_for_identity
+
+    identity_hex = "34" * 16
+    node_hex = nomad_node_hash_for_identity(identity_hex)
+    manager.record_node_announce(node_hex, "Friend's node")
+    row = manager.node_for_identity(identity_hex)
+    assert row is not None
+    assert row["display_name"] == "Friend's node"
+
+
+def test_node_for_identity_none_when_never_heard(manager):
+    assert manager.node_for_identity("56" * 16) is None
+    assert manager.node_for_identity("not-hex") is None

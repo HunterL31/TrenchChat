@@ -424,3 +424,14 @@ def set_node_hosting(node_browser, *, enabled: bool | None = None,
     if node_name is not None and not node_name.strip() and enabled:
         raise ValueError("node name must not be empty")
     return node_browser.set_hosting(enabled=enabled, node_name=node_name)
+
+
+def friends_with_pages(friends_mgr, node_browser) -> list[dict]:
+    """The friends list, each entry carrying "nomad_node_hash" when that
+    friend's node has been heard on the mesh (None otherwise), so a client
+    can offer to open their page."""
+    friends = friends_mgr.get_friends()
+    for friend in friends:
+        node = node_browser.node_for_identity(friend["identity_hash"])
+        friend["nomad_node_hash"] = node["node_hash"] if node else None
+    return friends

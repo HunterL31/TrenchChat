@@ -517,3 +517,26 @@ def test_set_node_hosting_rejects_blank_name_on_enable():
     with pytest.raises(ValueError):
         actions.set_node_hosting(_RecordingNodeBrowser(), enabled=True,
                                  node_name="   ")
+
+
+def test_friends_with_pages_decorates_hosting_friends():
+    from trenchchat.core.node_browser import nomad_node_hash_for_identity
+
+    hosting_hex = "ab" * 16
+    quiet_hex = "cd" * 16
+    node_hex = nomad_node_hash_for_identity(hosting_hex)
+
+    class _Friends:
+        def get_friends(self):
+            return [{"identity_hash": hosting_hex},
+                    {"identity_hash": quiet_hex}]
+
+    class _Browser:
+        def node_for_identity(self, identity_hex):
+            if identity_hex == hosting_hex:
+                return {"node_hash": node_hex}
+            return None
+
+    decorated = actions.friends_with_pages(_Friends(), _Browser())
+    assert decorated[0]["nomad_node_hash"] == node_hex
+    assert decorated[1]["nomad_node_hash"] is None
