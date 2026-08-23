@@ -122,6 +122,19 @@ DEEP_SYNC_COOLDOWN_SECS = 60
 # that cooldown will actually serve rather than inside the one that refused.
 SYNC_RETRY_SECS = 90.0
 
+# Minimum spacing of announce-driven sync requests per (channel, peer).
+# PeerAnnounceHandler fires on_peer_appeared on every announce, not just
+# transitions, so without this every repeat announce costs a full LXMF
+# request/response round trip per shared channel. Only paces the announce
+# trigger -- startup, join, link-return and retry requests are unaffected,
+# and a peer gone longer than this always gets a fresh request on return.
+# Matches MIN_RESYNC_INTERVAL_SECS in connectivity.py.
+ANNOUNCE_SYNC_COOLDOWN_SECS = 120.0
+
+# Idle (channel, peer) announce-cooldown entries older than this are pruned
+# during recording, so the map stays bounded over a long session.
+ANNOUNCE_SYNC_PRUNE_SECS = 3600.0
+
 # Consecutive unanswered re-asks to one peer on one channel before we stop.
 # A peer that keeps its path resolvable and simply never answers would
 # otherwise draw one whole-transcript request out of every member, forever --
@@ -255,6 +268,11 @@ class SyncManager:
         # resets it, which is acceptable for a soft rate limit.
         self._deep_sync_last_served: dict[tuple[str, str], tuple[float, str]] = {}
         self._deep_sync_lock = threading.Lock()
+
+        # (channel_hash_hex, peer_hex) -> last announce-driven sync request.
+        # In-memory only, same rationale as the deep-sync map.
+        self._announce_sync_times: dict[tuple[str, str], float] = {}
+        self._announce_sync_lock = threading.Lock()
         # Held no longer than a requester will accept an answer for: past
         # that they discard it as unsolicited and ask again anyway.
         self._retry = ControlRetryQueue("sync", SYNC_RESPONSE_WINDOW_SECS)
@@ -290,7 +308,15 @@ class SyncManager:
         """
         On startup: send MT_SYNC_REQUEST for every subscribed channel to all
         known-online peers (those whose RNS path is already resolved).
+
+        Also runs when our own link returns (LinkWatcher). Either way any
+        standing announce cooldown predates the world we are catching up
+        with, so it must not suppress the announce-driven requests that
+        follow -- a peer unreachable here (path not yet resolved) has only
+        those left.
         """
+        with self._announce_sync_lock:
+            self._announce_sync_times.clear()
         for sub in self._storage.get_subscriptions():
             self._request_sync_for_channel(sub["channel_hash"])
 
@@ -388,8 +414,11 @@ class SyncManager:
             channel_hash_hex = sub["channel_hash"]
             if peer_hex not in self._get_channel_peers(channel_hash_hex):
                 continue
+            if not self._announce_sync_due(channel_hash_hex, peer_hex):
+                continue
             since_ts = self._storage.get_peer_sync_progress(channel_hash_hex, peer_hex)
-            self._send_sync_request(peer_hex, channel_hash_hex, since_ts)
+            if self._send_sync_request(peer_hex, channel_hash_hex, since_ts):
+                self._record_announce_sync(channel_hash_hex, peer_hex)
 
     # --- missed-delivery hint broadcast ---
 
@@ -1517,6 +1546,24 @@ class SyncManager:
                 return False
             self._deep_sync_last_served[key] = (now, policy)
             return True
+
+    def _announce_sync_due(self, channel_hash_hex: str, peer_hex: str) -> bool:
+        """True unless an announce-driven request for this (channel, peer)
+        was sent within ANNOUNCE_SYNC_COOLDOWN_SECS."""
+        now = time.time()
+        with self._announce_sync_lock:
+            last = self._announce_sync_times.get((channel_hash_hex, peer_hex))
+            return last is None or now - last >= ANNOUNCE_SYNC_COOLDOWN_SECS
+
+    def _record_announce_sync(self, channel_hash_hex: str, peer_hex: str) -> None:
+        """Start the announce cooldown for this (channel, peer), pruning idle
+        entries so the map stays bounded."""
+        now = time.time()
+        with self._announce_sync_lock:
+            for stale_key, ts in list(self._announce_sync_times.items()):
+                if now - ts > ANNOUNCE_SYNC_PRUNE_SECS:
+                    del self._announce_sync_times[stale_key]
+            self._announce_sync_times[(channel_hash_hex, peer_hex)] = now
 
     # Message types the generic retry queue must not hold. A sync request is
     # re-issued by on_peer_appeared and by tick(), and only through

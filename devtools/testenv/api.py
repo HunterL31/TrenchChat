@@ -635,6 +635,13 @@ def create_app(backend: Backend, *, token: str | None = None,
         from trenchchat.core.network_map import gather_network_data
         return gather_network_data(backend.rns, backend.identity.hash_hex, backend.storage)
 
+    @app.get("/bandwidth")
+    def get_bandwidth():
+        # Windowed transfer rates over all Reticulum interfaces; the monitor
+        # itself lives in core (trenchchat/core/bandwidth.py) and samples on
+        # the backend's bandwidth-sampler thread plus once per request here.
+        return backend.bandwidth.rates()
+
     @app.get("/reticulum/interfaces")
     def get_interfaces():
         # Same data source InterfacesWidget.load_interfaces() merges: the

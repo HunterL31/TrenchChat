@@ -53,6 +53,36 @@ void main() {
         'txb': null,
       },
     ];
+    backend.routes['GET /bandwidth'] = {
+      'sampled_at': 1000.0,
+      'totals': {'rx': 3 * 1024 * 1024, 'tx': 2048},
+      'windows': [
+        {
+          'secs': 10,
+          'span_secs': 10.0,
+          'rx_bytes': 20480,
+          'tx_bytes': 5120,
+          'rx_per_sec': 2048.0,
+          'tx_per_sec': 512.0,
+        },
+        {
+          'secs': 60,
+          'span_secs': 60.0,
+          'rx_bytes': 61440,
+          'tx_bytes': 6144,
+          'rx_per_sec': 1024.0,
+          'tx_per_sec': 102.4,
+        },
+        {
+          'secs': 300,
+          'span_secs': 4.0,
+          'rx_bytes': 0,
+          'tx_bytes': 0,
+          'rx_per_sec': null,
+          'tx_per_sec': null,
+        },
+      ],
+    };
     state = AppState(baseUrl: backend.baseUrl, httpClient: backend.client());
   });
 
@@ -64,6 +94,46 @@ void main() {
     expect(formatByteCount(512), '512 B');
     expect(formatByteCount(2048), '2.0 KB');
     expect(formatByteCount(3 * 1024 * 1024), '3.0 MB');
+  });
+
+  test('formatRate steps through B/s, KB/s, and MB/s and dashes null', () {
+    expect(formatRate(null), '—');
+    expect(formatRate(512), '512 B/s');
+    expect(formatRate(2048), '2.0 KB/s');
+    expect(formatRate(3 * 1024 * 1024), '3.0 MB/s');
+  });
+
+  test('windowLabel renders seconds, minutes, and hours', () {
+    expect(windowLabel(10), '10S');
+    expect(windowLabel(60), '1M');
+    expect(windowLabel(300), '5M');
+    expect(windowLabel(3600), '1H');
+  });
+
+  testWidgets('shows windowed bandwidth rates and session totals', (tester) async {
+    await tester.pumpWidget(_harness(state));
+    await settle(tester);
+
+    expect(find.text('BANDWIDTH 10S'), findsOneWidget);
+    expect(find.text('RX 2.0 KB/s'), findsOneWidget);
+    expect(find.text('TX 512 B/s'), findsOneWidget);
+    expect(find.text('BANDWIDTH 1M'), findsOneWidget);
+    expect(find.text('RX 1.0 KB/s'), findsOneWidget);
+    // A window not yet spanned by samples dashes out instead of claiming 0.
+    expect(find.text('BANDWIDTH 5M'), findsOneWidget);
+    expect(find.text('RX —'), findsOneWidget);
+    expect(find.text('SESSION TOTAL'), findsOneWidget);
+    expect(find.text('RX 3.0 MB'), findsOneWidget);
+  });
+
+  testWidgets('a failing bandwidth endpoint hides the strip, not the tab',
+      (tester) async {
+    backend.routes.remove('GET /bandwidth');
+    await tester.pumpWidget(_harness(state));
+    await settle(tester);
+
+    expect(find.text('SESSION TOTAL'), findsNothing);
+    expect(find.text('TrenchChat Hub'), findsOneWidget);
   });
 
   testWidgets('lists interfaces with status and read-only marker', (tester) async {

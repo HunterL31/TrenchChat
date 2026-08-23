@@ -6,6 +6,7 @@ import 'dart:typed_data';
 
 import 'package:http/http.dart' as http;
 
+import 'models/bandwidth.dart';
 import 'models/emoji.dart';
 import 'models/friend.dart';
 import 'models/interface.dart';
@@ -389,6 +390,11 @@ class ApiClient {
       body: jsonEncode({'display_name': displayName}),
     );
     _decode(res);
+  }
+
+  Future<BandwidthReport> getBandwidth() async {
+    final res = await _http.get(_u('/bandwidth'));
+    return BandwidthReport.fromJson(_decode(res) as Map<String, dynamic>);
   }
 
   Future<List<RetInterface>> getInterfaces() async {

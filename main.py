@@ -39,13 +39,13 @@ from trenchchat.core.subscription import SubscriptionManager
 from trenchchat.core.invite import InviteManager
 from trenchchat.core.user_directory import UserDirectory
 from trenchchat.core.voice import VoiceManager
-from trenchchat.network.router import Router
+from trenchchat.network.router import REANNOUNCE_INTERVAL_SECS, Router
 from trenchchat.network.voice_transport import RNSVoiceTransport
 from trenchchat.network.announce import UserAnnounceHandler
 from trenchchat.gui.main_window import MainWindow
 from trenchchat.gui.pin_dialog import UnlockDialog
 
-_REANNOUNCE_INTERVAL_MS = 60_000
+_REANNOUNCE_INTERVAL_MS = int(REANNOUNCE_INTERVAL_SECS * 1000)
 _VOICE_TICK_INTERVAL_MS = 1_000
 _INTERFACE_POLL_INTERVAL_MS = 500
 _INTERFACE_POLL_TIMEOUT_MS = 30_000

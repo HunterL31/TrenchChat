@@ -212,6 +212,13 @@ Registered with `RNS.Transport.register_announce_handler(...)` at startup. Every
 2. Checks whether the peer is a known member/subscriber of any shared channel
 3. Sends a targeted `MT_SYNC_REQUEST` to that peer for each shared channel
 
+Step 3 is paced by `ANNOUNCE_SYNC_COOLDOWN_SECS` (120s) per (channel, peer):
+announces repeat on a heartbeat, not just on reconnect, and without the
+cooldown every repeat announce cost a full request/response round trip per
+shared channel. A peer that was actually away longer than the cooldown always
+gets a fresh request the moment it reappears; within the cooldown the other
+two mechanisms (pending retry, hints) still fire on every announce.
+
 ---
 
 ## Sync Window

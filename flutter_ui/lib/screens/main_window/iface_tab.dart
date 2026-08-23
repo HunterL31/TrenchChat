@@ -5,6 +5,7 @@
 import 'package:flutter/material.dart';
 
 import '../../api/client.dart';
+import '../../api/models/bandwidth.dart';
 import '../../api/models/interface.dart';
 import '../../app_state.dart';
 import '../../theme/section_theme.dart';
@@ -21,6 +22,21 @@ String formatByteCount(int n) {
   return '${(n / (1024 * 1024)).toStringAsFixed(1)} MB';
 }
 
+String formatRate(double? bytesPerSec) {
+  if (bytesPerSec == null) return '—';
+  if (bytesPerSec < 1024) return '${bytesPerSec.toStringAsFixed(0)} B/s';
+  if (bytesPerSec < 1024 * 1024) {
+    return '${(bytesPerSec / 1024).toStringAsFixed(1)} KB/s';
+  }
+  return '${(bytesPerSec / (1024 * 1024)).toStringAsFixed(1)} MB/s';
+}
+
+String windowLabel(int secs) {
+  if (secs < 60) return '${secs}S';
+  if (secs < 3600) return '${secs ~/ 60}M';
+  return '${secs ~/ 3600}H';
+}
+
 class IfaceTab extends StatefulWidget {
   const IfaceTab({super.key, required this.state});
 
@@ -32,6 +48,7 @@ class IfaceTab extends StatefulWidget {
 
 class _IfaceTabState extends State<IfaceTab> {
   List<RetInterface>? _interfaces;
+  BandwidthReport? _bandwidth;
   String? _error;
   String? _confirmDeleteName;
   bool _restartRequired = false;
@@ -56,6 +73,15 @@ class _IfaceTabState extends State<IfaceTab> {
         _interfaces = [];
         _error = e is ApiException ? e.message : e.toString();
       });
+    }
+    // Diagnostics only: a failure hides the strip without erroring the tab.
+    try {
+      final bandwidth = await widget.state.api.getBandwidth();
+      if (!mounted) return;
+      setState(() => _bandwidth = bandwidth);
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => _bandwidth = null);
     }
   }
 
@@ -142,6 +168,10 @@ class _IfaceTabState extends State<IfaceTab> {
               style: TextStyle(fontSize: TCType.textCaption, color: tc.statusDanger),
             ),
           ],
+          if (_bandwidth != null) ...[
+            const SizedBox(height: 12),
+            _bandwidthStrip(tc, _bandwidth!),
+          ],
           const SizedBox(height: 12),
           Expanded(
             child: LayoutBuilder(
@@ -169,6 +199,48 @@ class _IfaceTabState extends State<IfaceTab> {
               },
             ),
           ),
+        ],
+      ),
+    );
+  }
+
+  Widget _bandwidthStrip(TCSectionColors tc, BandwidthReport bw) {
+    Widget cell(String label, String rx, String tx) => Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                label,
+                style: TextStyle(
+                  fontSize: TCType.textMicro,
+                  color: tc.textTertiary,
+                  letterSpacing:
+                      TCType.letterSpacingFor(TCType.textMicro, TCType.trackingWide),
+                ),
+              ),
+              const SizedBox(height: 2),
+              Text('RX $rx',
+                  style: TextStyle(
+                      fontSize: TCType.textBodySm, color: tc.textSecondary)),
+              Text('TX $tx',
+                  style: TextStyle(
+                      fontSize: TCType.textBodySm, color: tc.textSecondary)),
+            ],
+          ),
+        );
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      decoration: BoxDecoration(
+        border: Border.all(color: tc.borderSubtle),
+      ),
+      child: Row(
+        children: [
+          for (final w in bw.windows)
+            cell('BANDWIDTH ${windowLabel(w.secs)}',
+                formatRate(w.rxPerSec), formatRate(w.txPerSec)),
+          cell('SESSION TOTAL', formatByteCount(bw.totalRx),
+              formatByteCount(bw.totalTx)),
         ],
       ),
     );

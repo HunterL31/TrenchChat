@@ -34,8 +34,7 @@ _DEFAULT_WEB_DIR = _REPO_ROOT / "flutter_ui" / "build" / "web"
 # on 8801-8808 -- so a real-profile server can run alongside it.
 _DEFAULT_PORT = 8810
 
-# Mirrors main.py's minute reannounce and main_window.py's startup sync delay.
-_REANNOUNCE_SECS = 60.0
+# Mirrors main_window.py's startup sync delay.
 _STARTUP_SYNC_DELAY_SECS = 3.0
 
 
@@ -72,13 +71,16 @@ def main():
     except RuntimeError as e:
         sys.exit(f"error: {e}")
 
+    from trenchchat.network.router import REANNOUNCE_INTERVAL_SECS
+
     # Same startup sequence as main.py: announce everything, pull from the
     # propagation node if one is configured, then keep reannouncing.
     backend.announce()
     backend.router.sync_from_propagation_node()
-    backend.start_heartbeat(interval=_REANNOUNCE_SECS)
+    backend.start_heartbeat(interval=REANNOUNCE_INTERVAL_SECS)
     backend.start_presence_pruner()
     backend.start_voice_ticker()
+    backend.start_bandwidth_sampler()
     threading.Timer(_STARTUP_SYNC_DELAY_SECS, backend.sync_mgr.request_sync_all).start()
 
     api_token = generate_token()
