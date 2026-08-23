@@ -960,7 +960,8 @@ def create_app(backend: Backend, *, token: str | None = None,
 
     @app.get("/friends")
     def list_friends():
-        return backend.friends_mgr.get_friends()
+        return actions.friends_with_pages(backend.friends_mgr,
+                                          backend.node_browser)
 
     @app.post("/friends")
     def add_friend(req: AddFriendRequest):

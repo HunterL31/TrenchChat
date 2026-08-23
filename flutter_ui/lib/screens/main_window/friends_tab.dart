@@ -27,9 +27,13 @@ String _shortHash(String hex) {
 }
 
 class FriendsTab extends StatelessWidget {
-  const FriendsTab({super.key, required this.state});
+  const FriendsTab({super.key, required this.state, this.onOpenNomadPage});
 
   final AppState state;
+
+  /// Called with a nomad URL when the user opens a hosting friend's page.
+  /// Null hides the page buttons.
+  final void Function(String url)? onOpenNomadPage;
 
   @override
   Widget build(BuildContext context) {
@@ -77,7 +81,12 @@ class FriendsTab extends StatelessWidget {
                   : ListView(
                       padding: const EdgeInsets.symmetric(vertical: 4),
                       children: [
-                        for (final f in friends) _FriendRow(friend: f, state: state),
+                        for (final f in friends)
+                          _FriendRow(
+                            friend: f,
+                            state: state,
+                            onOpenNomadPage: onOpenNomadPage,
+                          ),
                       ],
                     ),
             ),
@@ -89,10 +98,12 @@ class FriendsTab extends StatelessWidget {
 }
 
 class _FriendRow extends StatefulWidget {
-  const _FriendRow({required this.friend, required this.state});
+  const _FriendRow({required this.friend, required this.state,
+      this.onOpenNomadPage});
 
   final Friend friend;
   final AppState state;
+  final void Function(String url)? onOpenNomadPage;
 
   @override
   State<_FriendRow> createState() => _FriendRowState();
@@ -145,6 +156,16 @@ class _FriendRowState extends State<_FriendRow> {
                 formatRelative(f.lastSeenAt),
                 style: TextStyle(fontSize: TCType.textMicro, color: tc.textTertiary),
               ),
+              if (f.nomadNodeHash != null && widget.onOpenNomadPage != null) ...[
+                const SizedBox(width: 8),
+                TcIconButton(
+                  icon: TcIcons.globe,
+                  tooltip: 'Open their page',
+                  size: 24,
+                  onPressed: () => widget.onOpenNomadPage!(
+                      '${f.nomadNodeHash}:/page/index.mu'),
+                ),
+              ],
             ],
           ),
         ),

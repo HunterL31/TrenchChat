@@ -241,3 +241,24 @@ class TestNomadEvents:
                     statuses.append(event["status"])
         assert statuses[0] == "queued"
         assert statuses[-1] == "done"
+
+
+@needs_backend
+class TestFriendsPageDecoration:
+    def test_friends_carry_node_hash_once_heard(self, client, backend):
+        from trenchchat.core.node_browser import nomad_node_hash_for_identity
+
+        friend_hex = "ee" * 16
+        backend.friends_mgr.get_friends.return_value = [{
+            "identity_hash": friend_hex, "nickname": "", "note": "",
+            "display_name": "Pal", "added_at": 1.0, "last_seen_at": 2.0,
+            "is_online": True,
+        }]
+
+        before = client.get("/friends", headers=AUTH).json()
+        assert before[0]["nomad_node_hash"] is None
+
+        node_hex = nomad_node_hash_for_identity(friend_hex)
+        backend.node_browser.record_node_announce(node_hex, "Pal's node")
+        after = client.get("/friends", headers=AUTH).json()
+        assert after[0]["nomad_node_hash"] == node_hex

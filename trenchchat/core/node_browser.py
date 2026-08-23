@@ -21,7 +21,8 @@ from pathlib import Path
 import RNS
 
 from trenchchat.network.node_transport import (
-    NODE_FETCH_TIMEOUT_SECS, NodeTransportBase, is_valid_request_path,
+    NODE_FETCH_TIMEOUT_SECS, NOMAD_APP_NAME, NOMAD_ASPECT_NODE,
+    NodeTransportBase, is_valid_request_path,
 )
 
 MAX_PAGE_BYTES = 512 * 1024
@@ -43,6 +44,14 @@ Served by a TrenchChat peer over Reticulum.
 Edit the files under nomad_pages/pages/ in your TrenchChat data directory
 to publish your own pages.
 """
+
+
+def nomad_node_hash_for_identity(identity_hash_hex: str) -> str:
+    """The nomadnetwork.node destination hash a peer's node would announce
+    under, derived purely from their identity hash."""
+    return RNS.Destination.hash(
+        bytes.fromhex(identity_hash_hex), NOMAD_APP_NAME, NOMAD_ASPECT_NODE
+    ).hex()
 
 
 def parse_nomad_url(url: str) -> tuple[str | None, str]:
@@ -222,6 +231,14 @@ class NodeBrowserManager:
 
     def known_nodes(self) -> list:
         return self._storage.get_nomad_nodes()
+
+    def node_for_identity(self, identity_hash_hex: str):
+        """The discovered node a peer hosts, or None when never heard."""
+        try:
+            node_hex = nomad_node_hash_for_identity(identity_hash_hex)
+        except ValueError:
+            return None
+        return self._storage.get_nomad_node(node_hex)
 
     # --- bookmarks ---
 
