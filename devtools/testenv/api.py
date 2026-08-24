@@ -653,7 +653,8 @@ def create_app(backend: Backend, *, token: str | None = None,
         # Same free function NetworkMapDialog calls. Imported from core, not
         # the Qt module, so this works in headless installs without PyQt6.
         from trenchchat.core.network_map import gather_network_data
-        return gather_network_data(backend.rns, backend.identity.hash_hex, backend.storage)
+        return gather_network_data(backend.rns, backend.identity.hash_hex,
+                                   backend.storage, backend.user_directory)
 
     @app.get("/bandwidth")
     def get_bandwidth():

@@ -1610,7 +1610,8 @@ class MainWindow(QMainWindow):
     @pyqtSlot()
     def _refresh_network_map(self) -> None:
         """Fetch current network topology and push it to the map widget."""
-        data = gather_network_data(self._rns, self._identity.hash_hex, self._storage)
+        data = gather_network_data(self._rns, self._identity.hash_hex,
+                                   self._storage, self._user_directory)
         self._network_map_widget.set_data(data["nodes"], data["edges"])
         # Keep the peer filter up to date if it is currently active.
         if self._map_tc_only_check.isChecked():

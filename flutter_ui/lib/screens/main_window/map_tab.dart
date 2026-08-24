@@ -29,10 +29,12 @@ import '../../widgets/tc_icon.dart';
 Color mapQualityColor(int quality, {TCSectionColors? colors}) =>
     tcQualityColor(quality, colors ?? TCSectionColors.stock);
 
-/// Nodes kept by the "peers only" filter: real TrenchChat identities, not
-/// infrastructure (interfaces, transports, unresolved hashes).
+/// Nodes kept by the "peers only" filter: this device plus nodes known to
+/// run TrenchChat, not plain Reticulum/LXMF infrastructure (interfaces,
+/// relays, nodes that never announced as TrenchChat users).
 bool isPeerNode(MapNode node) =>
-    node.kind == MapNodeKind.self || node.kind == MapNodeKind.peer;
+    node.kind == MapNodeKind.self ||
+    (node.isTrenchChat && node.kind != MapNodeKind.interface_);
 
 const double _nodeHalf = 5.0;
 const double _labelMaxWidth = 140.0;
@@ -133,52 +135,106 @@ MapLayout layoutMapNodes(NetworkMapData data) {
   int weigh(String id) => weights[id] ??=
       1 + (childrenOf[id] ?? const []).fold(0, (s, c) => s + weigh(c));
 
+  final idsByRing = <int, List<String>>{};
+  for (final id in ringKeyById.keys) {
+    idsByRing.putIfAbsent(ringOf[id]!, () => []).add(id);
+  }
+  final ringCount = distinctKeys.length;
+
   final angleOf = <String, double>{};
-  void assignSectors(String id, double start, double sweep) {
+  void assignSectors(
+      String id, double start, double sweep, double Function(String) sizeOf) {
     final kids = List.of(childrenOf[id] ?? const <String>[])
       ..sort((a, b) {
         final byRing = ringOf[a]!.compareTo(ringOf[b]!);
         return byRing != 0 ? byRing : a.compareTo(b);
       });
     if (kids.isEmpty) return;
-    final total = kids.fold(0, (s, c) => s + weigh(c));
+    final total = kids.fold(0.0, (s, c) => s + sizeOf(c));
     var cursor = start;
     for (final kid in kids) {
-      final share = sweep * weigh(kid) / total;
+      final share =
+          total <= 0 ? sweep / kids.length : sweep * sizeOf(kid) / total;
       angleOf[kid] = cursor + share / 2;
-      assignSectors(kid, cursor, share);
+      assignSectors(kid, cursor, share, sizeOf);
       cursor += share;
     }
   }
 
-  assignSectors(selfId ?? root, -math.pi / 2, 2 * math.pi);
-
-  final idsByRing = <int, List<String>>{};
-  for (final id in ringKeyById.keys) {
-    idsByRing.putIfAbsent(ringOf[id]!, () => []).add(id);
-  }
-  final ringCount = distinctKeys.length;
-  final radii = List<double>.filled(ringCount + 1, 0);
-  var prev = 0.0;
-  for (var k = 1; k <= ringCount; k++) {
-    var r = math.max(prev + _ringGap, _innerRadius);
-    final ids = List.of(idsByRing[k] ?? const <String>[])
-      ..sort((a, b) => angleOf[a]!.compareTo(angleOf[b]!));
-    if (ids.length > 1) {
-      for (var i = 0; i < ids.length; i++) {
-        final a = ids[i];
-        final b = ids[(i + 1) % ids.length];
-        final gap = (angleOf[b]! - angleOf[a]!) % (2 * math.pi);
-        if (gap <= 1e-4) continue;
-        final need =
-            (_estimateLabelWidth(byId[a]!.label) + _estimateLabelWidth(byId[b]!.label)) / 2 +
-                _arcGap;
-        r = math.max(r, need / gap);
+  List<double> computeRadii() {
+    final radii = List<double>.filled(ringCount + 1, 0);
+    var prev = 0.0;
+    for (var k = 1; k <= ringCount; k++) {
+      var r = math.max(prev + _ringGap, _innerRadius);
+      final ids = List.of(idsByRing[k] ?? const <String>[])
+        ..sort((a, b) => angleOf[a]!.compareTo(angleOf[b]!));
+      if (ids.length > 1) {
+        // A crowded ring first grows to the circumference its labels need
+        // end to end, so labels stay beside their nodes instead of being
+        // pushed away to resolve overlaps.
+        var perimeter = 0.0;
+        for (final id in ids) {
+          perimeter += _estimateLabelWidth(byId[id]!.label) + _arcGap;
+        }
+        r = math.max(r, perimeter / (2 * math.pi));
+        // Grow for tight neighbor pairs, but follow the 90th-percentile
+        // need rather than the single worst pair -- one tight sector
+        // boundary must not inflate the whole ring; the push loop handles
+        // the tail. Near-zero gaps may not blow the ring out at all.
+        final spikeCap = r + 3 * _ringGap;
+        final pairNeeds = <double>[];
+        for (var i = 0; i < ids.length; i++) {
+          final a = ids[i];
+          final b = ids[(i + 1) % ids.length];
+          final gap = (angleOf[b]! - angleOf[a]!) % (2 * math.pi);
+          if (gap <= 1e-4) continue;
+          final need =
+              (_estimateLabelWidth(byId[a]!.label) + _estimateLabelWidth(byId[b]!.label)) /
+                      2 +
+                  _arcGap;
+          pairNeeds.add(need / gap);
+        }
+        if (pairNeeds.isNotEmpty) {
+          pairNeeds.sort();
+          r = math.max(r, pairNeeds[(0.9 * (pairNeeds.length - 1)).floor()]);
+        }
+        r = math.min(r, spikeCap);
       }
+      radii[k] = r;
+      prev = r;
     }
-    r = math.min(r, prev + 4 * _ringGap);
-    radii[k] = r;
-    prev = r;
+    return radii;
+  }
+
+  // First pass sizes sectors by subtree node count (needs no radii); two
+  // refinement passes re-divide them by the angular room each subtree's
+  // labels need at the current radii (label width over ring radius, summed
+  // per ring, maxed across rings), then re-derive the radii. This keeps a
+  // few nodes on an otherwise empty ring from being crammed into slivers,
+  // and leaves the label push loop only stragglers.
+  assignSectors(
+      selfId ?? root, -math.pi / 2, 2 * math.pi, (id) => weigh(id).toDouble());
+  var radii = computeRadii();
+  for (var pass = 0; pass < 2; pass++) {
+    final needOf = <String, double>{};
+    Map<int, double> accumulate(String id) {
+      final sums = <int, double>{};
+      final ring = ringOf[id];
+      if (ring != null && ring > 0) {
+        sums[ring] = (_estimateLabelWidth(byId[id]!.label) + _arcGap) /
+            math.max(radii[ring], _innerRadius);
+      }
+      for (final kid in childrenOf[id] ?? const <String>[]) {
+        accumulate(kid).forEach((k, v) => sums[k] = (sums[k] ?? 0) + v);
+      }
+      needOf[id] = sums.values.fold(0.0, math.max);
+      return sums;
+    }
+
+    accumulate(selfId ?? root);
+    angleOf.clear();
+    assignSectors(selfId ?? root, -math.pi / 2, 2 * math.pi, (id) => needOf[id]!);
+    radii = computeRadii();
   }
 
   final positions = <String, Offset>{?selfId: Offset.zero};
@@ -225,16 +281,22 @@ MapLayout layoutMapNodes(NetworkMapData data) {
   final labels = <String, MapLabel>{};
   final placedRects = <Rect>[];
   for (final id in order) {
-    var label = place(id, positions[id]!);
+    final label = place(id, positions[id]!);
     final theta = angleOf[id] ?? math.pi / 2;
-    final push = Offset(math.cos(theta), math.sin(theta)) * (_labelHeight + 2);
-    for (var attempt = 0;
-        attempt < 4 && placedRects.any((r) => r.overlaps(label.rect.inflate(2)));
+    // One step clears an overlapping label plus its collision margin; try
+    // alternating outward/inward so stacked labels split around the ring
+    // instead of marching away from their nodes.
+    final step = Offset(math.cos(theta), math.sin(theta)) * (_labelHeight + 4);
+    var chosen = label;
+    for (var attempt = 1;
+        attempt <= 6 && placedRects.any((r) => r.overlaps(chosen.rect.inflate(2)));
         attempt++) {
-      label = MapLabel(rect: label.rect.shift(push), align: label.align);
+      final shift =
+          step * (((attempt + 1) ~/ 2) * (attempt.isOdd ? 1.0 : -1.0));
+      chosen = MapLabel(rect: label.rect.shift(shift), align: label.align);
     }
-    placedRects.add(label.rect);
-    labels[id] = label;
+    placedRects.add(chosen.rect);
+    labels[id] = chosen;
   }
 
   Rect? bounds;

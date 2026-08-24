@@ -352,6 +352,133 @@ def test_dense_graph_nodes_do_not_overlap():
             )
 
 
+def test_large_path_table_is_capped():
+    """150 destinations: the node count respects the _MAX_NODES readability cap."""
+    from trenchchat.core.network_map import _MAX_NODES
+
+    path_table = [
+        {
+            "hash": bytes.fromhex(f"{i:032x}"),
+            "via":  bytes.fromhex(f"{i:032x}"),
+            "hops": 1,
+            "timestamp": 0.0,
+            "expires": 0.0,
+            "interface": "TestIface",
+        }
+        for i in range(1, 151)
+    ]
+    rns = _make_rns(path_table=path_table)
+    with patch("trenchchat.core.network_map.RNS.Identity.recall", return_value=None):
+        data = gather_network_data(rns, SELF_HEX)
+
+    assert len(data["nodes"]) <= _MAX_NODES + 1   # capped entries + self
+    assert data["stats"]["path_count"] == 150     # stats still report the real total
+
+
+def _mixed_topology_data():
+    """Direct peers, multi-hop paths via transports, and an interface, with
+    every quality-bearing shape the map draws."""
+    path_table = []
+    for i in range(1, 21):
+        dest = bytes.fromhex(f"{i:032x}")
+        if i % 3 == 0:
+            via = bytes.fromhex(f"{i + 100:032x}")
+            hops = 2 + i % 3
+        else:
+            via = dest
+            hops = 1
+        path_table.append({
+            "hash": dest, "via": via, "hops": hops,
+            "timestamp": 0.0, "expires": 0.0, "interface": "TestIface",
+        })
+    iface_stats = {"interfaces": [
+        {"name": "Hub", "short_name": "Hub", "type": "TCP",
+         "status": True, "rxb": 0, "txb": 0}
+    ]}
+    rns = _make_rns(path_table=path_table, interface_stats=iface_stats)
+    with patch("trenchchat.core.network_map.RNS.Identity.recall", return_value=None):
+        return gather_network_data(rns, SELF_HEX)
+
+
+def test_every_node_carries_a_quality_tier():
+    """The map colors every node by node["quality"]; a missing key silently
+    draws grey, so every kind — self, peer, transport, unknown, interface —
+    must carry a tier in 0..4."""
+    data = _mixed_topology_data()
+    kinds_seen = set()
+    for node in data["nodes"]:
+        kinds_seen.add(node["kind"])
+        assert node.get("quality") in range(5), (
+            f"node {node['id'][:12]} ({node['kind']}) has quality "
+            f"{node.get('quality')!r}"
+        )
+    assert {"self", "transport", "unknown", "interface"} <= kinds_seen
+
+
+class _FakeDirectory:
+    """UserDirectory stand-in: contains() against a fixed set."""
+
+    def __init__(self, known):
+        self._known = set(known)
+
+    def contains(self, peer_hex: str) -> bool:
+        return peer_hex in self._known
+
+
+def test_trenchchat_flag_from_directory_and_member_list():
+    """A node is a TrenchChat client if it announced as trenchchat.user or
+    sits in a channel member list; other resolvable identities are not."""
+    ids = [f"{i:02x}" * 16 for i in (1, 2, 3)]
+    path_table = [
+        {"hash": bytes.fromhex(h), "via": bytes.fromhex(h), "hops": 1,
+         "timestamp": 0.0, "expires": 0.0, "interface": "TestIface"}
+        for h in ids
+    ]
+    rns = _make_rns(path_table=path_table)
+    storage = MagicMock()
+    storage.get_trenchchat_peer_identities.return_value = {ids[1]}
+    storage.get_display_name_for_identity.return_value = None
+
+    def recall(dest_hash, **kwargs):
+        identity = MagicMock()
+        identity.hash = dest_hash
+        return identity
+
+    with patch("trenchchat.core.network_map.RNS.Identity.recall", side_effect=recall):
+        data = gather_network_data(rns, SELF_HEX, storage, _FakeDirectory({ids[0]}))
+
+    flags = {n["id"]: n["trenchchat"] for n in data["nodes"]}
+    assert flags[SELF_HEX] is True
+    assert flags[ids[0]] is True     # trenchchat.user announce
+    assert flags[ids[1]] is True     # channel member
+    assert flags[ids[2]] is False    # plain LXMF node
+
+
+def test_every_node_carries_a_trenchchat_flag():
+    """The peers-only filter reads node["trenchchat"]; every node must carry
+    it, and infrastructure is never flagged."""
+    data = _mixed_topology_data()
+    for node in data["nodes"]:
+        assert isinstance(node.get("trenchchat"), bool), (
+            f"node {node['id'][:12]} ({node['kind']}) has trenchchat "
+            f"{node.get('trenchchat')!r}"
+        )
+        if node["kind"] == "interface":
+            assert node["trenchchat"] is False
+        if node["kind"] == "self":
+            assert node["trenchchat"] is True
+
+
+def test_every_edge_carries_a_quality_tier():
+    data = _mixed_topology_data()
+    assert data["edges"]
+    for edge in data["edges"]:
+        assert edge.get("quality") in range(5), (
+            f"edge {edge['src'][:12]} -> {edge['dst'][:12]} has quality "
+            f"{edge.get('quality')!r}"
+        )
+
+
 def test_core_module_imports_without_qt():
     """The testenv API serves /network/map from a venv with no PyQt6, so this
     module must not reach the Qt one. Blocking PyQt6 reproduces that install."""
