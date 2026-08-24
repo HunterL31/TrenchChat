@@ -114,6 +114,9 @@ start_testenv() {
     # discover the address its default route uses, and every call the pages
     # make to a tester is cross-origin, so an address missing from the
     # allow-list shows up as every tester "failed to connect".
+    # Testers seed a browsable Nomad demo node on boot so the NET tab has
+    # something to open with no manual provisioning. Set to "" to disable.
+    export TC_TESTENV_NOMAD_DEMO="${TC_TESTENV_NOMAD_DEMO-1}"
     # shellcheck disable=SC2046
     nohup "$VENV/bin/python" "$REPO_ROOT/devtools/testenv/orchestrator.py" \
         --testers "$TESTERS" --host 0.0.0.0 $(page_origins) \

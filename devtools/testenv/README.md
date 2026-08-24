@@ -39,6 +39,11 @@ Click **Reset environment** to kill every tester and the hub, wipe their
 data directories, and relaunch fresh -- back to brand-new identities with
 no history.
 
+Set `TC_TESTENV_NOMAD_DEMO=1` before launching and every tester seeds a
+browsable Nomad demo node on boot (pages naming the tester they belong to,
+hosting enabled), so the NET tab has something to open immediately.
+`remote_host.sh` turns this on by default; the scenario runner leaves it off.
+
 ## Taking a tester offline
 
 Each pane has two independent controls, and they simulate two different
