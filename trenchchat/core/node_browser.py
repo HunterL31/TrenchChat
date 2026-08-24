@@ -33,6 +33,11 @@ NODE_LIST_MAX_ROWS = 200
 NODE_NAME_MAX_LEN = 64
 CACHE_PRUNE_INTERVAL_SECS = 300.0
 
+# How long a #!c=0 ("do not cache") page stays retrievable. The UI reads
+# fetched content back through the cache endpoint, so the row must outlive
+# the delivery; after the grace it is gone, honouring the author's intent.
+NO_CACHE_GRACE_SECS = 60.0
+
 FETCH_QUEUED = "queued"
 FETCH_FETCHING = "fetching"
 FETCH_DONE = "done"
@@ -83,6 +88,28 @@ def parse_nomad_url(url: str) -> tuple[str | None, str]:
     if not is_valid_request_path(path):
         raise ValueError(f"invalid request path: {path!r}")
     return node_hex, path
+
+
+def page_cache_expiry(payload: bytes, now: float) -> float | None:
+    """The cache deadline a page declares via NomadNet's #!c= header.
+
+    "#!c=N" on the first line is the cache lifetime in seconds; "#!c=0"
+    means do not cache (kept only for NO_CACHE_GRACE_SECS so the client can
+    read the delivery back). None means no header — the default LRU regime
+    applies. Total: malformed headers read as no header.
+    """
+    if not payload.startswith(b"#!c="):
+        return None
+    first_line = payload.split(b"\n", 1)[0]
+    try:
+        seconds = int(first_line[4:])
+    except ValueError:
+        return None
+    if seconds < 0:
+        return None
+    if seconds == 0:
+        return now + NO_CACHE_GRACE_SECS
+    return now + seconds
 
 
 def _validate_node_hex(value: str) -> str:
@@ -205,8 +232,9 @@ class NodeBrowserManager:
             return
         if ok and payload is not None:
             if state.kind == "page":
-                self._storage.put_nomad_page(state.node_hex, state.path,
-                                             payload)
+                self._storage.put_nomad_page(
+                    state.node_hex, state.path, payload,
+                    expires_at=page_cache_expiry(payload, time.time()))
             else:
                 self._storage.put_nomad_file(state.node_hex, state.path,
                                              payload)
