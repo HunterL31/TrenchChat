@@ -153,10 +153,11 @@ def gather_network_data(rns: RNS.Reticulum, self_hex: str,
                 if relay_id not in nodes:
                     via_identity = RNS.Identity.recall(bytes.fromhex(relay_id))
                     nodes[relay_id] = {
-                        "id":    relay_id,
-                        "label": _make_label(relay_id, via_identity, "transport", storage),
-                        "kind":  "transport",
-                        "hops":  1,
+                        "id":      relay_id,
+                        "label":   _make_label(relay_id, via_identity, "transport", storage),
+                        "kind":    "transport",
+                        "hops":    1,
+                        "quality": int(score_path(relay_id, 1, None)),
                     }
 
         # Score the quality of the path to this destination
