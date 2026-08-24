@@ -326,3 +326,69 @@ def test_prune_nomad_nodes_keeps_most_recently_heard(manager):
     storage.prune_nomad_nodes(2)
     remaining = [r["display_name"] for r in storage.get_nomad_nodes()]
     assert remaining == ["node 4", "node 3"]
+
+
+# ---------------------------------------------------------------------------
+# Page cache lifetime (#!c= header, NomadNet's convention)
+# ---------------------------------------------------------------------------
+
+def test_page_cache_expiry_header_forms():
+    from trenchchat.core.node_browser import (
+        NO_CACHE_GRACE_SECS, page_cache_expiry,
+    )
+
+    now = 1000.0
+    assert page_cache_expiry(b">no header\ntext", now) is None
+    assert page_cache_expiry(b"#!c=300\n>page", now) == now + 300
+    assert page_cache_expiry(b"#!c=0\n>page", now) == now + NO_CACHE_GRACE_SECS
+    assert page_cache_expiry(b"#!c=zz\n>page", now) is None
+    assert page_cache_expiry(b"#!c=-5\n>page", now) is None
+    assert page_cache_expiry(b"", now) is None
+
+
+def test_fetched_page_honours_its_cache_header(manager, registry):
+    _host(registry, NODE_B, {
+        "/page/keep.mu": lambda: b"#!c=300\n>kept",
+        "/page/nocache.mu": lambda: b"#!c=0\n>gone soon",
+        "/page/plain.mu": lambda: b">plain",
+    })
+    events = _events_of(manager)
+    for path in ("/page/keep.mu", "/page/nocache.mu", "/page/plain.mu"):
+        manager.fetch_page(NODE_B, path)
+    assert wait_for(
+        lambda: sum(1 for e in events if e[3] == "done") == 3)
+
+    storage = manager._storage
+    row = storage._fetchone(
+        "SELECT expires_at FROM nomad_page_cache "
+        "WHERE node_hash = ? AND path = ?", (NODE_B, "/page/keep.mu"))
+    assert row["expires_at"] is not None
+    row = storage._fetchone(
+        "SELECT expires_at FROM nomad_page_cache "
+        "WHERE node_hash = ? AND path = ?", (NODE_B, "/page/nocache.mu"))
+    assert row["expires_at"] is not None
+    row = storage._fetchone(
+        "SELECT expires_at FROM nomad_page_cache "
+        "WHERE node_hash = ? AND path = ?", (NODE_B, "/page/plain.mu"))
+    assert row["expires_at"] is None
+    # Within the delivery grace the no-cache page is still readable.
+    assert manager.get_cached_page(NODE_B, "/page/nocache.mu") is not None
+
+
+def test_expired_page_reads_as_not_cached(manager):
+    storage = manager._storage
+    storage.put_nomad_page(NODE_A, "/page/x.mu", b"x", expires_at=1.0)
+    assert manager.get_cached_page(NODE_A, "/page/x.mu") is None
+    assert storage._fetchone(
+        "SELECT * FROM nomad_page_cache WHERE node_hash = ?", (NODE_A,)) is None
+
+
+def test_prune_drops_expired_pages(manager):
+    storage = manager._storage
+    storage.put_nomad_page(NODE_A, "/page/dead.mu", b"x", expires_at=1.0)
+    storage.put_nomad_page(NODE_A, "/page/live.mu", b"x")
+    storage.prune_nomad_pages(100)
+    assert storage._fetchone(
+        "SELECT * FROM nomad_page_cache WHERE path = '/page/dead.mu'") is None
+    assert storage._fetchone(
+        "SELECT * FROM nomad_page_cache WHERE path = '/page/live.mu'") is not None

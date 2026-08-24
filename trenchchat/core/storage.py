@@ -293,11 +293,14 @@ CREATE TABLE IF NOT EXISTS nomad_nodes (
     last_seen    REAL NOT NULL
 );
 
+-- expires_at NULL means no page-declared lifetime (kept until LRU pruning);
+-- set, it comes from the page's #!c= header and the row dies at that time.
 CREATE TABLE IF NOT EXISTS nomad_page_cache (
     node_hash  TEXT NOT NULL,
     path       TEXT NOT NULL,
     content    BLOB NOT NULL,
     fetched_at REAL NOT NULL,
+    expires_at REAL,
     PRIMARY KEY (node_hash, path)
 );
 
@@ -444,6 +447,7 @@ class Storage:
         self._migrate_reactions()
         self._migrate_servers()
         self._migrate_invite_issued_at()
+        self._migrate_nomad_page_expiry()
         # _scope() reads channels.server_hash, so this must run after
         # _migrate_servers() has ensured that column exists.
         self._repair_tenure_from_message_history()
@@ -569,6 +573,14 @@ class Storage:
         if not self._has_column("messages", "image_stripped"):
             self._conn.execute(
                 "ALTER TABLE messages ADD COLUMN image_stripped INTEGER NOT NULL DEFAULT 0"
+            )
+            self._conn.commit()
+
+    def _migrate_nomad_page_expiry(self):
+        """Add expires_at to nomad_page_cache for existing databases."""
+        if not self._has_column("nomad_page_cache", "expires_at"):
+            self._conn.execute(
+                "ALTER TABLE nomad_page_cache ADD COLUMN expires_at REAL"
             )
             self._conn.commit()
 
@@ -2092,24 +2104,42 @@ class Storage:
                     ORDER BY last_seen DESC LIMIT ?)
             """, (max_rows,))
 
-    def put_nomad_page(self, node_hash: str, path: str, content: bytes) -> None:
+    def put_nomad_page(self, node_hash: str, path: str, content: bytes,
+                       expires_at: float | None = None) -> None:
         with self._tx():
             self._conn.execute("""
-                INSERT INTO nomad_page_cache (node_hash, path, content, fetched_at)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO nomad_page_cache
+                    (node_hash, path, content, fetched_at, expires_at)
+                VALUES (?, ?, ?, ?, ?)
                 ON CONFLICT(node_hash, path) DO UPDATE SET
                     content=excluded.content,
-                    fetched_at=excluded.fetched_at
-            """, (node_hash, path, content, time.time()))
+                    fetched_at=excluded.fetched_at,
+                    expires_at=excluded.expires_at
+            """, (node_hash, path, content, time.time(), expires_at))
 
     def get_nomad_page(self, node_hash: str, path: str) -> sqlite3.Row | None:
-        return self._fetchone(
+        """The cached page, honouring its declared lifetime: an expired row
+        is deleted and reported as not cached."""
+        row = self._fetchone(
             "SELECT * FROM nomad_page_cache WHERE node_hash = ? AND path = ?",
             (node_hash, path))
+        if row is None:
+            return None
+        if row["expires_at"] is not None and row["expires_at"] <= time.time():
+            with self._tx():
+                self._conn.execute(
+                    "DELETE FROM nomad_page_cache "
+                    "WHERE node_hash = ? AND path = ?", (node_hash, path))
+            return None
+        return row
 
     def prune_nomad_pages(self, max_rows: int) -> None:
-        """Drop the least recently fetched pages beyond max_rows."""
+        """Drop expired pages and the least recently fetched beyond max_rows."""
         with self._tx():
+            self._conn.execute(
+                "DELETE FROM nomad_page_cache "
+                "WHERE expires_at IS NOT NULL AND expires_at <= ?",
+                (time.time(),))
             self._conn.execute("""
                 DELETE FROM nomad_page_cache WHERE (node_hash, path) NOT IN (
                     SELECT node_hash, path FROM nomad_page_cache
