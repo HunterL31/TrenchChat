@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:flutter_ui/api/models/app_version.dart';
 import 'package:flutter_ui/app_state.dart';
 import 'package:flutter_ui/screens/dialogs/settings_dialog.dart';
 
@@ -65,6 +66,32 @@ void main() {
     expect(find.text('relay.example'), findsOneWidget);
     expect(find.text('512'), findsOneWidget);
     expect(find.text(state.meHashHex), findsOneWidget);
+  });
+
+  // The dialog nests more than one scrollable, so the settings list has to be
+  // named explicitly.
+  Future<void> scrollTo(WidgetTester tester, Finder target) =>
+      tester.scrollUntilVisible(
+        target,
+        100,
+        scrollable: find
+            .descendant(of: find.byType(ListView), matching: find.byType(Scrollable))
+            .first,
+      );
+
+  testWidgets('the about section names the running build', (tester) async {
+    state.appVersion = const AppVersionInfo(
+        version: '1.4.0',
+        transition: VersionTransition.downgrade,
+        previous: '1.5.0');
+
+    await open(tester);
+    await scrollTo(tester, find.text('1.4.0'));
+
+    expect(find.text('ABOUT'), findsOneWidget);
+    expect(find.text('1.4.0'), findsOneWidget);
+    // The build it replaced is recorded, but never shown.
+    expect(find.textContaining('1.5.0'), findsNothing);
   });
 
   testWidgets('rejects an empty display name without saving', (tester) async {

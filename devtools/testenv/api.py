@@ -550,6 +550,16 @@ def create_app(backend: Backend, *, token: str | None = None,
             "display_name": backend.config.display_name,
         }
 
+    @app.get("/version")
+    def get_version():
+        """This build's version and how it compares to the last one to run.
+
+        transition is one of first_run, unknown, same, upgrade, downgrade,
+        sidegrade -- what the installer that produced this build did to the
+        profile (see trenchchat/version.py).
+        """
+        return backend.version_state.as_dict()
+
     @app.post("/me/display_name")
     def set_display_name(req: SetDisplayNameRequest):
         # Same multi-step action the real Settings dialog drives: set the name

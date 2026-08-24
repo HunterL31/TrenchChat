@@ -7,7 +7,8 @@ Flutter client launcher. The release workflow builds the Flutter client
 first; the web build is collected here under flutter_web/, and the
 platform's desktop bundle is staged into the frozen output afterwards as
 flutter_client/ (see .github/workflows/release.yml). APP_VERSION in the
-environment sets the macOS bundle version.
+environment sets the macOS bundle version and the version stamp the
+frozen app reports at runtime.
 
 Build with:
     pyinstaller trenchchat.spec
@@ -26,6 +27,8 @@ REPO = Path(SPECPATH).resolve()
 for p in (str(REPO), str(REPO / "devtools" / "testenv")):
     if p not in sys.path:
         sys.path.insert(0, p)
+
+from trenchchat.version import BUNDLED_VERSION_FILE
 
 APP_VERSION = os.environ.get("APP_VERSION", "0.0.0")
 
@@ -76,6 +79,13 @@ hidden_imports = (
 datas = []
 datas += collect_data_files("RNS")
 datas += collect_data_files("LXMF")
+
+# The frozen app reads this back through trenchchat/version.py: the tag CI
+# built from is the only place the release version exists.
+version_stamp = REPO / "build" / BUNDLED_VERSION_FILE
+version_stamp.parent.mkdir(parents=True, exist_ok=True)
+version_stamp.write_text(APP_VERSION)
+datas += [(str(version_stamp), ".")]
 
 web_build = REPO / "flutter_ui" / "build" / "web"
 if web_build.is_dir():

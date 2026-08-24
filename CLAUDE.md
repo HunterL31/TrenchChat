@@ -26,7 +26,7 @@ setup.bat           # Windows
 .venv/bin/python main_flutter.py    # Linux/macOS
 .venv\Scripts\python main_flutter.py # Windows
 # Opens the built desktop binary if present, else the web client in a browser.
-# --port / --browser / --no-ui; needs flutter_ui/build/web (flutter build web) or a desktop build.
+# --port / --browser / --no-ui / --version; needs flutter_ui/build/web (flutter build web) or a desktop build.
 
 # Run the legacy Qt app
 .venv/bin/python main.py

@@ -315,11 +315,22 @@ class _SettingsDialogContentState extends State<_SettingsDialogContent> {
                         TcGhostButton(label: 'EDIT THEME…', onPressed: _onEditTheme),
                       ],
                     ),
+                    const SizedBox(height: 16),
+                    Container(height: 1, color: tc.borderSubtle),
+                    const SizedBox(height: 12),
+                    _sectionLabel(tc, 'ABOUT'),
+                    const SizedBox(height: 8),
+                    _readonlyRow(tc, 'Version', _version),
                   ],
                 ),
               ),
             ],
     );
+  }
+
+  String get _version {
+    final version = widget.state.appVersion;
+    return version.isKnown ? version.version : 'Unknown';
   }
 
   /// One line describing how far the saved theme departs from stock.

@@ -6,6 +6,7 @@ import 'dart:typed_data';
 
 import 'package:http/http.dart' as http;
 
+import 'models/app_version.dart';
 import 'models/bandwidth.dart';
 import 'models/emoji.dart';
 import 'models/friend.dart';
@@ -102,6 +103,11 @@ class ApiClient {
   Future<Map<String, dynamic>> getMe() async {
     final res = await _http.get(_u('/me'));
     return _decode(res) as Map<String, dynamic>;
+  }
+
+  Future<AppVersionInfo> getVersion() async {
+    final res = await _http.get(_u('/version'));
+    return AppVersionInfo.fromJson(_decode(res) as Map<String, dynamic>);
   }
 
   Future<List<Server>> getServers() async {

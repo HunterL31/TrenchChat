@@ -9,6 +9,7 @@ import 'package:http/http.dart' as http;
 
 import 'api/client.dart';
 import 'api/events.dart';
+import 'api/models/app_version.dart';
 import 'api/models/emoji.dart';
 import 'api/models/friend.dart';
 import 'api/models/invite.dart';
@@ -43,6 +44,11 @@ class AppState extends ChangeNotifier {
 
   String meHashHex = '';
   String meDisplayName = '';
+
+  /// The running build, and what the installer that delivered it replaced.
+  /// Unknown until [loadVersion] answers -- a backend too old to serve
+  /// /version simply leaves it that way.
+  AppVersionInfo appVersion = AppVersionInfo.unknown;
 
   List<Server> servers = [];
   List<Channel> standaloneChannels = [];
@@ -201,6 +207,7 @@ class AppState extends ChangeNotifier {
       }
 
       await loadFriends();
+      await loadVersion();
       await loadTheme();
       await loadThemeLibrary();
 
@@ -910,6 +917,17 @@ class AppState extends ChangeNotifier {
     } catch (e) {
       _reportActionError(e);
       return false;
+    }
+  }
+
+  /// Never fatal: the version is a note to the user, not something the client
+  /// needs in order to run.
+  Future<void> loadVersion() async {
+    try {
+      appVersion = await api.getVersion();
+      notifyListeners();
+    } catch (_) {
+      appVersion = AppVersionInfo.unknown;
     }
   }
 
