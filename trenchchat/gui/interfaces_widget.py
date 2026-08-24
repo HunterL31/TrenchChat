@@ -35,8 +35,9 @@ from PyQt6.QtWidgets import (
 
 from trenchchat.core.interfaces_config import (
     DuplicateInterfaceError, EDITABLE_TYPES, InterfaceConfigError,
-    build_interface_config_dict, delete_interface, load_interfaces_config,
-    missing_required_field, write_interface, write_interfaces_bulk,
+    SUGGESTED_DEFAULTS, apply_suggested_defaults, build_interface_config_dict,
+    delete_interface, get_missing_suggested_defaults, load_interfaces_config,
+    missing_required_field, write_interface,
 )
 
 # ---------------------------------------------------------------------------
@@ -120,34 +121,6 @@ _TYPE_FIELDS: dict[str, list[tuple[str, str, object, object]]] = {
 }
 
 
-# Community-hosted interfaces offered as one-click suggested defaults.
-# Keys are the interface names as they will appear in the Reticulum config.
-SUGGESTED_DEFAULTS: dict[str, dict[str, str]] = {
-    "RMAP": {
-        "type": "TCPClientInterface",
-        "enabled": "Yes",
-        "target_host": "rmap.world",
-        "target_port": "4242",
-        "kiss_framing": "No",
-        "i2p_tunneled": "No",
-        "connect_timeout": "5",
-        "interface_mode": "full",
-        "announce_cap": "2.0",
-    },
-    "QUAD4": {
-        "type": "TCPClientInterface",
-        "enabled": "Yes",
-        "target_host": "62.151.179.77",
-        "target_port": "45657",
-        "kiss_framing": "No",
-        "i2p_tunneled": "No",
-        "connect_timeout": "5",
-        "interface_mode": "full",
-        "announce_cap": "2.0",
-    },
-}
-
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -159,26 +132,6 @@ def _fmt_bytes(n: int) -> str:
     if n < 1024 * 1024:
         return f"{n / 1024:.1f} KB"
     return f"{n / (1024 * 1024):.1f} MB"
-
-
-def get_missing_suggested_defaults(config_path: str) -> dict[str, dict[str, str]]:
-    """Return suggested defaults not already present in the config.
-
-    An interface is considered present if any existing interface has the same
-    target_host and target_port as the suggested default, regardless of the
-    name it was saved under.
-    """
-    existing = load_interfaces_config(config_path)
-    existing_endpoints: set[tuple[str, str]] = {
-        (iface.get("target_host", ""), iface.get("target_port", ""))
-        for iface in existing.values()
-    }
-    result = {}
-    for name, cfg in SUGGESTED_DEFAULTS.items():
-        endpoint = (cfg.get("target_host", ""), cfg.get("target_port", ""))
-        if endpoint not in existing_endpoints:
-            result[name] = cfg
-    return result
 
 
 # ---------------------------------------------------------------------------
@@ -636,8 +589,10 @@ class InterfacesWidget(QWidget):
         reply = QMessageBox.question(
             self,
             "Add Suggested Defaults",
-            f"The following community-hosted interfaces will be added to your "
-            f"Reticulum config:\n\n{iface_list}\n\n"
+            f"The following community-hosted bootstrap interfaces will be added "
+            f"to your Reticulum config:\n\n{iface_list}\n\n"
+            "Interface discovery and auto-connection will be enabled, so these "
+            "are only used until better entry points are discovered.\n"
             "You can edit or remove them at any time. "
             "A restart will be required for them to take effect.\n\n"
             "Add these interfaces?",
@@ -647,7 +602,7 @@ class InterfacesWidget(QWidget):
             return
 
         try:
-            write_interfaces_bulk(self._config_path, missing)
+            apply_suggested_defaults(self._config_path)
         except InterfaceConfigError as e:
             QMessageBox.critical(self, "Error", str(e))
             return

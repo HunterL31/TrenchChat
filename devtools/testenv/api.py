@@ -35,10 +35,13 @@ from starlette.routing import Match, Mount
 from trenchchat.core import actions
 from trenchchat.core.image import is_gif, prepare_image
 from trenchchat.core.avatar import compress_avatar
+from trenchchat.core.discovery import list_discovered_interfaces, pin_discovered_interface
 from trenchchat.core.interfaces_config import (
     DuplicateInterfaceError, EDITABLE_TYPES, InterfaceConfigError,
-    build_interface_config_dict, delete_interface, load_interfaces_config,
-    missing_required_field, write_interface,
+    apply_suggested_defaults, build_interface_config_dict, delete_interface,
+    get_missing_suggested_defaults, load_discovery_settings,
+    load_interfaces_config, missing_required_field, write_discovery_settings,
+    write_interface,
 )
 from trenchchat.core.naming import NameInUseError
 from trenchchat.core.permissions import (
@@ -161,6 +164,16 @@ class UpdateInterfaceRequest(BaseModel):
     enabled: bool = True
     type_values: dict[str, str] = {}
     common_values: dict[str, str] = {}
+
+
+class DiscoverySettingsRequest(BaseModel):
+    discover_interfaces: bool
+    autoconnect_discovered_interfaces: int = 0
+    required_discovery_value: int | None = None
+
+
+class PinDiscoveredRequest(BaseModel):
+    discovery_hash: str
 
 
 class VoiceMuteRequest(BaseModel):
@@ -779,6 +792,55 @@ def create_app(backend: Backend, *, token: str | None = None,
                 {"ok": False, "error": "no such interface"}, status_code=404,
             )
         return {"ok": True, "restart_required": True}
+
+    @app.get("/reticulum/discovery")
+    def get_discovery():
+        # The [reticulum]-section discovery settings plus everything the
+        # running RNS instance has discovered on the mesh so far.
+        return {
+            "settings": load_discovery_settings(backend.rns_config_path),
+            "interfaces": list_discovered_interfaces(),
+        }
+
+    @app.put("/reticulum/discovery")
+    def put_discovery(req: DiscoverySettingsRequest):
+        try:
+            write_discovery_settings(
+                backend.rns_config_path, req.discover_interfaces,
+                req.autoconnect_discovered_interfaces, req.required_discovery_value,
+            )
+        except InterfaceConfigError as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+        return {"ok": True, "restart_required": True}
+
+    @app.post("/reticulum/discovery/pin")
+    def pin_discovered(req: PinDiscoveredRequest):
+        # The section written is built server-side from the discovered entry,
+        # so a client can only pin what was actually announced on the mesh.
+        try:
+            name = pin_discovered_interface(backend.rns_config_path, req.discovery_hash)
+        except InterfaceConfigError as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+        return {"ok": True, "name": name, "restart_required": True}
+
+    @app.get("/reticulum/interfaces_suggested")
+    def get_suggested_defaults():
+        missing = get_missing_suggested_defaults(backend.rns_config_path)
+        return {"missing": {
+            name: {"target_host": cfg.get("target_host", ""),
+                   "target_port": cfg.get("target_port", "")}
+            for name, cfg in missing.items()
+        }}
+
+    @app.post("/reticulum/interfaces_suggested")
+    def add_suggested_defaults():
+        # Same core action the Qt widget's suggested-defaults button runs:
+        # write the missing bootstrap seeds and enable discovery+autoconnect.
+        try:
+            added = apply_suggested_defaults(backend.rns_config_path)
+        except InterfaceConfigError as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+        return {"ok": True, "added": added, "restart_required": True}
 
     @app.get("/directory")
     def search_directory(q: str = ""):

@@ -245,4 +245,122 @@ void main() {
     await scrollDown();
     expect(find.widgetWithText(TextField, 'coast-mesh'), findsOneWidget);
   });
+
+  Map<String, Object> discoveryRoute({bool on = true}) => {
+        'settings': {
+          'discover_interfaces': on,
+          'autoconnect_discovered_interfaces': on ? 3 : 0,
+          'required_discovery_value': null,
+        },
+        'interfaces': [
+          {
+            'name': 'Ridge Hub',
+            'type': 'BackboneInterface',
+            'status': 'available',
+            'pinnable': true,
+            'hops': 2,
+            'value': 20,
+            'last_heard': 1000.0,
+            'reachable_on': 'ridge.example.org',
+            'port': 4242,
+            'discovery_hash': 'ef' * 16,
+          },
+          {
+            'name': 'Summit RNode',
+            'type': 'RNodeInterface',
+            'status': 'stale',
+            'pinnable': false,
+            'hops': 4,
+            'value': 15,
+            'last_heard': 500.0,
+          },
+        ],
+      };
+
+  testWidgets('discovered section lists entry points; only network ones get PIN',
+      (tester) async {
+    backend.routes['GET /reticulum/discovery'] = discoveryRoute();
+    await tester.pumpWidget(_harness(state));
+    await settle(tester);
+
+    expect(find.text('DISCOVERED ENTRY POINTS'), findsOneWidget);
+    expect(find.text('DISCOVERY ON · AUTOCONNECT 3'), findsOneWidget);
+    expect(find.text('Ridge Hub'), findsOneWidget);
+    expect(find.text('AVAILABLE'), findsOneWidget);
+    expect(find.text('Summit RNode'), findsOneWidget);
+    expect(find.text('STALE'), findsOneWidget);
+    expect(find.text('PIN'), findsOneWidget);
+  });
+
+  testWidgets('PIN posts the discovery hash and shows the restart banner',
+      (tester) async {
+    backend.routes['GET /reticulum/discovery'] = discoveryRoute();
+    backend.routes['POST /reticulum/discovery/pin'] = {
+      'ok': true, 'name': 'Ridge Hub', 'restart_required': true,
+    };
+    await tester.pumpWidget(_harness(state));
+    await settle(tester);
+
+    await tester.tap(find.text('PIN'));
+    await settle(tester);
+
+    final pins = backend.requests
+        .where((r) => r.path == '/reticulum/discovery/pin')
+        .toList();
+    expect(pins, hasLength(1));
+    expect(pins.first.body, contains('ef' * 16));
+    expect(find.textContaining('RESTART RETICULUM'), findsOneWidget);
+  });
+
+  testWidgets('ENABLE turns discovery on via PUT', (tester) async {
+    backend.routes['GET /reticulum/discovery'] = discoveryRoute(on: false);
+    backend.routes['PUT /reticulum/discovery'] = {
+      'ok': true, 'restart_required': true,
+    };
+    await tester.pumpWidget(_harness(state));
+    await settle(tester);
+
+    expect(find.text('DISCOVERY OFF'), findsOneWidget);
+    await tester.tap(find.widgetWithText(TcGhostButton, 'ENABLE'));
+    await settle(tester);
+
+    final puts = backend.requests
+        .where((r) => r.method == 'PUT' && r.path == '/reticulum/discovery')
+        .toList();
+    expect(puts, hasLength(1));
+    expect(puts.first.body, contains('"discover_interfaces":true'));
+  });
+
+  testWidgets('DEFAULTS appears when seeds are missing and posts on tap',
+      (tester) async {
+    backend.routes['GET /reticulum/interfaces_suggested'] = {
+      'missing': {
+        'RMAP Bootstrap': {'target_host': 'rmap.world', 'target_port': '4242'},
+      },
+    };
+    backend.routes['POST /reticulum/interfaces_suggested'] = {
+      'ok': true, 'added': ['RMAP Bootstrap'], 'restart_required': true,
+    };
+    await tester.pumpWidget(_harness(state));
+    await settle(tester);
+
+    await tester.tap(find.widgetWithText(TcGhostButton, 'DEFAULTS'));
+    await settle(tester);
+
+    expect(
+      backend.requests.where(
+          (r) => r.method == 'POST' && r.path == '/reticulum/interfaces_suggested'),
+      hasLength(1),
+    );
+    expect(find.textContaining('RESTART RETICULUM'), findsOneWidget);
+  });
+
+  testWidgets('a backend without the discovery endpoints hides the section',
+      (tester) async {
+    await tester.pumpWidget(_harness(state));
+    await settle(tester);
+
+    expect(find.text('DISCOVERED ENTRY POINTS'), findsNothing);
+    expect(find.widgetWithText(TcGhostButton, 'DEFAULTS'), findsNothing);
+  });
 }
