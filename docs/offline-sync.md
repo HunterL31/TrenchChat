@@ -273,3 +273,25 @@ Auto-joining a channel via an accepted invite fires an additional sync trigger, 
 By default, a member of an invite-only channel can only sync/backfill messages sent since they actually joined — the requester-tenure check above is active. `full_sync` is a per-role permission, the same shape as `send_message`/`invite`/`kick`/`manage_roles`/`manage_channel` (`ALL_PERMISSIONS` in `trenchchat/core/permissions.py`), not a channel-wide switch: an admin grants it to whichever role(s) should be able to request the channel's *entire* history via sync, e.g. the admin role but not the member role. Checked with the same `has_permission(perms, role, FULL_SYNC)` used for every other permission — `_handle_sync_request` looks up the *requester's* role, `_handle_sync_response` looks up the local peer's own role. Granting it disables the requester-side tenure check for that role while the sender-side check still applies regardless.
 
 Each member's true original join time — not just the timestamp of whichever member-list document version they first happened to receive — is carried in the signed member-list document itself (the `joined_at` field, covered by the same signature as the rest of the document; see `invite.py`'s `_build_document`/`_validate_document`). Without this, the first document version a peer processes would make everyone in it, including the channel owner, look like they joined "now," hiding all of their prior history regardless of how long the channel had actually existed.
+
+
+---
+
+## Direct messages use none of this
+
+A conversation between two friends is deliberately outside all three mechanisms
+above, because all three depend on somebody else being there. A conversation
+has exactly two participants: there is no member to broadcast a missed-delivery
+hint to, and no third peer who could answer a sync request for it.
+
+So a conversation is not synced at all. It has no `subscriptions` row, which is
+what keeps it out of `request_sync_all()`, the announce-driven per-channel loop
+in `on_peer_appeared()`, and the missed-delivery path — every one of those
+enumerates `get_subscriptions()`. Nothing had to be excluded by name.
+
+What replaces them is an LXMF **propagation node**: a message to a friend who
+is away is left with a node, which holds it until they collect it. That is a
+different trade, not the same one — a node learns which two identities
+corresponded and how much, where a channel's sync responder was already a
+member. `docs/direct-messages.md` covers what the node sees, and what happens
+on a mesh with no node at all.

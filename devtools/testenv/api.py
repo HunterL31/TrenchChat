@@ -101,6 +101,20 @@ class UpdateFriendRequest(BaseModel):
     note: str | None = None
 
 
+class FriendRequestRequest(BaseModel):
+    identity_hash: str
+    note: str = ""
+    nickname: str = ""
+
+
+class AcceptFriendRequest(BaseModel):
+    nickname: str = ""
+
+
+class PinPropagationNodeRequest(BaseModel):
+    node_hash: str = ""
+
+
 class SendMessageRequest(BaseModel):
     content: str
     reply_to: str | None = None
@@ -504,6 +518,15 @@ def create_app(backend: Backend, *, token: str | None = None,
     def _on_friend_updated(identity_hash_hex: str):
         bus.emit("friend_updated", identity_hash=identity_hash_hex)
 
+    def _on_friend_request(identity_hash_hex: str, display_name: str, note: str):
+        # Attacker-controlled text from someone with no relationship to us yet.
+        # It is capped on the way in (friends.py) and is data, not a command.
+        bus.emit("friend_request", identity_hash=identity_hash_hex,
+                 display_name=display_name, note=note)
+
+    def _on_propagation_node(node_hex: str):
+        bus.emit("propagation_node", node_hash=node_hex)
+
     def _on_directory_updated(identity_hash_hex: str, display_name: str):
         # A peer's display name changed (via their announce, or a message they
         # sent), so a running client can refresh /directory without a reload.
@@ -542,6 +565,8 @@ def create_app(backend: Backend, *, token: str | None = None,
     backend.presence_mgr.add_presence_callback(_on_presence_changed)
     backend.avatar_mgr.add_avatar_callback(_on_avatar_changed)
     backend.friends_mgr.add_friends_callback(_on_friend_updated)
+    backend.friends_mgr.add_request_callback(_on_friend_request)
+    backend.propagation_nodes.add_selection_callback(_on_propagation_node)
     backend.user_directory.add_directory_callback(_on_directory_updated)
     backend.reaction_mgr.add_reaction_callback(_on_reaction_changed)
     backend.reaction_mgr.add_emoji_callback(_on_emoji_received)
@@ -942,6 +967,112 @@ def create_app(backend: Backend, *, token: str | None = None,
         backend.friends_mgr.remove_friend(identity_hash)
         return {"ok": True}
 
+    # --- friend requests (the handshake that makes a friendship mutual) ---
+
+    @app.get("/friends/requests")
+    def list_friend_requests():
+        return backend.friends_mgr.get_pending_requests()
+
+    @app.post("/friends/requests")
+    def send_friend_request(req: FriendRequestRequest):
+        ok = actions.send_friend_request(
+            backend.friends_mgr, req.identity_hash, note=req.note,
+            nickname=req.nickname,
+        )
+        if not ok:
+            return JSONResponse(
+                {"ok": False, "error": "invalid identity hash, or self"},
+                status_code=400,
+            )
+        return {"ok": True}
+
+    @app.post("/friends/requests/{identity_hash}/accept")
+    def accept_friend_request(identity_hash: str, req: AcceptFriendRequest):
+        ok = actions.accept_friend_request(backend.friends_mgr, identity_hash,
+                                           nickname=req.nickname)
+        return {"ok": ok}
+
+    @app.post("/friends/requests/{identity_hash}/decline")
+    def decline_friend_request(identity_hash: str):
+        return {"ok": actions.decline_friend_request(backend.friends_mgr, identity_hash)}
+
+    @app.delete("/friends/requests/{identity_hash}")
+    def cancel_friend_request(identity_hash: str):
+        return {"ok": backend.friends_mgr.cancel_friend_request(identity_hash)}
+
+    # --- direct messages ---
+    #
+    # A conversation's messages are read through the ordinary
+    # /channels/{hash}/messages endpoints using its conversation hash: they are
+    # the same rows in the same table, so there is no second message pipeline.
+
+    @app.get("/dms")
+    def list_dms():
+        return backend.direct_mgr.conversations()
+
+    @app.post("/dms/{peer_hash}")
+    def open_dm(peer_hash: str):
+        conversation = actions.open_dm(backend.direct_mgr, peer_hash)
+        if conversation is None:
+            return JSONResponse(
+                {"ok": False, "error": "not an accepted friend"}, status_code=403,
+            )
+        return {"hash": conversation}
+
+    @app.post("/dms/{peer_hash}/messages")
+    def send_dm(peer_hash: str, req: SendMessageRequest):
+        image_data, error = _decode_attachment(req.image_data_b64)
+        if error is not None:
+            return error
+        msg_id = actions.send_direct_message(
+            backend.direct_mgr, backend.messaging, peer_hash, req.content,
+            reply_to=req.reply_to, image_data=image_data,
+        )
+        if msg_id is None:
+            return JSONResponse(
+                {"ok": False, "error": "not an accepted friend"}, status_code=403,
+            )
+        conversation = backend.direct_mgr.conversation_hash(peer_hash)
+        _on_message(conversation, msg_id)
+        return {"ok": True, "hash": conversation, "message_id": msg_id}
+
+    @app.post("/dms/{conversation_hash}/read")
+    def mark_dm_read(conversation_hash: str):
+        return {"ok": backend.direct_mgr.mark_read(conversation_hash)}
+
+    @app.delete("/dms/{conversation_hash}")
+    def delete_dm(conversation_hash: str):
+        return {"ok": backend.direct_mgr.delete_conversation(conversation_hash)}
+
+    # --- propagation node (how offline direct messages get through) ---
+
+    @app.get("/propagation")
+    def get_propagation():
+        return {
+            "selected": backend.propagation_nodes.selected,
+            "pinned": backend.propagation_nodes.pinned,
+            "nodes": backend.propagation_nodes.known_nodes(),
+            "sync_state": backend.router.propagation_sync_state(),
+        }
+
+    @app.post("/propagation/node")
+    def pin_propagation_node(req: PinPropagationNodeRequest):
+        if not backend.propagation_nodes.pin(req.node_hash):
+            return JSONResponse(
+                {"ok": False, "error": "node_hash must be hex"}, status_code=400,
+            )
+        return {"ok": True, "selected": backend.propagation_nodes.selected}
+
+    @app.post("/propagation/sync")
+    def collect_propagated():
+        started = backend.collect_propagated()
+        if not started:
+            return JSONResponse(
+                {"ok": False, "error": "no propagation node available"},
+                status_code=409,
+            )
+        return {"ok": True}
+
     # --- servers ---
 
     @app.get("/servers")
@@ -1320,26 +1451,35 @@ def create_app(backend: Backend, *, token: str | None = None,
             headers={"X-Content-Type-Options": "nosniff"},
         )
 
+    def _decode_attachment(image_data_b64: str | None):
+        """(image bytes or None, error response or None).
+
+        Fails closed, like main_window.py's _on_send_message: the re-encode is
+        the only sanitisation in the pipeline, and it rejects precisely the
+        inputs it exists to catch, so forwarding the original bytes would
+        bypass it on exactly those.
+        """
+        if not image_data_b64:
+            return None, None
+        try:
+            raw = base64.b64decode(image_data_b64, validate=True)
+        except Exception:
+            return None, JSONResponse(
+                {"ok": False, "error": "image_data_b64 is not valid base64"},
+                status_code=400,
+            )
+        try:
+            image_data, _ = prepare_image(raw)
+            return image_data, None
+        except Exception as exc:
+            RNS.log(f"TrenchChat testenv: image preparation failed: {exc}", RNS.LOG_WARNING)
+            return None, None
+
     @app.post("/channels/{channel_hash}/messages")
     def send_message(channel_hash: str, req: SendMessageRequest):
-        image_data = None
-        if req.image_data_b64:
-            try:
-                raw = base64.b64decode(req.image_data_b64, validate=True)
-            except Exception:
-                return JSONResponse(
-                    {"ok": False, "error": "image_data_b64 is not valid base64"},
-                    status_code=400,
-                )
-            # Fails closed, like main_window.py's _on_send_message: the
-            # re-encode is the only sanitisation in the pipeline, and it
-            # rejects precisely the inputs it exists to catch, so forwarding
-            # the original bytes would bypass it on exactly those.
-            try:
-                image_data, _ = prepare_image(raw)
-            except Exception as exc:
-                RNS.log(f"TrenchChat testenv: image preparation failed: {exc}", RNS.LOG_WARNING)
-                image_data = None
+        image_data, error = _decode_attachment(req.image_data_b64)
+        if error is not None:
+            return error
 
         # Messaging fires its message callback only for inbound LXMF, so the
         # sender's own message never reaches the WS bus by itself -- the Qt
@@ -1368,8 +1508,9 @@ def create_app(backend: Backend, *, token: str | None = None,
         # Same recipient logic _on_send_message uses, minus the SEND_MESSAGE
         # gate (which doesn't apply to reactions) -- see main_window.py's
         # _get_reaction_peers.
-        return actions.compute_channel_recipients(
-            backend.storage, backend.subscription_mgr, channel_hash, backend.identity.hash_hex,
+        return actions.conversation_recipients(
+            backend.storage, backend.subscription_mgr, backend.direct_mgr,
+            channel_hash, backend.identity.hash_hex,
         )
 
     @app.post("/channels/{channel_hash}/messages/{message_id}/reactions")

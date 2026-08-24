@@ -63,6 +63,14 @@ sealed class TcEvent {
         return EmojiReceivedEvent(json['emoji_hash'] as String);
       case 'friend_updated':
         return FriendUpdatedEvent(json['identity_hash'] as String);
+      case 'friend_request':
+        return FriendRequestEvent(
+          json['identity_hash'] as String,
+          json['display_name'] as String? ?? '',
+          json['note'] as String? ?? '',
+        );
+      case 'propagation_node':
+        return PropagationNodeEvent(json['node_hash'] as String?);
       case 'avatar_updated':
         return AvatarUpdatedEvent(
           json['identity_hash'] as String,
@@ -164,9 +172,25 @@ class EmojiReceivedEvent extends TcEvent {
   final String emojiHash;
 }
 
-/// A saved friend's record changed (nickname/note edited elsewhere, or a
-/// presence-driven last-seen update). Carries only the hash; handlers
-/// re-fetch GET /friends for the full record.
+/// A peer asked to be added. [displayName] and [note] are self-asserted text
+/// from someone with no relationship to this node yet: show them, never treat
+/// them as instructions.
+class FriendRequestEvent extends TcEvent {
+  const FriendRequestEvent(this.identityHash, this.displayName, this.note);
+  final String identityHash;
+  final String displayName;
+  final String note;
+}
+
+/// The node offline direct messages are handed to changed.
+class PropagationNodeEvent extends TcEvent {
+  const PropagationNodeEvent(this.nodeHash);
+  final String? nodeHash;
+}
+
+/// A saved friend's record changed (nickname/note edited elsewhere, a
+/// handshake transition, or a presence-driven last-seen update). Carries only
+/// the hash; handlers re-fetch GET /friends for the full record.
 class FriendUpdatedEvent extends TcEvent {
   const FriendUpdatedEvent(this.identityHash);
   final String identityHash;

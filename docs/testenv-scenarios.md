@@ -31,7 +31,8 @@ tester's API (8801+) or one orchestrator call (8800).
 | Group | Actions |
 |---|---|
 | **Identity** | set display name, set avatar, remove avatar, search directory |
-| **Friends** | add friend (nickname/note), update friend, remove friend |
+| **Friends** | add friend (nickname/note), update friend, remove friend, send friend request, accept request, decline request |
+| **Direct messages** | open conversation, send direct message, list conversations, enable propagation node, pin/unpin outbound node, collect held mail |
 | **Channel** | create public, create invite-only, list discovered, join discovered, leave |
 | **Server** | create server, create channel in server, invite to server, leave server |
 | **Membership** | send invite, accept invite, decline invite, kick, promote to admin, demote |
@@ -55,6 +56,9 @@ instant delivery.
 | Pending invites | `GET /invites` |
 | Reactions | reaction summary on each message row |
 | Presence | `GET /peers/{h}/presence` |
+| Conversations | `GET /dms` → conversation hash, peer, unread |
+| Friend requests | `GET /friends/requests` → `incoming` / `outgoing` |
+| Propagation node | `GET /propagation` → selected node, nodes heard, transfer state |
 | Link | `GET /net/status`, orchestrator `GET /status` |
 
 **Convergence** is the workhorse assertion: named peers hold identical message
@@ -377,6 +381,27 @@ about four seconds.
 | api2 | A | A wrong token, then the right one as a header, a bearer and `?token=` | ✅ Wrong token 401; all three routes 200; the socket opens on both the header and the query parameter |
 | api3 | A | Open the event socket with `Origin: http://evil.example`, then with its own | ✅ Foreign origin refused 403, own origin accepted. The socket checks this itself — a browser applies neither CORS nor same-origin policy to a WebSocket handshake |
 | api4 | A,B,C,D | Present each tester's token to a different tester's API | ⚠️ **One token for the whole environment**, as designed: B accepts A's, C's and D's (all 200), and the orchestrator's unauthenticated `/config` serves it. Recorded so the harness never claims per-identity isolation it does not have |
+
+### `dm` — Direct messages between mutual friends
+
+A conversation has two participants and nothing else: no roster, no announce,
+and no third peer who could serve its history later. Two things follow, and
+both are why this family exists rather than living in `tests/`.
+
+The gate is enforced at each end independently, so a one-sided friendship must
+produce *nothing* on the far side — and over a real network "refused" and
+"still in flight" look identical for a while, which is what `hold_for` is for.
+And a message to an absent friend has no member to backfill it, so it goes to a
+propagation node instead: a third process really acting as one, a peer that
+really leaves, and real time passing before it returns and collects.
+
+| ID | Peers | Actions | Expected result |
+|---|---|---|---|
+| dm1 | A,B | A requests, B accepts, one message each way | ✅ Handshake and both messages in **2.0s**. Both peers derive the same conversation address with nothing negotiated |
+| dm2 | A,B | A adds B; B never adds A; A sends | ✅ Nothing lands at B across the full **15s** hold, and B's own send back is refused with **403** before it leaves. One-sided trust delivers nothing in either direction |
+| dm3 | A,B | Mutual friends, one message, then B removes A and A sends again | ✅ First message held, second never arrives (15s hold), and the existing transcript survives the unfriending. **26s** |
+| dm4 | A,B,C | C runs a propagation node; B goes offline; A sends; B returns and collects | ✅ **5/5 runs, 29–38s.** The path the whole propagation layer exists for — a channel would have been caught up by any member, and a conversation has none |
+| dm5 | A,B,C | Two nodes announce; A auto-selects, pins the other, then reverts | ⚠ **Probe.** Pinning and reverting both work. Whether *hop count* separates two nodes is not shown here: the harness's topology is flat, so both are one hop and the tie is broken by which was heard last |
 
 ### `integrity` — Message integrity: authorship and attachments
 

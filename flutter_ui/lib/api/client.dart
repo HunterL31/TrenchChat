@@ -9,6 +9,7 @@ import 'package:http/http.dart' as http;
 import 'models/app_version.dart';
 import 'models/bandwidth.dart';
 import 'models/discovery.dart';
+import 'models/dm.dart';
 import 'models/emoji.dart';
 import 'models/friend.dart';
 import 'models/interface.dart';
@@ -365,6 +366,114 @@ class ApiClient {
 
   Future<bool> removeFriend(String identityHashHex) async {
     final res = await _http.delete(_u('/friends/$identityHashHex'));
+    return (_decode(res) as Map<String, dynamic>)['ok'] as bool? ?? false;
+  }
+
+  // --- friend requests ---
+
+  Future<FriendRequests> getFriendRequests() async {
+    final res = await _http.get(_u('/friends/requests'));
+    return FriendRequests.fromJson(_decode(res) as Map<String, dynamic>);
+  }
+
+  Future<bool> sendFriendRequest(String identityHashHex,
+      {String note = '', String nickname = ''}) async {
+    final res = await _http.post(
+      _u('/friends/requests'),
+      headers: _jsonHeaders,
+      body: jsonEncode({
+        'identity_hash': identityHashHex,
+        'note': note,
+        'nickname': nickname,
+      }),
+    );
+    return (_decode(res) as Map<String, dynamic>)['ok'] as bool? ?? false;
+  }
+
+  Future<bool> acceptFriendRequest(String identityHashHex,
+      {String nickname = ''}) async {
+    final res = await _http.post(
+      _u('/friends/requests/$identityHashHex/accept'),
+      headers: _jsonHeaders,
+      body: jsonEncode({'nickname': nickname}),
+    );
+    return (_decode(res) as Map<String, dynamic>)['ok'] as bool? ?? false;
+  }
+
+  Future<bool> declineFriendRequest(String identityHashHex) async {
+    final res = await _http.post(_u('/friends/requests/$identityHashHex/decline'));
+    return (_decode(res) as Map<String, dynamic>)['ok'] as bool? ?? false;
+  }
+
+  Future<bool> cancelFriendRequest(String identityHashHex) async {
+    final res = await _http.delete(_u('/friends/requests/$identityHashHex'));
+    return (_decode(res) as Map<String, dynamic>)['ok'] as bool? ?? false;
+  }
+
+  // --- direct messages ---
+  //
+  // A conversation's transcript is read with getMessages(conversationHash):
+  // they are the same rows the channel endpoints serve.
+
+  Future<List<DmConversation>> getDms() async {
+    final res = await _http.get(_u('/dms'));
+    return (_decode(res) as List<dynamic>)
+        .map((e) => DmConversation.fromJson(e as Map<String, dynamic>))
+        .toList();
+  }
+
+  /// The conversation with a peer, created on first use. Throws
+  /// [ApiException] (403) when they are not an accepted friend.
+  Future<String> openDm(String peerHashHex) async {
+    final res = await _http.post(_u('/dms/$peerHashHex'));
+    return (_decode(res) as Map<String, dynamic>)['hash'] as String;
+  }
+
+  /// Returns the stored message id. Throws [ApiException] (403) when the peer
+  /// is not an accepted friend.
+  Future<String> sendDm(String peerHashHex, String content,
+      {String? replyTo, Uint8List? imageData}) async {
+    final res = await _http.post(
+      _u('/dms/$peerHashHex/messages'),
+      headers: _jsonHeaders,
+      body: jsonEncode({
+        'content': content,
+        'reply_to': ?replyTo,
+        if (imageData != null) 'image_data_b64': base64Encode(imageData),
+      }),
+    );
+    return (_decode(res) as Map<String, dynamic>)['message_id'] as String;
+  }
+
+  Future<bool> markDmRead(String conversationHashHex) async {
+    final res = await _http.post(_u('/dms/$conversationHashHex/read'));
+    return (_decode(res) as Map<String, dynamic>)['ok'] as bool? ?? false;
+  }
+
+  Future<bool> deleteDm(String conversationHashHex) async {
+    final res = await _http.delete(_u('/dms/$conversationHashHex'));
+    return (_decode(res) as Map<String, dynamic>)['ok'] as bool? ?? false;
+  }
+
+  // --- propagation node (how offline direct messages get through) ---
+
+  Future<PropagationStatus> getPropagation() async {
+    final res = await _http.get(_u('/propagation'));
+    return PropagationStatus.fromJson(_decode(res) as Map<String, dynamic>);
+  }
+
+  /// Pass an empty hash to go back to automatic selection.
+  Future<bool> pinPropagationNode(String nodeHashHex) async {
+    final res = await _http.post(
+      _u('/propagation/node'),
+      headers: _jsonHeaders,
+      body: jsonEncode({'node_hash': nodeHashHex}),
+    );
+    return (_decode(res) as Map<String, dynamic>)['ok'] as bool? ?? false;
+  }
+
+  Future<bool> collectPropagated() async {
+    final res = await _http.post(_u('/propagation/sync'));
     return (_decode(res) as Map<String, dynamic>)['ok'] as bool? ?? false;
   }
 

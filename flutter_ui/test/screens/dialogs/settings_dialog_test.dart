@@ -115,7 +115,9 @@ void main() {
     expect(body['propagation_node_name'], 'ridge-node');
     expect(body['propagation_enabled'], true);
     expect(body['propagation_storage_limit_mb'], 512);
-    // Nothing sends PROPAGATED, so there is no outbound node to configure.
+    // The node offline direct messages go through is chosen through
+    // /propagation/node, which sets the live router too -- so it is never
+    // part of a settings save.
     expect(body.containsKey('outbound_propagation_node'), isFalse);
   });
 

@@ -28,10 +28,13 @@ from trenchchat.config import Config
 from trenchchat.core.identity import Identity
 from trenchchat.core.storage import Storage
 from trenchchat.core.channel import ChannelManager
+from trenchchat.core.direct import DirectMessageManager
+from trenchchat.core.friends import FriendsManager
 from trenchchat.core.messaging import Messaging
 from trenchchat.core.subscription import SubscriptionManager
 from trenchchat.core.invite import InviteManager
 from trenchchat.core.reaction import ReactionManager
+from trenchchat.core.presence import PresenceManager
 from trenchchat.core.server import ServerManager
 from trenchchat.core.sync import SyncManager
 from trenchchat.core.voice import VoiceManager
@@ -158,6 +161,9 @@ class TestPeer:
     invite_mgr: InviteManager
     reaction_mgr: ReactionManager
     sync_mgr: SyncManager
+    presence_mgr: PresenceManager
+    friends_mgr: FriendsManager
+    direct_mgr: DirectMessageManager
     voice_mgr: VoiceManager
     voice_transport: FakeVoiceTransport
     _teardown_callbacks: list = field(default_factory=list, repr=False)
@@ -266,6 +272,15 @@ def peer_factory(rns_instance, tmp_path):
         sync_mgr = SyncManager(identity, storage, router, messaging,
                                subscription_mgr, invite_mgr,
                                reaction_mgr=reaction_mgr)
+        presence_mgr = PresenceManager(identity.hash_hex, config)
+        friends_mgr = FriendsManager(storage, identity.hash_hex, presence_mgr,
+                                     identity=identity, router=router)
+        presence_mgr.add_seen_callback(friends_mgr.record_seen)
+        presence_mgr.add_presence_callback(friends_mgr.record_presence)
+        direct_mgr = DirectMessageManager(identity, storage, friends_mgr, presence_mgr)
+        messaging.set_direct_manager(direct_mgr)
+        reaction_mgr.set_direct_manager(direct_mgr)
+
         voice_transport = FakeVoiceTransport(identity.hash_hex, voice_registry)
         voice_mgr = VoiceManager(identity, storage, router, subscription_mgr,
                                  config, transport=voice_transport,
@@ -288,6 +303,9 @@ def peer_factory(rns_instance, tmp_path):
             invite_mgr=invite_mgr,
             reaction_mgr=reaction_mgr,
             sync_mgr=sync_mgr,
+            presence_mgr=presence_mgr,
+            friends_mgr=friends_mgr,
+            direct_mgr=direct_mgr,
             voice_mgr=voice_mgr,
             voice_transport=voice_transport,
         )

@@ -27,7 +27,9 @@ from PyQt6.QtWidgets import QApplication
 from trenchchat.config import Config
 from trenchchat.core import lockbox
 from trenchchat.core.avatar import AvatarManager
+from trenchchat.core.direct import DirectMessageManager
 from trenchchat.core.friends import FriendsManager
+from trenchchat.core.propagation import PropagationNodes
 from trenchchat.core.identity import Identity
 from trenchchat.core.interfaces_config import default_rns_config_path, seed_initial_config
 from trenchchat.core.reaction import ReactionManager
@@ -42,7 +44,9 @@ from trenchchat.core.user_directory import UserDirectory
 from trenchchat.core.voice import VoiceManager
 from trenchchat.network.router import REANNOUNCE_INTERVAL_SECS, Router
 from trenchchat.network.voice_transport import RNSVoiceTransport
-from trenchchat.network.announce import UserAnnounceHandler
+from trenchchat.network.announce import (
+    PropagationAnnounceHandler, UserAnnounceHandler,
+)
 from trenchchat.version import record_launch
 from trenchchat.gui.main_window import MainWindow
 from trenchchat.gui.pin_dialog import UnlockDialog
@@ -122,9 +126,18 @@ def main():
     user_directory = UserDirectory(identity.hash_hex)
     avatar_mgr = AvatarManager(identity, config, storage, router)
     reaction_mgr = ReactionManager(identity, storage, router)
-    friends_mgr = FriendsManager(storage, identity.hash_hex, presence_mgr)
+    friends_mgr = FriendsManager(storage, identity.hash_hex, presence_mgr,
+                                 identity=identity, router=router)
     presence_mgr.add_seen_callback(friends_mgr.record_seen)
     presence_mgr.add_presence_callback(friends_mgr.record_presence)
+    direct_mgr = DirectMessageManager(identity, storage, friends_mgr, presence_mgr)
+    messaging.set_direct_manager(direct_mgr)
+    messaging.set_presence_manager(presence_mgr)
+    reaction_mgr.set_direct_manager(direct_mgr)
+    propagation_nodes = PropagationNodes(config, router)
+    RNS.Transport.register_announce_handler(
+        PropagationAnnounceHandler(propagation_nodes.record_node)
+    )
     voice_transport = RNSVoiceTransport(identity)
     voice_mgr = VoiceManager(identity, storage, router, subscription_mgr,
                              config, transport=voice_transport)
@@ -220,6 +233,7 @@ def main():
         reaction_mgr=reaction_mgr,
         presence_beacon=presence_beacon,
         voice_mgr=voice_mgr,
+        friends_mgr=friends_mgr,
     )
     window.show()
 

@@ -298,6 +298,79 @@ def channel_roster_hexes(storage, subscription_mgr,
 
 
 # ---------------------------------------------------------------------------
+# Friends and direct messages
+#
+# A direct message needs both peers to hold the other as an accepted friend.
+# Every function here is a thin sequence over FriendsManager and
+# DirectMessageManager; the gate itself lives in those managers, because it has
+# to hold for a peer calling in over the network, not only for a frontend.
+# ---------------------------------------------------------------------------
+
+
+def send_friend_request(friends_mgr, peer_hash_hex: str, note: str = "",
+                        nickname: str = "") -> bool:
+    """Ask a peer to add us. False for a malformed hash or our own."""
+    return friends_mgr.send_friend_request(peer_hash_hex, note=note,
+                                           nickname=nickname)
+
+
+def accept_friend_request(friends_mgr, peer_hash_hex: str,
+                          nickname: str = "") -> bool:
+    """False if that peer has not asked us."""
+    return friends_mgr.accept_friend_request(peer_hash_hex, nickname=nickname)
+
+
+def decline_friend_request(friends_mgr, peer_hash_hex: str) -> bool:
+    """False if that peer has not asked us."""
+    return friends_mgr.decline_friend_request(peer_hash_hex)
+
+
+def open_dm(direct_mgr, peer_hash_hex: str) -> str | None:
+    """The conversation with a peer, created on first use.
+
+    None when they are not an accepted friend -- a silent no-op, matching
+    compute_send_recipients.
+    """
+    return direct_mgr.open_conversation(peer_hash_hex)
+
+
+def send_direct_message(direct_mgr, messaging, peer_hash_hex: str, content: str, *,
+                        image_data: bytes | None = None,
+                        reply_to: str | None = None) -> str | None:
+    """Send a direct message. Returns its id, or None if the peer is not a friend."""
+    if not direct_mgr.may_dm(peer_hash_hex):
+        return None
+    return messaging.send_direct(
+        peer_hash_hex, content, reply_to=reply_to, image_data=image_data,
+    )
+
+
+def dm_recipients(direct_mgr, conversation_hash_hex: str) -> list[str] | None:
+    """The delivery target set for a conversation: its other half, and nobody else.
+
+    The counterpart of compute_channel_recipients, for the reaction broadcast
+    path. None when the address is not a conversation we hold.
+    """
+    peer = direct_mgr.peer_for(conversation_hash_hex)
+    if peer is None or not direct_mgr.may_dm(peer):
+        return None
+    return [peer]
+
+
+def conversation_recipients(storage, subscription_mgr, direct_mgr,
+                            channel_hash_hex: str, self_hash_hex: str) -> list[str]:
+    """Recipients for any address, conversation or channel.
+
+    Lets a caller that does not know which kind it holds -- a reaction
+    broadcast, say -- ask once.
+    """
+    if direct_mgr is not None and direct_mgr.is_conversation(channel_hash_hex):
+        return dm_recipients(direct_mgr, channel_hash_hex) or []
+    return compute_channel_recipients(storage, subscription_mgr, channel_hash_hex,
+                                      self_hash_hex)
+
+
+# ---------------------------------------------------------------------------
 # Settings
 #
 # The avatar has its own dedicated entry point (AvatarManager.set_avatar) and
@@ -324,6 +397,7 @@ def read_settings(config) -> dict:
         "propagation_enabled": config.propagation_enabled,
         "propagation_node_name": config.propagation_node_name,
         "propagation_storage_limit_mb": config.propagation_storage_limit_mb,
+        "outbound_propagation_node": config.outbound_propagation_node,
     }
 
 
@@ -335,7 +409,9 @@ def apply_settings(config, router, updates: dict) -> None:
     fields unwritten. There is no rollback on a partial failure, matching
     Config's save-per-setter behaviour.
 
-    Only keys present in updates are touched.
+    Only keys present in updates are touched. outbound_propagation_node is
+    read-only here: PropagationNodes.pin() owns it, because choosing a node
+    means telling the live router, not only writing the setting.
     """
     if "propagation_node_name" in updates:
         config.propagation_node_name = updates["propagation_node_name"]

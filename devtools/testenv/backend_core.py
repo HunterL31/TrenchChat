@@ -39,13 +39,17 @@ from trenchchat.core.presence import (
 from trenchchat.core.protocol import F_DISPLAY_NAME, F_MSG_TYPE
 from trenchchat.core.user_directory import UserDirectory
 from trenchchat.core.avatar import AvatarManager
+from trenchchat.core.direct import DirectMessageManager
 from trenchchat.core.friends import FriendsManager
+from trenchchat.core.propagation import PropagationNodes
 from trenchchat.core.reaction import ReactionManager
 from trenchchat.core.voice import VoiceManager
 from trenchchat.core.audio.engine import make_tone_pipeline
 from trenchchat.network.router import Router
 from trenchchat.network.voice_transport import RNSVoiceTransport
-from trenchchat.network.announce import PeerAnnounceHandler, UserAnnounceHandler
+from trenchchat.network.announce import (
+    PeerAnnounceHandler, PropagationAnnounceHandler, UserAnnounceHandler,
+)
 from trenchchat.version import record_launch
 
 _LINK_INTERFACE_NAME = "TesterLink"
@@ -252,9 +256,20 @@ class Backend:
         self.router.add_outbound_callback(self.presence_beacon.record_sent)
         self.user_directory = UserDirectory(self.identity.hash_hex)
         self.avatar_mgr = AvatarManager(self.identity, self.config, self.storage, self.router)
-        self.friends_mgr = FriendsManager(self.storage, self.identity.hash_hex, self.presence_mgr)
+        self.friends_mgr = FriendsManager(self.storage, self.identity.hash_hex,
+                                          self.presence_mgr, identity=self.identity,
+                                          router=self.router)
         self.presence_mgr.add_seen_callback(self.friends_mgr.record_seen)
         self.presence_mgr.add_presence_callback(self.friends_mgr.record_presence)
+        self.direct_mgr = DirectMessageManager(self.identity, self.storage,
+                                               self.friends_mgr, self.presence_mgr)
+        self.messaging.set_direct_manager(self.direct_mgr)
+        self.messaging.set_presence_manager(self.presence_mgr)
+        self.reaction_mgr.set_direct_manager(self.direct_mgr)
+        self.propagation_nodes = PropagationNodes(self.config, self.router)
+        RNS.Transport.register_announce_handler(
+            PropagationAnnounceHandler(self.propagation_nodes.record_node)
+        )
         # Headless testers have no sound devices; the tone pipeline feeds the
         # real encode/transmit path with a generated signal instead. A real
         # profile uses no factory, so VoiceManager builds the real
@@ -296,6 +311,7 @@ class Backend:
             self.reaction_mgr.flush_pending_emoji(peer_hex)
             self.subscription_mgr.flush_pending(peer_hex)
             self.invite_mgr.flush_pending(peer_hex)
+            self.friends_mgr.flush_pending(peer_hex)
 
         RNS.Transport.register_announce_handler(
             PeerAnnounceHandler(_on_peer_appeared)
@@ -312,11 +328,27 @@ class Backend:
 
         # Nothing else notices *our own* link returning: every catch-up path
         # is driven by hearing from a remote peer.
-        self.link_watcher = LinkWatcher(self.sync_mgr.request_sync_all)
+        self.link_watcher = LinkWatcher(self._on_link_restored)
         self.link_watcher.start()
 
         self.channel_mgr.restore_owned_channels()
         self.server_mgr.restore_owned_servers()
+
+    def _on_link_restored(self) -> None:
+        """Catch up after our own link returns.
+
+        Channel history comes from peers; a direct message left with a
+        propagation node while we were away has to be collected, or it stays
+        there.
+        """
+        self.sync_mgr.request_sync_all()
+        self.collect_propagated()
+
+    def collect_propagated(self) -> bool:
+        """Ask the selected propagation node for anything held for us."""
+        if self.propagation_nodes.selected is None:
+            self.propagation_nodes.reselect()
+        return self.router.request_propagation_sync(self.identity.rns_identity)
 
     def _on_inbound_message(self, message) -> None:
         """Record presence and directory state from an inbound LXMF message.

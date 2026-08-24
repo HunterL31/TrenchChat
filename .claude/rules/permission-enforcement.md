@@ -27,6 +27,14 @@ layer allows a bad client (or a bug) to bypass the restriction.
 | `MANAGE_ROLES` | button hidden in `MembersDialog` | `_on_view_members` filters `admins_to_add/remove` | `publish_member_list` nulls `add/remove_admins` |
 | `MANAGE_CHANNEL` | menu item hidden | `_on_edit_permissions` returns early | n/a (member list doc is signature-validated) |
 
+Direct messages are gated by mutual friendship rather than a channel permission, but the same
+three-layer shape applies: the client offers a conversation only for an accepted friend, the
+`/dms` endpoints refuse a non-friend with 403 (`actions.send_direct_message`), and
+`Messaging._on_direct_message` drops anything inbound from a peer this node does not hold —
+which is the only layer that holds against a peer calling in directly. See
+`docs/direct-messages.md`; the adversarial cases are
+`tests/test_adversarial.py::TestDirectMessageGate`.
+
 ## Rules
 
 - The GUI gate is **convenience only** — never rely on it as the sole check.

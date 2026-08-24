@@ -5,6 +5,7 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../../api/models/dm.dart';
 import '../../api/models/link_quality.dart';
 import '../../api/models/member.dart';
 import '../../api/models/message.dart';
@@ -28,6 +29,7 @@ import '../dialogs/new_channel_dialog.dart';
 import '../dialogs/new_server_dialog.dart';
 import '../dialogs/permissions_dialog.dart';
 import '../dialogs/settings_dialog.dart';
+import '../dialogs/start_dm_dialog.dart';
 import 'channel_column.dart';
 import 'channel_header.dart';
 import 'compose_bar.dart';
@@ -124,6 +126,18 @@ class _MainWindowState extends State<MainWindow> {
     );
     if (!confirmed) return;
     await widget.state.leaveChannel(channel.hash);
+  }
+
+  /// A conversation's title: the peer's nickname if we gave one, else the
+  /// name they assert, else a short form of their hash.
+  String _dmLabel(AppState state, DmConversation dm) {
+    for (final f in state.friends) {
+      if (f.identityHash == dm.peerHash && f.nickname.isNotEmpty) return f.nickname;
+    }
+    if (dm.displayName.isNotEmpty) return dm.displayName;
+    final hex = dm.peerHash;
+    if (hex.length <= 8) return hex;
+    return '${hex.substring(0, 4)}…${hex.substring(hex.length - 4)}';
   }
 
   String _serverName(AppState state, String hash) =>
@@ -264,6 +278,18 @@ class _MainWindowState extends State<MainWindow> {
         }
         final channel = state.selectedChannel;
         final channelHash = state.selectedChannelHash;
+        // A conversation has no channel row, so its header and compose gate
+        // come from the conversation itself: no permissions to read, and
+        // nothing to send once the friendship ends.
+        final dm = state.selectedDmHash == null
+            ? null
+            : state.dmFor(state.selectedDmHash!);
+        final headerName = dm != null ? _dmLabel(state, dm) : channel?.name ?? '';
+        final headerTopic = dm != null
+            ? (dm.isFriend
+                ? 'Direct message'
+                : 'Direct message — no longer a friend')
+            : channel?.description ?? '';
         final List<Message> messages =
             channelHash != null ? state.messagesByChannel[channelHash] ?? [] : [];
         if (_replyTarget != null && _replyChannelHash != channelHash) {
@@ -340,6 +366,15 @@ class _MainWindowState extends State<MainWindow> {
           onCreateChannel: () =>
               showNewChannelDialog(context, state, serverHashHex: selectedServer),
           onCreateDirectChannel: () => showNewChannelDialog(context, state),
+          dms: state.dms,
+          onSelectDm: (hash) {
+            state.selectDm(hash);
+            if (_scaffoldKey.currentState?.isDrawerOpen ?? false) {
+              _scaffoldKey.currentState!.closeDrawer();
+            }
+          },
+          onDeleteDm: (dm) => state.deleteDm(dm.hash),
+          onStartDm: () => showStartDmDialog(context, state),
           onJoinChannel: () => showJoinChannelDialog(context, state),
           friendHashes: friendHashes,
           onAddFriend: (hash) => showAddFriendDialog(context, state, identityHash: hash),
@@ -386,8 +421,8 @@ class _MainWindowState extends State<MainWindow> {
                     spec: spec,
                     section: TCSection.topBar,
                     child: ChannelHeader(
-                      channelName: channel?.name ?? '',
-                      topic: channel?.description ?? '',
+                      channelName: headerName,
+                      topic: headerTopic,
                       linkQuality: linkQuality,
                       connectionState: state.connectionState,
                       activeTab: _tab,
@@ -474,9 +509,11 @@ class _MainWindowState extends State<MainWindow> {
                     ),
                   if (_tab == ChannelTab.chat)
                     ComposeBar(
-                      channelName: channel?.name ?? '',
+                      channelName: headerName,
                       channelHash: channelHash,
-                      enabled: channelHash != null && (permissions?.sendMessage ?? true),
+                      enabled: dm != null
+                          ? dm.isFriend
+                          : channelHash != null && (permissions?.sendMessage ?? true),
                       replyPreview: _replyTarget == null
                           ? null
                           : (
@@ -489,13 +526,21 @@ class _MainWindowState extends State<MainWindow> {
                       onCancelReply: () => setState(() => _replyTarget = null),
                       onSend: (content, attachment) async {
                         final replyTo = _replyTarget?.messageId;
-                        final ok = await state.sendMessage(
-                          content,
-                          replyTo: replyTo,
-                          imageDataB64: attachment == null
-                              ? null
-                              : base64Encode(attachment.bytes),
-                        );
+                        // A conversation is addressed by peer, not by
+                        // channel, and carries no permissions to check.
+                        final ok = state.selectedDmHash != null
+                            ? await state.sendDirectMessage(
+                                content,
+                                replyTo: replyTo,
+                                imageData: attachment?.bytes,
+                              )
+                            : await state.sendMessage(
+                                content,
+                                replyTo: replyTo,
+                                imageDataB64: attachment == null
+                                    ? null
+                                    : base64Encode(attachment.bytes),
+                              );
                         if (ok && _replyTarget != null) {
                           setState(() => _replyTarget = null);
                         }

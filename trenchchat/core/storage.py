@@ -23,6 +23,12 @@ DB_PATH = DATA_DIR / "storage.db"
 
 _KNOWN_TABLE_RE = re.compile(r"^[a-z_][a-z0-9_]*$")
 
+# friends.state -- the friendship itself, as opposed to the local-only nickname
+# and note stored alongside it.
+FRIEND_ACCEPTED    = "accepted"
+FRIEND_PENDING_OUT = "pending_out"
+FRIEND_PENDING_IN  = "pending_in"
+
 
 def _connect_plain(path: str) -> sqlite3.Connection:
     """Open a plain SQLite connection."""
@@ -72,6 +78,10 @@ CREATE TABLE IF NOT EXISTS servers (
     last_seen    REAL NOT NULL
 );
 
+-- kind is 'channel' for everything announced, joined or invited to, and 'dm'
+-- for a direct-message conversation. A DM row exists only because
+-- messages.channel_hash is a foreign key; it is never announced, never
+-- subscribed to, and carries no members, permissions or member-list document.
 CREATE TABLE IF NOT EXISTS channels (
     hash        TEXT PRIMARY KEY,
     name        TEXT NOT NULL,
@@ -80,7 +90,8 @@ CREATE TABLE IF NOT EXISTS channels (
     permissions TEXT NOT NULL DEFAULT '{}',
     created_at  REAL NOT NULL,
     last_seen   REAL NOT NULL,
-    server_hash TEXT
+    server_hash TEXT,
+    kind        TEXT NOT NULL DEFAULT 'channel'
 );
 
 CREATE TABLE IF NOT EXISTS messages (
@@ -274,13 +285,27 @@ CREATE TABLE IF NOT EXISTS pending_invites (
     issued_at     REAL NOT NULL DEFAULT 0
 );
 
--- Local-only saved contacts. Nothing here is ever sent to a peer.
+-- Saved contacts. The nickname and note stay local; state is the friendship
+-- itself, which the friend-request handshake moves between peers.
+--   accepted    -- we trust this identity: DMs from them are accepted
+--   pending_out -- we asked them, no answer yet
+--   pending_in  -- they asked us, the user has not decided
 CREATE TABLE IF NOT EXISTS friends (
     identity_hash TEXT PRIMARY KEY,
     nickname      TEXT NOT NULL DEFAULT '',
     note          TEXT NOT NULL DEFAULT '',
     added_at      REAL NOT NULL,
-    last_seen_at  REAL NOT NULL DEFAULT 0
+    last_seen_at  REAL NOT NULL DEFAULT 0,
+    state         TEXT NOT NULL DEFAULT 'accepted'
+);
+
+-- One row per direct-message conversation. conversation_hash is
+-- naming.dm_hash_for(self, peer) and doubles as the channels row it points at.
+CREATE TABLE IF NOT EXISTS dm_conversations (
+    conversation_hash TEXT PRIMARY KEY,
+    peer_hash         TEXT NOT NULL UNIQUE,
+    created_at        REAL NOT NULL,
+    last_read_at      REAL NOT NULL DEFAULT 0
 );
 """
 
@@ -409,6 +434,8 @@ class Storage:
         self._migrate_reactions()
         self._migrate_servers()
         self._migrate_invite_issued_at()
+        self._migrate_channel_kind()
+        self._migrate_friend_state()
         # _scope() reads channels.server_hash, so this must run after
         # _migrate_servers() has ensured that column exists.
         self._repair_tenure_from_message_history()
@@ -418,6 +445,26 @@ class Storage:
         if not self._has_column("pending_invites", "issued_at"):
             self._conn.execute(
                 "ALTER TABLE pending_invites ADD COLUMN issued_at REAL NOT NULL DEFAULT 0"
+            )
+            self._conn.commit()
+
+    def _migrate_channel_kind(self):
+        """Add channels.kind for existing databases. Every existing row is a channel."""
+        if not self._has_column("channels", "kind"):
+            self._conn.execute(
+                "ALTER TABLE channels ADD COLUMN kind TEXT NOT NULL DEFAULT 'channel'"
+            )
+            self._conn.commit()
+
+    def _migrate_friend_state(self):
+        """Add friends.state for existing databases.
+
+        Every friend saved before the handshake existed was added deliberately
+        by the user, so they all start accepted.
+        """
+        if not self._has_column("friends", "state"):
+            self._conn.execute(
+                "ALTER TABLE friends ADD COLUMN state TEXT NOT NULL DEFAULT 'accepted'"
             )
             self._conn.commit()
 
@@ -765,8 +812,14 @@ class Storage:
         )
 
     def get_standalone_channels(self) -> list[sqlite3.Row]:
+        """Channels outside any server. Never direct-message conversations.
+
+        A DM row has no subscription, so it would otherwise surface as an
+        undiscovered channel everywhere this feeds a "not yet joined" list.
+        """
         return self._fetchall(
-            "SELECT * FROM channels WHERE server_hash IS NULL ORDER BY name"
+            "SELECT * FROM channels WHERE server_hash IS NULL AND kind = 'channel' "
+            "ORDER BY name"
         )
 
     def get_scope_creator_hash(self, scope_hash: str) -> str | None:
@@ -1984,18 +2037,57 @@ class Storage:
         """)
         return [row["reactor_hash"] for row in rows]
 
-    # --- friends (local-only saved contacts) ---
+    # --- friends (saved contacts; state is the friendship itself) ---
 
-    def upsert_friend(self, identity_hash: str, nickname: str, note: str) -> None:
+    def upsert_friend(self, identity_hash: str, nickname: str, note: str,
+                      state: str = FRIEND_ACCEPTED) -> None:
         """Create or update a friend. Preserves added_at on an existing row."""
         with self._tx():
             self._conn.execute("""
-                INSERT INTO friends (identity_hash, nickname, note, added_at, last_seen_at)
-                VALUES (?, ?, ?, ?, 0)
+                INSERT INTO friends (identity_hash, nickname, note, added_at,
+                                     last_seen_at, state)
+                VALUES (?, ?, ?, ?, 0, ?)
                 ON CONFLICT(identity_hash) DO UPDATE SET
                     nickname=excluded.nickname,
-                    note=excluded.note
-            """, (identity_hash, nickname, note, time.time()))
+                    note=excluded.note,
+                    state=excluded.state
+            """, (identity_hash, nickname, note, time.time(), state))
+
+    def set_friend_state(self, identity_hash: str, state: str) -> None:
+        """Move an existing friend row to a new state. No-op if there is no row."""
+        with self._tx():
+            self._conn.execute(
+                "UPDATE friends SET state = ? WHERE identity_hash = ?",
+                (state, identity_hash),
+            )
+
+    def get_friend_state(self, identity_hash: str) -> str | None:
+        row = self._fetchone(
+            "SELECT state FROM friends WHERE identity_hash = ?", (identity_hash,)
+        )
+        return row["state"] if row else None
+
+    def get_friends_in_state(self, state: str) -> list[dict]:
+        rows = self._fetchall(
+            "SELECT * FROM friends WHERE state = ? ORDER BY added_at",
+            (state,),
+        )
+        return [dict(r) for r in rows]
+
+    def count_friends_in_state(self, state: str) -> int:
+        row = self._fetchone(
+            "SELECT COUNT(*) AS n FROM friends WHERE state = ?", (state,)
+        )
+        return row["n"] if row else 0
+
+    def oldest_friend_in_state(self, state: str) -> str | None:
+        """The least recently added row in a state, for evicting a full queue."""
+        row = self._fetchone(
+            "SELECT identity_hash FROM friends WHERE state = ? "
+            "ORDER BY added_at LIMIT 1",
+            (state,),
+        )
+        return row["identity_hash"] if row else None
 
     def get_friend(self, identity_hash: str) -> dict | None:
         row = self._fetchone(
@@ -2003,10 +2095,20 @@ class Storage:
         )
         return dict(row) if row else None
 
-    def get_friends(self) -> list[dict]:
-        rows = self._fetchall(
-            "SELECT * FROM friends ORDER BY nickname, identity_hash"
-        )
+    def get_friends(self, state: str | None = FRIEND_ACCEPTED) -> list[dict]:
+        """Saved contacts, accepted ones only unless *state* says otherwise.
+
+        Pass state=None for every row regardless of friendship state.
+        """
+        if state is None:
+            rows = self._fetchall(
+                "SELECT * FROM friends ORDER BY nickname, identity_hash"
+            )
+        else:
+            rows = self._fetchall(
+                "SELECT * FROM friends WHERE state = ? ORDER BY nickname, identity_hash",
+                (state,),
+            )
         return [dict(r) for r in rows]
 
     def delete_friend(self, identity_hash: str) -> None:
@@ -2015,8 +2117,14 @@ class Storage:
                 "DELETE FROM friends WHERE identity_hash = ?", (identity_hash,)
             )
 
-    def get_friend_hashes(self) -> set[str]:
-        rows = self._fetchall("SELECT identity_hash FROM friends")
+    def get_friend_hashes(self, state: str | None = FRIEND_ACCEPTED) -> set[str]:
+        """Identity hashes of saved contacts, accepted ones only by default."""
+        if state is None:
+            rows = self._fetchall("SELECT identity_hash FROM friends")
+        else:
+            rows = self._fetchall(
+                "SELECT identity_hash FROM friends WHERE state = ?", (state,)
+            )
         return {r["identity_hash"] for r in rows}
 
     def touch_friend_seen(self, identity_hash: str, seen_at: float) -> None:
@@ -2025,3 +2133,86 @@ class Storage:
                 "UPDATE friends SET last_seen_at = ? WHERE identity_hash = ?",
                 (seen_at, identity_hash),
             )
+
+    # --- direct message conversations ---
+
+    def create_dm_conversation(self, conversation_hash: str, peer_hash: str) -> None:
+        """Record a conversation, with the channels row its messages hang off.
+
+        Both rows are written together: messages.channel_hash is a foreign key,
+        so a conversation without its channels row could never store anything.
+        """
+        now = time.time()
+        with self._tx():
+            self._conn.execute("""
+                INSERT INTO channels (hash, name, description, creator_hash,
+                                      permissions, created_at, last_seen,
+                                      server_hash, kind)
+                VALUES (?, ?, '', ?, '{}', ?, ?, NULL, 'dm')
+                ON CONFLICT(hash) DO NOTHING
+            """, (conversation_hash, peer_hash, peer_hash, now, now))
+            self._conn.execute("""
+                INSERT INTO dm_conversations
+                    (conversation_hash, peer_hash, created_at, last_read_at)
+                VALUES (?, ?, ?, 0)
+                ON CONFLICT(conversation_hash) DO NOTHING
+            """, (conversation_hash, peer_hash, now))
+        self._scope_cache.pop(conversation_hash, None)
+
+    def get_dm_conversation(self, conversation_hash: str) -> dict | None:
+        row = self._fetchone(
+            "SELECT * FROM dm_conversations WHERE conversation_hash = ?",
+            (conversation_hash,),
+        )
+        return dict(row) if row else None
+
+    def get_dm_peer(self, conversation_hash: str) -> str | None:
+        row = self._fetchone(
+            "SELECT peer_hash FROM dm_conversations WHERE conversation_hash = ?",
+            (conversation_hash,),
+        )
+        return row["peer_hash"] if row else None
+
+    def is_dm(self, channel_hash: str) -> bool:
+        return self._fetchone(
+            "SELECT 1 FROM dm_conversations WHERE conversation_hash = ?",
+            (channel_hash,),
+        ) is not None
+
+    def get_dm_conversations(self, self_hash: str) -> list[dict]:
+        """Every conversation, newest activity first, with its unread count."""
+        rows = self._fetchall("""
+            SELECT d.conversation_hash, d.peer_hash, d.created_at, d.last_read_at,
+                   (SELECT MAX(timestamp) FROM messages m
+                     WHERE m.channel_hash = d.conversation_hash) AS last_message_at,
+                   (SELECT COUNT(*) FROM messages m
+                     WHERE m.channel_hash = d.conversation_hash
+                       AND m.sender_hash != ?
+                       AND m.timestamp > d.last_read_at) AS unread
+            FROM dm_conversations d
+            ORDER BY COALESCE(last_message_at, d.created_at) DESC
+        """, (self_hash,))
+        return [dict(r) for r in rows]
+
+    def mark_dm_read(self, conversation_hash: str, read_at: float | None = None) -> None:
+        with self._tx():
+            self._conn.execute(
+                "UPDATE dm_conversations SET last_read_at = ? WHERE conversation_hash = ?",
+                (time.time() if read_at is None else read_at, conversation_hash),
+            )
+
+    def delete_dm_conversation(self, conversation_hash: str) -> None:
+        """Drop a conversation and everything stored in it."""
+        with self._tx():
+            self._conn.execute(
+                "DELETE FROM messages WHERE channel_hash = ?", (conversation_hash,)
+            )
+            self._conn.execute(
+                "DELETE FROM dm_conversations WHERE conversation_hash = ?",
+                (conversation_hash,),
+            )
+            self._conn.execute(
+                "DELETE FROM channels WHERE hash = ? AND kind = 'dm'",
+                (conversation_hash,),
+            )
+        self._scope_cache.pop(conversation_hash, None)

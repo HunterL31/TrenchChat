@@ -57,6 +57,8 @@ from trenchchat.network.router import (
 from trenchchat.core import actions
 from trenchchat.core.invite import _sign, _signed_payload
 from trenchchat.core.messaging import _compute_message_id
+from trenchchat.core.naming import dm_hash_for
+from trenchchat.core.storage import FRIEND_PENDING_IN
 from trenchchat.core.permissions import (
     ALL_PERMISSIONS, FULL_SYNC, INVITE, KICK, MANAGE_CHANNEL, MANAGE_ROLES,
     PRESET_OPEN, PRESET_PRIVATE, ROLE_ADMIN, ROLE_MEMBER, ROLE_OWNER, SEND_MESSAGE,
@@ -70,7 +72,8 @@ from trenchchat.core.protocol import (
     F_TIMESTAMP,
     F_EMOJI_HASH, F_IMAGE_DATA, F_MISSED_FOR, F_REACTION_MSG_ID, F_REACTION_REMOVE,
     F_REACTION_UNICODE, F_AUTHOR_SIG,
-    MT_GOODBYE, MT_JOIN_REQUEST, MT_MEMBER_LIST_UPDATE, MT_REACTION,
+    MT_FRIEND_ACCEPT, MT_GOODBYE, MT_JOIN_REQUEST, MT_MEMBER_LIST_UPDATE,
+    MT_REACTION,
     MT_SYNC_RESPONSE, F_SYNC_MESSAGES,
 )
 from trenchchat.core.presence import PresenceManager
@@ -3371,3 +3374,212 @@ class TestAdversarialQuarantinePathRequests:
                     self._unknown_source_lxm(bob, i.to_bytes(16, "big")))
 
         assert len(bob.router._path_request_rate) <= PATH_REQUEST_MAX_SOURCES
+
+
+class TestDirectMessageGate:
+    """
+    Direct messages, driven straight at the core the way a bad client would.
+
+    Every check here is on the receiving side, because that is the only side
+    an attacker does not control. The frontend never appears.
+    """
+
+    @staticmethod
+    def _dm_lxm(sender, recipient, conversation_hash, content, ts=None):
+        dest = RNS.Destination(
+            recipient.identity.rns_identity, RNS.Destination.OUT,
+            RNS.Destination.SINGLE, "lxmf", "delivery",
+        )
+        lxm = LXMF.LXMessage(dest, sender.router.delivery_destination, content,
+                             desired_method=LXMF.LXMessage.DIRECT)
+        ts = time.time() if ts is None else ts
+        msg_id = _compute_message_id(content, sender.identity.hash_hex, ts)
+        lxm.fields = {
+            F_CHANNEL_HASH: bytes.fromhex(conversation_hash),
+            F_DISPLAY_NAME: "Mallory",
+            F_TIMESTAMP:    ts,
+            F_MESSAGE_ID:   msg_id,
+            F_AUTHOR_SIG:   sign_as(sender.identity.hash_hex, conversation_hash,
+                                    msg_id, ts, content),
+        }
+        return lxm, msg_id
+
+    @staticmethod
+    def _control_lxm(sender, recipient, msg_type):
+        dest = RNS.Destination(
+            recipient.identity.rns_identity, RNS.Destination.OUT,
+            RNS.Destination.SINGLE, "lxmf", "delivery",
+        )
+        lxm = LXMF.LXMessage(dest, sender.router.delivery_destination, "",
+                             desired_method=LXMF.LXMessage.DIRECT)
+        lxm.fields = {F_MSG_TYPE: msg_type, F_DISPLAY_NAME: "Mallory"}
+        return lxm
+
+    def test_direct_message_from_a_stranger_is_dropped(self, peer_factory):
+        """No friendship at all: the message must not be stored."""
+        mallory = peer_factory("mallory")
+        bob = peer_factory("bob")
+
+        conversation = dm_hash_for(mallory.identity.hash_hex, bob.identity.hash_hex)
+        lxm, msg_id = self._dm_lxm(mallory, bob, conversation, "let me in")
+        mallory.router.send(lxm)
+
+        time.sleep(0.4)
+        assert not bob.storage.message_exists(msg_id)
+        assert bob.direct_mgr.conversations() == []
+
+    def test_one_sided_friendship_does_not_open_the_gate(self, peer_factory):
+        """
+        Mallory has added Bob; Bob has not added Mallory. Adding someone is a
+        statement about who *we* accept, so it must not let them reach us.
+        """
+        mallory = peer_factory("mallory")
+        bob = peer_factory("bob")
+        mallory.friends_mgr.add_friend(bob.identity.hash_hex)
+
+        conversation = dm_hash_for(mallory.identity.hash_hex, bob.identity.hash_hex)
+        lxm, msg_id = self._dm_lxm(mallory, bob, conversation, "we are friends, right")
+        mallory.router.send(lxm)
+
+        time.sleep(0.4)
+        assert not bob.storage.message_exists(msg_id)
+
+    def test_a_pending_request_does_not_open_the_gate(self, peer_factory):
+        """Asking to be added is not being added."""
+        mallory = peer_factory("mallory")
+        bob = peer_factory("bob")
+
+        mallory.friends_mgr.send_friend_request(bob.identity.hash_hex, "hi")
+        assert wait_for(lambda: bob.storage.get_friend_state(
+            mallory.identity.hash_hex) == FRIEND_PENDING_IN)
+
+        conversation = dm_hash_for(mallory.identity.hash_hex, bob.identity.hash_hex)
+        lxm, msg_id = self._dm_lxm(mallory, bob, conversation, "jumping the queue")
+        mallory.router.send(lxm)
+
+        time.sleep(0.4)
+        assert not bob.storage.message_exists(msg_id)
+
+    def test_a_message_addressed_to_someone_elses_conversation_is_dropped(
+            self, peer_factory):
+        """
+        Mallory is Bob's friend, but addresses the message to the conversation
+        between Bob and Carol -- so a client that believed the address would
+        file it under a conversation Mallory is not in.
+        """
+        mallory = peer_factory("mallory")
+        bob = peer_factory("bob")
+        carol = peer_factory("carol")
+        mallory.friends_mgr.add_friend(bob.identity.hash_hex)
+        bob.friends_mgr.add_friend(mallory.identity.hash_hex)
+        bob.friends_mgr.add_friend(carol.identity.hash_hex)
+
+        foreign = dm_hash_for(bob.identity.hash_hex, carol.identity.hash_hex)
+        lxm, msg_id = self._dm_lxm(mallory, bob, foreign, "signed, Carol")
+        mallory.router.send(lxm)
+
+        time.sleep(0.4)
+        assert not bob.storage.message_exists(msg_id)
+
+    def test_a_forged_sender_cannot_deliver_a_direct_message(self, peer_factory):
+        """
+        Mallory claims Alice's delivery hash so sender resolution yields Alice,
+        who Bob really is friends with. LXMF marks the signature invalid and
+        the router must drop it before the gate is ever consulted.
+        """
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+        mallory = peer_factory("mallory")
+        alice.friends_mgr.add_friend(bob.identity.hash_hex)
+        bob.friends_mgr.add_friend(alice.identity.hash_hex)
+
+        conversation = dm_hash_for(alice.identity.hash_hex, bob.identity.hash_hex)
+        lxm, msg_id = self._dm_lxm(alice, bob, conversation, "trust me")
+        lxm.source_hash = alice.router.delivery_destination.hash
+        mallory.router.send(forge(lxm))
+
+        time.sleep(0.4)
+        assert not bob.storage.message_exists(msg_id)
+
+    def test_an_unsolicited_accept_creates_no_friendship(self, peer_factory):
+        """
+        An accept we never asked for must change nothing -- otherwise the gate
+        is one unsolicited control message away from anybody.
+        """
+        mallory = peer_factory("mallory")
+        bob = peer_factory("bob")
+
+        mallory.router.send(self._control_lxm(mallory, bob, MT_FRIEND_ACCEPT))
+
+        time.sleep(0.4)
+        assert bob.friends_mgr.is_friend(mallory.identity.hash_hex) is False
+        assert bob.storage.get_friend_state(mallory.identity.hash_hex) is None
+
+    def test_an_accept_cannot_promote_a_request_we_received(self, peer_factory):
+        """
+        Mallory asked us and then sent their own accept. Only our answer moves
+        an incoming request; theirs must leave it exactly where it was.
+        """
+        mallory = peer_factory("mallory")
+        bob = peer_factory("bob")
+
+        mallory.friends_mgr.send_friend_request(bob.identity.hash_hex)
+        assert wait_for(lambda: bob.storage.get_friend_state(
+            mallory.identity.hash_hex) == FRIEND_PENDING_IN)
+
+        mallory.router.send(self._control_lxm(mallory, bob, MT_FRIEND_ACCEPT))
+
+        time.sleep(0.4)
+        assert bob.storage.get_friend_state(
+            mallory.identity.hash_hex) == FRIEND_PENDING_IN
+        assert bob.friends_mgr.is_friend(mallory.identity.hash_hex) is False
+
+    def test_a_reaction_into_a_conversation_from_an_outsider_is_dropped(
+            self, peer_factory):
+        """
+        Mallory reacts inside the Bob-Carol conversation. Only its two halves
+        may, and Mallory is neither.
+        """
+        bob = peer_factory("bob")
+        carol = peer_factory("carol")
+        mallory = peer_factory("mallory")
+        bob.friends_mgr.add_friend(carol.identity.hash_hex)
+        carol.friends_mgr.add_friend(bob.identity.hash_hex)
+        bob.friends_mgr.add_friend(mallory.identity.hash_hex)
+        mallory.friends_mgr.add_friend(bob.identity.hash_hex)
+
+        sent = carol.messaging.send_direct(bob.identity.hash_hex, "just us")
+        assert wait_for(lambda: bob.storage.message_exists(sent))
+        conversation = dm_hash_for(bob.identity.hash_hex, carol.identity.hash_hex)
+
+        dest = RNS.Destination(
+            bob.identity.rns_identity, RNS.Destination.OUT,
+            RNS.Destination.SINGLE, "lxmf", "delivery",
+        )
+        lxm = LXMF.LXMessage(dest, mallory.router.delivery_destination, "",
+                             desired_method=LXMF.LXMessage.DIRECT)
+        lxm.fields = {
+            F_MSG_TYPE:         MT_REACTION,
+            F_CHANNEL_HASH:     bytes.fromhex(conversation),
+            F_REACTION_MSG_ID:  sent,
+            F_REACTION_UNICODE: "👎",
+        }
+        mallory.router.send(lxm)
+
+        time.sleep(0.4)
+        assert bob.storage.get_reactions(sent) == []
+
+    def test_an_unfriended_peer_stops_getting_our_queued_messages(self, peer_factory):
+        """
+        A message queued for an unreachable friend must not be pushed at them
+        once they reappear, if by then they are no longer a friend -- the same
+        rule a kick applies to a channel queue.
+        """
+        alice = peer_factory("alice")
+        stranger = "cc" * 16
+        alice.friends_mgr.add_friend(stranger)
+        alice.messaging.send_direct(stranger, "queued while you were away")
+
+        conversation = dm_hash_for(alice.identity.hash_hex, stranger)
+        alice.friends_mgr.remove_friend(stranger)
+        assert alice.messaging._may_receive(conversation, stranger) is False

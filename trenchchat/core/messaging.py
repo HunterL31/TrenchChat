@@ -35,6 +35,14 @@ LXMF fields layout:
     0x71  author_keys       dict        — {author hex: public key} sent with a sync
                                           batch, so a relayed message stays checkable
                                           after its author leaves
+    0x80  friend_note       str         — optional intro line on a friend request
+                                          (friends.py); never on a chat message
+
+A direct message is an ordinary chat message whose 0x01 channel_hash is a
+conversation address (naming.dm_hash_for) instead of a channel hash. Nothing
+else distinguishes it on the wire: the receiver recomputes that address from
+the sender it authenticated, so the address itself says which conversation the
+message belongs to, and proves the sender is in it.
 """
 
 import hashlib
@@ -50,8 +58,9 @@ from trenchchat.core.protocol import (
     F_MISSED_FOR, F_MISSED_MSG_ID, F_MSG_TYPE, F_IMAGE_DATA,
     F_AUTHOR_SIG, wire_timestamp,
 )
-from trenchchat.core.authorship import sign_message, verify_message
+from trenchchat.core.authorship import resolve_author, sign_message, verify_message
 from trenchchat.core.image import MAX_IMAGE_BYTES, inbound_image_is_sane
+from trenchchat.core.naming import dm_hash_for
 from trenchchat.core.storage import Storage
 from trenchchat.network.router import Router
 
@@ -62,6 +71,7 @@ __all__ = [
     "F_MISSED_FOR", "F_MISSED_MSG_ID", "F_MSG_TYPE", "F_IMAGE_DATA",
     "CAUSAL_WINDOW_SECS", "Messaging", "cancel_pending_for_channel",
     "DELIVERY_PENDING", "DELIVERY_DELIVERED", "DELIVERY_FAILED",
+    "DELIVERY_PROPAGATED",
 ]
 
 # Threshold in seconds within which last_seen_id causal ordering is applied
@@ -73,6 +83,8 @@ CAUSAL_WINDOW_SECS = 5.0
 DELIVERY_PENDING = "pending"      # a recipient is queued: path unknown, or awaiting retry
 DELIVERY_DELIVERED = "delivered"  # handed to the transport for every recipient, no failures
 DELIVERY_FAILED = "failed"        # a recipient's delivery failed and cannot be retried
+DELIVERY_PROPAGATED = "propagated"  # handed to a propagation node to hold until the
+#                                     recipient collects it (direct messages only)
 
 # Outbound messages whose delivery state is tracked before the oldest is dropped.
 MAX_TRACKED_DELIVERIES = 200
@@ -99,6 +111,10 @@ class Messaging:
         self._message_callbacks: list = []
         self._delivery_status_callbacks: list = []
         self._missed_delivery_callback = None
+        # Set by the frontend wiring once both exist; direct messaging is
+        # inert without them, which is what a channels-only build gets.
+        self._direct_mgr = None
+        self._presence_mgr = None
 
         # dest_hex → list of message param dicts queued for offline peers
         self._pending: dict[str, list[dict]] = {}
@@ -111,6 +127,18 @@ class Messaging:
         self._delivery: dict[str, dict] = {}
 
         router.add_delivery_callback(self._on_lxmf_message)
+
+    def set_direct_manager(self, direct_mgr) -> None:
+        """Attach the DirectMessageManager that owns conversations and the gate.
+
+        Set after construction because the two managers need each other: this
+        one sends and stores, that one decides whether it may.
+        """
+        self._direct_mgr = direct_mgr
+
+    def set_presence_manager(self, presence_mgr) -> None:
+        """Attach presence, used to choose direct delivery over propagation."""
+        self._presence_mgr = presence_mgr
 
     def set_missed_delivery_callback(self, callback):
         """
@@ -211,6 +239,174 @@ class Messaging:
             author_sig=author_sig,
         )
 
+    # --- direct messages ---
+
+    def send_direct(self, peer_hex: str, content: str,
+                    reply_to: str | None = None,
+                    image_data: bytes | None = None) -> str | None:
+        """Send a direct message to an accepted friend. Returns its message id.
+
+        Returns None when direct messaging is not wired up, or the peer is not
+        an accepted friend -- a silent no-op, matching the channel send path.
+        """
+        if self._direct_mgr is None:
+            return None
+        conversation = self._direct_mgr.open_conversation(peer_hex)
+        if conversation is None:
+            return None
+
+        ts = time.time()
+        last_seen = self._storage.get_latest_message_id(conversation)
+        msg_id = _compute_message_id(content, self._identity.hash_hex, ts)
+        author_sig = sign_message(
+            self._identity.rns_identity, conversation, msg_id, ts,
+            content, reply_to, last_seen, image_data,
+        )
+        msg_params = {
+            "channel_hash_hex":  conversation,
+            "content":           content,
+            "timestamp":         ts,
+            "msg_id":            msg_id,
+            "display_name":      self._identity.display_name,
+            "reply_to":          reply_to,
+            "last_seen_id":      last_seen,
+            "subscriber_hashes": [peer_hex],
+            "image_data":        image_data,
+            "author_sig":        author_sig,
+        }
+        self._params_by_id[msg_id] = msg_params
+        if len(self._params_by_id) > MAX_TRACKED_DELIVERIES:
+            del self._params_by_id[next(iter(self._params_by_id))]
+
+        self._deliver_direct(peer_hex, msg_params)
+
+        self._storage.insert_message(
+            channel_hash=conversation,
+            sender_hash=self._identity.hash_hex,
+            sender_name=self._identity.display_name,
+            content=content,
+            timestamp=ts,
+            message_id=msg_id,
+            reply_to=reply_to,
+            last_seen_id=last_seen,
+            received_at=ts,
+            image_data=image_data,
+            author_sig=author_sig,
+        )
+        return msg_id
+
+    def _deliver_direct(self, peer_hex: str, params: dict,
+                        propagate_only: bool = False) -> None:
+        """Hand one direct message to the transport.
+
+        Direct while the peer is there to receive it; through a propagation
+        node when they are not, because a conversation has no other member who
+        could serve it later the way a channel does. Falls back to the ordinary
+        pending queue when neither is possible.
+        """
+        conversation = params["channel_hash_hex"]
+        msg_id = params["msg_id"]
+
+        dest_identity = resolve_author(self._storage, peer_hex)
+        if dest_identity is None:
+            delivery_dest_hash = RNS.Destination.hash(
+                bytes.fromhex(peer_hex), "lxmf", "delivery")
+            RNS.Transport.request_path(delivery_dest_hash)
+            self._queue_pending(peer_hex, params)
+            self._track_delivery(msg_id, conversation, peer_hex, DELIVERY_PENDING)
+            return
+
+        if not propagate_only and self._peer_is_reachable(peer_hex):
+            if self._send_direct_lxm(dest_identity, peer_hex, params):
+                return
+
+        if self._send_propagated_lxm(dest_identity, peer_hex, params):
+            return
+
+        self._queue_pending(peer_hex, params)
+        self._track_delivery(msg_id, conversation, peer_hex, DELIVERY_PENDING)
+
+    def _peer_is_reachable(self, peer_hex: str) -> bool:
+        """Whether a direct attempt is worth making right now.
+
+        Presence is the signal when it is wired up; without it, a resolved
+        path is the best evidence available.
+        """
+        if self._presence_mgr is not None:
+            return self._presence_mgr.is_online(peer_hex)
+        delivery_dest_hash = RNS.Destination.hash(
+            bytes.fromhex(peer_hex), "lxmf", "delivery")
+        return RNS.Identity.recall(delivery_dest_hash) is not None
+
+    def _send_direct_lxm(self, dest_identity: RNS.Identity, peer_hex: str,
+                         params: dict) -> bool:
+        conversation = params["channel_hash_hex"]
+        msg_id = params["msg_id"]
+        try:
+            lxm = self._build_lxm(dest_identity, params, LXMF.LXMessage.DIRECT)
+            lxm.register_delivery_callback(
+                lambda m, d=peer_hex, c=conversation, mi=msg_id:
+                    self._track_delivery(mi, c, d, DELIVERY_DELIVERED)
+            )
+            lxm.register_failed_callback(
+                lambda m, d=peer_hex, c=conversation, mi=msg_id:
+                    self._on_direct_failed(d, mi)
+            )
+            self._router.send(lxm)
+            self._track_delivery(msg_id, conversation, peer_hex, DELIVERY_DELIVERED)
+            return True
+        except Exception as e:
+            RNS.log(f"TrenchChat [dm]: direct send to {peer_hex[:12]}… failed: {e}",
+                    RNS.LOG_WARNING)
+            return False
+
+    def _send_propagated_lxm(self, dest_identity: RNS.Identity, peer_hex: str,
+                             params: dict) -> bool:
+        """Hand the message to a propagation node. False if there is no node.
+
+        The node is checked first rather than caught afterwards: LXMF raises
+        from handle_outbound when none is configured, and fails the message on
+        the way out.
+        """
+        if getattr(self._router, "outbound_propagation_node", None) is None:
+            return False
+        conversation = params["channel_hash_hex"]
+        msg_id = params["msg_id"]
+        try:
+            lxm = self._build_lxm(dest_identity, params, LXMF.LXMessage.PROPAGATED)
+            lxm.register_delivery_callback(
+                lambda m, d=peer_hex, c=conversation, mi=msg_id:
+                    self._track_delivery(mi, c, d, DELIVERY_PROPAGATED)
+            )
+            lxm.register_failed_callback(
+                lambda m, d=peer_hex, c=conversation, mi=msg_id:
+                    self._track_delivery(mi, c, d, DELIVERY_FAILED)
+            )
+            self._router.send(lxm)
+            self._track_delivery(msg_id, conversation, peer_hex, DELIVERY_PROPAGATED)
+            RNS.log(
+                f"TrenchChat [dm]: {msg_id[:12]}… handed to a propagation node "
+                f"for {peer_hex[:12]}…",
+                RNS.LOG_NOTICE,
+            )
+            return True
+        except Exception as e:
+            RNS.log(f"TrenchChat [dm]: propagated send to {peer_hex[:12]}… "
+                    f"failed: {e}", RNS.LOG_WARNING)
+            return False
+
+    def _on_direct_failed(self, peer_hex: str, msg_id: str) -> None:
+        """A direct attempt failed: try propagation, then the pending queue.
+
+        No missed-delivery hint is ever broadcast for a conversation -- there
+        is no third member who could serve it, and naming the pair to one would
+        be the only thing such a hint achieved.
+        """
+        params = self._params_by_id.get(msg_id)
+        if params is None:
+            return
+        self._deliver_direct(peer_hex, params, propagate_only=True)
+
     def cancel_pending_for_channel(self, channel_hash_hex: str):
         """Discard all queued outbound messages for a specific channel.
 
@@ -230,8 +426,12 @@ class Messaging:
         """Whether this peer is still entitled to receive the channel's messages.
 
         A queue survives a kick, so a message queued before one would otherwise
-        be pushed at the peer the moment they reappear.
+        be pushed at the peer the moment they reappear. The same applies to a
+        conversation the user has since ended by removing the friend.
         """
+        if self._direct_mgr is not None and self._direct_mgr.is_conversation(
+                channel_hash_hex):
+            return self._direct_mgr.may_dm(dest_hex)
         channel = self._storage.get_channel(channel_hash_hex)
         if channel is None:
             return False
@@ -294,8 +494,8 @@ class Messaging:
         except Exception as e:
             RNS.log(f"TrenchChat: flush_pending error for {dest_hex}: {e}", RNS.LOG_WARNING)
 
-    def _build_lxm(self, dest_identity: RNS.Identity,
-                   params: dict) -> LXMF.LXMessage:
+    def _build_lxm(self, dest_identity: RNS.Identity, params: dict,
+                   desired_method: int | None = None) -> LXMF.LXMessage:
         dest = RNS.Destination(
             dest_identity,
             RNS.Destination.OUT,
@@ -307,7 +507,7 @@ class Messaging:
             dest,
             self._router.delivery_destination,
             params["content"],
-            desired_method=LXMF.LXMessage.DIRECT,
+            desired_method=desired_method or LXMF.LXMessage.DIRECT,
         )
         fields = {
             F_CHANNEL_HASH: bytes.fromhex(params["channel_hash_hex"]),
@@ -374,6 +574,10 @@ class Messaging:
             return DELIVERY_PENDING
         if any(s == DELIVERY_FAILED for s in states):
             return DELIVERY_FAILED
+        # A propagated message has left us but nobody has read it yet, so it is
+        # deliberately not reported as delivered.
+        if any(s == DELIVERY_PROPAGATED for s in states):
+            return DELIVERY_PROPAGATED
         return DELIVERY_DELIVERED
 
     def _track_delivery(self, msg_id: str, channel_hash_hex: str,
@@ -439,15 +643,19 @@ class Messaging:
         channel_hash_hex = channel_hash_bytes.hex() \
             if isinstance(channel_hash_bytes, bytes) else str(channel_hash_bytes)
 
-        if not self._storage.is_subscribed(channel_hash_hex):
-            return
-
         # Resolve the sender's identity hash from the LXMF delivery destination hash.
         # message.source_hash is the delivery dest hash, not the raw identity hash.
         sender_identity = RNS.Identity.recall(message.source_hash) \
             if message.source_hash else None
         sender_hex = sender_identity.hash.hex() \
             if sender_identity else (message.source_hash.hex() if message.source_hash else "")
+
+        if self._is_direct_message(channel_hash_hex, sender_hex):
+            self._on_direct_message(message, fields, channel_hash_hex, sender_hex)
+            return
+
+        if not self._storage.is_subscribed(channel_hash_hex):
+            return
 
         channel = self._storage.get_channel(channel_hash_hex)
         if channel is None:
@@ -472,6 +680,44 @@ class Messaging:
                     RNS.LOG_WARNING,
                 )
                 return
+
+        self._store_chat_message(message, fields, channel_hash_hex, sender_hex)
+
+    def _is_direct_message(self, channel_hash_hex: str, sender_hex: str) -> bool:
+        """Whether this address is the conversation we share with this sender.
+
+        Recomputed rather than believed: an address that is not the one these
+        two identities derive is not a conversation this node is part of.
+        """
+        if self._direct_mgr is None or len(sender_hex) != len(self._identity.hash_hex):
+            return False
+        try:
+            return channel_hash_hex == dm_hash_for(self._identity.hash_hex, sender_hex)
+        except ValueError:
+            return False
+
+    def _on_direct_message(self, message: LXMF.LXMessage, fields: dict,
+                           conversation_hash_hex: str, sender_hex: str) -> None:
+        """Store an inbound direct message, if we hold its sender as a friend."""
+        if not self._direct_mgr.may_dm(sender_hex):
+            RNS.log(
+                f"TrenchChat [dm]: dropping a direct message from "
+                f"{sender_hex[:12]}… — not an accepted friend",
+                RNS.LOG_WARNING,
+            )
+            return
+        if self._direct_mgr.open_conversation(sender_hex) is None:
+            return
+        self._store_chat_message(message, fields, conversation_hash_hex, sender_hex)
+
+    def _store_chat_message(self, message: LXMF.LXMessage, fields: dict,
+                            channel_hash_hex: str, sender_hex: str) -> None:
+        """Validate and store an authorised chat message.
+
+        Everything below is identical for a channel and a conversation: the
+        two paths differ only in who is allowed to send, never in what is
+        checked about what they sent.
+        """
         sender_name = fields.get(F_DISPLAY_NAME, "")
         if isinstance(sender_name, bytes):
             sender_name = sender_name.decode(errors="replace")

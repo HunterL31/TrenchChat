@@ -1,5 +1,6 @@
 """
-Reticulum announce handlers for channel discovery and peer reconnect detection.
+Reticulum announce handlers for channel discovery, peer reconnect detection,
+and finding the propagation nodes offline direct messages can be left with.
 """
 
 import RNS
@@ -152,3 +153,35 @@ class UserAnnounceHandler:
             self._callback(announced_identity.hash.hex(), display_name, iface)
         except Exception as e:
             RNS.log(f"TrenchChat: user announce callback error: {e}", RNS.LOG_ERROR)
+
+
+class PropagationAnnounceHandler:
+    """
+    Listens for LXMF propagation node announces and reports each one with the
+    number of hops to it, so a client can pick the nearest node to hand offline
+    direct messages to (see core/propagation.py).
+
+    LXMF registers its own handler on this aspect for its propagation-node
+    mode; this one is additive and read-only, and does not disturb it.
+    """
+
+    aspect_filter = "lxmf.propagation"
+
+    def __init__(self, on_node_heard):
+        self._callback = on_node_heard
+
+    def received_announce(self, destination_hash: bytes,
+                          announced_identity: RNS.Identity,
+                          app_data: bytes,
+                          announce_packet_hash: bytes):
+        if announced_identity is None:
+            return
+        try:
+            hops = RNS.Transport.hops_to(destination_hash)
+        except Exception:
+            hops = 0
+        try:
+            self._callback(destination_hash.hex(), hops)
+        except Exception as e:
+            RNS.log(f"TrenchChat: propagation announce callback error: {e}",
+                    RNS.LOG_ERROR)

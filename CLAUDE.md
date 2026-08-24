@@ -69,7 +69,8 @@ needed for normal development.
 
 `identity.py`, `channel.py`, `messaging.py`, `subscription.py`, `invite.py`, `sync.py`, `storage.py`
 (SQLite, optionally SQLCipher-encrypted), `permissions.py`, `presence.py`, `reaction.py`, `avatar.py`,
-`user_directory.py`, `lockbox.py` (PIN-based encryption gate), `link_quality.py`, `image.py`,
+`user_directory.py`, `friends.py`, `direct.py` (one-to-one conversations), `propagation.py`,
+`lockbox.py` (PIN-based encryption gate), `link_quality.py`, `image.py`,
 `fileutils.py`, `voice.py` (live group voice: LXMF signalling + roster; frames flow over RNS Links
 via `network/voice_transport.py`, audio primitives in `core/audio/` — see `docs/voice.md`).
 UI code — the Flutter client and the legacy Qt GUI (`trenchchat/gui/`) alike —
@@ -97,6 +98,22 @@ marshal into the main thread via signals, and the API layer marshals into asynci
   on Linux from ~0.1% anti-aliasing drift (primitives ×3 + regions channel_header) — leave them
   unless their content genuinely changed, and regenerate goldens on Windows when possible.
 
+### Direct messages — mutual friends only, propagation instead of sync
+
+Full detail in `docs/direct-messages.md`. A conversation exists between two identities that each
+hold the other as an **accepted** friend (`friends.state`); both ends check it independently
+(`DirectMessageManager.may_dm`), so one-sided trust delivers nothing. Its address is
+`naming.dm_hash_for(a, b)` — derived from the pair, same width as a channel hash, and *recomputed*
+by the receiver from the sender it just authenticated, so a peer cannot inject into a conversation
+it is not half of. A conversation gets a `channels` row (`kind='dm'`) because `messages` references
+one, and deliberately no `subscriptions` row: that absence is what keeps it out of sync, presence
+beacons and avatar broadcast, all of which enumerate `get_subscriptions()`.
+
+A conversation has no third member to backfill it, so a message to an offline friend goes through an
+LXMF **propagation node** (`core/propagation.py` picks one from `lxmf.propagation` announces;
+`Router.request_propagation_sync` collects held mail, which is *pulled, never pushed*). Never add a
+DM to any of the three sync mechanisms below.
+
 ### Offline sync — three independent, complementary mechanisms
 
 Full detail in `docs/offline-sync.md`. Summary:
@@ -108,6 +125,8 @@ Full detail in `docs/offline-sync.md`. Summary:
 3. **Timestamp-fallback sync** — on reconnect, a peer requests everything since its last sync
    timestamp; any online member can respond, checking hints first, then falling back to a bounded
    timestamp query (`SYNC_WINDOW_DAYS = 7`).
+
+All three are channel-only; direct messages use none of them (see above).
 
 Peer reconnect is detected via `PeerAnnounceHandler` (`trenchchat/network/announce.py`), which drives
 all three mechanisms.

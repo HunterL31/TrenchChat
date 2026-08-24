@@ -376,6 +376,44 @@ class Router:
         self._config.propagation_enabled = False
         RNS.log("TrenchChat: propagation node disabled", RNS.LOG_NOTICE)
 
+    # --- outbound propagation (offline direct messages) ---
+
+    @property
+    def outbound_propagation_node(self) -> bytes | None:
+        """The node this client leaves offline direct messages with, if any.
+
+        Callers must check this before sending PROPAGATED: LXMF raises from
+        handle_outbound when none is set, and fails the message on the way out.
+        """
+        return self._router.get_outbound_propagation_node()
+
+    def set_outbound_propagation_node(self, destination_hash: bytes) -> None:
+        self._router.set_outbound_propagation_node(destination_hash)
+
+    def request_propagation_sync(self, identity) -> bool:
+        """Collect anything a propagation node is holding for us.
+
+        Propagated messages are pulled, never pushed: without this call a
+        direct message left at a node while this client was offline stays
+        there. Collected messages arrive through the ordinary delivery
+        callback, so they are authenticated exactly like any other.
+
+        False if no node is configured, or the request could not be started.
+        """
+        if self.outbound_propagation_node is None:
+            return False
+        try:
+            self._router.request_messages_from_propagation_node(identity)
+            return True
+        except Exception as e:
+            RNS.log(f"TrenchChat: propagation sync request failed: {e}",
+                    RNS.LOG_WARNING)
+            return False
+
+    def propagation_sync_state(self) -> int:
+        """LXMF's transfer state for the last collection attempt."""
+        return getattr(self._router, "propagation_transfer_state", 0)
+
     def set_display_name(self, display_name: str) -> None:
         """Update the display name broadcast in LXMF delivery announces."""
         self._delivery_dest.display_name = display_name

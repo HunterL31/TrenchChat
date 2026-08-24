@@ -150,6 +150,7 @@ class TestSettings:
             "propagation_enabled": False,
             "propagation_node_name": "",
             "propagation_storage_limit_mb": 256,
+            "outbound_propagation_node": "",
         }
 
     def test_apply_settings_writes_simple_fields(self, peer_factory):
@@ -200,10 +201,11 @@ class TestSettings:
 
         assert alice.config.propagation_enabled is True
 
-    def test_apply_settings_ignores_a_setting_that_no_longer_exists(self, peer_factory):
-        """An outbound propagation node was configurable while nothing sent
-        PROPAGATED, so it only ever pulled from a store nothing filled. A
-        client still sending the old key must not break the rest of the
+    def test_apply_settings_does_not_choose_the_outbound_node(self, peer_factory):
+        """The node offline direct messages go through is read here and
+        written elsewhere: PropagationNodes.pin() owns it, because choosing one
+        means telling the live router, not only storing a string. A client
+        sending the key anyway must be ignored without breaking the rest of the
         update."""
         alice = peer_factory("alice")
 
@@ -213,7 +215,16 @@ class TestSettings:
         })
 
         assert alice.config.propagation_node_name == "still-applied"
-        assert "outbound_propagation_node" not in actions.read_settings(alice.config)
+        assert alice.config.outbound_propagation_node == ""
+        assert actions.read_settings(alice.config)["outbound_propagation_node"] == ""
+
+    def test_read_settings_reports_a_pinned_outbound_node(self, peer_factory):
+        """What pin() stored is what a client reads back."""
+        alice = peer_factory("alice")
+        alice.config.outbound_propagation_node = "AB" * 16
+
+        assert (actions.read_settings(alice.config)["outbound_propagation_node"]
+                == "ab" * 16)
 
 
 class TestUiTheme:

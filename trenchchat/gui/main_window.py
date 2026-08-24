@@ -263,7 +263,7 @@ class MainWindow(QMainWindow):
                  invite_mgr: InviteManager, presence_mgr: PresenceManager,
                  user_directory: UserDirectory, avatar_mgr=None, reaction_mgr=None,
                  server_mgr=None, presence_beacon: PresenceBeacon | None = None,
-                 voice_mgr=None):
+                 voice_mgr=None, friends_mgr=None):
         super().__init__()
         self._config = config
         self._identity = identity
@@ -284,6 +284,7 @@ class MainWindow(QMainWindow):
         # That UI must gate its join control on has_permission(channel, self,
         # VOICE_CHAT) and marshal VoiceManager callbacks through Qt signals.
         self._voice_mgr = voice_mgr
+        self._friends_mgr = friends_mgr
 
         # Pending invites: list of (channel_hash_hex, channel_name, token, expiry, admin_hash_hex)
         self._pending_invites: list[tuple] = []
@@ -360,6 +361,8 @@ class MainWindow(QMainWindow):
                 self._reaction_mgr.flush_pending_emoji(peer_hex)
             self._subscription_mgr.flush_pending(peer_hex)
             self._invite_mgr.flush_pending(peer_hex)
+            if self._friends_mgr is not None:
+                self._friends_mgr.flush_pending(peer_hex)
             self._peer_announced.emit()
             self._reannounce_requested.emit(iface)
 

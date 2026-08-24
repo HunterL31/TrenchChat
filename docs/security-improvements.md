@@ -416,6 +416,35 @@ capped.
 
 ## Still open
 
+### 0a. Friend requests are an unsolicited inbound surface
+
+`MT_FRIEND_REQUEST` can be sent by any identity that can reach this node, and
+it writes a `pending_in` row plus a UI prompt carrying attacker-chosen text
+(`F_FRIEND_NOTE`, capped at 140 characters). What bounds it today: the router's
+per-sender control throttle (60/min), a cap of
+`MAX_PENDING_FRIEND_REQUESTS` rows evicted oldest-first, and the fact that a
+request grants nothing — only the local user accepting does.
+
+What is not bounded: identities are free to mint, so a sender rotating them
+can keep the pending queue churning at the throttle's rate, and declining does
+not remember the refusal, so the same peer may ask again. A durable blocklist
+is the fix if this is abused. See `docs/direct-messages.md` for why it was left
+out for now.
+
+Note what an accept cannot do: `MT_FRIEND_ACCEPT` from an identity we never
+asked is ignored outright (`FriendsManager._handle_accept`), so the direct-
+message gate is never one unsolicited control message away from anybody —
+`tests/test_adversarial.py::TestDirectMessageGate` pins this.
+
+### 0b. A propagation node learns who talks to whom
+
+Direct messages to an offline friend go through an LXMF propagation node,
+which sees both endpoints' delivery addresses, the message size and the timing,
+though never the content. This is inherent to storing a message for an absent
+recipient, not a defect in the implementation — but it is a metadata exposure
+channels do not have, since a channel's sync responder was already a member.
+Preferring the fewest-hop node keeps it as local as the mesh allows.
+
 ### 0. Tenure filtering is a channel-level switch, so a tenure-blind peer is a hole
 
 `storage.has_any_tenure(channel)` gates the *entire* per-message tenure check,

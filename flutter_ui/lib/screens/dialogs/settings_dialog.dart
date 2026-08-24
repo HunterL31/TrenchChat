@@ -116,6 +116,67 @@ class _SettingsDialogContentState extends State<_SettingsDialogContent> {
     Navigator.pop(context);
   }
 
+  /// The node in use, the nodes heard on the mesh, and the controls to pin
+  /// one or hand the choice back to the mesh.
+  Widget _outboundNodeControls(TCSectionColors tc) {
+    final propagation = widget.state.propagation;
+    final selected = propagation.selected;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          selected == null
+              ? 'No node heard yet — messages to an offline friend wait here '
+                  'until they come back.'
+              : 'Using ${_shortHash(selected)}'
+                  '${propagation.pinned.isEmpty ? " (chosen automatically)" : " (pinned)"}',
+          style: TextStyle(fontSize: TCType.textBodySm, color: tc.textPrimary),
+        ),
+        for (final node in propagation.nodes)
+          Padding(
+            padding: const EdgeInsets.only(top: 6),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    '${_shortHash(node.hash)} — ${node.hops} hop'
+                    '${node.hops == 1 ? "" : "s"}',
+                    style: TextStyle(
+                        fontSize: TCType.textBodySm, color: tc.textSecondary),
+                  ),
+                ),
+                if (propagation.pinned != node.hash)
+                  TcGhostButton(
+                    label: 'USE',
+                    onPressed: () => widget.state.pinPropagationNode(node.hash),
+                  ),
+              ],
+            ),
+          ),
+        const SizedBox(height: 8),
+        Row(
+          children: [
+            if (propagation.pinned.isNotEmpty)
+              TcGhostButton(
+                label: 'CHOOSE AUTOMATICALLY',
+                onPressed: () => widget.state.pinPropagationNode(''),
+              ),
+            if (propagation.pinned.isNotEmpty) const SizedBox(width: 8),
+            TcGhostButton(
+              label: 'COLLECT NOW',
+              onPressed: selected == null
+                  ? null
+                  : () => widget.state.collectPropagated(),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+
+  static String _shortHash(String hex) =>
+      hex.length <= 12 ? hex : '${hex.substring(0, 6)}…${hex.substring(hex.length - 6)}';
+
   @override
   Widget build(BuildContext context) {
     return SectionTheme(
@@ -206,6 +267,22 @@ class _SettingsDialogContentState extends State<_SettingsDialogContent> {
                       style: TextStyle(
                           fontSize: TCType.textBodySm, color: tc.textSecondary),
                     ),
+                    const SizedBox(height: 16),
+                    Container(height: 1, color: tc.borderSubtle),
+                    const SizedBox(height: 12),
+                    _sectionLabel(tc, 'OFFLINE DIRECT MESSAGES'),
+                    const SizedBox(height: 8),
+                    Text(
+                      'A direct message to a friend who is away is left with a '
+                      'propagation node until they collect it — a group channel '
+                      'can be caught up by any other member, but a conversation '
+                      'has nobody else in it. The node sees who is talking to '
+                      'whom and how much, never what was said.',
+                      style: TextStyle(
+                          fontSize: TCType.textBodySm, color: tc.textSecondary),
+                    ),
+                    const SizedBox(height: 10),
+                    _outboundNodeControls(tc),
                     const SizedBox(height: 16),
                     Container(height: 1, color: tc.borderSubtle),
                     const SizedBox(height: 12),

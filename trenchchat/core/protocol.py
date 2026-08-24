@@ -15,6 +15,7 @@ Field key registry
 0x50–0x5F  Sync status fields
 0x60–0x6F  Voice fields
 0x70–0x7F  Message integrity fields
+0x80–0x8F  Friends / direct message fields
 """
 
 # --- Common / messaging fields ---
@@ -86,6 +87,14 @@ F_VOICE_CODEC       = 0x63   # str   — codec the sender transmits ("opus")
 F_AUTHOR_SIG        = 0x70   # bytes[64] — author's Ed25519 signature over author_digest()
 F_AUTHOR_KEYS       = 0x71   # dict   — {author identity hex: public key} for a synced batch
 
+# --- Friends / direct message fields ---
+F_FRIEND_NOTE       = 0x80   # str — optional intro line on a friend request
+
+# Longest intro line accepted on a friend request. Self-asserted text from an
+# identity we have no relationship with yet, so it is capped on the way in.
+MAX_FRIEND_NOTE_CHARS = 140
+
+
 # --- Message type strings ---
 MT_SUBSCRIBE        = "subscribe"
 MT_UNSUBSCRIBE      = "unsubscribe"
@@ -105,6 +114,9 @@ MT_GOODBYE          = "goodbye"         # graceful-shutdown notice; empty conten
 MT_VOICE_JOIN       = "voice_join"      # sender entered the channel's voice session
 MT_VOICE_LEAVE      = "voice_leave"     # sender left the channel's voice session
 MT_VOICE_STATE      = "voice_state"     # periodic self-refresh, mute change, or reply to a join
+MT_FRIEND_REQUEST   = "friend_request"  # ask a peer to add us to their friends list
+MT_FRIEND_ACCEPT    = "friend_accept"   # peer accepted our request, or already had us
+MT_FRIEND_DECLINE   = "friend_decline"  # peer refused our request
 
 
 # --- sync window ---

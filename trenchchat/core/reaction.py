@@ -147,7 +147,15 @@ class ReactionManager:
         # the periodic retry doesn't re-query on every tick.
         self._last_flush_by_peer: dict[str, float] = {}
 
+        # Set by the frontend wiring; without it a conversation is simply not
+        # a place reactions can happen.
+        self._direct_mgr = None
+
         router.add_delivery_callback(self._on_lxmf_message)
+
+    def set_direct_manager(self, direct_mgr) -> None:
+        """Attach the DirectMessageManager, so conversations count as shared."""
+        self._direct_mgr = direct_mgr
 
     # ------------------------------------------------------------------
     # Public API: reactions
@@ -335,13 +343,16 @@ class ReactionManager:
         self.request_missing_from_content(self._resolve_sender_hex(message), content)
 
     def _shares_any_channel(self, peer_hex: str) -> bool:
-        """True if peer_hex shares any channel with us.
+        """True if peer_hex shares a channel with us, or is an accepted friend.
 
         Gates both answering an emoji request and acting on the references in
         an inbound message, so an unrelated node can neither enumerate the
-        library nor drive outbound requests.
+        library nor drive outbound requests. A mutual friend is at least as
+        entitled to that as somebody who happens to be in the same channel.
         """
-        return self._storage.shares_any_channel(peer_hex)
+        if self._storage.shares_any_channel(peer_hex):
+            return True
+        return self._direct_mgr is not None and self._direct_mgr.may_dm(peer_hex)
 
     def _allow_emoji_request(self, requester_hex: str) -> bool:
         """Token-bucket style throttle: EMOJI_REQUEST_BURST per window per peer."""
@@ -371,6 +382,12 @@ class ReactionManager:
         """Mirror the inbound authorisation Messaging applies to chat messages."""
         if not sender_hex:
             return False
+        if self._direct_mgr is not None and self._direct_mgr.is_conversation(
+                channel_hash_hex):
+            # Only the other half of that conversation, and only while we still
+            # hold them as a friend.
+            return (self._direct_mgr.peer_for(channel_hash_hex) == sender_hex
+                    and self._direct_mgr.may_dm(sender_hex))
         channel = self._storage.get_channel(channel_hash_hex)
         if channel is None:
             return False
@@ -396,7 +413,11 @@ class ReactionManager:
             else str(channel_hash_bytes)
         )
 
-        if not self._storage.is_subscribed(channel_hash_hex):
+        # A conversation has no subscription row -- it is not a channel anyone
+        # joins -- so being one of its two halves is what stands in for that.
+        if not (self._storage.is_subscribed(channel_hash_hex)
+                or (self._direct_mgr is not None
+                    and self._direct_mgr.is_conversation(channel_hash_hex))):
             return
 
         if not self._may_react(channel_hash_hex, sender_hex):
