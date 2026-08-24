@@ -29,7 +29,7 @@ from trenchchat.core import lockbox
 from trenchchat.core.avatar import AvatarManager
 from trenchchat.core.direct import DirectMessageManager
 from trenchchat.core.friends import FriendsManager
-from trenchchat.core.propagation import PropagationNodes
+from trenchchat.core.propagation import PropagationCollector, PropagationNodes
 from trenchchat.core.identity import Identity
 from trenchchat.core.interfaces_config import default_rns_config_path, seed_initial_config
 from trenchchat.core.reaction import ReactionManager
@@ -53,6 +53,7 @@ from trenchchat.gui.pin_dialog import UnlockDialog
 
 _REANNOUNCE_INTERVAL_MS = int(REANNOUNCE_INTERVAL_SECS * 1000)
 _VOICE_TICK_INTERVAL_MS = 1_000
+_PROPAGATION_TICK_INTERVAL_MS = 5_000
 _INTERFACE_POLL_INTERVAL_MS = 500
 _INTERFACE_POLL_TIMEOUT_MS = 30_000
 _SIGNAL_POLL_INTERVAL_MS = 200
@@ -135,6 +136,12 @@ def main():
     messaging.set_presence_manager(presence_mgr)
     reaction_mgr.set_direct_manager(direct_mgr)
     propagation_nodes = PropagationNodes(config, router)
+    propagation_collector = PropagationCollector(router, identity, propagation_nodes)
+    # Held mail is pulled, so a node being chosen is the first moment there is
+    # anywhere to ask.
+    propagation_nodes.add_selection_callback(
+        lambda _node: propagation_collector.collect_now()
+    )
     RNS.Transport.register_announce_handler(
         PropagationAnnounceHandler(propagation_nodes.record_node)
     )
@@ -182,6 +189,12 @@ def main():
     voice_tick_timer = QTimer()
     voice_tick_timer.timeout.connect(voice_mgr.tick)
     voice_tick_timer.start(_VOICE_TICK_INTERVAL_MS)
+
+    # Held direct messages are pulled, never pushed; the collector owns its
+    # own cadence and this only has to ask it often enough to notice.
+    propagation_timer = QTimer()
+    propagation_timer.timeout.connect(propagation_collector.tick)
+    propagation_timer.start(_PROPAGATION_TICK_INTERVAL_MS)
 
     # Poll for the first interface to come online, then re-announce on it
     # immediately.  This replaces blind startup timers: we announce as soon as

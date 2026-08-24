@@ -400,8 +400,11 @@ really leaves, and real time passing before it returns and collects.
 | dm1 | A,B | A requests, B accepts, one message each way | ✅ Handshake and both messages in **2.0s**. Both peers derive the same conversation address with nothing negotiated |
 | dm2 | A,B | A adds B; B never adds A; A sends | ✅ Nothing lands at B across the full **15s** hold, and B's own send back is refused with **403** before it leaves. One-sided trust delivers nothing in either direction |
 | dm3 | A,B | Mutual friends, one message, then B removes A and A sends again | ✅ First message held, second never arrives (15s hold), and the existing transcript survives the unfriending. **26s** |
-| dm4 | A,B,C | C runs a propagation node; B goes offline; A sends; B returns and collects | ✅ **5/5 runs, 29–38s.** The path the whole propagation layer exists for — a channel would have been caught up by any member, and a conversation has none |
+| dm4 | A,B,C | C runs a propagation node; B goes offline; A sends; B returns and collects | ✅ **139s.** The path the whole propagation layer exists for — a channel would have been caught up by any member, and a conversation has none. Asserts the sender's own copy reads `propagated` before waiting: see below for why |
 | dm5 | A,B,C | Two nodes announce; A auto-selects, pins the other, then reverts | ⚠ **Probe.** Pinning and reverting both work. Whether *hop count* separates two nodes is not shown here: the harness's topology is flat, so both are one hop and the tie is broken by which was heard last |
+| dm6 | A,B,C | B's **process is killed**; A sends; B restarts and is never told to collect | ✅ **3/3 runs, 132–135s.** Found and fixed a real gap — see below. This is the case a person actually hits: nobody presses "collect" |
+| dm7 | A,B | Mutual friends, one message, then **both** peers restart | ✅ **19s.** Friendship and transcript both survive, and a new message flows without running the handshake again |
+| dm8 | A,B | A JPEG attachment and a reaction inside a conversation | ✅ **12s.** The attachment arrives unstripped and fetchable (200), and the reaction reaches the conversation's only other member |
 
 ### `integrity` — Message integrity: authorship and attachments
 
@@ -418,6 +421,38 @@ loses honest history with nothing but a log line to show for it.
 | integrity2 | A,B,C,D | B owns the channel; A sends, then dies; D wiped to a **new identity**, joins and backfills | ✅ **Was a confirmed gap, now fixed.** As a probe it measured 4.0s for the live owner's message and *never* for the dead author's. Responders now send each batch's author keys, and D holds both. Strict since |
 | integrity3 | A,B,C,D | A sends a real 64×64 JPEG | ✅ All three receivers hold it with `image_stripped: false` and can fetch the bytes. The signature covers the attachment, so the two travel together |
 | integrity4 | A,B,C,D | A sends a 68-byte PNG declaring 20000×20000 (400M pixels) | ✅ Delivered as text with no attachment on all four. The sender's own API is the gate: `prepare_image` fails closed rather than forwarding bytes it could not re-encode |
+
+#### What dm6 found: a green run that proved nothing
+
+dm6 passed the first time it was written, and the pass was worthless. The
+message reached B — but through `Messaging`'s ordinary pending queue, which
+re-sent it directly when B came back, not through the node at all. From the
+outside the two are indistinguishable: a message arrives either way.
+
+Asserting the sender's own delivery state (`propagated`) before waiting is what
+separated them, and with that in place dm6 failed for four consecutive rounds
+of investigation. Each round moved the wall back one step:
+
+1. **B never re-asked after the first empty answer.** The collector treated one
+   completed transfer as "settled" and dropped to a five-minute cadence — but a
+   completed transfer only means the node answered, and a sender can still be
+   uploading as we arrive (LXMF makes them generate a proof-of-work stamp
+   first, ~5s here). Fixed by pacing on a settling *window* after coming back,
+   not on whether an answer had been received.
+2. **A restarted peer had no node to ask.** A propagation node announces when
+   it is switched on and never again on a timer, so a client that forgot its
+   node on restart could never hear of one. The selected node is now
+   remembered across restarts (`propagation_node.last_selected`).
+3. **The node was chosen before anything was listening.** `PropagationNodes`
+   restores its selection during construction, so the collector's
+   selection callback — registered a line later — never fired for a restored
+   node, leaving the collector on its steady cadence. The collector now opens
+   its settling window on first use instead of depending on that ordering.
+
+None of the three is visible to pytest: all of them need a process that really
+dies, a node that really holds a message, and real seconds passing. The
+regression guards for the cadence itself live in `tests/test_propagation.py`,
+where they are deterministic.
 
 #### Why author keys travel with a synced batch
 

@@ -249,9 +249,11 @@ class Peer:
         return self.post_status(f"/dms/{peer_hash}")[0]
 
     def send_dm(self, peer_hash: str, content: str,
-                reply_to: str | None = None) -> dict:
+                reply_to: str | None = None,
+                image_data_b64: str | None = None) -> dict:
         return self._post(f"/dms/{peer_hash}/messages",
-                          {"content": content, "reply_to": reply_to})
+                          {"content": content, "reply_to": reply_to,
+                           "image_data_b64": image_data_b64})
 
     def try_send_dm(self, peer_hash: str, content: str) -> int:
         return self.post_status(f"/dms/{peer_hash}/messages", {"content": content})[0]

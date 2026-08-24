@@ -110,9 +110,10 @@ one, and deliberately no `subscriptions` row: that absence is what keeps it out 
 beacons and avatar broadcast, all of which enumerate `get_subscriptions()`.
 
 A conversation has no third member to backfill it, so a message to an offline friend goes through an
-LXMF **propagation node** (`core/propagation.py` picks one from `lxmf.propagation` announces;
-`Router.request_propagation_sync` collects held mail, which is *pulled, never pushed*). Never add a
-DM to any of the three sync mechanisms below.
+LXMF **propagation node** (`core/propagation.py`: `PropagationNodes` picks one from
+`lxmf.propagation` announces and remembers it across restarts — a node announces only when switched
+on, never on a timer; `PropagationCollector` owns when to ask, because held mail is *pulled, never
+pushed*). Never add a DM to any of the three sync mechanisms below.
 
 ### Offline sync — three independent, complementary mechanisms
 

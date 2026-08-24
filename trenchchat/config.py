@@ -24,6 +24,10 @@ _DEFAULTS = {
         # Which node this client hands offline direct messages to. Empty means
         # "whichever node the mesh offers", chosen by core/propagation.py.
         "outbound": "",
+        # The node that choice last landed on. A propagation node announces
+        # only when it is switched on, so a client that forgot one on restart
+        # may never hear of another; this is what it starts from.
+        "last_selected": "",
     },
     "ui_theme": {},
     "ui_theme_library": {},
@@ -227,6 +231,16 @@ class Config:
             except ValueError:
                 raise ValueError(f"outbound propagation node must be hex, got {value!r}")
         self._data["propagation_node"]["outbound"] = node
+        self.save()
+
+    @property
+    def last_propagation_node(self) -> str:
+        """The node automatic selection last settled on."""
+        return self._data["propagation_node"]["last_selected"]
+
+    @last_propagation_node.setter
+    def last_propagation_node(self, value: str):
+        self._data["propagation_node"]["last_selected"] = (value or "").strip().lower()
         self.save()
 
     # --- voice ---

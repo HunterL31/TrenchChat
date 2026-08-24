@@ -59,8 +59,18 @@ Consequences worth stating plainly:
   and roughly how much, is exposed to whoever runs it. Selecting the fewest-hop
   node keeps that as local as the mesh allows; it does not eliminate it.
 - **Propagated mail is pulled, never pushed.** Nothing arrives without
-  `Router.request_propagation_sync`, which runs on startup, on link recovery,
-  and on demand. A client that never asks never receives.
+  `Router.request_propagation_sync`. `PropagationCollector` owns when that
+  happens: often for a settling window (15s apart, 3 minutes) after starting
+  up, after the link returns, or after a node is chosen, then every 5 minutes.
+  The window is the important half — a sender can still be uploading as the
+  recipient arrives, because LXMF makes them generate a proof-of-work stamp
+  first, so asking once on return and then not again for five minutes strands
+  exactly the message that was in flight. `dm6` in the scenario suite is that
+  case, and it failed until the cadence was built this way.
+- **The node is remembered across restarts.** A propagation node announces
+  when it is switched on and never again on a timer, so a client that forgot
+  its node would have no way to hear of one — it is stored as
+  `propagation_node.last_selected`, distinct from the user's explicit pin.
 - **No node means no offline delivery.** LXMF fails a PROPAGATED send outright
   when no outbound node is configured, so the send path checks first and falls
   back to the in-memory pending queue — which does not survive a restart. On a

@@ -41,7 +41,7 @@ from trenchchat.core.user_directory import UserDirectory
 from trenchchat.core.avatar import AvatarManager
 from trenchchat.core.direct import DirectMessageManager
 from trenchchat.core.friends import FriendsManager
-from trenchchat.core.propagation import PropagationNodes
+from trenchchat.core.propagation import PropagationCollector, PropagationNodes
 from trenchchat.core.reaction import ReactionManager
 from trenchchat.core.voice import VoiceManager
 from trenchchat.core.audio.engine import make_tone_pipeline
@@ -267,6 +267,17 @@ class Backend:
         self.messaging.set_presence_manager(self.presence_mgr)
         self.reaction_mgr.set_direct_manager(self.direct_mgr)
         self.propagation_nodes = PropagationNodes(self.config, self.router)
+        self.propagation_collector = PropagationCollector(
+            self.router, self.identity, self.propagation_nodes,
+        )
+        # Held mail is pulled, so a node being chosen is the first moment
+        # there is anywhere to ask. A node restored from the last run is
+        # already selected by the time this is registered, which is why the
+        # collector also starts in its settling window rather than relying on
+        # this alone.
+        self.propagation_nodes.add_selection_callback(
+            lambda _node: self.propagation_collector.collect_now()
+        )
         RNS.Transport.register_announce_handler(
             PropagationAnnounceHandler(self.propagation_nodes.record_node)
         )
@@ -346,9 +357,7 @@ class Backend:
 
     def collect_propagated(self) -> bool:
         """Ask the selected propagation node for anything held for us."""
-        if self.propagation_nodes.selected is None:
-            self.propagation_nodes.reselect()
-        return self.router.request_propagation_sync(self.identity.rns_identity)
+        return self.propagation_collector.collect_now()
 
     def _on_inbound_message(self, message) -> None:
         """Record presence and directory state from an inbound LXMF message.
@@ -423,7 +432,9 @@ class Backend:
 
         Also drives SyncManager.tick on its own slower cadence: an unanswered
         sync request has nothing else to re-trigger it once the announce burst
-        that prompted it has passed.
+        that prompted it has passed, and PropagationCollector.tick, which
+        owns its own cadence -- held direct messages are pulled, and a node
+        with a path that was not up at startup is asked again here.
 
         Runs as a daemon thread so it never blocks process exit."""
         def _loop():
@@ -441,6 +452,11 @@ class Backend:
                         self.sync_mgr.tick()
                     except Exception as e:
                         RNS.log(f"TesterBackend: sync tick failed: {e}", RNS.LOG_WARNING)
+                try:
+                    self.propagation_collector.tick(now)
+                except Exception as e:
+                    RNS.log(f"TesterBackend: propagation collect failed: {e}",
+                            RNS.LOG_WARNING)
 
         t = threading.Thread(target=_loop, daemon=True, name="voice-ticker")
         t.start()
