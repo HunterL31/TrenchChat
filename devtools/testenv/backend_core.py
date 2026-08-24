@@ -25,6 +25,7 @@ from trenchchat.core.bandwidth import SAMPLE_INTERVAL_SECS, BandwidthMonitor
 from trenchchat.core.connectivity import LinkWatcher
 from trenchchat.core.sync import SYNC_RETRY_SECS
 from trenchchat.core.identity import Identity
+from trenchchat.core.interfaces_config import default_rns_config_path, seed_initial_config
 from trenchchat.core.storage import Storage
 from trenchchat.core.channel import ChannelManager
 from trenchchat.core.server import ServerManager
@@ -202,6 +203,10 @@ class Backend:
         self._link_callbacks = []
         self.config = Config()
         self.version_state = record_launch(self.data_dir)
+        # A machine with no Reticulum config at all gets the bootstrap seeds
+        # and interface discovery before RNS reads the file, so a fresh
+        # install connects without a restart.
+        seed_initial_config(default_rns_config_path(rns_configdir))
         self.rns = RNS.Reticulum(configdir=rns_configdir, loglevel=RNS.LOG_NOTICE)
         self.rns_config_path = str(Path(RNS.Reticulum.configdir) / "config")
         self.identity = Identity(self.config)
