@@ -20,6 +20,8 @@ import '../fake_backend.dart';
 /// interfaces, [directPeers] 1-hop peers, [relays] transports each carrying
 /// [peersPerRelay] peers at hops 2-3, and [unknowns] unresolved hashes.
 /// Qualities cycle through every tier and a quarter of the labels are long.
+/// Every seventh direct peer is a plain LXMF node (trenchchat: false), and
+/// only relay-1 among the relays is itself a TrenchChat client.
 Map<String, dynamic> stressTopology({
   int interfaces = 3,
   int directPeers = 30,
@@ -41,6 +43,7 @@ Map<String, dynamic> stressTopology({
       'kind': 'interface',
       'hops': 0,
       'quality': q,
+      'trenchchat': false,
     });
     edges.add(
         {'src': 'self', 'dst': '__iface__IF$i', 'hops': 0, 'direct': true, 'quality': q});
@@ -50,25 +53,28 @@ Map<String, dynamic> stressTopology({
   for (var i = 0; i < directPeers; i++) {
     final q = i % 5;
     final label = i % 4 == 0 ? 'unreasonably long operator callsign $i' : 'peer-$i';
-    nodes.add({'id': 'direct-$i', 'label': label, 'kind': 'peer', 'hops': 1, 'quality': q});
+    nodes.add({'id': 'direct-$i', 'label': label, 'kind': 'peer', 'hops': 1, 'quality': q,
+               'trenchchat': i % 7 != 6});
     edges.add({'src': 'self', 'dst': 'direct-$i', 'hops': 1, 'direct': true, 'quality': q});
   }
   for (var r = 0; r < relays; r++) {
     final rq = r % 4 + 1;
-    nodes.add(
-        {'id': 'relay-$r', 'label': 'relay-$r', 'kind': 'transport', 'hops': 1, 'quality': rq});
+    nodes.add({'id': 'relay-$r', 'label': 'relay-$r', 'kind': 'transport', 'hops': 1,
+               'quality': rq, 'trenchchat': r == 1});
     edges.add({'src': 'self', 'dst': 'relay-$r', 'hops': 1, 'direct': true, 'quality': rq});
     for (var p = 0; p < peersPerRelay; p++) {
       final hops = p % 3 == 0 ? 3 : 2;
       final q = (r + p) % 5;
       final id = 'relay-$r-peer-$p';
-      nodes.add({'id': id, 'label': id, 'kind': 'peer', 'hops': hops, 'quality': q});
+      nodes.add({'id': id, 'label': id, 'kind': 'peer', 'hops': hops, 'quality': q,
+                 'trenchchat': true});
       edges.add({'src': 'relay-$r', 'dst': id, 'hops': hops, 'direct': false, 'quality': q});
     }
   }
   for (var u = 0; u < unknowns; u++) {
     final id = 'unknown-$u';
-    nodes.add({'id': id, 'label': 'f00${u}baa71e57…', 'kind': 'unknown', 'hops': 1, 'quality': 0});
+    nodes.add({'id': id, 'label': 'f00${u}baa71e57…', 'kind': 'unknown', 'hops': 1,
+               'quality': 0, 'trenchchat': false});
     edges.add({'src': 'self', 'dst': id, 'hops': 1, 'direct': true, 'quality': 0});
   }
   return {
@@ -172,6 +178,21 @@ void main() {
     }
   });
 
+  test('labels stay beside their icons at scale', () {
+    // Crowded rings must get room from ring sizing, not from pushing labels
+    // away until they no longer read as belonging to their node.
+    final layout = layoutMapNodes(data);
+    for (final entry in layout.labels.entries) {
+      final pos = layout.positions[entry.key]!;
+      final rect = entry.value.rect;
+      final dx = math.max(0.0, math.max(rect.left - pos.dx, pos.dx - rect.right));
+      final dy = math.max(0.0, math.max(rect.top - pos.dy, pos.dy - rect.bottom));
+      final gap = math.sqrt(dx * dx + dy * dy);
+      expect(gap, lessThanOrEqualTo(48),
+          reason: '${entry.key} label sits ${gap.toStringAsFixed(1)}px from its node');
+    }
+  });
+
   test('label boxes never overlap at scale', () {
     final labels = layoutMapNodes(data).labels.entries.toList();
     for (var i = 0; i < labels.length; i++) {
@@ -180,6 +201,34 @@ void main() {
             reason: '${labels[i].key} overlaps ${labels[j].key}');
       }
     }
+  });
+
+  test('the trenchchat flag parses, defaulting to the old behavior for peers', () {
+    final byId = {for (final n in data.nodes) n.id: n};
+    expect(byId['direct-0']!.isTrenchChat, isTrue);
+    expect(byId['direct-6']!.isTrenchChat, isFalse);   // plain LXMF node
+    expect(byId['relay-1']!.isTrenchChat, isTrue);     // client that also relays
+    expect(byId['relay-0']!.isTrenchChat, isFalse);
+    expect(byId['__iface__IF0']!.isTrenchChat, isFalse);
+
+    // Old backends send no flag: peers keep the old filter behavior.
+    final legacy = MapNode.fromJson({'id': 'x', 'label': 'x', 'kind': 'peer', 'hops': 1});
+    expect(legacy.isTrenchChat, isTrue);
+    final legacyRelay =
+        MapNode.fromJson({'id': 'y', 'label': 'y', 'kind': 'transport', 'hops': 1});
+    expect(legacyRelay.isTrenchChat, isFalse);
+  });
+
+  test('peers-only keeps TrenchChat clients, drops infrastructure and LXMF-only nodes',
+      () {
+    final byId = {for (final n in data.nodes) n.id: n};
+    expect(isPeerNode(byId['self']!), isTrue);
+    expect(isPeerNode(byId['direct-0']!), isTrue);
+    expect(isPeerNode(byId['direct-6']!), isFalse);        // LXMF, no TrenchChat
+    expect(isPeerNode(byId['relay-1']!), isTrue);          // client acting as relay
+    expect(isPeerNode(byId['relay-0']!), isFalse);
+    expect(isPeerNode(byId['__iface__IF0']!), isFalse);
+    expect(isPeerNode(byId['unknown-0']!), isFalse);
   });
 
   test('quality tiers keep five distinct colors in every built-in preset', () {
@@ -235,7 +284,11 @@ void main() {
 
       final painted = (mapPaint(tester).painter as dynamic).data as NetworkMapData;
       expect(painted.nodes.every(isPeerNode), isTrue);
-      expect(painted.nodes.where((n) => n.kind == MapNodeKind.peer).length, 102);
+      // 30 direct minus 4 LXMF-only, plus 72 relay-subtree peers.
+      expect(painted.nodes.where((n) => n.kind == MapNodeKind.peer).length, 98);
+      // relay-1 is a TrenchChat client that happens to relay: it stays.
+      expect(painted.nodes.any((n) => n.id == 'relay-1'), isTrue);
+      expect(painted.nodes.any((n) => n.id == 'relay-0'), isFalse);
       final kept = painted.nodes.map((n) => n.id).toSet();
       for (final e in painted.edges) {
         expect(kept.contains(e.src) && kept.contains(e.dst), isTrue,

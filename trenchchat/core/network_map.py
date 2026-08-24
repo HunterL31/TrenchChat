@@ -21,16 +21,19 @@ _MAX_NODES = 120   # cap to keep the graph readable
 # ---------------------------------------------------------------------------
 
 def gather_network_data(rns: RNS.Reticulum, self_hex: str,
-                        storage=None) -> dict:
+                        storage=None, directory=None) -> dict:
     """
     Query the RNS instance for the current network topology.
 
-    storage — optional Storage instance; when provided, peer nodes are labelled
-              with the display name stored in the members table (i.e. the name
-              seen in channel member lists) in preference to the announce app_data.
+    storage   — optional Storage instance; when provided, peer nodes are labelled
+                with the display name stored in the members table (i.e. the name
+                seen in channel member lists) in preference to the announce app_data.
+    directory — optional UserDirectory; identities it contains (fed by
+                trenchchat.user announces) are marked as TrenchChat clients.
 
     Returns a dict with keys:
-      nodes  — list[dict]: id, label, kind ('self'|'transport'|'peer'|'unknown'), hops
+      nodes  — list[dict]: id, label, kind ('self'|'transport'|'peer'|'unknown'),
+               hops, quality, trenchchat (bool: known TrenchChat client)
       edges  — list[dict]: src, dst, hops, direct (bool)
       interfaces — list[dict]: name, type, status, rxb, txb
       stats  — dict: node_count, path_count, interface_count
@@ -40,11 +43,12 @@ def gather_network_data(rns: RNS.Reticulum, self_hex: str,
 
     # --- self node ---
     nodes[self_hex] = {
-        "id":      self_hex,
-        "label":   "This device",
-        "kind":    "self",
-        "hops":    0,
-        "quality": int(LinkQuality.EXCELLENT),
+        "id":         self_hex,
+        "label":      "This device",
+        "kind":       "self",
+        "hops":       0,
+        "quality":    int(LinkQuality.EXCELLENT),
+        "trenchchat": True,
     }
 
     # --- path table ---
@@ -52,6 +56,15 @@ def gather_network_data(rns: RNS.Reticulum, self_hex: str,
         path_table = rns.get_path_table()
     except Exception:
         path_table = []
+
+    # Identities in any channel member list are TrenchChat clients; fetched
+    # once and combined with the announce directory in _is_trenchchat.
+    member_identities: set[str] = set()
+    if storage is not None:
+        try:
+            member_identities = storage.get_trenchchat_peer_identities()
+        except Exception:
+            member_identities = set()
 
     # Fetch interface stats once; reused both for routing multi-hop peers through
     # the correct interface diamond node and for drawing the interface nodes.
@@ -132,11 +145,14 @@ def gather_network_data(rns: RNS.Reticulum, self_hex: str,
                     "label":        _make_label(dest_hex, identity, kind, storage),
                     "kind":         kind,
                     "hops":         hops,
+                    "trenchchat":   _is_trenchchat(identity_hex, member_identities, directory),
                 }
             elif identity_hex and nodes[dest_hex].get("identity_hex") is None:
                 # A later path-table entry resolved the identity — backfill it.
                 nodes[dest_hex]["identity_hex"] = identity_hex
                 nodes[dest_hex]["label"] = _make_label(dest_hex, identity, kind, storage)
+                nodes[dest_hex]["trenchchat"] = _is_trenchchat(
+                    identity_hex, member_identities, directory)
             if identity_hex:
                 identity_to_node[identity_hex] = dest_hex
 
@@ -152,12 +168,16 @@ def gather_network_data(rns: RNS.Reticulum, self_hex: str,
                 relay_id = via_hex                # fall back to transport hash node
                 if relay_id not in nodes:
                     via_identity = RNS.Identity.recall(bytes.fromhex(relay_id))
+                    via_identity_hex = (via_identity.hash.hex()
+                                        if via_identity is not None else None)
                     nodes[relay_id] = {
-                        "id":      relay_id,
-                        "label":   _make_label(relay_id, via_identity, "transport", storage),
-                        "kind":    "transport",
-                        "hops":    1,
-                        "quality": int(score_path(relay_id, 1, None)),
+                        "id":         relay_id,
+                        "label":      _make_label(relay_id, via_identity, "transport", storage),
+                        "kind":       "transport",
+                        "hops":       1,
+                        "quality":    int(score_path(relay_id, 1, None)),
+                        "trenchchat": _is_trenchchat(via_identity_hex,
+                                                     member_identities, directory),
                     }
 
         # Score the quality of the path to this destination
@@ -226,11 +246,12 @@ def gather_network_data(rns: RNS.Reticulum, self_hex: str,
                 LinkQuality.EXCELLENT if iface_status else LinkQuality.POOR
             )
             nodes[iface_id] = {
-                "id":      iface_id,
-                "label":   label,
-                "kind":    "interface",
-                "hops":    0,
-                "quality": iface_quality,
+                "id":         iface_id,
+                "label":      label,
+                "kind":       "interface",
+                "hops":       0,
+                "quality":    iface_quality,
+                "trenchchat": False,
             }
             # Edge: self → interface
             pair = (self_hex, iface_id)
@@ -257,6 +278,22 @@ def gather_network_data(rns: RNS.Reticulum, self_hex: str,
             "interface_count": len(interfaces),
         },
     }
+
+
+def _is_trenchchat(identity_hex: str | None, member_identities: set[str],
+                   directory) -> bool:
+    """True when the identity is a known TrenchChat client: it announced as a
+    trenchchat.user, or it appears in a channel member list we hold."""
+    if identity_hex is None:
+        return False
+    if identity_hex in member_identities:
+        return True
+    if directory is not None:
+        try:
+            return bool(directory.contains(identity_hex))
+        except Exception:
+            pass
+    return False
 
 
 def _make_label(hex_id: str, identity, kind: str, storage=None) -> str:

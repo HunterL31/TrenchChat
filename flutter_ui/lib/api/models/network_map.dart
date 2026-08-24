@@ -45,6 +45,7 @@ class MapNode {
     required this.kind,
     required this.hops,
     required this.quality,
+    required this.isTrenchChat,
   });
 
   final String id;
@@ -53,22 +54,31 @@ class MapNode {
   final int hops;
   final int quality;
 
-  factory MapNode.fromJson(Map<String, dynamic> json) => MapNode(
-        id: json['id'] as String,
-        // gather_network_data prefixes interface labels with an up/down dot
-        // glyph the app fonts don't cover; the node marker shows kind anyway.
-        label: (json['label'] as String? ?? '')
-            .replaceFirst(RegExp(r'^[●○]\s*'), ''),
-        kind: switch (json['kind'] as String?) {
-          'self' => MapNodeKind.self,
-          'interface' => MapNodeKind.interface_,
-          'transport' => MapNodeKind.transport,
-          'peer' => MapNodeKind.peer,
-          _ => MapNodeKind.unknown,
-        },
-        hops: (json['hops'] as num?)?.toInt() ?? 0,
-        quality: (json['quality'] as num?)?.toInt() ?? 0,
-      );
+  /// True when the node is known to run TrenchChat (directory announce or a
+  /// shared channel), not just any resolvable Reticulum identity.
+  final bool isTrenchChat;
+
+  factory MapNode.fromJson(Map<String, dynamic> json) {
+    final kind = switch (json['kind'] as String?) {
+      'self' => MapNodeKind.self,
+      'interface' => MapNodeKind.interface_,
+      'transport' => MapNodeKind.transport,
+      'peer' => MapNodeKind.peer,
+      _ => MapNodeKind.unknown,
+    };
+    return MapNode(
+      id: json['id'] as String,
+      // gather_network_data prefixes interface labels with an up/down dot
+      // glyph the app fonts don't cover; the node marker shows kind anyway.
+      label: (json['label'] as String? ?? '')
+          .replaceFirst(RegExp(r'^[●○]\s*'), ''),
+      kind: kind,
+      hops: (json['hops'] as num?)?.toInt() ?? 0,
+      quality: (json['quality'] as num?)?.toInt() ?? 0,
+      // Backends that predate the flag get the old filter behavior.
+      isTrenchChat: json['trenchchat'] as bool? ?? kind == MapNodeKind.peer,
+    );
+  }
 }
 
 class MapEdge {
