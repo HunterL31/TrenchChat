@@ -182,7 +182,11 @@ def test_fetch_unknown_identity_requests_path_and_backs_off(
     assert conn.next_dial_at > time.time()
 
 
-def test_fetch_exhausted_dials_fail_unreachable(transport, monkeypatch):
+def test_exhausted_ladder_keeps_fetch_until_its_own_timeout(
+        transport, monkeypatch):
+    """Cold-path resolution can outlast the backoff ladder while the node is
+    up, so exhaustion must not fail queued fetches early -- only the fetch's
+    own deadline does."""
     results = _collect_results(transport)
     monkeypatch.setattr(RNS.Identity, "recall", staticmethod(lambda h: None))
     monkeypatch.setattr(RNS.Transport, "request_path",
@@ -190,17 +194,23 @@ def test_fetch_exhausted_dials_fail_unreachable(transport, monkeypatch):
 
     node_hex = "cd" * 16
     transport.fetch("f1", node_hex, "/page/index.mu", max_size=1024)
-    for _ in range(len(NODE_REDIAL_BACKOFF)):
-        conn = transport._conns.get(node_hex)
-        if conn is None:
-            break
+    for _ in range(len(NODE_REDIAL_BACKOFF) + 2):
+        conn = transport._conns[node_hex]
         conn.next_dial_at = 0.0
         transport.tick()
+    assert results == []
+    conn = transport._conns[node_hex]
+    assert conn.exhausted and conn.queued
+
+    # Reaching the fetch's own deadline fails it as unreachable.
+    conn.queued[0].created_at = 0.0
+    transport.tick()
     assert results == [("f1", False, FETCH_UNREACHABLE)]
-    assert node_hex not in transport._conns
 
 
-def test_fetch_queued_times_out(transport, monkeypatch):
+def test_fetch_queued_past_deadline_is_unreachable(transport, monkeypatch):
+    """A fetch that never got a link reports unreachable, not timeout --
+    timeout is reserved for mid-transfer stalls."""
     results = _collect_results(transport)
     monkeypatch.setattr(RNS.Identity, "recall", staticmethod(lambda h: None))
     monkeypatch.setattr(RNS.Transport, "request_path",
@@ -210,7 +220,7 @@ def test_fetch_queued_times_out(transport, monkeypatch):
     transport.fetch("f1", node_hex, "/page/index.mu", max_size=1024,
                     timeout=0.0)
     transport.tick()
-    assert ("f1", False, "timeout") in results
+    assert ("f1", False, FETCH_UNREACHABLE) in results
 
 
 # ---------------------------------------------------------------------------

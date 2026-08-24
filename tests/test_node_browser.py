@@ -317,3 +317,12 @@ def test_node_for_identity_finds_announced_node(manager):
 def test_node_for_identity_none_when_never_heard(manager):
     assert manager.node_for_identity("56" * 16) is None
     assert manager.node_for_identity("not-hex") is None
+
+
+def test_prune_nomad_nodes_keeps_most_recently_heard(manager):
+    storage = manager._storage
+    for i in range(5):
+        storage.upsert_nomad_node(f"{i:02d}" * 16, f"node {i}")
+    storage.prune_nomad_nodes(2)
+    remaining = [r["display_name"] for r in storage.get_nomad_nodes()]
+    assert remaining == ["node 4", "node 3"]

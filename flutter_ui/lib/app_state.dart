@@ -779,12 +779,16 @@ class AppState extends ChangeNotifier {
     try {
       final result = await api.browseNomad(url, currentNode: currentNode);
       if (!result.ok || result.fetchId == null) return null;
-      nomadFetches[result.fetchId!] = NomadFetchStatus(
-        nodeHash: result.nodeHash ?? '',
-        path: result.path ?? '',
-        status: 'queued',
-        progress: 0,
-      );
+      // On a warm link the WS done event can beat this continuation; an
+      // entry already present is fresher than "queued" and must survive.
+      nomadFetches.putIfAbsent(
+          result.fetchId!,
+          () => NomadFetchStatus(
+                nodeHash: result.nodeHash ?? '',
+                path: result.path ?? '',
+                status: 'queued',
+                progress: 0,
+              ));
       notifyListeners();
       return result.fetchId;
     } catch (e) {

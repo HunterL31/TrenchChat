@@ -143,6 +143,10 @@ class _BrowserTabState extends State<BrowserTab> {
     });
     // Stale-while-revalidate: show whatever we already have immediately.
     _showCached(nodeHash, path);
+    // The fetch may have finished before _activeFetchId was assigned, in
+    // which case its terminal event already fired and nothing else will;
+    // claim it now rather than waiting for an unrelated notification.
+    _onStateChanged();
   }
 
   void _navigateHistory(int delta) {
@@ -214,11 +218,12 @@ class _BrowserTabState extends State<BrowserTab> {
         children: [
           _navBar(tc),
           if (_loading)
-            // Determinate even at zero: an indeterminate bar animates
-            // forever, which reads as busier than a mesh fetch is.
+            // Determinate (an indeterminate bar animates forever), but with
+            // a visible floor: the whole dial phase reports zero progress,
+            // and a bar at exactly zero paints nothing at all.
             LinearProgressIndicator(
-              value: _progress,
-              minHeight: 2,
+              value: _progress > 0.05 ? _progress : 0.05,
+              minHeight: 3,
               backgroundColor: tc.bgInset,
               color: tc.borderAccent,
             ),
@@ -425,7 +430,14 @@ class _BrowserTabState extends State<BrowserTab> {
     );
   }
 
+  /// Past this silence a node row dims: several announce intervals have been
+  /// missed, so an identically-named live node is distinguishable at a
+  /// glance from a dead one still in the list.
+  static const double _nodeStaleAfterSecs = 1800;
+
   Widget _nodeRow(TCSectionColors tc, NomadNode node) {
+    final now = DateTime.now().millisecondsSinceEpoch / 1000.0;
+    final stale = now - node.lastSeen > _nodeStaleAfterSecs;
     return InkWell(
       onTap: () => _go(node.nodeHash),
       child: Container(
@@ -435,14 +447,16 @@ class _BrowserTabState extends State<BrowserTab> {
         ),
         child: Row(
           children: [
-            TcIcon(TcIcons.globe, size: 14, color: tc.textSecondary),
+            TcIcon(TcIcons.globe, size: 14,
+                color: stale ? tc.textDisabled : tc.textSecondary),
             const SizedBox(width: 8),
             Expanded(
               child: Text(
                 node.displayName.isNotEmpty ? node.displayName : 'unnamed node',
                 overflow: TextOverflow.ellipsis,
                 style: TextStyle(
-                    fontSize: TCType.textBodySm, color: tc.textEmphasis),
+                    fontSize: TCType.textBodySm,
+                    color: stale ? tc.textTertiary : tc.textEmphasis),
               ),
             ),
             Text(

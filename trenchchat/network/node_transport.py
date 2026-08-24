@@ -269,16 +269,15 @@ class RNSNodeTransport(NodeTransportBase):
             self._defer_dial(node_hex)
 
     def _defer_dial(self, node_hex: str) -> None:
-        give_up = False
+        # Exhaustion never fails queued fetches here: on a cold path, RNS
+        # resolution can outlast the whole backoff ladder while the node is
+        # up. Each fetch's own timeout is the promise; dialing just settles
+        # to the backoff tail until then.
         with self._lock:
             conn = self._conns.get(node_hex)
             if conn is None:
                 return
             self._register_link_failure(conn)
-            if conn.exhausted:
-                give_up = True
-        if give_up:
-            self._fail_conn(node_hex, FETCH_UNREACHABLE)
 
     def _register_link_failure(self, conn: _NodeConn) -> None:
         """Caller holds the lock. Schedules the next dial with backoff."""
@@ -438,14 +437,18 @@ class RNSNodeTransport(NodeTransportBase):
         timed_out: list[_Fetch] = []
         idle_links: list = []
 
+        never_linked: list[_Fetch] = []
         with self._lock:
             for conn in list(self._conns.values()):
                 if conn.queued and conn.state == _IDLE and now >= conn.next_dial_at:
                     dial_needed.append(conn.node_hex)
                 for fetch in list(conn.queued):
+                    # Still queued at its deadline means no link was ever
+                    # established for it -- "unreachable" is the honest
+                    # reason, "timeout" is kept for mid-transfer stalls.
                     if now - fetch.created_at >= fetch.timeout:
                         conn.queued.remove(fetch)
-                        timed_out.append(fetch)
+                        never_linked.append(fetch)
             for key, fetch in list(self._active.items()):
                 # Belt and braces over RNS's own request timeout.
                 if now - fetch.created_at >= fetch.timeout * 2:
@@ -469,6 +472,8 @@ class RNSNodeTransport(NodeTransportBase):
 
         for node_hex in dial_needed:
             self._dial(node_hex)
+        for fetch in never_linked:
+            self._notify_result(fetch.fetch_id, False, None, FETCH_UNREACHABLE)
         for fetch in timed_out:
             self._notify_result(fetch.fetch_id, False, None, FETCH_TIMEOUT)
         for link in idle_links:
