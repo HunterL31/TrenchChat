@@ -320,7 +320,7 @@ class _SettingsDialogContentState extends State<_SettingsDialogContent> {
                     const SizedBox(height: 12),
                     _sectionLabel(tc, 'ABOUT'),
                     const SizedBox(height: 8),
-                    ..._versionRows(tc),
+                    _readonlyRow(tc, 'Version', _version),
                   ],
                 ),
               ),
@@ -328,28 +328,9 @@ class _SettingsDialogContentState extends State<_SettingsDialogContent> {
     );
   }
 
-  /// The running build, plus a line about what the last install replaced --
-  /// a downgrade is the case worth saying out loud, since the profile may
-  /// already hold data a newer build wrote.
-  List<Widget> _versionRows(TCSectionColors tc) {
+  String get _version {
     final version = widget.state.appVersion;
-    final note = version.installNote;
-    return [
-      _readonlyRow(tc, 'Version',
-          version.isKnown ? version.version : 'Unknown'),
-      if (note != null) ...[
-        const SizedBox(height: 6),
-        Text(
-          note,
-          style: TextStyle(
-            fontSize: TCType.textMicro,
-            color: version.isDowngrade || version.isSidegrade
-                ? tc.statusWarn
-                : tc.textTertiary,
-          ),
-        ),
-      ],
-    ];
+    return version.isKnown ? version.version : 'Unknown';
   }
 
   /// One line describing how far the saved theme departs from stock.

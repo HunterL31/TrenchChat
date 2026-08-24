@@ -20,7 +20,6 @@ void main() {
     expect(info.transition, VersionTransition.downgrade);
     expect(info.changedAt, 1700000000.0);
     expect(info.isKnown, isTrue);
-    expect(info.isDowngrade, isTrue);
   });
 
   test('a first run has no previous build', () {
@@ -28,7 +27,6 @@ void main() {
 
     expect(info.previous, isNull);
     expect(info.transition, VersionTransition.firstRun);
-    expect(info.installNote, isNull);
   });
 
   test('an unrecognised transition reads as unknown rather than throwing', () {
@@ -40,23 +38,5 @@ void main() {
 
     expect(info.isKnown, isFalse);
     expect(info.transition, VersionTransition.unknown);
-  });
-
-  test('the downgrade note warns about data from the newer build', () {
-    final note = _info('downgrade', previous: '1.5.0').installNote;
-
-    expect(note, contains('1.5.0'));
-    expect(note, contains('newer build'));
-  });
-
-  test('a sidegrade names the build it replaced', () {
-    final info = _info('sidegrade', previous: '1.4.0+ci.9');
-
-    expect(info.isSidegrade, isTrue);
-    expect(info.installNote, contains('1.4.0+ci.9'));
-  });
-
-  test('a plain restart says nothing', () {
-    expect(_info('same', previous: '1.4.0').installNote, isNull);
   });
 }

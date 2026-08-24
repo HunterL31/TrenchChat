@@ -33,7 +33,7 @@ void main() {
     await state.loadVersion();
 
     expect(state.appVersion.version, '1.4.0');
-    expect(state.appVersion.isDowngrade, isTrue);
+    expect(state.appVersion.transition, VersionTransition.downgrade);
   });
 
   test('a backend without the endpoint leaves the version unknown', () async {

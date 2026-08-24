@@ -81,26 +81,17 @@ void main() {
 
   testWidgets('the about section names the running build', (tester) async {
     state.appVersion = const AppVersionInfo(
-        version: '1.4.0', transition: VersionTransition.same, previous: '1.4.0');
+        version: '1.4.0',
+        transition: VersionTransition.downgrade,
+        previous: '1.5.0');
 
     await open(tester);
     await scrollTo(tester, find.text('1.4.0'));
 
     expect(find.text('ABOUT'), findsOneWidget);
     expect(find.text('1.4.0'), findsOneWidget);
-  });
-
-  testWidgets('a downgrade is called out where the version is shown',
-      (tester) async {
-    state.appVersion = const AppVersionInfo(
-        version: '1.4.0',
-        transition: VersionTransition.downgrade,
-        previous: '1.5.0');
-
-    await open(tester);
-    await scrollTo(tester, find.textContaining('Downgraded from 1.5.0'));
-
-    expect(find.textContaining('Downgraded from 1.5.0'), findsOneWidget);
+    // The build it replaced is recorded, but never shown.
+    expect(find.textContaining('1.5.0'), findsNothing);
   });
 
   testWidgets('rejects an empty display name without saving', (tester) async {

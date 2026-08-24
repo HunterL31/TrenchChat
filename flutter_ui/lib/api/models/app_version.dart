@@ -38,25 +38,6 @@ class AppVersionInfo {
 
   bool get isKnown => version.isNotEmpty;
 
-  /// True when this build is older than the one that last ran here, so the
-  /// profile may already hold data the newer build wrote.
-  bool get isDowngrade => transition == VersionTransition.downgrade;
-
-  /// True when this build carries the same version as the last one but is not
-  /// the same build of it.
-  bool get isSidegrade => transition == VersionTransition.sidegrade;
-
-  /// What the last install did, or null when nothing was replaced.
-  String? get installNote => switch (transition) {
-        VersionTransition.downgrade =>
-          'Downgraded from $previous. This profile may hold data written by '
-              'the newer build.',
-        VersionTransition.sidegrade =>
-          'Replaced a different build of the same version ($previous).',
-        VersionTransition.upgrade => 'Updated from $previous.',
-        _ => null,
-      };
-
   static VersionTransition _transitionFromName(String name) => switch (name) {
         'first_run' => VersionTransition.firstRun,
         'same' => VersionTransition.same,
