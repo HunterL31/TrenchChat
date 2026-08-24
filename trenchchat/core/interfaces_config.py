@@ -35,6 +35,48 @@ REQUIRED_FIELDS: dict[str, list[str]] = {
 # Values build_interface_config_dict treats as "unset" and omits.
 _OMITTED_VALUES = ("", "0", "0.0")
 
+# Community-hosted entry points offered as one-click bootstrap seeds. Marked
+# bootstrap_only so RNS drops them once enough discovered interfaces are
+# auto-connected, and brings them back if those connections are lost.
+SUGGESTED_DEFAULTS: dict[str, dict[str, str]] = {
+    "RMAP Bootstrap": {
+        "type": "TCPClientInterface",
+        "enabled": "Yes",
+        "target_host": "rmap.world",
+        "target_port": "4242",
+        "connect_timeout": "5",
+        "bootstrap_only": "Yes",
+    },
+    "Sydney RNS Bootstrap": {
+        "type": "TCPClientInterface",
+        "enabled": "Yes",
+        "target_host": "sydney.reticulum.au",
+        "target_port": "4242",
+        "connect_timeout": "5",
+        "bootstrap_only": "Yes",
+    },
+    "Thunderhost SJC Bootstrap": {
+        "type": "TCPClientInterface",
+        "enabled": "Yes",
+        "target_host": "sjc.us.thunderhost.net",
+        "target_port": "4242",
+        "connect_timeout": "5",
+        "bootstrap_only": "Yes",
+    },
+}
+
+# [reticulum]-section options the discovery settings functions manage.
+DISCOVERY_SETTING_KEYS = (
+    "discover_interfaces",
+    "autoconnect_discovered_interfaces",
+    "required_discovery_value",
+)
+
+# Autoconnect count written when discovery is enabled without an explicit one.
+DEFAULT_AUTOCONNECT_COUNT = 3
+
+_TRUE_VALUES = ("yes", "true", "on", "1")
+
 # Keys a caller may never supply as a field value: they are decided by the
 # validated arguments, and letting a field overwrite "type" turns the
 # EDITABLE_TYPES check into a check on a value that is then discarded --
@@ -172,6 +214,116 @@ def write_interfaces_bulk(config_path: str, entries: dict[str, dict[str, str]]) 
 
     for name in entries:
         RNS.log(f"TrenchChat [interfaces]: added suggested default '{name}'", RNS.LOG_NOTICE)
+
+
+def get_missing_suggested_defaults(config_path: str) -> dict[str, dict[str, str]]:
+    """Return suggested defaults not already present in the config.
+
+    An interface is considered present if any existing interface has the same
+    target_host and target_port as the suggested default, regardless of the
+    name it was saved under.
+    """
+    existing = load_interfaces_config(config_path)
+    existing_endpoints: set[tuple[str, str]] = {
+        (iface.get("target_host", ""), iface.get("target_port", ""))
+        for iface in existing.values()
+    }
+    result = {}
+    for name, cfg in SUGGESTED_DEFAULTS.items():
+        endpoint = (cfg.get("target_host", ""), cfg.get("target_port", ""))
+        if endpoint not in existing_endpoints:
+            result[name] = cfg
+    return result
+
+
+def load_discovery_settings(config_path: str) -> dict:
+    """Read the interface-discovery options from the [reticulum] section.
+
+    Returns discover_interfaces (bool), autoconnect_discovered_interfaces
+    (int, 0 when unset) and required_discovery_value (int | None).
+    """
+    settings: dict = {
+        "discover_interfaces": False,
+        "autoconnect_discovered_interfaces": 0,
+        "required_discovery_value": None,
+    }
+    if not os.path.isfile(config_path):
+        return settings
+    try:
+        cfg = ConfigObj(config_path)
+    except Exception:
+        return settings
+    section = cfg.get("reticulum", {})
+    if not isinstance(section, dict):
+        return settings
+
+    value = str(section.get("discover_interfaces", "")).lower()
+    settings["discover_interfaces"] = value in _TRUE_VALUES
+    try:
+        settings["autoconnect_discovered_interfaces"] = int(
+            section.get("autoconnect_discovered_interfaces", 0))
+    except (TypeError, ValueError):
+        pass
+    try:
+        required = int(section.get("required_discovery_value", 0))
+        settings["required_discovery_value"] = required if required > 0 else None
+    except (TypeError, ValueError):
+        pass
+    return settings
+
+
+def write_discovery_settings(config_path: str, discover_interfaces: bool,
+                             autoconnect_discovered_interfaces: int,
+                             required_discovery_value: int | None = None) -> None:
+    """Write the interface-discovery options to the [reticulum] section.
+
+    Only the keys in DISCOVERY_SETTING_KEYS are touched; everything else in
+    the section is preserved. Raises InterfaceConfigError on file errors.
+    """
+    try:
+        file_cfg = ConfigObj(config_path)
+    except Exception as e:
+        raise InterfaceConfigError(f"could not read config file: {e}") from e
+
+    if "reticulum" not in file_cfg or not isinstance(file_cfg["reticulum"], dict):
+        file_cfg["reticulum"] = {}
+    section = file_cfg["reticulum"]
+
+    section["discover_interfaces"] = "Yes" if discover_interfaces else "No"
+    if autoconnect_discovered_interfaces > 0:
+        section["autoconnect_discovered_interfaces"] = str(autoconnect_discovered_interfaces)
+    else:
+        section.pop("autoconnect_discovered_interfaces", None)
+    if required_discovery_value is not None and required_discovery_value > 0:
+        section["required_discovery_value"] = str(required_discovery_value)
+    else:
+        section.pop("required_discovery_value", None)
+
+    try:
+        file_cfg.write()
+    except Exception as e:
+        raise InterfaceConfigError(f"could not write config file: {e}") from e
+
+    RNS.log("TrenchChat [interfaces]: updated discovery settings", RNS.LOG_NOTICE)
+
+
+def apply_suggested_defaults(config_path: str) -> list[str]:
+    """Write missing bootstrap seeds and enable interface discovery.
+
+    The seeds are bootstrap_only, so they are only useful with discovery and
+    auto-connection on; enabling both together keeps the config coherent.
+    Returns the names of the interfaces added.
+    """
+    missing = get_missing_suggested_defaults(config_path)
+    if missing:
+        write_interfaces_bulk(config_path, missing)
+    settings = load_discovery_settings(config_path)
+    autoconnect = settings["autoconnect_discovered_interfaces"] or DEFAULT_AUTOCONNECT_COUNT
+    if (not settings["discover_interfaces"]
+            or settings["autoconnect_discovered_interfaces"] <= 0):
+        write_discovery_settings(config_path, True, autoconnect,
+                                 settings["required_discovery_value"])
+    return list(missing)
 
 
 def delete_interface(config_path: str, name: str) -> bool:
