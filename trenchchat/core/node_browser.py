@@ -29,6 +29,7 @@ MAX_PAGE_BYTES = 512 * 1024
 MAX_FILE_BYTES = 5 * 1024 * 1024
 PAGE_CACHE_MAX_ROWS = 500
 FILE_CACHE_MAX_BYTES = 50 * 1024 * 1024
+NODE_LIST_MAX_ROWS = 200
 NODE_NAME_MAX_LEN = 64
 CACHE_PRUNE_INTERVAL_SECS = 300.0
 
@@ -377,6 +378,7 @@ class NodeBrowserManager:
             try:
                 self._storage.prune_nomad_pages(PAGE_CACHE_MAX_ROWS)
                 self._storage.prune_nomad_files(FILE_CACHE_MAX_BYTES)
+                self._storage.prune_nomad_nodes(NODE_LIST_MAX_ROWS)
             except Exception as e:
                 RNS.log(f"TrenchChat [nomad]: cache prune failed: {e}",
                         RNS.LOG_WARNING)

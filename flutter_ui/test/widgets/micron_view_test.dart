@@ -68,6 +68,6 @@ void main() {
 
   testWidgets('input fields render as inert placeholders', (tester) async {
     await tester.pumpWidget(_harness('Name: `<24|user`guest>'));
-    expect(find.textContaining('⟦guest⟧', findRichText: true), findsOneWidget);
+    expect(find.textContaining('[ guest ]', findRichText: true), findsOneWidget);
   });
 }

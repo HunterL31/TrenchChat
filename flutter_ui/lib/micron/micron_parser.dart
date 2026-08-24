@@ -180,8 +180,10 @@ List<MicronSegment> _inline(String line, _ParserState state,
           final end = backtick == -1 ? -1 : line.indexOf('>', backtick);
           if (backtick != -1 && end != -1) {
             final data = line.substring(backtick + 1, end);
+            // ASCII brackets: the bundled terminal fonts have no glyph for
+            // fancier field markers, which render as tofu.
             output.add(MicronSegment(
-              '⟦${data.isEmpty ? ' ' : data}⟧',
+              '[ ${data.isEmpty ? ' ' : data} ]',
               state.style,
               isField: true,
             ));

@@ -155,4 +155,28 @@ void main() {
       isTrue,
     );
   });
+
+  test('a done event that beats the browse response is not clobbered', () async {
+    backend.routes['POST /nomad/browse'] = {
+      'ok': true,
+      'fetch_id': 'f2',
+      'node_hash': _node,
+      'path': '/page/index.mu',
+      'kind': 'page',
+    };
+    // On a warm link the WS done event can land before browseNomad's own
+    // continuation runs; the terminal status must survive.
+    state.applyEvent(TcEvent.tryParse(jsonEncode({
+      'type': 'nomad_fetch',
+      'fetch_id': 'f2',
+      'node_hash': _node,
+      'path': '/page/index.mu',
+      'status': 'done',
+      'progress': 1.0,
+      'reason': null,
+    }))!);
+    final fetchId = await state.browseNomad('$_node:/page/index.mu');
+    expect(fetchId, 'f2');
+    expect(state.nomadFetches['f2']!.status, 'done');
+  });
 }

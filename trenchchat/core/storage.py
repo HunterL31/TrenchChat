@@ -2083,6 +2083,15 @@ class Storage:
         return self._fetchone(
             "SELECT * FROM nomad_nodes WHERE node_hash = ?", (node_hash,))
 
+    def prune_nomad_nodes(self, max_rows: int) -> None:
+        """Drop the longest-unheard nodes beyond max_rows."""
+        with self._tx():
+            self._conn.execute("""
+                DELETE FROM nomad_nodes WHERE node_hash NOT IN (
+                    SELECT node_hash FROM nomad_nodes
+                    ORDER BY last_seen DESC LIMIT ?)
+            """, (max_rows,))
+
     def put_nomad_page(self, node_hash: str, path: str, content: bytes) -> None:
         with self._tx():
             self._conn.execute("""
