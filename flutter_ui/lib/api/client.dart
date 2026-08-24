@@ -8,6 +8,7 @@ import 'package:http/http.dart' as http;
 
 import 'models/app_version.dart';
 import 'models/bandwidth.dart';
+import 'models/discovery.dart';
 import 'models/emoji.dart';
 import 'models/friend.dart';
 import 'models/interface.dart';
@@ -444,6 +445,51 @@ class ApiClient {
   Future<void> deleteInterface(String name) async {
     final res =
         await _http.delete(_u('/reticulum/interfaces/${Uri.encodeComponent(name)}'));
+    _decode(res);
+  }
+
+  Future<DiscoveryReport> getDiscovery() async {
+    final res = await _http.get(_u('/reticulum/discovery'));
+    return DiscoveryReport.fromJson(_decode(res) as Map<String, dynamic>);
+  }
+
+  Future<void> setDiscoverySettings(bool discoverInterfaces,
+      int autoconnectCount, {int? requiredDiscoveryValue}) async {
+    final res = await _http.put(
+      _u('/reticulum/discovery'),
+      headers: _jsonHeaders,
+      body: jsonEncode({
+        'discover_interfaces': discoverInterfaces,
+        'autoconnect_discovered_interfaces': autoconnectCount,
+        'required_discovery_value': requiredDiscoveryValue,
+      }),
+    );
+    _decode(res);
+  }
+
+  Future<String> pinDiscoveredInterface(String discoveryHash) async {
+    final res = await _http.post(
+      _u('/reticulum/discovery/pin'),
+      headers: _jsonHeaders,
+      body: jsonEncode({'discovery_hash': discoveryHash}),
+    );
+    final body = _decode(res) as Map<String, dynamic>;
+    return body['name'] as String? ?? '';
+  }
+
+  /// Suggested bootstrap defaults not yet in the config: name -> host:port.
+  Future<Map<String, String>> getSuggestedDefaults() async {
+    final res = await _http.get(_u('/reticulum/interfaces_suggested'));
+    final body = _decode(res) as Map<String, dynamic>;
+    final missing = body['missing'] as Map<String, dynamic>? ?? {};
+    return missing.map((name, cfg) {
+      final m = cfg as Map<String, dynamic>;
+      return MapEntry(name, '${m['target_host']}:${m['target_port']}');
+    });
+  }
+
+  Future<void> applySuggestedDefaults() async {
+    final res = await _http.post(_u('/reticulum/interfaces_suggested'));
     _decode(res);
   }
 

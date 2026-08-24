@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 
 import '../../api/client.dart';
 import '../../api/models/bandwidth.dart';
+import '../../api/models/discovery.dart';
 import '../../api/models/interface.dart';
 import '../../app_state.dart';
 import '../../theme/section_theme.dart';
@@ -49,6 +50,8 @@ class IfaceTab extends StatefulWidget {
 class _IfaceTabState extends State<IfaceTab> {
   List<RetInterface>? _interfaces;
   BandwidthReport? _bandwidth;
+  DiscoveryReport? _discovery;
+  Map<String, String> _suggested = {};
   String? _error;
   String? _confirmDeleteName;
   bool _restartRequired = false;
@@ -82,6 +85,65 @@ class _IfaceTabState extends State<IfaceTab> {
     } catch (_) {
       if (!mounted) return;
       setState(() => _bandwidth = null);
+    }
+    // Both optional: a backend without the discovery endpoints just hides
+    // the section and the defaults button.
+    try {
+      final discovery = await widget.state.api.getDiscovery();
+      if (!mounted) return;
+      setState(() => _discovery = discovery);
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => _discovery = null);
+    }
+    try {
+      final suggested = await widget.state.api.getSuggestedDefaults();
+      if (!mounted) return;
+      setState(() => _suggested = suggested);
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => _suggested = {});
+    }
+  }
+
+  Future<void> _applyDefaults() async {
+    try {
+      await widget.state.api.applySuggestedDefaults();
+      setState(() => _restartRequired = true);
+      await _refresh();
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _error = e is ApiException ? e.message : e.toString());
+    }
+  }
+
+  Future<void> _toggleDiscovery() async {
+    final settings = _discovery?.settings;
+    if (settings == null) return;
+    final enable = !settings.discoverInterfaces;
+    final autoconnect =
+        settings.autoconnectCount > 0 ? settings.autoconnectCount : 3;
+    try {
+      await widget.state.api.setDiscoverySettings(enable, autoconnect,
+          requiredDiscoveryValue: settings.requiredDiscoveryValue);
+      setState(() => _restartRequired = true);
+      await _refresh();
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _error = e is ApiException ? e.message : e.toString());
+    }
+  }
+
+  Future<void> _pin(DiscoveredInterface iface) async {
+    final hash = iface.discoveryHash;
+    if (hash == null) return;
+    try {
+      await widget.state.api.pinDiscoveredInterface(hash);
+      setState(() => _restartRequired = true);
+      await _refresh();
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _error = e is ApiException ? e.message : e.toString());
     }
   }
 
@@ -137,6 +199,11 @@ class _IfaceTabState extends State<IfaceTab> {
                   ),
                 ),
               ),
+              if (_suggested.isNotEmpty) ...[
+                TcGhostButton(
+                    icon: TcIcons.plus, label: 'DEFAULTS', onPressed: _applyDefaults),
+                const SizedBox(width: 6),
+              ],
               TcGhostButton(icon: TcIcons.plus, label: 'ADD', onPressed: _add),
               const SizedBox(width: 6),
               TcGhostButton(icon: TcIcons.sync, label: 'REFRESH', onPressed: _refresh),
@@ -174,6 +241,7 @@ class _IfaceTabState extends State<IfaceTab> {
           ],
           const SizedBox(height: 12),
           Expanded(
+            flex: 3,
             child: LayoutBuilder(
               builder: (context, constraints) {
                 // Seven columns squeezed into a phone viewport ellipsize to
@@ -199,9 +267,166 @@ class _IfaceTabState extends State<IfaceTab> {
               },
             ),
           ),
+          if (_discovery != null) ...[
+            const SizedBox(height: 14),
+            _discoveredHeader(tc, _discovery!.settings),
+            const SizedBox(height: 6),
+            Expanded(flex: 2, child: _discoveredTable(tc, _discovery!)),
+          ],
         ],
       ),
     );
+  }
+
+  Widget _discoveredHeader(TCSectionColors tc, DiscoverySettings settings) {
+    final status = settings.discoverInterfaces
+        ? 'DISCOVERY ON · AUTOCONNECT ${settings.autoconnectCount}'
+        : 'DISCOVERY OFF';
+    return Row(
+      children: [
+        Expanded(
+          child: Text(
+            'DISCOVERED ENTRY POINTS',
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              fontSize: TCType.textCaption,
+              color: tc.textSecondary,
+              letterSpacing:
+                  TCType.letterSpacingFor(TCType.textCaption, TCType.trackingWider),
+            ),
+          ),
+        ),
+        Text(
+          status,
+          style: TextStyle(
+            fontSize: TCType.textMicro,
+            color: settings.discoverInterfaces ? tc.statusOnline : tc.textTertiary,
+            letterSpacing:
+                TCType.letterSpacingFor(TCType.textMicro, TCType.trackingWide),
+          ),
+        ),
+        const SizedBox(width: 8),
+        TcGhostButton(
+          label: settings.discoverInterfaces ? 'DISABLE' : 'ENABLE',
+          onPressed: _toggleDiscovery,
+        ),
+      ],
+    );
+  }
+
+  Widget _discoveredTable(TCSectionColors tc, DiscoveryReport discovery) {
+    if (discovery.interfaces.isEmpty) {
+      return Center(
+        child: Text(
+          discovery.settings.discoverInterfaces
+              ? 'Nothing discovered yet.'
+              : 'Enable discovery to find entry points announced on the mesh.',
+          style: TextStyle(fontSize: TCType.textBodySm, color: tc.textTertiary),
+        ),
+      );
+    }
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final width = constraints.maxWidth < _minTableWidth
+            ? _minTableWidth
+            : constraints.maxWidth;
+        return SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          child: SizedBox(
+            width: width,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                _discoveredHeaderRow(tc),
+                Container(height: 1, color: tc.borderDefault),
+                Expanded(
+                  child: ListView(children: [
+                    for (final i in discovery.interfaces) _discoveredRow(tc, i),
+                  ]),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _discoveredHeaderRow(TCSectionColors tc) {
+    Widget cell(String label, int flex) => Expanded(
+          flex: flex,
+          child: Text(
+            label,
+            style: TextStyle(
+              fontSize: TCType.textMicro,
+              color: tc.textTertiary,
+              letterSpacing:
+                  TCType.letterSpacingFor(TCType.textMicro, TCType.trackingWide),
+            ),
+          ),
+        );
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 6),
+      child: Row(
+        children: [
+          cell('NAME', _flexName),
+          cell('TYPE', _flexType),
+          cell('STATUS', _flexStatus),
+          cell('HOPS', 1),
+          cell('LAST HEARD', _flexStatus),
+          const SizedBox(width: _pinWidth),
+        ],
+      ),
+    );
+  }
+
+  Widget _discoveredRow(TCSectionColors tc, DiscoveredInterface iface) {
+    Widget cell(Widget child, int flex) => Expanded(flex: flex, child: child);
+    Text text(String s, {Color? color}) => Text(
+          s,
+          overflow: TextOverflow.ellipsis,
+          style:
+              TextStyle(fontSize: TCType.textBodySm, color: color ?? tc.textSecondary),
+        );
+    final statusColor = switch (iface.status) {
+      'available' => tc.statusOnline,
+      'stale' => tc.statusDanger,
+      _ => tc.textTertiary,
+    };
+    return Container(
+      padding: const EdgeInsets.symmetric(vertical: 8),
+      decoration: BoxDecoration(
+        border: Border(bottom: BorderSide(color: tc.borderSubtle)),
+      ),
+      child: Row(
+        children: [
+          cell(text(iface.name, color: tc.textEmphasis), _flexName),
+          cell(text(iface.type.replaceAll('Interface', '')), _flexType),
+          cell(text(iface.status.toUpperCase(), color: statusColor), _flexStatus),
+          cell(text(iface.hops?.toString() ?? '—'), 1),
+          cell(text(_ago(iface.lastHeard)), _flexStatus),
+          SizedBox(
+            width: _pinWidth,
+            child: iface.pinnable
+                ? Align(
+                    alignment: Alignment.centerRight,
+                    child: TcGhostButton(label: 'PIN', onPressed: () => _pin(iface)),
+                  )
+                : const SizedBox.shrink(),
+          ),
+        ],
+      ),
+    );
+  }
+
+  static String _ago(double? epochSecs) {
+    if (epochSecs == null) return '—';
+    final diff =
+        DateTime.now().millisecondsSinceEpoch / 1000.0 - epochSecs;
+    if (diff < 60) return 'JUST NOW';
+    if (diff < 3600) return '${diff ~/ 60}M AGO';
+    if (diff < 86400) return '${diff ~/ 3600}H AGO';
+    return '${diff ~/ 86400}D AGO';
   }
 
   Widget _bandwidthStrip(TCSectionColors tc, BandwidthReport bw) {
@@ -252,6 +477,7 @@ class _IfaceTabState extends State<IfaceTab> {
   static const _flexStatus = 2;
   static const _flexBytes = 2;
   static const _actionsWidth = 200.0;
+  static const _pinWidth = 70.0;
   static const _minTableWidth = 620.0;
 
   Widget _tableBody(TCSectionColors tc, List<RetInterface>? interfaces) {
