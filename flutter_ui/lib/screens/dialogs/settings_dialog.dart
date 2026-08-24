@@ -4,7 +4,6 @@
 // dialog) and Security/PIN tab (no API surface) are not in this spike.
 import 'package:flutter/material.dart';
 
-import '../../api/models/server.dart';
 import '../../api/models/settings.dart';
 import '../../app_state.dart';
 import '../../theme/section_theme.dart';
@@ -34,7 +33,6 @@ class _SettingsDialogContent extends StatefulWidget {
 
 class _SettingsDialogContentState extends State<_SettingsDialogContent> {
   final _displayName = TextEditingController();
-  final _outboundNode = TextEditingController();
   final _nodeName = TextEditingController();
   final _storageLimit = TextEditingController();
 
@@ -43,8 +41,6 @@ class _SettingsDialogContentState extends State<_SettingsDialogContent> {
   String? _error;
 
   bool _propEnabled = false;
-  String _filterMode = 'allowlist';
-  final Set<String> _filterHashes = {};
 
   /// Session-local stand-in for the lockbox PIN state -- the lockbox has no
   /// API surface yet (locked-start design still open), so the ported PIN
@@ -60,7 +56,6 @@ class _SettingsDialogContentState extends State<_SettingsDialogContent> {
   @override
   void dispose() {
     _displayName.dispose();
-    _outboundNode.dispose();
     _nodeName.dispose();
     _storageLimit.dispose();
     super.dispose();
@@ -72,12 +67,9 @@ class _SettingsDialogContentState extends State<_SettingsDialogContent> {
       if (!mounted) return;
       setState(() {
         _displayName.text = widget.state.meDisplayName;
-        _outboundNode.text = settings.outboundPropagationNode ?? '';
         _propEnabled = settings.propagationEnabled;
         _nodeName.text = settings.propagationNodeName;
         _storageLimit.text = '${settings.propagationStorageLimitMb}';
-        _filterMode = settings.channelFilterMode;
-        _filterHashes.addAll(settings.channelFilterHashes);
         _loading = false;
       });
     } catch (e) {
@@ -88,13 +80,6 @@ class _SettingsDialogContentState extends State<_SettingsDialogContent> {
       });
     }
   }
-
-  /// Every channel this client knows, mirroring the Qt dialog's
-  /// storage.get_all_channels() checklist source.
-  List<Channel> get _allChannels => [
-        ...widget.state.standaloneChannels,
-        for (final list in widget.state.channelsByServer.values) ...list,
-      ];
 
   Future<void> _submit() async {
     final name = _displayName.text.trim();
@@ -118,9 +103,6 @@ class _SettingsDialogContentState extends State<_SettingsDialogContent> {
       propagationEnabled: _propEnabled,
       propagationNodeName: _nodeName.text.trim(),
       propagationStorageLimitMb: storageMb,
-      channelFilterMode: _filterMode,
-      channelFilterHashes: _filterHashes.toList(),
-      outboundPropagationNode: _outboundNode.text.trim(),
     ));
 
     if (!mounted) return;
@@ -191,13 +173,6 @@ class _SettingsDialogContentState extends State<_SettingsDialogContent> {
                     ),
                     const SizedBox(height: 10),
                     _readonlyRow(tc, 'Identity hash', widget.state.meHashHex),
-                    const SizedBox(height: 10),
-                    TcTextField(
-                      label: 'Propagation node',
-                      controller: _outboundNode,
-                      hintText: 'Leave blank to use direct delivery only',
-                      onSubmitted: (_) => _submit(),
-                    ),
                     const SizedBox(height: 16),
                     Container(height: 1, color: tc.borderSubtle),
                     const SizedBox(height: 12),
@@ -223,50 +198,14 @@ class _SettingsDialogContentState extends State<_SettingsDialogContent> {
                     ),
                     const SizedBox(height: 10),
                     Text(
-                      'CHANNEL FILTER',
+                      'A propagation node stores and forwards mail for the wider '
+                      'LXMF network. It does not carry TrenchChat\'s own messages, '
+                      'and what it relays cannot be filtered — propagated messages '
+                      'are encrypted end to end, so a node cannot read what is in '
+                      'them.',
                       style: TextStyle(
-                        fontSize: TCType.textCaption,
-                        color: tc.textSecondary,
-                        letterSpacing:
-                            TCType.letterSpacingFor(TCType.textCaption, TCType.trackingWide),
-                      ),
+                          fontSize: TCType.textBodySm, color: tc.textSecondary),
                     ),
-                    const SizedBox(height: 6),
-                    TcChoiceRow(
-                      options: const {'allowlist': 'ALLOWLIST', 'all': 'ALL'},
-                      value: _filterMode,
-                      onSelected: (v) => setState(() => _filterMode = v),
-                    ),
-                    if (_filterMode == 'allowlist' && _allChannels.isNotEmpty) ...[
-                      const SizedBox(height: 10),
-                      Container(
-                        decoration: BoxDecoration(
-                          color: tc.bgInset,
-                          border: Border.all(color: tc.borderDefault),
-                        ),
-                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            for (final c in _allChannels)
-                              Padding(
-                                padding: const EdgeInsets.symmetric(vertical: 3),
-                                child: TcCheckbox(
-                                  value: _filterHashes.contains(c.hash),
-                                  label: '#${c.name}',
-                                  onChanged: (v) => setState(() {
-                                    if (v) {
-                                      _filterHashes.add(c.hash);
-                                    } else {
-                                      _filterHashes.remove(c.hash);
-                                    }
-                                  }),
-                                ),
-                              ),
-                          ],
-                        ),
-                      ),
-                    ],
                     const SizedBox(height: 16),
                     Container(height: 1, color: tc.borderSubtle),
                     const SizedBox(height: 12),

@@ -1,6 +1,5 @@
 """
-Manages the LXMFRouter lifecycle, propagation node enable/disable,
-and wires the propagation filter into the inbound delivery callback.
+Manages the LXMFRouter lifecycle and propagation node enable/disable.
 
 This module is the single choke point for inbound authentication: no message
 reaches a delivery callback unless its LXMF signature validated.  Messages
@@ -19,7 +18,6 @@ from pathlib import Path
 from trenchchat import APP_NAME, APP_ASPECT_USER
 from trenchchat.config import Config, DATA_DIR
 from trenchchat.core.protocol import F_MSG_TYPE
-from trenchchat.network.prop_filter import PropagationFilter
 
 _MESSAGE_STORE_PATH = str(DATA_DIR / "messagestore")
 
@@ -72,8 +70,6 @@ class Router:
         storagepath: override for the LXMF message store directory
         """
         self._config = config
-        self._identity = identity
-        self._filter = PropagationFilter(config)
         self._delivery_callbacks: list = []
         self._outbound_callbacks: list = []
         # source_hash hex -> list of (received_at, LXMessage) awaiting identity
@@ -112,15 +108,6 @@ class Router:
         )
 
         self._router.register_delivery_callback(self._on_message_received)
-
-        # Configure outbound propagation node if set.
-        if config.outbound_propagation_node:
-            try:
-                node_hash = bytes.fromhex(config.outbound_propagation_node)
-                self._router.set_outbound_propagation_node(node_hash)
-            except ValueError:
-                RNS.log("TrenchChat: invalid outbound propagation node hash in config",
-                        RNS.LOG_WARNING)
 
         # Enable propagation node mode if configured.
         if config.propagation_enabled:
@@ -366,72 +353,28 @@ class Router:
     # --- propagation node ---
 
     def enable_propagation(self):
+        """Host an LXMF propagation node on this instance.
+
+        This stores and relays mail for the wider LXMF network, not for
+        TrenchChat: every TrenchChat message is sent DIRECT, so none of them
+        ever enters a propagation store. What a node relays is not selectable
+        -- propagated payloads are encrypted end to end, so a node cannot read
+        the channel a message belongs to, or anything else about it.
+        """
         try:
             limit_kb = self._config.propagation_storage_limit_mb * 1024
             self._router.set_message_storage_limit(kilobytes=limit_kb)
             self._router.enable_propagation()
-            self._install_propagation_filter()
             self._config.propagation_enabled = True
             RNS.log("TrenchChat: propagation node enabled", RNS.LOG_NOTICE)
-            if self._filter.relays_nothing():
-                RNS.log(
-                    "TrenchChat: propagation node is in allowlist mode with an "
-                    "empty allowlist — it will relay nothing until channels are "
-                    "added or the filter is set to 'all'",
-                    RNS.LOG_WARNING,
-                )
         except Exception as e:
             RNS.log(f"TrenchChat: failed to enable propagation node: {e}", RNS.LOG_ERROR)
             raise
-
-    def _install_propagation_filter(self) -> None:
-        """Apply the channel filter where messages enter the propagation store.
-
-        The filter's verdict used to be returned from the delivery callback,
-        whose return value LXMF ignores -- so the Settings option presented as
-        controlling what this node relays for other people controlled nothing.
-        This is the ingest LXMF actually calls, so refusing here is what keeps
-        a message out of the store.
-        """
-        if getattr(self._router, "_tc_filter_installed", False):
-            return
-        original = self._router.lxmf_propagation
-
-        def _filtered(lxmf_data, *args, **kwargs):
-            if not self._filter.allows_packed(lxmf_data):
-                return None
-            return original(lxmf_data, *args, **kwargs)
-
-        self._router.lxmf_propagation = _filtered
-        self._router._tc_filter_installed = True
 
     def disable_propagation(self):
         self._router.disable_propagation()
         self._config.propagation_enabled = False
         RNS.log("TrenchChat: propagation node disabled", RNS.LOG_NOTICE)
-
-    def set_outbound_propagation_node(self, hex_hash: str | None):
-        self._config.outbound_propagation_node = hex_hash
-        if hex_hash:
-            node_hash = bytes.fromhex(hex_hash)
-            self._router.set_outbound_propagation_node(node_hash)
-            self._router.request_messages_from_propagation_node(
-                self._identity.rns_identity
-            )
-        else:
-            # LXMF's own setter rejects anything that isn't a valid
-            # destination hash, so it has no way to clear the node.
-            self._router.outbound_propagation_node = None
-            if self._router.outbound_propagation_link is not None:
-                self._router.outbound_propagation_link.teardown()
-                self._router.outbound_propagation_link = None
-
-    def sync_from_propagation_node(self):
-        """Manually trigger a sync pull from the configured propagation node."""
-        if self._config.outbound_propagation_node:
-            self._router.request_messages_from_propagation_node(
-                self._identity.rns_identity
-            )
 
     def set_display_name(self, display_name: str) -> None:
         """Update the display name broadcast in LXMF delivery announces."""

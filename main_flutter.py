@@ -142,12 +142,11 @@ def main():
     except RuntimeError as e:
         sys.exit(f"error: {e}")
 
-    # Same startup sequence as main.py: announce everything, pull from the
-    # propagation node if one is configured, then keep reannouncing.
+    # Same startup sequence as main.py: announce everything, then keep
+    # reannouncing.
     from trenchchat.network.router import REANNOUNCE_INTERVAL_SECS
 
     backend.announce()
-    backend.router.sync_from_propagation_node()
     backend.start_heartbeat(interval=REANNOUNCE_INTERVAL_SECS)
     backend.start_presence_pruner()
     backend.start_voice_ticker()

@@ -33,9 +33,6 @@ void main() {
       'propagation_enabled': true,
       'propagation_node_name': 'my-relay',
       'propagation_storage_limit_mb': 512,
-      'channel_filter_mode': 'allowlist',
-      'channel_filter_hashes': <String>[],
-      'outbound_propagation_node': 'relay.example',
     };
     backend.routes['POST /settings'] = {'ok': true};
     backend.routes['POST /me/display_name'] = {'ok': true};
@@ -63,7 +60,6 @@ void main() {
     expect(find.text('PROPAGATION NODE'), findsOneWidget);
     expect(find.text('operator'), findsOneWidget);
     expect(find.text('my-relay'), findsOneWidget);
-    expect(find.text('relay.example'), findsOneWidget);
     expect(find.text('512'), findsOneWidget);
     expect(find.text(state.meHashHex), findsOneWidget);
   });
@@ -119,6 +115,8 @@ void main() {
     expect(body['propagation_node_name'], 'ridge-node');
     expect(body['propagation_enabled'], true);
     expect(body['propagation_storage_limit_mb'], 512);
+    // Nothing sends PROPAGATED, so there is no outbound node to configure.
+    expect(body.containsKey('outbound_propagation_node'), isFalse);
   });
 
   testWidgets('the scrollable content keeps clear of the desktop scrollbar',

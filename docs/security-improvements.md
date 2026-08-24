@@ -164,11 +164,15 @@ but bearer credentials. Now:
   copy of the private key and the umask window. Applied to the identity, lock
   files and config.
 - `ATTACH DATABASE` no longer interpolates a filesystem path into SQL.
-- The propagation channel filter no longer drops the node's *own* inbound
-  messages; enabling propagation-node mode with the default allowlist silently
-  stopped the operator receiving their own mail, invites included.
-- `channel_filter_mode` validates with a raise rather than an `assert`, which
-  is stripped under `python -O`.
+- The per-channel propagation filter has been removed, along with the config
+  keys and both clients' UI for it. A node ingests
+  `destination_hash + ciphertext`, so the channel field a filter reads is
+  never in the clear: allowlist mode relayed nothing whatever was listed, and
+  the wrapper it installed also sat in front of the node's *own* inbound mail,
+  dropping messages the propagation node then deleted its copy of. An earlier
+  entry here claimed that second half was fixed; it was not. Nothing may wrap
+  `lxmf_propagation` — `TestPropagationRelayCannotBeFiltered` in
+  `tests/test_actions.py` holds that line.
 
 ### Supply chain
 Dependencies pinned in `requirements.txt`; release artefacts were previously

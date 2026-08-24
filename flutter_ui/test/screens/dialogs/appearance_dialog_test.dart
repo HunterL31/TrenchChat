@@ -211,9 +211,6 @@ void main() {
       'propagation_enabled': false,
       'propagation_node_name': '',
       'propagation_storage_limit_mb': 512,
-      'channel_filter_mode': 'all',
-      'channel_filter_hashes': <String>[],
-      'outbound_propagation_node': '',
     };
     useTallSurface(tester);
     await tester.pumpWidget(_harness(state, (c) => showSettingsDialog(c, state)));
@@ -241,9 +238,6 @@ void main() {
       'propagation_enabled': false,
       'propagation_node_name': '',
       'propagation_storage_limit_mb': 512,
-      'channel_filter_mode': 'all',
-      'channel_filter_hashes': <String>[],
-      'outbound_propagation_node': '',
     };
     state.themeSpec = ThemeSpec.fromJson({
       'version': 1,
@@ -650,9 +644,6 @@ void main() {
       'propagation_enabled': false,
       'propagation_node_name': '',
       'propagation_storage_limit_mb': 512,
-      'channel_filter_mode': 'all',
-      'channel_filter_hashes': <String>[],
-      'outbound_propagation_node': '',
     };
     state.themeLibrary = {'Deep': ThemeSpec.empty};
     useTallSurface(tester);
