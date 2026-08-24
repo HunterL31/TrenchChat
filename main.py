@@ -29,6 +29,7 @@ from trenchchat.core import lockbox
 from trenchchat.core.avatar import AvatarManager
 from trenchchat.core.friends import FriendsManager
 from trenchchat.core.identity import Identity
+from trenchchat.core.interfaces_config import default_rns_config_path, seed_initial_config
 from trenchchat.core.reaction import ReactionManager
 from trenchchat.core.storage import Storage
 from trenchchat.core.channel import ChannelManager
@@ -93,6 +94,9 @@ def main():
         encryption_key = dlg.raw_key
 
     # --- Reticulum ---
+    # A machine with no Reticulum config at all gets the bootstrap seeds and
+    # interface discovery before RNS reads the file.
+    seed_initial_config(default_rns_config_path())
     rns = RNS.Reticulum(loglevel=rns_loglevel)
 
     # --- identity ---

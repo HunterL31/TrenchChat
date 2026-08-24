@@ -16,9 +16,11 @@ from trenchchat.core.interfaces_config import (
     SUGGESTED_DEFAULTS,
     InterfaceConfigError,
     apply_suggested_defaults,
+    default_rns_config_path,
     get_missing_suggested_defaults,
     load_discovery_settings,
     load_interfaces_config,
+    seed_initial_config,
     write_discovery_settings,
 )
 
@@ -196,3 +198,33 @@ def test_apply_suggested_defaults_keeps_higher_autoconnect(tmp_path):
     write_discovery_settings(cfg_path, False, 5)
     apply_suggested_defaults(cfg_path)
     assert load_discovery_settings(cfg_path)["autoconnect_discovered_interfaces"] == 5
+
+
+# ---------------------------------------------------------------------------
+# first-run config seeding
+# ---------------------------------------------------------------------------
+
+def test_seed_initial_config_creates_full_config(tmp_path):
+    cfg_path = str(tmp_path / "rns" / "config")
+    assert seed_initial_config(cfg_path) is True
+    interfaces = load_interfaces_config(cfg_path)
+    assert interfaces["Default Interface"]["type"] == "AutoInterface"
+    for name in SUGGESTED_DEFAULTS:
+        assert interfaces[name]["bootstrap_only"] == "Yes"
+    settings = load_discovery_settings(cfg_path)
+    assert settings["discover_interfaces"] is True
+    assert settings["autoconnect_discovered_interfaces"] > 0
+    assert get_missing_suggested_defaults(cfg_path) == {}
+
+
+def test_seed_initial_config_never_touches_existing(tmp_path):
+    cfg_path = str(tmp_path / "config")
+    with open(cfg_path, "w") as f:
+        f.write("[interfaces]\n")
+    assert seed_initial_config(cfg_path) is False
+    with open(cfg_path) as f:
+        assert f.read() == "[interfaces]\n"
+
+
+def test_default_rns_config_path_explicit_dir(tmp_path):
+    assert default_rns_config_path(str(tmp_path)) == str(tmp_path / "config")

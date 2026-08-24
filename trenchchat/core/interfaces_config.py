@@ -326,6 +326,56 @@ def apply_suggested_defaults(config_path: str) -> list[str]:
     return list(missing)
 
 
+def default_rns_config_path(configdir: str | None = None) -> str:
+    """Resolve the config file path RNS will use, mirroring RNS.Reticulum's
+    configdir fallback, without initialising RNS."""
+    if configdir:
+        return os.path.join(configdir, "config")
+    if os.path.isdir("/etc/reticulum") and os.path.isfile("/etc/reticulum/config"):
+        return "/etc/reticulum/config"
+    userdir = os.path.expanduser("~")
+    xdg_dir = os.path.join(userdir, ".config", "reticulum")
+    if os.path.isdir(xdg_dir) and os.path.isfile(os.path.join(xdg_dir, "config")):
+        return os.path.join(xdg_dir, "config")
+    return os.path.join(userdir, ".reticulum", "config")
+
+
+def seed_initial_config(config_path: str) -> bool:
+    """Create a first-run Reticulum config: an AutoInterface for local peers,
+    the bootstrap seeds, and interface discovery enabled.
+
+    Only acts when no config file exists yet, so an existing install -- even
+    one whose defaults were deliberately removed -- is never touched. Returns
+    True when the config was created.
+    """
+    if os.path.isfile(config_path):
+        return False
+
+    parent = os.path.dirname(config_path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+
+    file_cfg = ConfigObj()
+    file_cfg.filename = config_path
+    file_cfg["reticulum"] = {
+        "discover_interfaces": "Yes",
+        "autoconnect_discovered_interfaces": str(DEFAULT_AUTOCONNECT_COUNT),
+    }
+    interfaces: dict[str, dict[str, str]] = {
+        "Default Interface": {"type": "AutoInterface", "enabled": "Yes"},
+    }
+    interfaces.update(SUGGESTED_DEFAULTS)
+    file_cfg["interfaces"] = interfaces
+    try:
+        file_cfg.write()
+    except Exception as e:
+        raise InterfaceConfigError(f"could not write config file: {e}") from e
+
+    RNS.log("TrenchChat [interfaces]: created first-run config with bootstrap "
+            "seeds and interface discovery enabled", RNS.LOG_NOTICE)
+    return True
+
+
 def delete_interface(config_path: str, name: str) -> bool:
     """Delete an interface section from the Reticulum config file.
 
