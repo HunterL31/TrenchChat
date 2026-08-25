@@ -436,7 +436,7 @@
 
 <div class="modal-backdrop" id="invite-modal">
   <div class="modal">
-    <h3>Invite a peer</h3>
+    <h3 id="inv-title">Invite a peer</h3>
     <label>Search</label>
     <input id="inv-search" placeholder="name or hash" oninput="searchDirectory()">
     <div class="directory-results" id="inv-results"></div>
@@ -463,6 +463,7 @@ function blankState(port) {
     port, me: null, channels: [], activeChannel: null, activeServer: null,
     servers: [], serverChannels: {}, serverPerms: {}, collapsedServers: new Set(),
     ws: null, invites: [], pendingImage: null, replyTarget: null,
+    friends: [], friendRequests: {incoming: [], outgoing: []}, dms: [],
     net: { online: null, reconnecting: false }, killed: false,
     linkProfile: 'broadband', inVoice: false,
   };
@@ -634,6 +635,13 @@ function renderShell() {
           <button class="decline" onclick="respondInvite('${tag}', false)">Decline</button>
         </span>
       </div>
+      <div class="invite-bar" id="friend-bar-${tag}">
+        <span id="friend-text-${tag}"></span>
+        <span>
+          <button class="accept" onclick="respondFriendRequest('${tag}', true)">Accept</button>
+          <button class="decline" onclick="respondFriendRequest('${tag}', false)">Decline</button>
+        </span>
+      </div>
       <div class="pane-body">
         <div class="channel-list">
           <div id="channels-${tag}"></div>
@@ -641,6 +649,10 @@ function renderShell() {
           <button class="new-channel-btn" onclick="openNewServerModal('${tag}')">+ New server</button>
           <div class="discovered-header">Discovered (not joined)</div>
           <div id="discovered-${tag}"></div>
+          <div class="discovered-header">Friends</div>
+          <div id="friends-${tag}"></div>
+          <button class="new-channel-btn" onclick="openFriendModal('${tag}')"
+                 title="Search the peer directory and ask someone to be friends">+ Friend request</button>
         </div>
         <div class="chat-area">
           <div class="chat-toolbar">
@@ -697,6 +709,7 @@ async function connectTester(tag) {
   await refreshChannels(tag);
   await refreshDiscovered(tag);
   await refreshInvites(tag);
+  await refreshFriends(tag);
   refreshVoiceState(tag);
   connectWs(tag);
   refreshOwnAvatar(tag);
@@ -964,6 +977,13 @@ function connectWs(tag) {
         renderMessages(tag);
         if (membersModalTag === tag) refreshMembersModal();
       }
+    } else if (msg.type === 'friend_request') {
+      const who = msg.display_name || msg.identity_hash.slice(0, 10);
+      toast(`Tester ${tag}: friend request from ${who}`);
+      refreshFriends(tag);
+    } else if (msg.type === 'friend_updated') {
+      refreshFriends(tag);
+      refreshChannels(tag);
     } else if (msg.type === 'channel_discovered') {
       toast(`Tester ${tag}: discovered #${msg.channel_name}`);
       refreshDiscovered(tag);
@@ -1024,6 +1044,77 @@ async function respondInvite(tag, accept) {
   if (accept) toast(`Tester ${tag}: join request sent, waiting for admin approval`);
 }
 
+// --- friends, requests and conversations ---
+//
+// Mirrors the invite bar above it: an incoming request raises a bar with
+// Accept/Decline, because a friendship needs both sides before a direct
+// message passes either way.
+
+async function refreshFriends(tag) {
+  const s = state[tag];
+  s.friends = await api(tag, '/friends');
+  s.friendRequests = await api(tag, '/friends/requests');
+
+  const box = document.getElementById(`friends-${tag}`);
+  if (box) {
+    const rows = s.friends.map(f => {
+      const name = escapeHtml(f.nickname || f.display_name || f.identity_hash.slice(0, 8));
+      return `<div class="channel-item" onclick="startDm('${tag}', '${f.identity_hash}')"
+          title="Open a direct message with this friend">
+          <span class="status-dot ${f.is_online ? 'up' : ''}"></span> ${name}</div>`;
+    });
+    const waiting = s.friendRequests.outgoing.length;
+    if (waiting) {
+      rows.push(`<div class="empty-state">${waiting} request(s) awaiting a reply</div>`);
+    }
+    box.innerHTML = rows.length ? rows.join('')
+      : '<div class="empty-state">No friends yet</div>';
+  }
+
+  const bar = document.getElementById(`friend-bar-${tag}`);
+  const text = document.getElementById(`friend-text-${tag}`);
+  if (!bar || !text) return;
+  const incoming = s.friendRequests.incoming;
+  if (incoming.length === 0) {
+    bar.classList.remove('show');
+    return;
+  }
+  const req = incoming[0];
+  const more = incoming.length > 1 ? ` (+${incoming.length - 1} more)` : '';
+  const who = escapeHtml(req.display_name || req.identity_hash.slice(0, 10));
+  // The note is text the peer wrote; it is shown, never acted on.
+  const note = req.note ? ` -- "${escapeHtml(req.note)}"` : '';
+  text.textContent = `${who} wants to be friends${note}${more}`;
+  bar.classList.add('show');
+  bar.dataset.peerHash = req.identity_hash;
+}
+
+async function respondFriendRequest(tag, accept) {
+  const bar = document.getElementById(`friend-bar-${tag}`);
+  const peerHash = bar.dataset.peerHash;
+  if (!peerHash) return;
+  await api(tag, `/friends/requests/${peerHash}/${accept ? 'accept' : 'decline'}`,
+            {method: 'POST', headers: {'Content-Type': 'application/json'},
+             body: JSON.stringify({nickname: ''})});
+  await refreshFriends(tag);
+  await refreshChannels(tag);
+  if (accept) toast(`Tester ${tag}: friend added`);
+}
+
+async function startDm(tag, peerHash) {
+  const res = await api(tag, `/dms/${peerHash}`, {method: 'POST'});
+  if (!res || !res.hash) {
+    toast(`Tester ${tag}: cannot message a peer who is not an accepted friend`);
+    return;
+  }
+  await refreshChannels(tag);
+  await selectChannel(tag, res.hash);
+}
+
+function dmForHash(tag, hash) {
+  return (state[tag].dms || []).find(d => d.hash === hash) || null;
+}
+
 function channelItemHtml(tag, c, indented) {
   const active = c.hash === state[tag].activeChannel ? 'active' : '';
   const style = indented ? ' style="margin-left:10px;"' : '';
@@ -1070,9 +1161,27 @@ async function refreshChannels(tag) {
     if (s.servers.length) parts.push('<div class="discovered-header">Channels</div>');
     parts.push(s.channels.map(c => channelItemHtml(tag, c, false)).join(''));
   }
+  // A conversation is addressed exactly like a channel, so it lists and reads
+  // through the same path -- only sending differs (see sendMessage).
+  s.dms = await api(tag, '/dms');
+  if (s.dms.length) {
+    parts.push('<div class="discovered-header">Direct messages</div>');
+    parts.push(s.dms.map(d => dmItemHtml(tag, d)).join(''));
+  }
   const list = document.getElementById(`channels-${tag}`);
   list.innerHTML = parts.length ? parts.join('')
     : '<div class="empty-state">No channels yet</div>';
+}
+
+function dmItemHtml(tag, d) {
+  const active = d.hash === state[tag].activeChannel ? 'active' : '';
+  const name = escapeHtml(d.display_name || d.peer_hash.slice(0, 8));
+  const unread = d.unread ? `<span class="badge">${d.unread}</span>` : '';
+  // A conversation with someone no longer held as a friend stays readable and
+  // says so: nothing can pass either way until both sides hold the other.
+  const gone = d.is_friend ? '' : '<span class="badge">not a friend</span>';
+  return `<div class="channel-item ${active}"
+      onclick="selectChannel('${tag}', '${d.hash}')">@${name}${unread}${gone}</div>`;
 }
 
 function selectServer(tag, serverHash) {
@@ -1130,10 +1239,20 @@ async function selectChannel(tag, hash) {
   clearReplyTarget(tag);
   clearPendingImage(tag);
   await refreshChannels(tag);
+  const dm = dmForHash(tag, hash);
   const ch = state[tag].channels.find(c => c.hash === hash);
-  document.getElementById(`active-channel-${tag}`).textContent = ch ? `#${ch.name}` : hash;
+  const label = document.getElementById(`active-channel-${tag}`);
+  label.textContent = dm ? `@${dm.display_name || dm.peer_hash.slice(0, 8)}`
+                         : (ch ? `#${ch.name}` : hash);
   await renderMessages(tag);
-  await refreshSyncStatus(tag);
+  if (dm) {
+    // A conversation has no subscription and so no sync state, by design.
+    document.getElementById(`sync-status-${tag}`).textContent = '';
+    await api(tag, `/dms/${hash}/read`, {method: 'POST'});
+    await refreshChannels(tag);
+  } else {
+    await refreshSyncStatus(tag);
+  }
 }
 
 function syncStatusLabel(status) {
@@ -1388,26 +1507,49 @@ async function sendMessage(tag) {
   input.value = '';
   clearPendingImage(tag);
   clearReplyTarget(tag);
-  const result = await api(tag, `/channels/${state[tag].activeChannel}/messages`, {
+  // A conversation is addressed by its peer, not by the conversation hash:
+  // the receiver recomputes that address from the sender it authenticated.
+  const dm = dmForHash(tag, state[tag].activeChannel);
+  const path = dm ? `/dms/${dm.peer_hash}/messages`
+                  : `/channels/${state[tag].activeChannel}/messages`;
+  const result = await api(tag, path, {
     method: 'POST', headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({content, image_data_b64: image, reply_to: replyTo}),
   });
-  if (!result.ok) toast(`Tester ${tag}: message not sent (permission?)`);
+  if (!result.ok) {
+    toast(dm ? `Tester ${tag}: not sent -- still friends?`
+             : `Tester ${tag}: message not sent (permission?)`);
+  }
   await renderMessages(tag);
 }
 
 let inviteForTag = null;
 
+let inviteMode = 'channel';   // 'channel' | 'friend'
+
 function openInviteModal(tag) {
   if (!state[tag].activeChannel) { toast('Select a channel first'); return; }
+  inviteMode = 'channel';
   inviteForTag = tag;
+  document.getElementById('inv-title').textContent = 'Invite a peer';
   document.getElementById('inv-search').value = '';
   document.getElementById('invite-modal').classList.add('show');
   searchDirectory();
 }
+
+function openFriendModal(tag) {
+  inviteMode = 'friend';
+  inviteForTag = tag;
+  document.getElementById('inv-title').textContent = 'Ask a peer to be friends';
+  document.getElementById('inv-search').value = '';
+  document.getElementById('invite-modal').classList.add('show');
+  searchDirectory();
+}
+
 function closeInviteModal() {
   document.getElementById('invite-modal').classList.remove('show');
   inviteForTag = null;
+  inviteMode = 'channel';
 }
 async function searchDirectory() {
   if (!inviteForTag) return;
@@ -1429,7 +1571,17 @@ async function searchDirectory() {
 }
 async function confirmInvite(peerHash) {
   const tag = inviteForTag;
+  const mode = inviteMode;
   closeInviteModal();
+  if (mode === 'friend') {
+    await api(tag, '/friends/requests', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({identity_hash: peerHash, note: `Hello from Tester ${tag}`}),
+    });
+    await refreshFriends(tag);
+    toast('Friend request sent');
+    return;
+  }
   await api(tag, `/channels/${state[tag].activeChannel}/invite`, {
     method: 'POST', headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({peer_hash_hex: peerHash}),

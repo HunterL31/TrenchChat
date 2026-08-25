@@ -305,6 +305,7 @@ the first ask is served and ~120s when it takes a retry.
 | social8 | A,B,C | B replies to A's message; C reacts to the reply | ✅ `reply_to` and the reaction target resolve identically on all three |
 | social9 | A,B,C | Same conversation on an **invite-only** channel: B replies to A's message; C reacts to the reply | ✅ Resolves identically there too, 4/4 runs in 23–29s — member-list fan-out carries replies and reactions the same way the subscriber set does |
 | social10 | A,B,C | B imports a custom emoji and reacts with it | ✅ A and C converge on the count and fetch the image over `MT_EMOJI_REQUEST`, in 0.0–3.5s after the count landed. 4/4 runs |
+| social11 | A,B | A is slowed to a real client's announce cadence; B is wiped so it has heard nobody; A invites B | ✅ **3/3 runs, 20–25s.** Found a real defect first — see below. Fails in 64s without the fix |
 
 ### `restart` — Restart, persistence, ordering
 
@@ -453,6 +454,40 @@ None of the three is visible to pytest: all of them need a process that really
 dies, a node that really holds a message, and real seconds passing. The
 regression guards for the cadence itself live in `tests/test_propagation.py`,
 where they are deterministic.
+
+#### What social11 found: the dev environment hid a bug in the real client
+
+A person testing by hand reported that invites from their client never reached
+the testers, and that the testers never showed their client as online. Both had
+one cause, and this suite could not have found it as it stood.
+
+Every tester announces every 10s, so meeting one here is instantaneous. A real
+client announces at startup and then every `REANNOUNCE_INTERVAL_SECS` — **900
+seconds**. Until a peer has heard that announce it cannot recall the sender's
+identity, so LXMF cannot verify the signature, so `Router._quarantine_message`
+holds the first message and drops it at `QUARANTINE_TTL_SECS` (300s). Nothing
+released it except a full announce. Relaunching the client emitted one, which is
+why relaunching made the missing invites appear — the tell that identified this.
+
+The Qt client had already solved it (`main_window.py`'s
+`_on_reannounce_debounced` says so in as many words), but that lives in the Qt
+window, and the active Flutter client runs on `backend_core.Backend`, which never
+got it. Two fixes, in different directions:
+
+- **`FirstContactAnnouncer`** answers a peer the *first* time we hear them, so
+  they can hear us back. Once per peer, not per announce: answering every
+  announce leaves two idle clients replying to each other's replies for ever,
+  while once-per-peer settles after exactly two announces.
+- **`PathResponseHandler`** releases the quarantine when a sender's identity
+  arrives as a path response — the quarantine already requests that path, but
+  RNS only calls handlers that set `receive_path_responses`, so nothing was
+  listening. This costs no airtime and would have delivered the invites with no
+  relaunch at all.
+
+Reproducing it needed the environment to stop being unrealistically chatty, so
+testers now take a heartbeat interval (`POST /testers/{tag}/heartbeat`). Slowing
+one tester to a real cadence and wiping the other is what makes the window
+observable. Confirmed by disabling both fixes: the scenario fails in 64s.
 
 #### Why author keys travel with a synced batch
 

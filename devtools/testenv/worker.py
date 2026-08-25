@@ -9,6 +9,7 @@ API over uvicorn. Launched by orchestrator.py via multiprocessing.
 """
 
 import sys
+import os
 import threading
 from pathlib import Path
 
@@ -39,7 +40,10 @@ def run(tag: str, data_dir: str, display_name: str, role: str, listen_port: int,
         instance_name, enable_transport=enable_transport, link_bitrate=link_bitrate,
     )
     backend.write_identity_file()
-    backend.start_heartbeat(interval=10.0)
+    # A tester announcing every 10s makes first contact instant, which is the
+    # opposite of a real client's 15-minute cadence. Scenarios that need to
+    # observe meeting a stranger slow one tester down through this.
+    backend.start_heartbeat(interval=float(os.environ.get("TC_TESTENV_HEARTBEAT_SECS", 10.0)))
     backend.start_presence_pruner(interval=5.0)
     backend.start_voice_ticker(interval=1.0)
     backend.start_bandwidth_sampler()

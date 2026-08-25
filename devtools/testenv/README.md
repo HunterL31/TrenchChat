@@ -95,6 +95,7 @@ therefore how many API and shaper ports are used above 8801 and 41101.
 | `POST /testers/{tag}/restart` | Kill then start one tester |
 | `POST /testers/{tag}/reset` | Kill, wipe only that tester's data dir, start |
 | `POST /hub/kill` / `/start` / `/restart` | Same lifecycle controls for the hub process |
+| `POST /testers/{tag}/heartbeat` | `{"secs": N}` — how often this tester re-announces, applied by restarting it. Every tester announcing every 10s makes meeting a stranger instant, which is the opposite of a real client's 900s cadence; slow one down to test first contact (see `social11`) |
 
 ### Per-tester API (ports 8801+)
 

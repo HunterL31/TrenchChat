@@ -45,7 +45,7 @@ from trenchchat.core.voice import VoiceManager
 from trenchchat.network.router import REANNOUNCE_INTERVAL_SECS, Router
 from trenchchat.network.voice_transport import RNSVoiceTransport
 from trenchchat.network.announce import (
-    PropagationAnnounceHandler, UserAnnounceHandler,
+    PathResponseHandler, PropagationAnnounceHandler, UserAnnounceHandler,
 )
 from trenchchat.version import record_launch
 from trenchchat.gui.main_window import MainWindow
@@ -156,6 +156,17 @@ def main():
         presence_mgr.record_seen(peer_hex)
 
     RNS.Transport.register_announce_handler(UserAnnounceHandler(_on_user_announced))
+
+    # A peer's identity can arrive as a path response rather than a live
+    # announce, which is how a first message from someone we have never heard
+    # becomes verifiable. Releasing the quarantine is what delivers it.
+    def _on_identity_resolved(peer_hex: str) -> None:
+        router.release_quarantined(peer_hex)
+        presence_mgr.record_seen(peer_hex)
+
+    RNS.Transport.register_announce_handler(
+        PathResponseHandler(_on_identity_resolved)
+    )
 
     # Restore RNS destinations for channels and servers we own
     channel_mgr.restore_owned_channels()

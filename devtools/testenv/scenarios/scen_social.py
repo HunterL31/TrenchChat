@@ -284,3 +284,49 @@ def f10(env):
             lambda peer=peer: holds_image(peer),
             f"{peer.tag} to fetch the emoji image", 90.0), 1)
     return {"image_fetch_secs": latency}
+
+
+# A client that has just started is unhearable until its next announce, and a
+# real one announces every 15 minutes. Slow enough that a scenario can observe
+# the window; short enough that the run does not sit in it.
+QUIET_HEARTBEAT_SECS = 600.0
+
+
+@scenario("social11", "A peer that announces rarely can still reach a stranger",
+          peers="AB")
+def f11(env):
+    """The case a person actually hit, and the reason it was invisible here.
+
+    Every tester announces every 10s, so meeting one is instant and nothing
+    ever exercises first contact. A real client announces every 15 minutes:
+    until a peer has heard it, that peer cannot recall its identity, cannot
+    verify its signature, and quarantines its first message until it expires.
+    Invites vanished exactly this way, and relaunching the client -- which
+    announces once at startup -- was what made them appear.
+
+    So A is slowed to a real client's cadence and restarted, then B is wiped so
+    it has never heard anybody. B announces on startup; A must answer that with
+    an announce of its own, or its invite is dropped at B's end and this fails.
+    """
+    a, b = env.peers("A", "B")
+
+    env.orch.set_heartbeat(a.tag, QUIET_HEARTBEAT_SECS)
+    env.wait_alive(a)
+    ch = a.create_channel("f11-invite", access="invite")
+
+    # B forgets every identity it has ever heard, A's included.
+    env.orch.reset_tester(b.tag)
+    env.wait_alive(b)
+    b.forget_hash()
+    wait_until(lambda: b.hash is not None, f"{b.tag} to come back with an identity",
+               DISCOVERY_TIMEOUT)
+
+    # A learns B from B's own announce; nothing has told B about A.
+    wait_until(lambda: any(e["identity_hash"] == b.hash for e in a.directory()),
+               f"{a.tag} to hear the restarted {b.tag}", DISCOVERY_TIMEOUT)
+
+    a.invite(ch, b.hash)
+    wait_until(lambda: any(i["channel_hash_hex"] == ch for i in b.invites()),
+               f"{b.tag} to receive an invite from a peer it had never heard",
+               DISCOVERY_TIMEOUT)
+    return {}

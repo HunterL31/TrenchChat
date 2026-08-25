@@ -1287,6 +1287,39 @@ class TestAdversarialUnauthenticatedDelivery:
         assert "release-bad-1" not in ids, \
             "A quarantined message was delivered without re-validating its signature"
 
+    def test_a_genuine_held_message_is_delivered_once_the_identity_resolves(
+            self, peer_factory):
+        """The other half of the quarantine: it is a delay, not a bin.
+
+        A first message from a peer we have never heard is unverifiable when it
+        lands, so it is held. Once their identity resolves -- by announce, or
+        by the path response the quarantine itself requests -- the message must
+        be re-validated and delivered. Without that release nothing ever
+        arrives from a peer who has not announced recently, which is exactly
+        how a freshly started client's invites went missing.
+        """
+        alice, bob, ch_hash = _setup_channel_with_member(
+            peer_factory, member_perms=[SEND_MESSAGE]
+        )
+        content = "held until you knew me"
+        ts = time.time()
+        msg_id = _compute_message_id(content, alice.identity.hash_hex, ts)
+        lxm = self._chat_lxm(alice, bob, ch_hash, content, msg_id, ts=ts)
+        # Real packed bytes, so the release path has something it can genuinely
+        # re-validate -- the other quarantine tests deliberately use garbage.
+        lxm.pack()
+        lxm.signature_validated = False
+        lxm.unverified_reason = LXMF.LXMessage.SOURCE_UNKNOWN
+
+        bob.router._on_message_received(lxm)
+        assert sum(len(v) for v in bob.router._quarantine.values()) == 1
+        assert not bob.storage.message_exists(msg_id)
+
+        bob.router.release_quarantined(alice.identity.hash_hex)
+
+        assert wait_for(lambda: bob.storage.message_exists(msg_id)), \
+            "A held message was never delivered after its sender became known"
+
     def test_quarantine_is_bounded_per_sender(self, peer_factory):
         """
         The quarantine must not become its own memory-exhaustion vector: a

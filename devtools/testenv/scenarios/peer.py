@@ -503,6 +503,10 @@ class Orchestrator:
     def reset(self) -> dict:
         return self._post("/reset")
 
+    def set_heartbeat(self, tag: str, secs: float) -> dict:
+        """Change how often a tester announces, restarting it to apply it."""
+        return self._post(f"/testers/{tag}/heartbeat", {"secs": secs})
+
     def kill(self, tag: str) -> dict:
         return self._post(f"/testers/{tag}/kill")
 
