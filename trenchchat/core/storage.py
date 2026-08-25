@@ -301,11 +301,18 @@ CREATE TABLE IF NOT EXISTS friends (
 
 -- One row per direct-message conversation. conversation_hash is
 -- naming.dm_hash_for(self, peer) and doubles as the channels row it points at.
+--
+-- peer_is_trenchchat records whether the other end has ever identified itself
+-- as a TrenchChat client (by sending the direct-message envelope). A
+-- conversation works either way -- that is the point of the interoperable
+-- format -- but reactions and everything else TrenchChat-only would arrive at
+-- another LXMF client as noise, so they are not sent to one.
 CREATE TABLE IF NOT EXISTS dm_conversations (
-    conversation_hash TEXT PRIMARY KEY,
-    peer_hash         TEXT NOT NULL UNIQUE,
-    created_at        REAL NOT NULL,
-    last_read_at      REAL NOT NULL DEFAULT 0
+    conversation_hash  TEXT PRIMARY KEY,
+    peer_hash          TEXT NOT NULL UNIQUE,
+    created_at         REAL NOT NULL,
+    last_read_at       REAL NOT NULL DEFAULT 0,
+    peer_is_trenchchat INTEGER NOT NULL DEFAULT 0
 );
 """
 
@@ -436,6 +443,7 @@ class Storage:
         self._migrate_invite_issued_at()
         self._migrate_channel_kind()
         self._migrate_friend_state()
+        self._migrate_dm_peer_kind()
         # _scope() reads channels.server_hash, so this must run after
         # _migrate_servers() has ensured that column exists.
         self._repair_tenure_from_message_history()
@@ -453,6 +461,19 @@ class Storage:
         if not self._has_column("channels", "kind"):
             self._conn.execute(
                 "ALTER TABLE channels ADD COLUMN kind TEXT NOT NULL DEFAULT 'channel'"
+            )
+            self._conn.commit()
+
+    def _migrate_dm_peer_kind(self):
+        """Add dm_conversations.peer_is_trenchchat for existing databases.
+
+        Unknown until the peer sends an envelope, so 0 is the honest default:
+        it only ever suppresses TrenchChat-only extras, never the conversation.
+        """
+        if not self._has_column("dm_conversations", "peer_is_trenchchat"):
+            self._conn.execute(
+                "ALTER TABLE dm_conversations ADD COLUMN peer_is_trenchchat "
+                "INTEGER NOT NULL DEFAULT 0"
             )
             self._conn.commit()
 
@@ -2166,6 +2187,22 @@ class Storage:
         )
         return dict(row) if row else None
 
+    def set_dm_peer_is_trenchchat(self, conversation_hash: str) -> None:
+        """Record that this conversation's peer runs TrenchChat. One way only:
+        a client that spoke the envelope once will not stop having done so."""
+        with self._tx():
+            self._conn.execute(
+                "UPDATE dm_conversations SET peer_is_trenchchat = 1 "
+                "WHERE conversation_hash = ?", (conversation_hash,),
+            )
+
+    def dm_peer_is_trenchchat(self, conversation_hash: str) -> bool:
+        row = self._fetchone(
+            "SELECT peer_is_trenchchat FROM dm_conversations WHERE conversation_hash = ?",
+            (conversation_hash,),
+        )
+        return bool(row["peer_is_trenchchat"]) if row else False
+
     def get_dm_peer(self, conversation_hash: str) -> str | None:
         row = self._fetchone(
             "SELECT peer_hash FROM dm_conversations WHERE conversation_hash = ?",
@@ -2183,6 +2220,7 @@ class Storage:
         """Every conversation, newest activity first, with its unread count."""
         rows = self._fetchall("""
             SELECT d.conversation_hash, d.peer_hash, d.created_at, d.last_read_at,
+                   d.peer_is_trenchchat,
                    (SELECT MAX(timestamp) FROM messages m
                      WHERE m.channel_hash = d.conversation_hash) AS last_message_at,
                    (SELECT COUNT(*) FROM messages m

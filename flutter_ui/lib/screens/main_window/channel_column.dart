@@ -612,7 +612,9 @@ class _ChannelRowState extends State<_ChannelRow> {
 
 /// One conversation in the DIRECT MESSAGES section. Shows the peer's presence
 /// and an unread count; a conversation with a peer who is no longer a friend
-/// stays readable but is marked, because nothing more can pass either way.
+/// stays readable but is marked, because nothing more can pass either way. A
+/// peer on another LXMF client is marked too: messages reach them, reactions
+/// and the rest of TrenchChat's extras do not.
 class _DmRow extends StatefulWidget {
   const _DmRow({
     required this.conversation,
@@ -686,15 +688,33 @@ class _DmRowState extends State<_DmRow> {
                       style: TextStyle(fontSize: TCType.textMicro, color: tc.textTertiary),
                     ),
                   )
-                else if (d.unread > 0)
-                  Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
-                    decoration: BoxDecoration(color: tc.accentPrimary),
-                    child: Text(
-                      '${d.unread}',
-                      style: TextStyle(fontSize: TCType.textMicro, color: tc.bgApp),
+                else ...[
+                  if (!d.peerIsTrenchchat)
+                    Padding(
+                      padding: const EdgeInsets.only(left: 6),
+                      child: TcTooltip(
+                        message: 'On another LXMF client — messages work, '
+                            'reactions and other TrenchChat extras do not',
+                        child: Text(
+                          'LXMF',
+                          style: TextStyle(
+                              fontSize: TCType.textMicro, color: tc.textTertiary),
+                        ),
+                      ),
                     ),
-                  ),
+                  if (d.unread > 0)
+                    Padding(
+                      padding: const EdgeInsets.only(left: 6),
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+                        decoration: BoxDecoration(color: tc.accentPrimary),
+                        child: Text(
+                          '${d.unread}',
+                          style: TextStyle(fontSize: TCType.textMicro, color: tc.bgApp),
+                        ),
+                      ),
+                    ),
+                ],
               ],
             ),
           ),

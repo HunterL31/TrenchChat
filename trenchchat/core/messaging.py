@@ -38,11 +38,17 @@ LXMF fields layout:
     0x80  friend_note       str         — optional intro line on a friend request
                                           (friends.py); never on a chat message
 
-A direct message is an ordinary chat message whose 0x01 channel_hash is a
-conversation address (naming.dm_hash_for) instead of a channel hash. Nothing
-else distinguishes it on the wire: the receiver recomputes that address from
-the sender it authenticated, so the address itself says which conversation the
-message belongs to, and proves the sender is in it.
+A direct message uses none of the fields above. It is a plain LXMF message --
+its text in the ordinary content, its attachment in LXMF's own FIELD_IMAGE --
+carrying TrenchChat's additions inside LXMF's custom-payload fields, where a
+client that is not TrenchChat knows to ignore them. That is what lets a
+conversation work with Sideband, NomadNet or anything else speaking LXMF.
+
+It carries no conversation address at all. The receiver derives that from the
+sender it has just authenticated, so a message that arrives with no fields
+whatsoever still lands in the right conversation, and no peer can name one it
+is not half of. The absence of a channel hash is what marks a message as
+direct; see protocol.pack_dm_envelope.
 """
 
 import hashlib
@@ -56,7 +62,9 @@ from trenchchat.core.protocol import (
     F_CHANNEL_HASH, F_DISPLAY_NAME, F_TIMESTAMP, F_MESSAGE_ID,
     F_REPLY_TO, F_LAST_SEEN_ID, F_SYNC_WINDOW_START, F_SYNC_MESSAGES,
     F_MISSED_FOR, F_MISSED_MSG_ID, F_MSG_TYPE, F_IMAGE_DATA,
-    F_AUTHOR_SIG, wire_timestamp,
+    F_AUTHOR_SIG, DM_ENVELOPE_TYPE, DM_IMAGE_EXTENSION,
+    LXMF_FIELD_CUSTOM_DATA, LXMF_FIELD_CUSTOM_TYPE, LXMF_FIELD_IMAGE,
+    inbound_image, pack_dm_envelope, unpack_dm_envelope, wire_timestamp,
 )
 from trenchchat.core.authorship import resolve_author, sign_message, verify_message
 from trenchchat.core.image import MAX_IMAGE_BYTES, inbound_image_is_sane
@@ -273,6 +281,9 @@ class Messaging:
             "subscriber_hashes": [peer_hex],
             "image_data":        image_data,
             "author_sig":        author_sig,
+            # Marks this as a conversation rather than a channel, so it is
+            # built in the interoperable form below.
+            "dm_peer_hex":       peer_hex,
         }
         self._params_by_id[msg_id] = msg_params
         if len(self._params_by_id) > MAX_TRACKED_DELIVERIES:
@@ -509,6 +520,12 @@ class Messaging:
             params["content"],
             desired_method=desired_method or LXMF.LXMessage.DIRECT,
         )
+        lxm.fields = (self._dm_fields(params) if params.get("dm_peer_hex")
+                      else self._channel_fields(params))
+        return lxm
+
+    @staticmethod
+    def _channel_fields(params: dict) -> dict:
         fields = {
             F_CHANNEL_HASH: bytes.fromhex(params["channel_hash_hex"]),
             F_DISPLAY_NAME: params["display_name"],
@@ -521,8 +538,30 @@ class Messaging:
             fields[F_IMAGE_DATA] = params["image_data"]
         if params.get("author_sig"):
             fields[F_AUTHOR_SIG] = params["author_sig"]
-        lxm.fields = fields
-        return lxm
+        return fields
+
+    @staticmethod
+    def _dm_fields(params: dict) -> dict:
+        """A conversation's fields: standard where a standard exists.
+
+        No channel hash -- its absence is what says "direct", and the address
+        is the receiver's to derive. The text rides in the ordinary content, so
+        any LXMF client displays it whether or not it understands the rest.
+        """
+        fields = {
+            LXMF_FIELD_CUSTOM_TYPE: DM_ENVELOPE_TYPE,
+            LXMF_FIELD_CUSTOM_DATA: pack_dm_envelope(
+                message_id=params["msg_id"],
+                timestamp=params["timestamp"],
+                display_name=params["display_name"],
+                reply_to=params["reply_to"],
+                last_seen_id=params["last_seen_id"],
+                author_sig=params.get("author_sig"),
+            ),
+        }
+        if params.get("image_data"):
+            fields[LXMF_FIELD_IMAGE] = [DM_IMAGE_EXTENSION, params["image_data"]]
+        return fields
 
     def _on_delivery_failed(self, dest_hex: str, channel_hash_hex: str,
                              msg_id: str, subscriber_hashes: list[str]):
@@ -636,13 +675,6 @@ class Messaging:
         if F_MSG_TYPE in fields:
             return
 
-        channel_hash_bytes = fields.get(F_CHANNEL_HASH)
-        if not channel_hash_bytes:
-            return
-
-        channel_hash_hex = channel_hash_bytes.hex() \
-            if isinstance(channel_hash_bytes, bytes) else str(channel_hash_bytes)
-
         # Resolve the sender's identity hash from the LXMF delivery destination hash.
         # message.source_hash is the delivery dest hash, not the raw identity hash.
         sender_identity = RNS.Identity.recall(message.source_hash) \
@@ -650,9 +682,15 @@ class Messaging:
         sender_hex = sender_identity.hash.hex() \
             if sender_identity else (message.source_hash.hex() if message.source_hash else "")
 
-        if self._is_direct_message(channel_hash_hex, sender_hex):
-            self._on_direct_message(message, fields, channel_hash_hex, sender_hex)
+        channel_hash_bytes = fields.get(F_CHANNEL_HASH)
+        if not channel_hash_bytes:
+            # No channel means a conversation -- including a plain message from
+            # a client that is not TrenchChat and sent no fields at all.
+            self._on_direct_message(message, fields, sender_hex)
             return
+
+        channel_hash_hex = channel_hash_bytes.hex() \
+            if isinstance(channel_hash_bytes, bytes) else str(channel_hash_bytes)
 
         if not self._storage.is_subscribed(channel_hash_hex):
             return
@@ -683,22 +721,17 @@ class Messaging:
 
         self._store_chat_message(message, fields, channel_hash_hex, sender_hex)
 
-    def _is_direct_message(self, channel_hash_hex: str, sender_hex: str) -> bool:
-        """Whether this address is the conversation we share with this sender.
-
-        Recomputed rather than believed: an address that is not the one these
-        two identities derive is not a conversation this node is part of.
-        """
-        if self._direct_mgr is None or len(sender_hex) != len(self._identity.hash_hex):
-            return False
-        try:
-            return channel_hash_hex == dm_hash_for(self._identity.hash_hex, sender_hex)
-        except ValueError:
-            return False
-
     def _on_direct_message(self, message: LXMF.LXMessage, fields: dict,
-                           conversation_hash_hex: str, sender_hex: str) -> None:
-        """Store an inbound direct message, if we hold its sender as a friend."""
+                           sender_hex: str) -> None:
+        """Store an inbound direct message, if we hold its sender as a friend.
+
+        Works for a TrenchChat peer and for any other LXMF client alike: the
+        difference is only how much of the message is described. A TrenchChat
+        peer sends an envelope with the id, timestamp and author signature it
+        computed; anything else sends words, and those are filled in here.
+        """
+        if self._direct_mgr is None:
+            return
         if not self._direct_mgr.may_dm(sender_hex):
             RNS.log(
                 f"TrenchChat [dm]: dropping a direct message from "
@@ -706,18 +739,101 @@ class Messaging:
                 RNS.LOG_WARNING,
             )
             return
-        if self._direct_mgr.open_conversation(sender_hex) is None:
+
+        conversation = self._direct_mgr.open_conversation(sender_hex)
+        if conversation is None:
             return
-        self._store_chat_message(message, fields, conversation_hash_hex, sender_hex)
+
+        content = message.content or ""
+        if isinstance(content, bytes):
+            content = content.decode(errors="replace")
+
+        envelope = unpack_dm_envelope(fields)
+        if envelope is not None:
+            self._direct_mgr.note_trenchchat_peer(sender_hex)
+            values = self._dm_values_from_envelope(envelope, content, sender_hex)
+            if values is None:
+                return
+        else:
+            values = self._dm_values_from_plain(message, content, sender_hex)
+
+        image_data = inbound_image(fields)
+        self._insert_chat_message(
+            channel_hash_hex=conversation,
+            sender_hex=sender_hex,
+            image_data=image_data,
+            # A directly delivered message is already signed by its sender at
+            # the LXMF layer, which the router verified before anything here
+            # ran. The author signature exists for messages that arrive by
+            # relay -- sync, where the peer handing it over is not the author --
+            # and a conversation is never relayed. So it is required from a
+            # TrenchChat peer, who has one, and not from a client that does not
+            # implement it; neither case is trusted any less than the other.
+            require_author_signature=envelope is not None,
+            **values,
+        )
+
+    def _dm_values_from_envelope(self, envelope: dict, content: str,
+                                 sender_hex: str) -> dict | None:
+        """The message as its TrenchChat sender described it, or None if not plausible."""
+        timestamp = wire_timestamp(envelope.get("timestamp"))
+        if timestamp is None:
+            RNS.log(
+                f"TrenchChat [dm]: dropping a message from {sender_hex[:12]}… — "
+                f"implausible timestamp {envelope.get('timestamp')!r}",
+                RNS.LOG_WARNING,
+            )
+            return None
+        msg_id = self._text(envelope.get("message_id"))
+        expected_id = _compute_message_id(content, sender_hex, timestamp)
+        if not msg_id:
+            msg_id = expected_id
+        elif msg_id != expected_id:
+            RNS.log(
+                f"TrenchChat [dm]: dropping a message from {sender_hex[:12]}… — "
+                f"message_id is not the hash of its content",
+                RNS.LOG_WARNING,
+            )
+            return None
+        author_sig = envelope.get("author_sig")
+        return {
+            "sender_name":  self._text(envelope.get("display_name")),
+            "timestamp":    timestamp,
+            "msg_id":       msg_id,
+            "content":      content,
+            "reply_to":     self._text(envelope.get("reply_to")) or None,
+            "last_seen_id": self._text(envelope.get("last_seen_id")) or None,
+            "author_sig":   author_sig if isinstance(author_sig, bytes) else None,
+        }
+
+    def _dm_values_from_plain(self, message: LXMF.LXMessage, content: str,
+                              sender_hex: str) -> dict:
+        """The message as any other LXMF client sent it.
+
+        Everything TrenchChat adds is derived here rather than trusted: the
+        timestamp is LXMF's own, and the id is computed the same way it would
+        have been at the other end.
+        """
+        timestamp = wire_timestamp(getattr(message, "timestamp", None)) or time.time()
+        return {
+            "sender_name":  "",
+            "timestamp":    timestamp,
+            "msg_id":       _compute_message_id(content, sender_hex, timestamp),
+            "content":      content,
+            "reply_to":     None,
+            "last_seen_id": None,
+            "author_sig":   None,
+        }
+
+    @staticmethod
+    def _text(value) -> str:
+        if isinstance(value, bytes):
+            return value.decode(errors="replace")
+        return value if isinstance(value, str) else ""
 
     def _store_chat_message(self, message: LXMF.LXMessage, fields: dict,
                             channel_hash_hex: str, sender_hex: str) -> None:
-        """Validate and store an authorised chat message.
-
-        Everything below is identical for a channel and a conversation: the
-        two paths differ only in who is allowed to send, never in what is
-        checked about what they sent.
-        """
+        """Read a channel message's own fields, then validate and store it."""
         sender_name = fields.get(F_DISPLAY_NAME, "")
         if isinstance(sender_name, bytes):
             sender_name = sender_name.decode(errors="replace")
@@ -770,14 +886,39 @@ class Messaging:
             )
             return
 
+        self._insert_chat_message(
+            channel_hash_hex=channel_hash_hex,
+            sender_hex=sender_hex,
+            sender_name=sender_name,
+            timestamp=timestamp,
+            msg_id=msg_id,
+            content=content,
+            reply_to=reply_to,
+            last_seen_id=last_seen_id,
+            image_data=image_data,
+            author_sig=fields.get(F_AUTHOR_SIG),
+        )
+
+    def _insert_chat_message(self, *, channel_hash_hex: str, sender_hex: str,
+                             sender_name: str, timestamp: float, msg_id: str,
+                             content: str, reply_to: str | None,
+                             last_seen_id: str | None, image_data: bytes | None,
+                             author_sig: bytes | None,
+                             require_author_signature: bool = True) -> None:
+        """Check what a message claims, then store it.
+
+        Shared by channels and conversations: whoever is allowed to send is
+        decided before this, and what is checked about what they sent is the
+        same either way. The one exception is the author signature, which only
+        means anything where a message can arrive by relay -- see the caller.
+        """
         # Checked against the payload exactly as it arrived, before any of it
         # is stripped below -- the signature covers the image, so re-checking
         # after would never match.
         image_stripped = False
-        author_sig = fields.get(F_AUTHOR_SIG)
-        if not verify_message(self._storage, sender_hex, author_sig,
-                              channel_hash_hex, msg_id, timestamp, content,
-                              reply_to, last_seen_id, image_data):
+        if require_author_signature and not verify_message(
+                self._storage, sender_hex, author_sig, channel_hash_hex, msg_id,
+                timestamp, content, reply_to, last_seen_id, image_data):
             RNS.log(
                 f"TrenchChat: dropping message {msg_id[:12]}… from "
                 f"{sender_hex[:12]}… — author signature missing or invalid",

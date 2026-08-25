@@ -1508,9 +1508,11 @@ def create_app(backend: Backend, *, token: str | None = None,
         # Same recipient logic _on_send_message uses, minus the SEND_MESSAGE
         # gate (which doesn't apply to reactions) -- see main_window.py's
         # _get_reaction_peers.
+        # trenchchat_only: a reaction is a TrenchChat control message, and a
+        # conversation's other end may be running something else entirely.
         return actions.conversation_recipients(
             backend.storage, backend.subscription_mgr, backend.direct_mgr,
-            channel_hash, backend.identity.hash_hex,
+            channel_hash, backend.identity.hash_hex, trenchchat_only=True,
         )
 
     @app.post("/channels/{channel_hash}/messages/{message_id}/reactions")

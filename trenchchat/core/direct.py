@@ -18,6 +18,13 @@ accepted friend. Both peers enforce it independently, so a message flows only
 where both sides have agreed. There is no channel-wide sync behind a
 conversation -- no third party holds its history -- so an undelivered direct
 message is handled by the propagation node instead (see messaging.send_direct).
+
+The other end does not have to be TrenchChat. A conversation is carried as a
+plain LXMF message (see protocol.pack_dm_envelope), so Sideband, NomadNet or
+anything else speaking LXMF can hold up its half, and the friendship gate is
+unchanged for them: adding a contact is a local decision, and only an accepted
+friend gets through. What such a peer cannot do is the TrenchChat-only extras,
+so those are not sent to one -- see peer_is_trenchchat.
 """
 
 import RNS
@@ -52,6 +59,18 @@ class DirectMessageManager:
 
     def peer_for(self, channel_hash_hex: str) -> str | None:
         return self._storage.get_dm_peer(channel_hash_hex)
+
+    def note_trenchchat_peer(self, peer_hash_hex: str) -> None:
+        """Record that this peer runs TrenchChat, having heard it say so."""
+        conversation = self.conversation_hash(peer_hash_hex)
+        if conversation is not None:
+            self._storage.set_dm_peer_is_trenchchat(conversation)
+
+    def peer_is_trenchchat(self, channel_hash_hex: str) -> bool:
+        """Whether the other end of a conversation understands TrenchChat's own
+        messages. False for a plain LXMF client -- and for a TrenchChat peer we
+        have not yet heard from, which costs only the extras until we do."""
+        return self._storage.dm_peer_is_trenchchat(channel_hash_hex)
 
     # --- gate ---
 
@@ -104,6 +123,7 @@ class DirectMessageManager:
                 "is_online": (self._presence_mgr.is_online(peer_hash)
                               if self._presence_mgr is not None else False),
                 "is_friend": self._friends.is_friend(peer_hash),
+                "peer_is_trenchchat": bool(row["peer_is_trenchchat"]),
             })
         return results
 

@@ -29,20 +29,61 @@ reaches that state by whatever route it likes.
 
 A conversation's address is `sha256("trenchchat-dm-v1" || min(a,b) || max(a,b))`
 truncated to 16 bytes (`naming.dm_hash_for`) — the same width as a channel
-hash, so it rides the ordinary message store and the ordinary chat message
-format with nothing added to the wire.
+hash, so it rides the ordinary message store with nothing added to it.
 
-The receiver recomputes it from the sender it has just authenticated. An
-inbound message whose address is anything else is not addressed to a
-conversation this node is in, and is dropped. So the address is not a field to
-be believed, it is a check: a peer cannot file a message into a conversation it
-is not half of, and there is no marker field to spoof.
+**It is never sent.** The receiver derives it from the sender it has just
+authenticated, so there is nothing on the wire to aim, forge or believe: a
+message lands in the conversation between its sender and its recipient, and
+there is no other conversation it could be made to land in. A peer cannot file
+a message into one it is not half of because it never gets to name one.
 
 A conversation gets a `channels` row (`kind = 'dm'`) because `messages`
 references it, and deliberately no `subscriptions` row. That absence is what
 keeps it out of channel sync, presence beacons and avatar broadcast — all three
 enumerate `get_subscriptions()`, so a conversation is invisible to them without
 a single exclusion check to forget.
+
+## Talking to clients that are not TrenchChat
+
+A conversation is the one thing TrenchChat sends that can legitimately arrive
+at somebody else's client, so it is carried as a plain LXMF message: the words
+in the ordinary `content`, an attachment in LXMF's own `FIELD_IMAGE`, and
+everything TrenchChat adds — message id, reply target, author signature —
+inside `FIELD_CUSTOM_TYPE`/`FIELD_CUSTOM_DATA`, which the standard sets aside
+for an application's own structures and every other client knows to ignore.
+Sideband, NomadNet or anything else speaking LXMF can hold up its half, and a
+message from one is accepted as an ordinary direct message.
+
+This matters beyond politeness. TrenchChat's own field numbers overlap LXMF's
+registry — `0x02` is `FIELD_TELEMETRY` there, `0x06` `FIELD_IMAGE` — which is
+harmless where both ends are TrenchChat and wrong the moment a message reaches
+somebody else. Channels, sync, invites and voice still use those numbers and
+never leave TrenchChat; moving them is deferred. A conversation cannot afford
+to, so it does not.
+
+**The gate is unchanged.** Adding a contact was always a local decision — the
+handshake is only the ergonomic way to reach it — so a peer on another client
+is added by hash exactly as any other, and only an accepted friend gets
+through. Dropping the envelope is what an attacker would try, since it carries
+the signature; it buys nothing, because the friendship is checked against the
+identity LXMF authenticated, not against anything the message says about
+itself.
+
+**The author signature is required from a TrenchChat sender and not from
+anyone else**, which is a deliberate trade and not an oversight. That signature
+exists for messages arriving *by relay* — sync, where the peer handing a
+message over is not its author — and a conversation is never relayed. What
+authenticates a direct message is LXMF's own signature over the whole thing,
+which `Router._authenticate` checked before any of this ran. A client that does
+not implement TrenchChat's extra signature is therefore not trusted any less
+than one that does; but a sender *claiming* to be TrenchChat must still produce
+one, or the envelope would be a way to assert authorship without proving it.
+
+What another client cannot do is TrenchChat's own extras. Reactions are control
+messages that would arrive as empty ones, so they are not sent to a peer that
+has never identified itself as TrenchChat (`dm_conversations.peer_is_trenchchat`,
+set when an envelope arrives). Both clients show such a conversation as `LXMF`
+so the difference is visible rather than mysterious.
 
 ## Offline delivery, and what the node sees
 
@@ -99,6 +140,9 @@ Consequences worth stating plainly:
   not, to keep this change to one surface. Extending them means the same
   one-line trust argument plus a friends reference in `AvatarManager`, on both
   the accept and the broadcast side — one without the other is half a fix.
+- **A conversation with another LXMF client has no delivery state beyond the
+  transport's.** Their client sends no receipts, and TrenchChat's indicator
+  reports only what LXMF reports: handed over, or not.
 - **A conversation is not backfilled.** If a message is lost with no node to
   hold it, nothing recovers it later — there is no member to ask. The delivery
   indicator is what tells the sender, and it is the only thing that does.

@@ -162,6 +162,7 @@ frames is the only way to exercise them without killing a process outright.
 | `hub.py` | Standalone headless Reticulum transport node every tester connects through |
 | `link_profiles.py` | The named link profiles (LoRa, packet radio, serial, satellite, ...) the UI offers |
 | `link_shaper.py` | Per-tester TCP shim between tester and hub applying bandwidth, latency, jitter and frame loss |
+| `lxmf_peer.py` | A bare LXMF client — RNS and LXMF only, no TrenchChat — for proving direct messages interoperate. `identity` prints its hash, `send` delivers a plain message, `listen` reports what it received (see the `interop` scenarios) |
 | `api.py` | FastAPI wrapper -- every endpoint calls `trenchchat.core.actions` or a manager method directly (except the link-control group -- see above) |
 | `worker.py` | Subprocess entry point: one tester's `Backend` + its `uvicorn` server |
 | `orchestrator.py` | Spawns the hub and every tester, serves the UI, handles `/reset` and per-tester/hub lifecycle |

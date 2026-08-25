@@ -1180,8 +1180,10 @@ function dmItemHtml(tag, d) {
   // A conversation with someone no longer held as a friend stays readable and
   // says so: nothing can pass either way until both sides hold the other.
   const gone = d.is_friend ? '' : '<span class="badge">not a friend</span>';
+  // A peer on another LXMF client: messages work, TrenchChat's extras do not.
+  const foreign = d.peer_is_trenchchat ? '' : '<span class="badge">LXMF</span>';
   return `<div class="channel-item ${active}"
-      onclick="selectChannel('${tag}', '${d.hash}')">@${name}${unread}${gone}</div>`;
+      onclick="selectChannel('${tag}', '${d.hash}')">@${name}${unread}${gone}${foreign}</div>`;
 }
 
 function selectServer(tag, serverHash) {

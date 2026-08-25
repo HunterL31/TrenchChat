@@ -307,6 +307,20 @@ the first ask is served and ~120s when it takes a retry.
 | social10 | A,B,C | B imports a custom emoji and reacts with it | ✅ A and C converge on the count and fetch the image over `MT_EMOJI_REQUEST`, in 0.0–3.5s after the count landed. 4/4 runs |
 | social11 | A,B | A is slowed to a real client's announce cadence; B is wiped so it has heard nobody; A invites B | ✅ **3/3 runs, 20–25s.** Found a real defect first — see below. Fails in 64s without the fix |
 
+### interop — direct messages with clients that are not TrenchChat
+
+These use `lxmf_peer.py`, which imports RNS and LXMF and nothing else. Every
+message it sends is a plain LXMessage with no fields at all, which is what
+Sideband, NomadNet or anything else speaking LXMF sends. Nothing else in this
+suite can show interoperability, because everything else is TrenchChat talking
+to itself.
+
+| ID | Peers | What it does | Result |
+|----|-------|--------------|--------|
+| interop1 | A + bare client | The bare client sends a plain LXMF message to a tester holding it as a friend | ✅ **5s.** Lands as an ordinary direct message, and the conversation is correctly marked as *not* TrenchChat |
+| interop2 | A + bare client | The same message with the friendship removed | ✅ **19s.** Refused. Sending without the envelope is exactly what an attacker would do, since that is the half carrying a signature — it buys nothing, because the gate reads the identity LXMF authenticated |
+| interop3 | A + bare client | A tester sends a direct message; the bare client reports what it received | ✅ **48s.** The text arrives in the ordinary content, and the only fields present are `0xFB`/`0xFC` — LXMF's own custom-payload fields. No TrenchChat field numbers reach a foreign client |
+
 ### `restart` — Restart, persistence, ordering
 
 | ID | Peers | Actions | Expected result |
@@ -488,6 +502,26 @@ Reproducing it needed the environment to stop being unrealistically chatty, so
 testers now take a heartbeat interval (`POST /testers/{tag}/heartbeat`). Slowing
 one tester to a real cadence and wiping the other is what makes the window
 observable. Confirmed by disabling both fixes: the scenario fails in 64s.
+
+#### Why a direct message looks like nothing in particular
+
+TrenchChat's field numbers are its own and overlap LXMF's standard registry:
+`0x02` is `FIELD_TELEMETRY` there, `0x06` `FIELD_IMAGE`, `0x0C` `FIELD_TICKET`.
+Between TrenchChat peers that is harmless — both ends read them the same way —
+and it is wrong the moment a message reaches a client that follows the
+standard, which would read a display name as telemetry and a message id as an
+image.
+
+Channels, sync, invites and voice never leave TrenchChat, so they still use
+those numbers and moving them is deferred. A direct message is the exception:
+it is the one thing that can legitimately arrive at somebody else's client. So
+it carries none of them. The text rides in the ordinary content, an attachment
+in LXMF's own image field, and everything TrenchChat adds sits inside
+`FIELD_CUSTOM_TYPE`/`FIELD_CUSTOM_DATA`, which the standard sets aside for
+exactly this and every other client knows to ignore.
+
+interop3 is what keeps that true: it fails if any field number outside that set
+appears in a message a foreign client received.
 
 #### Why author keys travel with a synced batch
 

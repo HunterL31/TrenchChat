@@ -103,9 +103,15 @@ marshal into the main thread via signals, and the API layer marshals into asynci
 Full detail in `docs/direct-messages.md`. A conversation exists between two identities that each
 hold the other as an **accepted** friend (`friends.state`); both ends check it independently
 (`DirectMessageManager.may_dm`), so one-sided trust delivers nothing. Its address is
-`naming.dm_hash_for(a, b)` — derived from the pair, same width as a channel hash, and *recomputed*
-by the receiver from the sender it just authenticated, so a peer cannot inject into a conversation
-it is not half of. A conversation gets a `channels` row (`kind='dm'`) because `messages` references
+`naming.dm_hash_for(a, b)` — derived from the pair and never sent: the receiver derives it from the
+sender it just authenticated, so a peer cannot inject into a conversation it is not half of.
+
+A DM is a **plain LXMF message** — text in `content`, attachment in LXMF's `FIELD_IMAGE`, and
+TrenchChat's additions inside `FIELD_CUSTOM_TYPE`/`FIELD_CUSTOM_DATA` (`protocol.pack_dm_envelope`)
+— so Sideband and other LXMF clients can hold up the other half. It is the one message type that
+leaves the TrenchChat world; everything else still uses the field numbers in the registry below,
+which overlap LXMF's own and are deliberately left alone for now. Never add TrenchChat field
+numbers to a DM. A conversation gets a `channels` row (`kind='dm'`) because `messages` references
 one, and deliberately no `subscriptions` row: that absence is what keeps it out of sync, presence
 beacons and avatar broadcast, all of which enumerate `get_subscriptions()`.
 

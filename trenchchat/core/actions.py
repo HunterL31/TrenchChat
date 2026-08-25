@@ -345,27 +345,37 @@ def send_direct_message(direct_mgr, messaging, peer_hash_hex: str, content: str,
     )
 
 
-def dm_recipients(direct_mgr, conversation_hash_hex: str) -> list[str] | None:
+def dm_recipients(direct_mgr, conversation_hash_hex: str,
+                  trenchchat_only: bool = False) -> list[str] | None:
     """The delivery target set for a conversation: its other half, and nobody else.
 
     The counterpart of compute_channel_recipients, for the reaction broadcast
     path. None when the address is not a conversation we hold.
+
+    trenchchat_only returns an empty list for a peer running another LXMF
+    client: a reaction means nothing to one, and would arrive as an empty
+    message. The reaction is still recorded locally, it simply is not sent.
     """
     peer = direct_mgr.peer_for(conversation_hash_hex)
     if peer is None or not direct_mgr.may_dm(peer):
         return None
+    if trenchchat_only and not direct_mgr.peer_is_trenchchat(conversation_hash_hex):
+        return []
     return [peer]
 
 
 def conversation_recipients(storage, subscription_mgr, direct_mgr,
-                            channel_hash_hex: str, self_hash_hex: str) -> list[str]:
+                            channel_hash_hex: str, self_hash_hex: str,
+                            trenchchat_only: bool = False) -> list[str]:
     """Recipients for any address, conversation or channel.
 
     Lets a caller that does not know which kind it holds -- a reaction
-    broadcast, say -- ask once.
+    broadcast, say -- ask once. Pass trenchchat_only for traffic only
+    TrenchChat understands, so it is not sent to another LXMF client.
     """
     if direct_mgr is not None and direct_mgr.is_conversation(channel_hash_hex):
-        return dm_recipients(direct_mgr, channel_hash_hex) or []
+        return dm_recipients(direct_mgr, channel_hash_hex,
+                             trenchchat_only=trenchchat_only) or []
     return compute_channel_recipients(storage, subscription_mgr, channel_hash_hex,
                                       self_hash_hex)
 

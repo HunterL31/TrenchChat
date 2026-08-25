@@ -12,6 +12,7 @@ class DmConversation {
     required this.unread,
     required this.isOnline,
     required this.isFriend,
+    this.peerIsTrenchchat = false,
   });
 
   final String hash;
@@ -30,6 +31,11 @@ class DmConversation {
   /// can pass either way.
   final bool isFriend;
 
+  /// Whether the other end runs TrenchChat. A conversation works either way --
+  /// the wire format is plain LXMF -- but reactions and other TrenchChat-only
+  /// extras are not sent to a peer using a different client.
+  final bool peerIsTrenchchat;
+
   factory DmConversation.fromJson(Map<String, dynamic> json) => DmConversation(
         hash: json['hash'] as String,
         peerHash: json['peer_hash'] as String,
@@ -39,6 +45,7 @@ class DmConversation {
         unread: (json['unread'] as num?)?.toInt() ?? 0,
         isOnline: json['is_online'] as bool? ?? false,
         isFriend: json['is_friend'] as bool? ?? false,
+        peerIsTrenchchat: json['peer_is_trenchchat'] as bool? ?? false,
       );
 }
 

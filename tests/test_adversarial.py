@@ -58,6 +58,10 @@ from trenchchat.core import actions
 from trenchchat.core.invite import _sign, _signed_payload
 from trenchchat.core.messaging import _compute_message_id
 from trenchchat.core.naming import dm_hash_for
+from trenchchat.core.protocol import (
+    DM_ENVELOPE_TYPE, LXMF_FIELD_CUSTOM_DATA, LXMF_FIELD_CUSTOM_TYPE,
+    pack_dm_envelope,
+)
 from trenchchat.core.storage import FRIEND_PENDING_IN
 from trenchchat.core.permissions import (
     ALL_PERMISSIONS, FULL_SYNC, INVITE, KICK, MANAGE_CHANNEL, MANAGE_ROLES,
@@ -3419,6 +3423,13 @@ class TestDirectMessageGate:
 
     @staticmethod
     def _dm_lxm(sender, recipient, conversation_hash, content, ts=None):
+        """A direct message in the form a real TrenchChat client sends.
+
+        No conversation address on the wire -- the receiver derives it from the
+        sender it authenticated -- so everything TrenchChat adds rides in the
+        LXMF custom-payload envelope. conversation_hash is only what the author
+        signature is computed over.
+        """
         dest = RNS.Destination(
             recipient.identity.rns_identity, RNS.Destination.OUT,
             RNS.Destination.SINGLE, "lxmf", "delivery",
@@ -3428,12 +3439,13 @@ class TestDirectMessageGate:
         ts = time.time() if ts is None else ts
         msg_id = _compute_message_id(content, sender.identity.hash_hex, ts)
         lxm.fields = {
-            F_CHANNEL_HASH: bytes.fromhex(conversation_hash),
-            F_DISPLAY_NAME: "Mallory",
-            F_TIMESTAMP:    ts,
-            F_MESSAGE_ID:   msg_id,
-            F_AUTHOR_SIG:   sign_as(sender.identity.hash_hex, conversation_hash,
-                                    msg_id, ts, content),
+            LXMF_FIELD_CUSTOM_TYPE: DM_ENVELOPE_TYPE,
+            LXMF_FIELD_CUSTOM_DATA: pack_dm_envelope(
+                message_id=msg_id, timestamp=ts, display_name="Mallory",
+                reply_to=None, last_seen_id=None,
+                author_sig=sign_as(sender.identity.hash_hex, conversation_hash,
+                                   msg_id, ts, content),
+            ),
         }
         return lxm, msg_id
 
@@ -3493,12 +3505,17 @@ class TestDirectMessageGate:
         time.sleep(0.4)
         assert not bob.storage.message_exists(msg_id)
 
-    def test_a_message_addressed_to_someone_elses_conversation_is_dropped(
+    def test_a_conversation_cannot_be_addressed_by_the_sender_at_all(
             self, peer_factory):
-        """
-        Mallory is Bob's friend, but addresses the message to the conversation
-        between Bob and Carol -- so a client that believed the address would
-        file it under a conversation Mallory is not in.
+        """The address is derived, never accepted.
+
+        A direct message carries no conversation hash, so there is nothing to
+        aim somewhere it does not belong: whatever Mallory sends lands in the
+        conversation between Mallory and the recipient, and nowhere else. The
+        old shape of this attack -- naming Bob and Carol's conversation -- has
+        no way to be expressed on the wire any more, and a message that does
+        carry a channel hash is read as a channel message, where Mallory is
+        not a member.
         """
         mallory = peer_factory("mallory")
         bob = peer_factory("bob")
@@ -3508,11 +3525,21 @@ class TestDirectMessageGate:
         bob.friends_mgr.add_friend(carol.identity.hash_hex)
 
         foreign = dm_hash_for(bob.identity.hash_hex, carol.identity.hash_hex)
-        lxm, msg_id = self._dm_lxm(mallory, bob, foreign, "signed, Carol")
+        # Signed as though for Bob and Carol's conversation, and sent anyway.
+        lxm, _ = self._dm_lxm(mallory, bob, foreign, "signed, Carol")
         mallory.router.send(lxm)
 
         time.sleep(0.4)
-        assert not bob.storage.message_exists(msg_id)
+        assert bob.storage.get_messages(foreign) == [], \
+            "a message reached a conversation its sender is not half of"
+
+        # Naming it as a channel instead reaches nothing either.
+        channel_style, _ = self._dm_lxm(mallory, bob, foreign, "as a channel")
+        channel_style.fields[F_CHANNEL_HASH] = bytes.fromhex(foreign)
+        mallory.router.send(channel_style)
+
+        time.sleep(0.4)
+        assert bob.storage.get_messages(foreign) == []
 
     def test_a_forged_sender_cannot_deliver_a_direct_message(self, peer_factory):
         """
