@@ -314,6 +314,44 @@ CREATE TABLE IF NOT EXISTS dm_conversations (
     last_read_at       REAL NOT NULL DEFAULT 0,
     peer_is_trenchchat INTEGER NOT NULL DEFAULT 0
 );
+
+-- Nomad Network nodes seen on the mesh. node_hash is the announce's
+-- destination hash (what a page browser dials). display_name comes from
+-- unsigned announce app_data: presentation only, never authority.
+CREATE TABLE IF NOT EXISTS nomad_nodes (
+    node_hash    TEXT PRIMARY KEY,
+    display_name TEXT NOT NULL DEFAULT '',
+    first_seen   REAL NOT NULL,
+    last_seen    REAL NOT NULL
+);
+
+-- expires_at NULL means no page-declared lifetime (kept until LRU pruning);
+-- set, it comes from the page's #!c= header and the row dies at that time.
+CREATE TABLE IF NOT EXISTS nomad_page_cache (
+    node_hash  TEXT NOT NULL,
+    path       TEXT NOT NULL,
+    content    BLOB NOT NULL,
+    fetched_at REAL NOT NULL,
+    expires_at REAL,
+    PRIMARY KEY (node_hash, path)
+);
+
+CREATE TABLE IF NOT EXISTS nomad_file_cache (
+    node_hash  TEXT NOT NULL,
+    path       TEXT NOT NULL,
+    content    BLOB NOT NULL,
+    fetched_at REAL NOT NULL,
+    PRIMARY KEY (node_hash, path)
+);
+
+-- Local-only, like friends. Nothing here is ever sent to a peer.
+CREATE TABLE IF NOT EXISTS nomad_bookmarks (
+    node_hash TEXT NOT NULL,
+    path      TEXT NOT NULL,
+    label     TEXT NOT NULL DEFAULT '',
+    added_at  REAL NOT NULL,
+    PRIMARY KEY (node_hash, path)
+);
 """
 
 
@@ -444,6 +482,7 @@ class Storage:
         self._migrate_channel_kind()
         self._migrate_friend_state()
         self._migrate_dm_peer_kind()
+        self._migrate_nomad_page_expiry()
         # _scope() reads channels.server_hash, so this must run after
         # _migrate_servers() has ensured that column exists.
         self._repair_tenure_from_message_history()
@@ -602,6 +641,14 @@ class Storage:
         if not self._has_column("messages", "image_stripped"):
             self._conn.execute(
                 "ALTER TABLE messages ADD COLUMN image_stripped INTEGER NOT NULL DEFAULT 0"
+            )
+            self._conn.commit()
+
+    def _migrate_nomad_page_expiry(self):
+        """Add expires_at to nomad_page_cache for existing databases."""
+        if not self._has_column("nomad_page_cache", "expires_at"):
+            self._conn.execute(
+                "ALTER TABLE nomad_page_cache ADD COLUMN expires_at REAL"
             )
             self._conn.commit()
 
@@ -2254,3 +2301,125 @@ class Storage:
                 (conversation_hash,),
             )
         self._scope_cache.pop(conversation_hash, None)
+    # --- nomad nodes (page browsing) ---
+
+    def upsert_nomad_node(self, node_hash: str, display_name: str) -> None:
+        """Record a node announce. Refreshes presentation fields only."""
+        now = time.time()
+        with self._tx():
+            self._conn.execute("""
+                INSERT INTO nomad_nodes (node_hash, display_name, first_seen, last_seen)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(node_hash) DO UPDATE SET
+                    display_name=excluded.display_name,
+                    last_seen=excluded.last_seen
+            """, (node_hash, display_name, now, now))
+
+    def get_nomad_nodes(self) -> list[sqlite3.Row]:
+        return self._fetchall(
+            "SELECT * FROM nomad_nodes ORDER BY last_seen DESC")
+
+    def get_nomad_node(self, node_hash: str) -> sqlite3.Row | None:
+        return self._fetchone(
+            "SELECT * FROM nomad_nodes WHERE node_hash = ?", (node_hash,))
+
+    def prune_nomad_nodes(self, max_rows: int) -> None:
+        """Drop the longest-unheard nodes beyond max_rows."""
+        with self._tx():
+            self._conn.execute("""
+                DELETE FROM nomad_nodes WHERE node_hash NOT IN (
+                    SELECT node_hash FROM nomad_nodes
+                    ORDER BY last_seen DESC LIMIT ?)
+            """, (max_rows,))
+
+    def put_nomad_page(self, node_hash: str, path: str, content: bytes,
+                       expires_at: float | None = None) -> None:
+        with self._tx():
+            self._conn.execute("""
+                INSERT INTO nomad_page_cache
+                    (node_hash, path, content, fetched_at, expires_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(node_hash, path) DO UPDATE SET
+                    content=excluded.content,
+                    fetched_at=excluded.fetched_at,
+                    expires_at=excluded.expires_at
+            """, (node_hash, path, content, time.time(), expires_at))
+
+    def get_nomad_page(self, node_hash: str, path: str) -> sqlite3.Row | None:
+        """The cached page, honouring its declared lifetime: an expired row
+        is deleted and reported as not cached."""
+        row = self._fetchone(
+            "SELECT * FROM nomad_page_cache WHERE node_hash = ? AND path = ?",
+            (node_hash, path))
+        if row is None:
+            return None
+        if row["expires_at"] is not None and row["expires_at"] <= time.time():
+            with self._tx():
+                self._conn.execute(
+                    "DELETE FROM nomad_page_cache "
+                    "WHERE node_hash = ? AND path = ?", (node_hash, path))
+            return None
+        return row
+
+    def prune_nomad_pages(self, max_rows: int) -> None:
+        """Drop expired pages and the least recently fetched beyond max_rows."""
+        with self._tx():
+            self._conn.execute(
+                "DELETE FROM nomad_page_cache "
+                "WHERE expires_at IS NOT NULL AND expires_at <= ?",
+                (time.time(),))
+            self._conn.execute("""
+                DELETE FROM nomad_page_cache WHERE (node_hash, path) NOT IN (
+                    SELECT node_hash, path FROM nomad_page_cache
+                    ORDER BY fetched_at DESC LIMIT ?)
+            """, (max_rows,))
+
+    def put_nomad_file(self, node_hash: str, path: str, content: bytes) -> None:
+        with self._tx():
+            self._conn.execute("""
+                INSERT INTO nomad_file_cache (node_hash, path, content, fetched_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(node_hash, path) DO UPDATE SET
+                    content=excluded.content,
+                    fetched_at=excluded.fetched_at
+            """, (node_hash, path, content, time.time()))
+
+    def get_nomad_file(self, node_hash: str, path: str) -> sqlite3.Row | None:
+        return self._fetchone(
+            "SELECT * FROM nomad_file_cache WHERE node_hash = ? AND path = ?",
+            (node_hash, path))
+
+    def prune_nomad_files(self, max_bytes: int) -> None:
+        """Drop the least recently fetched files once the cache exceeds max_bytes."""
+        with self._tx():
+            rows = self._conn.execute("""
+                SELECT node_hash, path, LENGTH(content) AS size
+                FROM nomad_file_cache ORDER BY fetched_at DESC
+            """).fetchall()
+            total = 0
+            for row in rows:
+                total += row["size"]
+                if total > max_bytes:
+                    self._conn.execute(
+                        "DELETE FROM nomad_file_cache "
+                        "WHERE node_hash = ? AND path = ?",
+                        (row["node_hash"], row["path"]))
+
+    def get_nomad_bookmarks(self) -> list[sqlite3.Row]:
+        return self._fetchall(
+            "SELECT * FROM nomad_bookmarks ORDER BY label, node_hash")
+
+    def add_nomad_bookmark(self, node_hash: str, path: str, label: str) -> None:
+        with self._tx():
+            self._conn.execute("""
+                INSERT INTO nomad_bookmarks (node_hash, path, label, added_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(node_hash, path) DO UPDATE SET label=excluded.label
+            """, (node_hash, path, label, time.time()))
+
+    def remove_nomad_bookmark(self, node_hash: str, path: str) -> bool:
+        with self._tx():
+            cursor = self._conn.execute(
+                "DELETE FROM nomad_bookmarks WHERE node_hash = ? AND path = ?",
+                (node_hash, path))
+            return cursor.rowcount > 0

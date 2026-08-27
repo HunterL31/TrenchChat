@@ -553,6 +553,22 @@ a `LOG_WARNING`. `messages_rejected` already reaches the sync status, so
 surfacing "N held back, author unverifiable" is a UI change, not a protocol
 one.
 
+### `nomad` — Nomad Network page browsing and hosting
+
+A tester that enables hosting announces a `nomadnetwork.node` destination and
+serves its `nomad_pages` directory; a browser discovers it from the announce
+and fetches over a real RNS Link via `Link.request`. This is the layer
+pytest's `FakeNodeTransport` cannot touch: announce propagation, path
+resolution, link establishment, and the request/response transfer itself.
+The manual interop check — browsing a real pip `nomadnet` node and being
+browsed back by it — is documented in `scen_nomad.py` and not automated.
+
+| ID | Peers | Actions | Expected result |
+|---|---|---|---|
+| nomad1 | A,B | A enables hosting; B browses the node's index | ✅ B discovers the node from the announce and fetches the default `index.mu` in 0.5s. 4/4 runs |
+| nomad2 | A,B | A page and a 16 KB file added to A's directory; A rescans; B fetches both | ✅ Rescan serves the new paths; page and file each fetch in 0.5s and the file round-trips byte-identical. 4/4 runs |
+| nomad3 | A,B | B fetches once; A goes offline; B requests an uncached page; A returns; B fetches a new page | ⚠ **Confirmed.** The offline fetch never arrives and never hangs — the dial ladder gives up within its bounded backoff (browse accepted, nothing after 90s). After A returns, a fresh page fetch succeeds in 20.1s, tracking path re-resolution. Probe |
+
 ## The LoRa pass
 
 Every family re-run with `--link-profile lora_fast` (SF7, 5.5 kbps, 60±20ms, 1%
@@ -679,7 +695,7 @@ How to run it, when a scenario is the right tool, and how to add one live in
 
 ## Status
 
-All ten families built and run: **90 scenarios, 69 strict and 21 probes.**
+All eleven families built and run: **93 scenarios, 71 strict and 22 probes.**
 
 | Family | Scenarios | Result |
 |---|---|---|
@@ -693,8 +709,9 @@ All ten families built and run: **90 scenarios, 69 strict and 21 probes.**
 | `voice` — live group voice | 12 (9 strict, 3 probes) | All passing; voice4, voice5 and voice11 recorded gaps |
 | `api` — the API surface | 4 (3 strict, 1 probe) | All passing; api4 records the shared-token property |
 | `integrity` — message integrity | 4 (4 strict) | All passing; integrity2 found a real gap, now fixed and strict |
+| `nomad` — page browsing and hosting | 3 (2 strict, 1 probe) | All passing, 4/4 runs each; nomad3 confirmed bounded offline failure and recovery |
 
-**68 of 69 strict scenarios pass.** The one failure is a real defect, left
+**70 of 71 strict scenarios pass.** The one failure is a real defect, left
 strict and failing on purpose, so `--family sync` exits non-zero until it is
 resolved: sync11, intermittently (2 passes in 7). invite11 is now passing on
 the narrowed `kick` rule described above.

@@ -17,6 +17,7 @@ import 'api/models/invite.dart';
 import 'api/models/link_quality.dart';
 import 'api/models/member.dart';
 import 'api/models/message.dart';
+import 'api/models/nomad.dart';
 import 'api/models/permissions.dart';
 import 'api/models/server.dart';
 import 'api/models/settings.dart';
@@ -143,6 +144,18 @@ class AppState extends ChangeNotifier {
   /// query. Kept live on [DirectoryUpdatedEvent] so the invite picker reflects
   /// a peer's renamed self without a reload.
   List<DirectoryEntry> directory = [];
+
+  /// Nomad Network nodes heard on the mesh, keyed by node destination hash.
+  /// Loaded on first browse-tab open, kept live on [NomadNodeEvent].
+  final Map<String, NomadNode> nomadNodes = {};
+
+  /// Saved page bookmarks. Local-only, like [friends].
+  List<NomadBookmark> nomadBookmarks = [];
+
+  /// Live state of page/file fetches, keyed by fetch id and updated from
+  /// [NomadFetchEvent]s. The browser tab watches its own fetch id here;
+  /// terminal entries are removed once a consumer takes them.
+  final Map<String, NomadFetchStatus> nomadFetches = {};
 
   /// The saved per-section color theme. Empty means every section renders
   /// stock; the shell resolves it per region via SectionTheme.
@@ -384,6 +397,7 @@ class AppState extends ChangeNotifier {
     unawaited(loadFriends());
     unawaited(refreshEmoji());
     unawaited(refreshVoiceStatus());
+    if (nomadNodes.isNotEmpty) unawaited(loadNomadNodes());
   }
 
   Future<bool> sendMessage(String content,
@@ -755,6 +769,18 @@ class AppState extends ChangeNotifier {
     }
   }
 
+  Future<void> loadNomadNodes() async {
+    try {
+      final nodes = await api.getNomadNodes();
+      nomadNodes
+        ..clear()
+        ..addEntries(nodes.map((n) => MapEntry(n.nodeHash, n)));
+      notifyListeners();
+    } catch (e) {
+      _reportActionError(e);
+    }
+  }
+
   // --- friend requests ---
 
   Future<void> loadFriendRequests() async {
@@ -763,6 +789,48 @@ class AppState extends ChangeNotifier {
       notifyListeners();
     } catch (e) {
       _reportActionError(e);
+    }
+  }
+
+  Future<void> loadNomadBookmarks() async {
+    try {
+      nomadBookmarks = await api.getNomadBookmarks();
+      notifyListeners();
+    } catch (e) {
+      _reportActionError(e);
+    }
+  }
+
+  /// Starts a fetch for a nomad URL. Returns the fetch id to watch in
+  /// [nomadFetches], or null when the URL was rejected.
+  Future<String?> browseNomad(String url, {String? currentNode}) async {
+    try {
+      final result = await api.browseNomad(url, currentNode: currentNode);
+      if (!result.ok || result.fetchId == null) return null;
+      // On a warm link the WS done event can beat this continuation; an
+      // entry already present is fresher than "queued" and must survive.
+      nomadFetches.putIfAbsent(
+          result.fetchId!,
+          () => NomadFetchStatus(
+                nodeHash: result.nodeHash ?? '',
+                path: result.path ?? '',
+                status: 'queued',
+                progress: 0,
+              ));
+      notifyListeners();
+      return result.fetchId;
+    } catch (e) {
+      _reportActionError(e);
+      return null;
+    }
+  }
+
+  Future<NomadPage?> fetchCachedNomadPage(String nodeHash, String path) async {
+    try {
+      return await api.getNomadPage(nodeHash, path);
+    } catch (e) {
+      _reportActionError(e);
+      return null;
     }
   }
 
@@ -845,6 +913,23 @@ class AppState extends ChangeNotifier {
     }
   }
 
+  bool isNomadBookmarked(String nodeHash, String path) => nomadBookmarks
+      .any((b) => b.nodeHash == nodeHash && b.path == path);
+
+  Future<void> toggleNomadBookmark(
+      String nodeHash, String path, String label) async {
+    try {
+      if (isNomadBookmarked(nodeHash, path)) {
+        await api.removeNomadBookmark(nodeHash, path);
+      } else {
+        await api.addNomadBookmark(nodeHash, path, label);
+      }
+      await loadNomadBookmarks();
+    } catch (e) {
+      _reportActionError(e);
+    }
+  }
+
   Future<void> selectDm(String conversationHashHex) async {
     selectedDmHash = conversationHashHex;
     selectedChannelHash = conversationHashHex;
@@ -864,6 +949,32 @@ class AppState extends ChangeNotifier {
     } catch (e) {
       _reportActionError(e);
     }
+  }
+
+  /// The browser tab claims a finished fetch here; removing it keeps
+  /// [nomadFetches] from accumulating terminal entries.
+  NomadFetchStatus? takeNomadFetch(String fetchId) {
+    final status = nomadFetches[fetchId];
+    if (status != null && status.isTerminal) {
+      nomadFetches.remove(fetchId);
+    }
+    return status;
+  }
+
+  /// A nomad URL waiting for the browser tab to open it -- set when a link
+  /// is tapped outside the tab (a chat message). Claimed once with
+  /// [takePendingNomadUrl], the same take-style contract as [actionError].
+  String? pendingNomadUrl;
+
+  void openNomadUrl(String url) {
+    pendingNomadUrl = url;
+    notifyListeners();
+  }
+
+  String? takePendingNomadUrl() {
+    final url = pendingNomadUrl;
+    pendingNomadUrl = null;
+    return url;
   }
 
   /// The peer on the other side of a conversation, or null if it isn't one.
@@ -1386,6 +1497,37 @@ class AppState extends ChangeNotifier {
             notifyListeners();
           }
         }
+      case NomadNodeEvent(:final nodeHash, :final displayName):
+        final existing = nomadNodes[nodeHash];
+        final now = DateTime.now().millisecondsSinceEpoch / 1000.0;
+        nomadNodes[nodeHash] = NomadNode(
+          nodeHash: nodeHash,
+          displayName: displayName,
+          firstSeen: existing?.firstSeen ?? now,
+          lastSeen: now,
+        );
+        // A first-heard node may belong to a saved friend; re-fetching the
+        // list is what makes their page button appear live.
+        if (existing == null && friends.isNotEmpty) {
+          unawaited(loadFriends());
+        }
+        notifyListeners();
+      case NomadFetchEvent(
+          :final fetchId,
+          :final nodeHash,
+          :final path,
+          :final status,
+          :final progress,
+          :final reason
+        ):
+        nomadFetches[fetchId] = NomadFetchStatus(
+          nodeHash: nodeHash,
+          path: path,
+          status: status,
+          progress: progress,
+          reason: reason,
+        );
+        notifyListeners();
       case UiThemeEvent(:final spec):
         // An event that only says what is already in force is what this
         // client's own save just produced; adopting it again would rebuild

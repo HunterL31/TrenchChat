@@ -44,6 +44,7 @@ import scen_restart # noqa: F401,E402  (registers family restart)
 import scen_voice   # noqa: F401,E402  (registers family voice)
 import scen_api     # noqa: F401,E402  (registers family api)
 import scen_authorship  # noqa: F401,E402  (registers family integrity)
+import scen_nomad   # noqa: F401,E402  (registers family nomad)
 import scen_interop # noqa: F401,E402  (registers family interop)
 import scen_dm     # noqa: F401,E402  (registers family dm)
 

@@ -120,6 +120,42 @@ class PeerAnnounceHandler:
             RNS.log(f"TrenchChat: peer announce callback error: {e}", RNS.LOG_ERROR)
 
 
+class NodeAnnounceHandler:
+    """
+    Listens for Nomad Network node announces (nomadnetwork.node).
+
+    Fires on_node_discovered(node_hash_hex, display_name, interface).
+    node_hash_hex is the node's *destination* hash — what a page browser
+    dials — not the identity hash. app_data is the unsigned node name:
+    presentation only, never authority.
+    """
+
+    aspect_filter = "nomadnetwork.node"
+
+    def __init__(self, on_node_discovered):
+        self._callback = on_node_discovered
+
+    def received_announce(self, destination_hash: bytes,
+                          announced_identity: RNS.Identity,
+                          app_data: bytes,
+                          announce_packet_hash: bytes):
+        if announced_identity is None:
+            return
+        display_name = ""
+        if app_data:
+            try:
+                decoded = app_data.decode("utf-8", errors="replace")
+                display_name = "".join(
+                    c for c in decoded if c.isprintable())[:64]
+            except Exception:
+                pass
+        try:
+            iface = _receiving_interface_for(destination_hash)
+            self._callback(destination_hash.hex(), display_name, iface)
+        except Exception as e:
+            RNS.log(f"TrenchChat: node announce callback error: {e}", RNS.LOG_ERROR)
+
+
 class UserAnnounceHandler:
     """
     Listens for trenchchat.user announces from TrenchChat peers.

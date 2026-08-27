@@ -8,6 +8,7 @@ class Friend {
     required this.lastSeenAt,
     required this.isOnline,
     this.state = 'accepted',
+    this.nomadNodeHash,
   });
 
   final String identityHash;
@@ -27,6 +28,10 @@ class Friend {
   /// exchange direct messages; the others are a handshake in progress.
   final String state;
 
+  /// The nomad node this friend hosts, when one has been heard on the mesh.
+  /// Null means no known page.
+  final String? nomadNodeHash;
+
   factory Friend.fromJson(Map<String, dynamic> json) => Friend(
         identityHash: json['identity_hash'] as String,
         nickname: json['nickname'] as String? ?? '',
@@ -36,5 +41,6 @@ class Friend {
         lastSeenAt: (json['last_seen_at'] as num).toDouble(),
         isOnline: json['is_online'] as bool? ?? false,
         state: json['state'] as String? ?? 'accepted',
+        nomadNodeHash: json['nomad_node_hash'] as String?,
       );
 }

@@ -8,6 +8,7 @@ API over uvicorn. Launched by orchestrator.py via multiprocessing.
                      <bind_host> <page_origins>
 """
 
+import os
 import sys
 import os
 import threading
@@ -40,6 +41,15 @@ def run(tag: str, data_dir: str, display_name: str, role: str, listen_port: int,
         instance_name, enable_transport=enable_transport, link_bitrate=link_bitrate,
     )
     backend.write_identity_file()
+    if os.environ.get("TC_TESTENV_NOMAD_DEMO"):
+        # A seeding failure must not take the tester down with it.
+        try:
+            from nomad_demo import seed_demo_node
+            seed_demo_node(backend, display_name)
+        except Exception as e:
+            import RNS
+            RNS.log(f"TesterBackend: nomad demo seed failed: {e}",
+                    RNS.LOG_WARNING)
     # A tester announcing every 10s makes first contact instant, which is the
     # opposite of a real client's 15-minute cadence. Scenarios that need to
     # observe meeting a stranger slow one tester down through this.

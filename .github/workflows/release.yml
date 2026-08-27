@@ -1,15 +1,12 @@
 name: Build & Release
 
-# PR branches: run tests only, as a merge gate.
-# main (post-merge): run tests, bump version (tag only — no commit back), build, release.
-# The build/bump_version/release jobs are gated to the push event so the
-# expensive multi-OS installer build only runs once per merge, not on every
-# PR push.
-# A merge whose commit message contains "[skip release]" runs tests only:
-# no tag, no build, no release. Its commits roll into the next release that
-# does build, since the changelog and bump scan everything since the last tag.
-# workflow_dispatch: dry run from any branch — tests + installer builds with
-# version 0.0.0, uploaded as workflow artifacts; no tag, no release.
+# PR branches and push to main: tests only. Building and releasing never
+# happen automatically — they are opt-in via manual workflow_dispatch.
+# workflow_dispatch from main: bump version (tag only — no commit back),
+# build, and publish a GitHub Release.
+# workflow_dispatch from any other branch: dry run — tests + installer
+# builds with version 0.0.0, uploaded as workflow artifacts; no tag, no
+# release.
 on:
   push:
     branches:
@@ -63,7 +60,7 @@ jobs:
   # ---------------------------------------------------------------------------
   # bump_version — compute the next semver from git tags.
   #
-  # Only runs on push to main (i.e. after a PR merges):
+  # Only runs when manually triggered (workflow_dispatch) from main:
   #   - Creates and pushes a vX.Y.Z tag. The tag is the sole source of truth
   #     for the version — nothing is committed back to pyproject.toml.
   #
@@ -72,19 +69,14 @@ jobs:
   #   - If any commit since that tag contains "[major]", bump major.
   #   - If any commit contains "[patch]", bump patch only.
   #   - Otherwise bump minor and reset patch to 0.
-  #
-  # "[skip release]" in the merge commit (the pushed head commit) skips this
-  # job, and build/release — which need it — skip with it. Only the head
-  # commit is checked, not the whole range since the last tag: a skipped
-  # merge must not also suppress the next merge's release.
   # ---------------------------------------------------------------------------
   bump_version:
     name: Bump version & collect changelog
     runs-on: ubuntu-22.04
     needs: test
     if: >-
-      github.event_name == 'push' &&
-      !contains(github.event.head_commit.message, '[skip release]')
+      github.event_name == 'workflow_dispatch' &&
+      github.ref == 'refs/heads/main'
     permissions:
       contents: write
     outputs:
@@ -173,8 +165,9 @@ jobs:
   #
   # Each leg builds the Flutter client (web + this platform's desktop bundle),
   # freezes the backend with PyInstaller, stages the desktop bundle into the
-  # frozen output, then wraps it in the platform installer. Runs after a merge
-  # (real version from bump_version) or on workflow_dispatch (0.0.0 dry run).
+  # frozen output, then wraps it in the platform installer. Runs only on
+  # workflow_dispatch: real version from bump_version when dispatched from
+  # main, otherwise a 0.0.0 dry run.
   # ---------------------------------------------------------------------------
   build:
     name: Build (${{ matrix.os }})
@@ -326,12 +319,14 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # release — publish a GitHub Release from the three built installers.
-  # Push-to-main only: workflow_dispatch dry runs stop at the uploaded artifacts.
+  # Only runs when bump_version actually ran (workflow_dispatch from main);
+  # workflow_dispatch dry runs from other branches stop at the uploaded
+  # artifacts.
   # ---------------------------------------------------------------------------
   release:
     name: Publish GitHub Release
     needs: [bump_version, build]
-    if: github.event_name == 'push'
+    if: needs.bump_version.result == 'success'
     runs-on: ubuntu-22.04
     permissions:
       contents: write

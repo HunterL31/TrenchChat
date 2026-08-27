@@ -38,6 +38,10 @@ _DEFAULTS = {
         "bitrate": 16000,
         "vad_threshold_db": -45.0,
     },
+    "nomad_node": {
+        "enabled": False,
+        "node_name": "",
+    },
 }
 
 # Opus bitrate bounds. The upper bound keeps VBR peaks under the 255-byte
@@ -133,6 +137,10 @@ class Config:
             except (json.JSONDecodeError, OSError) as e:
                 RNS.log(f"TrenchChat: failed to load config from disk: {e}", RNS.LOG_WARNING)
         return {}
+
+    @property
+    def data_dir(self) -> Path:
+        return self._data_dir
 
     def save(self):
         atomic_write_bytes(
@@ -297,6 +305,26 @@ class Config:
     @voice_vad_threshold_db.setter
     def voice_vad_threshold_db(self, value: float):
         self._data["voice"]["vad_threshold_db"] = float(value)
+        self.save()
+
+    # --- nomad node hosting ---
+
+    @property
+    def nomad_hosting_enabled(self) -> bool:
+        return bool(self._data["nomad_node"]["enabled"])
+
+    @nomad_hosting_enabled.setter
+    def nomad_hosting_enabled(self, value: bool):
+        self._data["nomad_node"]["enabled"] = bool(value)
+        self.save()
+
+    @property
+    def nomad_node_name(self) -> str:
+        return str(self._data["nomad_node"]["node_name"])
+
+    @nomad_node_name.setter
+    def nomad_node_name(self, value: str):
+        self._data["nomad_node"]["node_name"] = str(value)
         self.save()
 
     # --- ui theme ---

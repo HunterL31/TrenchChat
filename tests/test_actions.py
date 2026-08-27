@@ -472,3 +472,82 @@ def test_set_display_name_reannounces_both_destinations():
         ("announce",),
         ("announce_user",),
     ]
+
+
+class _RecordingNodeBrowser:
+    """Records which fetch the browse action dispatched."""
+
+    def __init__(self):
+        self.calls: list = []
+
+    def fetch_page(self, node_hex, path):
+        self.calls.append(("page", node_hex, path))
+        return "fid1"
+
+    def fetch_file(self, node_hex, path):
+        self.calls.append(("file", node_hex, path))
+        return "fid2"
+
+
+def test_browse_nomad_url_dispatches_page_fetch():
+    browser = _RecordingNodeBrowser()
+    node = "ab" * 16
+    result = actions.browse_nomad_url(browser, f"{node}:/page/x.mu")
+    assert result == {"fetch_id": "fid1", "node_hash": node,
+                      "path": "/page/x.mu", "kind": "page"}
+    assert browser.calls == [("page", node, "/page/x.mu")]
+
+
+def test_browse_nomad_url_dispatches_file_fetch():
+    browser = _RecordingNodeBrowser()
+    node = "ab" * 16
+    result = actions.browse_nomad_url(browser, f"{node}:/file/data.bin")
+    assert result["kind"] == "file"
+    assert browser.calls == [("file", node, "/file/data.bin")]
+
+
+def test_browse_nomad_url_resolves_relative_against_current_node():
+    browser = _RecordingNodeBrowser()
+    node = "cd" * 16
+    result = actions.browse_nomad_url(browser, ":/page/x.mu",
+                                      current_node_hex=node)
+    assert result["node_hash"] == node
+
+
+def test_browse_nomad_url_relative_without_current_node_raises():
+    with pytest.raises(ValueError):
+        actions.browse_nomad_url(_RecordingNodeBrowser(), ":/page/x.mu")
+
+
+def test_browse_nomad_url_rejects_malformed():
+    with pytest.raises(ValueError):
+        actions.browse_nomad_url(_RecordingNodeBrowser(), "https://example.com")
+
+
+def test_set_node_hosting_rejects_blank_name_on_enable():
+    with pytest.raises(ValueError):
+        actions.set_node_hosting(_RecordingNodeBrowser(), enabled=True,
+                                 node_name="   ")
+
+
+def test_friends_with_pages_decorates_hosting_friends():
+    from trenchchat.core.node_browser import nomad_node_hash_for_identity
+
+    hosting_hex = "ab" * 16
+    quiet_hex = "cd" * 16
+    node_hex = nomad_node_hash_for_identity(hosting_hex)
+
+    class _Friends:
+        def get_friends(self):
+            return [{"identity_hash": hosting_hex},
+                    {"identity_hash": quiet_hex}]
+
+    class _Browser:
+        def node_for_identity(self, identity_hex):
+            if identity_hex == hosting_hex:
+                return {"node_hash": node_hex}
+            return None
+
+    decorated = actions.friends_with_pages(_Friends(), _Browser())
+    assert decorated[0]["nomad_node_hash"] == node_hex
+    assert decorated[1]["nomad_node_hash"] is None

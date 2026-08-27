@@ -18,6 +18,7 @@ import '../../clipboard_paste.dart';
 import '../../theme/section_theme.dart';
 import '../../theme/theme_spec.dart';
 import '../../theme/tokens.dart';
+import '../../widgets/emoji_text.dart' show nomadUrlRe;
 import '../dialogs/add_friend_dialog.dart';
 import '../dialogs/confirm_dialog.dart';
 import '../dialogs/emoji_picker_dialog.dart';
@@ -32,6 +33,7 @@ import '../dialogs/settings_dialog.dart';
 import '../dialogs/start_dm_dialog.dart';
 import 'channel_column.dart';
 import 'channel_header.dart';
+import 'browser_tab.dart';
 import 'compose_bar.dart';
 import 'friends_tab.dart';
 import 'iface_tab.dart';
@@ -203,10 +205,15 @@ class _MainWindowState extends State<MainWindow> {
     });
   }
 
-  /// Interim link action: url_launcher is not a dependency, so a tapped link
-  /// is copied to the clipboard rather than opened. Wire launchUrl here once
-  /// the dependency is added.
+  /// Nomad page links open in the NET tab; anything else is the interim
+  /// clipboard action (url_launcher is not a dependency -- wire launchUrl
+  /// here once it is).
   Future<void> _openLink(String url) async {
+    if (nomadUrlRe.matchAsPrefix(url) != null) {
+      setState(() => _tab = ChannelTab.browse);
+      widget.state.openNomadUrl(url);
+      return;
+    }
     await Clipboard.setData(ClipboardData(text: url));
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
@@ -444,7 +451,9 @@ class _MainWindowState extends State<MainWindow> {
                     child: switch (_tab) {
                       ChannelTab.map => MapTab(state: state),
                       ChannelTab.iface => IfaceTab(state: state),
-                      ChannelTab.friends => FriendsTab(state: state),
+                      ChannelTab.friends =>
+                        FriendsTab(state: state, onOpenNomadPage: _openLink),
+                      ChannelTab.browse => BrowserTab(state: state),
                       ChannelTab.chat => MessageList(
                             messages: messages,
                             meHashHex: state.meHashHex,
