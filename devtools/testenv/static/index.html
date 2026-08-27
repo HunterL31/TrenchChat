@@ -1083,9 +1083,17 @@ async function refreshFriends(tag) {
   const req = incoming[0];
   const more = incoming.length > 1 ? ` (+${incoming.length - 1} more)` : '';
   const who = escapeHtml(req.display_name || req.identity_hash.slice(0, 10));
-  // The note is text the peer wrote; it is shown, never acted on.
-  const note = req.note ? ` -- "${escapeHtml(req.note)}"` : '';
-  text.textContent = `${who} wants to be friends${note}${more}`;
+  // Both the note and a held message are text the peer wrote; shown, never
+  // acted on. A peer with no friend-request concept can only ask by messaging.
+  if (req.message_count) {
+    const kind = req.from_trenchchat ? '' : ' [LXMF]';
+    const held = req.message ? ` -- "${escapeHtml(req.message)}"` : '';
+    const rest = req.message_count > 1 ? ` (+${req.message_count - 1} held)` : '';
+    text.textContent = `${who}${kind} sent you a message${held}${rest}${more}`;
+  } else {
+    const note = req.note ? ` -- "${escapeHtml(req.note)}"` : '';
+    text.textContent = `${who} wants to be friends${note}${more}`;
+  }
   bar.classList.add('show');
   bar.dataset.peerHash = req.identity_hash;
 }

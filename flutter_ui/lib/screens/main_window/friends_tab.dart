@@ -73,7 +73,11 @@ class FriendsTab extends StatelessWidget {
           const SizedBox(height: 12),
           if (incoming.isNotEmpty) ...[
             _RequestBlock(
-              label: 'ASKING TO BE ADDED',
+              // A peer with no friend-request concept asks by messaging, so
+              // the heading says which happened rather than assuming.
+              label: incoming.every((r) => r.isMessageRequest)
+                  ? 'SENT YOU A MESSAGE'
+                  : 'ASKING TO BE ADDED',
               requests: incoming,
               trailing: (r) => Row(
                 mainAxisSize: MainAxisSize.min,
@@ -259,12 +263,45 @@ class _RequestBlock extends StatelessWidget {
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            Text(
-                              _requestLabel(r),
-                              overflow: TextOverflow.ellipsis,
-                              style: TextStyle(fontSize: 13, color: tc.textSecondary),
+                            Row(
+                              children: [
+                                Flexible(
+                                  child: Text(
+                                    _requestLabel(r),
+                                    overflow: TextOverflow.ellipsis,
+                                    style: TextStyle(
+                                        fontSize: 13, color: tc.textSecondary),
+                                  ),
+                                ),
+                                // A client with no friend-request concept can
+                                // only ask by messaging, so say which it was.
+                                if (r.isMessageRequest && !r.fromTrenchchat) ...[
+                                  const SizedBox(width: 6),
+                                  Text(
+                                    'LXMF',
+                                    style: TextStyle(
+                                      fontSize: TCType.textMicro,
+                                      color: tc.textTertiary,
+                                      letterSpacing: TCType.letterSpacingFor(
+                                          TCType.textMicro, TCType.trackingWide),
+                                    ),
+                                  ),
+                                ],
+                              ],
                             ),
-                            if (r.note.isNotEmpty)
+                            if (r.message != null && r.message!.isNotEmpty)
+                              Text(
+                                r.messageCount > 1
+                                    ? '${r.message}  (+${r.messageCount - 1} more)'
+                                    : r.message!,
+                                maxLines: 2,
+                                overflow: TextOverflow.ellipsis,
+                                style: TextStyle(
+                                  fontSize: TCType.textMicro,
+                                  color: tc.textTertiary,
+                                ),
+                              )
+                            else if (r.note.isNotEmpty)
                               Text(
                                 r.note,
                                 maxLines: 2,

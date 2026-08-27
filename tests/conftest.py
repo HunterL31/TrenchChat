@@ -25,6 +25,7 @@ import RNS
 import LXMF
 
 from trenchchat.config import Config
+from trenchchat.core import actions
 from trenchchat.core.identity import Identity
 from trenchchat.core.storage import Storage
 from trenchchat.core.channel import ChannelManager
@@ -279,6 +280,10 @@ def peer_factory(rns_instance, tmp_path):
         presence_mgr.add_presence_callback(friends_mgr.record_presence)
         direct_mgr = DirectMessageManager(identity, storage, friends_mgr, presence_mgr)
         messaging.set_direct_manager(direct_mgr)
+        friends_mgr.set_message_filer(
+            lambda peer_hex, _f=friends_mgr, _d=direct_mgr, _m=messaging:
+                actions.file_message_requests(_f, _d, _m, peer_hex)
+        )
         reaction_mgr.set_direct_manager(direct_mgr)
 
         voice_transport = FakeVoiceTransport(identity.hash_hex, voice_registry)

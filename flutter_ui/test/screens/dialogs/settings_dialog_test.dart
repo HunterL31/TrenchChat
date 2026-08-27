@@ -190,7 +190,7 @@ void main() {
   // Up to MAX_TRACKED_NODES are held at once and ordered nearest first, so
   // the pane lists only the nearest few and moves the rest behind a button.
   group('the propagation node list', () {
-    PropagationStatus _heard(int count) => PropagationStatus(
+    PropagationStatus heard(int count) => PropagationStatus(
           selected: 'node-0' * 5,
           pinned: '',
           nodes: [
@@ -206,7 +206,7 @@ void main() {
         );
 
     testWidgets('lists at most five nodes inline', (tester) async {
-      state.propagation = _heard(9);
+      state.propagation = heard(9);
 
       await open(tester);
       await scrollTo(tester, find.text('ALL 9 NODES'));
@@ -217,7 +217,7 @@ void main() {
 
     testWidgets('shows every node with no button when five or fewer',
         (tester) async {
-      state.propagation = _heard(4);
+      state.propagation = heard(4);
 
       await open(tester);
       await scrollTo(tester, find.text('COLLECT NOW'));
@@ -227,7 +227,7 @@ void main() {
     });
 
     testWidgets('the button opens the full list', (tester) async {
-      state.propagation = _heard(9);
+      state.propagation = heard(9);
       await open(tester);
       await scrollTo(tester, find.text('ALL 9 NODES'));
       await tester.ensureVisible(find.text('ALL 9 NODES'));

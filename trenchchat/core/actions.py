@@ -317,8 +317,38 @@ def send_friend_request(friends_mgr, peer_hash_hex: str, note: str = "",
 
 def accept_friend_request(friends_mgr, peer_hash_hex: str,
                           nickname: str = "") -> bool:
-    """False if that peer has not asked us."""
+    """False if that peer has not asked us.
+
+    Words the peer sent while unaccepted are filed by FriendsManager's message
+    filer, which every route to accepted goes through -- see
+    file_message_requests.
+    """
     return friends_mgr.accept_friend_request(peer_hash_hex, nickname=nickname)
+
+
+def file_message_requests(friends_mgr, direct_mgr, messaging,
+                          peer_hash_hex: str) -> int:
+    """Move a newly accepted peer's held messages into their conversation.
+
+    Wired into FriendsManager rather than called by each caller: a peer reaches
+    accepted through the handshake, through a plain add, and through asking
+    someone who had already asked them, and words left behind on any of those
+    routes would be invisible with no way to get them back.
+
+    Returns how many were filed.
+    """
+    held = friends_mgr.take_message_requests(peer_hash_hex)
+    if not held:
+        return 0
+    conversation = direct_mgr.open_conversation(peer_hash_hex)
+    if conversation is None:
+        return 0
+    if any(row["from_trenchchat"] for row in held):
+        direct_mgr.note_trenchchat_peer(peer_hash_hex)
+    for row in held:
+        messaging.store_held_message(
+            conversation, peer_hash_hex, row["body"], row["received_at"])
+    return len(held)
 
 
 def decline_friend_request(friends_mgr, peer_hash_hex: str) -> bool:

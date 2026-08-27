@@ -141,6 +141,22 @@ class TestFriendRequestEndpoints:
         res = client.get("/friends/requests", headers=AUTH)
         assert res.json()["incoming"][0]["identity_hash"] == PEER
 
+    def test_an_incoming_request_carries_any_words_the_peer_sent(
+            self, client, backend):
+        """A client with no handshake asks by messaging, so the same queue has
+        to describe both kinds."""
+        backend.friends_mgr.get_pending_requests.return_value = {
+            "incoming": [{
+                "identity_hash": PEER, "message": "is this thing on",
+                "message_count": 2, "from_trenchchat": False,
+            }],
+            "outgoing": [],
+        }
+        entry = client.get("/friends/requests", headers=AUTH).json()["incoming"][0]
+        assert entry["message"] == "is this thing on"
+        assert entry["message_count"] == 2
+        assert entry["from_trenchchat"] is False
+
 
 @needs_backend
 class TestPropagationEndpoints:

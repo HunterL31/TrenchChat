@@ -299,6 +299,25 @@ CREATE TABLE IF NOT EXISTS friends (
     state         TEXT NOT NULL DEFAULT 'accepted'
 );
 
+-- Words from someone we have not accepted, held until the user decides. A
+-- client with no friend-request concept -- Sideband, MeshChat, anything else
+-- speaking plain LXMF -- has no other way to reach a stranger, and dropping
+-- what it sends made TrenchChat unreachable from every one of them.
+--
+-- Bounded on body length, per sender, in total and by age, because unlike a
+-- friend request this arrives on the chat path, which carries no per-sender
+-- throttle by design. Holding a message grants nothing: the sender stays
+-- unaccepted until the user says otherwise.
+CREATE TABLE IF NOT EXISTS message_requests (
+    id              INTEGER PRIMARY KEY,
+    identity_hash   TEXT NOT NULL,
+    body            TEXT NOT NULL,
+    received_at     REAL NOT NULL,
+    from_trenchchat INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_message_requests_sender
+    ON message_requests(identity_hash, received_at);
+
 -- One row per direct-message conversation. conversation_hash is
 -- naming.dm_hash_for(self, peer) and doubles as the channels row it points at.
 --
@@ -2229,6 +2248,71 @@ class Storage:
                 "UPDATE friends SET last_seen_at = ? WHERE identity_hash = ?",
                 (seen_at, identity_hash),
             )
+
+    # --- message requests (words from someone not yet accepted) ---
+
+    def add_message_request(self, identity_hash: str, body: str,
+                            from_trenchchat: bool, *,
+                            max_per_sender: int, max_total: int) -> None:
+        """Hold one message from an unaccepted sender, oldest-first within bounds.
+
+        Both caps are applied here rather than by the caller so no path can add
+        a row without them: identities are free to mint, and this arrives on the
+        chat path, which carries no per-sender throttle.
+        """
+        with self._tx():
+            self._conn.execute(
+                "INSERT INTO message_requests "
+                "(identity_hash, body, received_at, from_trenchchat) "
+                "VALUES (?, ?, ?, ?)",
+                (identity_hash, body, time.time(), 1 if from_trenchchat else 0),
+            )
+            self._conn.execute(
+                "DELETE FROM message_requests WHERE identity_hash = ? AND id NOT IN ("
+                "  SELECT id FROM message_requests WHERE identity_hash = ? "
+                "  ORDER BY received_at DESC, id DESC LIMIT ?)",
+                (identity_hash, identity_hash, max_per_sender),
+            )
+            self._conn.execute(
+                "DELETE FROM message_requests WHERE id NOT IN ("
+                "  SELECT id FROM message_requests "
+                "  ORDER BY received_at DESC, id DESC LIMIT ?)",
+                (max_total,),
+            )
+
+    def get_message_requests(self, identity_hash: str | None = None) -> list[dict]:
+        """Held messages, oldest first — the order they should be filed in."""
+        if identity_hash is None:
+            rows = self._fetchall(
+                "SELECT * FROM message_requests ORDER BY received_at, id")
+        else:
+            rows = self._fetchall(
+                "SELECT * FROM message_requests WHERE identity_hash = ? "
+                "ORDER BY received_at, id",
+                (identity_hash,),
+            )
+        return [dict(r) for r in rows]
+
+    def count_message_requests(self, identity_hash: str) -> int:
+        row = self._fetchone(
+            "SELECT COUNT(*) AS n FROM message_requests WHERE identity_hash = ?",
+            (identity_hash,),
+        )
+        return row["n"] if row else 0
+
+    def clear_message_requests(self, identity_hash: str) -> None:
+        with self._tx():
+            self._conn.execute(
+                "DELETE FROM message_requests WHERE identity_hash = ?",
+                (identity_hash,),
+            )
+
+    def prune_message_requests(self, older_than: float) -> int:
+        """Drop everything held since before *older_than*. Returns how many went."""
+        with self._tx():
+            cur = self._conn.execute(
+                "DELETE FROM message_requests WHERE received_at < ?", (older_than,))
+        return cur.rowcount
 
     # --- direct message conversations ---
 

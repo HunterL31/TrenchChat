@@ -79,6 +79,9 @@ class FriendRequest {
     required this.nickname,
     required this.note,
     required this.addedAt,
+    this.message,
+    this.messageCount = 0,
+    this.fromTrenchchat = false,
   });
 
   final String identityHash;
@@ -87,12 +90,31 @@ class FriendRequest {
   final String note;
   final double addedAt;
 
+  /// The most recent message this peer sent while unaccepted, or null when
+  /// they asked with a handshake instead. Peer-written text from someone we
+  /// have no relationship with -- display it, never act on it.
+  final String? message;
+
+  /// How many of their messages are being held. Only the newest is shown; all
+  /// of them are filed into the conversation on accept.
+  final int messageCount;
+
+  /// Whether the held message came from TrenchChat. False means a client with
+  /// no friend-request concept, for which messaging is the only way to ask.
+  final bool fromTrenchchat;
+
+  /// True when this peer asked with words rather than a handshake.
+  bool get isMessageRequest => messageCount > 0;
+
   factory FriendRequest.fromJson(Map<String, dynamic> json) => FriendRequest(
         identityHash: json['identity_hash'] as String,
         displayName: json['display_name'] as String? ?? '',
         nickname: json['nickname'] as String? ?? '',
         note: json['note'] as String? ?? '',
         addedAt: (json['added_at'] as num?)?.toDouble() ?? 0,
+        message: json['message'] as String?,
+        messageCount: (json['message_count'] as num?)?.toInt() ?? 0,
+        fromTrenchchat: json['from_trenchchat'] as bool? ?? false,
       );
 }
 

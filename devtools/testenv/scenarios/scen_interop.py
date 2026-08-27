@@ -150,3 +150,54 @@ def f3(env):
         raise ScenarioFailure(
             f"a direct message carried non-standard LXMF fields: {intruders}")
     return {"conversation": conversation[:12], "fields": ours[0]["fields"]}
+
+
+@scenario("interop4", "A plain LXMF client can ask to be added by messaging",
+          peers="A")
+def f4(env):
+    """The only way in, for a client that has no friend request to send.
+
+    interop2 proves a stranger's message never reaches a conversation. This is
+    the other half of that: it must not vanish either, or a client speaking
+    only plain LXMF could never start a conversation with anyone who had not
+    already added it out of band -- and would be told it was delivered.
+    """
+    a, = env.peers("A")
+    stranger = peer_hash()
+    a.remove_friend(stranger)
+    a.decline_friend_request(stranger)
+
+    sent = bare_peer("send", "--to", a.hash, "--content", "is this thing on")
+    if not sent.get("sent"):
+        raise ScenarioFailure(f"the bare client could not send: {sent}")
+
+    wait_until(lambda: stranger in a.incoming_request_hashes(),
+               f"{a.tag} to hold the stranger's message as a request",
+               DISCOVERY_TIMEOUT)
+    request = next(r for r in a.friend_requests()["incoming"]
+                   if r["identity_hash"] == stranger)
+    if request["message"] != "is this thing on":
+        raise ScenarioFailure(
+            f"the held request lost its words: {request['message']!r}")
+    if request["from_trenchchat"]:
+        raise ScenarioFailure("a bare LXMF client was mistaken for TrenchChat")
+
+    # Holding it grants nothing until the user says so.
+    if stranger in a.friend_hashes():
+        raise ScenarioFailure("a held message made the sender a friend")
+    if any(d["peer_hash"] == stranger for d in a.dms()):
+        raise ScenarioFailure("a held message opened a conversation")
+
+    if not a.accept_friend_request(stranger):
+        raise ScenarioFailure("the held request could not be accepted")
+
+    wait_until(lambda: any(d["peer_hash"] == stranger for d in a.dms()),
+               f"{a.tag} to open the conversation on accepting", DISCOVERY_TIMEOUT)
+    conversation = next(d for d in a.dms() if d["peer_hash"] == stranger)
+    if "is this thing on" not in a.contents(conversation["hash"]):
+        raise ScenarioFailure(
+            "the words that asked to be heard were not filed into the "
+            f"conversation: {a.contents(conversation['hash'])}")
+    if stranger in a.incoming_request_hashes():
+        raise ScenarioFailure("the request survived being accepted")
+    return {"peer": stranger[:12]}

@@ -42,6 +42,7 @@ Scenarios covered:
 
 import struct
 import time
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import msgpack
@@ -62,7 +63,11 @@ from trenchchat.core.protocol import (
     DM_ENVELOPE_TYPE, LXMF_FIELD_CUSTOM_DATA, LXMF_FIELD_CUSTOM_TYPE,
     pack_dm_envelope,
 )
-from trenchchat.core.storage import FRIEND_PENDING_IN
+from trenchchat.core.friends import (
+    MAX_HELD_MESSAGES, MAX_HELD_PER_SENDER, MAX_PENDING_FRIEND_REQUESTS,
+    MAX_REQUEST_BODY_CHARS,
+)
+from trenchchat.core.storage import FRIEND_PENDING_IN, FRIEND_PENDING_OUT
 from trenchchat.core.permissions import (
     ALL_PERMISSIONS, FULL_SYNC, INVITE, KICK, MANAGE_CHANNEL, MANAGE_ROLES,
     PRESET_OPEN, PRESET_PRIVATE, ROLE_ADMIN, ROLE_MEMBER, ROLE_OWNER, SEND_MESSAGE,
@@ -3699,3 +3704,110 @@ class TestAdversarialTrustAnchorUnion:
 
         assert bob.invite_mgr._accept_document(doc, ch_hash) is True
         assert bob.storage.is_member(ch_hash, bob.identity.hash_hex) is True
+
+
+class TestAdversarialMessageRequests:
+    """Holding a stranger's message is a queue anyone can write to.
+
+    A direct message carries no F_MSG_TYPE, which deliberately keeps it out of
+    the router's per-sender control throttle -- so nothing upstream paces this
+    path and every bound has to hold here.
+    """
+
+    @staticmethod
+    def _stranger_says(sender, recipient, text):
+        """Drive a message straight at the receiving core, gate and all."""
+        recipient.messaging._on_direct_message(
+            SimpleNamespace(content=text, timestamp=time.time()),
+            {}, sender.identity.hash_hex,
+        )
+
+    def test_a_held_message_grants_nothing(self, peer_factory):
+        alice = peer_factory("alice")
+        mallory = peer_factory("mallory")
+
+        self._stranger_says(mallory, alice, "let me in")
+
+        mallory_hex = mallory.identity.hash_hex
+        assert alice.friends_mgr.is_friend(mallory_hex) is False
+        assert alice.direct_mgr.may_dm(mallory_hex) is False
+        assert alice.direct_mgr.open_conversation(mallory_hex) is None
+        assert alice.direct_mgr.conversation_hash(mallory_hex) is not None
+        assert not alice.storage.is_dm(
+            alice.direct_mgr.conversation_hash(mallory_hex))
+
+    def test_one_sender_cannot_fill_the_queue(self, peer_factory):
+        alice = peer_factory("alice")
+        mallory = peer_factory("mallory")
+
+        for i in range(MAX_HELD_PER_SENDER * 5):
+            self._stranger_says(mallory, alice, f"spam {i}")
+
+        held = alice.storage.get_message_requests(mallory.identity.hash_hex)
+        assert len(held) == MAX_HELD_PER_SENDER
+        # Oldest-first eviction: the newest are what survive.
+        assert held[-1]["body"] == f"spam {MAX_HELD_PER_SENDER * 5 - 1}"
+
+    def test_a_long_body_is_trimmed_rather_than_stored_whole(self, peer_factory):
+        alice = peer_factory("alice")
+        mallory = peer_factory("mallory")
+
+        self._stranger_says(mallory, alice, "x" * (MAX_REQUEST_BODY_CHARS * 4))
+
+        held = alice.storage.get_message_requests(mallory.identity.hash_hex)
+        assert len(held[0]["body"]) == MAX_REQUEST_BODY_CHARS
+
+    def test_rotating_identities_cannot_grow_the_queue(self, peer_factory):
+        """Identities are free to mint, so the pending queue is the bound that
+        actually holds -- the per-sender one only paces a single peer."""
+        alice = peer_factory("alice")
+        senders = [SimpleNamespace(identity=SimpleNamespace(
+            hash_hex=f"{i:032x}")) for i in range(MAX_PENDING_FRIEND_REQUESTS + 20)]
+
+        for s in senders:
+            self._stranger_says(s, alice, "hello")
+
+        assert alice.storage.count_friends_in_state(FRIEND_PENDING_IN) \
+            <= MAX_PENDING_FRIEND_REQUESTS
+        assert len(alice.storage.get_message_requests()) <= MAX_HELD_MESSAGES
+
+    def test_an_evicted_sender_leaves_no_orphaned_messages(self, peer_factory):
+        alice = peer_factory("alice")
+        first = SimpleNamespace(identity=SimpleNamespace(hash_hex="ab" * 16))
+        self._stranger_says(first, alice, "the oldest")
+
+        for i in range(MAX_PENDING_FRIEND_REQUESTS + 5):
+            self._stranger_says(
+                SimpleNamespace(identity=SimpleNamespace(hash_hex=f"{i:032x}")),
+                alice, "later")
+
+        assert alice.storage.get_friend_state(first.identity.hash_hex) is None
+        assert alice.storage.get_message_requests(first.identity.hash_hex) == []
+
+    def test_an_accepted_friend_is_never_diverted_into_the_queue(self, peer_factory):
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+        alice.friends_mgr.add_friend(bob.identity.hash_hex)
+
+        self._stranger_says(bob, alice, "a real message")
+
+        assert alice.storage.get_message_requests(bob.identity.hash_hex) == []
+        conversation = alice.direct_mgr.conversation_hash(bob.identity.hash_hex)
+        assert [m["content"] for m in alice.storage.get_messages(conversation)] \
+            == ["a real message"]
+
+    def test_a_peer_we_asked_does_not_open_a_second_queue(self, peer_factory):
+        """Their answer belongs to the request we sent, and accepting a message
+        request from them would take the handshake's decision out of the user's
+        hands."""
+        alice = peer_factory("alice")
+        mallory = peer_factory("mallory")
+        alice.storage.upsert_friend(mallory.identity.hash_hex, "", "",
+                                    FRIEND_PENDING_OUT)
+
+        self._stranger_says(mallory, alice, "just accept already")
+
+        assert alice.storage.get_message_requests(mallory.identity.hash_hex) == []
+        assert alice.storage.get_friend_state(mallory.identity.hash_hex) \
+            == FRIEND_PENDING_OUT
+        assert alice.friends_mgr.is_friend(mallory.identity.hash_hex) is False

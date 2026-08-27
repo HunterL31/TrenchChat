@@ -729,19 +729,12 @@ class Messaging:
         difference is only how much of the message is described. A TrenchChat
         peer sends an envelope with the id, timestamp and author signature it
         computed; anything else sends words, and those are filled in here.
+
+        From anyone else the message is held as a request rather than stored --
+        see FriendsManager.hold_message_request. The gate is unchanged; what
+        changed is that being refused is no longer the same as never happening.
         """
         if self._direct_mgr is None:
-            return
-        if not self._direct_mgr.may_dm(sender_hex):
-            RNS.log(
-                f"TrenchChat [dm]: dropping a direct message from "
-                f"{sender_hex[:12]}… — not an accepted friend",
-                RNS.LOG_WARNING,
-            )
-            return
-
-        conversation = self._direct_mgr.open_conversation(sender_hex)
-        if conversation is None:
             return
 
         content = message.content or ""
@@ -749,6 +742,21 @@ class Messaging:
             content = content.decode(errors="replace")
 
         envelope = unpack_dm_envelope(fields)
+
+        if not self._direct_mgr.may_dm(sender_hex):
+            # Held rather than dropped: a client that speaks only plain LXMF
+            # cannot send a friend request, so silence here left it no way to
+            # reach anyone who had not already added it. The attachment is
+            # deliberately not carried over -- an unknown sender's binary
+            # payload is the half worth refusing.
+            self._direct_mgr.hold_message_request(
+                sender_hex, content, from_trenchchat=envelope is not None)
+            return
+
+        conversation = self._direct_mgr.open_conversation(sender_hex)
+        if conversation is None:
+            return
+
         if envelope is not None:
             self._direct_mgr.note_trenchchat_peer(sender_hex)
             values = self._dm_values_from_envelope(envelope, content, sender_hex)
@@ -805,6 +813,29 @@ class Messaging:
             "last_seen_id": self._text(envelope.get("last_seen_id")) or None,
             "author_sig":   author_sig if isinstance(author_sig, bytes) else None,
         }
+
+    def store_held_message(self, conversation_hash_hex: str, sender_hex: str,
+                           content: str, timestamp: float) -> None:
+        """File a message that was held while its sender was not yet accepted.
+
+        The words are already ours -- LXMF authenticated the sender before they
+        were held -- so this is the plain-client path with the arrival time it
+        was held at, and no author signature to require of a peer that may not
+        implement one.
+        """
+        self._insert_chat_message(
+            channel_hash_hex=conversation_hash_hex,
+            sender_hex=sender_hex,
+            sender_name="",
+            timestamp=timestamp,
+            msg_id=_compute_message_id(content, sender_hex, timestamp),
+            content=content,
+            reply_to=None,
+            last_seen_id=None,
+            image_data=None,
+            author_sig=None,
+            require_author_signature=False,
+        )
 
     def _dm_values_from_plain(self, message: LXMF.LXMessage, content: str,
                               sender_hex: str) -> dict:

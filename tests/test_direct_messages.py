@@ -327,3 +327,119 @@ def test_reactions_work_inside_a_conversation(peer_factory):
         lambda: any(r["reactor_hash"] == b.identity.hash_hex
                     for r in a.storage.get_reactions(sent))
     )
+
+
+# ---------------------------------------------------------------------------
+# message requests -- words from someone not yet accepted
+# ---------------------------------------------------------------------------
+
+def test_a_message_from_a_stranger_is_held_not_dropped(peer_factory):
+    """A client that speaks only plain LXMF cannot send a friend request, so
+    dropping what it sends left it no way to reach anyone at all."""
+    a = peer_factory("alice")
+    b = peer_factory("bob")
+    a.friends_mgr.add_friend(b.identity.hash_hex)  # one-sided: b holds nothing
+
+    a.messaging.send_direct(b.identity.hash_hex, "is this thing on")
+
+    assert wait_for(lambda: bool(
+        b.storage.get_message_requests(a.identity.hash_hex)))
+    held = b.storage.get_message_requests(a.identity.hash_hex)
+    assert [h["body"] for h in held] == ["is this thing on"]
+    assert b.storage.get_friend_state(a.identity.hash_hex) == FRIEND_PENDING_IN
+    assert b.friends_mgr.is_friend(a.identity.hash_hex) is False
+
+
+def test_a_held_message_shows_up_as_an_incoming_request(peer_factory):
+    a = peer_factory("alice")
+    b = peer_factory("bob")
+    a.friends_mgr.add_friend(b.identity.hash_hex)
+
+    a.messaging.send_direct(b.identity.hash_hex, "knock knock")
+    assert wait_for(lambda: bool(b.friends_mgr.get_pending_requests()["incoming"]))
+
+    entry = b.friends_mgr.get_pending_requests()["incoming"][0]
+    assert entry["identity_hash"] == a.identity.hash_hex
+    assert entry["message"] == "knock knock"
+    assert entry["message_count"] == 1
+    assert entry["from_trenchchat"] is True
+
+
+def test_accepting_files_every_held_message_in_order(peer_factory):
+    a = peer_factory("alice")
+    b = peer_factory("bob")
+    a.friends_mgr.add_friend(b.identity.hash_hex)
+
+    for text in ("first", "second"):
+        a.messaging.send_direct(b.identity.hash_hex, text)
+    assert wait_for(lambda: len(
+        b.storage.get_message_requests(a.identity.hash_hex)) == 2)
+
+    assert actions.accept_friend_request(b.friends_mgr, a.identity.hash_hex) is True
+
+    conversation = b.direct_mgr.conversation_hash(a.identity.hash_hex)
+    bodies = [m["content"] for m in b.storage.get_messages(conversation)]
+    assert bodies == ["first", "second"]
+    assert b.storage.get_message_requests(a.identity.hash_hex) == []
+
+
+def test_declining_drops_the_held_messages(peer_factory):
+    a = peer_factory("alice")
+    b = peer_factory("bob")
+    a.friends_mgr.add_friend(b.identity.hash_hex)
+    a.messaging.send_direct(b.identity.hash_hex, "hello")
+    assert wait_for(lambda: bool(
+        b.storage.get_message_requests(a.identity.hash_hex)))
+
+    assert b.friends_mgr.decline_friend_request(a.identity.hash_hex) is True
+
+    assert b.storage.get_message_requests(a.identity.hash_hex) == []
+    assert b.storage.get_friend_state(a.identity.hash_hex) is None
+
+
+def test_adding_a_stranger_directly_also_files_their_messages(peer_factory):
+    """Every route to accepted files them, not only the handshake -- words left
+    behind on one would be invisible with no way to get them back."""
+    a = peer_factory("alice")
+    b = peer_factory("bob")
+    a.friends_mgr.add_friend(b.identity.hash_hex)
+    a.messaging.send_direct(b.identity.hash_hex, "let me in")
+    assert wait_for(lambda: bool(
+        b.storage.get_message_requests(a.identity.hash_hex)))
+
+    assert b.friends_mgr.add_friend(a.identity.hash_hex) is True
+
+    conversation = b.direct_mgr.conversation_hash(a.identity.hash_hex)
+    assert [m["content"] for m in b.storage.get_messages(conversation)] == ["let me in"]
+
+
+def test_an_attachment_from_a_stranger_is_not_held(peer_factory):
+    a = peer_factory("alice")
+    b = peer_factory("bob")
+    a.friends_mgr.add_friend(b.identity.hash_hex)
+
+    a.messaging.send_direct(b.identity.hash_hex, "look at this",
+                            image_data=b"\xff\xd8\xff" + b"\x00" * 64)
+    assert wait_for(lambda: bool(
+        b.storage.get_message_requests(a.identity.hash_hex)))
+
+    actions.accept_friend_request(b.friends_mgr, a.identity.hash_hex)
+    conversation = b.direct_mgr.conversation_hash(a.identity.hash_hex)
+    stored = b.storage.get_messages(conversation)
+    assert [m["content"] for m in stored] == ["look at this"]
+    assert all(not m["image_data"] for m in stored)
+
+
+def test_a_reply_reaches_a_peer_accepted_from_a_message_request(peer_factory):
+    a = peer_factory("alice")
+    b = peer_factory("bob")
+    a.friends_mgr.add_friend(b.identity.hash_hex)
+    a.messaging.send_direct(b.identity.hash_hex, "hi")
+    assert wait_for(lambda: bool(
+        b.storage.get_message_requests(a.identity.hash_hex)))
+
+    actions.accept_friend_request(b.friends_mgr, a.identity.hash_hex)
+    reply = b.messaging.send_direct(a.identity.hash_hex, "hi back")
+
+    assert reply is not None
+    assert wait_for(lambda: a.storage.message_exists(reply))

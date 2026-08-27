@@ -25,7 +25,7 @@ from PyQt6.QtCore import QTimer
 from PyQt6.QtWidgets import QApplication
 
 from trenchchat.config import Config
-from trenchchat.core import lockbox
+from trenchchat.core import actions, lockbox
 from trenchchat.core.avatar import AvatarManager
 from trenchchat.core.direct import DirectMessageManager
 from trenchchat.core.friends import FriendsManager
@@ -133,6 +133,10 @@ def main():
     presence_mgr.add_presence_callback(friends_mgr.record_presence)
     direct_mgr = DirectMessageManager(identity, storage, friends_mgr, presence_mgr)
     messaging.set_direct_manager(direct_mgr)
+    friends_mgr.set_message_filer(
+        lambda peer_hex: actions.file_message_requests(
+            friends_mgr, direct_mgr, messaging, peer_hex)
+    )
     messaging.set_presence_manager(presence_mgr)
     reaction_mgr.set_direct_manager(direct_mgr)
     propagation_nodes = PropagationNodes(config, router)

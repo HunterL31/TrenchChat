@@ -85,6 +85,63 @@ has never identified itself as TrenchChat (`dm_conversations.peer_is_trenchchat`
 set when an envelope arrives). Both clients show such a conversation as `LXMF`
 so the difference is visible rather than mysterious.
 
+## Being refused is not the same as never happening
+
+A message from someone not accepted used to be dropped where the gate refused
+it, with a log line and nothing else. That was wrong in a way the gate is not.
+
+LXMF proves a delivery packet as it arrives, before the message is assembled
+and long before any of this runs, so the sender's client showed it delivered.
+And a client speaking only plain LXMF cannot send `MT_FRIEND_REQUEST` -- that is
+a TrenchChat control message -- so messaging *is* its only way to ask. Between
+the two, a Sideband or MeshChat user could never start a conversation with
+anyone who had not already added them out of band, and would be told it worked.
+That undoes most of what carrying conversations in the standard format is for.
+
+So a refused message is now **held** rather than dropped: the sender gets a
+`pending_in` row and their words are stored, appearing wherever a friend request
+already appears. Accepting files every held message into the conversation in the
+order it arrived; declining drops both.
+
+**The gate is unchanged, and holding grants nothing.** `may_dm` still answers
+for an accepted friend and nobody else, on both sides, and a held message
+creates no conversation, no membership and no way to reply. Only the user
+accepting changes that -- which is the same decision a friend request asks for,
+reached by the only route some clients have.
+
+What is deliberately *not* held:
+
+- **The attachment.** An unknown sender's binary payload is the surface worth
+  refusing and the expensive half to store, so `FIELD_IMAGE` is not read on this
+  path. Their words arrive; their picture does not.
+- **Reactions.** `_may_react` refuses a conversation we are not half of, and a
+  reaction from a stranger means nothing without the message it points at.
+
+**Nothing is sent back.** A TrenchChat peer could not have messaged us at all
+without already holding us as accepted -- its own outbound gate saw to that --
+so accepting completes the friendship with nothing to announce. A plain LXMF
+client has no friendship to be told about, and an `MT_FRIEND_ACCEPT` would reach
+it as an empty message. Either side learns the same way: a reply arrives, or it
+does not.
+
+### Why the bounds are the whole design
+
+A direct message carries no `F_MSG_TYPE`, which keeps it out of the router's
+per-sender control throttle -- deliberately, because a limit there would drop
+conversation. Friend requests are paced by that throttle; **this queue is not
+paced by anything**, so every bound is enforced where the row is written
+(`friends.py`, `storage.add_message_request`):
+
+- the body is capped at `MAX_REQUEST_BODY_CHARS`, matched to the friend-request
+  note so peer-written text is capped identically wherever it is shown;
+- `MAX_HELD_PER_SENDER` messages per sender, newest kept;
+- `MAX_HELD_MESSAGES` in total, and `MESSAGE_REQUEST_TTL_SECS` swept on write;
+- the `pending_in` rows themselves stay under `MAX_PENDING_FRIEND_REQUESTS`,
+  evicted oldest-first, taking their held messages with them.
+
+Identities are free to mint, so the total caps are the ones that hold; the
+per-sender one only paces a single honest peer.
+
 ## Offline delivery, and what the node sees
 
 A channel survives an absent member because any other member can serve the gap
@@ -122,7 +179,9 @@ Consequences worth stating plainly:
 
 - **No "friend removed" message.** Removing a friend is local. Telling the peer
   they were dropped leaks more than it helps; they find out when their messages
-  stop being accepted, which is also what a network failure looks like.
+  stop being accepted, which is also what a network failure looks like. What
+  they will see is their next message held as a request again, which says the
+  same thing without asserting it.
 - **A declined request can be re-sent.** Declining deletes the row rather than
   remembering the refusal, so the same peer can ask again. A durable blocklist
   is the fix if this is ever abused; the pending queue is capped

@@ -54,6 +54,20 @@ FRIEND_SEEN_WRITE_INTERVAL_SECS = 60
 # router's per-sender control throttle bounds one peer; this bounds the rest.
 MAX_PENDING_FRIEND_REQUESTS = 64
 
+# A message from someone not yet accepted is held rather than dropped, so a
+# client with no friend-request concept can still ask to be heard. Everything
+# below bounds that, and all of it is load-bearing: a direct message carries no
+# F_MSG_TYPE, which deliberately keeps it out of the router's per-sender
+# control throttle, so this path has no rate limit of its own.
+#
+# Matched to the friend-request note so peer-written text is capped identically
+# wherever it is shown.
+MAX_REQUEST_BODY_CHARS = MAX_FRIEND_NOTE_CHARS
+# A stranger gets to say a little, not to fill a screen. Oldest-first.
+MAX_HELD_PER_SENDER = 3
+MAX_HELD_MESSAGES = 128
+MESSAGE_REQUEST_TTL_SECS = 30 * 24 * 3600
+
 
 class FriendsManager:
     """Saved contacts, the friend-request handshake, and durable last-seen."""
@@ -78,6 +92,8 @@ class FriendsManager:
         self._callbacks: list = []
         self._request_callbacks: list = []
         self._retry = ControlRetryQueue("friends")
+        # Set by the frontend wiring; see set_message_filer.
+        self._message_filer = None
 
         if router is not None:
             router.add_delivery_callback(self._on_lxmf_message)
@@ -100,8 +116,9 @@ class FriendsManager:
         self._storage.upsert_friend(identity_hash_hex, nickname, note, FRIEND_ACCEPTED)
         with self._lock:
             self._friend_hashes.add(identity_hash_hex)
-        if was_pending_in:
+        if was_pending_in and self._asked_us(identity_hash_hex):
             self._send(identity_hash_hex, MT_FRIEND_ACCEPT)
+        self._file_held_messages(identity_hash_hex)
         self._fire_callbacks(identity_hash_hex)
         return True
 
@@ -130,6 +147,7 @@ class FriendsManager:
         if self._storage.get_friend(identity_hash_hex) is None:
             return False
         self._storage.delete_friend(identity_hash_hex)
+        self._storage.clear_message_requests(identity_hash_hex)
         with self._lock:
             self._friend_hashes.discard(identity_hash_hex)
             self._last_write.pop(identity_hash_hex, None)
@@ -189,16 +207,102 @@ class FriendsManager:
         )
         with self._lock:
             self._friend_hashes.add(identity_hash_hex)
-        self._send(identity_hash_hex, MT_FRIEND_ACCEPT)
+        if self._asked_us(identity_hash_hex):
+            self._send(identity_hash_hex, MT_FRIEND_ACCEPT)
+        self._file_held_messages(identity_hash_hex)
         self._fire_callbacks(identity_hash_hex)
         return True
+
+    def hold_message_request(self, identity_hash_hex: str, body: str,
+                             from_trenchchat: bool = False) -> bool:
+        """Hold words from someone we have not accepted, for the user to judge.
+
+        A client that speaks only plain LXMF cannot send MT_FRIEND_REQUEST, so
+        without this it has no way to reach a stranger at all -- its message was
+        dropped and nobody was ever told. Holding it grants nothing: the sender
+        stays unaccepted, and only the user accepting changes that.
+
+        False when there is nothing to hold: our own hash, a malformed one, a
+        sender already accepted (their message is a real one), or one we have an
+        outstanding request to -- their answer belongs to that request, not to a
+        second queue.
+        """
+        if not self._is_valid_hash(identity_hash_hex) \
+                or identity_hash_hex == self._self_hex:
+            return False
+        state = self._storage.get_friend_state(identity_hash_hex)
+        if state in (FRIEND_ACCEPTED, FRIEND_PENDING_OUT):
+            return False
+
+        self._storage.prune_message_requests(time.time() - MESSAGE_REQUEST_TTL_SECS)
+        if state != FRIEND_PENDING_IN:
+            self._evict_oldest_pending()
+            self._storage.upsert_friend(identity_hash_hex, "", "", FRIEND_PENDING_IN)
+
+        self._storage.add_message_request(
+            identity_hash_hex, (body or "")[:MAX_REQUEST_BODY_CHARS],
+            from_trenchchat,
+            max_per_sender=MAX_HELD_PER_SENDER, max_total=MAX_HELD_MESSAGES,
+        )
+        RNS.log(
+            f"TrenchChat [friends]: holding a message from {identity_hash_hex[:12]}… "
+            f"— not an accepted friend, waiting on the user",
+            RNS.LOG_NOTICE,
+        )
+        self._fire_callbacks(identity_hash_hex)
+        return True
+
+    def set_message_filer(self, filer) -> None:
+        """Attach what files a newly accepted peer's held messages.
+
+        A plain callable taking the peer's hash, not a manager: filing needs
+        Messaging, and friends.py must not depend on it. Optional -- without
+        one, held messages simply stay held.
+        """
+        self._message_filer = filer
+
+    def _file_held_messages(self, identity_hash_hex: str) -> None:
+        if self._message_filer is None:
+            return
+        try:
+            self._message_filer(identity_hash_hex)
+        except Exception as e:
+            RNS.log(f"TrenchChat [friends]: could not file held messages for "
+                    f"{identity_hash_hex[:12]}…: {e}", RNS.LOG_ERROR)
+
+    def take_message_requests(self, identity_hash_hex: str) -> list[dict]:
+        """Held messages from a peer, oldest first, cleared as they are handed over.
+
+        Called once a peer is accepted, so the words that asked for that
+        acceptance end up in the conversation they were always meant for.
+        """
+        held = self._storage.get_message_requests(identity_hash_hex)
+        if held:
+            self._storage.clear_message_requests(identity_hash_hex)
+        return held
+
+    def _asked_us(self, identity_hash_hex: str) -> bool:
+        """Whether this peer sent a handshake rather than only words.
+
+        A peer holding messages it sent us, none of them from TrenchChat, has no
+        handshake to answer -- and an empty control message is all its client
+        would show. A TrenchChat peer could not have messaged us at all without
+        already accepting us, so an accept back is at worst redundant.
+        """
+        held = self._storage.get_message_requests(identity_hash_hex)
+        return not held or any(h["from_trenchchat"] for h in held)
 
     def decline_friend_request(self, identity_hash_hex: str) -> bool:
         """Refuse a request we received. False if there is no request from them."""
         if self._storage.get_friend_state(identity_hash_hex) != FRIEND_PENDING_IN:
             return False
+        held = self._storage.get_message_requests(identity_hash_hex)
         self._storage.delete_friend(identity_hash_hex)
-        self._send(identity_hash_hex, MT_FRIEND_DECLINE)
+        self._storage.clear_message_requests(identity_hash_hex)
+        # A peer that only ever sent words has no handshake to decline, and
+        # telling it we refused would be the one thing it hears from us.
+        if not held or any(h["from_trenchchat"] for h in held):
+            self._send(identity_hash_hex, MT_FRIEND_DECLINE)
         self._fire_callbacks(identity_hash_hex)
         return True
 
@@ -211,13 +315,30 @@ class FriendsManager:
         return True
 
     def get_pending_requests(self) -> dict[str, list[dict]]:
-        """Requests waiting on someone: 'incoming' on us, 'outgoing' on them."""
+        """Requests waiting on someone: 'incoming' on us, 'outgoing' on them.
+
+        An incoming entry also carries any words the peer sent while unaccepted
+        -- that is how a client with no handshake asks, so it is the same queue.
+        """
         return {
-            "incoming": [self._present(r)
+            "incoming": [self._with_held_message(self._present(r))
                          for r in self._storage.get_friends_in_state(FRIEND_PENDING_IN)],
             "outgoing": [self._present(r)
                          for r in self._storage.get_friends_in_state(FRIEND_PENDING_OUT)],
         }
+
+    def _with_held_message(self, entry: dict) -> dict:
+        """Add the most recent held message, its count, and who sent it.
+
+        The body is peer-written text shown before the user has agreed to
+        anything, capped on the way in at MAX_REQUEST_BODY_CHARS; a client
+        renders it as text and never as anything else.
+        """
+        held = self._storage.get_message_requests(entry["identity_hash"])
+        entry["message"] = held[-1]["body"] if held else None
+        entry["message_count"] = len(held)
+        entry["from_trenchchat"] = bool(held and held[-1]["from_trenchchat"])
+        return entry
 
     def flush_pending(self, dest_hex: str) -> int:
         """Re-send handshake messages held while this peer had no known path."""
@@ -361,6 +482,7 @@ class FriendsManager:
             if oldest is None:
                 return
             self._storage.delete_friend(oldest)
+            self._storage.clear_message_requests(oldest)
             RNS.log(
                 f"TrenchChat [friends]: dropped the oldest pending request "
                 f"({oldest[:12]}…) — queue full",

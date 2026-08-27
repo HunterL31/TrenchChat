@@ -436,6 +436,32 @@ asked is ignored outright (`FriendsManager._handle_accept`), so the direct-
 message gate is never one unsolicited control message away from anybody —
 `tests/test_adversarial.py::TestDirectMessageGate` pins this.
 
+### 0a-bis. Messages from unaccepted senders are held, on a path with no throttle
+
+A direct message from someone not accepted is no longer dropped: it is held as a
+message request, because a client speaking only plain LXMF cannot send
+`MT_FRIEND_REQUEST` and so had no way to reach anyone at all. See
+`docs/direct-messages.md` for why that mattered.
+
+The surface this adds is the same shape as 0a, with one difference that matters:
+**a direct message carries no `F_MSG_TYPE`, so it is deliberately exempt from
+the router's per-sender control throttle** — a limit there would drop
+conversation. Friend requests are paced by that throttle and by
+`MAX_PENDING_FRIEND_REQUESTS`; this queue has only the caps, so all of them are
+enforced where the row is written rather than by any caller:
+`MAX_REQUEST_BODY_CHARS` on the body, `MAX_HELD_PER_SENDER` per sender,
+`MAX_HELD_MESSAGES` in total, `MESSAGE_REQUEST_TTL_SECS` by age, and the
+`pending_in` cap above them, evicted oldest-first and taking held messages with
+it. `tests/test_adversarial.py::TestAdversarialMessageRequests` pins each one,
+including under rotating identities.
+
+Attachments are not held at all, so nothing from an unaccepted sender is stored
+that a person did not choose to receive as text. Holding grants nothing: the
+sender stays unaccepted, no conversation exists, and no reply can pass until the
+user accepts — the same property 0a records for a request.
+
+The missing throttle is therefore deliberate and compensated, not an oversight.
+
 ### 0b. A propagation node learns who talks to whom
 
 Direct messages to an offline friend go through an LXMF propagation node,

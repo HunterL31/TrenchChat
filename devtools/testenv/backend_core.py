@@ -20,7 +20,7 @@ from pathlib import Path
 import RNS
 
 from trenchchat.config import DATA_DIR, Config
-from trenchchat.core import lockbox
+from trenchchat.core import actions, lockbox
 from trenchchat.core.bandwidth import SAMPLE_INTERVAL_SECS, BandwidthMonitor
 from trenchchat.core.connectivity import LinkWatcher
 from trenchchat.core.sync import SYNC_RETRY_SECS
@@ -267,6 +267,10 @@ class Backend:
         self.direct_mgr = DirectMessageManager(self.identity, self.storage,
                                                self.friends_mgr, self.presence_mgr)
         self.messaging.set_direct_manager(self.direct_mgr)
+        self.friends_mgr.set_message_filer(
+            lambda peer_hex: actions.file_message_requests(
+                self.friends_mgr, self.direct_mgr, self.messaging, peer_hex)
+        )
         self.messaging.set_presence_manager(self.presence_mgr)
         self.reaction_mgr.set_direct_manager(self.direct_mgr)
         # Answers a peer the first time we hear them: our own re-announce is

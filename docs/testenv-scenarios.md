@@ -324,6 +324,7 @@ to itself.
 | interop1 | A + bare client | The bare client sends a plain LXMF message to a tester holding it as a friend | ✅ **5s.** Lands as an ordinary direct message, and the conversation is correctly marked as *not* TrenchChat |
 | interop2 | A + bare client | The same message with the friendship removed | ✅ **19s.** Refused. Sending without the envelope is exactly what an attacker would do, since that is the half carrying a signature — it buys nothing, because the gate reads the identity LXMF authenticated |
 | interop3 | A + bare client | A tester sends a direct message; the bare client reports what it received | ✅ **48s.** The text arrives in the ordinary content, and the only fields present are `0xFB`/`0xFC` — LXMF's own custom-payload fields. No TrenchChat field numbers reach a foreign client |
+| interop4 | A + bare client | The bare LXMF client messages A, which has **not** added it; A accepts | ✅ **Was a real gap.** The message used to be dropped where the gate refused it — with LXMF having already proved the packet, so the sender was told it was delivered — and a client that cannot send `MT_FRIEND_REQUEST` had no other way to ask. It is now held as a request carrying its text, grants nothing until accepted, and is filed into the conversation on accept. Fails without the fix (64s). 5/5 runs, 3–5s |
 
 ### `restart` — Restart, persistence, ordering
 
@@ -638,6 +639,7 @@ Everything the matrix turned up, across all ten families.
 | **A held membership was unreachable from the Flutter client** — a document for a scope with no anchor is parked for the user to confirm and surfaced with a null token, which `api.py` called `.hex()` on. That raised inside the manager's callback guard, so the entry *and* its event were lost, and no endpoint exposed the held document anyway | Fixed: held documents ride the invite list under a null token, accept and decline branch on it exactly as the Qt client does, and the held metadata now carries its scope kind so a server confirms as a server rather than a phantom channel. Tests in `tests/test_api_invites.py` |
 | **A membership document was delivered exactly once**, and the queue holding one for an unreachable peer is in memory — so a peer that missed the only copy stayed a member on every other node and a stranger on its own, recoverable only by a fresh invite | Fixed: hearing a peer re-sends the current document for any scope they are a member of, behind a per-(scope, peer) cooldown matched to the announce interval. Documents are version-ordered, so a peer already current ignores it. invite20 fails without it |
 | **The equal-version tiebreak compared against a sentinel** — it re-derives the *stored* document's signer rather than trusting its signature map, but rebuilt that document without `joined_at`, `departed` or `channels`. The payload no longer matched the signature, nothing validated, and the `0xff…` fallback lost every tie — so any equal-version document from a trusted signer was re-applied over the one already held | Fixed: every signed field is carried across, present-or-absent as stored. Latent while equal-version documents were rare; the membership resync made them routine and servers4 went 0/5. 5/5 after the fix. Regression tests in `tests/test_invites.py` |
+| **A message from an unaccepted sender vanished** — dropped where the gate refused it, while LXMF had already proved the packet, so the sender's client showed it delivered. A client speaking only plain LXMF cannot send `MT_FRIEND_REQUEST`, so messaging was its only way to ask and it had no way at all | Fixed: the message is held as a request carrying its text, shown wherever a friend request is, and filed into the conversation on accept. The gate is untouched — holding grants nothing. Bounded where the row is written, because this path is deliberately exempt from the router's control throttle. interop4 fails without it; `tests/test_adversarial.py::TestAdversarialMessageRequests` pins the bounds |
 | **Rejections were silent** — `_validate_document` returned `None` with no log for a failed signature or an unrecallable signer, and the auto-join block aborted without one for a name mismatch or a missing channel name. From outside, a rejected document is indistinguishable from one never sent | Fixed: each of those paths logs a warning naming the scope and the reason |
 
 ### Open
@@ -706,7 +708,7 @@ How to run it, when a scenario is the right tool, and how to add one live in
 
 ## Status
 
-All eleven families built and run: **97 scenarios, 75 strict and 22 probes.**
+All twelve families built and run: **98 scenarios, 76 strict and 22 probes.**
 
 | Family | Scenarios | Result |
 |---|---|---|
@@ -721,8 +723,9 @@ All eleven families built and run: **97 scenarios, 75 strict and 22 probes.**
 | `api` — the API surface | 4 (3 strict, 1 probe) | All passing; api4 records the shared-token property |
 | `integrity` — message integrity | 4 (4 strict) | All passing; integrity2 found a real gap, now fixed and strict |
 | `nomad` — page browsing and hosting | 3 (2 strict, 1 probe) | All passing, 4/4 runs each; nomad3 confirmed bounded offline failure and recovery |
+| `interop` — direct messages with other LXMF clients | 4 (4 strict) | All passing against a real bare RNS+LXMF client; interop4 found a real gap, 5/5 after the fix |
 
-**74 of 75 strict scenarios pass.** The one failure is a real defect, left
+**75 of 76 strict scenarios pass.** The one failure is a real defect, left
 strict and failing on purpose, so `--family sync` exits non-zero until it is
 resolved: sync11, intermittently (2 passes in 7). invite11 is now passing on
 the narrowed `kick` rule described above.
