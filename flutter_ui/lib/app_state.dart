@@ -1461,6 +1461,8 @@ class AppState extends ChangeNotifier {
         _scheduleReactionRefresh(channelHash);
       case ChannelJoinedEvent():
         unawaited(_applyChannelJoined());
+      case ServerJoinedEvent():
+        unawaited(_applyChannelJoined());
       case ChannelDiscoveredEvent():
         unawaited(refreshDiscoveredChannels());
       case InviteReceivedEvent():
@@ -1556,9 +1558,9 @@ class AppState extends ChangeNotifier {
     }
   }
 
-  /// A channel was joined (accepted invite, or a join that completed on the
-  /// backend) -- refetch the server and channel lists so it appears without a
-  /// full reload.
+  /// A channel or server was joined (accepted invite, or a join that completed
+  /// on the backend) -- refetch the server and channel lists so it appears
+  /// without a full reload.
   Future<void> _applyChannelJoined() async {
     try {
       await _reloadServersAndChannels();

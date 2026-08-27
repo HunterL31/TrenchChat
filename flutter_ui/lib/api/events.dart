@@ -42,6 +42,11 @@ sealed class TcEvent {
           json['channel_hash'] as String,
           json['channel_name'] as String,
         );
+      case 'server_joined':
+        return ServerJoinedEvent(
+          json['server_hash'] as String,
+          json['server_name'] as String? ?? '',
+        );
       case 'channel_discovered':
         return ChannelDiscoveredEvent(
           json['channel_hash'] as String,
@@ -160,6 +165,15 @@ class ChannelJoinedEvent extends TcEvent {
   const ChannelJoinedEvent(this.channelHash, this.channelName);
   final String channelHash;
   final String channelName;
+}
+
+/// A server was joined. Servers carry no subscription, so a server whose
+/// channels were already known -- or that has none yet -- produces no
+/// ChannelJoinedEvent and would otherwise never reach the sidebar.
+class ServerJoinedEvent extends TcEvent {
+  const ServerJoinedEvent(this.serverHash, this.serverName);
+  final String serverHash;
+  final String serverName;
 }
 
 /// A standalone public channel was heard via a real-time announce but not

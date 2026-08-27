@@ -971,7 +971,8 @@ function connectWs(tag) {
     } else if (msg.type === 'invite_received') {
       toast(`Tester ${tag}: invite received for #${msg.channel_name}`);
       refreshInvites(tag);
-    } else if (msg.type === 'channel_joined' || msg.type === 'member_list_updated') {
+    } else if (msg.type === 'channel_joined' || msg.type === 'server_joined' ||
+               msg.type === 'member_list_updated') {
       refreshChannels(tag);
       if (msg.channel_hash === state[tag].activeChannel) {
         renderMessages(tag);

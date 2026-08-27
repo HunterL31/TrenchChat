@@ -18,12 +18,24 @@ PendingInvite _invite() => PendingInvite(
       scopeKind: 'channel',
     );
 
-Widget _harness(AppState state) {
+/// An admin added us directly: the signed membership record is already held,
+/// so there is no token and nothing to expire.
+PendingInvite _heldMembership() => const PendingInvite(
+      channelHashHex: _channelHash,
+      channelName: 'ops',
+      expiry: 0,
+      adminHex: _adminHash,
+      scopeKind: 'channel',
+      hasToken: false,
+    );
+
+Widget _harness(AppState state, {PendingInvite? invite}) {
   return MaterialApp(
     home: Scaffold(
       body: Builder(
         builder: (context) => ElevatedButton(
-          onPressed: () => showIncomingInviteDialog(context, state, _invite()),
+          onPressed: () =>
+              showIncomingInviteDialog(context, state, invite ?? _invite()),
           child: const Text('open'),
         ),
       ),
@@ -46,8 +58,8 @@ void main() {
     state.dispose();
   });
 
-  Future<void> open(WidgetTester tester) async {
-    await tester.pumpWidget(_harness(state));
+  Future<void> open(WidgetTester tester, {PendingInvite? invite}) async {
+    await tester.pumpWidget(_harness(state, invite: invite));
     await tester.tap(find.text('open'));
     await tester.pumpAndSettle();
   }
@@ -75,5 +87,14 @@ void main() {
       backend.requests.where((r) => r.path.endsWith('/decline')),
       hasLength(1),
     );
+  });
+
+  testWidgets('a held membership is offered without an expiry', (tester) async {
+    state.pendingInvites = [_heldMembership()];
+
+    await open(tester, invite: _heldMembership());
+
+    expect(find.textContaining('EXPIRED'), findsNothing);
+    expect(find.textContaining('AWAITING YOUR CONFIRMATION'), findsOneWidget);
   });
 }

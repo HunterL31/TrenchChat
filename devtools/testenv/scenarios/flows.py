@@ -119,11 +119,19 @@ def offer_invite(inviter, invitee, channel_hash: str) -> None:
 
 
 def invite_and_accept(inviter, invitee, channel_hash: str) -> None:
-    """Invite a peer and wait until the inviter's roster shows them as a member."""
+    """Invite a peer and wait until both ends agree they joined.
+
+    Waiting on the inviter's roster alone returned before the invitee had
+    anything at all, which is how a whole class of "admitted everywhere but
+    their own client" defects went unseen: the invitee's own membership is the
+    half that actually reaches their sidebar.
+    """
     offer_invite(inviter, invitee, channel_hash)
     invitee.accept_invite(channel_hash)
     wait_until(lambda: invitee.hash in roster(inviter, channel_hash),
                f"{inviter.tag} to admit {invitee.tag}", INVITE_TIMEOUT)
+    wait_until(lambda: invitee.hash in roster(invitee, channel_hash),
+               f"{invitee.tag} to hold their own membership", INVITE_TIMEOUT)
 
 
 def invite_only_channel(owner, invitees, name: str, permissions=None) -> str:

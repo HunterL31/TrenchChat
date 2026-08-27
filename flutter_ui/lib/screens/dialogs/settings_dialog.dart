@@ -15,6 +15,11 @@ import '../../widgets/tc_dialog.dart';
 import '../../widgets/tc_text_field.dart';
 import 'appearance_dialog.dart';
 import 'pin_dialogs.dart';
+import 'propagation_nodes_dialog.dart';
+
+/// How many propagation nodes the settings pane lists inline before the
+/// rest move behind a button.
+const int _nodePreviewCount = 5;
 
 Future<void> showSettingsDialog(BuildContext context, AppState state) {
   return showTcDialog<void>(
@@ -116,8 +121,10 @@ class _SettingsDialogContentState extends State<_SettingsDialogContent> {
     Navigator.pop(context);
   }
 
-  /// The node in use, the nodes heard on the mesh, and the controls to pin
-  /// one or hand the choice back to the mesh.
+  /// The node in use, the nearest few heard on the mesh, and the controls to
+  /// pin one or hand the choice back to the mesh. Up to MAX_TRACKED_NODES are
+  /// held at once and they are ordered nearest first, so the rest go behind a
+  /// button rather than pushing the rest of this pane off the screen.
   Widget _outboundNodeControls(TCSectionColors tc) {
     final propagation = widget.state.propagation;
     final selected = propagation.selected;
@@ -132,25 +139,15 @@ class _SettingsDialogContentState extends State<_SettingsDialogContent> {
                   '${propagation.pinned.isEmpty ? " (chosen automatically)" : " (pinned)"}',
           style: TextStyle(fontSize: TCType.textBodySm, color: tc.textPrimary),
         ),
-        for (final node in propagation.nodes)
+        for (final node in propagation.nodes.take(_nodePreviewCount))
+          PropagationNodeRow(state: widget.state, node: node),
+        if (propagation.nodes.length > _nodePreviewCount)
           Padding(
             padding: const EdgeInsets.only(top: 6),
-            child: Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    '${_shortHash(node.hash)} — ${node.hops} hop'
-                    '${node.hops == 1 ? "" : "s"}',
-                    style: TextStyle(
-                        fontSize: TCType.textBodySm, color: tc.textSecondary),
-                  ),
-                ),
-                if (propagation.pinned != node.hash)
-                  TcGhostButton(
-                    label: 'USE',
-                    onPressed: () => widget.state.pinPropagationNode(node.hash),
-                  ),
-              ],
+            child: TcGhostButton(
+              label: 'ALL ${propagation.nodes.length} NODES',
+              onPressed: () =>
+                  showPropagationNodesDialog(context, widget.state),
             ),
           ),
         const SizedBox(height: 8),
@@ -174,8 +171,7 @@ class _SettingsDialogContentState extends State<_SettingsDialogContent> {
     );
   }
 
-  static String _shortHash(String hex) =>
-      hex.length <= 12 ? hex : '${hex.substring(0, 6)}…${hex.substring(hex.length - 6)}';
+  static String _shortHash(String hex) => shortNodeHash(hex);
 
   @override
   Widget build(BuildContext context) {

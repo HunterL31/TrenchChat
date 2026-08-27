@@ -120,4 +120,26 @@ void main() {
     expect(state.channelByHash('hash-beta'), isNotNull);
     expect(state.standaloneChannels.map((c) => c.hash), ['hash-alpha', 'hash-beta']);
   });
+
+  // A server carries no subscription, so joining one whose channels were
+  // already known produces no channel_joined at all -- and the sidebar stayed
+  // blank until a reconnect or a full reload.
+  test('a server_joined event adds the joined server to the sidebar', () async {
+    _seedTopLevelLists(backend, channels: <Object>[], servers: [
+      {'hash': 'srv-1', 'name': 'mesh-crew', 'description': '',
+       'creator_hash': 'c', 'created_at': 0},
+    ]);
+    backend.routes['GET /servers/srv-1/channels'] =
+        [_channelJson('general', serverHash: 'srv-1')];
+    backend.routes['GET /servers/srv-1/members'] = <Object>[];
+    backend.routes['GET /servers/srv-1/my_permissions'] = {'invite': false};
+
+    expect(state.servers, isEmpty);
+
+    state.applyEvent(const ServerJoinedEvent('srv-1', 'mesh-crew'));
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+
+    expect(state.servers.map((s) => s.hash), ['srv-1']);
+    expect(state.channelsByServer['srv-1']!.map((c) => c.hash), ['hash-general']);
+  });
 }

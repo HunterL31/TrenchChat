@@ -321,6 +321,7 @@ class MainWindow(QMainWindow):
         messaging.add_message_callback(self._on_new_message)
         invite_mgr.add_invite_callback(self._on_incoming_invite)
         invite_mgr.add_channel_joined_callback(self._on_channel_joined)
+        invite_mgr.add_server_joined_callback(self._on_server_joined)
         invite_mgr.add_member_list_callback(self._on_member_list_updated)
         channel_mgr.add_channel_discovered_callback(self._on_channel_discovered)
         presence_mgr.add_presence_callback(self._on_presence_changed)
@@ -361,6 +362,7 @@ class MainWindow(QMainWindow):
                 self._reaction_mgr.flush_pending_emoji(peer_hex)
             self._subscription_mgr.flush_pending(peer_hex)
             self._invite_mgr.flush_pending(peer_hex)
+            self._invite_mgr.resync_membership(peer_hex)
             if self._friends_mgr is not None:
                 self._friends_mgr.flush_pending(peer_hex)
             self._peer_announced.emit()
@@ -1029,6 +1031,12 @@ class MainWindow(QMainWindow):
             self._channel_views[channel_hash_hex].on_new_message(message_id)
         else:
             self._refresh_channel_list()
+
+    def _on_server_joined(self, server_hash_hex: str, server_name: str):
+        # A server has no subscription, so the joined-channel signal never
+        # fires for one whose channels we already knew. Reuse it: both ask the
+        # sidebar to rebuild, and it reads servers and channels together.
+        self._channel_joined.emit(server_hash_hex, server_name)
 
     def _on_channel_joined(self, channel_hash_hex: str, channel_name: str):
         """Called from background thread when auto-joined a channel via invite."""

@@ -10,7 +10,9 @@ The contract under test:
 """
 
 import time
+from types import SimpleNamespace
 
+import msgpack
 import pytest
 
 from tests.helpers import wait_for, wait_for_member
@@ -440,3 +442,145 @@ class TestServerCollapse:
         w = self._window_stub(alice.storage, alice.server_mgr, collapsed={s})
         w._refresh_channel_list()
         assert w._rows[0][2] == 3
+
+
+class TestInvitingToAChannelInvitesToItsServer:
+    """A channel inside a server has no membership of its own.
+
+    publish_member_list normalises to the owning scope, so the document that
+    answers a join request is always the server's. An invite that named the
+    channel anchored the wrong hash, and the invitee could not trust the
+    document it then received -- their sidebar stayed empty while the inviter's
+    roster showed them admitted.
+    """
+
+    def test_channel_invite_admits_to_the_whole_server(self, peer_factory):
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+        s = actions.create_server(alice.server_mgr, alice.invite_mgr, "S")
+        general = actions.create_channel_in_server(
+            alice.storage, alice.channel_mgr, alice.invite_mgr,
+            s, alice.identity.hash_hex, "general")
+
+        _invite_and_join(alice, bob, general)
+
+        bob_hex = bob.identity.hash_hex
+        assert wait_for(lambda: bob.storage.is_member(s, bob_hex), timeout=5), \
+            "bob holds no membership on the server, so it never reaches /servers"
+        assert bob.storage.get_server(s) is not None
+        assert wait_for(lambda: bob.storage.get_channel(general) is not None, timeout=5)
+        assert bob.storage.is_subscribed(general) is True
+        assert bob.server_mgr.list_servers(), "the server is missing from bob's sidebar"
+
+    def test_the_invite_reports_the_server_as_its_scope(self, peer_factory):
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+        s = actions.create_server(alice.server_mgr, alice.invite_mgr, "S")
+        general = actions.create_channel_in_server(
+            alice.storage, alice.channel_mgr, alice.invite_mgr,
+            s, alice.identity.hash_hex, "general")
+
+        seen: list[str] = []
+        bob.invite_mgr.add_invite_callback(
+            lambda scope_hex, *_: seen.append(scope_hex))
+        alice.invite_mgr.send_invite(general, bob.identity.hash_hex)
+
+        assert wait_for(lambda: bool(seen), timeout=5), "bob never saw the invite"
+        assert seen[0] == s, "the invite named the channel rather than its server"
+        assert bob.invite_mgr.invite_scope_kind(seen[0]) == "server"
+
+
+class TestNonCreatorAdminInvites:
+    """A trusted signer is not only the creator.
+
+    The servers row is written before the document is validated, which made
+    get_scope_creator_hash the only anchor consulted -- so a server admitted by
+    any admin other than its creator had its document rejected outright.
+    """
+
+    def test_admin_who_is_not_the_creator_can_admit(self, peer_factory):
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+        carol = peer_factory("carol")
+        s = actions.create_server(alice.server_mgr, alice.invite_mgr, "S")
+        actions.create_channel_in_server(
+            alice.storage, alice.channel_mgr, alice.invite_mgr,
+            s, alice.identity.hash_hex, "general")
+
+        _invite_and_join(alice, bob, s)
+        assert wait_for(lambda: bob.storage.get_server(s) is not None, timeout=5)
+
+        alice.invite_mgr.publish_member_list(s, add_admins=[bob.identity.hash])
+        assert wait_for(
+            lambda: bob.storage.get_role(s, bob.identity.hash_hex) == ROLE_ADMIN,
+            timeout=5), "bob never learned he is an admin"
+
+        _invite_and_join(bob, carol, s)
+
+        carol_hex = carol.identity.hash_hex
+        assert wait_for(lambda: carol.storage.is_member(s, carol_hex), timeout=5), \
+            "carol rejected a document signed by an admin who is not the creator"
+        assert carol.server_mgr.list_servers()
+
+    def test_an_unanchored_document_creates_nothing(self, peer_factory):
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+        s = actions.create_server(alice.server_mgr, alice.invite_mgr, "S")
+
+        # Added directly, with no invite for bob to have accepted -- so he
+        # holds no anchor and the document is parked rather than applied.
+        alice.invite_mgr.publish_member_list(s, add_members=[bob.identity.hash])
+
+        assert wait_for(lambda: bool(bob.invite_mgr.list_pending_memberships()),
+                        timeout=5), "bob never held the document for confirmation"
+        assert bob.storage.get_server(s) is None, \
+            "a server row survived a document that was never applied"
+
+    def test_a_rejected_document_leaves_no_server_row(self, peer_factory):
+        """The servers row is written before the document is validated, so a
+        rejection has to take it back out: an empty server the user never joined
+        is indistinguishable from a real one they cannot see into."""
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+        s = actions.create_server(alice.server_mgr, alice.invite_mgr, "S")
+
+        # Anchor bob to alice, so the document gets as far as being validated.
+        bob.storage.record_accepted_invite(
+            s, alice.identity.hash_hex, time.time() + 3600)
+
+        doc = msgpack.unpackb(
+            alice.storage.get_member_list_version(s)["document_blob"], raw=True)
+        forged = dict(doc)
+        forged[b"signatures"] = {
+            k: bytes(v[:-1]) + bytes([v[-1] ^ 0xFF])
+            for k, v in doc[b"signatures"].items()
+        }
+        fields = alice.invite_mgr._member_list_fields(
+            s, msgpack.packb(forged, use_bin_type=True))
+        bob.invite_mgr._on_lxmf_message(SimpleNamespace(fields=fields,
+                                                        source_hash=None))
+
+        assert bob.storage.get_server(s) is None, \
+            "a server row survived a document whose signature did not validate"
+
+    def test_confirming_a_held_server_document_joins_the_server(self, peer_factory):
+        """A held server document dropped its scope kind, so confirming it wrote
+        a phantom standalone channel under the server's own hash."""
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+        s = actions.create_server(alice.server_mgr, alice.invite_mgr, "S")
+        general = actions.create_channel_in_server(
+            alice.storage, alice.channel_mgr, alice.invite_mgr,
+            s, alice.identity.hash_hex, "general")
+        alice.invite_mgr.publish_member_list(s, add_members=[bob.identity.hash])
+        assert wait_for(lambda: bool(bob.invite_mgr.list_pending_memberships()),
+                        timeout=5)
+
+        assert bob.invite_mgr.accept_pending_membership(s) is True
+
+        assert bob.storage.get_server(s) is not None, "the server was never created"
+        assert bob.storage.get_channel(s) is None, \
+            "the server hash was materialised as a channel"
+        assert bob.storage.is_member(s, bob.identity.hash_hex) is True
+        assert bob.storage.get_channel(general) is not None
+        assert bob.storage.is_subscribed(general) is True

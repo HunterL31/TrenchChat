@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:flutter_ui/api/models/app_version.dart';
+import 'package:flutter_ui/api/models/dm.dart';
 import 'package:flutter_ui/app_state.dart';
 import 'package:flutter_ui/screens/dialogs/settings_dialog.dart';
 
@@ -184,5 +185,62 @@ void main() {
 
     expect(find.text('Settings'), findsNothing);
     expect(backend.requests.any((r) => r.path == '/settings' && r.method == 'POST'), isTrue);
+  });
+
+  // Up to MAX_TRACKED_NODES are held at once and ordered nearest first, so
+  // the pane lists only the nearest few and moves the rest behind a button.
+  group('the propagation node list', () {
+    PropagationStatus _heard(int count) => PropagationStatus(
+          selected: 'node-0' * 5,
+          pinned: '',
+          nodes: [
+            for (var i = 0; i < count; i++)
+              PropagationNode(
+                hash: 'node${i.toString().padLeft(2, '0')}' * 4,
+                hops: i + 1,
+                lastHeard: 0,
+                selected: i == 0,
+              ),
+          ],
+          syncState: 0,
+        );
+
+    testWidgets('lists at most five nodes inline', (tester) async {
+      state.propagation = _heard(9);
+
+      await open(tester);
+      await scrollTo(tester, find.text('ALL 9 NODES'));
+
+      expect(find.text('USE'), findsNWidgets(5));
+      expect(find.text('ALL 9 NODES'), findsOneWidget);
+    });
+
+    testWidgets('shows every node with no button when five or fewer',
+        (tester) async {
+      state.propagation = _heard(4);
+
+      await open(tester);
+      await scrollTo(tester, find.text('COLLECT NOW'));
+
+      expect(find.text('USE'), findsNWidgets(4));
+      expect(find.textContaining('NODES'), findsNothing);
+    });
+
+    testWidgets('the button opens the full list', (tester) async {
+      state.propagation = _heard(9);
+      await open(tester);
+      await scrollTo(tester, find.text('ALL 9 NODES'));
+      await tester.ensureVisible(find.text('ALL 9 NODES'));
+      await tester.pumpAndSettle();
+      // The ninth node is past the inline cap, so it is only reachable here.
+      expect(find.textContaining('node08…node08'), findsNothing);
+
+      await tester.tap(find.text('ALL 9 NODES'));
+      await settle(tester);
+
+      expect(find.text('Propagation nodes'), findsOneWidget);
+      expect(find.textContaining('9 nodes heard'), findsOneWidget);
+      expect(find.textContaining('node08…node08'), findsOneWidget);
+    });
   });
 }

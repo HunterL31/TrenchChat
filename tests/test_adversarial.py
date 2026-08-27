@@ -3643,3 +3643,59 @@ class TestDirectMessageGate:
         conversation = dm_hash_for(alice.identity.hash_hex, stranger)
         alice.friends_mgr.remove_friend(stranger)
         assert alice.messaging._may_receive(conversation, stranger) is False
+
+
+class TestAdversarialTrustAnchorUnion:
+    """The creator and the admin whose invite we accepted are both anchors for
+    a first document. Unioning them fixed a real rejection, and must not have
+    widened what counts as a trusted signer."""
+
+    def test_a_third_party_still_cannot_sign_a_first_document(self, peer_factory):
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+        mallory = peer_factory("mallory")
+        ch_hash = alice.channel_mgr.create_channel("private", "", "invite")
+
+        # Bob accepted an invite from alice, so both anchors exist for him.
+        bob.storage.record_accepted_invite(
+            ch_hash, alice.identity.hash_hex, time.time() + 3600)
+        bob.storage.upsert_channel(
+            hash=ch_hash, name="private", description="",
+            creator_hash=alice.identity.hash_hex, permissions="invite",
+            created_at=time.time(),
+        )
+
+        doc = _build_crafted_doc(
+            mallory.identity.rns_identity, ch_hash, 1,
+            [alice.identity.hash, bob.identity.hash, mallory.identity.hash],
+            [mallory.identity.hash], [mallory.identity.hash],
+        )
+
+        assert bob.invite_mgr._accept_document(doc, ch_hash) is False, \
+            "a signer who is neither the creator nor the inviting admin was trusted"
+        assert bob.storage.is_member(ch_hash, mallory.identity.hash_hex) is False
+
+    def test_the_inviting_admin_is_trusted_even_beside_a_creator(self, peer_factory):
+        """The anchors used to be a fallback chain, so a stored creator hid the
+        invite entirely and any other admin's document was rejected."""
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+        carol = peer_factory("carol")
+        ch_hash = alice.channel_mgr.create_channel("private", "", "invite")
+
+        bob.storage.upsert_channel(
+            hash=ch_hash, name="private", description="",
+            creator_hash=alice.identity.hash_hex, permissions="invite",
+            created_at=time.time(),
+        )
+        bob.storage.record_accepted_invite(
+            ch_hash, carol.identity.hash_hex, time.time() + 3600)
+
+        doc = _build_crafted_doc(
+            carol.identity.rns_identity, ch_hash, 1,
+            [alice.identity.hash, carol.identity.hash, bob.identity.hash],
+            [alice.identity.hash, carol.identity.hash], [alice.identity.hash],
+        )
+
+        assert bob.invite_mgr._accept_document(doc, ch_hash) is True
+        assert bob.storage.is_member(ch_hash, bob.identity.hash_hex) is True

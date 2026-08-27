@@ -868,6 +868,25 @@ class Storage:
     def get_all_servers(self) -> list[sqlite3.Row]:
         return self._fetchall("SELECT * FROM servers ORDER BY name")
 
+    def discard_empty_server(self, hash: str) -> bool:
+        """Drop a servers row that holds no members and no channels.
+
+        The row has to exist before a server document is validated, so
+        is_server() is true while the document is applied -- which leaves one
+        behind when the document is then rejected, and an empty server the user
+        never joined is indistinguishable from a real one they cannot see into.
+        The two emptiness checks are what make this safe to call blind: a server
+        with anything in it is never touched.
+        """
+        if self._fetchone("SELECT 1 FROM members WHERE channel_hash = ?", (hash,)):
+            return False
+        if self._fetchone("SELECT 1 FROM channels WHERE server_hash = ?", (hash,)):
+            return False
+        with self._tx():
+            cur = self._conn.execute("DELETE FROM servers WHERE hash = ?", (hash,))
+        self._scope_cache.pop(hash, None)
+        return cur.rowcount > 0
+
     def is_server(self, hash: str) -> bool:
         return self._fetchone(
             "SELECT 1 FROM servers WHERE hash = ?", (hash,)
@@ -955,15 +974,19 @@ class Storage:
             # re-parent an existing channel would allow a signed server roster
             # to adopt a standalone channel a peer is already in, handing that
             # server's members the channel's membership, permissions and history.
+            # kind is named rather than left to the column default so an
+            # upsert always restores it: a row is filtered out of every channel
+            # listing while it says 'dm', and nothing else would set it back.
             self._conn.execute("""
                 INSERT INTO channels (hash, name, description, creator_hash, permissions,
-                                      created_at, last_seen, server_hash)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                                      created_at, last_seen, server_hash, kind)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'channel')
                 ON CONFLICT(hash) DO UPDATE SET
                     name=excluded.name,
                     description=excluded.description,
                     permissions=excluded.permissions,
-                    last_seen=excluded.last_seen
+                    last_seen=excluded.last_seen,
+                    kind=excluded.kind
             """, (hash, name, description, creator_hash, permissions, created_at,
                   time.time(), server_hash))
             self._scope_cache.pop(hash, None)
@@ -1600,6 +1623,11 @@ class Storage:
             "SELECT * FROM member_list_versions WHERE channel_hash = ?",
             (channel_hash,)
         )
+
+    def get_member_list_scopes(self) -> list[str]:
+        """Every scope this node holds a member list document for."""
+        return [row["channel_hash"] for row in self._fetchall(
+            "SELECT channel_hash FROM member_list_versions")]
 
     def upsert_member_list_version(self, channel_hash: str, version: int,
                                    published_at: float, document_blob: bytes):

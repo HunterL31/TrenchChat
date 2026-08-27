@@ -501,23 +501,43 @@ def create_app(backend: Backend, *, token: str | None = None,
             "admin_hex": inv["admin_hash_hex"],
             "scope_kind": backend.invite_mgr.invite_scope_kind(inv["channel_hash_hex"]),
         })
+    # Held member list documents ride in the same list under a null token, the
+    # way the Qt client carries them. They are the other half of "you have been
+    # invited", and without them a peer added by an admin it holds no anchor for
+    # has nothing to accept.
+    for held in backend.invite_mgr.list_pending_memberships():
+        pending_invites.append({
+            "channel_hash_hex": held["channel_hash"], "channel_name": held["channel_name"],
+            "token_hex": None, "expiry": 0.0,
+            "admin_hex": held["admin_hash"],
+            "scope_kind": backend.invite_mgr.invite_scope_kind(held["channel_hash"]),
+        })
 
     def _on_invite(channel_hash_hex, channel_name, token, expiry, admin_hex):
         # A re-invite to the same channel refreshes the pending entry (new
         # token/expiry) instead of stacking a second one alongside it --
         # mirrors main_window.py's _on_invite_received_main_thread.
+        #
+        # A null token means an admin added us directly: the member list
+        # document is already held, so accepting confirms it rather than
+        # sending a join request. Calling .hex() on that used to raise inside
+        # the manager's callback guard, losing the event as well as the entry.
         pending_invites[:] = [
             i for i in pending_invites if i["channel_hash_hex"] != channel_hash_hex
         ]
         pending_invites.append({
             "channel_hash_hex": channel_hash_hex, "channel_name": channel_name,
-            "token_hex": token.hex(), "expiry": expiry, "admin_hex": admin_hex,
+            "token_hex": token.hex() if token else None,
+            "expiry": expiry, "admin_hex": admin_hex,
             "scope_kind": backend.invite_mgr.invite_scope_kind(channel_hash_hex),
         })
         bus.emit("invite_received", channel_hash=channel_hash_hex, channel_name=channel_name)
 
     def _on_channel_joined(channel_hash_hex, channel_name):
         bus.emit("channel_joined", channel_hash=channel_hash_hex, channel_name=channel_name)
+
+    def _on_server_joined(server_hash_hex, server_name):
+        bus.emit("server_joined", server_hash=server_hash_hex, server_name=server_name)
 
     def _on_member_list_updated(channel_hash_hex):
         bus.emit("member_list_updated", channel_hash=channel_hash_hex)
@@ -585,6 +605,7 @@ def create_app(backend: Backend, *, token: str | None = None,
     backend.messaging.add_delivery_status_callback(_on_delivery_status)
     backend.invite_mgr.add_invite_callback(_on_invite)
     backend.invite_mgr.add_channel_joined_callback(_on_channel_joined)
+    backend.invite_mgr.add_server_joined_callback(_on_server_joined)
     backend.invite_mgr.add_member_list_callback(_on_member_list_updated)
     backend.channel_mgr.add_channel_discovered_callback(_on_channel_discovered)
     backend.presence_mgr.add_presence_callback(_on_presence_changed)
@@ -1543,11 +1564,20 @@ def create_app(backend: Backend, *, token: str | None = None,
 
     @app.post("/invites/{channel_hash}/accept")
     def accept_invite(channel_hash: str):
-        # Same call main_window.py's _on_accept_invite makes (via Backend.accept_invite).
+        # Same calls main_window.py's _on_accept_invite makes, including its
+        # split on a null token: a held document is confirmed locally, a token
+        # invite sends a join request and waits for the document to come back.
         match = next((i for i in pending_invites if i["channel_hash_hex"] == channel_hash), None)
         if match is None:
             return JSONResponse({"ok": False, "error": "no such pending invite"}, status_code=404)
         pending_invites.remove(match)
+        if match["token_hex"] is None:
+            if not backend.invite_mgr.accept_pending_membership(channel_hash):
+                return JSONResponse(
+                    {"ok": False, "error": "membership record could not be verified"},
+                    status_code=409,
+                )
+            return {"ok": True}
         backend.accept_invite(
             match["channel_hash_hex"], bytes.fromhex(match["token_hex"]),
             match["expiry"], match["admin_hex"],
@@ -1560,7 +1590,10 @@ def create_app(backend: Backend, *, token: str | None = None,
         match = next((i for i in pending_invites if i["channel_hash_hex"] == channel_hash), None)
         if match is not None:
             pending_invites.remove(match)
-        backend.invite_mgr.decline_invite(channel_hash)
+        if match is not None and match["token_hex"] is None:
+            backend.invite_mgr.decline_pending_membership(channel_hash)
+        else:
+            backend.invite_mgr.decline_invite(channel_hash)
         return {"ok": True}
 
     # --- messages ---

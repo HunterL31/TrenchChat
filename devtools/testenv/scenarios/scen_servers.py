@@ -10,10 +10,12 @@ See docs/testenv-scenarios.md for the matrix these implement.
 """
 
 from asserts import (
-    all_hold, hold_for, roster, rosters_identical, settle,
+    all_hold, hold_for, joined_server_hashes, roster, rosters_identical, settle,
     wait_until, ScenarioFailure,
 )
-from flows import invite_and_accept, DISCOVERY_TIMEOUT, NEGATIVE_HOLD_SECS
+from flows import (
+    invite_and_accept, DISCOVERY_TIMEOUT, INVITE_TIMEOUT, NEGATIVE_HOLD_SECS,
+)
 from scenario import PROBE, scenario
 
 SEND_MESSAGE = "send_message"
@@ -173,3 +175,61 @@ def e6(env):
     if not all(r["backfilled"] for r in results.values()):
         notes["surprise"] = "a server full_sync grant did not backfill every channel"
     return notes
+
+
+@scenario("servers7", "Inviting to a server's channel admits to the server itself")
+def e7(env):
+    """A channel inside a server has no membership of its own: the document
+    that answers a join request is always the server's. An invite naming the
+    channel anchored a hash no document would ever arrive for, so the invitee
+    could not trust the one it got -- their sidebar stayed empty while the
+    inviter's roster showed them admitted."""
+    a, b = env.peers("A", "B")
+    server, channels = _server_with_channels(a, "e7-server", ["general", "second"])
+
+    # Deliberately the channel, not the server -- the path the report hit.
+    a.invite(channels[0], b.hash)
+    wait_until(lambda: bool(b.invites()), "B to receive an invite", INVITE_TIMEOUT)
+    offered = b.invites()[0]
+    if offered["channel_hash_hex"] != server:
+        raise ScenarioFailure(
+            f"the invite named {offered['channel_hash_hex'][:12]}…, not the server "
+            f"{server[:12]}…"
+        )
+    b.accept_invite(server)
+
+    wait_until(lambda: server in joined_server_hashes(b),
+               "the server to reach B's sidebar", DISCOVERY_TIMEOUT)
+    wait_until(lambda: len(b.server_channels(server)) == len(channels),
+               "B to receive every channel in the server", DISCOVERY_TIMEOUT)
+    rosters_identical([a, b], server, timeout=DISCOVERY_TIMEOUT)
+
+    a.send(channels[0], "invited-via-the-channel")
+    all_hold([b], channels[0], {"invited-via-the-channel"}, timeout=DISCOVERY_TIMEOUT)
+    return {"channels": len(b.server_channels(server))}
+
+
+@scenario("servers8", "A server with no channels still reaches the invitee's sidebar")
+def e8(env):
+    """A server's visibility is gated on membership rather than a subscription,
+    and no scenario asserted that positively before this one.
+
+    It does not cover the live refresh: this polls GET /servers every time, so
+    it cannot see a missing server_joined event the way a running client with a
+    cached sidebar does. That half is the Flutter widget test."""
+    a, b = env.peers("A", "B")
+    server = a.create_server("e8-server")
+
+    a.invite_to_server(server, b.hash)
+    invite_and_accept(a, b, server)
+
+    wait_until(lambda: server in joined_server_hashes(b),
+               "the empty server to reach B's sidebar", DISCOVERY_TIMEOUT)
+    if b.server_channels(server):
+        raise ScenarioFailure("the server was supposed to have no channels")
+
+    # And it carries a channel added afterwards, proving the join was real.
+    late = a.create_server_channel(server, "general")["hash"]
+    wait_until(lambda: late in {ch["hash"] for ch in b.server_channels(server)},
+               "B to receive a channel added after joining", DISCOVERY_TIMEOUT)
+    return {}

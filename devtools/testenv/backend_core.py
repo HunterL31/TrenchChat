@@ -345,6 +345,7 @@ class Backend:
             self.reaction_mgr.flush_pending_emoji(peer_hex)
             self.subscription_mgr.flush_pending(peer_hex)
             self.invite_mgr.flush_pending(peer_hex)
+            self.invite_mgr.resync_membership(peer_hex)
             self.friends_mgr.flush_pending(peer_hex)
             self.first_contact.note_peer(peer_hex, iface)
 
