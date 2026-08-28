@@ -41,7 +41,8 @@ APP_VERSION = os.environ.get("APP_VERSION", "0.0.0")
 # correct fix for wildcard-import packages. uvicorn and websockets select
 # protocol implementations dynamically and need the same treatment. The
 # audio stack (sounddevice/numpy/opuslib) is imported lazily behind runtime
-# probes, so it must be named explicitly too.
+# probes, so it must be named explicitly too. pystray picks its tray backend
+# inside a try/except at import, so nothing static names that either.
 # ---------------------------------------------------------------------------
 hidden_imports = (
     collect_submodules("RNS")
@@ -61,6 +62,10 @@ hidden_imports = (
         "sounddevice",
         "numpy",
         "opuslib",
+        # tray backends; the ones this platform cannot use are simply absent
+        "pystray",
+        "pystray._win32" if sys.platform == "win32" else
+        "pystray._darwin" if sys.platform == "darwin" else "pystray._xorg",
         # stdlib modules sometimes missed in frozen builds
         "sqlite3",
         "json",
@@ -86,6 +91,10 @@ version_stamp = REPO / "build" / BUNDLED_VERSION_FILE
 version_stamp.parent.mkdir(parents=True, exist_ok=True)
 version_stamp.write_text(APP_VERSION)
 datas += [(str(version_stamp), ".")]
+
+# Read back through trenchchat/tray.py's __file__, so it has to land beside
+# the frozen module.
+datas += [(str(REPO / "trenchchat" / "assets" / "tray.png"), "trenchchat/assets")]
 
 web_build = REPO / "flutter_ui" / "build" / "web"
 if web_build.is_dir():

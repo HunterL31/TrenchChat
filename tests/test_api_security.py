@@ -19,6 +19,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from trenchchat import single_instance
+
 _TESTENV_DIR = Path(__file__).resolve().parents[1] / "devtools" / "testenv"
 if str(_TESTENV_DIR) not in sys.path:
     sys.path.insert(0, str(_TESTENV_DIR))
@@ -98,6 +100,25 @@ class TestTokenRequired:
 
     def test_generated_tokens_differ(self):
         assert generate_token() != generate_token()
+
+    def test_a_route_added_after_the_app_is_built_is_still_gated(self):
+        """main_flutter.py adds /ui/open to the app create_app hands back.
+
+        It reopens the client window for a second launch, so an ungated one
+        would let any local process pop windows open. Naming the launcher's
+        own path and header here also catches them drifting apart.
+        """
+        app = create_app(_stub_backend(), token=TOKEN)
+
+        @app.post(single_instance.OPEN_UI_PATH)
+        def open_ui():
+            return {"ok": True}
+
+        client = TestClient(app, base_url="http://127.0.0.1:8801")
+        assert client.post(single_instance.OPEN_UI_PATH).status_code == 401
+        assert client.post(
+            single_instance.OPEN_UI_PATH,
+            headers={single_instance.TOKEN_HEADER: TOKEN}).status_code == 200
 
 
 @needs_backend

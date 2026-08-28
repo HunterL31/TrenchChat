@@ -1,9 +1,11 @@
 """Generate the Windows branding artwork from the TrenchChat design tokens.
 
 Writes the setup icon and the two wizard bitmaps (one per display scaling)
-into packaging/windows/assets/, and the same mark as the Flutter client's
-Windows app icon -- the one Windows shows in the title bar and taskbar.
-Re-run after changing a colour token or the mark:
+into packaging/windows/assets/, the same mark as the Flutter client's
+Windows app icon -- the one Windows shows in the title bar and taskbar --
+and as trenchchat/assets/tray.png, which the launcher shows in the tray
+while the app runs with no window. Re-run after changing a colour token or
+the mark:
 
     python3 packaging/windows/make_assets.py
 
@@ -20,6 +22,7 @@ REPO = Path(__file__).resolve().parents[2]
 OUT = Path(__file__).resolve().parent / "assets"
 FONTS = REPO / "flutter_ui" / "assets" / "fonts"
 CLIENT_ICON = REPO / "flutter_ui" / "windows" / "runner" / "resources" / "app_icon.ico"
+TRAY_ICON = REPO / "trenchchat" / "assets" / "tray.png"
 
 SUPERSAMPLE = 8
 
@@ -29,6 +32,7 @@ SCALINGS = (1.0, 1.25, 1.5, 1.75, 2.0)
 LARGE_BASE = (164, 314)
 SMALL_BASE = (55, 58)
 ICON_SIZES = (16, 24, 32, 48, 64, 128, 256)
+TRAY_SIZE = 64
 
 
 def _hsl(h: float, s: float, lightness: float) -> tuple[int, int, int]:
@@ -169,6 +173,9 @@ def main() -> None:
         icons[-1].save(target, format="ICO", sizes=[(s, s) for s in ICON_SIZES],
                        append_images=icons[:-1])
 
+    TRAY_ICON.parent.mkdir(parents=True, exist_ok=True)
+    render_icon(TRAY_SIZE).save(TRAY_ICON, format="PNG")
+
     for factor in SCALINGS:
         tag = f"{round(factor * 100)}"
         large = render_large(round(LARGE_BASE[0] * factor), round(LARGE_BASE[1] * factor))
@@ -178,6 +185,7 @@ def main() -> None:
 
     print(f"wrote {len(list(OUT.iterdir()))} files to {OUT}")
     print(f"wrote {CLIENT_ICON}")
+    print(f"wrote {TRAY_ICON}")
 
 
 if __name__ == "__main__":

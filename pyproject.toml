@@ -23,6 +23,7 @@ dependencies = [
     "sounddevice>=0.5",
     "numpy>=1.26",
     "opuslib>=3.0",
+    "pystray>=0.19",
 ]
 
 [project.gui-scripts]
