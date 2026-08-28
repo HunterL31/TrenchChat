@@ -118,6 +118,7 @@ CREATE TABLE IF NOT EXISTS subscriptions (
     channel_hash TEXT PRIMARY KEY,
     joined_at    REAL NOT NULL,
     last_sync_at REAL NOT NULL DEFAULT 0,
+    last_read_at REAL NOT NULL DEFAULT 0,
     FOREIGN KEY (channel_hash) REFERENCES channels(hash)
 );
 
@@ -502,6 +503,7 @@ class Storage:
         self._migrate_friend_state()
         self._migrate_dm_peer_kind()
         self._migrate_nomad_page_expiry()
+        self._migrate_channel_last_read()
         # _scope() reads channels.server_hash, so this must run after
         # _migrate_servers() has ensured that column exists.
         self._repair_tenure_from_message_history()
@@ -519,6 +521,14 @@ class Storage:
         if not self._has_column("channels", "kind"):
             self._conn.execute(
                 "ALTER TABLE channels ADD COLUMN kind TEXT NOT NULL DEFAULT 'channel'"
+            )
+            self._conn.commit()
+
+    def _migrate_channel_last_read(self):
+        """Add subscriptions.last_read_at for existing databases."""
+        if not self._has_column("subscriptions", "last_read_at"):
+            self._conn.execute(
+                "ALTER TABLE subscriptions ADD COLUMN last_read_at REAL NOT NULL DEFAULT 0"
             )
             self._conn.commit()
 
@@ -1162,6 +1172,27 @@ class Storage:
                 "UPDATE subscriptions SET last_sync_at = ? WHERE channel_hash = ?",
                 (ts if ts is not None else time.time(), channel_hash)
             )
+
+    def mark_channel_read(self, channel_hash: str, ts: float | None = None) -> bool:
+        """Advance the channel's read watermark. False if it isn't subscribed."""
+        with self._tx():
+            cur = self._conn.execute(
+                "UPDATE subscriptions SET last_read_at = ? WHERE channel_hash = ?",
+                (ts if ts is not None else time.time(), channel_hash)
+            )
+            return cur.rowcount > 0
+
+    def get_unread_counts(self, self_hash: str) -> dict[str, int]:
+        """Unread message count per subscribed channel, own messages excluded."""
+        rows = self._fetchall("""
+            SELECT s.channel_hash, COUNT(m.id) AS unread
+            FROM subscriptions s
+            LEFT JOIN messages m ON m.channel_hash = s.channel_hash
+                AND m.timestamp > s.last_read_at
+                AND m.sender_hash != ?
+            GROUP BY s.channel_hash
+        """, (self_hash,))
+        return {row["channel_hash"]: row["unread"] for row in rows}
 
     # --- channel subscribers (durable copy of SubscriptionManager state) ---
 

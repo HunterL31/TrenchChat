@@ -21,10 +21,15 @@ class ServerRailEntry {
     required this.name,
     this.canInvite = false,
     this.canManage = false,
+    this.hasUnread = false,
   });
 
   final String hash;
   final String name;
+
+  /// Any of this server's channels holds unread messages; draws the tile's
+  /// unread dot.
+  final bool hasUnread;
 
   /// This reader's INVITE permission on the server, gating the rail menu's
   /// "Invite…" item.
@@ -123,6 +128,7 @@ class ServerRail extends StatelessWidget {
               selected: s.hash == selectedHash,
               onTap: () => onSelect(s.hash),
               menuItems: _menuFor(s),
+              hasUnread: s.hasUnread,
             ),
             const SizedBox(height: 12),
           ],
@@ -149,6 +155,7 @@ class _ServerTile extends StatefulWidget {
     required this.selected,
     required this.onTap,
     this.menuItems = const [],
+    this.hasUnread = false,
   });
 
   final String label;
@@ -156,6 +163,7 @@ class _ServerTile extends StatefulWidget {
   final bool selected;
   final VoidCallback onTap;
   final List<TcContextMenuItem> menuItems;
+  final bool hasUnread;
 
   @override
   State<_ServerTile> createState() => _ServerTileState();
@@ -178,30 +186,49 @@ class _ServerTileState extends State<_ServerTile> {
           onExit: (_) => setState(() => _hover = false),
           child: GestureDetector(
             onTap: widget.onTap,
-            child: AnimatedContainer(
-          duration: TCEffects.durationMed,
-          curve: TCEffects.easeTerminal,
-          width: _tileSize,
-          height: _tileSize,
-          alignment: Alignment.center,
-          decoration: BoxDecoration(
-            color: selected ? tc.bgSelected : tc.bgInset,
-            border: Border.all(
-              color: selected
-                  ? tc.borderAccent
-                  : (_hover ? tc.borderStrong : tc.borderDefault),
-            ),
-            borderRadius: tcAvatarCorners(context, _tileSize),
-            boxShadow: selected ? tcBoxGlowSm(context) : null,
-          ),
-              child: Text(
-                widget.label,
-                style: TextStyle(
-                  fontSize: 13,
-                  letterSpacing: TCType.letterSpacingFor(13, 0.04),
-                  color: selected ? tc.accentPrimary : tc.textSecondary,
+            child: Stack(
+              clipBehavior: Clip.none,
+              children: [
+                AnimatedContainer(
+                  duration: TCEffects.durationMed,
+                  curve: TCEffects.easeTerminal,
+                  width: _tileSize,
+                  height: _tileSize,
+                  alignment: Alignment.center,
+                  decoration: BoxDecoration(
+                    color: selected ? tc.bgSelected : tc.bgInset,
+                    border: Border.all(
+                      color: selected
+                          ? tc.borderAccent
+                          : (_hover ? tc.borderStrong : tc.borderDefault),
+                    ),
+                    borderRadius: tcAvatarCorners(context, _tileSize),
+                    boxShadow: selected ? tcBoxGlowSm(context) : null,
+                  ),
+                  child: Text(
+                    widget.label,
+                    style: TextStyle(
+                      fontSize: 13,
+                      letterSpacing: TCType.letterSpacingFor(13, 0.04),
+                      color: selected ? tc.accentPrimary : tc.textSecondary,
+                    ),
+                  ),
                 ),
-              ),
+                if (widget.hasUnread && !selected)
+                  Positioned(
+                    top: -2,
+                    right: -2,
+                    child: Container(
+                      width: 8,
+                      height: 8,
+                      decoration: BoxDecoration(
+                        color: tc.accentPrimary,
+                        shape: BoxShape.circle,
+                        border: Border.all(color: tc.bgApp, width: 1),
+                      ),
+                    ),
+                  ),
+              ],
             ),
           ),
         ),

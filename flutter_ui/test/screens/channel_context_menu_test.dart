@@ -66,7 +66,6 @@ Widget _harness({
           directChannels: directChannels,
           selectedChannelHash: null,
           onSelectChannel: (_) {},
-          onlinePresence: const [],
           channelPermissions: permissions,
           onViewMembers: onViewMembers,
           onInviteToChannel: onInviteToChannel,

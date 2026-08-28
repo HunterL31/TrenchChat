@@ -624,6 +624,13 @@ class _MessageRowWidgetState extends State<_MessageRowWidget> {
       height: TCType.leadingBody,
       color: tc.textPrimary,
     );
+    // An all-emoji message renders jumbo, so a sent emoji is unmistakably
+    // larger than the reaction chips.
+    final jumboEmoji = !message.hasImage &&
+        emojiOnlyCount(message.content, widget.emojiLibrary) != null;
+    final bodyStyle = jumboEmoji
+        ? baseStyle.copyWith(fontSize: jumboEmojiFontSize, height: 1.2)
+        : baseStyle;
     for (final r in _linkRecognizers) {
       r.dispose();
     }
@@ -642,8 +649,9 @@ class _MessageRowWidgetState extends State<_MessageRowWidget> {
         children: messageContentSpans(
           message.content,
           widget.emojiLibrary,
-          baseStyle,
+          bodyStyle,
           links: links,
+          emojiSize: jumboEmoji ? jumboEmojiSize : inlineEmojiSize,
         ),
       ),
     );

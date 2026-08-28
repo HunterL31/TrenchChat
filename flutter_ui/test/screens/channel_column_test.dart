@@ -5,7 +5,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:flutter_ui/api/models/member.dart';
 import 'package:flutter_ui/api/models/server.dart';
 import 'package:flutter_ui/screens/main_window/channel_column.dart';
 
@@ -32,7 +31,6 @@ void main() {
           directChannels: const [],
           selectedChannelHash: null,
           onSelectChannel: (_) {},
-          onlinePresence: const [],
           onCreateChannel: () => serverCreates++,
           onCreateDirectChannel: () => directCreates++,
           onJoinChannel: () {},
@@ -47,9 +45,111 @@ void main() {
     expect(directCreates, 1);
     expect(serverCreates, 0);
 
-    await tester.tap(find.text('NEW CHANNEL'));
+    // The CHANNELS header's + creates in the server.
+    await tester.tap(find.byTooltip('New channel'));
     expect(serverCreates, 1);
     expect(directCreates, 1);
+  });
+
+  testWidgets('the footer ADD menu consolidates every add action', (tester) async {
+    var serverCreates = 0;
+    var directCreates = 0;
+    var joins = 0;
+    var dmStarts = 0;
+    await tester.pumpWidget(MaterialApp(
+      home: Scaffold(
+        body: ChannelColumn(
+          serverName: 'mesh-crew',
+          serverMemberCount: 3,
+          channels: [_channel('general')],
+          directChannels: const [],
+          selectedChannelHash: null,
+          onSelectChannel: (_) {},
+          onCreateChannel: () => serverCreates++,
+          onCreateDirectChannel: () => directCreates++,
+          onJoinChannel: () => joins++,
+          onStartDm: () => dmStarts++,
+        ),
+      ),
+    ));
+
+    // The old stacked footer buttons are gone.
+    expect(find.text('NEW CHANNEL'), findsNothing);
+    expect(find.text('JOIN CHANNEL'), findsNothing);
+
+    await tester.tap(find.text('ADD'));
+    await tester.pumpAndSettle();
+    expect(find.text('New channel in mesh-crew'), findsOneWidget);
+    expect(find.text('New direct channel'), findsOneWidget);
+    expect(find.text('Message a friend…'), findsOneWidget);
+
+    await tester.tap(find.text('Join channel…'));
+    await tester.pumpAndSettle();
+    expect(joins, 1);
+    expect(serverCreates, 0);
+    expect(directCreates, 0);
+    expect(dmStarts, 0);
+  });
+
+  testWidgets('without a server the ADD menu offers a plain new channel',
+      (tester) async {
+    await tester.pumpWidget(MaterialApp(
+      home: Scaffold(
+        body: ChannelColumn(
+          serverName: null,
+          serverMemberCount: null,
+          channels: const [],
+          directChannels: const [],
+          selectedChannelHash: null,
+          onSelectChannel: (_) {},
+          onCreateChannel: () {},
+          onCreateDirectChannel: () {},
+          onJoinChannel: () {},
+        ),
+      ),
+    ));
+
+    await tester.tap(find.text('ADD'));
+    await tester.pumpAndSettle();
+    expect(find.text('New channel'), findsOneWidget);
+    // Redundant with "New channel" when there is no server to distinguish.
+    expect(find.text('New direct channel'), findsNothing);
+  });
+
+  testWidgets('a channel with unread messages carries a count pill', (tester) async {
+    await tester.pumpWidget(MaterialApp(
+      home: Scaffold(
+        body: ChannelColumn(
+          serverName: 'mesh-crew',
+          serverMemberCount: 2,
+          channels: [_channel('general'), _channel('ops')],
+          directChannels: const [],
+          selectedChannelHash: 'hash-general',
+          onSelectChannel: (_) {},
+          unreadCounts: const {'hash-ops': 4},
+        ),
+      ),
+    ));
+
+    expect(find.text('4'), findsOneWidget);
+  });
+
+  testWidgets('the selected channel never shows an unread pill', (tester) async {
+    await tester.pumpWidget(MaterialApp(
+      home: Scaffold(
+        body: ChannelColumn(
+          serverName: 'mesh-crew',
+          serverMemberCount: 2,
+          channels: [_channel('general')],
+          directChannels: const [],
+          selectedChannelHash: 'hash-general',
+          onSelectChannel: (_) {},
+          unreadCounts: const {'hash-general': 3},
+        ),
+      ),
+    ));
+
+    expect(find.text('3'), findsNothing);
   });
 
   testWidgets('without the callback the empty section stays hidden', (tester) async {
@@ -62,7 +162,6 @@ void main() {
           directChannels: const [],
           selectedChannelHash: null,
           onSelectChannel: (_) {},
-          onlinePresence: const [],
         ),
       ),
     ));
@@ -80,7 +179,6 @@ void main() {
           directChannels: const [],
           selectedChannelHash: null,
           onSelectChannel: (_) {},
-          onlinePresence: const [],
           syncStates: const {
             'hash-general': 'incomplete',
             'hash-ops': 'synced',
@@ -90,40 +188,6 @@ void main() {
     ));
 
     expect(find.text('INCOMPLETE'), findsOneWidget);
-  });
-
-  testWidgets('the ONLINE roster shows display names, not raw hashes, and hides self',
-      (tester) async {
-    const meHash = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
-    await tester.pumpWidget(MaterialApp(
-      home: Scaffold(
-        body: ChannelColumn(
-          serverName: null,
-          serverMemberCount: null,
-          channels: const [],
-          directChannels: const [],
-          selectedChannelHash: null,
-          onSelectChannel: (_) {},
-          meHashHex: meHash,
-          onlinePresence: const [
-            PresenceEntry(identityHash: meHash, isOnline: true, displayName: 'me'),
-            PresenceEntry(
-                identityHash: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
-                isOnline: true,
-                displayName: 'Alice'),
-            PresenceEntry(
-                identityHash: 'cccccccccccccccccccccccccccccccc', isOnline: true),
-          ],
-        ),
-      ),
-    ));
-
-    // The local user is filtered out; two peers remain.
-    expect(find.text('▾ ONLINE — 2'), findsOneWidget);
-    expect(find.text('me'), findsNothing);
-    // A named peer renders its name; an unnamed one falls back to a short hash.
-    expect(find.text('Alice'), findsOneWidget);
-    expect(find.text('cccc…cccc'), findsOneWidget);
   });
 
   testWidgets('a fully synced column shows no indicator', (tester) async {
@@ -136,7 +200,6 @@ void main() {
           directChannels: const [],
           selectedChannelHash: null,
           onSelectChannel: (_) {},
-          onlinePresence: const [],
           syncStates: const {'hash-general': 'synced'},
         ),
       ),

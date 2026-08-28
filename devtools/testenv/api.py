@@ -1367,6 +1367,17 @@ def create_app(backend: Backend, *, token: str | None = None,
         return [_channel_to_dict(c) for c in backend.storage.get_standalone_channels()
                if not backend.storage.is_subscribed(c["hash"])]
 
+    @app.get("/channels/unread")
+    def channel_unread_counts():
+        # Per-channel unread, the channel counterpart of /dms' unread field.
+        # Conversations are excluded by construction: they have no
+        # subscriptions row (see docs/direct-messages.md).
+        return {"counts": backend.storage.get_unread_counts(backend.identity.hash_hex)}
+
+    @app.post("/channels/{channel_hash}/read")
+    def mark_channel_read(channel_hash: str):
+        return {"ok": backend.storage.mark_channel_read(channel_hash)}
+
     @app.post("/channels")
     def create_channel(req: CreateChannelRequest):
         permissions = PRESET_OPEN if req.access == "public" else PRESET_PRIVATE

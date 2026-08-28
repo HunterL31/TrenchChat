@@ -10,6 +10,7 @@ import 'package:flutter_ui/format.dart';
 import 'package:flutter_ui/screens/main_window/message_list.dart';
 import 'package:flutter_ui/theme/tokens.dart';
 import 'package:flutter_ui/widgets/avatar.dart';
+import 'package:flutter_ui/widgets/emoji_text.dart';
 
 Message _msg(String sender, double ts, String content,
         {bool imageStripped = false, String? replyTo, String? deliveryState}) =>
@@ -397,4 +398,39 @@ void main() {
       findsOneWidget,
     );
   });
+
+  testWidgets('an emoji-only message renders jumbo; a mixed one stays body-sized',
+      (tester) async {
+    const base = 1_700_000_000.0;
+    final messages = [
+      _msg('alice', base, '\ud83c\udf89'),
+      _msg('bob', base + 600, 'nice \ud83c\udf89'),
+    ];
+
+    await tester.pumpWidget(_harness(messages));
+    await tester.pumpAndSettle();
+
+    final jumbo = tester.widgetList<RichText>(find.byType(RichText)).where((r) =>
+        r.text.toPlainText() == '\ud83c\udf89' && _spanFontSize(r.text) == jumboEmojiFontSize);
+    expect(jumbo, isNotEmpty, reason: 'the emoji-only message should be jumbo');
+
+    final normal = tester.widgetList<RichText>(find.byType(RichText)).where((r) =>
+        r.text.toPlainText() == 'nice \ud83c\udf89' &&
+        _spanFontSize(r.text) == TCType.textBodyMd);
+    expect(normal, isNotEmpty, reason: 'the mixed message keeps body size');
+  });
+}
+
+/// The font size of the first styled span in a rich text tree.
+double _spanFontSize(InlineSpan span) {
+  double found = 0;
+  span.visitChildren((s) {
+    final size = s.style?.fontSize;
+    if (size != null) {
+      found = size;
+      return false;
+    }
+    return true;
+  });
+  return found;
 }

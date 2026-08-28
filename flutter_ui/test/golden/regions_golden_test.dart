@@ -51,7 +51,6 @@ void main() {
         directChannels: fixtureDirectChannels(),
         selectedChannelHash: kGeneralHash,
         onSelectChannel: (_) {},
-        onlinePresence: fixturePresence(),
       ),
       height: 900,
     ));
