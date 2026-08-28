@@ -1,7 +1,6 @@
 // New Channel dialog -- offers an access preset (public/invite-only) for a
 // standalone channel; a channel created inside a server inherits the
 // server's permissions instead, so the preset picker is omitted there.
-// Mirrors trenchchat/gui/main_window.py's NewChannelDialog(in_server=...).
 import 'package:flutter/material.dart';
 
 import '../../app_state.dart';

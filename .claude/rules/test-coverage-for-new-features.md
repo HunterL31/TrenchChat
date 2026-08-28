@@ -35,5 +35,4 @@ Any time you add new functionality to `trenchchat/`, you must verify it is cover
 ## What does not require a new test
 
 - Pure refactors with no behaviour change (existing tests are sufficient)
-- GUI-only changes in `trenchchat/gui/`
 - Documentation or comment edits

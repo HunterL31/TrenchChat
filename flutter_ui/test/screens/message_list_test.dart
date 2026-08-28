@@ -1,6 +1,5 @@
-// Verifies author grouping collapses at the GROUP_WINDOW_SECS (300s)
-// boundary, and that a date divider appears exactly on a day change --
-// mirroring trenchchat/gui/channel_view.py's grouping contract.
+// Verifies author grouping collapses at the groupWindowSecs (300s)
+// boundary, and that a date divider appears exactly on a day change.
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';

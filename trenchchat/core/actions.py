@@ -4,10 +4,9 @@ Shared multi-step action sequences driven by user-facing frontends.
 Each user-visible action (create a channel, send a message, edit
 permissions...) is more than one core manager call: it's a specific
 sequence, sometimes with an outbound permission guard in front of it.
-Previously that sequencing lived inline in trenchchat/gui/main_window.py's
-_on_* handlers. It now lives here instead, as the single implementation,
-so that any frontend driving the backend -- the Qt GUI or a headless
-harness -- calls the exact same code and can't silently diverge from it.
+It lives here as the single implementation, so that any frontend
+driving the backend calls the exact same code and can't silently diverge
+from it.
 
 These functions take already-constructed manager/storage objects and are
 free of any GUI framework dependency.

@@ -48,7 +48,7 @@ offline / off-grid.
 Two ways to serve it:
 
 - **Against your real profile** -- `~/.trenchchat` plus your usual Reticulum
-  config, wired exactly like `main.py`:
+  config:
 
   ```bash
   # from the repo root; close the desktop client first (same identity, same DB)

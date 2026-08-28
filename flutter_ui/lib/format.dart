@@ -1,5 +1,4 @@
-// Timestamp formatting mirroring trenchchat/gui/channel_view.py's
-// _format_ts / _format_ts_short so headers read identically to the Qt client.
+// Timestamp formatting for message headers and date dividers.
 
 const List<String> _monthAbbrev = [
   'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',

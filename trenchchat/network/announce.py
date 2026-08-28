@@ -324,7 +324,7 @@ class FirstContactAnnouncer:
                 self._pending_iface = iface
             elif iface is not self._pending_iface:
                 # Two interfaces cannot be targeted at once, so fall back to
-                # announcing on all of them, as main_window.py does.
+                # announcing on all of them.
                 self._pending_iface = None
             self._pending_count += 1
         return True

@@ -1,8 +1,8 @@
 """
-Tests for trenchchat.core.actions -- the shared entry points both
-main_window.py and devtools/testenv/api.py call, so a caller with no other
-feedback loop (an HTTP response, a scripted test) can tell success apart
-from a silently-filtered request.
+Tests for trenchchat.core.actions -- the shared entry points
+devtools/testenv/api.py calls, so a caller with no other feedback loop
+(an HTTP response, a scripted test) can tell success apart from a
+silently-filtered request.
 """
 
 import time

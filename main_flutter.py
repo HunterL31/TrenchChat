@@ -1,8 +1,8 @@
 """
-One-command launcher for the Flutter client, the counterpart of main.py.
+One-command launcher for the Flutter client.
 
 Starts the headless backend over the machine's real profile (~/.trenchchat,
-default Reticulum config -- the same wiring as main.py), serves the API and
+default Reticulum config), serves the API and
 the built web client on one local port, then opens the UI: the platform's
 Flutter desktop binary when one has been built, otherwise the web client in
 the default browser.
@@ -16,7 +16,7 @@ starting a second node over the same profile.
     .venv/bin/python main_flutter.py            # Linux/macOS
     .venv\\Scripts\\python main_flutter.py       # Windows
 
-Close the Qt client first: both would announce the same identity and
+Run only one instance at a time: two would announce the same identity and
 contend for the same database.
 """
 
@@ -78,7 +78,6 @@ ensure_std_streams()
 
 _DEFAULT_PORT = 8810
 
-# Mirrors main.py's reannounce cadence and main_window.py's startup sync delay.
 _STARTUP_SYNC_DELAY_SECS = 3.0
 
 _DESKTOP_BINARIES = {
@@ -211,8 +210,7 @@ def main():
     except RuntimeError as e:
         sys.exit(f"error: {e}")
 
-    # Same startup sequence as main.py: announce everything, then keep
-    # reannouncing.
+    # Announce everything, then keep reannouncing.
     from trenchchat.network.router import REANNOUNCE_INTERVAL_SECS
 
     backend.announce()

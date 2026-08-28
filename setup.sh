@@ -207,8 +207,9 @@ if [ -f "$REPO_ROOT/flutter_ui/build/web/index.html" ] || \
         [ -x "$REPO_ROOT/flutter_ui/build/linux/x64/release/bundle/flutter_ui" ]; then
     ENTRY="main_flutter.py"
 else
-    log "No client build (no Flutter SDK) -- launching the legacy Qt app instead."
-    ENTRY="main.py"
+    log "No client build (no Flutter SDK). Install Flutter and re-run setup.sh,"
+    log "or run the backend headless: .venv/bin/python main_flutter.py --no-ui"
+    exit 1
 fi
 log "Setup complete. Launching TrenchChat ($ENTRY)..."
 echo ""

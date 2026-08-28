@@ -1,6 +1,5 @@
 // New Server dialog -- name + description, no access choice (servers are
-// always invite-only). Mirrors trenchchat/gui/main_window.py's
-// NewServerDialog.
+// always invite-only).
 import 'package:flutter/material.dart';
 
 import '../../app_state.dart';

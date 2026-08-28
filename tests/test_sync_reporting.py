@@ -94,10 +94,9 @@ def _sync_response_fields(messages: list[dict], truncated: bool = False,
 class TestPruneHasNoProductionCaller:
     """F1: SyncStatusTracker.prune() is never called outside tests.
 
-    Confirmed by grep across the repo: trenchchat/gui/main_window.py's
-    periodic tick (_on_presence_tick) prunes presence and the user
-    directory, never sync_mgr.status. devtools/testenv/backend_core.py's
-    equivalent loop does the same. Nothing else calls prune().
+    Confirmed by grep across the repo: devtools/testenv/backend_core.py's
+    periodic tick prunes presence and the user directory, never
+    sync_mgr.status. Nothing else calls prune().
     """
 
     def test_stalled_request_stays_syncing_forever_without_a_prune_caller(

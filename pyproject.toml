@@ -5,6 +5,8 @@ build-backend = "setuptools.backends._legacy:_Backend"
 [project]
 name = "TrenchChat"
 version = "0.1.0"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.10"
 # Lower bounds pinned to the versions this release is built and tested
 # against; requirements.txt pins exact versions for reproducible builds.
@@ -14,7 +16,6 @@ requires-python = ">=3.10"
 dependencies = [
     "rns>=1.4.2",
     "lxmf>=1.1.1",
-    "PyQt6>=6.10",
     "msgpack>=1.0",
     "configobj>=5.0",
     "sqlcipher3>=0.6",
@@ -27,4 +28,4 @@ dependencies = [
 ]
 
 [project.gui-scripts]
-trenchchat = "main:main"
+trenchchat = "main_flutter:main"

@@ -2,8 +2,8 @@
 Headless TrenchChat backend, for running one "tester" identity as its own
 OS process during local multi-user testing.
 
-Mirrors the object wiring in main.py (Identity, Storage, Router, core
-managers) minus the Qt GUI. Each tester gets a fully isolated data
+Wires Identity, Storage, Router and the core managers together -- the
+same wiring main_flutter.py runs. Each tester gets a fully isolated data
 directory and its own standalone Reticulum instance (share_instance=No,
 so it never silently attaches to another Reticulum instance already
 running on the machine) connected to the other tester via a single
@@ -191,10 +191,9 @@ class Backend:
     @classmethod
     def for_real_profile(cls, rns_configdir: str | None = None) -> "Backend":
         """Backend over the machine's real profile: ~/.trenchchat plus the
-        default Reticulum config (real interfaces, real mesh), constructed
-        exactly like main.py's wiring. Must not run alongside the desktop
-        client -- both would announce the same identity and contend for the
-        same database.
+        default Reticulum config (real interfaces, real mesh). Must not run
+        alongside the desktop client -- both would announce the same identity
+        and contend for the same database.
 
         Raises RuntimeError for a PIN-locked profile: there is no headless
         unlock path yet (see the migration board's unlock design question).
@@ -227,14 +226,14 @@ class Backend:
                        voice_state_refresh_secs: float | None = None,
                        voice_roster_ttl_secs: float | None = None,
                        use_tone_audio: bool = True) -> None:
-        """Managers and announce handlers shared by both constructors,
-        mirroring main.py. The presence overrides shorten the testenv's
-        observation windows; None keeps the production defaults.
+        """Managers and announce handlers shared by both constructors.
+        The presence overrides shorten the testenv's observation windows;
+        None keeps the production defaults.
 
         use_tone_audio drives the tone pipeline for headless testers (no sound
-        devices); a real profile passes False so VoiceManager builds the same
-        real AudioPipeline main.py does, degrading to receive-only when the
-        machine has no audio libraries or devices."""
+        devices); a real profile passes False so VoiceManager builds the
+        real AudioPipeline, degrading to receive-only when the machine has
+        no audio libraries or devices."""
         self.channel_mgr = ChannelManager(self.identity, self.storage)
         self.server_mgr = ServerManager(self.identity, self.storage)
         self.messaging = Messaging(self.identity, self.storage, self.router)
@@ -297,7 +296,7 @@ class Backend:
         # Headless testers have no sound devices; the tone pipeline feeds the
         # real encode/transmit path with a generated signal instead. A real
         # profile uses no factory, so VoiceManager builds the real
-        # AudioPipeline (mic capture + playback), exactly as main.py does.
+        # AudioPipeline (mic capture + playback).
         voice_kwargs = {}
         if voice_state_refresh_secs is not None:
             voice_kwargs["state_refresh_secs"] = voice_state_refresh_secs
@@ -324,7 +323,7 @@ class Backend:
             NodeAnnounceHandler(_on_node_discovered)
         )
 
-        # Mirrors main.py's _on_user_announced: a trenchchat.user announce is
+        # A trenchchat.user announce is
         # the strongest signal a peer is a TrenchChat client (not just any
         # LXMF client), so it feeds both the directory and presence.
         def _on_user_announced(peer_hex: str, display_name: str, iface) -> None:
@@ -336,7 +335,7 @@ class Backend:
             UserAnnounceHandler(_on_user_announced)
         )
 
-        # Mirrors main_window.py's combined _on_peer_appeared handler: one
+        # One combined peer-appeared handler: one
         # PeerAnnounceHandler registration drives both the sync manager's
         # gap-fill request and presence tracking, so a peer's LXMF delivery
         # announce is the single trigger for both. Without this, SyncManager
@@ -371,8 +370,7 @@ class Backend:
         # Also update presence and the user directory from any inbound LXMF
         # message, covering peers reached via a backchannel link without a
         # prior announce, peers signing off, and a peer's display name
-        # travelling on a chat message (same rationale as main_window.py's
-        # _on_inbound_message).
+        # travelling on a chat message.
         self.router.add_delivery_callback(self._on_inbound_message)
 
         self.bandwidth = BandwidthMonitor()
@@ -424,9 +422,9 @@ class Backend:
     def _seed_user_directory(self, peer_hex: str) -> None:
         """Refresh a confirmed TrenchChat peer's directory entry.
 
-        Mirrors main_window._seed_user_directory: a peer is confirmed if they
-        are already in the directory (from a prior trenchchat.user announce) or
-        appear in any channel's members table. Resolves the best available name.
+        A peer is confirmed if they are already in the directory (from a
+        prior trenchchat.user announce) or appear in any channel's members
+        table. Resolves the best available name.
         """
         if (self.user_directory.contains(peer_hex)
                 or peer_hex in self.storage.get_trenchchat_peer_identities()):
@@ -437,7 +435,7 @@ class Backend:
 
     def accept_invite(self, channel_hash_hex: str, token: bytes, expiry: float,
                       admin_hex: str) -> None:
-        """Same call main_window.py's _on_accept_invite makes. invite.py's
+        """Accept an invite. invite.py's
         _send_raw has no retry queue (unlike chat messages), so it silently
         drops the join_request if the admin's path isn't known yet -- a real
         human clicking "Accept" usually has enough natural delay for that to
@@ -468,7 +466,7 @@ class Backend:
         t.start()
 
     def start_voice_ticker(self, interval: float = 1.0) -> None:
-        """Drive VoiceManager.tick, mirroring main.py's voice tick QTimer.
+        """Drive VoiceManager.tick on a background thread.
 
         Also drives SyncManager.tick on its own slower cadence: an unanswered
         sync request has nothing else to re-trigger it once the announce burst
@@ -526,9 +524,8 @@ class Backend:
         t.start()
 
     def start_presence_pruner(self, interval: float = 15.0) -> None:
-        """Periodically prune stale presence and user directory entries,
-        mirroring main_window.py's _on_presence_tick. Runs as a daemon
-        thread so it never blocks process exit."""
+        """Periodically prune stale presence and user directory entries.
+        Runs as a daemon thread so it never blocks process exit."""
         def _loop():
             while True:
                 time.sleep(interval)
@@ -556,8 +553,8 @@ class Backend:
         )
 
     def announce_offline(self) -> int:
-        """Same notice main.py sends from aboutToQuit -- tell channel peers we
-        are shutting down so they drop us to offline now."""
+        """Tell channel peers we are shutting down so they drop us to
+        offline now."""
         return self.presence_beacon.announce_offline()
 
     def close(self):

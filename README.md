@@ -9,8 +9,7 @@ A decentralized, encrypted group chat application built on the [Reticulum Networ
 - **Public and invite-only channels** — open channels anyone can join; invite-only channels with cryptographically-signed member lists
 - **Offline sync** — messages sent while you were offline are delivered when you reconnect; see [Offline Sync](docs/offline-sync.md)
 - **Propagation node support** — optionally designate a node as a store-and-forward relay
-- **Terminal-styled Flutter client** — runs as a desktop app or in the browser; the previous
-  Qt6 GUI remains available as a legacy client
+- **Terminal-styled Flutter client** — runs as a desktop app or in the browser
 
 ## Requirements
 
@@ -20,7 +19,6 @@ A decentralized, encrypted group chat application built on the [Reticulum Networ
 ```
 rns
 lxmf
-PyQt6
 msgpack
 ```
 
@@ -85,10 +83,6 @@ icons in 3.26). X11's own tray takes a click and shows no menu, so it is treated
 at all. Where there is none, closing the window quits as it always did, and `--no-tray` asks
 for that everywhere.
 
-The legacy Qt client still works via `python main.py`; pass `-v` / `--verbose` for detailed
-Reticulum and TrenchChat debug logging. Run one client at a time — both use the same identity
-and database.
-
 ## Development
 
 `devtools/testenv/` runs two fully independent, real TrenchChat backends
@@ -96,7 +90,7 @@ and database.
 link, driven from a two-pane web UI — no second physical machine or manual
 key exchange needed to test multi-peer behavior (invites, channel
 discovery, sync, permissions) end-to-end. Every action it takes calls the
-same `trenchchat.core.actions` entry points the real GUI does, so a bug
+same `trenchchat.core.actions` entry points the real client does, so a bug
 caught there is a bug in the real client. See
 [devtools/testenv/README.md](devtools/testenv/README.md).
 
@@ -144,7 +138,6 @@ In brief:
 
 ```
 main_flutter.py             Entry point: backend + Flutter client in one command
-main.py                     Legacy Qt entry point
 requirements.txt
 setup.sh / setup.bat
 flutter_ui/                 Flutter client (the active UI): desktop + web
@@ -167,7 +160,6 @@ trenchchat/
   network/
     router.py               LXMFRouter lifecycle and propagation node
     announce.py             Reticulum announce handlers
-  gui/                      Legacy Qt client
 devtools/
   testenv/                  Two-process local dev/test environment (see its README);
                             also the FastAPI backend the Flutter client talks to
@@ -187,4 +179,17 @@ All application data is stored under `~/.trenchchat/`:
 | `storage.db` | SQLite: channels, messages, subscriptions, members, missed-delivery hints |
 | `messagestore/` | LXMF propagation node message store (if enabled) |
 | `launcher.log` | Console output from an installed build, which runs without a console |
+<<<<<<< HEAD
 | `launcher.json` | Where the running instance's API is, so a second launch can hand over to it |
+=======
+
+## License
+
+TrenchChat is released under the [MIT License](LICENSE).
+
+It depends on [Reticulum](https://github.com/markqvist/Reticulum) and
+[LXMF](https://github.com/markqvist/LXMF), which are distributed under the
+Reticulum License — MIT-style, with restrictions on use in systems designed
+to harm people and on use in AI/ML training datasets. Those terms travel
+with the bundled copies of `rns` and `lxmf` in binary distributions.
+>>>>>>> 7fdd23c (Remove the legacy Qt client and license the project MIT)

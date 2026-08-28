@@ -14,9 +14,7 @@ import os
 import threading
 from pathlib import Path
 
-# Matches main_window.py's _STARTUP_SYNC_DELAY_MS -- give the peer link a
-# moment to come up before requesting sync, same as the real GUI does via
-# QTimer.singleShot(_STARTUP_SYNC_DELAY_MS, self._sync_mgr.request_sync_all).
+# Give the peer link a moment to come up before requesting sync.
 _STARTUP_SYNC_DELAY_SECS = 3.0
 
 _TESTENV_DIR = Path(__file__).resolve().parent

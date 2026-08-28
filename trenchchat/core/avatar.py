@@ -207,7 +207,7 @@ class AvatarManager:
         wiped: a peer who only ever learns about us via announce (no shared
         channel to have received the direct push) would otherwise be stuck
         showing a stale cached avatar forever after we remove it.
-        Called from the peer-appeared callback in main_window.py.
+        Called from the backend's peer-appeared callback.
         """
         current_version = self._config.avatar_version
         if current_version == 0:

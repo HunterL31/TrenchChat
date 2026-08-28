@@ -9,11 +9,11 @@ user-facing flow through the real protocol handlers end to end, and assert
 on outcomes visible to every participant -- mirroring what a human using
 the GUI would actually experience.
 
-Recipient computation mirrors trenchchat/gui/main_window.py's
-_on_send_message: open-join channels deliver to the live subscriber set,
-invite-only channels deliver to the members table. tests/helpers.py's
+Recipient computation mirrors actions.compute_channel_recipients:
+open-join channels deliver to the live subscriber set, invite-only
+channels deliver to the members table. tests/helpers.py's
 get_subscriber_hashes() implements this same branch and is used throughout
-so these tests fail if that boundary ever drifts from the real GUI logic.
+so these tests fail if that boundary ever drifts from the real logic.
 """
 
 import time

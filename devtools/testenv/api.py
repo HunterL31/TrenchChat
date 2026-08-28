@@ -1,12 +1,11 @@
 """
 FastAPI wrapper around one tester's Backend.
 
-Every mutating endpoint here calls the exact same functions the Qt GUI
-calls: trenchchat.core.actions for multi-step sequences (create channel,
-send message, edit permissions, ...) and the core managers directly for
-single-call actions (send_invite, send_join_request, ...). There is no
-reimplementation of GUI logic here -- see trenchchat/core/actions.py,
-which both this file and trenchchat/gui/main_window.py import from.
+Every mutating endpoint here calls trenchchat.core.actions for
+multi-step sequences (create channel, send message, edit permissions, ...)
+and the core managers directly for single-call actions (send_invite,
+send_join_request, ...). There is no reimplementation of core logic here --
+see trenchchat/core/actions.py.
 
 This means a bug (or a fix) exercised through this API is exercising the
 same code path a real client would hit.
@@ -276,9 +275,7 @@ def _message_to_dict(row, reactions: list[dict[str, Any]] | None = None,
 
 class EventBus:
     """Fan-out for backend callbacks (fired on RNS/LXMF background threads)
-    to any connected WebSocket clients (running in the asyncio event loop).
-    Mirrors how main_window.py marshals background-thread callbacks into
-    the Qt main thread via signals -- same idea, different thread model."""
+    to any connected WebSocket clients (running in the asyncio event loop)."""
 
     def __init__(self):
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -501,10 +498,9 @@ def create_app(backend: Backend, *, token: str | None = None,
             "admin_hex": inv["admin_hash_hex"],
             "scope_kind": backend.invite_mgr.invite_scope_kind(inv["channel_hash_hex"]),
         })
-    # Held member list documents ride in the same list under a null token, the
-    # way the Qt client carries them. They are the other half of "you have been
-    # invited", and without them a peer added by an admin it holds no anchor for
-    # has nothing to accept.
+    # Held member list documents ride in the same list under a null token.
+    # They are the other half of "you have been invited", and without them a
+    # peer added by an admin it holds no anchor for has nothing to accept.
     for held in backend.invite_mgr.list_pending_memberships():
         pending_invites.append({
             "channel_hash_hex": held["channel_hash"], "channel_name": held["channel_name"],
@@ -515,8 +511,7 @@ def create_app(backend: Backend, *, token: str | None = None,
 
     def _on_invite(channel_hash_hex, channel_name, token, expiry, admin_hex):
         # A re-invite to the same channel refreshes the pending entry (new
-        # token/expiry) instead of stacking a second one alongside it --
-        # mirrors main_window.py's _on_invite_received_main_thread.
+        # token/expiry) instead of stacking a second one alongside it.
         #
         # A null token means an admin added us directly: the member list
         # document is already held, so accepting confirms it rather than
@@ -734,8 +729,6 @@ def create_app(backend: Backend, *, token: str | None = None,
 
     @app.get("/network/map")
     def get_network_map():
-        # Same free function NetworkMapDialog calls. Imported from core, not
-        # the Qt module, so this works in headless installs without PyQt6.
         from trenchchat.core.network_map import gather_network_data
         return gather_network_data(backend.rns, backend.identity.hash_hex,
                                    backend.storage, backend.user_directory)
@@ -778,10 +771,9 @@ def create_app(backend: Backend, *, token: str | None = None,
                 "rxb": stats.get("rxb"),
                 "txb": stats.get("txb"),
                 # The raw config section, so an edit dialog can show current
-                # values -- the Qt widget reads the config file directly, but
-                # a remote client can't. ConfigObj parses comma values into
-                # lists; flatten those back to the string form the editor
-                # writes.
+                # values -- a remote client can't read the config file
+                # directly. ConfigObj parses comma values into lists; flatten
+                # those back to the string form the editor writes.
                 "config": {
                     k: (", ".join(str(x) for x in v) if isinstance(v, list) else str(v))
                     for k, v in cfg.items()
@@ -916,8 +908,8 @@ def create_app(backend: Backend, *, token: str | None = None,
 
     @app.post("/reticulum/interfaces_suggested")
     def add_suggested_defaults():
-        # Same core action the Qt widget's suggested-defaults button runs:
-        # write the missing bootstrap seeds and enable discovery+autoconnect.
+        # Write the missing bootstrap seeds and enable
+        # discovery+autoconnect.
         try:
             added = apply_suggested_defaults(backend.rns_config_path)
         except InterfaceConfigError as e:
@@ -1485,9 +1477,9 @@ def create_app(backend: Backend, *, token: str | None = None,
 
     @app.get("/channels/{channel_hash}/my_permissions")
     def my_permissions(channel_hash: str):
-        # Lets the UI gate kick/promote/demote controls the same way
-        # main_window.py's _on_view_members does -- server-side enforcement
-        # in actions.update_membership is the real boundary regardless.
+        # Lets the UI gate kick/promote/demote controls -- server-side
+        # enforcement in actions.update_membership is the real boundary
+        # regardless.
         my_hex = backend.identity.hash_hex
         # send_message mirrors messaging._on_lxmf_message: open-join channels
         # accept anyone, so it is effectively true; otherwise it is the role
@@ -1524,9 +1516,9 @@ def create_app(backend: Backend, *, token: str | None = None,
 
     @app.post("/channels/{channel_hash}/permissions")
     def update_permissions(channel_hash: str, req: UpdatePermissionsRequest):
-        # Same entry point main_window.py's _on_edit_permissions uses.
         # edit_channel_permissions re-checks MANAGE_CHANNEL itself and
-        # no-ops if the caller lacks it, same as the GUI's pre-flight gate.
+        # no-ops if the caller lacks it, same as the client's pre-flight
+        # gate.
         row = backend.storage.get_channel(channel_hash)
         if row is not None and row["server_hash"]:
             # A per-channel override would be silently clobbered by the
@@ -1547,7 +1539,6 @@ def create_app(backend: Backend, *, token: str | None = None,
 
     @app.post("/channels/{channel_hash}/roles")
     def update_roles(channel_hash: str, req: UpdateRolesRequest):
-        # Same entry point main_window.py's _on_view_members uses --
         # update_membership() re-applies the KICK/MANAGE_ROLES gate itself,
         # so an unauthorized request here is silently dropped server-side
         # even if a caller bypasses the UI gate above. Its return value
@@ -1575,9 +1566,9 @@ def create_app(backend: Backend, *, token: str | None = None,
 
     @app.post("/invites/{channel_hash}/accept")
     def accept_invite(channel_hash: str):
-        # Same calls main_window.py's _on_accept_invite makes, including its
-        # split on a null token: a held document is confirmed locally, a token
-        # invite sends a join request and waits for the document to come back.
+        # Split on a null token: a held document is confirmed locally, a
+        # token invite sends a join request and waits for the document to
+        # come back.
         match = next((i for i in pending_invites if i["channel_hash_hex"] == channel_hash), None)
         if match is None:
             return JSONResponse({"ok": False, "error": "no such pending invite"}, status_code=404)
@@ -1640,7 +1631,7 @@ def create_app(backend: Backend, *, token: str | None = None,
     def _decode_attachment(image_data_b64: str | None):
         """(image bytes or None, error response or None).
 
-        Fails closed, like main_window.py's _on_send_message: the re-encode is
+        Fails closed: the re-encode is
         the only sanitisation in the pipeline, and it rejects precisely the
         inputs it exists to catch, so forwarding the original bytes would
         bypass it on exactly those.
@@ -1668,8 +1659,7 @@ def create_app(backend: Backend, *, token: str | None = None,
             return error
 
         # Messaging fires its message callback only for inbound LXMF, so the
-        # sender's own message never reaches the WS bus by itself -- the Qt
-        # client refreshes its own view after sending instead. Detect the
+        # sender's own message never reaches the WS bus by itself. Detect the
         # stored message by id and emit it here so browser clients update
         # live too. This also catches the silent-drop case: send_message
         # returns True but stores nothing when the recipient list is empty,
@@ -1691,9 +1681,8 @@ def create_app(backend: Backend, *, token: str | None = None,
     # --- reactions and custom emoji ---
 
     def _reaction_peers(channel_hash: str) -> list[str]:
-        # Same recipient logic _on_send_message uses, minus the SEND_MESSAGE
-        # gate (which doesn't apply to reactions) -- see main_window.py's
-        # _get_reaction_peers.
+        # Same recipient logic send_message uses, minus the SEND_MESSAGE
+        # gate (which doesn't apply to reactions).
         # trenchchat_only: a reaction is a TrenchChat control message, and a
         # conversation's other end may be running something else entirely.
         return actions.conversation_recipients(
