@@ -62,7 +62,9 @@ hidden_imports = (
         "sounddevice",
         "numpy",
         "opuslib",
-        # tray backends; the ones this platform cannot use are simply absent
+        # Tray backend for this platform. Linux gets the X11 one, the only
+        # backend that needs no PyGObject -- it has no menu, so tray.py
+        # declines it and the app quits with its window there.
         "pystray",
         "pystray._win32" if sys.platform == "win32" else
         "pystray._darwin" if sys.platform == "darwin" else "pystray._xorg",

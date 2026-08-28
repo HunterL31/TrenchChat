@@ -76,9 +76,14 @@ forces the browser, `--no-ui` runs the backend headless.
 Closing the window does not close TrenchChat. It leaves a tray icon and keeps the node on
 the mesh, so announces, discovery and sync carry on and messages sent while you were away
 are still there; open a window again or quit from the tray. Launching it again while it sits
-there reopens that window rather than starting a second node. Where there is no tray to drop
-to — GNOME, which shows no tray icons, or a machine with no desktop at all — closing the
-window quits as it always did; `--no-tray` asks for that everywhere.
+there reopens that window rather than starting a second node.
+
+The tray needs a menu to quit from, so TrenchChat uses one only where that exists: Windows
+and macOS always, Linux only with an AppIndicator or GTK status icon (PyGObject, so from
+source rather than the packaged build — and not on GNOME, which stopped drawing status
+icons in 3.26). X11's own tray takes a click and shows no menu, so it is treated as no tray
+at all. Where there is none, closing the window quits as it always did, and `--no-tray` asks
+for that everywhere.
 
 The legacy Qt client still works via `python main.py`; pass `-v` / `--verbose` for detailed
 Reticulum and TrenchChat debug logging. Run one client at a time — both use the same identity

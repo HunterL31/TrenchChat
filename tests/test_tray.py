@@ -31,6 +31,7 @@ class FakeMenu:
 
 class FakeIcon:
     notify_error = None
+    HAS_MENU = True
 
     def __init__(self, name, image, title, menu):
         self.name = name
@@ -151,17 +152,25 @@ def test_a_backend_without_notifications_is_not_a_failure(fake_pystray):
     background.notify(tray.BACKGROUND_NOTICE)
 
 
-def test_a_desktop_that_hides_tray_icons_gets_no_tray(monkeypatch, fake_pystray):
-    """On GNOME the X11 icon exists and is never shown: the window would be
-    the only way back to an app that had just hidden itself."""
-    monkeypatch.setattr(FakeIcon, "__module__", tray.X11_BACKEND)
+def test_a_backend_with_no_menu_gets_no_tray(monkeypatch, fake_pystray):
+    """X11's tray takes a click and shows no menu, so Quit would not exist:
+    the window the user just closed was the only way back."""
+    monkeypatch.setattr(FakeIcon, "HAS_MENU", False)
+
+    assert tray.create_tray(on_open=lambda: None, on_quit=lambda: None) is None
+
+
+def test_a_desktop_that_hides_status_icons_gets_no_tray(monkeypatch, fake_pystray):
+    """GNOME dropped GtkStatusIcon in 3.26 -- the icon exists and is never
+    drawn, which hides the app with no way back to it."""
+    monkeypatch.setattr(FakeIcon, "__module__", tray.GTK_BACKEND)
     monkeypatch.setenv("XDG_CURRENT_DESKTOP", "ubuntu:GNOME")
 
     assert tray.create_tray(on_open=lambda: None, on_quit=lambda: None) is None
 
 
-def test_a_desktop_with_a_notification_area_gets_one(monkeypatch, fake_pystray):
-    monkeypatch.setattr(FakeIcon, "__module__", tray.X11_BACKEND)
+def test_a_desktop_that_draws_them_gets_one(monkeypatch, fake_pystray):
+    monkeypatch.setattr(FakeIcon, "__module__", tray.GTK_BACKEND)
     monkeypatch.setenv("XDG_CURRENT_DESKTOP", "XFCE")
 
     assert tray.create_tray(on_open=lambda: None, on_quit=lambda: None) is not None

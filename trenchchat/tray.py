@@ -17,12 +17,12 @@ from typing import Callable
 
 import RNS
 
-# GNOME dropped XEmbed tray icons in 3.26. pystray's X11 backend still
-# creates one and nothing ever shows it, which would leave the window as the
-# only way back to an app that just hid itself -- worse than not having a
-# tray at all.
-X11_BACKEND = "pystray._xorg"
-DESKTOPS_WITHOUT_A_TRAY = ("GNOME",)
+# A tray the user cannot quit from is worse than no tray at all: the window
+# they just closed was the only way back. Two backends are that:
+# pystray's X11 one takes a click and shows no menu (HAS_MENU), and GTK's
+# status icon is never drawn on GNOME, which dropped it in 3.26.
+GTK_BACKEND = "pystray._gtk"
+DESKTOPS_WITHOUT_STATUS_ICONS = ("GNOME",)
 
 ICON_PATH = Path(__file__).resolve().parent / "assets" / "tray.png"
 
@@ -33,12 +33,14 @@ BACKGROUND_NOTICE = ("Still running in the background -- announces, discovery "
                      "and messages carry on. Quit from the tray icon.")
 
 
-def _icon_would_be_invisible(icon_class) -> bool:
-    """Whether this desktop would swallow the icon rather than show it."""
-    if icon_class.__module__ != X11_BACKEND:
+def _icon_is_usable(icon_class) -> bool:
+    """Whether this backend can show an icon there is a way back out of."""
+    if not icon_class.HAS_MENU:
         return False
+    if icon_class.__module__ != GTK_BACKEND:
+        return True
     desktop = os.environ.get("XDG_CURRENT_DESKTOP", "").upper()
-    return any(name in desktop for name in DESKTOPS_WITHOUT_A_TRAY)
+    return not any(name in desktop for name in DESKTOPS_WITHOUT_STATUS_ICONS)
 
 
 def load_icon_image():
@@ -95,8 +97,8 @@ def create_tray(*, on_open: Callable[[], None], on_quit: Callable[[], None],
                 RNS.LOG_NOTICE)
         return None
 
-    if _icon_would_be_invisible(pystray.Icon):
-        RNS.log("TrenchChat [tray]: this desktop shows no tray icons; "
+    if not _icon_is_usable(pystray.Icon):
+        RNS.log("TrenchChat [tray]: this desktop has no tray worth hiding in; "
                 "closing the window will quit", RNS.LOG_NOTICE)
         return None
 
