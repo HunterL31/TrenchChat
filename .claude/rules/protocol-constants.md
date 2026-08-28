@@ -37,6 +37,8 @@ F_CHANNEL_HASH = 0x01
 | `0x30–0x3F` | Subscription | `F_SUBSCRIBER_LIST=0x30` |
 | `0x50–0x5F` | Sync status | `F_SYNC_TRUNCATED=0x50` |
 | `0x60–0x6F` | Voice | `F_VOICE_STATE=0x60`, `F_VOICE_MUTED=0x61`, `F_VOICE_JOINED_AT=0x62`, `F_VOICE_CODEC=0x63` |
+| `0x70–0x7F` | Message integrity | `F_AUTHOR_SIG=0x70`, `F_AUTHOR_KEYS=0x71` |
+| `0x80–0x8F` | Friends / direct messages | `F_FRIEND_NOTE=0x80` |
 
 When adding a new field:
 1. Pick the next unused key in the appropriate range.
@@ -61,9 +63,18 @@ Control messages are identified by `fields[F_MSG_TYPE]`. Defined values:
 | `MT_VOICE_JOIN` | `"voice_join"` | `voice.py` |
 | `MT_VOICE_LEAVE` | `"voice_leave"` | `voice.py` |
 | `MT_VOICE_STATE` | `"voice_state"` | `voice.py` |
+| `MT_FRIEND_REQUEST` | `"friend_request"` | `friends.py` |
+| `MT_FRIEND_ACCEPT` | `"friend_accept"` | `friends.py` |
+| `MT_FRIEND_DECLINE` | `"friend_decline"` | `friends.py` |
 
 Chat messages have **no** `F_MSG_TYPE` field. Handlers should check `F_MSG_TYPE in fields`
 to distinguish control messages from chat messages.
+
+A **direct message is a chat message**, not a control one: it carries no `F_MSG_TYPE`, and its
+`F_CHANNEL_HASH` is a conversation address (`naming.dm_hash_for`) rather than a channel hash. That
+keeps it out of the router's per-sender control throttle, where a limit would drop conversation.
+Nothing on the wire marks it as a direct message — the receiver recomputes the address from the
+authenticated sender, so the address itself is the proof.
 
 ## msgpack conventions
 

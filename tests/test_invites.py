@@ -7,7 +7,10 @@ flow, expired tokens, and member list versioning/tiebreak rules.
 
 import time
 import struct
+from types import SimpleNamespace
 from unittest.mock import patch
+
+import msgpack
 
 import pytest
 
@@ -19,6 +22,8 @@ from trenchchat.core.invite import (
     _signed_payload,
     _verify,
 )
+from trenchchat.core import actions
+from trenchchat.core.protocol import F_CHANNEL_NAME
 
 
 class TestInviteTokens:
@@ -527,3 +532,164 @@ class TestInviteSurvivesAnUnresolvedPath:
             i["channel_hash_hex"] == ch_hash
             for i in bob.invite_mgr.list_pending_invites()
         ), timeout=5), "the invitee never received an invite that was flushed"
+
+
+class TestInviteeSidebarState:
+    """is_member alone was the whole assertion here, and every listing filters
+    on the subscription instead -- so a peer could be a full member of a channel
+    that never appeared anywhere in their client."""
+
+    @staticmethod
+    def _invite_and_join(inviter, invitee, channel_hash):
+        invitee.invite_mgr.add_invite_callback(
+            lambda ch, name, token, expiry, admin: (
+                invitee.invite_mgr.send_join_request(ch, token, expiry, admin)
+            )
+        )
+        inviter.invite_mgr.send_invite(channel_hash, invitee.identity.hash_hex)
+
+    def test_accepted_invite_leaves_a_visible_channel(self, peer_factory):
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+        ch = alice.channel_mgr.create_channel("private", "Invite only", "invite")
+
+        self._invite_and_join(alice, bob, ch)
+
+        assert wait_for_member(bob.storage, ch, bob.identity.hash_hex, timeout=5)
+        assert wait_for(lambda: bob.storage.is_subscribed(ch), timeout=5), \
+            "bob is a member of a channel he is not subscribed to"
+        row = bob.storage.get_channel(ch)
+        assert row is not None
+        assert row["server_hash"] is None
+        assert ch in {c["hash"] for c in bob.storage.get_standalone_channels()}
+
+    def test_re_invite_after_leaving_restores_the_subscription(self, peer_factory):
+        """Leaving drops the subscription and keeps the channel row, so gating
+        the subscribe on the row being absent never let a returning member
+        back into their own sidebar."""
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+        ch = alice.channel_mgr.create_channel("private", "Invite only", "invite")
+
+        self._invite_and_join(alice, bob, ch)
+        assert wait_for(lambda: bob.storage.is_subscribed(ch), timeout=5)
+
+        bob.storage.unsubscribe(ch)
+        assert bob.storage.get_channel(ch) is not None, "the row should survive a leave"
+
+        alice.invite_mgr.publish_member_list(ch, remove_members=[bob.identity.hash])
+        assert wait_for(
+            lambda: not alice.storage.is_member(ch, bob.identity.hash_hex), timeout=5)
+        self._invite_and_join(alice, bob, ch)
+
+        assert wait_for(lambda: bob.storage.is_subscribed(ch), timeout=5), \
+            "a re-invited member never re-subscribed, so the channel stayed hidden"
+
+    def test_a_document_with_no_channel_name_creates_nothing(self, peer_factory):
+        """The members row is written before the channel row, so an abort in
+        between used to leave a member of a channel that does not exist."""
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+        ch = alice.channel_mgr.create_channel("private", "Invite only", "invite")
+        bob.storage.record_accepted_invite(
+            ch, alice.identity.hash_hex, time.time() + 3600)
+        alice.invite_mgr.publish_member_list(ch, add_members=[bob.identity.hash])
+
+        fields = alice.invite_mgr._member_list_fields(
+            ch, alice.storage.get_member_list_version(ch)["document_blob"])
+        fields.pop(F_CHANNEL_NAME)
+        bob.invite_mgr._on_lxmf_message(
+            SimpleNamespace(fields=fields, source_hash=None))
+
+        assert bob.storage.is_member(ch, bob.identity.hash_hex) is True
+        assert bob.storage.get_channel(ch) is None
+        assert bob.storage.is_subscribed(ch) is False
+
+
+class TestMembershipResync:
+    """A membership document is delivered exactly once. A peer that missed the
+    only copy stayed a member everywhere but its own node, recoverable only by
+    a fresh invite."""
+
+    def test_a_peer_that_missed_the_document_converges_on_announce(self, peer_factory):
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+        ch = alice.channel_mgr.create_channel("private", "Invite only", "invite")
+        bob.storage.record_accepted_invite(
+            ch, alice.identity.hash_hex, time.time() + 3600)
+
+        # Add bob without him ever seeing the document, exactly as a dropped
+        # link or an expired quarantine would leave things.
+        bob.router.remove_delivery_callback(bob.invite_mgr._on_lxmf_message)
+        alice.invite_mgr.publish_member_list(ch, add_members=[bob.identity.hash])
+        assert wait_for_member(alice.storage, ch, bob.identity.hash_hex, timeout=5)
+        assert not wait_for(lambda: bob.storage.is_member(ch, bob.identity.hash_hex),
+                            timeout=1), "bob was never supposed to hear this"
+        bob.router.add_delivery_callback(bob.invite_mgr._on_lxmf_message)
+
+        assert alice.invite_mgr.resync_membership(bob.identity.hash_hex) == 1
+
+        assert wait_for(lambda: bob.storage.is_subscribed(ch), timeout=5), \
+            "bob never converged after the roster was re-sent"
+
+    def test_the_cooldown_holds_a_second_resync(self, peer_factory):
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+        ch = alice.channel_mgr.create_channel("private", "Invite only", "invite")
+        alice.invite_mgr.publish_member_list(ch, add_members=[bob.identity.hash])
+
+        assert alice.invite_mgr.resync_membership(bob.identity.hash_hex) == 1
+        assert alice.invite_mgr.resync_membership(bob.identity.hash_hex) == 0, \
+            "an announcing peer would re-broadcast every roster it is in"
+
+    def test_a_non_member_is_never_sent_a_roster(self, peer_factory):
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+        alice.channel_mgr.create_channel("private", "Invite only", "invite")
+
+        assert alice.invite_mgr.resync_membership(bob.identity.hash_hex) == 0
+
+
+class TestEqualVersionTiebreak:
+    """The tiebreak compares an incoming signer against the *stored* document's
+    signer, re-derived rather than read off its signature map. Rebuilding that
+    document without its v2+ fields changed the payload the signature is checked
+    against, so nothing validated, the sentinel lost every tie, and any
+    equal-version document was re-applied over the one already held."""
+
+    def test_a_resent_document_is_not_re_applied(self, peer_factory):
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+        ch = alice.channel_mgr.create_channel("private", "Invite only", "invite")
+        bob.storage.record_accepted_invite(
+            ch, alice.identity.hash_hex, time.time() + 3600)
+        alice.invite_mgr.publish_member_list(ch, add_members=[bob.identity.hash])
+        assert wait_for_member(bob.storage, ch, bob.identity.hash_hex, timeout=5)
+
+        # Bob leaves: local only, so alice still lists him and keeps re-sending.
+        bob.storage.unsubscribe(ch)
+        bob.storage.remove_member(ch, bob.identity.hash_hex)
+
+        fields = alice.invite_mgr._member_list_fields(
+            ch, alice.storage.get_member_list_version(ch)["document_blob"])
+        bob.invite_mgr._on_lxmf_message(
+            SimpleNamespace(fields=fields, source_hash=None))
+
+        assert bob.storage.is_subscribed(ch) is False, \
+            "an identical document was re-applied and undid a local leave"
+        assert bob.storage.is_member(ch, bob.identity.hash_hex) is False
+
+    def test_the_stored_signer_is_recovered_from_a_v2_document(self, peer_factory):
+        """The document a server publishes carries joined_at, departed and a
+        channel roster; every one of them is signed."""
+        alice = peer_factory("alice")
+        s = actions.create_server(alice.server_mgr, alice.invite_mgr, "S")
+        actions.create_channel_in_server(
+            alice.storage, alice.channel_mgr, alice.invite_mgr,
+            s, alice.identity.hash_hex, "general")
+
+        stored = msgpack.unpackb(
+            alice.storage.get_member_list_version(s)["document_blob"], raw=True)
+        assert b"channels" in stored and b"joined_at" in stored
+
+        assert alice.invite_mgr._validated_signer(stored, s) == alice.identity.hash

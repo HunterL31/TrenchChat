@@ -59,6 +59,15 @@ from trenchchat.network.router import Router
 
 DEFAULT_TOKEN_TTL = 7 * 24 * 3600  # 7 days
 
+# How rarely one peer is re-sent one scope's member list document. Matched to
+# the re-announce interval, so a peer announcing on its own timer costs at most
+# one document per roster per announce.
+RESYNC_COOLDOWN_SECS = 900.0
+
+# Identities are free to mint, so the cooldown map is bounded like every other
+# per-peer table here; evicting a pair only lets it resync sooner.
+MAX_RESYNC_PAIRS = 1024
+
 # Upper bound on a member list version. The counter increments by one per
 # publish, so nothing legitimate approaches this; the bound exists because
 # version is signed wire data that drives an ordering comparison, and a
@@ -196,6 +205,13 @@ class InviteManager:
         self._accept_lock = threading.Lock()
         # An invite or join request sent before the recipient's path
         # resolved used to be dropped outright, and nothing re-sent it.
+        self._server_callbacks: list = []
+        # (scope_hex, peer_hex) -> when we last re-sent them that roster.
+        self._resync_at: dict[tuple[str, str], float] = {}
+        self._resync_lock = threading.Lock()
+        # Servers materialised but not yet reported, so a document rejected
+        # after its row was written never announces a join.
+        self._new_servers: set[str] = set()
         self._retry = ControlRetryQueue("invite")
         # scope_hex -> "server" | "channel", learned from an inbound invite.
         # Presentation only: trust anchoring is the accepted_invites table.
@@ -231,6 +247,33 @@ class InviteManager:
     def remove_channel_joined_callback(self, callback):
         if callback in self._channel_callbacks:
             self._channel_callbacks.remove(callback)
+
+    def add_server_joined_callback(self, callback):
+        """callback(server_hash_hex, server_name) — fired when a server is first joined.
+
+        A server carries no subscription, so nothing else marks the moment it
+        becomes visible: a client watching only for joined channels missed a
+        server whose channels it already knew, or that had none yet.
+        """
+        if callback not in self._server_callbacks:
+            self._server_callbacks.append(callback)
+
+    def remove_server_joined_callback(self, callback):
+        if callback in self._server_callbacks:
+            self._server_callbacks.remove(callback)
+
+    def _announce_new_server(self, server_hash_hex: str) -> None:
+        if server_hash_hex not in self._new_servers:
+            return
+        self._new_servers.discard(server_hash_hex)
+        row = self._storage.get_server(server_hash_hex)
+        name = row["name"] if row else server_hash_hex[:12]
+        for cb in self._server_callbacks:
+            try:
+                cb(server_hash_hex, name)
+            except Exception as e:
+                RNS.log(f"TrenchChat: server joined callback error: {e}",
+                        RNS.LOG_ERROR)
 
     def add_member_list_callback(self, callback):
         """callback(channel_hash_hex) — fired whenever a member list update is accepted."""
@@ -287,6 +330,11 @@ class InviteManager:
         Uses the scope-aware creator lookup so a server we already know anchors
         the same way a channel does. It must only ever read state stored before
         this message arrived -- see the caller.
+
+        The accepted-invite anchor is keyed by the scope the invite named, which
+        is why send_invite normalises a channel to its server: a document always
+        arrives for the owning scope, and an anchor under any other hash cannot
+        be found from here.
         """
         if self._storage.get_member_list_version(channel_hash_hex):
             return True
@@ -321,10 +369,15 @@ class InviteManager:
             channel_name = channel_name.decode("utf-8", errors="replace")
         channel_name = str(channel_name) or channel_hash_hex[:12]
 
+        # F_SCOPE_KIND belongs here as much as the presentation fields do:
+        # without it a confirmed server document is applied as a standalone
+        # channel under the server's own hash, and the real server never
+        # appears at all.
         meta = {
             k: fields.get(k) for k in (
                 F_CHANNEL_NAME, F_CHANNEL_DESC, F_CHANNEL_CREATOR,
                 F_CHANNEL_PERMISSIONS, F_CHANNEL_ACCESS, F_CHANNEL_CREATED_AT,
+                F_SCOPE_KIND,
             ) if fields.get(k) is not None
         }
         self._storage.record_pending_member_doc(
@@ -370,7 +423,12 @@ class InviteManager:
         self._storage.clear_pending_invite(channel_hash_hex)
 
     def accept_pending_membership(self, channel_hash_hex: str) -> bool:
-        """Confirm a held document: anchor it to its signer, then apply it."""
+        """Confirm a held document: anchor it to its signer, then apply it.
+
+        A server document has to materialise its servers row first, exactly as
+        the inbound path does, or is_server() is false while it is applied and
+        the roster is never read.
+        """
         row = self._storage.get_pending_member_doc(channel_hash_hex)
         if row is None:
             return False
@@ -390,21 +448,34 @@ class InviteManager:
             self._storage.clear_pending_member_doc(channel_hash_hex)
             return False
 
+        is_server_doc = _decode(meta.get(F_SCOPE_KIND, "")) == "server"
+        if is_server_doc:
+            self._materialise_server(meta, channel_hash_hex)
+
         accepted = self._accept_document(doc, channel_hash_hex)
         self._storage.clear_pending_member_doc(channel_hash_hex)
         if not accepted:
             self._storage.clear_accepted_invite(channel_hash_hex)
+            if is_server_doc:
+                self._new_servers.discard(channel_hash_hex)
+                self._storage.discard_empty_server(channel_hash_hex)
             return False
 
-        self._create_channel_from_metadata(channel_hash_hex, meta,
-                                           row["channel_name"])
+        if is_server_doc:
+            self._announce_new_server(channel_hash_hex)
+        else:
+            self._create_channel_from_metadata(channel_hash_hex, meta,
+                                               row["channel_name"])
         return True
 
     def _create_channel_from_metadata(self, channel_hash_hex: str, meta: dict,
                                       fallback_name: str) -> None:
-        if self._storage.get_channel(channel_hash_hex):
-            return
+        """Create and subscribe a channel from a confirmed document's metadata.
 
+        Subscribing sits outside the "channel is unknown" guard for the same
+        reason it does in _auto_join_channel: leaving keeps the row, so gating
+        both on the row being absent never re-subscribes a returning member.
+        """
         def _text(key, default=""):
             value = meta.get(key, default)
             if isinstance(value, bytes):
@@ -412,28 +483,28 @@ class InviteManager:
             return str(value) if value is not None else default
 
         name = _text(F_CHANNEL_NAME) or fallback_name
-        perms_field = meta.get(F_CHANNEL_PERMISSIONS)
-        if perms_field is None:
-            perms_field = meta.get(F_CHANNEL_ACCESS, b"invite")
-        if isinstance(perms_field, bytes):
-            perms_field = perms_field.decode("utf-8", errors="replace")
+        if self._storage.get_channel(channel_hash_hex) is None:
+            perms_field = meta.get(F_CHANNEL_PERMISSIONS)
+            if perms_field is None:
+                perms_field = meta.get(F_CHANNEL_ACCESS, b"invite")
+            if isinstance(perms_field, bytes):
+                perms_field = perms_field.decode("utf-8", errors="replace")
 
-        self._storage.upsert_channel(
-            hash=channel_hash_hex,
-            name=name,
-            description=_text(F_CHANNEL_DESC),
-            creator_hash=_text(F_CHANNEL_CREATOR),
-            permissions=perms_field,
-            created_at=meta.get(F_CHANNEL_CREATED_AT, time.time()),
-        )
+            self._storage.upsert_channel(
+                hash=channel_hash_hex,
+                name=name,
+                description=_text(F_CHANNEL_DESC),
+                creator_hash=_text(F_CHANNEL_CREATOR),
+                permissions=perms_field,
+                created_at=meta.get(F_CHANNEL_CREATED_AT, time.time()),
+            )
+
+        if self._storage.is_subscribed(channel_hash_hex):
+            return
         self._storage.subscribe(channel_hash_hex)
         RNS.log(f"TrenchChat [invite]: joined channel {name!r} "
                 f"({channel_hash_hex[:12]}…) after confirmation", RNS.LOG_NOTICE)
-        for cb in self._channel_callbacks:
-            try:
-                cb(channel_hash_hex, name)
-            except Exception as e:
-                RNS.log(f"TrenchChat: channel callback error: {e}", RNS.LOG_ERROR)
+        self._notify_channel_joined(channel_hash_hex, name)
 
     def _validate_document(self, doc: dict, channel_hash_hex: str) -> bytes | None:
         """Return the hash of the trusted signer that validated, or None.
@@ -456,15 +527,12 @@ class InviteManager:
         # Determine the set of identities that are *currently* authorised to
         # sign member list updates for this channel.
         #
-        # Priority order:
-        #   1. Previously stored member list doc — most secure; prevents a peer
-        #      from granting themselves signing authority in a crafted doc.
-        #   2. Channel creator from local storage — used when we have a channel
-        #      record but no stored member list yet (e.g. first publish).
-        #   3. The doc's own admins/owners — bootstrap fallback for peers that
-        #      receive a member list before they have any local channel record
-        #      (e.g. auto-join on first invite).  The cryptographic signature
-        #      check still applies; we just can't cross-reference a stored list.
+        # A previously stored document is the strongest anchor and wins alone:
+        # it is what stops a peer granting itself signing authority in a doc it
+        # crafted. With none stored, the channel's creator and the admin whose
+        # invite this user accepted both count, and a document anchored by
+        # neither is never applied -- _can_anchor holds it for the user to
+        # confirm instead.
         existing = self._storage.get_member_list_version(channel_hash_hex)
         if existing:
             old_doc = msgpack.unpackb(existing["document_blob"], raw=True)
@@ -473,25 +541,26 @@ class InviteManager:
                 | set(old_doc.get(b"owners", []))
             )
         else:
+            # Both remaining anchors are accepted on their own, so they are
+            # unioned rather than tried in order. As a fallback chain the
+            # creator displaced the invite: _materialise_server writes the
+            # servers row before this runs, so a server admitted by any admin
+            # other than its creator had its document rejected outright.
+            #
             # get_scope_creator_hash checks servers before channels: without
-            # that a server document would skip this tier entirely and fall
-            # through to the weaker anchors below.
-            creator_hex = self._storage.get_scope_creator_hash(channel_hash_hex)
+            # that a server document would miss the creator entirely.
             trusted_signers = set()
-            if creator_hex:
+            creator_hex = self._storage.get_scope_creator_hash(channel_hash_hex)
+            # An invite this user actively accepted, naming the admin we sent
+            # the join request to.
+            admin_hex = self._storage.get_accepted_invite_admin(channel_hash_hex)
+            for anchor_hex in (creator_hex, admin_hex):
+                if not anchor_hex:
+                    continue
                 try:
-                    trusted_signers = {bytes.fromhex(creator_hex)}
+                    trusted_signers.add(bytes.fromhex(anchor_hex))
                 except ValueError:
-                    trusted_signers = set()
-            if not trusted_signers:
-                # Next anchor: an invite this user actively accepted, which
-                # names the admin we sent the join request to.
-                admin_hex = self._storage.get_accepted_invite_admin(channel_hash_hex)
-                if admin_hex:
-                    try:
-                        trusted_signers = {bytes.fromhex(admin_hex)}
-                    except ValueError:
-                        trusted_signers = set()
+                    continue
 
             if not trusted_signers:
                 RNS.log(
@@ -519,6 +588,7 @@ class InviteManager:
                 doc["members"], admins_in_doc,
             )
 
+        unresolved: list[str] = []
         for signer_hash_bytes, sig in sorted(sigs.items()):
             if signer_hash_bytes not in trusted_signers:
                 continue
@@ -528,9 +598,26 @@ class InviteManager:
                 delivery_hash = RNS.Destination.hash(signer_hash_bytes, "lxmf", "delivery")
                 signer_identity = RNS.Identity.recall(delivery_hash)
             if signer_identity is None:
+                unresolved.append(signer_hash_bytes.hex()[:12])
                 continue
             if _verify(signer_identity, payload, sig):
                 return signer_hash_bytes
+
+        # Silence here reads as packet loss from the other side, which is what
+        # made a rejected document indistinguishable from one never sent.
+        if unresolved:
+            RNS.log(
+                f"TrenchChat [invite]: member list doc for {channel_hash_hex[:12]}… "
+                f"— identity not known for trusted signer(s) "
+                f"{', '.join(unresolved)}… — rejected",
+                RNS.LOG_WARNING,
+            )
+        else:
+            RNS.log(
+                f"TrenchChat [invite]: member list doc for {channel_hash_hex[:12]}… "
+                f"carries no signature from a trusted signer — rejected",
+                RNS.LOG_WARNING,
+            )
         return None
 
     def _signer_may_apply(self, doc: dict, channel_hash_hex: str,
@@ -683,6 +770,12 @@ class InviteManager:
         Re-derived rather than read off the map, for the same reason the
         incoming side uses its validated signer: a signature map may carry
         keys that never validated.
+
+        Every signed field has to be carried across, present-or-absent exactly
+        as stored. Dropping joined_at, departed or channels changed the payload
+        the signature is checked against, so no signer validated and the
+        sentinel below lost every tiebreak -- letting any equal-version
+        document be re-applied over the one already held.
         """
         readable = {
             "channel_hash": stored_doc.get(b"channel_hash", b""),
@@ -690,10 +783,20 @@ class InviteManager:
             "published_at": stored_doc.get(b"published_at", 0.0),
             "members": list(stored_doc.get(b"members", [])),
             "admins": list(stored_doc.get(b"admins", [])),
-            "owners": list(stored_doc.get(b"owners", [])),
-            "permissions": stored_doc.get(b"permissions", b""),
             "signatures": stored_doc.get(b"signatures", {}),
         }
+        if b"owners" in stored_doc:
+            readable["owners"] = list(stored_doc[b"owners"])
+        if b"permissions" in stored_doc:
+            readable["permissions"] = stored_doc[b"permissions"]
+        if b"joined_at" in stored_doc:
+            readable["joined_at"] = dict(stored_doc[b"joined_at"])
+        if b"departed" in stored_doc:
+            readable["departed"] = {
+                k: tuple(v) for k, v in stored_doc[b"departed"].items()
+            }
+        if b"channels" in stored_doc:
+            readable["channels"] = stored_doc[b"channels"]
         signer = self._validate_document(readable, channel_hash_hex)
         return signer if signer is not None else b"\xff" * 16
 
@@ -898,12 +1001,7 @@ class InviteManager:
             )
 
         for hash_hex, name in new_channels:
-            for cb in self._channel_callbacks:
-                try:
-                    cb(hash_hex, name)
-                except Exception as e:
-                    RNS.log(f"TrenchChat: channel joined callback error: {e}",
-                            RNS.LOG_ERROR)
+            self._notify_channel_joined(hash_hex, name)
 
         return True
 
@@ -931,7 +1029,9 @@ class InviteManager:
         is never deleted, so roster propagation stays monotonic and converges
         even when a concurrent publish loses the version tiebreak.
 
-        Returns (channel_hash_hex, name) for channels newly created here.
+        Returns (channel_hash_hex, name) for channels this node newly
+        subscribed to, which is what makes one appear in a sidebar -- a row
+        created without a subscription is not somewhere we have joined.
         """
         # unpack_wire, not msgpack.unpackb: this came off the network.
         try:
@@ -1001,7 +1101,7 @@ class InviteManager:
                 )
                 continue
 
-            is_new = row is None
+            was_subscribed = self._storage.is_subscribed(ch_hex)
             self._storage.upsert_channel(
                 hash=ch_hex,
                 name=name,
@@ -1013,9 +1113,72 @@ class InviteManager:
             )
             if am_member:
                 self._storage.subscribe(ch_hex)
-            if is_new:
-                created.append((ch_hex, name))
+                if not was_subscribed:
+                    created.append((ch_hex, name))
         return created
+
+    def _auto_join_channel(self, fields: dict, channel_hash_hex: str) -> None:
+        """Create and subscribe a standalone channel an accepted document admits us to.
+
+        Subscribing is deliberately outside the "channel is unknown" guard that
+        covers the metadata write. Leaving a channel drops the subscription and
+        keeps the row, so gating both on the row being absent left a re-invited
+        peer a full member with no subscription -- and every listing filters on
+        that, so the channel never came back.
+        """
+        my_hex = self._identity.hash_hex
+        if not self._storage.is_member(channel_hash_hex, my_hex):
+            return
+
+        if self._storage.get_channel(channel_hash_hex) is None:
+            channel_name = _decode(fields.get(F_CHANNEL_NAME, ""))
+            if not channel_name:
+                RNS.log(
+                    f"TrenchChat [invite]: accepted a document for unknown channel "
+                    f"{channel_hash_hex[:12]}… carrying no name — nothing to create",
+                    RNS.LOG_WARNING,
+                )
+                return
+            creator = _decode(fields.get(F_CHANNEL_CREATOR, ""))
+            perms_field = fields.get(F_CHANNEL_PERMISSIONS)
+            if perms_field is None:
+                perms_field = fields.get(F_CHANNEL_ACCESS, b"invite")
+            # These fields are unsigned, and creator_hash goes on to serve as a
+            # trusted-signer fallback for later documents. Bind it the same way
+            # roster entries and servers are bound, so the hash has to be one
+            # this creator could have minted.
+            if not self._creator_binds(channel_hash_hex, creator, channel_name):
+                RNS.log(
+                    f"TrenchChat [invite]: channel {channel_hash_hex[:12]}… does not "
+                    f"bind to its claimed creator and name — not created",
+                    RNS.LOG_WARNING,
+                )
+                return
+            self._storage.upsert_channel(
+                hash=channel_hash_hex,
+                name=channel_name,
+                description=_decode(fields.get(F_CHANNEL_DESC, "")),
+                creator_hash=creator,
+                permissions=_decode(perms_field),
+                created_at=fields.get(F_CHANNEL_CREATED_AT, time.time()),
+            )
+
+        if self._storage.is_subscribed(channel_hash_hex):
+            return
+        self._storage.subscribe(channel_hash_hex)
+        row = self._storage.get_channel(channel_hash_hex)
+        name = row["name"] if row else channel_hash_hex[:12]
+        RNS.log(f"TrenchChat [invite]: auto-joined channel {name!r} "
+                f"({channel_hash_hex[:12]}…)", RNS.LOG_NOTICE)
+        self._notify_channel_joined(channel_hash_hex, name)
+
+    def _notify_channel_joined(self, channel_hash_hex: str, name: str) -> None:
+        for cb in self._channel_callbacks:
+            try:
+                cb(channel_hash_hex, name)
+            except Exception as e:
+                RNS.log(f"TrenchChat: channel joined callback error: {e}",
+                        RNS.LOG_ERROR)
 
     def _materialise_server(self, fields: dict, server_hash_hex: str) -> None:
         """Create the local servers row for an inbound server document.
@@ -1054,6 +1217,10 @@ class InviteManager:
         )
         RNS.log(f"TrenchChat [invite]: joined server {name!r} "
                 f"({server_hash_hex[:12]}…)", RNS.LOG_NOTICE)
+        # Reported once the document is applied, not here: a server whose
+        # document is then rejected is discarded again, and listeners refresh
+        # a sidebar that reads membership.
+        self._new_servers.add(server_hash_hex)
 
     # --- publish a new member list (admin action) ---
 
@@ -1358,9 +1525,13 @@ class InviteManager:
         )
         self._broadcast_member_list(channel_hash_hex, doc)
 
-    def _broadcast_member_list(self, channel_hash_hex: str, doc: dict,
-                               extra_recipients: list[str] | None = None):
-        blob = msgpack.packb(doc, use_bin_type=True)
+    def _member_list_fields(self, channel_hash_hex: str, blob: bytes) -> dict:
+        """The LXMF fields carrying one member list document.
+
+        The scope metadata rides alongside the signed blob because an invitee
+        has no local record of an invite-only scope: without it the receiver
+        can apply the document but has nothing to name or create.
+        """
         scope = self._storage.get_server(channel_hash_hex)
         is_server = scope is not None
         if scope is None:
@@ -1378,6 +1549,64 @@ class InviteManager:
             fields[F_CHANNEL_CREATOR]     = scope["creator_hash"]
             fields[F_CHANNEL_PERMISSIONS] = scope["permissions"]
             fields[F_CHANNEL_CREATED_AT]  = scope["created_at"]
+        return fields
+
+    def resync_membership(self, peer_hex: str) -> int:
+        """Re-send held member list documents to a peer that just reappeared.
+
+        A membership document is otherwise delivered exactly once, so a peer
+        that missed the only copy -- held in quarantine past its TTL, dropped
+        with a link, rejected under a rule since fixed -- stays a member on
+        every other node and a stranger on its own, recoverable only by a fresh
+        invite. Documents are version-ordered and idempotent, so a resend costs
+        one message and changes nothing for a peer already current.
+
+        Bounded by a per-(scope, peer) cooldown: peers announce on a timer, and
+        without one every announce would re-broadcast every roster.
+        """
+        if peer_hex == self._identity.hash_hex:
+            return 0
+        my_hex = self._identity.hash_hex
+        now = time.time()
+        sent = 0
+        for scope_hex in self._storage.get_member_list_scopes():
+            if not self._storage.is_member(scope_hex, peer_hex):
+                continue
+            if not self._storage.is_member(scope_hex, my_hex):
+                continue
+            if not self._resync_due(scope_hex, peer_hex, now):
+                continue
+            row = self._storage.get_member_list_version(scope_hex)
+            if row is None:
+                continue
+            fields = self._member_list_fields(scope_hex, bytes(row["document_blob"]))
+            if self._send_raw(peer_hex, fields):
+                sent += 1
+        if sent:
+            RNS.log(
+                f"TrenchChat [invite]: re-sent {sent} member list document(s) to "
+                f"{peer_hex[:12]}…",
+                RNS.LOG_DEBUG,
+            )
+        return sent
+
+    def _resync_due(self, scope_hex: str, peer_hex: str, now: float) -> bool:
+        """True if this pair is outside the cooldown, marking it if so."""
+        with self._resync_lock:
+            key = (scope_hex, peer_hex)
+            last = self._resync_at.get(key, 0.0)
+            if now - last < RESYNC_COOLDOWN_SECS:
+                return False
+            if len(self._resync_at) >= MAX_RESYNC_PAIRS:
+                oldest = min(self._resync_at, key=self._resync_at.get)
+                del self._resync_at[oldest]
+            self._resync_at[key] = now
+            return True
+
+    def _broadcast_member_list(self, channel_hash_hex: str, doc: dict,
+                               extra_recipients: list[str] | None = None):
+        fields = self._member_list_fields(
+            channel_hash_hex, msgpack.packb(doc, use_bin_type=True))
         # get_members resolves to the server scope, so this is one document per
         # server member rather than one per member per channel. Just-removed
         # peers are no longer in that table, so they are unioned in explicitly
@@ -1411,7 +1640,15 @@ class InviteManager:
 
     def send_invite(self, channel_hash_hex: str, invitee_hash_hex: str,
                     ttl: float = DEFAULT_TOKEN_TTL):
-        """Generate a token and send it to the invitee via LXMF."""
+        """Generate a token and send it to the invitee via LXMF.
+
+        A channel inside a server normalises to that server, so inviting to one
+        of its channels invites to the server. publish_member_list normalises
+        the same way, and the invite is what anchors the document it produces:
+        anchoring the channel while the document arrives for the server left the
+        invitee unable to trust it, and holding it unapplied forever.
+        """
+        channel_hash_hex = self._storage.scope_for(channel_hash_hex)
         RNS.log(f"TrenchChat: sending invite for channel {channel_hash_hex[:12]}… "
                 f"to {invitee_hash_hex[:12]}…", RNS.LOG_NOTICE)
         invitee_hash = bytes.fromhex(invitee_hash_hex)
@@ -1448,7 +1685,12 @@ class InviteManager:
         *issued_at* is part of what the token signs over, so it has to travel
         with it. Callers that hold only the token read it back from the stored
         invite; a token with none predates the field.
+
+        Normalises to the owning scope for the same reason send_invite does --
+        the anchor recorded here has to name the scope the member list document
+        will be published for.
         """
+        channel_hash_hex = self._storage.scope_for(channel_hash_hex)
         RNS.log(f"TrenchChat: sending join request for channel {channel_hash_hex[:12]}… "
                 f"to admin {admin_hash_hex[:12]}…", RNS.LOG_NOTICE)
         if issued_at is None:
@@ -1573,7 +1815,8 @@ class InviteManager:
                     # The server row must exist before _accept_document so
                     # is_server() is true when the permissions branch runs and
                     # the roster is materialised.
-                    if _decode(fields.get(F_SCOPE_KIND, "")) == "server":
+                    is_server_doc = _decode(fields.get(F_SCOPE_KIND, "")) == "server"
+                    if is_server_doc:
                         self._materialise_server(fields, channel_hash_hex)
 
                     accepted = self._accept_document(doc_clean, channel_hash_hex)
@@ -1581,51 +1824,15 @@ class InviteManager:
                             f"for {channel_hash_hex[:12]}… — {'accepted' if accepted else 'rejected'}",
                             RNS.LOG_NOTICE)
 
-                    # If channel metadata was included and we don't know this channel yet,
-                    # upsert it and subscribe so it appears in the sidebar.
+                    if is_server_doc:
+                        if accepted:
+                            self._announce_new_server(channel_hash_hex)
+                        else:
+                            self._new_servers.discard(channel_hash_hex)
+                            self._storage.discard_empty_server(channel_hash_hex)
+
                     if accepted and not self._storage.is_server(channel_hash_hex):
-                        channel_name = fields.get(F_CHANNEL_NAME)
-                        if channel_name and not self._storage.get_channel(channel_hash_hex):
-                            if isinstance(channel_name, bytes):
-                                channel_name = channel_name.decode("utf-8", errors="replace")
-                            desc = fields.get(F_CHANNEL_DESC, b"")
-                            if isinstance(desc, bytes):
-                                desc = desc.decode("utf-8", errors="replace")
-                            creator = fields.get(F_CHANNEL_CREATOR, b"")
-                            if isinstance(creator, bytes):
-                                creator = creator.decode("utf-8", errors="replace")
-                            perms_field = fields.get(F_CHANNEL_PERMISSIONS)
-                            if perms_field is None:
-                                perms_field = fields.get(F_CHANNEL_ACCESS, b"invite")
-                            if isinstance(perms_field, bytes):
-                                perms_field = perms_field.decode("utf-8", errors="replace")
-                            created_at = fields.get(F_CHANNEL_CREATED_AT, time.time())
-                            # These fields are unsigned, and creator_hash goes
-                            # on to serve as a trusted-signer fallback for
-                            # later documents. Bind it the same way roster
-                            # entries and servers are bound, so the hash has
-                            # to be one this creator could have minted.
-                            if not self._creator_binds(channel_hash_hex, creator,
-                                                       channel_name):
-                                return
-                            self._storage.upsert_channel(
-                                hash=channel_hash_hex,
-                                name=channel_name,
-                                description=desc,
-                                creator_hash=creator,
-                                permissions=perms_field,
-                                created_at=created_at,
-                            )
-                            self._storage.subscribe(channel_hash_hex)
-                            RNS.log(f"TrenchChat [invite]: auto-joined channel "
-                                    f"{channel_name!r} ({channel_hash_hex[:12]}…)",
-                                    RNS.LOG_NOTICE)
-                            for cb in self._channel_callbacks:
-                                try:
-                                    cb(channel_hash_hex, channel_name)
-                                except Exception as e:
-                                    RNS.log(f"TrenchChat: channel callback error: {e}",
-                                            RNS.LOG_ERROR)
+                        self._auto_join_channel(fields, channel_hash_hex)
                 except Exception as e:
                     RNS.log(f"TrenchChat: member list update parse error: {e}",
                             RNS.LOG_WARNING)

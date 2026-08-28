@@ -93,6 +93,11 @@ def joined_hashes(peer) -> set[str]:
 # --- convergence ---
 
 
+def joined_server_hashes(peer) -> set:
+    """Servers in a peer's own sidebar view -- GET /servers, membership-gated."""
+    return {s["hash"] for s in peer.servers()}
+
+
 def all_hold(peers, channel_hash: str, expected: set[str], *,
              timeout: float = DEFAULT_TIMEOUT) -> dict[str, float]:
     """Every peer holds exactly *expected* message contents. Returns per-tag latency."""

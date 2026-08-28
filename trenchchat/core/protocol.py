@@ -15,6 +15,18 @@ Field key registry
 0x50–0x5F  Sync status fields
 0x60–0x6F  Voice fields
 0x70–0x7F  Message integrity fields
+0x80–0x8F  Friends / direct message fields
+
+These numbers are TrenchChat's own and overlap LXMF's standard registry
+(0x01 is FIELD_EMBEDDED_LXMS there, 0x02 FIELD_TELEMETRY, and so on). That is
+harmless for messages only TrenchChat ever sees -- channels, sync, invites,
+voice -- because both ends read them the same way, and moving them is deferred.
+
+A direct message is the exception, and the reason the envelope below exists: it
+is the one message type that can legitimately arrive at a client that is not
+TrenchChat, where those numbers mean something else entirely. So a direct
+message carries none of them, and puts everything TrenchChat-specific inside
+LXMF's own custom-payload fields, which any other client knows to ignore.
 """
 
 # --- Common / messaging fields ---
@@ -86,6 +98,93 @@ F_VOICE_CODEC       = 0x63   # str   — codec the sender transmits ("opus")
 F_AUTHOR_SIG        = 0x70   # bytes[64] — author's Ed25519 signature over author_digest()
 F_AUTHOR_KEYS       = 0x71   # dict   — {author identity hex: public key} for a synced batch
 
+# --- Friends / direct message fields ---
+F_FRIEND_NOTE       = 0x80   # str — optional intro line on a friend request
+
+# Longest intro line accepted on a friend request. Self-asserted text from an
+# identity we have no relationship with yet, so it is capped on the way in.
+MAX_FRIEND_NOTE_CHARS = 140
+
+
+# --- Direct message envelope ---
+#
+# LXMF sets aside FIELD_CUSTOM_TYPE/FIELD_CUSTOM_DATA for exactly this: an
+# application's own structure, carried without claiming a number that means
+# something else to somebody. Imported rather than restated so the numbers
+# cannot drift from the library's.
+from LXMF import (  # noqa: E402
+    FIELD_CUSTOM_DATA as LXMF_FIELD_CUSTOM_DATA,
+    FIELD_CUSTOM_TYPE as LXMF_FIELD_CUSTOM_TYPE,
+    FIELD_IMAGE as LXMF_FIELD_IMAGE,
+)
+
+# Names the envelope's shape, so a future change is a new version rather than a
+# silent reinterpretation of the same bytes.
+DM_ENVELOPE_TYPE = "trenchchat/dm/1"
+
+# The image structure is not specified by the LXMF library. Sideband and
+# NomadNet use [extension, bytes], so that is what is sent; anything readable
+# is accepted on the way in (see inbound_image()).
+DM_IMAGE_EXTENSION = "jpg"
+
+
+def pack_dm_envelope(*, message_id: str, timestamp: float, display_name: str,
+                     reply_to: str | None, last_seen_id: str | None,
+                     author_sig: bytes | None) -> bytes:
+    """The TrenchChat-specific half of a direct message.
+
+    Deliberately does not carry the conversation's address: the receiver
+    derives that from the sender it authenticated, so putting it on the wire
+    would add a claim to check rather than a fact to use.
+    """
+    return msgpack.packb({
+        "message_id":   message_id,
+        "timestamp":    timestamp,
+        "display_name": display_name,
+        "reply_to":     reply_to,
+        "last_seen_id": last_seen_id,
+        "author_sig":   author_sig,
+    }, use_bin_type=True)
+
+
+def unpack_dm_envelope(fields: dict) -> dict | None:
+    """Read a TrenchChat envelope out of an inbound message's fields.
+
+    None when there is none, or it is not ours, or it does not parse -- all of
+    which mean the same thing to the caller: treat this as a plain message from
+    a client that is not TrenchChat.
+    """
+    if not fields:
+        return None
+    envelope_type = fields.get(LXMF_FIELD_CUSTOM_TYPE)
+    if isinstance(envelope_type, bytes):
+        envelope_type = envelope_type.decode(errors="replace")
+    if envelope_type != DM_ENVELOPE_TYPE:
+        return None
+    payload = fields.get(LXMF_FIELD_CUSTOM_DATA)
+    if not isinstance(payload, bytes):
+        return None
+    try:
+        unpacked = unpack_wire(payload)
+    except Exception:
+        return None
+    return unpacked if isinstance(unpacked, dict) else None
+
+
+def inbound_image(fields: dict):
+    """The attachment bytes from a standard LXMF image field, or None.
+
+    Accepts the [extension, bytes] pair other clients send, and a bare payload,
+    since the structure is convention rather than specification.
+    """
+    if not fields:
+        return None
+    value = fields.get(LXMF_FIELD_IMAGE)
+    if isinstance(value, (list, tuple)):
+        value = next((part for part in value if isinstance(part, bytes)), None)
+    return value if isinstance(value, bytes) and value else None
+
+
 # --- Message type strings ---
 MT_SUBSCRIBE        = "subscribe"
 MT_UNSUBSCRIBE      = "unsubscribe"
@@ -105,6 +204,9 @@ MT_GOODBYE          = "goodbye"         # graceful-shutdown notice; empty conten
 MT_VOICE_JOIN       = "voice_join"      # sender entered the channel's voice session
 MT_VOICE_LEAVE      = "voice_leave"     # sender left the channel's voice session
 MT_VOICE_STATE      = "voice_state"     # periodic self-refresh, mute change, or reply to a join
+MT_FRIEND_REQUEST   = "friend_request"  # ask a peer to add us to their friends list
+MT_FRIEND_ACCEPT    = "friend_accept"   # peer accepted our request, or already had us
+MT_FRIEND_DECLINE   = "friend_decline"  # peer refused our request
 
 
 # --- sync window ---

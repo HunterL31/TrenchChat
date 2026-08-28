@@ -7,6 +7,7 @@ class Friend {
     required this.addedAt,
     required this.lastSeenAt,
     required this.isOnline,
+    this.state = 'accepted',
     this.nomadNodeHash,
   });
 
@@ -23,6 +24,10 @@ class Friend {
   final double lastSeenAt;
   final bool isOnline;
 
+  /// 'accepted', 'pending_in' or 'pending_out'. Only an accepted friend can
+  /// exchange direct messages; the others are a handshake in progress.
+  final String state;
+
   /// The nomad node this friend hosts, when one has been heard on the mesh.
   /// Null means no known page.
   final String? nomadNodeHash;
@@ -35,6 +40,7 @@ class Friend {
         addedAt: (json['added_at'] as num).toDouble(),
         lastSeenAt: (json['last_seen_at'] as num).toDouble(),
         isOnline: json['is_online'] as bool? ?? false,
+        state: json['state'] as String? ?? 'accepted',
         nomadNodeHash: json['nomad_node_hash'] as String?,
       );
 }

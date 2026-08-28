@@ -31,6 +31,7 @@ Ports (fixed, all on this machine):
 
 import argparse
 import asyncio
+import os
 import secrets
 import shutil
 import socket
@@ -161,7 +162,11 @@ def _launch(tag: str) -> subprocess.Popen:
         str(t["launched_bitrate"]),
         _API_TOKEN, _BIND_HOST, ",".join(_page_origins()),
     ]
-    return subprocess.Popen(args)
+    env = dict(os.environ)
+    heartbeat = t.get("heartbeat_secs")
+    if heartbeat:
+        env["TC_TESTENV_HEARTBEAT_SECS"] = str(heartbeat)
+    return subprocess.Popen(args, env=env)
 
 
 def _page_origins() -> list[str]:
@@ -386,6 +391,30 @@ def reset_tester(tag: str):
     _wipe_tester(tag)
     _processes[tag] = _launch(tag)
     return {"ok": True}
+
+
+class HeartbeatBody(BaseModel):
+    secs: float
+
+
+@app.post("/testers/{tag}/heartbeat")
+def set_heartbeat(tag: str, body: HeartbeatBody):
+    """Change how often a tester re-announces, and restart it to apply it.
+
+    Every tester announcing every 10s makes meeting a stranger instantaneous,
+    which is the opposite of a real client's 15-minute cadence -- and it is why
+    a client being unhearable after startup went unnoticed here. A scenario
+    that needs to observe first contact slows one tester down through this.
+    """
+    if tag not in _TESTERS:
+        return JSONResponse({"ok": False, "error": f"unknown tester {tag}"}, status_code=404)
+    if body.secs <= 0:
+        return JSONResponse({"ok": False, "error": "secs must be positive"},
+                            status_code=400)
+    _TESTERS[tag]["heartbeat_secs"] = body.secs
+    _stop(tag)
+    _processes[tag] = _launch(tag)
+    return {"ok": True, "heartbeat_secs": body.secs}
 
 
 class LinkProfileBody(BaseModel):

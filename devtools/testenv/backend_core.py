@@ -20,7 +20,7 @@ from pathlib import Path
 import RNS
 
 from trenchchat.config import DATA_DIR, Config
-from trenchchat.core import lockbox
+from trenchchat.core import actions, lockbox
 from trenchchat.core.bandwidth import SAMPLE_INTERVAL_SECS, BandwidthMonitor
 from trenchchat.core.connectivity import LinkWatcher
 from trenchchat.core.sync import SYNC_RETRY_SECS
@@ -39,7 +39,9 @@ from trenchchat.core.presence import (
 from trenchchat.core.protocol import F_DISPLAY_NAME, F_MSG_TYPE
 from trenchchat.core.user_directory import UserDirectory
 from trenchchat.core.avatar import AvatarManager
+from trenchchat.core.direct import DirectMessageManager
 from trenchchat.core.friends import FriendsManager
+from trenchchat.core.propagation import PropagationCollector, PropagationNodes
 from trenchchat.core.reaction import ReactionManager
 from trenchchat.core.voice import VoiceManager
 from trenchchat.core.audio.engine import make_tone_pipeline
@@ -48,7 +50,8 @@ from trenchchat.network.router import Router
 from trenchchat.network.node_transport import RNSNodeTransport
 from trenchchat.network.voice_transport import RNSVoiceTransport
 from trenchchat.network.announce import (
-    NodeAnnounceHandler, PeerAnnounceHandler, UserAnnounceHandler,
+    FirstContactAnnouncer, NodeAnnounceHandler, PathResponseHandler,
+    PeerAnnounceHandler, PropagationAnnounceHandler, UserAnnounceHandler,
 )
 from trenchchat.version import record_launch
 
@@ -256,9 +259,41 @@ class Backend:
         self.router.add_outbound_callback(self.presence_beacon.record_sent)
         self.user_directory = UserDirectory(self.identity.hash_hex)
         self.avatar_mgr = AvatarManager(self.identity, self.config, self.storage, self.router)
-        self.friends_mgr = FriendsManager(self.storage, self.identity.hash_hex, self.presence_mgr)
+        self.friends_mgr = FriendsManager(self.storage, self.identity.hash_hex,
+                                          self.presence_mgr, identity=self.identity,
+                                          router=self.router)
         self.presence_mgr.add_seen_callback(self.friends_mgr.record_seen)
         self.presence_mgr.add_presence_callback(self.friends_mgr.record_presence)
+        self.direct_mgr = DirectMessageManager(self.identity, self.storage,
+                                               self.friends_mgr, self.presence_mgr)
+        self.messaging.set_direct_manager(self.direct_mgr)
+        self.friends_mgr.set_message_filer(
+            lambda peer_hex: actions.file_message_requests(
+                self.friends_mgr, self.direct_mgr, self.messaging, peer_hex)
+        )
+        self.messaging.set_presence_manager(self.presence_mgr)
+        self.reaction_mgr.set_direct_manager(self.direct_mgr)
+        # Answers a peer the first time we hear them: our own re-announce is
+        # 15 minutes apart, and until they have heard us they cannot verify
+        # anything we send -- it is quarantined at their end and dropped.
+        self.first_contact = FirstContactAnnouncer(
+            self.router, self.channel_mgr, self.identity.hash_hex,
+        )
+        self.propagation_nodes = PropagationNodes(self.config, self.router)
+        self.propagation_collector = PropagationCollector(
+            self.router, self.identity, self.propagation_nodes,
+        )
+        # Held mail is pulled, so a node being chosen is the first moment
+        # there is anywhere to ask. A node restored from the last run is
+        # already selected by the time this is registered, which is why the
+        # collector also starts in its settling window rather than relying on
+        # this alone.
+        self.propagation_nodes.add_selection_callback(
+            lambda _node: self.propagation_collector.collect_now()
+        )
+        RNS.Transport.register_announce_handler(
+            PropagationAnnounceHandler(self.propagation_nodes.record_node)
+        )
         # Headless testers have no sound devices; the tone pipeline feeds the
         # real encode/transmit path with a generated signal instead. A real
         # profile uses no factory, so VoiceManager builds the real
@@ -295,6 +330,7 @@ class Backend:
         def _on_user_announced(peer_hex: str, display_name: str, iface) -> None:
             self.user_directory.record_user(peer_hex, display_name)
             self.presence_mgr.record_seen(peer_hex)
+            self.first_contact.note_peer(peer_hex, iface)
 
         RNS.Transport.register_announce_handler(
             UserAnnounceHandler(_on_user_announced)
@@ -313,9 +349,23 @@ class Backend:
             self.reaction_mgr.flush_pending_emoji(peer_hex)
             self.subscription_mgr.flush_pending(peer_hex)
             self.invite_mgr.flush_pending(peer_hex)
+            self.invite_mgr.resync_membership(peer_hex)
+            self.friends_mgr.flush_pending(peer_hex)
+            self.first_contact.note_peer(peer_hex, iface)
 
         RNS.Transport.register_announce_handler(
             PeerAnnounceHandler(_on_peer_appeared)
+        )
+
+        # A peer's identity can also arrive as a path response, which is how a
+        # first message from someone we have never heard becomes verifiable.
+        # Releasing the quarantine is what actually delivers it.
+        def _on_identity_resolved(peer_hex: str) -> None:
+            self.router.release_quarantined(peer_hex)
+            self.presence_mgr.record_seen(peer_hex)
+
+        RNS.Transport.register_announce_handler(
+            PathResponseHandler(_on_identity_resolved)
         )
 
         # Also update presence and the user directory from any inbound LXMF
@@ -329,11 +379,25 @@ class Backend:
 
         # Nothing else notices *our own* link returning: every catch-up path
         # is driven by hearing from a remote peer.
-        self.link_watcher = LinkWatcher(self.sync_mgr.request_sync_all)
+        self.link_watcher = LinkWatcher(self._on_link_restored)
         self.link_watcher.start()
 
         self.channel_mgr.restore_owned_channels()
         self.server_mgr.restore_owned_servers()
+
+    def _on_link_restored(self) -> None:
+        """Catch up after our own link returns.
+
+        Channel history comes from peers; a direct message left with a
+        propagation node while we were away has to be collected, or it stays
+        there.
+        """
+        self.sync_mgr.request_sync_all()
+        self.collect_propagated()
+
+    def collect_propagated(self) -> bool:
+        """Ask the selected propagation node for anything held for us."""
+        return self.propagation_collector.collect_now()
 
     def _on_inbound_message(self, message) -> None:
         """Record presence and directory state from an inbound LXMF message.
@@ -383,10 +447,10 @@ class Backend:
             self.warm_up(admin_hex, timeout=15.0, interval=1.0)
         self.invite_mgr.send_join_request(channel_hash_hex, token, expiry, admin_hex)
 
-    def announce(self):
-        self.router.announce()
-        self.router.announce_user()
-        self.channel_mgr.announce_all_owned()
+    def announce(self, attached_interface=None):
+        self.router.announce(attached_interface=attached_interface)
+        self.router.announce_user(attached_interface=attached_interface)
+        self.channel_mgr.announce_all_owned(attached_interface=attached_interface)
 
     def start_heartbeat(self, interval: float = 1.5) -> None:
         """Re-announce on a timer for the life of the process, mirroring the
@@ -408,7 +472,9 @@ class Backend:
 
         Also drives SyncManager.tick on its own slower cadence: an unanswered
         sync request has nothing else to re-trigger it once the announce burst
-        that prompted it has passed.
+        that prompted it has passed, and PropagationCollector.tick, which
+        owns its own cadence -- held direct messages are pulled, and a node
+        with a path that was not up at startup is asked again here.
 
         Runs as a daemon thread so it never blocks process exit."""
         def _loop():
@@ -430,6 +496,16 @@ class Backend:
                         self.sync_mgr.tick()
                     except Exception as e:
                         RNS.log(f"TesterBackend: sync tick failed: {e}", RNS.LOG_WARNING)
+                try:
+                    self.propagation_collector.tick(now)
+                except Exception as e:
+                    RNS.log(f"TesterBackend: propagation collect failed: {e}",
+                            RNS.LOG_WARNING)
+                try:
+                    self.first_contact.tick(now)
+                except Exception as e:
+                    RNS.log(f"TesterBackend: first-contact announce failed: {e}",
+                            RNS.LOG_WARNING)
 
         t = threading.Thread(target=_loop, daemon=True, name="voice-ticker")
         t.start()

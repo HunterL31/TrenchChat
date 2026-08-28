@@ -215,6 +215,72 @@ class Peer:
     def remove_friend(self, identity_hash: str) -> dict:
         return self._delete(f"/friends/{identity_hash}")
 
+    # --- friend requests ---
+
+    def send_friend_request(self, identity_hash: str, note: str = "",
+                            nickname: str = "") -> dict:
+        return self._post("/friends/requests", {"identity_hash": identity_hash,
+                                                "note": note, "nickname": nickname})
+
+    def friend_requests(self) -> dict:
+        return self._get("/friends/requests")
+
+    def incoming_request_hashes(self) -> set[str]:
+        return {r["identity_hash"] for r in self.friend_requests()["incoming"]}
+
+    def accept_friend_request(self, identity_hash: str, nickname: str = "") -> bool:
+        return self._post(f"/friends/requests/{identity_hash}/accept",
+                          {"nickname": nickname})["ok"]
+
+    def decline_friend_request(self, identity_hash: str) -> bool:
+        return self._post(f"/friends/requests/{identity_hash}/decline")["ok"]
+
+    def friend_hashes(self) -> set[str]:
+        return {f["identity_hash"] for f in self.friends()}
+
+    # --- direct messages ---
+
+    def dms(self) -> list[dict]:
+        return self._get("/dms")
+
+    def open_dm(self, peer_hash: str) -> str:
+        return self._post(f"/dms/{peer_hash}")["hash"]
+
+    def try_open_dm(self, peer_hash: str) -> int:
+        """Status of opening a conversation; 403 when not an accepted friend."""
+        return self.post_status(f"/dms/{peer_hash}")[0]
+
+    def send_dm(self, peer_hash: str, content: str,
+                reply_to: str | None = None,
+                image_data_b64: str | None = None) -> dict:
+        return self._post(f"/dms/{peer_hash}/messages",
+                          {"content": content, "reply_to": reply_to,
+                           "image_data_b64": image_data_b64})
+
+    def try_send_dm(self, peer_hash: str, content: str) -> int:
+        return self.post_status(f"/dms/{peer_hash}/messages", {"content": content})[0]
+
+    def dm_contents(self, conversation_hash: str) -> set[str]:
+        return self.contents(conversation_hash)
+
+    # --- propagation node ---
+
+    def propagation(self) -> dict:
+        return self._get("/propagation")
+
+    def pin_propagation_node(self, node_hash: str) -> bool:
+        return self._post("/propagation/node", {"node_hash": node_hash})["ok"]
+
+    def collect_propagated(self) -> int:
+        """Status of asking the node for held mail; 409 when none is selected."""
+        return self.post_status("/propagation/sync")[0]
+
+    def settings(self) -> dict:
+        return self._get("/settings")
+
+    def update_settings(self, **updates) -> dict:
+        return self._post("/settings", updates)
+
     # --- servers ---
 
     def create_server(self, name: str, description: str = "") -> str:
@@ -481,6 +547,10 @@ class Orchestrator:
 
     def reset(self) -> dict:
         return self._post("/reset")
+
+    def set_heartbeat(self, tag: str, secs: float) -> dict:
+        """Change how often a tester announces, restarting it to apply it."""
+        return self._post(f"/testers/{tag}/heartbeat", {"secs": secs})
 
     def kill(self, tag: str) -> dict:
         return self._post(f"/testers/{tag}/kill")

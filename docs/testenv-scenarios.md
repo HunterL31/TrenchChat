@@ -31,7 +31,8 @@ tester's API (8801+) or one orchestrator call (8800).
 | Group | Actions |
 |---|---|
 | **Identity** | set display name, set avatar, remove avatar, search directory |
-| **Friends** | add friend (nickname/note), update friend, remove friend |
+| **Friends** | add friend (nickname/note), update friend, remove friend, send friend request, accept request, decline request |
+| **Direct messages** | open conversation, send direct message, list conversations, enable propagation node, pin/unpin outbound node, collect held mail |
 | **Channel** | create public, create invite-only, list discovered, join discovered, leave |
 | **Server** | create server, create channel in server, invite to server, leave server |
 | **Membership** | send invite, accept invite, decline invite, kick, promote to admin, demote |
@@ -55,6 +56,9 @@ instant delivery.
 | Pending invites | `GET /invites` |
 | Reactions | reaction summary on each message row |
 | Presence | `GET /peers/{h}/presence` |
+| Conversations | `GET /dms` → conversation hash, peer, unread |
+| Friend requests | `GET /friends/requests` → `incoming` / `outgoing` |
+| Propagation node | `GET /propagation` → selected node, nodes heard, transfer state |
 | Link | `GET /net/status`, orchestrator `GET /status` |
 
 **Convergence** is the workhorse assertion: named peers hold identical message
@@ -145,6 +149,8 @@ currently implies, and the scenario exists to confirm it.
 | invite16 | A,B,C,D | A grants `invite` to member; C (member) invites D; D accepts | ⚠ **Confirmed, worse than predicted, 4/4 runs.** The token verifies and C honours D's join request, but the admission document — signed by a plain member — is rejected by every peer *including C itself*, since `publish_member_list` applies its own document through `_accept_document`. D's token is spent, every roster is unchanged, and D ends holding no roster at all. invite11's gap, on the invite path. Re-confirmed unchanged after the second audit pass |
 | invite17 | A,B,C | C (member) leaves the invite-only channel | ⚠ **Confirmed.** The departure is invisible: `leave_channel()` unsubscribes locally and notifies only the creator's *subscriber* set, and no member-list update is published — so every roster, C's own included, keeps listing C, and senders keep addressing it. Only C's `is_subscribed` gate goes quiet: it received nothing after leaving. 4/4 runs |
 | invite18 | A,B,C | A kicks C, then re-invites; C accepts | ✅ A kick revokes C's outstanding tokens at every peer, but `invite_revoked_at` is a moment rather than a flag, so the fresh invite issued after the kick readmits C to every roster and A's next send reaches it. Moderation stays reversible. 4/4 runs, 24–36s |
+| invite19 | A,B | B leaves an invite-only channel, is removed, then re-invited | ✅ **Was a defect.** Leaving drops the subscription and keeps the `channels` row, and the subscribe on re-admission was gated on that row being *absent* — so B was readmitted to a channel that never returned to its own sidebar, and every listing filters on the subscription. Fails without the fix (63s, timing out on the missing channel). 5/5 runs, 3–9s |
+| invite20 | A,B,C | B killed; A promotes C; A restarted; B restarted | ✅ **Was a defect.** A membership document is sent once and the queue holding one for an unreachable peer is in memory, so restarting the sender took the only remaining copy with it — B stayed behind on every other roster with no way back but a fresh invite. An announce now re-sends the current document to a member, version-ordered so a peer already current ignores it. Fails without the fix (103s). 5/5 runs, 13–19s |
 
 #### invite11: a grantable permission that could not take effect
 
@@ -286,6 +292,8 @@ the first ask is served and ~120s when it takes a retry.
 | servers4 | A,B,C | B leaves the server | ✅ B unsubscribed from every channel in it; A and C unaffected |
 | servers5 | A,B,C | A kicks C from the server | ✅ C loses every channel at once and its later send is rejected |
 | servers6 | A,B | Server-level `full_sync` grant, then invite B with backlog in 2 channels | ✅ Both channels backfilled (1.0s, 0.0s) — server-scoped tenure resolves per channel |
+| servers7 | A,B | A invites B **to a channel inside the server**, not to the server | ✅ **Was the reported defect.** `publish_member_list` normalises to the owning scope, so the document answering a join request is always the server's — but the invite named the channel, so B anchored a hash no document would ever arrive for and could not trust the one it got. B's sidebar stayed empty while A's roster showed B admitted. `send_invite` now normalises the same way. Fails without the fix (3s). 5/5 runs, 2–7s |
+| servers8 | A,B | A creates a server with no channels and admits B | ✅ A server's visibility is gated on membership rather than a subscription, and nothing asserted that positively before. **Does not** cover the live sidebar refresh: this polls `GET /servers` each time, so it cannot see a missing `server_joined` event the way a running client with a cached sidebar does — that half is the Flutter widget test. Passes with and without the event. 5/5 runs, 3–10s |
 
 ### `social` — Reactions, emoji, presence, identity
 
@@ -301,6 +309,22 @@ the first ask is served and ~120s when it takes a retry.
 | social8 | A,B,C | B replies to A's message; C reacts to the reply | ✅ `reply_to` and the reaction target resolve identically on all three |
 | social9 | A,B,C | Same conversation on an **invite-only** channel: B replies to A's message; C reacts to the reply | ✅ Resolves identically there too, 4/4 runs in 23–29s — member-list fan-out carries replies and reactions the same way the subscriber set does |
 | social10 | A,B,C | B imports a custom emoji and reacts with it | ✅ A and C converge on the count and fetch the image over `MT_EMOJI_REQUEST`, in 0.0–3.5s after the count landed. 4/4 runs |
+| social11 | A,B | A is slowed to a real client's announce cadence; B is wiped so it has heard nobody; A invites B | ✅ **3/3 runs, 20–25s.** Found a real defect first — see below. Fails in 64s without the fix |
+
+### interop — direct messages with clients that are not TrenchChat
+
+These use `lxmf_peer.py`, which imports RNS and LXMF and nothing else. Every
+message it sends is a plain LXMessage with no fields at all, which is what
+Sideband, NomadNet or anything else speaking LXMF sends. Nothing else in this
+suite can show interoperability, because everything else is TrenchChat talking
+to itself.
+
+| ID | Peers | What it does | Result |
+|----|-------|--------------|--------|
+| interop1 | A + bare client | The bare client sends a plain LXMF message to a tester holding it as a friend | ✅ **5s.** Lands as an ordinary direct message, and the conversation is correctly marked as *not* TrenchChat |
+| interop2 | A + bare client | The same message with the friendship removed | ✅ **19s.** Refused. Sending without the envelope is exactly what an attacker would do, since that is the half carrying a signature — it buys nothing, because the gate reads the identity LXMF authenticated |
+| interop3 | A + bare client | A tester sends a direct message; the bare client reports what it received | ✅ **48s.** The text arrives in the ordinary content, and the only fields present are `0xFB`/`0xFC` — LXMF's own custom-payload fields. No TrenchChat field numbers reach a foreign client |
+| interop4 | A + bare client | The bare LXMF client messages A, which has **not** added it; A accepts | ✅ **Was a real gap.** The message used to be dropped where the gate refused it — with LXMF having already proved the packet, so the sender was told it was delivered — and a client that cannot send `MT_FRIEND_REQUEST` had no other way to ask. It is now held as a request carrying its text, grants nothing until accepted, and is filed into the conversation on accept. Fails without the fix (64s). 5/5 runs, 3–5s |
 
 ### `restart` — Restart, persistence, ordering
 
@@ -378,6 +402,30 @@ about four seconds.
 | api3 | A | Open the event socket with `Origin: http://evil.example`, then with its own | ✅ Foreign origin refused 403, own origin accepted. The socket checks this itself — a browser applies neither CORS nor same-origin policy to a WebSocket handshake |
 | api4 | A,B,C,D | Present each tester's token to a different tester's API | ⚠️ **One token for the whole environment**, as designed: B accepts A's, C's and D's (all 200), and the orchestrator's unauthenticated `/config` serves it. Recorded so the harness never claims per-identity isolation it does not have |
 
+### `dm` — Direct messages between mutual friends
+
+A conversation has two participants and nothing else: no roster, no announce,
+and no third peer who could serve its history later. Two things follow, and
+both are why this family exists rather than living in `tests/`.
+
+The gate is enforced at each end independently, so a one-sided friendship must
+produce *nothing* on the far side — and over a real network "refused" and
+"still in flight" look identical for a while, which is what `hold_for` is for.
+And a message to an absent friend has no member to backfill it, so it goes to a
+propagation node instead: a third process really acting as one, a peer that
+really leaves, and real time passing before it returns and collects.
+
+| ID | Peers | Actions | Expected result |
+|---|---|---|---|
+| dm1 | A,B | A requests, B accepts, one message each way | ✅ Handshake and both messages in **2.0s**. Both peers derive the same conversation address with nothing negotiated |
+| dm2 | A,B | A adds B; B never adds A; A sends | ✅ Nothing lands at B across the full **15s** hold, and B's own send back is refused with **403** before it leaves. One-sided trust delivers nothing in either direction |
+| dm3 | A,B | Mutual friends, one message, then B removes A and A sends again | ✅ First message held, second never arrives (15s hold), and the existing transcript survives the unfriending. **26s** |
+| dm4 | A,B,C | C runs a propagation node; B goes offline; A sends; B returns and collects | ✅ **139s.** The path the whole propagation layer exists for — a channel would have been caught up by any member, and a conversation has none. Asserts the sender's own copy reads `propagated` before waiting: see below for why |
+| dm5 | A,B,C | Two nodes announce; A auto-selects, pins the other, then reverts | ⚠ **Probe.** Pinning and reverting both work. Whether *hop count* separates two nodes is not shown here: the harness's topology is flat, so both are one hop and the tie is broken by which was heard last |
+| dm6 | A,B,C | B's **process is killed**; A sends; B restarts and is never told to collect | ✅ **3/3 runs, 132–135s.** Found and fixed a real gap — see below. This is the case a person actually hits: nobody presses "collect" |
+| dm7 | A,B | Mutual friends, one message, then **both** peers restart | ✅ **19s.** Friendship and transcript both survive, and a new message flows without running the handshake again |
+| dm8 | A,B | A JPEG attachment and a reaction inside a conversation | ✅ **12s.** The attachment arrives unstripped and fetchable (200), and the reaction reaches the conversation's only other member |
+
 ### `integrity` — Message integrity: authorship and attachments
 
 A synced message reaches you from a peer who did not write it. LXMF
@@ -393,6 +441,92 @@ loses honest history with nothing but a log line to show for it.
 | integrity2 | A,B,C,D | B owns the channel; A sends, then dies; D wiped to a **new identity**, joins and backfills | ✅ **Was a confirmed gap, now fixed.** As a probe it measured 4.0s for the live owner's message and *never* for the dead author's. Responders now send each batch's author keys, and D holds both. Strict since |
 | integrity3 | A,B,C,D | A sends a real 64×64 JPEG | ✅ All three receivers hold it with `image_stripped: false` and can fetch the bytes. The signature covers the attachment, so the two travel together |
 | integrity4 | A,B,C,D | A sends a 68-byte PNG declaring 20000×20000 (400M pixels) | ✅ Delivered as text with no attachment on all four. The sender's own API is the gate: `prepare_image` fails closed rather than forwarding bytes it could not re-encode |
+
+#### What dm6 found: a green run that proved nothing
+
+dm6 passed the first time it was written, and the pass was worthless. The
+message reached B — but through `Messaging`'s ordinary pending queue, which
+re-sent it directly when B came back, not through the node at all. From the
+outside the two are indistinguishable: a message arrives either way.
+
+Asserting the sender's own delivery state (`propagated`) before waiting is what
+separated them, and with that in place dm6 failed for four consecutive rounds
+of investigation. Each round moved the wall back one step:
+
+1. **B never re-asked after the first empty answer.** The collector treated one
+   completed transfer as "settled" and dropped to a five-minute cadence — but a
+   completed transfer only means the node answered, and a sender can still be
+   uploading as we arrive (LXMF makes them generate a proof-of-work stamp
+   first, ~5s here). Fixed by pacing on a settling *window* after coming back,
+   not on whether an answer had been received.
+2. **A restarted peer had no node to ask.** A propagation node announces when
+   it is switched on and never again on a timer, so a client that forgot its
+   node on restart could never hear of one. The selected node is now
+   remembered across restarts (`propagation_node.last_selected`).
+3. **The node was chosen before anything was listening.** `PropagationNodes`
+   restores its selection during construction, so the collector's
+   selection callback — registered a line later — never fired for a restored
+   node, leaving the collector on its steady cadence. The collector now opens
+   its settling window on first use instead of depending on that ordering.
+
+None of the three is visible to pytest: all of them need a process that really
+dies, a node that really holds a message, and real seconds passing. The
+regression guards for the cadence itself live in `tests/test_propagation.py`,
+where they are deterministic.
+
+#### What social11 found: the dev environment hid a bug in the real client
+
+A person testing by hand reported that invites from their client never reached
+the testers, and that the testers never showed their client as online. Both had
+one cause, and this suite could not have found it as it stood.
+
+Every tester announces every 10s, so meeting one here is instantaneous. A real
+client announces at startup and then every `REANNOUNCE_INTERVAL_SECS` — **900
+seconds**. Until a peer has heard that announce it cannot recall the sender's
+identity, so LXMF cannot verify the signature, so `Router._quarantine_message`
+holds the first message and drops it at `QUARANTINE_TTL_SECS` (300s). Nothing
+released it except a full announce. Relaunching the client emitted one, which is
+why relaunching made the missing invites appear — the tell that identified this.
+
+The Qt client had already solved it (`main_window.py`'s
+`_on_reannounce_debounced` says so in as many words), but that lives in the Qt
+window, and the active Flutter client runs on `backend_core.Backend`, which never
+got it. Two fixes, in different directions:
+
+- **`FirstContactAnnouncer`** answers a peer the *first* time we hear them, so
+  they can hear us back. Once per peer, not per announce: answering every
+  announce leaves two idle clients replying to each other's replies for ever,
+  while once-per-peer settles after exactly two announces.
+- **`PathResponseHandler`** releases the quarantine when a sender's identity
+  arrives as a path response — the quarantine already requests that path, but
+  RNS only calls handlers that set `receive_path_responses`, so nothing was
+  listening. This costs no airtime and would have delivered the invites with no
+  relaunch at all.
+
+Reproducing it needed the environment to stop being unrealistically chatty, so
+testers now take a heartbeat interval (`POST /testers/{tag}/heartbeat`). Slowing
+one tester to a real cadence and wiping the other is what makes the window
+observable. Confirmed by disabling both fixes: the scenario fails in 64s.
+
+#### Why a direct message looks like nothing in particular
+
+TrenchChat's field numbers are its own and overlap LXMF's standard registry:
+`0x02` is `FIELD_TELEMETRY` there, `0x06` `FIELD_IMAGE`, `0x0C` `FIELD_TICKET`.
+Between TrenchChat peers that is harmless — both ends read them the same way —
+and it is wrong the moment a message reaches a client that follows the
+standard, which would read a display name as telemetry and a message id as an
+image.
+
+Channels, sync, invites and voice never leave TrenchChat, so they still use
+those numbers and moving them is deferred. A direct message is the exception:
+it is the one thing that can legitimately arrive at somebody else's client. So
+it carries none of them. The text rides in the ordinary content, an attachment
+in LXMF's own image field, and everything TrenchChat adds sits inside
+`FIELD_CUSTOM_TYPE`/`FIELD_CUSTOM_DATA`, which the standard sets aside for
+exactly this and every other client knows to ignore.
+
+interop3 is what keeps that true: it fails if any field number outside that set
+appears in a message a foreign client received.
 
 #### Why author keys travel with a synced batch
 
@@ -499,6 +633,14 @@ Everything the matrix turned up, across all ten families.
 | **One `sync_progress` row written from both directions**, collapsing the responder's trust-horizon floor and stranding history older than a requester's watermark | Root-caused and fixed by splitting the serve direction into a `sync_served` table; regression test in `tests/test_sync_multipeer.py`. Found through sync11, but **it did not fix sync11** — see below |
 | **invite11** — `kick` and `manage_roles` were grantable to any role, but a non-admin's member-list document is rejected by every recipient, so the grant did nothing on the network | Fixed by narrowing the permission: both are dropped from the member role on read and on write, and neither client offers them. Scenario rewritten to the new rule; regression tests in `tests/test_permissions.py` |
 | **restart1** — `_subscriber_versions` lived only in memory, so a restarted owner renumbered from 1 and every later list was rejected as a replay | Fixed on `main` by the August security audit, which persists the counter in a `subscriber_list_versions` table and re-checks the version under the commit lock. This branch's own fix was dropped at the merge in favour of it; the end-to-end regression test in `tests/test_subscriptions.py` stays |
+| **An invite to a channel inside a server anchored a hash no document would arrive for** — `publish_member_list` normalises to the owning scope, so a join request is always answered with the *server's* document, but `send_invite` did not. The invitee could not trust what it received, held it unapplied, and its sidebar stayed empty while the inviter's roster showed it admitted | Fixed: `send_invite` and `send_join_request` normalise through `scope_for` the same way. servers7 fails without it. Regression tests in `tests/test_servers.py` |
+| **A re-invited member was never re-subscribed** — leaving drops the subscription and keeps the `channels` row, and the subscribe on re-admission was gated on that row being absent. Every listing filters on the subscription, so the channel never came back | Fixed: the guard now covers only the metadata write; subscribing and the joined callback run whenever an accepted document names us, matching what the server roster already did. invite19 fails without it. Tests in `tests/test_invites.py` |
+| **A server document from a non-creator admin was rejected** — the `servers` row is written before the document is validated, so the creator anchor displaced the accepted-invite anchor instead of joining it | Fixed: with no stored member list the two anchors are unioned, and a rejected document no longer leaves an empty `servers` row behind. Adversarial coverage in `tests/test_adversarial.py` proves the union admits nothing new |
+| **A held membership was unreachable from the Flutter client** — a document for a scope with no anchor is parked for the user to confirm and surfaced with a null token, which `api.py` called `.hex()` on. That raised inside the manager's callback guard, so the entry *and* its event were lost, and no endpoint exposed the held document anyway | Fixed: held documents ride the invite list under a null token, accept and decline branch on it exactly as the Qt client does, and the held metadata now carries its scope kind so a server confirms as a server rather than a phantom channel. Tests in `tests/test_api_invites.py` |
+| **A membership document was delivered exactly once**, and the queue holding one for an unreachable peer is in memory — so a peer that missed the only copy stayed a member on every other node and a stranger on its own, recoverable only by a fresh invite | Fixed: hearing a peer re-sends the current document for any scope they are a member of, behind a per-(scope, peer) cooldown matched to the announce interval. Documents are version-ordered, so a peer already current ignores it. invite20 fails without it |
+| **The equal-version tiebreak compared against a sentinel** — it re-derives the *stored* document's signer rather than trusting its signature map, but rebuilt that document without `joined_at`, `departed` or `channels`. The payload no longer matched the signature, nothing validated, and the `0xff…` fallback lost every tie — so any equal-version document from a trusted signer was re-applied over the one already held | Fixed: every signed field is carried across, present-or-absent as stored. Latent while equal-version documents were rare; the membership resync made them routine and servers4 went 0/5. 5/5 after the fix. Regression tests in `tests/test_invites.py` |
+| **A message from an unaccepted sender vanished** — dropped where the gate refused it, while LXMF had already proved the packet, so the sender's client showed it delivered. A client speaking only plain LXMF cannot send `MT_FRIEND_REQUEST`, so messaging was its only way to ask and it had no way at all | Fixed: the message is held as a request carrying its text, shown wherever a friend request is, and filed into the conversation on accept. The gate is untouched — holding grants nothing. Bounded where the row is written, because this path is deliberately exempt from the router's control throttle. interop4 fails without it; `tests/test_adversarial.py::TestAdversarialMessageRequests` pins the bounds |
+| **Rejections were silent** — `_validate_document` returned `None` with no log for a failed signature or an unrecallable signer, and the auto-join block aborted without one for a name mismatch or a missing channel name. From outside, a rejected document is indistinguishable from one never sent | Fixed: each of those paths logs a warning naming the scope and the reason |
 
 ### Open
 
@@ -566,23 +708,24 @@ How to run it, when a scenario is the right tool, and how to add one live in
 
 ## Status
 
-All eleven families built and run: **93 scenarios, 71 strict and 22 probes.**
+All twelve families built and run: **98 scenarios, 76 strict and 22 probes.**
 
 | Family | Scenarios | Result |
 |---|---|---|
 | `public` — public channels | 11 (7 strict, 4 probes) | All passing, three consecutive clean runs |
-| `invite` — invite-only and membership | 18 (15 strict, 3 probes) | All passing; invite11 rewritten to the narrowed `kick` rule; invite16 and invite17 (probes) record the ineffective member `invite` grant and the invisible leave |
+| `invite` — invite-only and membership | 20 (17 strict, 3 probes) | All passing; invite11 rewritten to the narrowed `kick` rule; invite16 and invite17 (probes) record the ineffective member `invite` grant and the invisible leave; invite19 and invite20 each found a real defect, 5/5 after the fix |
 | `sync` — offline and sync | 10 (9 strict, 1 probe) | 8/9 — **sync11 fails**, 2 passes in 7 runs. sync2 fixed, 12/12 |
 | `links` — degraded links | 10 (5 strict, 5 probes) | All passing, on genuinely shaped links |
-| `servers` — servers | 6 (5 strict, 1 probe) | All passing |
+| `servers` — servers | 8 (7 strict, 1 probe) | All passing; servers7 is the reported channel-invite defect, 5/5 after the fix |
 | `social` — reactions, presence, identity | 10 (9 strict, 1 probe) | All passing; social3's prediction refuted |
 | `restart` — restart and ordering | 5 (3 strict, 2 probes) | All passing; restart1 confirmed, then fixed; restart3 confirmed |
 | `voice` — live group voice | 12 (9 strict, 3 probes) | All passing; voice4, voice5 and voice11 recorded gaps |
 | `api` — the API surface | 4 (3 strict, 1 probe) | All passing; api4 records the shared-token property |
 | `integrity` — message integrity | 4 (4 strict) | All passing; integrity2 found a real gap, now fixed and strict |
 | `nomad` — page browsing and hosting | 3 (2 strict, 1 probe) | All passing, 4/4 runs each; nomad3 confirmed bounded offline failure and recovery |
+| `interop` — direct messages with other LXMF clients | 4 (4 strict) | All passing against a real bare RNS+LXMF client; interop4 found a real gap, 5/5 after the fix |
 
-**70 of 71 strict scenarios pass.** The one failure is a real defect, left
+**75 of 76 strict scenarios pass.** The one failure is a real defect, left
 strict and failing on purpose, so `--family sync` exits non-zero until it is
 resolved: sync11, intermittently (2 passes in 7). invite11 is now passing on
 the narrowed `kick` rule described above.

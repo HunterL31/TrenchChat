@@ -39,6 +39,7 @@ class _IncomingInviteDialogContentState extends State<_IncomingInviteDialogConte
   bool _busy = false;
 
   String get _expiryLabel {
+    if (!widget.invite.hasToken) return 'awaiting your confirmation';
     final remaining = widget.invite.expiry -
         DateTime.now().millisecondsSinceEpoch / 1000.0;
     if (remaining <= 0) return 'expired';

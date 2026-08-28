@@ -416,6 +416,61 @@ capped.
 
 ## Still open
 
+### 0a. Friend requests are an unsolicited inbound surface
+
+`MT_FRIEND_REQUEST` can be sent by any identity that can reach this node, and
+it writes a `pending_in` row plus a UI prompt carrying attacker-chosen text
+(`F_FRIEND_NOTE`, capped at 140 characters). What bounds it today: the router's
+per-sender control throttle (60/min), a cap of
+`MAX_PENDING_FRIEND_REQUESTS` rows evicted oldest-first, and the fact that a
+request grants nothing — only the local user accepting does.
+
+What is not bounded: identities are free to mint, so a sender rotating them
+can keep the pending queue churning at the throttle's rate, and declining does
+not remember the refusal, so the same peer may ask again. A durable blocklist
+is the fix if this is abused. See `docs/direct-messages.md` for why it was left
+out for now.
+
+Note what an accept cannot do: `MT_FRIEND_ACCEPT` from an identity we never
+asked is ignored outright (`FriendsManager._handle_accept`), so the direct-
+message gate is never one unsolicited control message away from anybody —
+`tests/test_adversarial.py::TestDirectMessageGate` pins this.
+
+### 0a-bis. Messages from unaccepted senders are held, on a path with no throttle
+
+A direct message from someone not accepted is no longer dropped: it is held as a
+message request, because a client speaking only plain LXMF cannot send
+`MT_FRIEND_REQUEST` and so had no way to reach anyone at all. See
+`docs/direct-messages.md` for why that mattered.
+
+The surface this adds is the same shape as 0a, with one difference that matters:
+**a direct message carries no `F_MSG_TYPE`, so it is deliberately exempt from
+the router's per-sender control throttle** — a limit there would drop
+conversation. Friend requests are paced by that throttle and by
+`MAX_PENDING_FRIEND_REQUESTS`; this queue has only the caps, so all of them are
+enforced where the row is written rather than by any caller:
+`MAX_REQUEST_BODY_CHARS` on the body, `MAX_HELD_PER_SENDER` per sender,
+`MAX_HELD_MESSAGES` in total, `MESSAGE_REQUEST_TTL_SECS` by age, and the
+`pending_in` cap above them, evicted oldest-first and taking held messages with
+it. `tests/test_adversarial.py::TestAdversarialMessageRequests` pins each one,
+including under rotating identities.
+
+Attachments are not held at all, so nothing from an unaccepted sender is stored
+that a person did not choose to receive as text. Holding grants nothing: the
+sender stays unaccepted, no conversation exists, and no reply can pass until the
+user accepts — the same property 0a records for a request.
+
+The missing throttle is therefore deliberate and compensated, not an oversight.
+
+### 0b. A propagation node learns who talks to whom
+
+Direct messages to an offline friend go through an LXMF propagation node,
+which sees both endpoints' delivery addresses, the message size and the timing,
+though never the content. This is inherent to storing a message for an absent
+recipient, not a defect in the implementation — but it is a metadata exposure
+channels do not have, since a channel's sync responder was already a member.
+Preferring the fewest-hop node keeps it as local as the mesh allows.
+
 ### 0. Tenure filtering is a channel-level switch, so a tenure-blind peer is a hole
 
 `storage.has_any_tenure(channel)` gates the *entire* per-message tenure check,

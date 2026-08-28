@@ -1,7 +1,10 @@
 // 1b: 206px channel column -- server header, CHANNELS, DIRECT CHANNELS,
-// ONLINE roster footer, NEW CHANNEL / JOIN CHANNEL ghost buttons.
+// DIRECT MESSAGES, ONLINE roster footer, NEW CHANNEL / JOIN CHANNEL ghost
+// buttons. DIRECT CHANNELS are channels outside any server; DIRECT MESSAGES
+// are one-to-one conversations, which are a different thing entirely.
 import 'package:flutter/material.dart';
 
+import '../../api/models/dm.dart';
 import '../../api/models/invite.dart';
 import '../../api/models/member.dart';
 import '../../api/models/permissions.dart';
@@ -34,6 +37,10 @@ class ChannelColumn extends StatelessWidget {
     this.onCreateChannel,
     this.onCreateDirectChannel,
     this.onJoinChannel,
+    this.dms = const [],
+    this.onSelectDm,
+    this.onDeleteDm,
+    this.onStartDm,
     this.friendHashes = const {},
     this.onAddFriend,
     this.voiceParticipants = const [],
@@ -66,6 +73,16 @@ class ChannelColumn extends StatelessWidget {
   /// keeps direct channels reachable while a server occupies the main button.
   final VoidCallback? onCreateDirectChannel;
   final VoidCallback? onJoinChannel;
+
+  /// Direct-message conversations. Distinct from [directChannels], which are
+  /// channels outside any server -- a conversation has two people in it and is
+  /// never announced or joined.
+  final List<DmConversation> dms;
+  final ValueChanged<String>? onSelectDm;
+  final ValueChanged<DmConversation>? onDeleteDm;
+
+  /// Opens the "message a friend" picker.
+  final VoidCallback? onStartDm;
 
   /// Identity hashes already saved as a friend -- drives the "Add friend…"
   /// vs "Edit friend…" context menu label. Plain data, not a live AppState
@@ -195,6 +212,16 @@ class ChannelColumn extends StatelessWidget {
                       onTap: () => onSelectChannel(c.hash),
                       incomplete: syncStates[c.hash] == 'incomplete',
                       menuItems: _menuFor(c),
+                    ),
+                ],
+                if (dms.isNotEmpty || onStartDm != null) ...[
+                  _SectionLabel('DIRECT MESSAGES', onAdd: onStartDm),
+                  for (final d in dms)
+                    _DmRow(
+                      conversation: d,
+                      selected: d.hash == selectedChannelHash,
+                      onTap: () => onSelectDm?.call(d.hash),
+                      onDelete: onDeleteDm == null ? null : () => onDeleteDm!(d),
                     ),
                 ],
                 if (voiceParticipants.isNotEmpty || onJoinVoice != null) ...[
@@ -573,6 +600,121 @@ class _ChannelRowState extends State<_ChannelRow> {
                 ],
                 if (widget.channel.isInviteOnly)
                   TcIcon(TcIcons.lock, size: TCType.textMicro, color: tc.textTertiary),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+
+/// One conversation in the DIRECT MESSAGES section. Shows the peer's presence
+/// and an unread count; a conversation with a peer who is no longer a friend
+/// stays readable but is marked, because nothing more can pass either way. A
+/// peer on another LXMF client is marked too: messages reach them, reactions
+/// and the rest of TrenchChat's extras do not.
+class _DmRow extends StatefulWidget {
+  const _DmRow({
+    required this.conversation,
+    required this.selected,
+    required this.onTap,
+    this.onDelete,
+  });
+
+  final DmConversation conversation;
+  final bool selected;
+  final VoidCallback onTap;
+  final VoidCallback? onDelete;
+
+  @override
+  State<_DmRow> createState() => _DmRowState();
+}
+
+class _DmRowState extends State<_DmRow> {
+  bool _hover = false;
+
+  String get _label {
+    final d = widget.conversation;
+    if (d.displayName.isNotEmpty) return d.displayName;
+    final hex = d.peerHash;
+    if (hex.length <= 8) return hex;
+    return '${hex.substring(0, 4)}…${hex.substring(hex.length - 4)}';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final tc = SectionTheme.of(context);
+    final d = widget.conversation;
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() => _hover = false),
+      child: TcContextMenuRegion(
+        items: [
+          if (widget.onDelete != null)
+            TcContextMenuItem(label: 'Delete conversation', onTap: widget.onDelete!),
+        ],
+        child: GestureDetector(
+          onTap: widget.onTap,
+          child: Container(
+            color: widget.selected
+                ? tc.bgSelected
+                : (_hover ? tc.bgHover : Colors.transparent),
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+            child: Row(
+              children: [
+                StatusDot(
+                  status: d.isOnline ? PresenceStatus.online : PresenceStatus.offline,
+                  size: 8,
+                ),
+                const SizedBox(width: 9),
+                Expanded(
+                  child: Text(
+                    _label,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 13,
+                      color: widget.selected ? tc.textEmphasis : tc.textSecondary,
+                    ),
+                  ),
+                ),
+                if (!d.isFriend)
+                  Padding(
+                    padding: const EdgeInsets.only(left: 6),
+                    child: Text(
+                      'NOT A FRIEND',
+                      style: TextStyle(fontSize: TCType.textMicro, color: tc.textTertiary),
+                    ),
+                  )
+                else ...[
+                  if (!d.peerIsTrenchchat)
+                    Padding(
+                      padding: const EdgeInsets.only(left: 6),
+                      child: TcTooltip(
+                        message: 'On another LXMF client — messages work, '
+                            'reactions and other TrenchChat extras do not',
+                        child: Text(
+                          'LXMF',
+                          style: TextStyle(
+                              fontSize: TCType.textMicro, color: tc.textTertiary),
+                        ),
+                      ),
+                    ),
+                  if (d.unread > 0)
+                    Padding(
+                      padding: const EdgeInsets.only(left: 6),
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+                        decoration: BoxDecoration(color: tc.accentPrimary),
+                        child: Text(
+                          '${d.unread}',
+                          style: TextStyle(fontSize: TCType.textMicro, color: tc.bgApp),
+                        ),
+                      ),
+                    ),
+                ],
               ],
             ),
           ),

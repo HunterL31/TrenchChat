@@ -15,6 +15,11 @@ import '../../widgets/tc_dialog.dart';
 import '../../widgets/tc_text_field.dart';
 import 'appearance_dialog.dart';
 import 'pin_dialogs.dart';
+import 'propagation_nodes_dialog.dart';
+
+/// How many propagation nodes the settings pane lists inline before the
+/// rest move behind a button.
+const int _nodePreviewCount = 5;
 
 Future<void> showSettingsDialog(BuildContext context, AppState state) {
   return showTcDialog<void>(
@@ -116,6 +121,58 @@ class _SettingsDialogContentState extends State<_SettingsDialogContent> {
     Navigator.pop(context);
   }
 
+  /// The node in use, the nearest few heard on the mesh, and the controls to
+  /// pin one or hand the choice back to the mesh. Up to MAX_TRACKED_NODES are
+  /// held at once and they are ordered nearest first, so the rest go behind a
+  /// button rather than pushing the rest of this pane off the screen.
+  Widget _outboundNodeControls(TCSectionColors tc) {
+    final propagation = widget.state.propagation;
+    final selected = propagation.selected;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          selected == null
+              ? 'No node heard yet — messages to an offline friend wait here '
+                  'until they come back.'
+              : 'Using ${_shortHash(selected)}'
+                  '${propagation.pinned.isEmpty ? " (chosen automatically)" : " (pinned)"}',
+          style: TextStyle(fontSize: TCType.textBodySm, color: tc.textPrimary),
+        ),
+        for (final node in propagation.nodes.take(_nodePreviewCount))
+          PropagationNodeRow(state: widget.state, node: node),
+        if (propagation.nodes.length > _nodePreviewCount)
+          Padding(
+            padding: const EdgeInsets.only(top: 6),
+            child: TcGhostButton(
+              label: 'ALL ${propagation.nodes.length} NODES',
+              onPressed: () =>
+                  showPropagationNodesDialog(context, widget.state),
+            ),
+          ),
+        const SizedBox(height: 8),
+        Row(
+          children: [
+            if (propagation.pinned.isNotEmpty)
+              TcGhostButton(
+                label: 'CHOOSE AUTOMATICALLY',
+                onPressed: () => widget.state.pinPropagationNode(''),
+              ),
+            if (propagation.pinned.isNotEmpty) const SizedBox(width: 8),
+            TcGhostButton(
+              label: 'COLLECT NOW',
+              onPressed: selected == null
+                  ? null
+                  : () => widget.state.collectPropagated(),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+
+  static String _shortHash(String hex) => shortNodeHash(hex);
+
   @override
   Widget build(BuildContext context) {
     return SectionTheme(
@@ -206,6 +263,22 @@ class _SettingsDialogContentState extends State<_SettingsDialogContent> {
                       style: TextStyle(
                           fontSize: TCType.textBodySm, color: tc.textSecondary),
                     ),
+                    const SizedBox(height: 16),
+                    Container(height: 1, color: tc.borderSubtle),
+                    const SizedBox(height: 12),
+                    _sectionLabel(tc, 'OFFLINE DIRECT MESSAGES'),
+                    const SizedBox(height: 8),
+                    Text(
+                      'A direct message to a friend who is away is left with a '
+                      'propagation node until they collect it — a group channel '
+                      'can be caught up by any other member, but a conversation '
+                      'has nobody else in it. The node sees who is talking to '
+                      'whom and how much, never what was said.',
+                      style: TextStyle(
+                          fontSize: TCType.textBodySm, color: tc.textSecondary),
+                    ),
+                    const SizedBox(height: 10),
+                    _outboundNodeControls(tc),
                     const SizedBox(height: 16),
                     Container(height: 1, color: tc.borderSubtle),
                     const SizedBox(height: 12),

@@ -11,12 +11,12 @@ See docs/testenv-scenarios.md for the matrix these implement.
 """
 
 from asserts import (
-    all_hold, discovered_hashes, hold_for, roster, roster_views,
+    all_hold, discovered_hashes, hold_for, joined_hashes, roster, roster_views,
     rosters_identical, settle, wait_until, ScenarioFailure,
 )
 from flows import (
-    invite_and_accept, invite_only_channel, offer_invite,
-    DISCOVERY_TIMEOUT, NEGATIVE_HOLD_SECS,
+    go_offline, go_online, invite_and_accept, invite_only_channel, offer_invite,
+    DISCOVERY_TIMEOUT, NEGATIVE_HOLD_SECS, RECONNECT_TIMEOUT,
 )
 from scenario import PROBE, scenario
 
@@ -460,3 +460,62 @@ def b18(env):
     a.send(ch, "welcome-back")
     all_hold([b, c], ch, {"welcome-back"}, timeout=DISCOVERY_TIMEOUT)
     return {"members": len(agreed)}
+
+
+@scenario("invite19", "A re-invited member gets their channel back")
+def b19(env):
+    """Leaving drops the subscription and keeps the channels row, and the
+    subscribe on re-admission was gated on that row being absent -- so a
+    returning member was admitted to a channel that never came back to their
+    sidebar, and every listing filters on the subscription."""
+    a, b = env.peers("A", "B")
+    ch = invite_only_channel(a, [b], "b19-private")
+
+    b.leave(ch)
+    wait_until(lambda: ch not in joined_hashes(b), "B to drop the channel",
+               DISCOVERY_TIMEOUT)
+    if not a.set_roles(ch, remove_members=[b.hash]):
+        raise ScenarioFailure("the removal was rejected")
+    wait_until(lambda: b.hash not in roster(a, ch), "A to drop B",
+               DISCOVERY_TIMEOUT)
+
+    a.invite(ch, b.hash)
+    invite_and_accept(a, b, ch)
+
+    wait_until(lambda: ch in joined_hashes(b),
+               "the re-invited channel to return to B's sidebar", DISCOVERY_TIMEOUT)
+    a.send(ch, "welcome-back")
+    all_hold([b], ch, {"welcome-back"}, timeout=DISCOVERY_TIMEOUT)
+    return {}
+
+
+@scenario("invite20", "A roster change lost with the sender's queue still converges")
+def b20(env):
+    """A membership document is sent once, and the queue that holds one for an
+    unreachable peer is in memory. A peer that was down when the only copy went
+    out, and whose sender then restarted, stayed behind on every other node's
+    roster with no way back but a fresh invite -- so an announce now re-sends
+    the current document to a member, version-ordered and idempotent.
+
+    Killing B rather than dropping its link is the point: LXMF's own outbound
+    queue recovers a dropped link on its own, and restarting A is what takes
+    the retry queue with it.
+    """
+    a, b, c = env.peers("A", "B", "C")
+    ch = invite_only_channel(a, [b, c], "b20-private")
+
+    env.orch.kill(b.tag)
+    if not a.set_roles(ch, add_admins=[c.hash]):
+        raise ScenarioFailure("the promotion was rejected")
+    wait_until(lambda: roster(a, ch).get(c.hash) == "admin",
+               "A to record C as an admin", DISCOVERY_TIMEOUT)
+
+    env.orch.restart(a.tag)
+    env.orch.start(b.tag)
+    env.wait_alive(a)
+    env.wait_alive(b)
+
+    wait_until(lambda: roster(b, ch).get(c.hash) == "admin",
+               "B to converge on the roster change it was down for",
+               RECONNECT_TIMEOUT)
+    return {"role": roster(b, ch).get(c.hash)}

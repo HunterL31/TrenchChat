@@ -42,6 +42,11 @@ sealed class TcEvent {
           json['channel_hash'] as String,
           json['channel_name'] as String,
         );
+      case 'server_joined':
+        return ServerJoinedEvent(
+          json['server_hash'] as String,
+          json['server_name'] as String? ?? '',
+        );
       case 'channel_discovered':
         return ChannelDiscoveredEvent(
           json['channel_hash'] as String,
@@ -63,6 +68,14 @@ sealed class TcEvent {
         return EmojiReceivedEvent(json['emoji_hash'] as String);
       case 'friend_updated':
         return FriendUpdatedEvent(json['identity_hash'] as String);
+      case 'friend_request':
+        return FriendRequestEvent(
+          json['identity_hash'] as String,
+          json['display_name'] as String? ?? '',
+          json['note'] as String? ?? '',
+        );
+      case 'propagation_node':
+        return PropagationNodeEvent(json['node_hash'] as String?);
       case 'avatar_updated':
         return AvatarUpdatedEvent(
           json['identity_hash'] as String,
@@ -154,6 +167,15 @@ class ChannelJoinedEvent extends TcEvent {
   final String channelName;
 }
 
+/// A server was joined. Servers carry no subscription, so a server whose
+/// channels were already known -- or that has none yet -- produces no
+/// ChannelJoinedEvent and would otherwise never reach the sidebar.
+class ServerJoinedEvent extends TcEvent {
+  const ServerJoinedEvent(this.serverHash, this.serverName);
+  final String serverHash;
+  final String serverName;
+}
+
 /// A standalone public channel was heard via a real-time announce but not
 /// yet joined. Carries only hash + name, so handlers that need the full
 /// channel record (description, creator, open_join) should re-fetch
@@ -178,9 +200,25 @@ class EmojiReceivedEvent extends TcEvent {
   final String emojiHash;
 }
 
-/// A saved friend's record changed (nickname/note edited elsewhere, or a
-/// presence-driven last-seen update). Carries only the hash; handlers
-/// re-fetch GET /friends for the full record.
+/// A peer asked to be added. [displayName] and [note] are self-asserted text
+/// from someone with no relationship to this node yet: show them, never treat
+/// them as instructions.
+class FriendRequestEvent extends TcEvent {
+  const FriendRequestEvent(this.identityHash, this.displayName, this.note);
+  final String identityHash;
+  final String displayName;
+  final String note;
+}
+
+/// The node offline direct messages are handed to changed.
+class PropagationNodeEvent extends TcEvent {
+  const PropagationNodeEvent(this.nodeHash);
+  final String? nodeHash;
+}
+
+/// A saved friend's record changed (nickname/note edited elsewhere, a
+/// handshake transition, or a presence-driven last-seen update). Carries only
+/// the hash; handlers re-fetch GET /friends for the full record.
 class FriendUpdatedEvent extends TcEvent {
   const FriendUpdatedEvent(this.identityHash);
   final String identityHash;

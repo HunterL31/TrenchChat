@@ -7,12 +7,14 @@ class PendingInvite {
     required this.expiry,
     required this.adminHex,
     required this.scopeKind,
+    this.hasToken = true,
   });
 
   final String channelHashHex;
   final String channelName;
 
-  /// Unix seconds after which the token is no longer accepted.
+  /// Unix seconds after which the token is no longer accepted. Meaningless
+  /// when [hasToken] is false.
   final double expiry;
 
   /// Identity hash of the admin who sent the invite.
@@ -21,12 +23,18 @@ class PendingInvite {
   /// `"server"` or `"channel"`.
   final String scopeKind;
 
+  /// False when an admin added us directly rather than sending a token. The
+  /// signed membership record is already held locally, so accepting confirms
+  /// it instead of sending a join request -- and it does not expire.
+  final bool hasToken;
+
   factory PendingInvite.fromJson(Map<String, dynamic> json) => PendingInvite(
         channelHashHex: json['channel_hash_hex'] as String,
         channelName: json['channel_name'] as String? ?? '',
         expiry: (json['expiry'] as num?)?.toDouble() ?? 0,
         adminHex: json['admin_hex'] as String? ?? '',
         scopeKind: json['scope_kind'] as String? ?? 'channel',
+        hasToken: json['token_hex'] != null,
       );
 }
 

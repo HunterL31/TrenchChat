@@ -25,9 +25,11 @@ from PyQt6.QtCore import QTimer
 from PyQt6.QtWidgets import QApplication
 
 from trenchchat.config import Config
-from trenchchat.core import lockbox
+from trenchchat.core import actions, lockbox
 from trenchchat.core.avatar import AvatarManager
+from trenchchat.core.direct import DirectMessageManager
 from trenchchat.core.friends import FriendsManager
+from trenchchat.core.propagation import PropagationCollector, PropagationNodes
 from trenchchat.core.identity import Identity
 from trenchchat.core.interfaces_config import default_rns_config_path, seed_initial_config
 from trenchchat.core.reaction import ReactionManager
@@ -42,13 +44,16 @@ from trenchchat.core.user_directory import UserDirectory
 from trenchchat.core.voice import VoiceManager
 from trenchchat.network.router import REANNOUNCE_INTERVAL_SECS, Router
 from trenchchat.network.voice_transport import RNSVoiceTransport
-from trenchchat.network.announce import UserAnnounceHandler
+from trenchchat.network.announce import (
+    PathResponseHandler, PropagationAnnounceHandler, UserAnnounceHandler,
+)
 from trenchchat.version import record_launch
 from trenchchat.gui.main_window import MainWindow
 from trenchchat.gui.pin_dialog import UnlockDialog
 
 _REANNOUNCE_INTERVAL_MS = int(REANNOUNCE_INTERVAL_SECS * 1000)
 _VOICE_TICK_INTERVAL_MS = 1_000
+_PROPAGATION_TICK_INTERVAL_MS = 5_000
 _INTERFACE_POLL_INTERVAL_MS = 500
 _INTERFACE_POLL_TIMEOUT_MS = 30_000
 _SIGNAL_POLL_INTERVAL_MS = 200
@@ -122,9 +127,28 @@ def main():
     user_directory = UserDirectory(identity.hash_hex)
     avatar_mgr = AvatarManager(identity, config, storage, router)
     reaction_mgr = ReactionManager(identity, storage, router)
-    friends_mgr = FriendsManager(storage, identity.hash_hex, presence_mgr)
+    friends_mgr = FriendsManager(storage, identity.hash_hex, presence_mgr,
+                                 identity=identity, router=router)
     presence_mgr.add_seen_callback(friends_mgr.record_seen)
     presence_mgr.add_presence_callback(friends_mgr.record_presence)
+    direct_mgr = DirectMessageManager(identity, storage, friends_mgr, presence_mgr)
+    messaging.set_direct_manager(direct_mgr)
+    friends_mgr.set_message_filer(
+        lambda peer_hex: actions.file_message_requests(
+            friends_mgr, direct_mgr, messaging, peer_hex)
+    )
+    messaging.set_presence_manager(presence_mgr)
+    reaction_mgr.set_direct_manager(direct_mgr)
+    propagation_nodes = PropagationNodes(config, router)
+    propagation_collector = PropagationCollector(router, identity, propagation_nodes)
+    # Held mail is pulled, so a node being chosen is the first moment there is
+    # anywhere to ask.
+    propagation_nodes.add_selection_callback(
+        lambda _node: propagation_collector.collect_now()
+    )
+    RNS.Transport.register_announce_handler(
+        PropagationAnnounceHandler(propagation_nodes.record_node)
+    )
     voice_transport = RNSVoiceTransport(identity)
     voice_mgr = VoiceManager(identity, storage, router, subscription_mgr,
                              config, transport=voice_transport)
@@ -136,6 +160,17 @@ def main():
         presence_mgr.record_seen(peer_hex)
 
     RNS.Transport.register_announce_handler(UserAnnounceHandler(_on_user_announced))
+
+    # A peer's identity can arrive as a path response rather than a live
+    # announce, which is how a first message from someone we have never heard
+    # becomes verifiable. Releasing the quarantine is what delivers it.
+    def _on_identity_resolved(peer_hex: str) -> None:
+        router.release_quarantined(peer_hex)
+        presence_mgr.record_seen(peer_hex)
+
+    RNS.Transport.register_announce_handler(
+        PathResponseHandler(_on_identity_resolved)
+    )
 
     # Restore RNS destinations for channels and servers we own
     channel_mgr.restore_owned_channels()
@@ -169,6 +204,12 @@ def main():
     voice_tick_timer = QTimer()
     voice_tick_timer.timeout.connect(voice_mgr.tick)
     voice_tick_timer.start(_VOICE_TICK_INTERVAL_MS)
+
+    # Held direct messages are pulled, never pushed; the collector owns its
+    # own cadence and this only has to ask it often enough to notice.
+    propagation_timer = QTimer()
+    propagation_timer.timeout.connect(propagation_collector.tick)
+    propagation_timer.start(_PROPAGATION_TICK_INTERVAL_MS)
 
     # Poll for the first interface to come online, then re-announce on it
     # immediately.  This replaces blind startup timers: we announce as soon as
@@ -220,6 +261,7 @@ def main():
         reaction_mgr=reaction_mgr,
         presence_beacon=presence_beacon,
         voice_mgr=voice_mgr,
+        friends_mgr=friends_mgr,
     )
     window.show()
 

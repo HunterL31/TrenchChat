@@ -10,6 +10,7 @@ import 'package:http/http.dart' as http;
 import 'api/client.dart';
 import 'api/events.dart';
 import 'api/models/app_version.dart';
+import 'api/models/dm.dart';
 import 'api/models/emoji.dart';
 import 'api/models/friend.dart';
 import 'api/models/invite.dart';
@@ -127,6 +128,18 @@ class AppState extends ChangeNotifier {
   /// message bubbles or the presence roster (see friends_tab.dart).
   List<Friend> friends = [];
 
+  /// Direct-message conversations, newest activity first. A conversation's
+  /// messages live in [messagesByChannel] under its own hash, exactly like a
+  /// channel's -- they are the same rows on the backend.
+  List<DmConversation> dms = [];
+  FriendRequests friendRequests = const FriendRequests.empty();
+  PropagationStatus propagation = const PropagationStatus.none();
+
+  /// The conversation being read, or null when a channel is selected. Set
+  /// alongside [selectedChannelHash], which stays the address the message
+  /// list renders either way.
+  String? selectedDmHash;
+
   /// Peers heard via trenchchat.user announces, from the last [loadDirectory]
   /// query. Kept live on [DirectoryUpdatedEvent] so the invite picker reflects
   /// a peer's renamed self without a reload.
@@ -220,6 +233,9 @@ class AppState extends ChangeNotifier {
       }
 
       await loadFriends();
+      await loadFriendRequests();
+      await loadDms();
+      await loadPropagation();
       await loadVersion();
       await loadTheme();
       await loadThemeLibrary();
@@ -308,6 +324,7 @@ class AppState extends ChangeNotifier {
 
   Future<void> selectChannel(String channelHashHex) async {
     selectedChannelHash = channelHashHex;
+    selectedDmHash = null;
     notifyListeners();
     if (!messagesByChannel.containsKey(channelHashHex)) {
       await loadChannel(channelHashHex);
@@ -764,6 +781,17 @@ class AppState extends ChangeNotifier {
     }
   }
 
+  // --- friend requests ---
+
+  Future<void> loadFriendRequests() async {
+    try {
+      friendRequests = await api.getFriendRequests();
+      notifyListeners();
+    } catch (e) {
+      _reportActionError(e);
+    }
+  }
+
   Future<void> loadNomadBookmarks() async {
     try {
       nomadBookmarks = await api.getNomadBookmarks();
@@ -806,6 +834,85 @@ class AppState extends ChangeNotifier {
     }
   }
 
+  /// Asks a peer to add us. Both sides have to hold the other before a direct
+  /// message passes either way, so this is the start of that, not the end.
+  Future<bool> sendFriendRequest(String identityHashHex,
+      {String note = '', String nickname = ''}) async {
+    try {
+      final ok = await api.sendFriendRequest(identityHashHex,
+          note: note, nickname: nickname);
+      if (!ok) {
+        actionError = 'That identity hash is not valid.';
+        notifyListeners();
+        return false;
+      }
+      await Future.wait([loadFriends(), loadFriendRequests()]);
+      return true;
+    } catch (e) {
+      _reportActionError(e);
+      return false;
+    }
+  }
+
+  Future<bool> acceptFriendRequest(String identityHashHex,
+      {String nickname = ''}) async {
+    try {
+      final ok = await api.acceptFriendRequest(identityHashHex, nickname: nickname);
+      await Future.wait([loadFriends(), loadFriendRequests()]);
+      return ok;
+    } catch (e) {
+      _reportActionError(e);
+      return false;
+    }
+  }
+
+  Future<bool> declineFriendRequest(String identityHashHex) async {
+    try {
+      final ok = await api.declineFriendRequest(identityHashHex);
+      await loadFriendRequests();
+      return ok;
+    } catch (e) {
+      _reportActionError(e);
+      return false;
+    }
+  }
+
+  Future<bool> cancelFriendRequest(String identityHashHex) async {
+    try {
+      final ok = await api.cancelFriendRequest(identityHashHex);
+      await loadFriendRequests();
+      return ok;
+    } catch (e) {
+      _reportActionError(e);
+      return false;
+    }
+  }
+
+  // --- direct messages ---
+
+  Future<void> loadDms() async {
+    try {
+      dms = await api.getDms();
+      notifyListeners();
+    } catch (e) {
+      _reportActionError(e);
+    }
+  }
+
+  /// Opens (creating if needed) the conversation with a peer and selects it.
+  /// Returns its hash, or null when they are not an accepted friend.
+  Future<String?> openDm(String peerHashHex) async {
+    try {
+      final hash = await api.openDm(peerHashHex);
+      await loadDms();
+      await selectDm(hash);
+      return hash;
+    } catch (e) {
+      _reportActionError(e);
+      return null;
+    }
+  }
+
   bool isNomadBookmarked(String nodeHash, String path) => nomadBookmarks
       .any((b) => b.nodeHash == nodeHash && b.path == path);
 
@@ -818,6 +925,27 @@ class AppState extends ChangeNotifier {
         await api.addNomadBookmark(nodeHash, path, label);
       }
       await loadNomadBookmarks();
+    } catch (e) {
+      _reportActionError(e);
+    }
+  }
+
+  Future<void> selectDm(String conversationHashHex) async {
+    selectedDmHash = conversationHashHex;
+    selectedChannelHash = conversationHashHex;
+    notifyListeners();
+    if (!messagesByChannel.containsKey(conversationHashHex)) {
+      await refreshMessages(conversationHashHex);
+    } else {
+      unawaited(refreshMessages(conversationHashHex));
+    }
+    await markDmRead(conversationHashHex);
+  }
+
+  Future<void> markDmRead(String conversationHashHex) async {
+    try {
+      await api.markDmRead(conversationHashHex);
+      await loadDms();
     } catch (e) {
       _reportActionError(e);
     }
@@ -847,6 +975,98 @@ class AppState extends ChangeNotifier {
     final url = pendingNomadUrl;
     pendingNomadUrl = null;
     return url;
+  }
+
+  /// The peer on the other side of a conversation, or null if it isn't one.
+  String? dmPeerFor(String conversationHashHex) {
+    for (final d in dms) {
+      if (d.hash == conversationHashHex) return d.peerHash;
+    }
+    return null;
+  }
+
+  DmConversation? dmFor(String conversationHashHex) {
+    for (final d in dms) {
+      if (d.hash == conversationHashHex) return d;
+    }
+    return null;
+  }
+
+  Future<bool> sendDirectMessage(String content,
+      {String? replyTo, Uint8List? imageData}) async {
+    final conversation = selectedDmHash;
+    if (conversation == null) return false;
+    final peer = dmPeerFor(conversation);
+    if (peer == null) return false;
+    if (content.trim().isEmpty && imageData == null) return false;
+    try {
+      await api.sendDm(peer, content.trim(), replyTo: replyTo, imageData: imageData);
+      unawaited(refreshMessages(conversation));
+      unawaited(loadDms());
+      return true;
+    } catch (e) {
+      _reportActionError(e);
+      return false;
+    }
+  }
+
+  Future<bool> deleteDm(String conversationHashHex) async {
+    try {
+      final ok = await api.deleteDm(conversationHashHex);
+      messagesByChannel.remove(conversationHashHex);
+      if (selectedDmHash == conversationHashHex) {
+        selectedDmHash = null;
+        selectedChannelHash = standaloneChannels.isNotEmpty
+            ? standaloneChannels.first.hash
+            : null;
+      }
+      await loadDms();
+      return ok;
+    } catch (e) {
+      _reportActionError(e);
+      return false;
+    }
+  }
+
+  // --- propagation node ---
+
+  Future<void> loadPropagation() async {
+    try {
+      propagation = await api.getPropagation();
+      notifyListeners();
+    } catch (e) {
+      _reportActionError(e);
+    }
+  }
+
+  /// Pass an empty hash to go back to automatic selection.
+  Future<bool> pinPropagationNode(String nodeHashHex) async {
+    try {
+      final ok = await api.pinPropagationNode(nodeHashHex);
+      if (!ok) {
+        actionError = 'That node address is not valid.';
+        notifyListeners();
+        return false;
+      }
+      await loadPropagation();
+      return true;
+    } catch (e) {
+      _reportActionError(e);
+      return false;
+    }
+  }
+
+  /// Collects anything a propagation node is holding for us. Propagated
+  /// messages are pulled, never pushed, so nothing arrives without this.
+  Future<bool> collectPropagated() async {
+    try {
+      final ok = await api.collectPropagated();
+      await loadPropagation();
+      return ok;
+    } catch (e) {
+      _reportActionError(e);
+      return false;
+    }
   }
 
   /// Runs a directory search and caches the result in [directory] so live
@@ -1241,6 +1461,8 @@ class AppState extends ChangeNotifier {
         _scheduleReactionRefresh(channelHash);
       case ChannelJoinedEvent():
         unawaited(_applyChannelJoined());
+      case ServerJoinedEvent():
+        unawaited(_applyChannelJoined());
       case ChannelDiscoveredEvent():
         unawaited(refreshDiscoveredChannels());
       case InviteReceivedEvent():
@@ -1252,6 +1474,12 @@ class AppState extends ChangeNotifier {
         unawaited(refreshEmoji());
       case FriendUpdatedEvent():
         unawaited(loadFriends());
+        unawaited(loadFriendRequests());
+        unawaited(loadDms());
+      case FriendRequestEvent():
+        unawaited(loadFriendRequests());
+      case PropagationNodeEvent():
+        unawaited(loadPropagation());
       case AvatarUpdatedEvent(:final identityHash, :final avatarVersion):
         unawaited(_applyAvatarUpdated(identityHash, avatarVersion));
       case DirectoryUpdatedEvent(:final identityHash, :final displayName):
@@ -1330,9 +1558,9 @@ class AppState extends ChangeNotifier {
     }
   }
 
-  /// A channel was joined (accepted invite, or a join that completed on the
-  /// backend) -- refetch the server and channel lists so it appears without a
-  /// full reload.
+  /// A channel or server was joined (accepted invite, or a join that completed
+  /// on the backend) -- refetch the server and channel lists so it appears
+  /// without a full reload.
   Future<void> _applyChannelJoined() async {
     try {
       await _reloadServersAndChannels();

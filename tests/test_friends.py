@@ -302,3 +302,160 @@ def test_offline_transition_ignores_non_friends(mgr, storage, presence_mgr):
     presence_mgr.record_seen(PEER_B)
     presence_mgr.record_offline(PEER_B)
     assert storage.get_friend(PEER_B) is None
+
+
+# ---------------------------------------------------------------------------
+# the friend-request handshake
+#
+# These use two fully wired peers, because the handshake is the part of the
+# friends list that leaves the machine.
+# ---------------------------------------------------------------------------
+
+from tests.helpers import wait_for  # noqa: E402
+from trenchchat.core.storage import (  # noqa: E402
+    FRIEND_ACCEPTED, FRIEND_PENDING_IN, FRIEND_PENDING_OUT,
+)
+from trenchchat.core.friends import MAX_PENDING_FRIEND_REQUESTS  # noqa: E402
+
+
+def state_of(peer, other) -> str | None:
+    return peer.storage.get_friend_state(other.identity.hash_hex)
+
+
+def test_request_and_accept_makes_both_sides_friends(peer_factory):
+    a = peer_factory("alice")
+    b = peer_factory("bob")
+
+    assert a.friends_mgr.send_friend_request(b.identity.hash_hex, "from the ridge") is True
+    assert state_of(a, b) == FRIEND_PENDING_OUT
+    assert a.friends_mgr.is_friend(b.identity.hash_hex) is False
+
+    assert wait_for(lambda: state_of(b, a) == FRIEND_PENDING_IN)
+    assert b.friends_mgr.get_pending_requests()["incoming"][0]["note"] == "from the ridge"
+
+    assert b.friends_mgr.accept_friend_request(a.identity.hash_hex) is True
+    assert b.friends_mgr.is_friend(a.identity.hash_hex) is True
+    assert wait_for(lambda: a.friends_mgr.is_friend(b.identity.hash_hex))
+
+
+def test_crossed_requests_settle_as_a_friendship(peer_factory):
+    a = peer_factory("alice")
+    b = peer_factory("bob")
+
+    a.friends_mgr.send_friend_request(b.identity.hash_hex)
+    b.friends_mgr.send_friend_request(a.identity.hash_hex)
+
+    assert wait_for(lambda: a.friends_mgr.is_friend(b.identity.hash_hex))
+    assert wait_for(lambda: b.friends_mgr.is_friend(a.identity.hash_hex))
+
+
+def test_a_repeat_request_from_an_existing_friend_is_answered_quietly(peer_factory):
+    a = peer_factory("alice")
+    b = peer_factory("bob")
+    b.friends_mgr.add_friend(a.identity.hash_hex)
+
+    prompts = []
+    b.friends_mgr.add_request_callback(lambda *args: prompts.append(args))
+
+    # A asked before losing their contacts; B already holds them.
+    a.friends_mgr.send_friend_request(b.identity.hash_hex)
+    assert wait_for(lambda: a.friends_mgr.is_friend(b.identity.hash_hex))
+    assert prompts == []
+
+
+def test_declining_clears_the_request_on_both_sides(peer_factory):
+    a = peer_factory("alice")
+    b = peer_factory("bob")
+
+    a.friends_mgr.send_friend_request(b.identity.hash_hex)
+    assert wait_for(lambda: state_of(b, a) == FRIEND_PENDING_IN)
+
+    assert b.friends_mgr.decline_friend_request(a.identity.hash_hex) is True
+    assert state_of(b, a) is None
+    assert wait_for(lambda: state_of(a, b) is None)
+    assert a.friends_mgr.is_friend(b.identity.hash_hex) is False
+
+
+def test_accepting_without_a_request_returns_false(peer_factory):
+    a = peer_factory("alice")
+    b = peer_factory("bob")
+    assert a.friends_mgr.accept_friend_request(b.identity.hash_hex) is False
+    assert a.friends_mgr.is_friend(b.identity.hash_hex) is False
+
+
+def test_cancelling_our_own_request_is_local(peer_factory):
+    a = peer_factory("alice")
+    b = peer_factory("bob")
+
+    a.friends_mgr.send_friend_request(b.identity.hash_hex)
+    assert a.friends_mgr.cancel_friend_request(b.identity.hash_hex) is True
+    assert state_of(a, b) is None
+    # B was never told; their side is theirs to clear.
+    assert wait_for(lambda: state_of(b, a) == FRIEND_PENDING_IN)
+
+
+def test_adding_a_pending_requester_directly_also_answers_them(peer_factory):
+    a = peer_factory("alice")
+    b = peer_factory("bob")
+
+    a.friends_mgr.send_friend_request(b.identity.hash_hex)
+    assert wait_for(lambda: state_of(b, a) == FRIEND_PENDING_IN)
+
+    assert b.friends_mgr.add_friend(a.identity.hash_hex, "Al") is True
+    assert wait_for(lambda: a.friends_mgr.is_friend(b.identity.hash_hex))
+
+
+def test_requesting_someone_who_asked_us_accepts_theirs(peer_factory):
+    a = peer_factory("alice")
+    b = peer_factory("bob")
+
+    a.friends_mgr.send_friend_request(b.identity.hash_hex)
+    assert wait_for(lambda: state_of(b, a) == FRIEND_PENDING_IN)
+
+    assert b.friends_mgr.send_friend_request(a.identity.hash_hex) is True
+    assert b.friends_mgr.is_friend(a.identity.hash_hex) is True
+    assert wait_for(lambda: a.friends_mgr.is_friend(b.identity.hash_hex))
+
+
+def test_pending_requests_are_bounded(mgr, storage):
+    for i in range(MAX_PENDING_FRIEND_REQUESTS + 5):
+        storage.upsert_friend(f"{i:032x}", "", "", FRIEND_PENDING_IN)
+        time.sleep(0.001)
+    mgr._evict_oldest_pending()
+    assert (storage.count_friends_in_state(FRIEND_PENDING_IN)
+            < MAX_PENDING_FRIEND_REQUESTS)
+
+
+def test_pending_friends_are_not_listed_as_friends(mgr, storage):
+    storage.upsert_friend(PEER_A, "", "", FRIEND_PENDING_IN)
+    storage.upsert_friend(PEER_B, "", "", FRIEND_PENDING_OUT)
+
+    assert mgr.get_friends() == []
+    assert mgr.is_friend(PEER_A) is False
+
+    pending = mgr.get_pending_requests()
+    assert [f["identity_hash"] for f in pending["incoming"]] == [PEER_A]
+    assert [f["identity_hash"] for f in pending["outgoing"]] == [PEER_B]
+
+
+def test_existing_friends_survive_the_state_migration(tmp_path):
+    """A database written before the handshake existed keeps its friends."""
+    db = tmp_path / "legacy.db"
+    s1 = Storage(db_path=db)
+    s1._conn.execute("DROP TABLE friends")
+    s1._conn.execute(
+        "CREATE TABLE friends (identity_hash TEXT PRIMARY KEY, nickname TEXT NOT NULL "
+        "DEFAULT '', note TEXT NOT NULL DEFAULT '', added_at REAL NOT NULL, "
+        "last_seen_at REAL NOT NULL DEFAULT 0)"
+    )
+    s1._conn.execute(
+        "INSERT INTO friends (identity_hash, nickname, note, added_at) VALUES (?,?,?,?)",
+        (PEER_A, "Al", "", time.time()),
+    )
+    s1._conn.commit()
+    s1.close()
+
+    s2 = Storage(db_path=db)
+    assert s2.get_friend_state(PEER_A) == FRIEND_ACCEPTED
+    assert FriendsManager(s2, SELF_HEX).is_friend(PEER_A) is True
+    s2.close()

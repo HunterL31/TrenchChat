@@ -3,6 +3,12 @@
 // identityHash from a context menu or the friends panel for add-with-known-
 // hash or edit (hash pre-filled and read-only either way -- only the
 // manual path lets the user type a hash).
+//
+// Two ways to reach a friendship, and they differ in who else has to act.
+// ADD saves the contact here and tells nobody: right for a hash exchanged
+// out of band, where the other side will add us too. REQUEST asks them,
+// and their answer completes it. Direct messages need both sides either way
+// -- each end only ever accepts messages from someone it holds itself.
 import 'package:flutter/material.dart';
 
 import '../../app_state.dart';
@@ -41,6 +47,8 @@ class _AddFriendDialogContentState extends State<_AddFriendDialogContent> {
   late final TextEditingController _hash;
   final _nickname = TextEditingController();
   final _note = TextEditingController();
+  // Sent to the peer with a request, unlike _note, which never leaves here.
+  final _message = TextEditingController();
   String? _error;
   bool _busy = false;
   late final bool _isEdit;
@@ -66,6 +74,7 @@ class _AddFriendDialogContentState extends State<_AddFriendDialogContent> {
     _hash.dispose();
     _nickname.dispose();
     _note.dispose();
+    _message.dispose();
     super.dispose();
   }
 
@@ -94,6 +103,32 @@ class _AddFriendDialogContentState extends State<_AddFriendDialogContent> {
     Navigator.pop(context);
   }
 
+  Future<void> _sendRequest() async {
+    final hash = _hash.text.trim();
+    if (hash.isEmpty) {
+      setState(() => _error = 'Identity hash cannot be empty.');
+      return;
+    }
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
+    final ok = await widget.state.sendFriendRequest(
+      hash,
+      note: _message.text.trim(),
+      nickname: _nickname.text.trim(),
+    );
+    if (!mounted) return;
+    if (!ok) {
+      setState(() {
+        _busy = false;
+        _error = widget.state.takeActionError() ?? 'Could not send the request.';
+      });
+      return;
+    }
+    Navigator.pop(context);
+  }
+
   @override
   Widget build(BuildContext context) {
     return TcDialogShell(
@@ -101,6 +136,11 @@ class _AddFriendDialogContentState extends State<_AddFriendDialogContent> {
       errorText: _error,
       actions: [
         TcGhostButton(label: 'CANCEL', onPressed: () => Navigator.pop(context)),
+        if (!_isEdit)
+          TcGhostButton(
+            label: 'REQUEST',
+            onPressed: _busy ? null : _sendRequest,
+          ),
         TcPrimaryButton(
           label: _busy ? 'SAVING…' : (_isEdit ? 'SAVE' : 'ADD'),
           onPressed: _busy ? null : _submit,
@@ -127,9 +167,18 @@ class _AddFriendDialogContentState extends State<_AddFriendDialogContent> {
         TcTextField(
           label: 'Note',
           controller: _note,
-          hintText: 'optional',
+          hintText: 'optional, stays on this device',
           onSubmitted: (_) => _submit(),
         ),
+        if (!_isEdit) ...[
+          const SizedBox(height: 12),
+          TcTextField(
+            label: 'Request message',
+            controller: _message,
+            hintText: 'optional, sent with the request',
+            onSubmitted: (_) => _sendRequest(),
+          ),
+        ],
       ],
     );
   }
