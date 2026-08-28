@@ -26,7 +26,53 @@ final RegExp nomadUrlRe =
 /// or a wrapping bracket is not swept into the link.
 const String _urlTrailingTrim = '.,;:!?)]}\'"';
 
-const double _inlineEmojiSize = 18;
+const double inlineEmojiSize = 18;
+
+/// Sizes for a message that is nothing but emoji: noticeably larger than the
+/// 14px reaction chips, so a sent emoji never reads as a stray reaction.
+const double jumboEmojiSize = 40;
+const double jumboEmojiFontSize = 34;
+
+/// Above this many emoji the message renders at normal size again.
+const int jumboEmojiMaxCount = 8;
+
+/// One unicode emoji unit: a pictographic (with optional variation selector
+/// and skin tone), a keycap, or a regional-indicator pair -- plus any ZWJ
+/// continuation. Extended_Pictographic rather than Emoji, which also matches
+/// bare digits.
+const String _emojiUnitPattern =
+    r'(?:\p{Extended_Pictographic}\uFE0F?[\u{1F3FB}-\u{1F3FF}]?'
+    r'|[#*0-9]\uFE0F\u20E3'
+    r'|[\u{1F1E6}-\u{1F1FF}]{2})'
+    r'(?:\u200D\p{Extended_Pictographic}\uFE0F?[\u{1F3FB}-\u{1F3FF}]?)*';
+final RegExp _emojiUnitRe = RegExp(_emojiUnitPattern, unicode: true);
+
+/// How many emoji [content] holds when it holds nothing else -- unicode emoji
+/// and custom tokens resolvable in [library], whitespace aside. Null when any
+/// other text is present, when there is no emoji at all, or when there are
+/// more than [jumboEmojiMaxCount] of them.
+int? emojiOnlyCount(String content, Map<String, CustomEmoji> library) {
+  final trimmed = content.trim();
+  if (trimmed.isEmpty) return null;
+  var count = 0;
+  final withoutCustom = trimmed.replaceAllMapped(emojiTokenRe, (m) {
+    final hash = m.group(2);
+    final name = m.group(1)!;
+    final resolved = hash != null
+        ? library.containsKey(hash)
+        : library.values.any((e) => e.name == name);
+    if (!resolved) return m.group(0)!;
+    count++;
+    return ' ';
+  });
+  final rest = withoutCustom.replaceAllMapped(_emojiUnitRe, (m) {
+    count++;
+    return ' ';
+  });
+  if (rest.trim().isNotEmpty) return null;
+  if (count == 0 || count > jumboEmojiMaxCount) return null;
+  return count;
+}
 
 /// Styling and behavior for inline links. The caller owns [recognizers] and
 /// must dispose them; every tappable link span appends its recognizer here.
@@ -110,7 +156,7 @@ List<InlineSpan> _linkifyRun(String text, TextStyle style, InlineLinkConfig? lin
 /// Returns a single text span when no token resolves.
 List<InlineSpan> emojiSpans(
     String content, Map<String, CustomEmoji> library, TextStyle style,
-    {InlineLinkConfig? links}) {
+    {InlineLinkConfig? links, double emojiSize = inlineEmojiSize}) {
   if (!content.contains(':') || library.isEmpty) {
     return _linkifyRun(content, style, links);
   }
@@ -136,7 +182,7 @@ List<InlineSpan> emojiSpans(
           decoration: tcTooltipDecoration(context),
           textStyle: tcTooltipTextStyle(context),
           message: ':${emoji.name}:',
-          child: peerImage(emoji.imageBytes, size: _inlineEmojiSize),
+          child: peerImage(emoji.imageBytes, size: emojiSize),
         ),
       ),
     ));

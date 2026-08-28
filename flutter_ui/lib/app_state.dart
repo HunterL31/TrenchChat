@@ -83,6 +83,11 @@ class AppState extends ChangeNotifier {
   /// that never opens the socket (widget tests) reads as connected.
   TcConnState connectionState = TcConnState.connected;
 
+  /// Unread message count per channel, mirroring the unread field DMs carry.
+  /// Loaded from GET /channels/unread, bumped live on WS messages for
+  /// channels not on screen, and zeroed when a channel is selected.
+  final Map<String, int> unreadByChannel = {};
+
   /// Per-channel sync state from the backend's SyncStatusTracker. "incomplete"
   /// means history is known to be missing -- including rows a peer served that
   /// we refused as unverifiable, which would otherwise be silent.
@@ -325,6 +330,7 @@ class AppState extends ChangeNotifier {
   Future<void> selectChannel(String channelHashHex) async {
     selectedChannelHash = channelHashHex;
     selectedDmHash = null;
+    _clearUnread(channelHashHex);
     notifyListeners();
     if (!messagesByChannel.containsKey(channelHashHex)) {
       await loadChannel(channelHashHex);
@@ -372,6 +378,30 @@ class AppState extends ChangeNotifier {
       channelsByServer[s.hash] = await api.getServerChannels(s.hash);
       serverMemberCounts[s.hash] = (await api.getServerMembers(s.hash)).length;
       serverPermissionsByHash[s.hash] = await api.getMyServerPermissions(s.hash);
+    }
+    await refreshUnreadCounts();
+  }
+
+  /// Zeroes a channel's local unread and persists the read watermark, so the
+  /// badge stays cleared across restarts. Fire-and-forget: a failed persist
+  /// costs nothing but a stale badge on next launch.
+  void _clearUnread(String channelHashHex) {
+    unreadByChannel[channelHashHex] = 0;
+    unawaited(api.markChannelRead(channelHashHex).catchError((_) => false));
+  }
+
+  /// Refetches per-channel unread counts. Non-fatal on failure (an older
+  /// backend without the endpoint simply shows no badges), and the channel
+  /// on screen always reads as caught up.
+  Future<void> refreshUnreadCounts() async {
+    try {
+      unreadByChannel
+        ..clear()
+        ..addAll(await api.getChannelUnread());
+      final selected = selectedChannelHash;
+      if (selected != null) unreadByChannel[selected] = 0;
+    } catch (_) {
+      // Live WS bumps still maintain the in-session counts.
     }
   }
 
@@ -1394,6 +1424,23 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Unread bookkeeping for a message that just arrived live. The channel on
+  /// screen stays caught up (watermark advanced backend-side); any other
+  /// channel's badge bumps. A conversation's unread is backend-counted, so a
+  /// DM refreshes the list instead.
+  void _onNewMessage(String channelHash, Message message) {
+    if (message.senderHash == meHashHex) return;
+    if (channelHash == selectedChannelHash) {
+      unawaited(api.markChannelRead(channelHash).catchError((_) => false));
+      return;
+    }
+    if (dms.any((d) => d.hash == channelHash)) {
+      unawaited(loadDms());
+      return;
+    }
+    unreadByChannel[channelHash] = (unreadByChannel[channelHash] ?? 0) + 1;
+  }
+
   /// Applies a socket event directly, so tests can exercise event handling
   /// without standing up a WebSocket.
   @visibleForTesting
@@ -1413,6 +1460,7 @@ class AppState extends ChangeNotifier {
           list[idx] = message;
         } else {
           list.add(message);
+          _onNewMessage(channelHash, message);
         }
         notifyListeners();
       case PresenceEvent(:final identityHash, :final isOnline):

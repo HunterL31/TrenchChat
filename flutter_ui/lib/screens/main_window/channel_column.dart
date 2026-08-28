@@ -51,6 +51,7 @@ class ChannelColumn extends StatelessWidget {
     this.onInviteToChannel,
     this.onEditPermissions,
     this.onLeaveChannel,
+    this.unreadCounts = const {},
   });
 
   final String? serverName;
@@ -117,6 +118,10 @@ class ChannelColumn extends StatelessWidget {
   final void Function(Channel channel)? onEditPermissions;
   final void Function(Channel channel)? onLeaveChannel;
 
+  /// Channel hash -> unread message count. Zero or missing draws nothing;
+  /// anything else brightens the row and adds the same count pill DM rows use.
+  final Map<String, int> unreadCounts;
+
   /// The right-click menu for one channel row, mirroring the Qt client's
   /// channel menu (main_window.py's _on_channel_context_menu). Leaving is
   /// offered for standalone channels only: membership of a server's channel
@@ -138,6 +143,25 @@ class ChannelColumn extends StatelessWidget {
         ),
       if (onLeaveChannel != null && channel.serverHash == null)
         TcContextMenuItem(label: 'Leave channel', onTap: () => onLeaveChannel!(channel)),
+    ];
+  }
+
+  /// Every way to add a conversation, consolidated behind the footer's one
+  /// ADD button. With a server selected its channel button lives here too;
+  /// the per-section + shortcuts stay as quicker paths to the same actions.
+  List<TcContextMenuItem> _addMenuItems() {
+    return [
+      if (onCreateChannel != null)
+        TcContextMenuItem(
+          label: serverName != null ? 'New channel in $serverName' : 'New channel',
+          onTap: onCreateChannel!,
+        ),
+      if (serverName != null && onCreateDirectChannel != null)
+        TcContextMenuItem(label: 'New direct channel', onTap: onCreateDirectChannel!),
+      if (onJoinChannel != null)
+        TcContextMenuItem(label: 'Join channel…', onTap: onJoinChannel!),
+      if (onStartDm != null)
+        TcContextMenuItem(label: 'Message a friend…', onTap: onStartDm!),
     ];
   }
 
@@ -193,7 +217,8 @@ class ChannelColumn extends StatelessWidget {
                     _InviteRow(invite: invite, onTap: onTapInvite),
                 ],
                 if (channels.isNotEmpty) ...[
-                  const _SectionLabel('CHANNELS'),
+                  _SectionLabel('CHANNELS',
+                      onAdd: onCreateChannel, addTooltip: 'New channel'),
                   for (final c in channels)
                     _ChannelRow(
                       channel: c,
@@ -201,10 +226,12 @@ class ChannelColumn extends StatelessWidget {
                       onTap: () => onSelectChannel(c.hash),
                       incomplete: syncStates[c.hash] == 'incomplete',
                       menuItems: _menuFor(c),
+                      unread: unreadCounts[c.hash] ?? 0,
                     ),
                 ],
                 if (directChannels.isNotEmpty || onCreateDirectChannel != null) ...[
-                  _SectionLabel('DIRECT CHANNELS', onAdd: onCreateDirectChannel),
+                  _SectionLabel('DIRECT CHANNELS',
+                      onAdd: onCreateDirectChannel, addTooltip: 'New direct channel'),
                   for (final c in directChannels)
                     _ChannelRow(
                       channel: c,
@@ -212,10 +239,12 @@ class ChannelColumn extends StatelessWidget {
                       onTap: () => onSelectChannel(c.hash),
                       incomplete: syncStates[c.hash] == 'incomplete',
                       menuItems: _menuFor(c),
+                      unread: unreadCounts[c.hash] ?? 0,
                     ),
                 ],
                 if (dms.isNotEmpty || onStartDm != null) ...[
-                  _SectionLabel('DIRECT MESSAGES', onAdd: onStartDm),
+                  _SectionLabel('DIRECT MESSAGES',
+                      onAdd: onStartDm, addTooltip: 'Message a friend'),
                   for (final d in dms)
                     _DmRow(
                       conversation: d,
@@ -259,22 +288,14 @@ class ChannelColumn extends StatelessWidget {
               onAddFriend: onAddFriend,
             ),
           ),
-          Container(
-            decoration: BoxDecoration(
-              border: Border(top: BorderSide(color: tc.borderSubtle)),
+          if (_addMenuItems().isNotEmpty)
+            Container(
+              decoration: BoxDecoration(
+                border: Border(top: BorderSide(color: tc.borderSubtle)),
+              ),
+              padding: const EdgeInsets.all(10),
+              child: _AddMenuButton(items: _addMenuItems()),
             ),
-            padding: const EdgeInsets.all(10),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                TcGhostButton(
-                    icon: TcIcons.plus, label: 'NEW CHANNEL', onPressed: onCreateChannel),
-                const SizedBox(height: 6),
-                TcGhostButton(
-                    icon: TcIcons.join, label: 'JOIN CHANNEL', onPressed: onJoinChannel),
-              ],
-            ),
-          ),
         ],
       ),
     );
@@ -379,9 +400,10 @@ String _shortHash(String hex) {
 }
 
 class _SectionLabel extends StatelessWidget {
-  const _SectionLabel(this.label, {this.onAdd});
+  const _SectionLabel(this.label, {this.onAdd, this.addTooltip = ''});
   final String label;
   final VoidCallback? onAdd;
+  final String addTooltip;
 
   @override
   Widget build(BuildContext context) {
@@ -404,11 +426,59 @@ class _SectionLabel extends StatelessWidget {
           Expanded(child: text),
           TcIconButton(
             icon: TcIcons.plus,
-            tooltip: 'New direct channel',
+            tooltip: addTooltip,
             size: 22,
             onPressed: onAdd,
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// The footer's single entry point for adding anything: opens the
+/// consolidated add menu anchored on itself.
+class _AddMenuButton extends StatelessWidget {
+  const _AddMenuButton({required this.items});
+  final List<TcContextMenuItem> items;
+
+  @override
+  Widget build(BuildContext context) {
+    return Builder(
+      builder: (buttonContext) => TcGhostButton(
+        icon: TcIcons.plus,
+        label: 'ADD',
+        onPressed: () {
+          final box = buttonContext.findRenderObject() as RenderBox?;
+          final position = box?.localToGlobal(Offset.zero) ?? Offset.zero;
+          showTcContextMenu(
+            context: buttonContext,
+            position: position,
+            items: items,
+          );
+        },
+      ),
+    );
+  }
+}
+
+/// The unread-count pill shared by channel and conversation rows.
+class _UnreadPill extends StatelessWidget {
+  const _UnreadPill({required this.count});
+  final int count;
+
+  @override
+  Widget build(BuildContext context) {
+    final tc = SectionTheme.of(context);
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+      decoration: BoxDecoration(
+        color: tc.accentPrimary,
+        borderRadius: tcCorners(context, scale: 0.5),
+      ),
+      child: Text(
+        '$count',
+        style: TextStyle(fontSize: TCType.textMicro, color: tc.bgApp),
       ),
     );
   }
@@ -520,6 +590,7 @@ class _ChannelRow extends StatefulWidget {
     required this.onTap,
     this.incomplete = false,
     this.menuItems = const [],
+    this.unread = 0,
   });
 
   final Channel channel;
@@ -527,6 +598,7 @@ class _ChannelRow extends StatefulWidget {
   final VoidCallback onTap;
   final bool incomplete;
   final List<TcContextMenuItem> menuItems;
+  final int unread;
 
   @override
   State<_ChannelRow> createState() => _ChannelRowState();
@@ -577,10 +649,19 @@ class _ChannelRowState extends State<_ChannelRow> {
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(
                       fontSize: 13,
-                      color: selected ? tc.textEmphasis : tc.textSecondary,
+                      color: selected || widget.unread > 0
+                          ? tc.textEmphasis
+                          : tc.textSecondary,
+                      fontWeight: widget.unread > 0 && !selected
+                          ? FontWeight.w600
+                          : FontWeight.normal,
                     ),
                   ),
                 ),
+                if (widget.unread > 0 && !selected) ...[
+                  _UnreadPill(count: widget.unread),
+                  const SizedBox(width: 4),
+                ],
                 if (widget.incomplete) ...[
                   Tooltip(
                     decoration: tcTooltipDecoration(context),
@@ -658,11 +739,25 @@ class _DmRowState extends State<_DmRow> {
         ],
         child: GestureDetector(
           onTap: widget.onTap,
-          child: Container(
-            color: widget.selected
-                ? tc.bgSelected
-                : (_hover ? tc.bgHover : Colors.transparent),
+          child: AnimatedContainer(
+            duration: TCEffects.durationMed,
+            curve: TCEffects.easeTerminal,
+            margin: EdgeInsets.symmetric(horizontal: tcRadius(context, scale: 0.75)),
             padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+            decoration: BoxDecoration(
+              color: widget.selected
+                  ? tc.bgSelected
+                  : (_hover ? tc.bgHover : Colors.transparent),
+              border: Border(
+                left: BorderSide(
+                  color: widget.selected && !tcIsRounded(context)
+                      ? tc.accentPrimary
+                      : Colors.transparent,
+                  width: 2,
+                ),
+              ),
+              borderRadius: tcCorners(context, scale: 0.75),
+            ),
             child: Row(
               children: [
                 StatusDot(
@@ -676,7 +771,12 @@ class _DmRowState extends State<_DmRow> {
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(
                       fontSize: 13,
-                      color: widget.selected ? tc.textEmphasis : tc.textSecondary,
+                      color: widget.selected || d.unread > 0
+                          ? tc.textEmphasis
+                          : tc.textSecondary,
+                      fontWeight: d.unread > 0 && !widget.selected
+                          ? FontWeight.w600
+                          : FontWeight.normal,
                     ),
                   ),
                 ),
@@ -705,14 +805,7 @@ class _DmRowState extends State<_DmRow> {
                   if (d.unread > 0)
                     Padding(
                       padding: const EdgeInsets.only(left: 6),
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
-                        decoration: BoxDecoration(color: tc.accentPrimary),
-                        child: Text(
-                          '${d.unread}',
-                          style: TextStyle(fontSize: TCType.textMicro, color: tc.bgApp),
-                        ),
-                      ),
+                      child: _UnreadPill(count: d.unread),
                     ),
                 ],
               ],

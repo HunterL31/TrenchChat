@@ -336,6 +336,8 @@ class _MainWindowState extends State<MainWindow> {
                   name: s.name,
                   canInvite: state.serverPermissionsByHash[s.hash]?.invite ?? false,
                   canManage: state.serverPermissionsByHash[s.hash]?.manageChannel ?? false,
+                  hasUnread: (state.channelsByServer[s.hash] ?? [])
+                      .any((c) => (state.unreadByChannel[c.hash] ?? 0) > 0),
                 ),
             ],
             selectedHash: state.selectedServerHash,
@@ -388,6 +390,7 @@ class _MainWindowState extends State<MainWindow> {
           voiceParticipants: voiceRoster,
           onJoinVoice: canJoinVoice ? () => state.joinVoice(channelHash) : null,
           syncStates: state.syncStateByChannel,
+          unreadCounts: state.unreadByChannel,
           channelPermissions: state.permissionsByChannel,
           onViewMembers: (c) => showMembersDialog(context, state,
               channelHashHex: c.hash, channelName: c.name),

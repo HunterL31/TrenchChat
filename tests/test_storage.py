@@ -255,6 +255,49 @@ class TestSubscriptions:
         assert db.get_last_sync("nope") == 0.0
 
 
+class TestChannelUnread:
+    def _seed(self, db):
+        db.upsert_channel("ch01", "Test", "", "creator", "public", time.time())
+        db.subscribe("ch01")
+
+    def _insert(self, db, sender, msg_id, ts):
+        db.insert_message("ch01", sender, sender, "hi", ts, msg_id, None, None, ts)
+
+    def test_unread_counts_only_others_messages(self, db):
+        self._seed(db)
+        now = time.time()
+        self._insert(db, "peer", "m1", now - 10)
+        self._insert(db, "peer", "m2", now - 5)
+        self._insert(db, "me0000", "m3", now - 3)
+        assert db.get_unread_counts("me0000") == {"ch01": 2}
+
+    def test_mark_read_resets_the_count(self, db):
+        self._seed(db)
+        now = time.time()
+        self._insert(db, "peer", "m1", now - 10)
+        assert db.mark_channel_read("ch01") is True
+        assert db.get_unread_counts("me0000") == {"ch01": 0}
+
+    def test_messages_after_the_watermark_count_again(self, db):
+        self._seed(db)
+        now = time.time()
+        db.mark_channel_read("ch01", ts=now - 7)
+        self._insert(db, "peer", "m1", now - 10)
+        self._insert(db, "peer", "m2", now - 5)
+        assert db.get_unread_counts("me0000") == {"ch01": 1}
+
+    def test_a_channel_with_no_messages_reads_zero(self, db):
+        self._seed(db)
+        assert db.get_unread_counts("me0000") == {"ch01": 0}
+
+    def test_unsubscribed_channels_are_absent(self, db):
+        db.upsert_channel("ch02", "Other", "", "creator", "public", time.time())
+        assert db.get_unread_counts("me0000") == {}
+
+    def test_mark_read_on_an_unsubscribed_channel_is_false(self, db):
+        assert db.mark_channel_read("nope") is False
+
+
 # ---------------------------------------------------------------------------
 # Members
 # ---------------------------------------------------------------------------

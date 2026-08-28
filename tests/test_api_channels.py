@@ -153,3 +153,31 @@ class TestMyPermissionsSendMessage:
         res = client.get("/channels/deadbeef/my_permissions", headers=AUTH)
 
         assert res.json()["send_message"] is False
+
+
+@needs_backend
+class TestChannelUnread:
+    def test_unread_counts_come_from_storage(self, client, backend):
+        backend.storage.get_unread_counts.return_value = {"aa" * 16: 3}
+
+        res = client.get("/channels/unread", headers=AUTH)
+
+        assert res.status_code == 200
+        assert res.json() == {"counts": {"aa" * 16: 3}}
+        backend.storage.get_unread_counts.assert_called_once_with("a" * 32)
+
+    def test_mark_read_answers_ok(self, client, backend):
+        backend.storage.mark_channel_read.return_value = True
+
+        res = client.post(f"/channels/{'bb' * 16}/read", headers=AUTH)
+
+        assert res.status_code == 200
+        assert res.json() == {"ok": True}
+        backend.storage.mark_channel_read.assert_called_once_with("bb" * 16)
+
+    def test_mark_read_on_an_unknown_channel_is_false(self, client, backend):
+        backend.storage.mark_channel_read.return_value = False
+
+        res = client.post(f"/channels/{'cc' * 16}/read", headers=AUTH)
+
+        assert res.json() == {"ok": False}

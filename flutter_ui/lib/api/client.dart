@@ -158,6 +158,20 @@ class ApiClient {
         .toList();
   }
 
+  /// Unread message counts per subscribed channel, own messages excluded.
+  Future<Map<String, int>> getChannelUnread() async {
+    final res = await _http.get(_u('/channels/unread'));
+    final body = _decode(res) as Map<String, dynamic>;
+    final counts = body['counts'] as Map<String, dynamic>? ?? {};
+    return counts.map((k, v) => MapEntry(k, (v as num).toInt()));
+  }
+
+  /// Advances the channel's read watermark to now.
+  Future<bool> markChannelRead(String channelHashHex) async {
+    final res = await _http.post(_u('/channels/$channelHashHex/read'));
+    return (_decode(res) as Map<String, dynamic>)['ok'] as bool? ?? false;
+  }
+
   /// Standalone channels announced on the mesh but not yet joined.
   Future<List<Channel>> getDiscoveredChannels() async {
     final res = await _http.get(_u('/channels/discovered'));
