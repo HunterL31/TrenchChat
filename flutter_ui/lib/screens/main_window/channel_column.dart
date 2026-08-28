@@ -1,19 +1,18 @@
 // 1b: 206px channel column -- server header, CHANNELS, DIRECT CHANNELS,
-// DIRECT MESSAGES, ONLINE roster footer, NEW CHANNEL / JOIN CHANNEL ghost
-// buttons. DIRECT CHANNELS are channels outside any server; DIRECT MESSAGES
-// are one-to-one conversations, which are a different thing entirely.
+// DIRECT MESSAGES, VOICE, and the ADD footer menu. DIRECT CHANNELS are
+// channels outside any server; DIRECT MESSAGES are one-to-one conversations,
+// which are a different thing entirely. The ONLINE roster lives in
+// presence_panel.dart, beside the message list.
 import 'package:flutter/material.dart';
 
 import '../../api/models/dm.dart';
 import '../../api/models/invite.dart';
-import '../../api/models/member.dart';
 import '../../api/models/permissions.dart';
 import '../../api/models/server.dart';
 import '../../api/models/voice.dart';
 import '../../theme/effects.dart';
 import '../../theme/section_theme.dart';
 import '../../theme/shape.dart';
-import '../../theme/theme_spec.dart';
 import '../../theme/tokens.dart';
 import '../../widgets/status_dot.dart';
 import '../../widgets/tc_button.dart';
@@ -30,8 +29,6 @@ class ChannelColumn extends StatelessWidget {
     required this.directChannels,
     required this.selectedChannelHash,
     required this.onSelectChannel,
-    required this.onlinePresence,
-    this.meHashHex = '',
     this.pendingInvites = const [],
     this.onTapInvite,
     this.onCreateChannel,
@@ -41,8 +38,6 @@ class ChannelColumn extends StatelessWidget {
     this.onSelectDm,
     this.onDeleteDm,
     this.onStartDm,
-    this.friendHashes = const {},
-    this.onAddFriend,
     this.voiceParticipants = const [],
     this.onJoinVoice,
     this.syncStates = const {},
@@ -60,12 +55,6 @@ class ChannelColumn extends StatelessWidget {
   final List<Channel> directChannels;
   final String? selectedChannelHash;
   final ValueChanged<String> onSelectChannel;
-  final List<PresenceEntry> onlinePresence;
-
-  /// The local user's identity hash, so the ONLINE roster never lists the
-  /// reader as one of their own peers.
-  final String meHashHex;
-
   final List<PendingInvite> pendingInvites;
   final ValueChanged<PendingInvite>? onTapInvite;
   final VoidCallback? onCreateChannel;
@@ -85,16 +74,8 @@ class ChannelColumn extends StatelessWidget {
   /// Opens the "message a friend" picker.
   final VoidCallback? onStartDm;
 
-  /// Identity hashes already saved as a friend -- drives the "Add friend…"
-  /// vs "Edit friend…" context menu label. Plain data, not a live AppState
+  /// The selected channel's voice roster. Plain data: not a live AppState
   /// read, so this leaf stays testable in isolation.
-  final Set<String> friendHashes;
-
-  /// Fired with an online peer's identity hash when "Add/Edit friend…" is
-  /// chosen from the roster row's right-click menu.
-  final void Function(String identityHashHex)? onAddFriend;
-
-  /// The selected channel's voice roster. Plain data, like [friendHashes].
   final List<VoiceParticipant> voiceParticipants;
 
   /// Joins the selected channel's voice session; null hides the affordance
@@ -168,9 +149,6 @@ class ChannelColumn extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final tc = SectionTheme.of(context);
-    final online = onlinePresence
-        .where((p) => p.isOnline && p.identityHash != meHashHex)
-        .toList();
     return Container(
       width: 206,
       color: tc.bgSurface,
@@ -280,14 +258,6 @@ class ChannelColumn extends StatelessWidget {
               ],
             ),
           ),
-          _presenceSection(
-            context,
-            _PresenceRoster(
-              online: online,
-              friendHashes: friendHashes,
-              onAddFriend: onAddFriend,
-            ),
-          ),
           if (_addMenuItems().isNotEmpty)
             Container(
               decoration: BoxDecoration(
@@ -298,98 +268,6 @@ class ChannelColumn extends StatelessWidget {
             ),
         ],
       ),
-    );
-  }
-}
-
-/// Opens the presence section around the roster. When the enclosing
-/// SectionTheme carries no spec -- an unwrapped ChannelColumn in a widget
-/// test -- there is nothing to resolve overrides from, so the roster keeps
-/// the palette it would have rendered with anyway.
-Widget _presenceSection(BuildContext context, Widget child) {
-  final spec = SectionTheme.specOf(context);
-  if (spec == null) {
-    return SectionTheme.resolved(
-      section: TCSection.presence,
-      colors: SectionTheme.of(context),
-      style: SectionTheme.styleOf(context),
-      child: child,
-    );
-  }
-  return SectionTheme(spec: spec, section: TCSection.presence, child: child);
-}
-
-class _PresenceRoster extends StatelessWidget {
-  const _PresenceRoster({
-    required this.online,
-    required this.friendHashes,
-    required this.onAddFriend,
-  });
-
-  final List<PresenceEntry> online;
-  final Set<String> friendHashes;
-  final void Function(String identityHashHex)? onAddFriend;
-
-  @override
-  Widget build(BuildContext context) {
-    final tc = SectionTheme.of(context);
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        Container(
-          decoration: BoxDecoration(
-            border: Border(top: BorderSide(color: tc.borderSubtle)),
-          ),
-          padding: const EdgeInsets.fromLTRB(14, 10, 14, 4),
-          child: Text(
-            '▾ ONLINE — ${online.length}',
-            style: TextStyle(
-              fontSize: TCType.textMicro,
-              color: tc.textSecondary,
-              letterSpacing: TCType.letterSpacingFor(TCType.textMicro, TCType.trackingWider),
-            ),
-          ),
-        ),
-        Padding(
-          padding: const EdgeInsets.fromLTRB(14, 2, 14, 12),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              for (final p in online)
-                Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 3),
-                  child: TcContextMenuRegion(
-                    items: [
-                      if (onAddFriend != null)
-                        TcContextMenuItem(
-                          label: friendHashes.contains(p.identityHash)
-                              ? 'Edit friend…'
-                              : 'Add friend…',
-                          onTap: () => onAddFriend!(p.identityHash),
-                        ),
-                    ],
-                    child: Row(
-                      children: [
-                        const StatusDot(status: PresenceStatus.online, size: 10),
-                        const SizedBox(width: 9),
-                        Expanded(
-                          child: Text(
-                            p.displayName?.isNotEmpty == true
-                                ? p.displayName!
-                                : _shortHash(p.identityHash),
-                            overflow: TextOverflow.ellipsis,
-                            style: TextStyle(fontSize: 12, color: tc.textSecondary),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-            ],
-          ),
-        ),
-      ],
     );
   }
 }

@@ -50,7 +50,6 @@ Widget _column({
           directChannels: const [],
           selectedChannelHash: null,
           onSelectChannel: (_) {},
-          onlinePresence: const [],
           dms: dms,
           onSelectDm: onSelectDm,
           onStartDm: onStartDm,

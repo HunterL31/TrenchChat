@@ -37,7 +37,6 @@ Widget _harness({
           directChannels: const [],
           selectedChannelHash: null,
           onSelectChannel: (_) {},
-          onlinePresence: const [],
           voiceParticipants: voiceParticipants,
           onJoinVoice: onJoinVoice,
         ),

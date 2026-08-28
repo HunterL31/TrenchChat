@@ -39,6 +39,7 @@ import 'friends_tab.dart';
 import 'iface_tab.dart';
 import 'map_tab.dart';
 import 'message_list.dart';
+import 'presence_panel.dart';
 import 'server_rail.dart';
 import 'voice_panel.dart';
 
@@ -368,8 +369,6 @@ class _MainWindowState extends State<MainWindow> {
               _scaffoldKey.currentState!.closeDrawer();
             }
           },
-          onlinePresence: presence,
-          meHashHex: state.meHashHex,
           pendingInvites: state.pendingInvites,
           onTapInvite: (invite) => showIncomingInviteDialog(context, state, invite),
           onCreateChannel: () =>
@@ -385,8 +384,6 @@ class _MainWindowState extends State<MainWindow> {
           onDeleteDm: (dm) => state.deleteDm(dm.hash),
           onStartDm: () => showStartDmDialog(context, state),
           onJoinChannel: () => showJoinChannelDialog(context, state),
-          friendHashes: friendHashes,
-          onAddFriend: (hash) => showAddFriendDialog(context, state, identityHash: hash),
           voiceParticipants: voiceRoster,
           onJoinVoice: canJoinVoice ? () => state.joinVoice(channelHash) : null,
           syncStates: state.syncStateByChannel,
@@ -588,6 +585,15 @@ class _MainWindowState extends State<MainWindow> {
           );
         }
 
+        // The roster is channel state, so it sits beside the channel's
+        // content, not under the global channel/DM list. Hidden for
+        // conversations (no roster to show) and on narrow windows, where
+        // the header's members dialog covers the same ground.
+        final showPresencePanel = _tab == ChannelTab.chat &&
+            channelHash != null &&
+            dm == null &&
+            MediaQuery.of(context).size.width >= presencePanelBreakpoint;
+
         return Scaffold(
           backgroundColor: baseColors.bgApp,
           body: Row(
@@ -596,6 +602,18 @@ class _MainWindowState extends State<MainWindow> {
               rail,
               SizedBox(width: 206, child: channelPane),
               Expanded(child: content),
+              if (showPresencePanel)
+                SectionTheme(
+                  spec: spec,
+                  section: TCSection.presence,
+                  child: PresencePanel(
+                    presence: presence,
+                    meHashHex: state.meHashHex,
+                    friendHashes: friendHashes,
+                    onAddFriend: (hash) =>
+                        showAddFriendDialog(context, state, identityHash: hash),
+                  ),
+                ),
             ],
           ),
         );

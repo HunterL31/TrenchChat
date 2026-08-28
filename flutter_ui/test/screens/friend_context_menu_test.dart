@@ -1,4 +1,4 @@
-// Right-click "Add/Edit friend…" is the only place ChannelColumn and
+// Right-click "Add/Edit friend…" is the only place PresencePanel and
 // MessageList reach outside their own plain-value + callback contract, so
 // it gets its own coverage: both leaves must fire onAddFriend with the
 // tapped row's identity hash, and switch label when that hash is already
@@ -10,8 +10,8 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'package:flutter_ui/api/models/member.dart';
 import 'package:flutter_ui/api/models/message.dart';
-import 'package:flutter_ui/screens/main_window/channel_column.dart';
 import 'package:flutter_ui/screens/main_window/message_list.dart';
+import 'package:flutter_ui/screens/main_window/presence_panel.dart';
 
 const String kAliceHash = 'f3a1c2d4e5b6a798f3a1c2d4e5b6a798';
 
@@ -47,16 +47,12 @@ void main() {
     String? fired;
     await tester.pumpWidget(MaterialApp(
       home: Scaffold(
-        body: ChannelColumn(
-          serverName: 'mesh-crew',
-          serverMemberCount: 1,
-          channels: const [],
-          directChannels: const [],
-          selectedChannelHash: null,
-          onSelectChannel: (_) {},
-          onlinePresence: const [PresenceEntry(identityHash: kAliceHash, isOnline: true)],
-          onAddFriend: (hash) => fired = hash,
-        ),
+        body: Row(children: [
+          PresencePanel(
+            presence: const [PresenceEntry(identityHash: kAliceHash, isOnline: true)],
+            onAddFriend: (hash) => fired = hash,
+          ),
+        ]),
       ),
     ));
     await tester.pump();
@@ -74,17 +70,13 @@ void main() {
   testWidgets('an already-saved hash offers Edit friend instead of Add friend', (tester) async {
     await tester.pumpWidget(MaterialApp(
       home: Scaffold(
-        body: ChannelColumn(
-          serverName: 'mesh-crew',
-          serverMemberCount: 1,
-          channels: const [],
-          directChannels: const [],
-          selectedChannelHash: null,
-          onSelectChannel: (_) {},
-          onlinePresence: const [PresenceEntry(identityHash: kAliceHash, isOnline: true)],
-          friendHashes: const {kAliceHash},
-          onAddFriend: (_) {},
-        ),
+        body: Row(children: [
+          PresencePanel(
+            presence: const [PresenceEntry(identityHash: kAliceHash, isOnline: true)],
+            friendHashes: const {kAliceHash},
+            onAddFriend: (_) {},
+          ),
+        ]),
       ),
     ));
     await tester.pump();
@@ -129,16 +121,12 @@ void main() {
     String? fired;
     await tester.pumpWidget(MaterialApp(
       home: Scaffold(
-        body: ChannelColumn(
-          serverName: 'mesh-crew',
-          serverMemberCount: 1,
-          channels: const [],
-          directChannels: const [],
-          selectedChannelHash: null,
-          onSelectChannel: (_) {},
-          onlinePresence: const [PresenceEntry(identityHash: kAliceHash, isOnline: true)],
-          onAddFriend: (hash) => fired = hash,
-        ),
+        body: Row(children: [
+          PresencePanel(
+            presence: const [PresenceEntry(identityHash: kAliceHash, isOnline: true)],
+            onAddFriend: (hash) => fired = hash,
+          ),
+        ]),
       ),
     ));
     await tester.pump();

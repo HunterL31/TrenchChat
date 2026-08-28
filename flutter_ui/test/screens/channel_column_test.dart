@@ -5,7 +5,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:flutter_ui/api/models/member.dart';
 import 'package:flutter_ui/api/models/server.dart';
 import 'package:flutter_ui/screens/main_window/channel_column.dart';
 
@@ -32,7 +31,6 @@ void main() {
           directChannels: const [],
           selectedChannelHash: null,
           onSelectChannel: (_) {},
-          onlinePresence: const [],
           onCreateChannel: () => serverCreates++,
           onCreateDirectChannel: () => directCreates++,
           onJoinChannel: () {},
@@ -67,7 +65,6 @@ void main() {
           directChannels: const [],
           selectedChannelHash: null,
           onSelectChannel: (_) {},
-          onlinePresence: const [],
           onCreateChannel: () => serverCreates++,
           onCreateDirectChannel: () => directCreates++,
           onJoinChannel: () => joins++,
@@ -105,7 +102,6 @@ void main() {
           directChannels: const [],
           selectedChannelHash: null,
           onSelectChannel: (_) {},
-          onlinePresence: const [],
           onCreateChannel: () {},
           onCreateDirectChannel: () {},
           onJoinChannel: () {},
@@ -130,7 +126,6 @@ void main() {
           directChannels: const [],
           selectedChannelHash: 'hash-general',
           onSelectChannel: (_) {},
-          onlinePresence: const [],
           unreadCounts: const {'hash-ops': 4},
         ),
       ),
@@ -149,7 +144,6 @@ void main() {
           directChannels: const [],
           selectedChannelHash: 'hash-general',
           onSelectChannel: (_) {},
-          onlinePresence: const [],
           unreadCounts: const {'hash-general': 3},
         ),
       ),
@@ -168,7 +162,6 @@ void main() {
           directChannels: const [],
           selectedChannelHash: null,
           onSelectChannel: (_) {},
-          onlinePresence: const [],
         ),
       ),
     ));
@@ -186,7 +179,6 @@ void main() {
           directChannels: const [],
           selectedChannelHash: null,
           onSelectChannel: (_) {},
-          onlinePresence: const [],
           syncStates: const {
             'hash-general': 'incomplete',
             'hash-ops': 'synced',
@@ -196,40 +188,6 @@ void main() {
     ));
 
     expect(find.text('INCOMPLETE'), findsOneWidget);
-  });
-
-  testWidgets('the ONLINE roster shows display names, not raw hashes, and hides self',
-      (tester) async {
-    const meHash = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
-    await tester.pumpWidget(MaterialApp(
-      home: Scaffold(
-        body: ChannelColumn(
-          serverName: null,
-          serverMemberCount: null,
-          channels: const [],
-          directChannels: const [],
-          selectedChannelHash: null,
-          onSelectChannel: (_) {},
-          meHashHex: meHash,
-          onlinePresence: const [
-            PresenceEntry(identityHash: meHash, isOnline: true, displayName: 'me'),
-            PresenceEntry(
-                identityHash: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
-                isOnline: true,
-                displayName: 'Alice'),
-            PresenceEntry(
-                identityHash: 'cccccccccccccccccccccccccccccccc', isOnline: true),
-          ],
-        ),
-      ),
-    ));
-
-    // The local user is filtered out; two peers remain.
-    expect(find.text('▾ ONLINE — 2'), findsOneWidget);
-    expect(find.text('me'), findsNothing);
-    // A named peer renders its name; an unnamed one falls back to a short hash.
-    expect(find.text('Alice'), findsOneWidget);
-    expect(find.text('cccc…cccc'), findsOneWidget);
   });
 
   testWidgets('a fully synced column shows no indicator', (tester) async {
@@ -242,7 +200,6 @@ void main() {
           directChannels: const [],
           selectedChannelHash: null,
           onSelectChannel: (_) {},
-          onlinePresence: const [],
           syncStates: const {'hash-general': 'synced'},
         ),
       ),
