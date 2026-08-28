@@ -69,7 +69,7 @@ from trenchchat.core.protocol import (
     F_MISSED_FOR, F_MISSED_MSG_ID,
     MT_MISSED_DELIVERY, MT_SYNC_REQUEST, MT_SYNC_RESPONSE,
     SYNC_WINDOW_SECS,
-    unpack_wire, wire_timestamp,
+    pack_fields, unpack_wire, wire_timestamp,
 )
 from trenchchat.core.reaction import is_custom_emoji_hash
 from trenchchat.core.storage import Storage
@@ -1603,7 +1603,7 @@ class SyncManager:
                 "",
                 desired_method=LXMF.LXMessage.DIRECT,
             )
-            lxm.fields = fields
+            lxm.fields = pack_fields(fields)
             self._router.send(lxm)
             return True
         except Exception as e:

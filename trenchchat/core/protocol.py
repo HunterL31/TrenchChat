@@ -17,16 +17,19 @@ Field key registry
 0x70–0x7F  Message integrity fields
 0x80–0x8F  Friends / direct message fields
 
-These numbers are TrenchChat's own and overlap LXMF's standard registry
-(0x01 is FIELD_EMBEDDED_LXMS there, 0x02 FIELD_TELEMETRY, and so on). That is
-harmless for messages only TrenchChat ever sees -- channels, sync, invites,
-voice -- because both ends read them the same way, and moving them is deferred.
+These numbers are TrenchChat's own and never appear as LXMF field keys on the
+wire: LXMF reserves 0x00-0x80 for its standard registry (0x01 is
+FIELD_EMBEDDED_LXMS there, 0x02 FIELD_TELEMETRY, and so on), so the whole
+dict travels msgpack-packed inside LXMF's custom-payload fields instead
+(pack_fields / unpack_fields below). To any client that is not TrenchChat a
+channel or control message is one unknown envelope, not fourteen misparsed
+fields, and upstream can allocate in its reserved range without breaking us.
 
-A direct message is the exception, and the reason the envelope below exists: it
-is the one message type that can legitimately arrive at a client that is not
-TrenchChat, where those numbers mean something else entirely. So a direct
-message carries none of them, and puts everything TrenchChat-specific inside
-LXMF's own custom-payload fields, which any other client knows to ignore.
+A direct message uses the same custom-payload fields under its own envelope
+type: it is the one message type that legitimately arrives at a client that
+is not TrenchChat, so its text rides in the ordinary content, its attachment
+in LXMF's standard image field, and only the TrenchChat extras in the
+envelope (pack_dm_envelope below).
 """
 
 # --- Common / messaging fields ---
@@ -154,18 +157,63 @@ def unpack_dm_envelope(fields: dict) -> dict | None:
     which mean the same thing to the caller: treat this as a plain message from
     a client that is not TrenchChat.
     """
-    if not fields:
-        return None
-    envelope_type = fields.get(LXMF_FIELD_CUSTOM_TYPE)
-    if isinstance(envelope_type, bytes):
-        envelope_type = envelope_type.decode(errors="replace")
-    if envelope_type != DM_ENVELOPE_TYPE:
+    if _envelope_type(fields) != DM_ENVELOPE_TYPE:
         return None
     payload = fields.get(LXMF_FIELD_CUSTOM_DATA)
     if not isinstance(payload, bytes):
         return None
     try:
         unpacked = unpack_wire(payload)
+    except Exception:
+        return None
+    return unpacked if isinstance(unpacked, dict) else None
+
+
+# --- protocol envelope ---
+#
+# Every channel and control message wraps its field dict in the same
+# custom-payload fields, under its own type. The receiving Router unwraps it
+# once, at the inbound choke point, so handlers only ever see the inner dict.
+ENVELOPE_TYPE = "trenchchat/1"
+
+
+def _envelope_type(fields: dict) -> str | None:
+    value = fields.get(LXMF_FIELD_CUSTOM_TYPE) if fields else None
+    if isinstance(value, bytes):
+        value = value.decode(errors="replace")
+    return value if isinstance(value, str) else None
+
+
+def pack_fields(fields: dict) -> dict:
+    """Wrap a TrenchChat field dict for the wire.
+
+    The result is what an outbound LXMessage's fields must be set to: the
+    registry keys above never appear as LXMF field keys themselves.
+    """
+    return {
+        LXMF_FIELD_CUSTOM_TYPE: ENVELOPE_TYPE,
+        LXMF_FIELD_CUSTOM_DATA: msgpack.packb(fields, use_bin_type=True),
+    }
+
+
+def is_protocol_envelope(fields: dict) -> bool:
+    """True if these fields claim the channel/control envelope type."""
+    return _envelope_type(fields) == ENVELOPE_TYPE
+
+
+def unpack_fields(fields: dict) -> dict | None:
+    """The TrenchChat field dict inside an inbound message's envelope.
+
+    None when the message carries no envelope of ours or the payload does
+    not parse; is_protocol_envelope() tells those two cases apart.
+    """
+    if not is_protocol_envelope(fields):
+        return None
+    payload = fields.get(LXMF_FIELD_CUSTOM_DATA)
+    if not isinstance(payload, bytes):
+        return None
+    try:
+        unpacked = unpack_wire(payload, int_keys=True)
     except Exception:
         return None
     return unpacked if isinstance(unpacked, dict) else None
@@ -309,12 +357,13 @@ def author_digest(channel_hash_hex: str, message_id: str, timestamp: float,
     )).digest()
 
 
-def unpack_wire(payload: bytes, *, raw: bool = False):
+def unpack_wire(payload: bytes, *, raw: bool = False, int_keys: bool = False):
     """msgpack.unpackb with explicit limits, for data received from a peer.
 
     Use this for every payload that originated off the network; the plain
     msgpack.unpackb call is fine for blobs we wrote ourselves.
-    Raises ValueError if the payload itself is over the size cap.
+    int_keys permits integer map keys, which the protocol envelope's field
+    dict uses. Raises ValueError if the payload itself is over the size cap.
     """
     if len(payload) > MAX_WIRE_PAYLOAD:
         raise ValueError(
@@ -324,6 +373,7 @@ def unpack_wire(payload: bytes, *, raw: bool = False):
     return msgpack.unpackb(
         payload,
         raw=raw,
+        strict_map_key=not int_keys,
         max_array_len=MAX_WIRE_ARRAY,
         max_map_len=MAX_WIRE_MAP,
         max_str_len=MAX_WIRE_STR,

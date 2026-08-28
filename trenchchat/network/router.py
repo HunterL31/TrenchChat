@@ -17,7 +17,7 @@ import msgpack
 from pathlib import Path
 from trenchchat import APP_NAME, APP_ASPECT_USER
 from trenchchat.config import Config, DATA_DIR
-from trenchchat.core.protocol import F_MSG_TYPE
+from trenchchat.core.protocol import F_MSG_TYPE, is_protocol_envelope, unpack_fields
 
 _MESSAGE_STORE_PATH = str(DATA_DIR / "messagestore")
 
@@ -120,10 +120,38 @@ class Router:
         if not self._authenticate(message):
             return
 
+        if not self._unwrap_envelope(message):
+            return
+
         if not self._allow_control_message(message):
             return
 
         self._dispatch(message)
+
+    def _unwrap_envelope(self, message: LXMF.LXMessage) -> bool:
+        """Replace message.fields with the TrenchChat dict inside its envelope.
+
+        Handlers downstream only ever see unwrapped fields; the registry's
+        numbers never appear as LXMF field keys on the wire. A message with
+        no envelope of ours -- a direct message, or any other client's
+        traffic -- passes through untouched and unmarked; one that claims
+        the envelope with an unreadable payload is dropped.
+        """
+        fields = getattr(message, "fields", None) or {}
+        inner = unpack_fields(fields)
+        if inner is not None:
+            message.fields = inner
+            message.trenchchat_protocol = True
+            return True
+        if is_protocol_envelope(fields):
+            source_hex = message.source_hash.hex() if message.source_hash else "<none>"
+            RNS.log(
+                f"TrenchChat: dropped message with unreadable protocol "
+                f"envelope from {source_hex[:16]}…",
+                RNS.LOG_WARNING,
+            )
+            return False
+        return True
 
     def _allow_control_message(self, message: LXMF.LXMessage) -> bool:
         """Throttle control messages per sender.
@@ -298,6 +326,8 @@ class Router:
                     f"— signature still invalid after identity resolution",
                     RNS.LOG_WARNING,
                 )
+                continue
+            if not self._unwrap_envelope(revalidated):
                 continue
             # Released messages count against the same throttle as any other
             # inbound control message; otherwise a peer can park a burst while

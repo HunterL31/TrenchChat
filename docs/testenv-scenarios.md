@@ -517,13 +517,13 @@ and it is wrong the moment a message reaches a client that follows the
 standard, which would read a display name as telemetry and a message id as an
 image.
 
-Channels, sync, invites and voice never leave TrenchChat, so they still use
-those numbers and moving them is deferred. A direct message is the exception:
-it is the one thing that can legitimately arrive at somebody else's client. So
-it carries none of them. The text rides in the ordinary content, an attachment
-in LXMF's own image field, and everything TrenchChat adds sits inside
-`FIELD_CUSTOM_TYPE`/`FIELD_CUSTOM_DATA`, which the standard sets aside for
-exactly this and every other client knows to ignore.
+No message puts those numbers on the wire as LXMF field keys any more:
+channels, sync, invites and voice carry their whole field dict msgpack-packed
+inside `FIELD_CUSTOM_TYPE`/`FIELD_CUSTOM_DATA` under `trenchchat/1`, which the
+standard sets aside for exactly this. A direct message is still the special
+case — the one thing that can legitimately arrive at somebody else's client —
+so its text rides in the ordinary content, an attachment in LXMF's own image
+field, and only the TrenchChat extras sit in the envelope, under its own type.
 
 interop3 is what keeps that true: it fails if any field number outside that set
 appears in a message a foreign client received.

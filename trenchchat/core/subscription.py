@@ -31,7 +31,7 @@ from trenchchat.core.protocol import (
     F_CHANNEL_HASH, F_MSG_TYPE, F_SUBSCRIBER_LIST,
     F_SUBSCRIBER_SIG, F_SUBSCRIBER_VERSION,
     MT_SUBSCRIBE, MT_UNSUBSCRIBE, MT_SUBSCRIBER_LIST,
-    unpack_wire,
+    pack_fields, unpack_wire,
 )
 from trenchchat.core.storage import Storage
 from trenchchat.network.router import Router
@@ -335,7 +335,7 @@ class SubscriptionManager:
                 "",
                 desired_method=LXMF.LXMessage.DIRECT,
             )
-            lxm.fields = fields
+            lxm.fields = pack_fields(fields)
             self._router.send(lxm)
             return True
         except Exception as e:

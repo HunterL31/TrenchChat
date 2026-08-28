@@ -38,6 +38,7 @@ from trenchchat.core.presence import resolve_display_name
 from trenchchat.core.protocol import (
     F_DISPLAY_NAME, F_FRIEND_NOTE, F_MSG_TYPE, MAX_FRIEND_NOTE_CHARS,
     MT_FRIEND_ACCEPT, MT_FRIEND_DECLINE, MT_FRIEND_REQUEST,
+    pack_fields,
 )
 from trenchchat.core.storage import (
     FRIEND_ACCEPTED, FRIEND_PENDING_IN, FRIEND_PENDING_OUT,
@@ -525,7 +526,7 @@ class FriendsManager:
                 "",
                 desired_method=LXMF.LXMessage.DIRECT,
             )
-            lxm.fields = fields
+            lxm.fields = pack_fields(fields)
             self._router.send(lxm)
             return True
         except Exception as e:
