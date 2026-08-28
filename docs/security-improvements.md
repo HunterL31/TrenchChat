@@ -229,7 +229,16 @@ serves, and none of them authenticated anything.
   fails closed.
 
 Covered by `tests/test_api_security.py` (token required, CORS, WS origin,
-static assets stay public, bind defaults).
+static assets stay public, bind defaults, and a route added to the app after
+`create_app` returns — which is how `main_flutter.py` adds `/ui/open`).
+
+**The token is also written to `~/.trenchchat/launcher.json`** (owner-only,
+`atomic_write_bytes`) so a second launch can ask the instance in the tray to
+open a window instead of starting a second node over the same identity and
+database. This adds no exposure: a reader of that file can already read the
+identity keypair and the message database beside it. It does mean the token
+now outlives a single request — a stale file names a port that answers
+nothing, and the launcher starts normally when it does.
 
 ## Fixed: replay, amplification and unbounded values
 

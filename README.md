@@ -73,6 +73,18 @@ One command starts the backend and the client: the native desktop binary when on
 otherwise the web client in your default browser. `--port` moves the local port, `--browser`
 forces the browser, `--no-ui` runs the backend headless.
 
+Closing the window does not close TrenchChat. It leaves a tray icon and keeps the node on
+the mesh, so announces, discovery and sync carry on and messages sent while you were away
+are still there; open a window again or quit from the tray. Launching it again while it sits
+there reopens that window rather than starting a second node.
+
+The tray needs a menu to quit from, so TrenchChat uses one only where that exists: Windows
+and macOS always, Linux only with an AppIndicator or GTK status icon (PyGObject, so from
+source rather than the packaged build — and not on GNOME, which stopped drawing status
+icons in 3.26). X11's own tray takes a click and shows no menu, so it is treated as no tray
+at all. Where there is none, closing the window quits as it always did, and `--no-tray` asks
+for that everywhere.
+
 The legacy Qt client still works via `python main.py`; pass `-v` / `--verbose` for detailed
 Reticulum and TrenchChat debug logging. Run one client at a time — both use the same identity
 and database.
@@ -142,6 +154,8 @@ flutter_ui/                 Flutter client (the active UI): desktop + web
   test/                     Widget, layout, and golden tests (flutter test)
 trenchchat/
   config.py                 Configuration (data dir, propagation settings)
+  tray.py                   Tray icon the app drops to when its window closes
+  single_instance.py        Hands a second launch to the instance already running
   core/
     identity.py             Keypair management
     channel.py              Channel creation and announce
@@ -173,3 +187,4 @@ All application data is stored under `~/.trenchchat/`:
 | `storage.db` | SQLite: channels, messages, subscriptions, members, missed-delivery hints |
 | `messagestore/` | LXMF propagation node message store (if enabled) |
 | `launcher.log` | Console output from an installed build, which runs without a console |
+| `launcher.json` | Where the running instance's API is, so a second launch can hand over to it |

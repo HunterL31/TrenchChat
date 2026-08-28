@@ -90,6 +90,12 @@ marshal into the main thread via signals, and the API layer marshals into asynci
 - `main_flutter.py` bundles backend + client for real use; `devtools/testenv/serve_profile.py`
   serves a real profile for browser testing; `devtools/testenv/remote_host.sh` hosts the stack
   from a container over Tailscale.
+- Closing the client window does not stop the node: the launcher keeps the backend running
+  behind a tray icon (`trenchchat/tray.py`, optional — a machine with no tray, or a pystray
+  backend whose icon has no menu to quit from, gets None and the old quit-with-the-window
+  behaviour; in practice that means Windows and macOS) and reopens the window there. That makes a
+  second launch likely, so it hands off to the running instance instead of starting a second
+  backend over the same profile (`trenchchat/single_instance.py` + the launcher's `/ui/open`).
 - Backend URL resolution lives in `lib/main.dart` (`resolveBaseUrl`): dart-define → web `?api=` →
   web page origin → desktop `TC_API_URL` env var → tester-A default `127.0.0.1:8801`.
 - Tests: `flutter analyze && flutter test` after any `flutter_ui/` change. Widget tests inject

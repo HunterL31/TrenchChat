@@ -29,6 +29,10 @@ cryptography==46.0.5
 sounddevice==0.5.2
 numpy==2.2.6
 opuslib==3.0.1
+# The tray icon the app drops to when its window closes (trenchchat/tray.py).
+# Backends: win32 and AppKit natively, AppIndicator/GTK/XEmbed on Linux, where
+# a desktop with no notification area leaves the launcher without a tray.
+pystray==0.19.5
 
 # Development / testing
 pytest>=7.0,<9
