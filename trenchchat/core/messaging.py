@@ -64,7 +64,8 @@ from trenchchat.core.protocol import (
     F_MISSED_FOR, F_MISSED_MSG_ID, F_MSG_TYPE, F_IMAGE_DATA,
     F_AUTHOR_SIG, DM_ENVELOPE_TYPE, DM_IMAGE_EXTENSION,
     LXMF_FIELD_CUSTOM_DATA, LXMF_FIELD_CUSTOM_TYPE, LXMF_FIELD_IMAGE,
-    inbound_image, pack_dm_envelope, unpack_dm_envelope, wire_timestamp,
+    inbound_image, pack_dm_envelope, pack_fields, unpack_dm_envelope,
+    wire_timestamp,
 )
 from trenchchat.core.authorship import resolve_author, sign_message, verify_message
 from trenchchat.core.image import MAX_IMAGE_BYTES, inbound_image_is_sane
@@ -521,7 +522,7 @@ class Messaging:
             desired_method=desired_method or LXMF.LXMessage.DIRECT,
         )
         lxm.fields = (self._dm_fields(params) if params.get("dm_peer_hex")
-                      else self._channel_fields(params))
+                      else pack_fields(self._channel_fields(params)))
         return lxm
 
     @staticmethod
@@ -682,7 +683,11 @@ class Messaging:
         sender_hex = sender_identity.hash.hex() \
             if sender_identity else (message.source_hash.hex() if message.source_hash else "")
 
-        channel_hash_bytes = fields.get(F_CHANNEL_HASH)
+        # Only fields the Router unwrapped from our envelope can name a
+        # channel; a foreign message's LXMF field keys (0x01 is embedded
+        # messages there) must not be misread as one.
+        channel_hash_bytes = fields.get(F_CHANNEL_HASH) \
+            if getattr(message, "trenchchat_protocol", False) else None
         if not channel_hash_bytes:
             # No channel means a conversation -- including a plain message from
             # a client that is not TrenchChat and sent no fields at all.

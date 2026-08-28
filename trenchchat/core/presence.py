@@ -24,7 +24,9 @@ import LXMF
 import msgpack
 
 from trenchchat.core.actions import compute_channel_recipients
-from trenchchat.core.protocol import F_MSG_TYPE, MT_GOODBYE, MT_PRESENCE, unpack_wire
+from trenchchat.core.protocol import (
+    F_MSG_TYPE, MT_GOODBYE, MT_PRESENCE, pack_fields, unpack_wire,
+)
 
 PRESENCE_TIMEOUT_SECS = 300
 
@@ -438,7 +440,7 @@ class PresenceBeacon:
             "",
             desired_method=LXMF.LXMessage.DIRECT,
         )
-        lxm.fields = {F_MSG_TYPE: msg_type}
+        lxm.fields = pack_fields({F_MSG_TYPE: msg_type})
         self._router.send(lxm)
         self.record_sent(peer_hex)
         return lxm

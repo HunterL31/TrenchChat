@@ -33,6 +33,7 @@ from trenchchat.core.image import inbound_image_is_sane
 from trenchchat.core.protocol import (
     F_MSG_TYPE, F_AVATAR_DATA, F_AVATAR_VERSION,
     MT_AVATAR_UPDATE,
+    pack_fields,
 )
 from trenchchat.core.storage import Storage
 from trenchchat.network.router import Router
@@ -411,11 +412,11 @@ class AvatarManager:
                 "",
                 desired_method=LXMF.LXMessage.DIRECT,
             )
-            lxm.fields = {
+            lxm.fields = pack_fields({
                 F_MSG_TYPE:      MT_AVATAR_UPDATE,
                 F_AVATAR_DATA:   avatar_data,
                 F_AVATAR_VERSION: avatar_version,
-            }
+            })
             lxm.register_failed_callback(
                 lambda m, p=peer_hex, v=avatar_version:
                     self._on_delivery_failed(p, v)

@@ -37,7 +37,11 @@ dest = RNS.Destination(
 ## Constructing LXMessages
 
 - Set `desired_method=LXMF.LXMessage.DIRECT` for all peer-to-peer messages.
-- Use `lxm.fields` for structured protocol data (see `protocol-constants` rule).
+- Wrap the field dict with `protocol.pack_fields()` — TrenchChat's field keys sit in
+  LXMF's reserved range and must never appear as bare LXMF field keys on the wire.
+  The receiving `Router` unwraps once, so inbound handlers see the inner dict.
+  Direct messages are the exception: they use LXMF's standard fields directly
+  (`pack_dm_envelope`), so foreign clients can read them.
 - Use `lxm.content` (the constructor's `content` arg) for human-readable text only.
 - Control messages carry no human-readable content — pass `""` as content.
 
@@ -48,7 +52,7 @@ lxm = LXMF.LXMessage(
     "",                                  # empty for control messages
     desired_method=LXMF.LXMessage.DIRECT,
 )
-lxm.fields = { F_MSG_TYPE: MT_SUBSCRIBE, F_CHANNEL_HASH: channel_hash_bytes }
+lxm.fields = pack_fields({ F_MSG_TYPE: MT_SUBSCRIBE, F_CHANNEL_HASH: channel_hash_bytes })
 self._router.send(lxm)
 ```
 

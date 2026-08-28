@@ -32,6 +32,7 @@ from trenchchat.core.protocol import (
     F_CHANNEL_HASH, F_MSG_TYPE, F_TIMESTAMP,
     F_VOICE_CODEC, F_VOICE_JOINED_AT, F_VOICE_MUTED, F_VOICE_STATE,
     MT_VOICE_JOIN, MT_VOICE_LEAVE, MT_VOICE_STATE,
+    pack_fields,
 )
 from trenchchat.core.storage import Storage
 from trenchchat.core.subscription import SubscriptionManager
@@ -776,7 +777,7 @@ class VoiceManager:
                 "",
                 desired_method=LXMF.LXMessage.DIRECT,
             )
-            lxm.fields = fields
+            lxm.fields = pack_fields(fields)
             self._router.send(lxm)
         except Exception as e:
             RNS.log(f"TrenchChat [voice]: signalling send error: {e}",

@@ -55,11 +55,11 @@ Sideband, NomadNet or anything else speaking LXMF can hold up its half, and a
 message from one is accepted as an ordinary direct message.
 
 This matters beyond politeness. TrenchChat's own field numbers overlap LXMF's
-registry — `0x02` is `FIELD_TELEMETRY` there, `0x06` `FIELD_IMAGE` — which is
-harmless where both ends are TrenchChat and wrong the moment a message reaches
-somebody else. Channels, sync, invites and voice still use those numbers and
-never leave TrenchChat; moving them is deferred. A conversation cannot afford
-to, so it does not.
+registry — `0x02` is `FIELD_TELEMETRY` there, `0x06` `FIELD_IMAGE` — so
+nothing puts them on the wire as LXMF field keys: channels, sync, invites and
+voice pack their whole field dict inside the same custom-payload fields under
+their own envelope type (`protocol.pack_fields`), and a conversation uses the
+standard fields directly under its own.
 
 **The gate is unchanged.** Adding a contact was always a local decision — the
 handshake is only the ergonomic way to reach it — so a peer on another client

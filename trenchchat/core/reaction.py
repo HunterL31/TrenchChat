@@ -38,6 +38,7 @@ from trenchchat.core.protocol import (
     F_EMOJI_HASH, F_EMOJI_DATA, F_EMOJI_NAME,
     F_REACTION_MSG_ID, F_REACTION_REMOVE, F_REACTION_UNICODE,
     MT_REACTION, MT_EMOJI_REQUEST, MT_EMOJI_RESPONSE,
+    pack_fields,
 )
 from trenchchat.core.storage import Storage
 from trenchchat.network.router import Router
@@ -636,13 +637,13 @@ class ReactionManager:
                     "",
                     desired_method=LXMF.LXMessage.DIRECT,
                 )
-                lxm.fields = {
+                lxm.fields = pack_fields({
                     F_MSG_TYPE:          MT_REACTION,
                     F_CHANNEL_HASH:      channel_hash_bytes,
                     F_REACTION_MSG_ID:   message_id,
                     F_REACTION_REMOVE:   remove,
                     **emoji_field,
-                }
+                })
                 self._router.send(lxm)
             except Exception as e:
                 RNS.log(
@@ -704,7 +705,7 @@ class ReactionManager:
             }
             if name:
                 fields[F_EMOJI_NAME] = name
-            lxm.fields = fields
+            lxm.fields = pack_fields(fields)
             self._router.send(lxm)
             RNS.log(
                 f"TrenchChat [reaction]: requested emoji {emoji_hash[:12]}… from {peer_hex[:12]}…",
@@ -748,7 +749,7 @@ class ReactionManager:
             }
             if name:
                 fields[F_EMOJI_NAME] = name
-            lxm.fields = fields
+            lxm.fields = pack_fields(fields)
             self._router.send(lxm)
             RNS.log(
                 f"TrenchChat [reaction]: sent emoji {emoji_hash[:12]}… to {peer_hex[:12]}…",

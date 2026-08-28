@@ -109,8 +109,9 @@ sender it just authenticated, so a peer cannot inject into a conversation it is 
 A DM is a **plain LXMF message** — text in `content`, attachment in LXMF's `FIELD_IMAGE`, and
 TrenchChat's additions inside `FIELD_CUSTOM_TYPE`/`FIELD_CUSTOM_DATA` (`protocol.pack_dm_envelope`)
 — so Sideband and other LXMF clients can hold up the other half. It is the one message type that
-leaves the TrenchChat world; everything else still uses the field numbers in the registry below,
-which overlap LXMF's own and are deliberately left alone for now. Never add TrenchChat field
+leaves the TrenchChat world; everything else travels msgpack-packed inside the same custom-payload
+fields under `protocol.ENVELOPE_TYPE` (`pack_fields`/`unpack_fields` — the registry's numbers are
+internal to that envelope and never appear as LXMF field keys). Never add TrenchChat field
 numbers to a DM. A conversation gets a `channels` row (`kind='dm'`) because `messages` references
 one, and deliberately no `subscriptions` row: that absence is what keeps it out of sync, presence
 beacons and avatar broadcast, all of which enumerate `get_subscriptions()`.

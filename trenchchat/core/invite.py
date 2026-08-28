@@ -52,7 +52,7 @@ from trenchchat.core.protocol import (
     F_CHANNEL_PERMISSIONS, F_SCOPE_KIND,
     MT_GOODBYE, MT_JOIN_REQUEST, MT_MEMBER_LIST_UPDATE, MT_INVITE, MT_PRESENCE,
     SYNC_WINDOW_SECS,
-    unpack_wire, wire_timestamp,
+    pack_fields, unpack_wire, wire_timestamp,
 )
 from trenchchat.core.storage import Storage
 from trenchchat.network.router import Router
@@ -1977,7 +1977,7 @@ class InviteManager:
                 "",
                 desired_method=LXMF.LXMessage.DIRECT,
             )
-            lxm.fields = fields
+            lxm.fields = pack_fields(fields)
             RNS.log(f"TrenchChat [invite]: queuing {msg_type!r} → {dest_hex[:12]}…",
                     RNS.LOG_NOTICE)
             self._router.send(lxm)

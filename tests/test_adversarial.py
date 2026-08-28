@@ -61,7 +61,7 @@ from trenchchat.core.messaging import _compute_message_id
 from trenchchat.core.naming import dm_hash_for
 from trenchchat.core.protocol import (
     DM_ENVELOPE_TYPE, LXMF_FIELD_CUSTOM_DATA, LXMF_FIELD_CUSTOM_TYPE,
-    pack_dm_envelope,
+    pack_dm_envelope, pack_fields,
 )
 from trenchchat.core.friends import (
     MAX_HELD_MESSAGES, MAX_HELD_PER_SENDER, MAX_PENDING_FRIEND_REQUESTS,
@@ -1163,7 +1163,7 @@ class TestAdversarialUnauthenticatedDelivery:
         lxm = LXMF.LXMessage(dest, sender.router.delivery_destination, content,
                              desired_method=LXMF.LXMessage.DIRECT)
         ts = time.time() if ts is None else ts
-        lxm.fields = {
+        lxm.fields = pack_fields({
             F_CHANNEL_HASH: bytes.fromhex(ch_hash),
             F_DISPLAY_NAME: "Alice",
             F_TIMESTAMP:    ts,
@@ -1173,7 +1173,7 @@ class TestAdversarialUnauthenticatedDelivery:
             # signature they are actually about.
             F_AUTHOR_SIG:   sign_as(sender.identity.hash_hex, ch_hash, msg_id,
                                     ts, content),
-        }
+        })
         return lxm
 
     def test_forged_chat_message_is_dropped(self, peer_factory):
@@ -1667,7 +1667,7 @@ class TestAdversarialPayloadLimits:
         ts = time.time()
         oversized = b"\x00" * (MAX_IMAGE_BYTES + 1)
         msg_id = _compute_message_id("huge", alice.identity.hash_hex, ts)
-        lxm.fields = {
+        lxm.fields = pack_fields({
             F_CHANNEL_HASH: bytes.fromhex(ch_hash),
             F_DISPLAY_NAME: "Alice",
             F_TIMESTAMP:    ts,
@@ -1676,7 +1676,7 @@ class TestAdversarialPayloadLimits:
             F_AUTHOR_SIG:   sign_as(alice.identity.hash_hex, ch_hash,
                                     msg_id, ts, "huge",
                                     image_data=oversized),
-        }
+        })
         lxm.signature_validated = True
 
         bob.router._on_message_received(lxm)
@@ -3250,14 +3250,14 @@ class TestAdversarialMessageIdSquatting:
         )
         lxm = LXMF.LXMessage(dest, sender.router.delivery_destination, content,
                              desired_method=LXMF.LXMessage.DIRECT)
-        lxm.fields = {
+        lxm.fields = pack_fields({
             F_CHANNEL_HASH: bytes.fromhex(ch_hash),
             F_DISPLAY_NAME: "Peer",
             F_TIMESTAMP:    ts,
             F_MESSAGE_ID:   msg_id,
             F_AUTHOR_SIG:   sign_as(sender.identity.hash_hex, ch_hash, msg_id,
                                     ts, content),
-        }
+        })
         lxm.signature_validated = True
         return lxm
 

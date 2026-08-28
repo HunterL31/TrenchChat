@@ -28,6 +28,12 @@ F_CHANNEL_HASH = 0x01
 
 ## Field key registry
 
+These keys are internal to the protocol envelope: outbound senders wrap the whole
+dict with `pack_fields()` (msgpack inside LXMF's `FIELD_CUSTOM_TYPE`/`FIELD_CUSTOM_DATA`,
+type `ENVELOPE_TYPE`), and the `Router` unwraps inbound messages once with
+`unpack_fields()` before dispatch. They never appear as LXMF field keys on the wire,
+so overlapping LXMF's own registry is harmless.
+
 | Range | Owner | Examples |
 |-------|-------|---------|
 | `0x01–0x0F` | Common / messaging | `F_CHANNEL_HASH=0x01`, `F_DISPLAY_NAME=0x02`, `F_TIMESTAMP=0x03`, `F_MESSAGE_ID=0x04`, `F_REPLY_TO=0x05`, `F_LAST_SEEN_ID=0x06`, `F_SYNC_WINDOW_START=0x07`, `F_SYNC_MESSAGES=0x08`, `F_MISSED_FOR=0x09`, `F_MISSED_MSG_ID=0x0A` |
