@@ -208,7 +208,7 @@ need control of the clock and stay deferred.
 | ID | Peers | Actions | Expected result |
 |---|---|---|---|
 | sync1 | A,B,C | B goes offline (link drop); A sends 3; B goes online | ✅ B receives all 3 — from its sender's pending retry; a public channel has no other path. 17.1s post-conversion (1.0–5.0s when hints/sync also served it) |
-| sync2 | A,B,C,D | B offline; A sends 3; A offline; B online (only C, D reachable) | ✅ **Fixed**, after three causes. 12/12 after the last one; recovery is 26–41s when the first ask is served and ~120s when it takes a retry. Was failing half of all runs. See below |
+| sync2 | A,B,C,D | B offline; A sends 3; A offline; B online (only C, D reachable) | ✅ **Fixed**, after three causes. 12/12 after the last one; recovery is 26–41s when the first ask is served and ~120s when it takes a retry. Was failing half of all runs. See below. Re-measured on its invite-only conversion: 6/7, recovery 3.0–19.6s; the one failure timed out at 180s on the retry-backoff edge — the pre-existing variance, not the conversion |
 | sync3 | A,B,C | Same as sync1 but B is **killed and restarted** instead of link-dropped | ✅ B ends with its own history plus what it missed, in 3.5s, via the cold path |
 | sync4 | A,D | D offline; A sends 60 (> `MAX_RESPONSE_MESSAGES` = 50); D online | ✅ D ends with all 60 and `state == synced`, in 18.1s — the truncated batch does chain its follow-up |
 | sync5 | A,B,C | B offline for messages 1–5; B online, C offline for 6–10; C online | ✅ Both end with all 10, in 10.6s — per-(channel, peer) watermarks hold up |
@@ -714,12 +714,14 @@ How to run it, when a scenario is the right tool, and how to add one live in
 
 ## Status
 
-⚠ **The live-only public-channel change re-specified part of this suite and
-the affected families have not been re-run since.** sync2–5/7/10/11, links6,
-integrity1/2 moved to invite-only channels; public5/6/11 and the new sync12
-now assert that public channels never backfill. Rows touched by the change
-say so; every measured timing on them predates it. Re-run `public`, `sync`,
-`links` and `integrity` before trusting those rows again.
+⚠ **The live-only public-channel change re-specified part of this suite.**
+sync2–5/7/10/11, links6 and integrity1/2 moved to invite-only channels;
+public5/6/11 and the new sync12 now assert that public channels never
+backfill. Re-measured since: public5/6/11, sync1 and sync12 (all passing)
+and sync2 (6/7, within its documented variance). sync3–5/7/10/11, links6
+and integrity1/2 have not been re-run since the conversion — their timings
+predate it — so re-run `sync`, `links` and `integrity` before trusting
+those rows again.
 
 All twelve families built and run: **99 scenarios, 79 strict and 20 probes.**
 
