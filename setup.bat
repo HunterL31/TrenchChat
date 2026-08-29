@@ -67,6 +67,16 @@ echo Installing dependencies...
 .venv\Scripts\pip install --upgrade pip --quiet
 .venv\Scripts\pip install -r requirements.txt --quiet
 
+:: Voice readiness: sounddevice bundles PortAudio on Windows, but libopus
+:: is not installable from a package manager here -- probe and say so.
+echo.
+.venv\Scripts\python -c "import sys; from trenchchat.core.audio import audio_available; ok, reason = audio_available(); print('Voice audio: ready' if ok else 'Voice audio unavailable: ' + reason); sys.exit(0 if ok else 1)"
+if errorlevel 1 (
+    echo Voice needs libopus: download opus.dll and place it in
+    echo packaging\voicelibs\ ^(create the folder^), then relaunch.
+    echo Packaged TrenchChat installers ship it already.
+)
+
 echo.
 echo Setup complete. Launching TrenchChat...
 echo.

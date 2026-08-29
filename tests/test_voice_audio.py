@@ -587,3 +587,45 @@ class TestPerDirectionStart:
     def test_both_directions_dead_raises(self, monkeypatch):
         with pytest.raises(RuntimeError):
             self._started(monkeypatch, input_fails=True, output_fails=True)
+
+
+class TestVoiceLibPath:
+    """packaging/voicelibs/ must satisfy opuslib's find_library('opus') on
+    a source checkout, the same way the frozen app's runtime hook does."""
+
+    def test_a_dropped_library_is_found(self, tmp_path, monkeypatch):
+        import ctypes.util
+        from trenchchat.core.audio import libpath
+
+        monkeypatch.setattr(ctypes.util, "find_library",
+                            ctypes.util.find_library)
+        dll = tmp_path / "opus.dll"
+        dll.write_bytes(b"not a real dll")
+
+        libpath.ensure_voice_libs_findable(tmp_path)
+
+        assert ctypes.util.find_library("opus") == str(dll)
+
+    def test_other_names_fall_through(self, tmp_path, monkeypatch):
+        import ctypes.util
+        from trenchchat.core.audio import libpath
+
+        original = ctypes.util.find_library
+        monkeypatch.setattr(ctypes.util, "find_library", original)
+        (tmp_path / "opus.dll").write_bytes(b"x")
+
+        libpath.ensure_voice_libs_findable(tmp_path)
+
+        assert ctypes.util.find_library("portaudio") == \
+            original("portaudio")
+
+    def test_missing_directory_is_a_noop(self, tmp_path, monkeypatch):
+        import ctypes.util
+        from trenchchat.core.audio import libpath
+
+        before = ctypes.util.find_library
+        monkeypatch.setattr(ctypes.util, "find_library", before)
+
+        libpath.ensure_voice_libs_findable(tmp_path / "absent")
+
+        assert ctypes.util.find_library is before

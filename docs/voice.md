@@ -179,4 +179,7 @@ the workflow stages libopus for the frozen app on Windows/macOS
 `packaging/hooks/rthook_voice_libs.py`), sounddevice's bundled PortAudio is
 collected by its PyInstaller hook, and the `.deb` declares
 `libopus0, libportaudio2` in Depends. On source checkouts, `setup.sh` offers
-to install both libraries via the system package manager.
+to install both libraries via the system package manager; on Windows/macOS
+source checkouts, a library dropped into `packaging/voicelibs/` (gitignored)
+is found by `core/audio/libpath.py` — the source-run twin of the frozen
+app's `rthook_voice_libs.py`.
