@@ -83,8 +83,11 @@ voice_mgr.get_roster(channel_hash_hex) -> list[dict]
 #    link_state: "self" | "streaming" | "connecting" | "unreachable" | "signalled"}
 voice_mgr.frame_stats() / voice_mgr.audio_status()
 #   frame_stats()["rx_quality"] carries per-sender received/lost/late frame
-#   counts, loss_pct, and smoothed inter-arrival jitter_ms — the backend
-#   signal for a per-peer connection-quality indicator in the UI.
+#   counts, loss_pct, smoothed inter-arrival jitter_ms, and rate_fps
+#   (delivered frames a second, 50 nominal, null under a second of audio)
+#   — the backend signal for a per-peer connection-quality indicator in
+#   the UI. frame_stats()["playout"] carries the listener's own continuity
+#   counters per sender: decoded, plc, starved.
 
 voice_mgr.add_roster_callback(cb)     # cb(channel_hash_hex)
 voice_mgr.add_speaking_callback(cb)   # cb(channel_hash_hex, peer_hex, speaking)
@@ -151,6 +154,19 @@ stream that dies mid-call is rebuilt by a cooldown-limited watchdog in
   chat flow, then join voice, stream the tone for a 5 s measurement
   window, and verify both directions streamed with Discord-comparable
   measured quality (loss ≤ 2 %, jitter ≤ 30 ms).
+- `devtools/testenv/scenarios/scen_voice.py::voice13` — the same
+  listening floor across a three-way mesh over real links.
+
+Loss and jitter are clocked by sequence numbers, so they cannot see a
+sender that emits every frame it should, just slowly: it scores 0 % loss
+and ~0 ms jitter while the listener's buffer drains, starves, refills and
+starves again — audibly choppy. The listener-side truth is `rate_fps` in
+`rx_quality` (frames a second of wall clock, 50 nominal) and the
+`playout` counters `starved` (ticks with nothing to play from a peer that
+is still sending — dead air) and `plc` (concealed mid-stream gaps).
+Headless testenv workers run the real jitter buffer, decoder and 20 ms
+playout thread and discard the PCM, so what they measure is what a
+desktop listener would have heard.
 
 ## Packaging
 

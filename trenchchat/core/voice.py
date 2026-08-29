@@ -50,6 +50,9 @@ VOICE_STATE_MIN_INTERVAL_SECS = 2.0
 MAX_VOICE_PARTICIPANTS = 8
 SPEAKING_HOLD_SECS = 0.3
 VOICE_CODEC_OPUS = "opus"
+NOMINAL_FRAME_RATE_FPS = 1000.0 / VOICE_FRAME_MS
+# Below this the arrival span is too short for a meaningful rate.
+RATE_MIN_SPAN_SECS = 1.0
 
 STATE_JOINED = "joined"
 STATE_LEFT = "left"
@@ -101,6 +104,7 @@ class VoiceManager:
         self._tx_packets = 0
         self._rx_frames: dict[str, int] = {}
         self._rx_quality: dict[str, dict] = {}
+        self._first_frame_at: dict[str, float] = {}
         self._last_frame_at: dict[str, float] = {}
         self._speaking: dict[str, bool] = {}
 
@@ -197,6 +201,7 @@ class VoiceManager:
             roster.pop(self._identity.hash_hex, None)
             self._rx_frames.clear()
             self._rx_quality.clear()
+            self._first_frame_at.clear()
             self._last_frame_at.clear()
             self._speaking.clear()
         self._notify_roster(channel_hash_hex)
@@ -334,17 +339,26 @@ class VoiceManager:
         self.restart_audio()
 
     def frame_stats(self) -> dict:
-        """Transmit/receive counters plus per-sender receive quality.
+        """Transmit/receive counters, per-sender receive quality, playout.
 
-        rx_quality per peer: received/lost/late frame counts, loss_pct, and
+        rx_quality per peer: received/lost/late frame counts, loss_pct,
         smoothed inter-arrival jitter in ms (RFC 3550-style, using frame
-        sequence numbers as the send clock). This is the backend signal for
-        a per-peer connection-quality indicator.
+        sequence numbers as the send clock), and rate_fps — frames per
+        second of wall clock, None until a peer has been heard for
+        RATE_MIN_SPAN_SECS. Everything but rate_fps is clocked by sequence
+        number, so a uniformly slow sender scores clean on all of them
+        while starving the listener's jitter buffer; rate_fps against
+        NOMINAL_FRAME_RATE_FPS is what shows it.
+
+        "playout" carries the pipeline's per-peer continuity counters
+        (decoded/plc/starved), or {} for a pipeline that has none.
         """
         with self._lock:
             quality = {}
             for peer_hex, q in self._rx_quality.items():
                 total = q["received"] + q["lost"]
+                span = self._last_frame_at.get(peer_hex, 0.0) - \
+                    self._first_frame_at.get(peer_hex, 0.0)
                 quality[peer_hex] = {
                     "received": q["received"],
                     "lost": q["lost"],
@@ -352,12 +366,28 @@ class VoiceManager:
                     "jitter_ms": round(q["jitter_ms"], 2),
                     "loss_pct": round(100.0 * q["lost"] / total, 2)
                     if total else 0.0,
+                    "rate_fps": round(q["received"] / span, 1)
+                    if span >= RATE_MIN_SPAN_SECS else None,
                 }
-            return {
+            stats = {
                 "tx_packets": self._tx_packets,
                 "rx_frames": dict(self._rx_frames),
                 "rx_quality": quality,
             }
+        stats["playout"] = self._playout_stats()
+        return stats
+
+    def _playout_stats(self) -> dict:
+        """The active pipeline's continuity counters; {} for one without."""
+        reader = getattr(self._audio_pipeline, "playout_stats", None)
+        if reader is None:
+            return {}
+        try:
+            return reader()
+        except Exception as e:
+            RNS.log(f"TrenchChat [voice]: playout stats error: {e}",
+                    RNS.LOG_DEBUG)
+            return {}
 
     def audio_status(self) -> dict:
         if self._audio_pipeline is not None:
@@ -521,6 +551,7 @@ class VoiceManager:
         with self._lock:
             self._rx_frames[peer_hex] = \
                 self._rx_frames.get(peer_hex, 0) + len(frames)
+            self._first_frame_at.setdefault(peer_hex, now)
             self._last_frame_at[peer_hex] = now
             self._track_rx_quality(peer_hex, seq, len(frames), now)
             if not self._speaking.get(peer_hex, False):
@@ -607,6 +638,7 @@ class VoiceManager:
             with self._lock:
                 self._rx_frames.pop(peer_hex, None)
                 self._rx_quality.pop(peer_hex, None)
+                self._first_frame_at.pop(peer_hex, None)
                 self._last_frame_at.pop(peer_hex, None)
                 self._speaking.pop(peer_hex, None)
         channel_hash_hex = self._session_channel

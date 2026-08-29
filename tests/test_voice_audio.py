@@ -6,6 +6,7 @@ libraries.
 """
 
 import sys
+import time
 
 import pytest
 
@@ -182,6 +183,148 @@ class TestTonePipeline:
             pipeline.set_muted(True)
             time.sleep(0.2)
             assert emitted == []
+        finally:
+            pipeline.stop()
+
+
+# ---------------------------------------------------------------------------
+# Cadence and playout continuity
+# ---------------------------------------------------------------------------
+
+_FRAME_PCM_BYTES = 1920
+_ENCODE_SECS = 0.01
+# A bundle is 2 x 20 ms frames, so 25 a second. A loop that sleeps the whole
+# interval and then encodes runs at 1/(0.04 + 2 x _ENCODE_SECS) — about 17 —
+# and every frame it fails to send is 20 ms of silence at the listener.
+_NOMINAL_BUNDLE_RATE = 25.0
+_MIN_BUNDLE_RATE = 21.0
+# Of the ~100 playout ticks in the 2 s window below; a scheduling hiccup on a
+# loaded machine may cost one or two, a slow sender costs far more.
+_MAX_STARVED_TICKS = 4
+
+
+class _FakeCodec:
+    """Codec double: no libopus, and encode costs real time."""
+
+    def __init__(self, encode_secs: float = 0.0):
+        self._encode_secs = encode_secs
+
+    def encode(self, pcm: bytes) -> bytes:
+        if self._encode_secs:
+            time.sleep(self._encode_secs)
+        return b"\x01" * 40
+
+    def decode(self, data: bytes | None) -> bytes:
+        return b"\x00" * _FRAME_PCM_BYTES
+
+
+def _tone_pipeline(on_encoded=lambda seq, frames: None, *, encode_secs=0.0):
+    from trenchchat.core.audio.engine import make_tone_pipeline
+    return make_tone_pipeline(
+        None, on_encoded, lambda speaking: None,
+        codec_factory=lambda: _FakeCodec(encode_secs))
+
+
+def _feed(pipeline, peer_hex: str, *, bundles: int, interval: float,
+          start_seq: int = 0, skip: int | None = None) -> int:
+    """Deliver 2-frame bundles on an anchored schedule, optionally dropping
+    one whole bundle to leave a sequence gap. Returns the next free seq."""
+    next_at = time.monotonic()
+    seq = start_seq
+    for i in range(bundles):
+        if i != skip:
+            pipeline.play(peer_hex, seq, [b"\x01" * 40] * 2)
+        seq += 2
+        next_at += interval
+        delay = next_at - time.monotonic()
+        if delay > 0:
+            time.sleep(delay)
+    return seq
+
+
+class TestTonePipelineCadence:
+    def test_emits_at_nominal_rate_despite_slow_encoding(self):
+        """The tone is a send clock: the work of a cycle must come out of the
+        interval, not be added to it. An unanchored loop emits a few percent
+        slow on an idle machine and far worse under real per-peer sends,
+        which drains every listener's jitter buffer into a periodic dropout."""
+        stamps: list[float] = []
+        pipeline = _tone_pipeline(
+            lambda seq, frames: stamps.append(time.monotonic()),
+            encode_secs=_ENCODE_SECS)
+        pipeline.start()
+        try:
+            pipeline.set_tone_enabled(True)
+            started = time.monotonic()
+            time.sleep(1.5)
+            elapsed = time.monotonic() - started
+        finally:
+            pipeline.stop()
+
+        rate = len([s for s in stamps if s >= started]) / elapsed
+        assert rate >= _MIN_BUNDLE_RATE, (
+            f"tone emitted {rate:.1f} bundles/s against a nominal "
+            f"{_NOMINAL_BUNDLE_RATE:.0f}/s"
+        )
+
+
+class TestPlayoutContinuity:
+    def _stats(self, pipeline, peer_hex: str) -> dict:
+        return pipeline.playout_stats().get(
+            peer_hex, {"decoded": 0, "plc": 0, "starved": 0})
+
+    def test_a_sender_at_nominal_rate_does_not_starve_playout(self):
+        peer = "aa" * 16
+        pipeline = _tone_pipeline()
+        pipeline.start()
+        try:
+            _feed(pipeline, peer, bundles=50, interval=0.04)
+            stats = self._stats(pipeline, peer)
+        finally:
+            pipeline.stop()
+
+        assert stats["decoded"] > 50
+        assert stats["starved"] <= _MAX_STARVED_TICKS, \
+            f"playout starved on a 50 fps sender: {stats}"
+
+    def test_a_slow_sender_starves_playout(self):
+        """40 frames a second against a 50 a second playout: the buffer drains,
+        refills, and the listener hears the gap. Nothing else reports it."""
+        peer = "bb" * 16
+        pipeline = _tone_pipeline()
+        pipeline.start()
+        try:
+            _feed(pipeline, peer, bundles=40, interval=0.05)
+            stats = self._stats(pipeline, peer)
+        finally:
+            pipeline.stop()
+
+        assert stats["starved"] > 0, f"a 40 fps sender starved nothing: {stats}"
+
+    def test_a_sequence_gap_runs_concealment(self):
+        peer = "cc" * 16
+        pipeline = _tone_pipeline()
+        pipeline.start()
+        try:
+            seq = _feed(pipeline, peer, bundles=15, interval=0.04)
+            before = self._stats(pipeline, peer)["plc"]
+            _feed(pipeline, peer, bundles=15, interval=0.04,
+                  start_seq=seq, skip=7)
+            after = self._stats(pipeline, peer)["plc"]
+        finally:
+            pipeline.stop()
+
+        assert after - before >= 1, "a dropped bundle ran no concealment"
+
+    def test_drop_peer_releases_the_counters(self):
+        peer = "dd" * 16
+        pipeline = _tone_pipeline()
+        pipeline.start()
+        try:
+            _feed(pipeline, peer, bundles=10, interval=0.04)
+            assert peer in pipeline.playout_stats()
+            pipeline.drop_peer(peer)
+            assert peer not in pipeline.playout_stats()
         finally:
             pipeline.stop()
 

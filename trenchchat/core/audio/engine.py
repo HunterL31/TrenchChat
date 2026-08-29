@@ -12,6 +12,11 @@ queues; encoding runs on a dedicated thread (so socket writes never happen
 on the audio callback), and playout runs on its own 20 ms-cadence thread
 that pops each sender's jitter buffer, decodes with packet-loss
 concealment, and mixes.
+
+Every periodic thread runs on _Cadence: a sender even a few percent slow
+drains the listener's jitter buffer, and the listener then plays 80 ms,
+starves, refills and plays again — audible as the stream cutting in and
+out, while loss and jitter both read clean.
 """
 
 import array
@@ -35,6 +40,7 @@ _OUT_QUEUE_BLOCKS = 3
 _SPEAKING_HANGOVER_SECS = 0.3
 _DEFAULT_VAD_THRESHOLD_DB = -45.0
 _SEQ_MODULUS = 1 << 16
+_PLAYOUT_ACTIVE_WINDOW_SECS = 0.5
 
 
 def _rms_db(pcm: bytes) -> float:
@@ -48,6 +54,89 @@ def _rms_db(pcm: bytes) -> float:
     if rms <= 0.0:
         return -120.0
     return 20.0 * math.log10(rms)
+
+
+class _Cadence:
+    """Monotonic tick schedule for a periodic thread.
+
+    Sleeps only what is left of the interval after the cycle's work, and
+    re-anchors on an overrun rather than sleeping negative or bursting to
+    catch up. Sleeping the whole interval and then working instead makes
+    the real period interval + work, which drifts without bound.
+    """
+
+    def __init__(self, interval: float):
+        self._interval = interval
+        self._next_at = time.monotonic()
+
+    def wait(self) -> None:
+        self._next_at += self._interval
+        delay = self._next_at - time.monotonic()
+        if delay > 0:
+            time.sleep(delay)
+        else:
+            self._next_at = time.monotonic()
+
+
+class _PlayoutCounters:
+    """Per-peer playout continuity counters, written by the playout thread
+    and read from API threads."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._counts: dict[str, dict[str, int]] = {}
+
+    def bump(self, peer_hex: str, key: str) -> None:
+        with self._lock:
+            counts = self._counts.get(peer_hex)
+            if counts is None:
+                counts = {"decoded": 0, "plc": 0, "starved": 0}
+                self._counts[peer_hex] = counts
+            counts[key] += 1
+
+    def drop(self, peer_hex: str) -> None:
+        with self._lock:
+            self._counts.pop(peer_hex, None)
+
+    def snapshot(self) -> dict[str, dict[str, int]]:
+        with self._lock:
+            return {peer_hex: dict(counts)
+                    for peer_hex, counts in self._counts.items()}
+
+
+def _playout_peers(lock: threading.Lock, jitter: dict, decoders: dict,
+                   last_push: dict) -> list[tuple]:
+    """Snapshot of what to play this tick: (peer, buffer, decoder, active)."""
+    now = time.monotonic()
+    with lock:
+        return [
+            (peer_hex, buffer, decoders.get(peer_hex),
+             now - last_push.get(peer_hex, 0.0) <= _PLAYOUT_ACTIVE_WINDOW_SECS)
+            for peer_hex, buffer in jitter.items()
+        ]
+
+
+def _playout_step(peer_hex: str, buffer: JitterBuffer, decoder,
+                  counters: _PlayoutCounters, active: bool) -> bytes | None:
+    """One playout tick for one sender: pop, conceal a mid-stream gap, count.
+
+    Returns decoded PCM, or None when there was nothing to play or no codec
+    to decode with.
+    """
+    frame = buffer.pop()
+    if frame is None and buffer.depth() == 0:
+        if active:
+            counters.bump(peer_hex, "starved")
+        return None
+    pcm = None
+    if decoder is not None:
+        try:
+            pcm = decoder.decode(frame)
+        except Exception as e:
+            RNS.log(f"TrenchChat [voice]: decode error: {e}", RNS.LOG_DEBUG)
+            return None
+    counters.bump(peer_hex, "plc" if frame is None else "decoded")
+    return pcm
 
 
 class AudioPipeline:
@@ -72,6 +161,8 @@ class AudioPipeline:
         self._pcm_out: queue.Queue = queue.Queue(maxsize=_OUT_QUEUE_BLOCKS)
         self._jitter: dict[str, JitterBuffer] = {}
         self._decoders: dict[str, object] = {}
+        self._last_push: dict[str, float] = {}
+        self._counters = _PlayoutCounters()
         self._peer_lock = threading.Lock()
         self._in_stream = None
         self._out_stream = None
@@ -165,6 +256,7 @@ class AudioPipeline:
                 buffer = JitterBuffer()
                 self._jitter[peer_hex] = buffer
                 self._decoders[peer_hex] = self._codec_factory()
+            self._last_push[peer_hex] = time.monotonic()
         for i, frame in enumerate(frames):
             buffer.push(seq + i, frame)
 
@@ -172,6 +264,18 @@ class AudioPipeline:
         with self._peer_lock:
             self._jitter.pop(peer_hex, None)
             self._decoders.pop(peer_hex, None)
+            self._last_push.pop(peer_hex, None)
+        self._counters.drop(peer_hex)
+
+    def playout_stats(self) -> dict:
+        """Per-peer playout continuity: frames decoded, mid-stream gaps
+        concealed (plc), and starved ticks — ticks with nothing to play
+        while the peer was still delivering, which is audible dead air.
+
+        A sender its own gate has closed delivers nothing on purpose, so
+        only peers heard from within the last half second are counted.
+        """
+        return self._counters.snapshot()
 
     # --- device callbacks (never block, never do real work) ---
 
@@ -271,33 +375,22 @@ class AudioPipeline:
         """
         from trenchchat.core.audio.mixer import mix
 
-        interval = VOICE_FRAME_MS / 1000.0
-        next_at = time.monotonic()
+        cadence = _Cadence(VOICE_FRAME_MS / 1000.0)
         while self._running:
             try:
-                next_at = self._playout_tick(mix, next_at, interval)
+                self._playout_tick(mix)
             except Exception as e:
                 RNS.log(f"TrenchChat [voice]: playout error: {e}", RNS.LOG_ERROR)
-                next_at = time.monotonic() + interval
-                time.sleep(interval)
+            cadence.wait()
 
-    def _playout_tick(self, mix, next_at: float, interval: float) -> float:
-        next_at += interval
+    def _playout_tick(self, mix) -> None:
         decoded: list[bytes] = []
-        with self._peer_lock:
-            peers = list(self._jitter.items())
-        for peer_hex, buffer in peers:
-            frame = buffer.pop()
-            decoder = self._decoders.get(peer_hex)
-            if decoder is None:
-                continue
-            if frame is None and buffer.depth() == 0:
-                continue  # silent, not a mid-stream gap: skip PLC
-            try:
-                pcm = decoder.decode(frame)
-            except Exception as e:
-                RNS.log(f"TrenchChat [voice]: decode error: {e}",
-                        RNS.LOG_DEBUG)
+        for peer_hex, buffer, decoder, active in _playout_peers(
+                self._peer_lock, self._jitter, self._decoders,
+                self._last_push):
+            pcm = _playout_step(peer_hex, buffer, decoder, self._counters,
+                                active)
+            if pcm is None:
                 continue
             # Opus returns as many samples as the packet actually held, so
             # a peer encoding at 10 ms yields half a frame. mix() sums
@@ -318,49 +411,62 @@ class AudioPipeline:
                 pass
             except Exception as e:
                 RNS.log(f"TrenchChat [voice]: mix error: {e}", RNS.LOG_WARNING)
-        delay = next_at - time.monotonic()
-        if delay > 0:
-            time.sleep(delay)
-        else:
-            next_at = time.monotonic()
-        return next_at
 
 
 class TonePipeline:
     """Deviceless pipeline for headless workers and loopback tests.
 
     Transmits a 440 Hz tone through the real codec when one is available
-    (falling back to synthetic byte frames), and counts received frames
-    instead of playing them. The tone starts disabled; the testenv toggles
-    it per worker.
+    (falling back to synthetic byte frames), and runs the same receive
+    path a desktop listener does — jitter buffer, stateful decoder, 20 ms
+    playout tick — discarding the decoded PCM. A headless worker therefore
+    measures the continuity a listener would hear, not just a frame count.
+    The tone starts disabled; the testenv toggles it per worker.
     """
 
-    def __init__(self, config, on_encoded, on_speaking_self):
+    def __init__(self, config, on_encoded, on_speaking_self,
+                 codec_factory=None):
         self._on_encoded = on_encoded
         self._on_speaking_self = on_speaking_self
-        try:
-            from trenchchat.core.audio.codec import OpusCodec
-            self._encoder = OpusCodec()
-        except Exception:
-            self._encoder = None
+        self._encoder = None
+        if codec_factory is None:
+            try:
+                from trenchchat.core.audio.codec import OpusCodec
+                self._encoder = OpusCodec()
+                codec_factory = OpusCodec
+            except Exception:
+                codec_factory = None
+        else:
+            self._encoder = codec_factory()
+        self._codec_factory = codec_factory
         self._muted = False
         self._tone_enabled = False
         self._running = False
         self._thread = None
+        self._playout_thread = None
         self._seq = 0
         self._phase = 0.0
         self.rx_counts: dict[str, int] = {}
+        self._jitter: dict[str, JitterBuffer] = {}
+        self._decoders: dict[str, object] = {}
+        self._last_push: dict[str, float] = {}
+        self._counters = _PlayoutCounters()
+        self._peer_lock = threading.Lock()
 
     def start(self) -> None:
         self._running = True
         self._thread = threading.Thread(
             target=self._loop, daemon=True, name="voice-tone")
+        self._playout_thread = threading.Thread(
+            target=self._playout_loop, daemon=True, name="voice-tone-playout")
         self._thread.start()
+        self._playout_thread.start()
 
     def stop(self) -> None:
         self._running = False
-        if self._thread is not None:
-            self._thread.join(timeout=2.0)
+        for thread in (self._thread, self._playout_thread):
+            if thread is not None:
+                thread.join(timeout=2.0)
 
     def set_muted(self, muted: bool) -> None:
         self._muted = muted
@@ -374,27 +480,63 @@ class TonePipeline:
                 pass
 
     def play(self, peer_hex: str, seq: int, frames: list[bytes]) -> None:
-        self.rx_counts[peer_hex] = self.rx_counts.get(peer_hex, 0) + len(frames)
+        with self._peer_lock:
+            self.rx_counts[peer_hex] = \
+                self.rx_counts.get(peer_hex, 0) + len(frames)
+            buffer = self._jitter.get(peer_hex)
+            if buffer is None:
+                buffer = JitterBuffer()
+                self._jitter[peer_hex] = buffer
+                self._decoders[peer_hex] = \
+                    self._codec_factory() if self._codec_factory else None
+            self._last_push[peer_hex] = time.monotonic()
+        for i, frame in enumerate(frames):
+            buffer.push(seq + i, frame)
 
     def drop_peer(self, peer_hex: str) -> None:
-        self.rx_counts.pop(peer_hex, None)
+        with self._peer_lock:
+            self.rx_counts.pop(peer_hex, None)
+            self._jitter.pop(peer_hex, None)
+            self._decoders.pop(peer_hex, None)
+            self._last_push.pop(peer_hex, None)
+        self._counters.drop(peer_hex)
+
+    def playout_stats(self) -> dict:
+        """Per-peer playout continuity, as AudioPipeline.playout_stats."""
+        return self._counters.snapshot()
 
     def _loop(self) -> None:
-        interval = VOICE_FRAME_MS * VOICE_FRAMES_PER_PACKET / 1000.0
+        cadence = _Cadence(VOICE_FRAME_MS * VOICE_FRAMES_PER_PACKET / 1000.0)
         while self._running:
-            time.sleep(interval)
-            if self._muted or not self._tone_enabled:
-                continue
-            frames = [self._next_frame()
-                      for _ in range(VOICE_FRAMES_PER_PACKET)]
-            seq = self._seq
-            self._seq = (self._seq + len(frames)) % _SEQ_MODULUS
+            self._emit_bundle()
+            cadence.wait()
+
+    def _emit_bundle(self) -> None:
+        if self._muted or not self._tone_enabled:
+            return
+        frames = [self._next_frame() for _ in range(VOICE_FRAMES_PER_PACKET)]
+        seq = self._seq
+        self._seq = (self._seq + len(frames)) % _SEQ_MODULUS
+        try:
+            self._on_speaking_self(True)
+            self._on_encoded(seq, frames)
+        except Exception as e:
+            RNS.log(f"TrenchChat [voice]: tone emit error: {e}",
+                    RNS.LOG_ERROR)
+
+    def _playout_loop(self) -> None:
+        cadence = _Cadence(VOICE_FRAME_MS / 1000.0)
+        while self._running:
             try:
-                self._on_speaking_self(True)
-                self._on_encoded(seq, frames)
+                for peer_hex, buffer, decoder, active in _playout_peers(
+                        self._peer_lock, self._jitter, self._decoders,
+                        self._last_push):
+                    _playout_step(peer_hex, buffer, decoder, self._counters,
+                                  active)
             except Exception as e:
-                RNS.log(f"TrenchChat [voice]: tone emit error: {e}",
+                RNS.log(f"TrenchChat [voice]: tone playout error: {e}",
                         RNS.LOG_ERROR)
+            cadence.wait()
 
     def _next_frame(self) -> bytes:
         if self._encoder is None:
@@ -407,8 +549,10 @@ class TonePipeline:
         return self._encoder.encode(samples.tobytes())
 
 
-def make_tone_pipeline(config, on_encoded, on_speaking_self) -> TonePipeline:
-    return TonePipeline(config, on_encoded, on_speaking_self)
+def make_tone_pipeline(config, on_encoded, on_speaking_self,
+                       codec_factory=None) -> TonePipeline:
+    return TonePipeline(config, on_encoded, on_speaking_self,
+                        codec_factory=codec_factory)
 
 
 def _voice_setting(config, key: str, default):
