@@ -178,4 +178,45 @@ void main() {
 
     expect(state.voiceAudioError, isFalse);
   });
+
+  test('a dead mic with live playback reads as listening-only, with the cause',
+      () async {
+    backend.routes['GET /voice/status'] = {
+      ..._statusInCall(),
+      'audio': {
+        'available': true,
+        'reason': '',
+        'input_ok': false,
+        'output_ok': true,
+        'input_error': "'USB Headset': Invalid sample rate; default: no default",
+        'output_error': '',
+      },
+    };
+
+    await state.refreshVoiceStatus();
+
+    expect(state.voiceAudioError, isTrue);
+    expect(state.voiceAudioWarning, 'MIC UNAVAILABLE — LISTENING ONLY');
+    expect(state.voiceAudioReason, contains('Invalid sample rate'));
+  });
+
+  test('dead playback with a live mic names the output side', () async {
+    backend.routes['GET /voice/status'] = {
+      ..._statusInCall(),
+      'audio': {
+        'available': true,
+        'reason': '',
+        'input_ok': true,
+        'output_ok': false,
+        'input_error': '',
+        'output_error': 'no playback device',
+      },
+    };
+
+    await state.refreshVoiceStatus();
+
+    expect(state.voiceAudioError, isTrue);
+    expect(state.voiceAudioWarning, 'AUDIO OUTPUT UNAVAILABLE — MIC STILL LIVE');
+    expect(state.voiceAudioReason, 'no playback device');
+  });
 }

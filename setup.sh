@@ -8,6 +8,17 @@
 # TRENCHCHAT_SETUP_NO_LAUNCH=1 prints the launch command instead of running it.
 set -euo pipefail
 
+# Git Bash/MSYS reaches line one fine and then breaks on the venv layout
+# (Scripts/ vs bin/), package managers and the Linux Flutter archive —
+# fail here with the right pointer instead.
+case "$(uname -s 2>/dev/null || true)" in
+    MINGW*|MSYS*|CYGWIN*)
+        echo "[setup] This script targets Linux/macOS. On Windows, run"
+        echo "[setup] setup.bat from Command Prompt or PowerShell instead."
+        exit 1
+        ;;
+esac
+
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SDK_DIR="$REPO_ROOT/.flutter-sdk"
 OS_RELEASE="${TRENCHCHAT_OS_RELEASE:-/etc/os-release}"

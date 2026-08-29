@@ -24,17 +24,29 @@ for p in (str(_REPO_ROOT), str(_TESTENV_DIR)):
     if p not in sys.path:
         sys.path.insert(0, p)
 
+from trenchchat.core.voice import NOMINAL_FRAME_RATE_FPS  # noqa: E402
+
 _PORT = 41501
 _BASE = _TESTENV_DIR / "smoke_data"
 
 # How long both sides stream the test tone to sample quality metrics.
 _VOICE_MEASURE_SECS = 5.0
+# How long A keeps streaming afterwards for B, which joins voice much later.
+_VOICE_PEER_HOLD_SECS = 30.0
 # Discord-comparable quality floor for the measured tone stream: Discord
 # voice degrades noticeably past ~2% loss / ~30 ms jitter, so a loopback
 # run that can't stay inside those bounds indicates a transport regression
 # (e.g. accidental retransmission or pacing stalls), not a bad network.
 _VOICE_MAX_LOSS_PCT = 2.0
 _VOICE_MAX_JITTER_MS = 30.0
+# Loss and jitter are clocked by sequence number and so cannot see a sender
+# that emits every frame, just slowly. Below ~95% of nominal the listener's
+# jitter buffer drains, starves and refills on a loop -- audible as the
+# stream cutting in and out -- so the delivered rate and the listener's
+# starved playout ticks are measured too. Starvation is dead air: 2% of the
+# window is already 100 ms of it.
+VOICE_MIN_RATE_FPS = 0.95 * NOMINAL_FRAME_RATE_FPS
+VOICE_MAX_STARVED_PCT = 2.0
 
 
 def tester_a(base: Path):
@@ -125,7 +137,8 @@ def tester_a(base: Path):
               "sent_content": sent_content, "backlog": backlog}
 
     if joined:
-        result["voice"] = _run_voice_phase(backend, ch_hash, b_hash)
+        result["voice"] = _run_voice_phase(backend, ch_hash, b_hash,
+                                           hold_secs=_VOICE_PEER_HOLD_SECS)
 
     (data_dir / "result.json").write_text(json.dumps(result))
     time.sleep(15)  # let B's backfill chain finish before the process exits
@@ -133,7 +146,7 @@ def tester_a(base: Path):
 
 
 def _run_voice_phase(backend, ch_hash: str, peer_hash: str,
-                     timeout: float = 60.0) -> dict:
+                     timeout: float = 60.0, hold_secs: float = 0.0) -> dict:
     """Join the channel's voice session, stream the test tone, and report
     whether a real link reached the peer and frames flowed both ways.
 
@@ -168,11 +181,18 @@ def _run_voice_phase(backend, ch_hash: str, peer_hash: str,
 
     # Keep the tone running: this window is both the quality-measurement
     # sample and a hold so the peer's own success check doesn't race this
-    # side's departure.
+    # side's departure. Playout counters are cumulative, so they are read
+    # either side of the window rather than once at the end -- link setup
+    # before the window is not part of what is being measured.
+    before = _playout_of(backend, peer_hash)
+    started = time.time()
     time.sleep(_VOICE_MEASURE_SECS)
+    window = time.time() - started
 
     stats = backend.voice_mgr.frame_stats()
     quality = stats["rx_quality"].get(peer_hash, {})
+    after = stats.get("playout", {}).get(peer_hash, {})
+    starved = after.get("starved", 0) - before.get("starved", 0)
     result = {
         "joined": True,
         "peer_streaming": streaming,
@@ -181,9 +201,39 @@ def _run_voice_phase(backend, ch_hash: str, peer_hash: str,
         "loss_pct": quality.get("loss_pct"),
         "jitter_ms": quality.get("jitter_ms"),
         "late": quality.get("late"),
+        "rate_fps": quality.get("rate_fps"),
+        "decoded": after.get("decoded", 0) - before.get("decoded", 0),
+        "plc": after.get("plc", 0) - before.get("plc", 0),
+        "starved": starved,
+        "starved_pct": round(
+            100.0 * starved / (window * NOMINAL_FRAME_RATE_FPS), 2),
     }
+    _hold_for_peer(backend, ch_hash, peer_hash, hold_secs)
     backend.voice_mgr.leave_voice()
     return result
+
+
+def _hold_for_peer(backend, ch_hash: str, peer_hash: str,
+                   timeout: float) -> None:
+    """Keep streaming until the peer has left, or the timeout runs out.
+
+    B only joins voice once its backfill has settled, about a minute into
+    the run -- and a departure drops the leaver's jitter buffer and
+    counters on the other side, so whoever finishes first waits instead of
+    pulling the stream out from under the other's measurement window.
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        entry = next((e for e in backend.voice_mgr.get_roster(ch_hash)
+                      if e["identity_hash"] == peer_hash), None)
+        if entry is None or entry["link_state"] != "streaming":
+            return
+        time.sleep(0.5)
+
+
+def _playout_of(backend, peer_hash: str) -> dict:
+    """One sender's playout continuity counters, or empty before any frame."""
+    return backend.voice_mgr.frame_stats().get("playout", {}).get(peer_hash, {})
 
 
 def tester_b(base: Path):
@@ -320,6 +370,13 @@ def main() -> int:
             and voice["loss_pct"] <= _VOICE_MAX_LOSS_PCT
             and voice.get("jitter_ms") is not None
             and voice["jitter_ms"] <= _VOICE_MAX_JITTER_MS
+            # What a listener hears: frames actually played, how many
+            # arrived per second, and how many ticks had nothing to play.
+            and voice.get("decoded", 0) > 0
+            and voice.get("rate_fps") is not None
+            and voice["rate_fps"] >= VOICE_MIN_RATE_FPS
+            and voice.get("starved_pct") is not None
+            and voice["starved_pct"] <= VOICE_MAX_STARVED_PCT
         )
 
     ok = bool(

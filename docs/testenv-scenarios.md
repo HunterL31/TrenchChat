@@ -359,6 +359,7 @@ three- and four-peer cases, and the states `docs/voice.md` is explicit about.
 | voice10 | A,B,C | Five chat messages while the voice mesh streams | ✅ Text delivery unaffected (0.0s), despite sharing the interface |
 | voice11 | A,B | Voice over a `lora_fast` link, with the tone measured | ⚠️ **Two findings**: the link reports `streaming` and `loss_pct` reports ~6% while only ~8% of frames arrive. See below |
 | voice12 | A,B,C | B mutes, then unmutes, mid-call | ✅ Both peers' rosters flip `muted` within 3.0s each way — the coalesced `voice_state` refresh carries it. 4/4 runs |
+| voice13 | A,B,C | All three stream the tone for 10s, measured as a listener hears it | ✅ All six directions **50.2 fps and 0 starved playout ticks**, 5/5 runs. See below |
 
 #### voice11: the quality metric cannot see a starved link
 
@@ -378,12 +379,33 @@ nothing the UI is told says so:
 
 `docs/voice.md` designates `rx_quality`'s `loss_pct` as "the backend signal for
 a per-peer connection-quality indicator in the UI". A UI built on it would show
-a healthy connection on an unusable call. The signal that does show it is
-delivery ratio — frames received against the ~48/s the codec produces — which
-`frame_stats()` has the raw numbers for but does not expose as a rate.
+a healthy connection on an unusable call. The signal that does show it is the
+delivered rate — frames received per second against the 50/s the codec
+produces — which `frame_stats()` now exposes as `rate_fps` (added for voice13),
+alongside the listener's own starved playout ticks.
 
 Neither is a crash, so voice11 stays a probe. Both are worth a decision before the
 voice UI ships a quality indicator.
+
+#### voice13: what a listener hears, not what arrived
+
+voice9 measures loss and jitter, and both are clocked by sequence number: a
+sender that emits every frame it should, only slowly, scores 0% loss and ~0 ms
+jitter. The listener's jitter buffer drains anyway, starves, refills to its 80 ms
+target, plays, and starves again — the stream cutting in and out, with every
+metric reading clean.
+
+That was not hypothetical. `TonePipeline._loop` slept the whole 40 ms packet
+interval and *then* generated and sent the frames, so its real period was 40 ms
+plus the work: 47.4 fps measured here, worse on a slower machine. With that loop
+restored, voice13 fails at **47.3–47.5 fps and 9–10 starved ticks per listener
+per 10 s** — 180–200 ms of dead air from each sender every 10 s, which is
+exactly what a person on the desktop client reported hearing. Anchoring the
+loop to a monotonic schedule fixes it; the rate floor is what catches it,
+since the starvation it causes (1.8–2.0%) sits right on the 2% ceiling.
+
+The scenario shares its floors with `smoke_test.py` (95% of nominal, ≤2% starved
+ticks), so a pair and a mesh mean the same thing by them.
 
 ### `api` — The API surface
 
@@ -650,7 +672,7 @@ Everything the matrix turned up, across all ten families.
 | **sync11** — a four-way partition reconciles only sometimes: 2 passes in 7 runs, always losing the *first* message a peer wrote in isolation | **Partly root-caused.** The watermark collision above was one cause and is fixed. The deep-sync cooldown refusing a returning peer's request silently, once per pair per 60s, is the leading candidate for the rest |
 | **invite16** — `invite` remains grantable to the member role (invite11's narrowing covers only `kick` and `manage_roles`), and the token check and join-request handler honour it, but the admission document a member publishes is rejected by every peer — including the inviter itself, whose own `_accept_document` refuses it | **Confirmed** (probe). The invitee's token is spent while membership lands nowhere. The same disagreement invite11 had, awaiting the same kind of decision: narrow the grant or admit the inviter's document. invite14 and invite15 show the identical grants working at admin rank |
 | **invite17** — leaving an invite-only channel propagates to nobody: `leave_channel()` unsubscribes locally and notifies only the creator's *subscriber* set, and no member-list update is published | **Confirmed** (probe). Every roster — the leaver's own included — keeps the departed member, and senders keep addressing it; only the leaver's `is_subscribed` gate goes quiet. A UI reading the roster shows a ghost member indefinitely. A self-removal document would hit the same trusted-signer wall as invite16, so the fix likely belongs to the owner or an admin noticing the goodbye |
-| **voice11** — `loss_pct`, the metric `docs/voice.md` designates for the UI's per-peer quality indicator, cannot see a starved link. It counts gaps between frames that arrived, so a link delivering 8% of the audio reports ~6% loss, and `link_state` still reads `streaming` | **Confirmed** across three runs. Delivery ratio (frames received against ~48/s) is the signal that shows it; `frame_stats()` has the raw counts but exposes no rate |
+| **voice11** — `loss_pct`, the metric `docs/voice.md` designates for the UI's per-peer quality indicator, cannot see a starved link. It counts gaps between frames that arrived, so a link delivering 8% of the audio reports ~6% loss, and `link_state` still reads `streaming` | **Confirmed** across three runs. The signal that shows it now exists — `rx_quality`'s `rate_fps`, added for voice13, plus the listener's starved playout ticks — and the UI still reads `loss_pct` |
 | **voice5 / voice4** — a voice participant whose link drops shows `connecting` indefinitely rather than `unreachable`, and one whose process dies lingers for the roster TTL — 180s in production | **Confirmed.** Neither is wrong, but a UI showing "connecting…" for three minutes after someone crashed is not the honest state `docs/voice.md` asks for |
 | **public5** — a public-channel join fires no sync request; backfill waits on the next peer announce | **Confirmed, and deliberately left.** 0 messages at join, backfill at 1.0s / 9.1s tracking the 10s heartbeat; up to 60s in the real client, and at SF7 it never arrived at all (see the LoRa pass). Deferred by decision — public-channel behaviour is being left alone for now |
 | **public6** — `full_sync` has no effect on public channels; any subscriber can pull full history | **Confirmed, and deliberately left.** Identical backfill with and without the grant, and the UI offers the toggle regardless — so it reads as a privacy control that is not one. Deferred by decision, same as public5 |
@@ -708,7 +730,7 @@ How to run it, when a scenario is the right tool, and how to add one live in
 
 ## Status
 
-All twelve families built and run: **98 scenarios, 76 strict and 22 probes.**
+All twelve families built and run: **99 scenarios, 77 strict and 22 probes.**
 
 | Family | Scenarios | Result |
 |---|---|---|
@@ -719,13 +741,13 @@ All twelve families built and run: **98 scenarios, 76 strict and 22 probes.**
 | `servers` — servers | 8 (7 strict, 1 probe) | All passing; servers7 is the reported channel-invite defect, 5/5 after the fix |
 | `social` — reactions, presence, identity | 10 (9 strict, 1 probe) | All passing; social3's prediction refuted |
 | `restart` — restart and ordering | 5 (3 strict, 2 probes) | All passing; restart1 confirmed, then fixed; restart3 confirmed |
-| `voice` — live group voice | 12 (9 strict, 3 probes) | All passing; voice4, voice5 and voice11 recorded gaps |
+| `voice` — live group voice | 13 (10 strict, 3 probes) | All passing; voice13 found a real cadence defect, 5/5 after the fix; voice4, voice5 and voice11 recorded gaps |
 | `api` — the API surface | 4 (3 strict, 1 probe) | All passing; api4 records the shared-token property |
 | `integrity` — message integrity | 4 (4 strict) | All passing; integrity2 found a real gap, now fixed and strict |
 | `nomad` — page browsing and hosting | 3 (2 strict, 1 probe) | All passing, 4/4 runs each; nomad3 confirmed bounded offline failure and recovery |
 | `interop` — direct messages with other LXMF clients | 4 (4 strict) | All passing against a real bare RNS+LXMF client; interop4 found a real gap, 5/5 after the fix |
 
-**75 of 76 strict scenarios pass.** The one failure is a real defect, left
+**76 of 77 strict scenarios pass.** The one failure is a real defect, left
 strict and failing on purpose, so `--family sync` exits non-zero until it is
 resolved: sync11, intermittently (2 passes in 7). invite11 is now passing on
 the narrowed `kick` rule described above.

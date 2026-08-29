@@ -551,3 +551,50 @@ def test_friends_with_pages_decorates_hosting_friends():
     decorated = actions.friends_with_pages(_Friends(), _Browser())
     assert decorated[0]["nomad_node_hash"] == node_hex
     assert decorated[1]["nomad_node_hash"] is None
+
+
+class TestAudioDevices:
+    class _Config:
+        def __init__(self):
+            self.voice_input_device = None
+            self.voice_output_device = None
+
+    class _VoiceMgr:
+        def __init__(self):
+            self.restarts = 0
+
+        def restart_audio(self):
+            self.restarts += 1
+
+    def test_list_audio_devices_carries_the_selection(self, monkeypatch):
+        from trenchchat.core.audio import devices
+        monkeypatch.setattr(devices, "list_devices", lambda: {
+            "available": True, "reason": "",
+            "input": ["Mic A"], "output": ["Out B"],
+        })
+        config = self._Config()
+        config.voice_input_device = "Mic A"
+
+        info = actions.list_audio_devices(config)
+        assert info["input"] == ["Mic A"]
+        assert info["selected"] == {"input": "Mic A", "output": None}
+
+    def test_set_audio_devices_persists_and_restarts(self):
+        config, voice_mgr = self._Config(), self._VoiceMgr()
+
+        changed = actions.set_audio_devices(config, voice_mgr,
+                                            "Mic A", None)
+        assert changed is True
+        assert config.voice_input_device == "Mic A"
+        assert config.voice_output_device is None
+        assert voice_mgr.restarts == 1
+
+    def test_set_audio_devices_same_choice_is_a_noop(self):
+        config, voice_mgr = self._Config(), self._VoiceMgr()
+        config.voice_input_device = "Mic A"
+
+        changed = actions.set_audio_devices(config, voice_mgr,
+                                            "Mic A", None)
+        assert changed is False
+        assert voice_mgr.restarts == 0, \
+            "an unchanged selection rebuilt a live pipeline"

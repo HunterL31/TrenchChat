@@ -9,6 +9,12 @@ opuslib binding (and a system libopus); callers go through
 trenchchat.core.audio.audio_available() first.
 """
 
+from trenchchat.core.audio.libpath import ensure_voice_libs_findable
+
+# opuslib runs find_library at import, so the search hook must be in
+# place before the import happens — local import first, deliberately.
+ensure_voice_libs_findable()
+
 import opuslib
 
 from trenchchat.network.voice_wire import CODEC_OPUS

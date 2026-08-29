@@ -83,8 +83,11 @@ voice_mgr.get_roster(channel_hash_hex) -> list[dict]
 #    link_state: "self" | "streaming" | "connecting" | "unreachable" | "signalled"}
 voice_mgr.frame_stats() / voice_mgr.audio_status()
 #   frame_stats()["rx_quality"] carries per-sender received/lost/late frame
-#   counts, loss_pct, and smoothed inter-arrival jitter_ms — the backend
-#   signal for a per-peer connection-quality indicator in the UI.
+#   counts, loss_pct, smoothed inter-arrival jitter_ms, and rate_fps
+#   (delivered frames a second, 50 nominal, null under a second of audio)
+#   — the backend signal for a per-peer connection-quality indicator in
+#   the UI. frame_stats()["playout"] carries the listener's own continuity
+#   counters per sender: decoded, plc, starved.
 
 voice_mgr.add_roster_callback(cb)     # cb(channel_hash_hex)
 voice_mgr.add_speaking_callback(cb)   # cb(channel_hash_hex, peer_hex, speaking)
@@ -104,9 +107,12 @@ Rules for the client, same as every other manager:
   `GET /channels/{h}/my_permissions`; its voice UI lives in
   `channel_column.dart` (roster section) and `voice_panel.dart`
   (session panel), with quality polled from `GET /voice/status`.
-- `"audio_error"` means the session is up but capture/playback failed
-  (missing system library, no device); show recv-only/muted state, don't
-  treat it as a failed join.
+- `"audio_error"` means the session is up but some of the audio pipeline
+  is not (missing system library, a device that failed to open); never a
+  failed join. Capture and playback open independently, so
+  `audio_status()`'s `input_ok`/`output_ok` (+ per-direction error
+  strings) say whether this is listening-only, capture-only, or no audio
+  at all — surface which, not just that.
 - "In voice but unreachable" is an honest state: signalling says a peer is
   present while no link can reach them. Show it (grayed entry) rather than
   hiding the peer.
@@ -118,7 +124,23 @@ mode (default) transmission is gated on voice activity above
 
 Config keys (all under `"voice"` in `~/.trenchchat/config.json`):
 `input_device`, `output_device`, `mode` ("vad"/"ptt"), `bitrate`
-(16000/24000), `vad_threshold_db`.
+(16000/24000), `vad_threshold_db`, `event_sounds`.
+
+`event_sounds` (default on) plays a local rising blip when someone enters
+the session and a falling one when someone leaves — a genuine roster
+transition only, never a state refresh, and a timeout counts as a leave.
+The cues are synthesized (`core/audio/cues.py`) and mixed into playout, so
+they follow the chosen output device; your own leave is silent because the
+pipeline stops with the session.
+
+Devices are stored by name; `null` means the system default. The client's
+Settings picker drives `GET`/`POST /voice/devices`
+(`actions.list_audio_devices` / `set_audio_devices`); a change rebuilds a
+live pipeline in place via `voice_mgr.restart_audio()`. Names are resolved
+at pipeline start (`core/audio/devices.py`), so a missing or unplugged
+device falls back to the default instead of erroring the session, and a
+stream that dies mid-call is rebuilt by a cooldown-limited watchdog in
+`tick()`.
 
 ## Testing
 
@@ -142,6 +164,19 @@ Config keys (all under `"voice"` in `~/.trenchchat/config.json`):
   chat flow, then join voice, stream the tone for a 5 s measurement
   window, and verify both directions streamed with Discord-comparable
   measured quality (loss ≤ 2 %, jitter ≤ 30 ms).
+- `devtools/testenv/scenarios/scen_voice.py::voice13` — the same
+  listening floor across a three-way mesh over real links.
+
+Loss and jitter are clocked by sequence numbers, so they cannot see a
+sender that emits every frame it should, just slowly: it scores 0 % loss
+and ~0 ms jitter while the listener's buffer drains, starves, refills and
+starves again — audibly choppy. The listener-side truth is `rate_fps` in
+`rx_quality` (frames a second of wall clock, 50 nominal) and the
+`playout` counters `starved` (ticks with nothing to play from a peer that
+is still sending — dead air) and `plc` (concealed mid-stream gaps).
+Headless testenv workers run the real jitter buffer, decoder and 20 ms
+playout thread and discard the PCM, so what they measure is what a
+desktop listener would have heard.
 
 ## Packaging
 
@@ -151,4 +186,7 @@ the workflow stages libopus for the frozen app on Windows/macOS
 `packaging/hooks/rthook_voice_libs.py`), sounddevice's bundled PortAudio is
 collected by its PyInstaller hook, and the `.deb` declares
 `libopus0, libportaudio2` in Depends. On source checkouts, `setup.sh` offers
-to install both libraries via the system package manager.
+to install both libraries via the system package manager; on Windows/macOS
+source checkouts, a library dropped into `packaging/voicelibs/` (gitignored)
+is found by `core/audio/libpath.py` — the source-run twin of the frozen
+app's `rthook_voice_libs.py`.

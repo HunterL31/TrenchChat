@@ -95,4 +95,30 @@ void main() {
     });
     expect(voiceOverallLevel(mixed), LinkQualityLevel.poor);
   });
+
+  test('per-direction device state parses, defaulting to fully ok', () {
+    final degraded = VoiceStatus.fromJson({
+      'channel': 'ch1',
+      'audio': {
+        'available': true,
+        'reason': '',
+        'input_ok': false,
+        'output_ok': true,
+        'input_error': 'no capture device',
+        'output_error': '',
+      },
+    });
+    expect(degraded.audioAvailable, isTrue);
+    expect(degraded.inputOk, isFalse);
+    expect(degraded.outputOk, isTrue);
+    expect(degraded.inputError, 'no capture device');
+
+    // An older backend sends no per-direction keys; both default ok.
+    final legacy = VoiceStatus.fromJson({
+      'channel': 'ch1',
+      'audio': {'available': true, 'reason': ''},
+    });
+    expect(legacy.inputOk, isTrue);
+    expect(legacy.outputOk, isTrue);
+  });
 }

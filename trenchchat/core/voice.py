@@ -43,12 +43,16 @@ from trenchchat.network.voice_wire import (
 )
 
 VOICE_STATE_REFRESH_SECS = 60.0
+AUDIO_RESTART_COOLDOWN_SECS = 5.0
 VOICE_ROSTER_TTL_SECS = 180.0
 VOICE_SIGNAL_MAX_AGE_SECS = 120.0
 VOICE_STATE_MIN_INTERVAL_SECS = 2.0
 MAX_VOICE_PARTICIPANTS = 8
 SPEAKING_HOLD_SECS = 0.3
 VOICE_CODEC_OPUS = "opus"
+NOMINAL_FRAME_RATE_FPS = 1000.0 / VOICE_FRAME_MS
+# Below this the arrival span is too short for a meaningful rate.
+RATE_MIN_SPAN_SECS = 1.0
 
 STATE_JOINED = "joined"
 STATE_LEFT = "left"
@@ -95,10 +99,12 @@ class VoiceManager:
         self._state_dirty = False
         self._audio_pipeline = None
         self._audio_error = ""
+        self._last_audio_restart = 0.0
 
         self._tx_packets = 0
         self._rx_frames: dict[str, int] = {}
         self._rx_quality: dict[str, dict] = {}
+        self._first_frame_at: dict[str, float] = {}
         self._last_frame_at: dict[str, float] = {}
         self._speaking: dict[str, bool] = {}
 
@@ -165,6 +171,7 @@ class VoiceManager:
         if self._transport is not None:
             self._transport.start(channel_hash_hex)
         self._start_audio()
+        self._play_cue(join=True)
         self._broadcast(MT_VOICE_JOIN, channel_hash_hex)
         self._last_state_sent = now
         if self._transport is not None:
@@ -195,6 +202,7 @@ class VoiceManager:
             roster.pop(self._identity.hash_hex, None)
             self._rx_frames.clear()
             self._rx_quality.clear()
+            self._first_frame_at.clear()
             self._last_frame_at.clear()
             self._speaking.clear()
         self._notify_roster(channel_hash_hex)
@@ -226,6 +234,17 @@ class VoiceManager:
         else:
             self._state_dirty = True
         self._notify_roster(channel_hash_hex)
+
+    def restart_audio(self) -> None:
+        """Rebuild the audio pipeline mid-session — after a device change,
+        or when a stream died under an unplugged device. Device names are
+        re-resolved on start, so a vanished device falls back to the system
+        default. No-op outside a session."""
+        if self._session_channel is None:
+            return
+        self._last_audio_restart = time.time()
+        self._stop_audio()
+        self._start_audio()
 
     # --- roster read model ---
 
@@ -298,22 +317,49 @@ class VoiceManager:
             if self._transport is not None:
                 self._transport.tick()
                 self._redial_and_reauthorize(channel_hash_hex, now)
+            self._check_audio_health(now)
 
         self._prune_rosters(now)
         self._update_speaking(now)
 
-    def frame_stats(self) -> dict:
-        """Transmit/receive counters plus per-sender receive quality.
+    def _check_audio_health(self, now: float) -> None:
+        """Rebuild the pipeline when a device stream has died mid-session
+        (unplug); the rebuild re-resolves devices and falls back to the
+        default. Cooldown-limited so a persistently failing device cannot
+        thrash."""
+        pipeline = self._audio_pipeline
+        if pipeline is None:
+            return
+        probe = getattr(pipeline, "healthy", None)
+        if probe is None or probe():
+            return
+        if now - self._last_audio_restart < AUDIO_RESTART_COOLDOWN_SECS:
+            return
+        RNS.log("TrenchChat [voice]: audio stream died (device unplugged?); "
+                "rebuilding pipeline", RNS.LOG_WARNING)
+        self.restart_audio()
 
-        rx_quality per peer: received/lost/late frame counts, loss_pct, and
+    def frame_stats(self) -> dict:
+        """Transmit/receive counters, per-sender receive quality, playout.
+
+        rx_quality per peer: received/lost/late frame counts, loss_pct,
         smoothed inter-arrival jitter in ms (RFC 3550-style, using frame
-        sequence numbers as the send clock). This is the backend signal for
-        a per-peer connection-quality indicator.
+        sequence numbers as the send clock), and rate_fps — frames per
+        second of wall clock, None until a peer has been heard for
+        RATE_MIN_SPAN_SECS. Everything but rate_fps is clocked by sequence
+        number, so a uniformly slow sender scores clean on all of them
+        while starving the listener's jitter buffer; rate_fps against
+        NOMINAL_FRAME_RATE_FPS is what shows it.
+
+        "playout" carries the pipeline's per-peer continuity counters
+        (decoded/plc/starved), or {} for a pipeline that has none.
         """
         with self._lock:
             quality = {}
             for peer_hex, q in self._rx_quality.items():
                 total = q["received"] + q["lost"]
+                span = self._last_frame_at.get(peer_hex, 0.0) - \
+                    self._first_frame_at.get(peer_hex, 0.0)
                 quality[peer_hex] = {
                     "received": q["received"],
                     "lost": q["lost"],
@@ -321,18 +367,60 @@ class VoiceManager:
                     "jitter_ms": round(q["jitter_ms"], 2),
                     "loss_pct": round(100.0 * q["lost"] / total, 2)
                     if total else 0.0,
+                    "rate_fps": round(q["received"] / span, 1)
+                    if span >= RATE_MIN_SPAN_SECS else None,
                 }
-            return {
+            stats = {
                 "tx_packets": self._tx_packets,
                 "rx_frames": dict(self._rx_frames),
                 "rx_quality": quality,
             }
+        stats["playout"] = self._playout_stats()
+        return stats
+
+    def _playout_stats(self) -> dict:
+        """The active pipeline's continuity counters; {} for one without."""
+        reader = getattr(self._audio_pipeline, "playout_stats", None)
+        if reader is None:
+            return {}
+        try:
+            return reader()
+        except Exception as e:
+            RNS.log(f"TrenchChat [voice]: playout stats error: {e}",
+                    RNS.LOG_DEBUG)
+            return {}
 
     def audio_status(self) -> dict:
-        if self._audio_pipeline is not None:
-            return {"available": True, "reason": ""}
-        return {"available": False,
-                "reason": self._audio_error or "no audio pipeline"}
+        """Pipeline availability plus per-direction device state.
+
+        available means a pipeline exists at all; input_ok/output_ok say
+        which halves are actually running, with the open failure recorded
+        per direction. A pipeline without devices to report (the tone
+        pipeline) counts as fully ok.
+        """
+        pipeline = self._audio_pipeline
+        if pipeline is None:
+            return {"available": False,
+                    "reason": self._audio_error or "no audio pipeline",
+                    "input_ok": False, "output_ok": False,
+                    "input_error": "", "output_error": ""}
+        status = {"available": True, "reason": "",
+                  "input_ok": True, "output_ok": True,
+                  "input_error": "", "output_error": ""}
+        status.update(self._device_status(pipeline))
+        return status
+
+    @staticmethod
+    def _device_status(pipeline) -> dict:
+        reader = getattr(pipeline, "device_status", None)
+        if reader is None:
+            return {}
+        try:
+            return reader()
+        except Exception as e:
+            RNS.log(f"TrenchChat [voice]: device status error: {e}",
+                    RNS.LOG_DEBUG)
+            return {}
 
     # --- permission enforcement ---
 
@@ -445,7 +533,11 @@ class VoiceManager:
 
         if msg_type == MT_VOICE_LEAVE:
             with self._lock:
-                self._rosters.get(channel_hash_hex, {}).pop(sender_hex, None)
+                departed = self._rosters.get(channel_hash_hex, {}).pop(
+                    sender_hex, None)
+            if departed is not None and \
+                    channel_hash_hex == self._session_channel:
+                self._play_cue(join=False)
             if self._transport is not None and \
                     channel_hash_hex == self._session_channel:
                 self._transport.disconnect(sender_hex)
@@ -470,6 +562,10 @@ class VoiceManager:
             codec = codec.decode(errors="replace")
 
         with self._lock:
+            # A cue only for a genuine newcomer: a JOIN re-broadcast for a
+            # peer already on the roster, or occupants learned via their
+            # STATE replies to our own join, must not blip.
+            newcomer = sender_hex not in self._rosters.get(channel_hash_hex, {})
             self._upsert_entry(channel_hash_hex, sender_hex, muted=muted,
                                joined_at=float(joined_at), now=now,
                                codec=codec)
@@ -477,6 +573,8 @@ class VoiceManager:
         if channel_hash_hex == self._session_channel:
             if msg_type == MT_VOICE_JOIN:
                 self._send_state_to(sender_hex, channel_hash_hex)
+                if newcomer:
+                    self._play_cue(join=True)
             if self._transport is not None:
                 self._transport.connect(sender_hex)
 
@@ -490,6 +588,7 @@ class VoiceManager:
         with self._lock:
             self._rx_frames[peer_hex] = \
                 self._rx_frames.get(peer_hex, 0) + len(frames)
+            self._first_frame_at.setdefault(peer_hex, now)
             self._last_frame_at[peer_hex] = now
             self._track_rx_quality(peer_hex, seq, len(frames), now)
             if not self._speaking.get(peer_hex, False):
@@ -576,6 +675,7 @@ class VoiceManager:
             with self._lock:
                 self._rx_frames.pop(peer_hex, None)
                 self._rx_quality.pop(peer_hex, None)
+                self._first_frame_at.pop(peer_hex, None)
                 self._last_frame_at.pop(peer_hex, None)
                 self._speaking.pop(peer_hex, None)
         channel_hash_hex = self._session_channel
@@ -642,6 +742,7 @@ class VoiceManager:
     def _prune_rosters(self, now: float):
         changed: list[str] = []
         stale_conns: list[str] = []
+        session_departures = 0
         with self._lock:
             for channel_hash_hex, roster in self._rosters.items():
                 expired = [
@@ -655,6 +756,12 @@ class VoiceManager:
                     stale_conns.append(peer_hex)
                 if expired:
                     changed.append(channel_hash_hex)
+                    if channel_hash_hex == self._session_channel:
+                        session_departures += len(expired)
+        # A timed-out peer left without saying so; same blip as a polite
+        # leave, once per departed peer.
+        for _ in range(session_departures):
+            self._play_cue(join=False)
         # An expired roster entry with no live link is a peer we have stopped
         # hearing from: without this the connection stays, and every re-dial
         # of it is another mesh-wide path request.
@@ -690,6 +797,22 @@ class VoiceManager:
 
     # --- audio pipeline ---
 
+    def _play_cue(self, *, join: bool) -> None:
+        """Local join/leave blip, mixed into playout. Silent with
+        voice.event_sounds off, without a pipeline, or on a pipeline that
+        cannot play cues. Our own leave is silent by design: the pipeline
+        stops immediately, so a cue would only ever be cut off."""
+        if not getattr(self._config, "voice_event_sounds", True):
+            return
+        player = getattr(self._audio_pipeline, "play_cue", None)
+        if player is None:
+            return
+        try:
+            from trenchchat.core.audio.cues import join_cue, leave_cue
+            player(join_cue() if join else leave_cue())
+        except Exception as e:
+            RNS.log(f"TrenchChat [voice]: cue error: {e}", RNS.LOG_DEBUG)
+
     def _start_audio(self):
         factory = self._audio_factory
         if factory is None:
@@ -707,14 +830,33 @@ class VoiceManager:
                 self._audio_pipeline.set_muted(self._muted)
                 self._audio_pipeline.start()
                 self._audio_error = ""
+                status = self._device_status(self._audio_pipeline)
+                if not status.get("input_ok", True) or \
+                        not status.get("output_ok", True):
+                    self._notify_session(SESSION_AUDIO_ERROR)
                 return
-            self._audio_error = "no audio pipeline available"
+            self._audio_error = self._unavailable_reason()
         except Exception as e:
             RNS.log(f"TrenchChat [voice]: audio start failed: {e}",
                     RNS.LOG_ERROR)
             self._audio_pipeline = None
             self._audio_error = str(e)
         self._notify_session(SESSION_AUDIO_ERROR)
+
+    def _unavailable_reason(self) -> str:
+        """Why the default factory built no pipeline: the failed import
+        (sounddevice/numpy/opus), re-probed because create_pipeline only
+        logs it, and the client needs it in audio_status()."""
+        if self._audio_factory is None:
+            try:
+                from trenchchat.core.audio import audio_available
+                available, reason = audio_available()
+                if not available and reason:
+                    return reason
+            except Exception as e:
+                RNS.log(f"TrenchChat [voice]: availability probe error: {e}",
+                        RNS.LOG_DEBUG)
+        return "no audio pipeline available"
 
     def _stop_audio(self):
         pipeline = self._audio_pipeline

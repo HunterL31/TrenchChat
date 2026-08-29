@@ -21,6 +21,7 @@ import pytest
 from tests.helpers import wait_for, wait_for_rx_frames
 from tests.test_voice import _setup_invite_channel
 from tests.test_voice_transport import _join_both
+from trenchchat.core.voice import NOMINAL_FRAME_RATE_FPS
 from trenchchat.network.voice_wire import (
     VOICE_FRAME_MS, VOICE_FRAMES_PER_PACKET, VOICE_MAX_FRAME_BYTES,
     pack_audio,
@@ -164,6 +165,25 @@ class TestDiscordComparableProfile:
 # Receive-quality metrics
 # ---------------------------------------------------------------------------
 
+class _StubPipeline:
+    """Audio pipeline double exposing only what VoiceManager calls."""
+
+    def __init__(self, playout: dict):
+        self._playout = playout
+
+    def start(self) -> None:
+        pass
+
+    def stop(self) -> None:
+        pass
+
+    def set_muted(self, muted: bool) -> None:
+        pass
+
+    def playout_stats(self) -> dict:
+        return self._playout
+
+
 class TestRxQualityMetrics:
     def test_clean_stream_reports_no_loss(self, peer_factory):
         alice, bob, ch_hash = _setup_invite_channel(peer_factory)
@@ -209,6 +229,63 @@ class TestRxQualityMetrics:
         quality = alice.voice_mgr.frame_stats()["rx_quality"][
             bob.identity.hash_hex]
         assert quality["jitter_ms"] > 0.0
+
+    def test_uniformly_slow_sender_is_invisible_to_loss_but_not_rate_fps(
+            self, peer_factory):
+        """The blind spot rate_fps exists for.
+
+        loss and jitter are clocked by sequence number, so a sender emitting
+        every frame but 25% slower than its own seq spacing claims scores 0%
+        loss and near-zero jitter — while the listener's jitter buffer drains,
+        starves and refills, which is audible as the stream cutting in and out.
+        Wall-clock rate is the only metric here that sees it.
+        """
+        alice, bob, ch_hash = _setup_invite_channel(peer_factory)
+        _join_both(alice, bob, ch_hash)
+
+        packets = 30
+        next_at = time.monotonic()
+        for i in range(packets):
+            bob.voice_transport.send_frames(i * 2, [b"\x01" * 40] * 2)
+            next_at += 0.05  # seq spacing claims 40 ms
+            delay = next_at - time.monotonic()
+            if delay > 0:
+                time.sleep(delay)
+        assert wait_for_rx_frames(alice, bob.identity.hash_hex, packets * 2)
+
+        quality = alice.voice_mgr.frame_stats()["rx_quality"][
+            bob.identity.hash_hex]
+        assert quality["lost"] == 0
+        assert quality["loss_pct"] == 0.0
+        assert 34.0 <= quality["rate_fps"] <= 46.0, (
+            f"expected ~40 fps against a nominal {NOMINAL_FRAME_RATE_FPS:.0f}, "
+            f"got {quality['rate_fps']}"
+        )
+
+    def test_rate_is_none_until_the_span_is_long_enough(self, peer_factory):
+        alice, bob, ch_hash = _setup_invite_channel(peer_factory)
+        _join_both(alice, bob, ch_hash)
+        bob.voice_transport.send_frames(0, [b"\x01" * 40] * 2)
+        assert wait_for_rx_frames(alice, bob.identity.hash_hex, 2)
+
+        quality = alice.voice_mgr.frame_stats()["rx_quality"][
+            bob.identity.hash_hex]
+        assert quality["rate_fps"] is None
+
+    def test_playout_counters_reach_frame_stats(self, peer_factory):
+        alice, _bob, ch_hash = _setup_invite_channel(peer_factory)
+        counts = {"ab" * 16: {"decoded": 40, "plc": 1, "starved": 3}}
+        alice.voice_mgr._audio_factory = lambda *a: _StubPipeline(counts)
+        assert alice.voice_mgr.join_voice(ch_hash)
+
+        assert alice.voice_mgr.frame_stats()["playout"] == counts
+
+    def test_playout_is_empty_for_a_pipeline_without_counters(self,
+                                                              peer_factory):
+        alice, _bob, ch_hash = _setup_invite_channel(peer_factory)
+        assert alice.voice_mgr.join_voice(ch_hash)
+
+        assert alice.voice_mgr.frame_stats()["playout"] == {}
 
     def test_quality_counters_reset_on_leave(self, peer_factory):
         alice, bob, ch_hash = _setup_invite_channel(peer_factory)

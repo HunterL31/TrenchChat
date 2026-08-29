@@ -429,3 +429,247 @@ class TestVoiceResourceRelease:
 
         assert seen["session_at_stop"] is None, \
             "the transport stopped while the session was still authorising links"
+
+
+# ---------------------------------------------------------------------------
+# Audio pipeline rebuild: device changes and unplug recovery
+# ---------------------------------------------------------------------------
+
+class _CountingPipeline:
+    def __init__(self):
+        self.started = False
+        self.stopped = False
+        self.muted = None
+        self.alive = True
+
+    def start(self):
+        self.started = True
+
+    def stop(self):
+        self.stopped = True
+
+    def set_muted(self, muted):
+        self.muted = muted
+
+    def healthy(self):
+        return self.alive
+
+
+class TestAudioRestart:
+    def _join_with_counting_audio(self, peer_factory):
+        peers, ch_hash = _setup_open_channel(peer_factory, names=("alice",))
+        alice = peers[0]
+        built = []
+
+        def factory(config, on_encoded, on_speaking_self):
+            pipeline = _CountingPipeline()
+            built.append(pipeline)
+            return pipeline
+
+        alice.voice_mgr._audio_factory = factory
+        assert alice.voice_mgr.join_voice(ch_hash)
+        return alice, built
+
+    def test_restart_audio_rebuilds_the_pipeline(self, peer_factory):
+        alice, built = self._join_with_counting_audio(peer_factory)
+        assert len(built) == 1 and built[0].started
+
+        alice.voice_mgr.restart_audio()
+
+        assert built[0].stopped, "the old pipeline was left running"
+        assert len(built) == 2 and built[1].started
+        assert alice.voice_mgr.audio_status()["available"] is True
+
+    def test_restart_audio_is_a_noop_outside_a_session(self, peer_factory):
+        alice = peer_factory("alice")
+        built = []
+        alice.voice_mgr._audio_factory = lambda *a: built.append(a)
+
+        alice.voice_mgr.restart_audio()
+        assert built == []
+
+    def test_tick_rebuilds_a_dead_pipeline(self, peer_factory):
+        alice, built = self._join_with_counting_audio(peer_factory)
+        built[0].alive = False
+        alice.voice_mgr._last_audio_restart = 0.0  # cooldown long expired
+
+        alice.voice_mgr.tick()
+
+        assert built[0].stopped
+        assert len(built) == 2 and built[1].started
+
+    def test_tick_respects_the_restart_cooldown(self, peer_factory):
+        alice, built = self._join_with_counting_audio(peer_factory)
+        built[0].alive = False
+        alice.voice_mgr._last_audio_restart = time.time()
+
+        alice.voice_mgr.tick()
+
+        assert len(built) == 1, "a restart thrashed inside the cooldown"
+
+
+class TestDegradedAudioStatus:
+    """A pipeline can run with one direction down; the status must say so
+    and the session callback must surface it."""
+
+    class _HalfDeafPipeline(_CountingPipeline):
+        def device_status(self):
+            return {"input_ok": False, "output_ok": True,
+                    "input_error": "no capture device", "output_error": ""}
+
+    def test_direction_state_reaches_audio_status(self, peer_factory):
+        peers, ch_hash = _setup_open_channel(peer_factory, names=("alice",))
+        alice = peers[0]
+        alice.voice_mgr._audio_factory = \
+            lambda *a: self._HalfDeafPipeline()
+        states = []
+        alice.voice_mgr.add_session_callback(states.append)
+
+        assert alice.voice_mgr.join_voice(ch_hash)
+
+        status = alice.voice_mgr.audio_status()
+        assert status["available"] is True
+        assert status["input_ok"] is False
+        assert status["output_ok"] is True
+        assert status["input_error"] == "no capture device"
+        assert "audio_error" in states, \
+            "a degraded start surfaced nothing to the client"
+
+    def test_pipeline_without_device_status_is_fully_ok(self, peer_factory):
+        peers, ch_hash = _setup_open_channel(peer_factory, names=("alice",))
+        alice = peers[0]
+        alice.voice_mgr._audio_factory = lambda *a: _CountingPipeline()
+        states = []
+        alice.voice_mgr.add_session_callback(states.append)
+
+        assert alice.voice_mgr.join_voice(ch_hash)
+
+        status = alice.voice_mgr.audio_status()
+        assert status["available"] is True
+        assert status["input_ok"] is True and status["output_ok"] is True
+        assert "audio_error" not in states
+
+
+class TestUnavailableAudioReason:
+    def test_missing_audio_stack_reason_reaches_audio_status(
+            self, peer_factory, monkeypatch):
+        """create_pipeline logs why the stack is missing and returns None;
+        the specific reason (not a generic line) must reach the client."""
+        from trenchchat.core import audio
+
+        peers, ch_hash = _setup_open_channel(peer_factory, names=("alice",))
+        alice = peers[0]
+        assert alice.voice_mgr._audio_factory is None  # default factory path
+        monkeypatch.setattr(audio, "create_pipeline", lambda *a: None)
+        monkeypatch.setattr(
+            audio, "audio_available",
+            lambda: (False, "opus codec unavailable: libopus not found"))
+
+        assert alice.voice_mgr.join_voice(ch_hash)
+
+        status = alice.voice_mgr.audio_status()
+        assert status["available"] is False
+        assert status["reason"] == "opus codec unavailable: libopus not found"
+
+
+class TestVoiceEventCues:
+    """Join/leave blips: once per genuine roster transition, never for
+    refreshes or discovered occupants, and off when configured off."""
+
+    class _CuePipeline(_CountingPipeline):
+        def __init__(self):
+            super().__init__()
+            self.cues = []
+
+        def play_cue(self, frames):
+            self.cues.append(frames)
+
+    def _join_with_cue_audio(self, peer_factory, names=("alice", "bob")):
+        peers, ch_hash = _setup_open_channel(peer_factory, names=names)
+        alice = peers[0]
+        pipeline = self._CuePipeline()
+        alice.voice_mgr._audio_factory = lambda *a: pipeline
+        return peers, ch_hash, pipeline
+
+    def test_own_join_and_a_peer_join_each_blip_once(self, peer_factory):
+        from trenchchat.core.audio.cues import join_cue
+
+        (alice, bob), ch_hash, pipeline = \
+            self._join_with_cue_audio(peer_factory)
+        assert alice.voice_mgr.join_voice(ch_hash)
+        assert pipeline.cues == [join_cue()]
+
+        assert bob.voice_mgr.join_voice(ch_hash)
+        assert wait_for(lambda: len(pipeline.cues) == 2,
+                        msg="join cue for bob")
+        assert pipeline.cues[1] == join_cue()
+
+        # A re-broadcast JOIN for a peer already on the roster is a refresh.
+        now = time.time()
+        _craft_voice_message(bob, alice, {
+            F_MSG_TYPE: MT_VOICE_JOIN,
+            F_CHANNEL_HASH: bytes.fromhex(ch_hash),
+            F_TIMESTAMP: now,
+            F_VOICE_MUTED: False,
+            F_VOICE_JOINED_AT: now,
+        })
+        time.sleep(0.3)
+        assert len(pipeline.cues) == 2, "a JOIN refresh re-blipped"
+
+    def test_peer_leave_blips_and_unknown_leave_does_not(self, peer_factory):
+        from trenchchat.core.audio.cues import leave_cue
+        from trenchchat.core.protocol import MT_VOICE_LEAVE
+
+        (alice, bob), ch_hash, pipeline = \
+            self._join_with_cue_audio(peer_factory)
+        assert alice.voice_mgr.join_voice(ch_hash)
+        assert bob.voice_mgr.join_voice(ch_hash)
+        assert wait_for(lambda: len(pipeline.cues) == 2, msg="both joins")
+
+        bob.voice_mgr.leave_voice()
+        assert wait_for(lambda: len(pipeline.cues) == 3,
+                        msg="leave cue for bob")
+        assert pipeline.cues[2] == leave_cue()
+
+        # A LEAVE from a peer never on the roster changes nothing heard.
+        _craft_voice_message(bob, alice, {
+            F_MSG_TYPE: MT_VOICE_LEAVE,
+            F_CHANNEL_HASH: bytes.fromhex(ch_hash),
+            F_TIMESTAMP: time.time(),
+        })
+        time.sleep(0.3)
+        assert len(pipeline.cues) == 3
+
+    def test_a_timed_out_peer_blips_a_leave(self, peer_factory):
+        from trenchchat.core.audio.cues import leave_cue
+
+        (alice, bob), ch_hash, pipeline = \
+            self._join_with_cue_audio(peer_factory)
+        assert alice.voice_mgr.join_voice(ch_hash)
+
+        now = time.time()
+        _craft_voice_message(bob, alice, {
+            F_MSG_TYPE: MT_VOICE_JOIN,
+            F_CHANNEL_HASH: bytes.fromhex(ch_hash),
+            F_TIMESTAMP: now,
+            F_VOICE_MUTED: False,
+            F_VOICE_JOINED_AT: now,
+        })
+        assert wait_for(lambda: len(pipeline.cues) == 2, msg="bob's join cue")
+
+        # No refresh ever comes (bob never really joined); ttl is 2 s here.
+        assert wait_for(lambda: len(pipeline.cues) == 3, timeout=10.0,
+                        msg="leave cue when bob's entry expires")
+        assert pipeline.cues[2] == leave_cue()
+
+    def test_event_sounds_off_silences_the_blips(self, peer_factory):
+        (alice, bob), ch_hash, pipeline = \
+            self._join_with_cue_audio(peer_factory)
+        alice.config.voice_event_sounds = False
+
+        assert alice.voice_mgr.join_voice(ch_hash)
+        assert bob.voice_mgr.join_voice(ch_hash)
+        assert wait_for_roster(alice, ch_hash, bob.identity.hash_hex)
+
+        time.sleep(0.3)
+        assert pipeline.cues == []

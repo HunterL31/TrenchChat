@@ -31,6 +31,11 @@ from flows import (
     BROADBAND, LORA_FAST, DISCOVERY_TIMEOUT, NEGATIVE_HOLD_SECS,
 )
 from scenario import PROBE, scenario
+# The listening-quality floors smoke_test asserts for one pair, so a mesh and
+# a pair mean the same thing by them.
+from smoke_test import (
+    NOMINAL_FRAME_RATE_FPS, VOICE_MAX_STARVED_PCT, VOICE_MIN_RATE_FPS,
+)
 
 SEND_MESSAGE = "send_message"
 INVITE = "invite"
@@ -52,6 +57,10 @@ ROSTER_TTL_TIMEOUT = 120.0
 
 # Long enough for the tone pipeline to produce a usable quality sample.
 TONE_WINDOW_SECS = 8.0
+
+# Long enough that a few percent of cadence drift shows up as starvation
+# rather than as one unlucky refill.
+LISTEN_WINDOW_SECS = 10.0
 
 # 20 ms Opus frames, so ~50 a second. Measured at 384 over an 8 s window on a
 # broadband mesh (voice9); used as the denominator for a delivery ratio, since
@@ -88,6 +97,16 @@ def _await_mesh(peers, channel_hash: str, timeout: float = MESH_TIMEOUT) -> floa
 
     return wait_until(meshed, f"{[p.tag for p in peers]} to form a full voice mesh",
                       timeout)
+
+
+def _rx_quality(peer, sender) -> dict:
+    stats = peer.voice_status().get("stats", {}) or {}
+    return (stats.get("rx_quality", {}) or {}).get(sender.hash, {})
+
+
+def _playout(peer, sender) -> dict:
+    stats = peer.voice_status().get("stats", {}) or {}
+    return (stats.get("playout", {}) or {}).get(sender.hash, {})
 
 
 @scenario("voice1", "Three participants form a full voice mesh")
@@ -446,3 +465,67 @@ def v12(env):
     for p in (a, b, c):
         p.leave_voice()
     return {"mute_seen_secs": mute_secs}
+
+
+@scenario("voice13", "A listener hears an unbroken stream, not just frames")
+def v13(env):
+    """voice9 measures loss and jitter, both clocked by sequence number: a
+    sender that emits every frame a few percent slowly scores clean on both
+    while the listener's jitter buffer drains, starves, refills and starves
+    again -- the stream cutting in and out. The tone pipeline runs the real
+    jitter/decode/playout path, so rate_fps and starved playout ticks are what
+    a person on the other end would have heard."""
+    a, b, c = env.peers("A", "B", "C")
+    ch = public_channel(a, [b, c], "v13-voice")
+
+    _join_voice_all([a, b, c], ch)
+    _await_mesh([a, b, c], ch)
+    for p in (a, b, c):
+        status, body = p.set_test_tone(True)
+        if status != 200:
+            raise ScenarioFailure(f"{p.tag} has no tone pipeline: {status} {body}")
+        p.set_voice_muted(False)
+
+    pairs = [(listener, sender) for listener in (a, b, c)
+             for sender in (a, b, c) if listener is not sender]
+    # A rate measured across link setup measures the setup: start the window
+    # only once every pair is actually delivering.
+    wait_until(lambda: all(_rx_quality(listener, sender).get("received", 0) > 0
+                           for listener, sender in pairs),
+               "every participant to be receiving from both others", MESH_TIMEOUT)
+
+    before = {(listener.tag, sender.tag): _playout(listener, sender).get("starved", 0)
+              for listener, sender in pairs}
+    # A fixed window, not a poll: starvation is counted per playout tick, so
+    # the denominator has to be a known interval.
+    started = time.time()
+    time.sleep(LISTEN_WINDOW_SECS)
+    window = time.time() - started
+    ticks = window * NOMINAL_FRAME_RATE_FPS
+
+    heard, slow, broken = {}, [], []
+    for listener, sender in pairs:
+        rate = _rx_quality(listener, sender).get("rate_fps")
+        starved = _playout(listener, sender).get("starved", 0) - \
+            before[(listener.tag, sender.tag)]
+        starved_pct = round(100.0 * starved / ticks, 2)
+        heard[f"{listener.tag}<-{sender.tag}"] = {
+            "rate_fps": rate, "starved": starved, "starved_pct": starved_pct,
+        }
+        if rate is None or rate < VOICE_MIN_RATE_FPS:
+            slow.append(f"{listener.tag} heard {sender.tag} ({sender.hash[:12]}) "
+                        f"at {rate} fps")
+        if starved_pct > VOICE_MAX_STARVED_PCT:
+            broken.append(f"{listener.tag} lost {starved_pct}% of its playout to "
+                          f"{sender.tag} ({sender.hash[:12]}) starving")
+
+    for p in (a, b, c):
+        p.set_test_tone(False)
+        p.leave_voice()
+
+    if slow or broken:
+        raise ScenarioFailure(
+            f"below the listening floor ({VOICE_MIN_RATE_FPS:.1f} fps, "
+            f"{VOICE_MAX_STARVED_PCT}% starved): {'; '.join(slow + broken)} -- {heard}"
+        )
+    return {"window_secs": round(window, 1), "heard": heard}

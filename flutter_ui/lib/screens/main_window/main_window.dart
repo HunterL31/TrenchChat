@@ -356,6 +356,18 @@ class _MainWindowState extends State<MainWindow> {
           ),
         );
 
+        final voicePanel = inVoice
+            ? VoicePanel(
+                channelName: state.channelByHash(state.voiceChannelHash!)?.name ?? '',
+                quality: state.voiceQualityLevel,
+                muted: state.voiceMuted,
+                audioError: state.voiceAudioError,
+                audioWarning: state.voiceAudioWarning,
+                audioReason: state.voiceAudioReason,
+                onToggleMute: () => state.toggleVoiceMute(),
+                onLeave: () => state.leaveVoice(),
+              )
+            : null;
         final channelColumn = ChannelColumn(
           serverName: serverName,
           serverMemberCount:
@@ -386,6 +398,7 @@ class _MainWindowState extends State<MainWindow> {
           onJoinChannel: () => showJoinChannelDialog(context, state),
           voiceParticipants: voiceRoster,
           onJoinVoice: canJoinVoice ? () => state.joinVoice(channelHash) : null,
+          voiceSessionPanel: voicePanel,
           syncStates: state.syncStateByChannel,
           unreadCounts: state.unreadByChannel,
           channelPermissions: state.permissionsByChannel,
@@ -398,25 +411,10 @@ class _MainWindowState extends State<MainWindow> {
           onLeaveChannel: _leaveChannel,
         );
 
-        final voicePanel = inVoice
-            ? VoicePanel(
-                channelName: state.channelByHash(state.voiceChannelHash!)?.name ?? '',
-                quality: state.voiceQualityLevel,
-                muted: state.voiceMuted,
-                audioError: state.voiceAudioError,
-                onToggleMute: () => state.toggleVoiceMute(),
-                onLeave: () => state.leaveVoice(),
-              )
-            : null;
         final channelPane = SectionTheme(
           spec: spec,
           section: TCSection.channelList,
-          child: voicePanel == null
-              ? channelColumn
-              : Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [Expanded(child: channelColumn), voicePanel],
-                ),
+          child: channelColumn,
         );
 
         final content = SectionTheme(

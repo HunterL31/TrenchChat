@@ -122,6 +122,84 @@ void main() {
     expect(body.containsKey('outbound_propagation_node'), isFalse);
   });
 
+  group('voice devices', () {
+    void stubDevices() {
+      backend.routes['GET /voice/devices'] = {
+        'available': true,
+        'reason': '',
+        'input': ['Built-in Mic', 'USB Headset'],
+        'output': ['Built-in Speakers', 'USB Headset'],
+        'selected': {'input': null, 'output': null},
+      };
+      backend.routes['POST /voice/devices'] = {
+        'ok': true,
+        'devices': backend.routes['GET /voice/devices']!,
+      };
+    }
+
+    testWidgets('defaults to the system default for both directions',
+        (tester) async {
+      stubDevices();
+      await open(tester);
+      await scrollTo(tester, find.text('SPEAKERS'));
+
+      expect(find.text('MICROPHONE'), findsOneWidget);
+      expect(find.text('System default'), findsNWidgets(2));
+    });
+
+    testWidgets('without an audio stack the section says so, with no pickers',
+        (tester) async {
+      backend.routes['GET /voice/devices'] = {
+        'available': false,
+        'reason': 'sounddevice unavailable',
+        'input': <String>[],
+        'output': <String>[],
+        'selected': {'input': null, 'output': null},
+      };
+      await open(tester);
+      await scrollTo(tester, find.textContaining('not available'));
+
+      expect(find.textContaining('sounddevice unavailable'), findsOneWidget);
+      expect(find.text('MICROPHONE'), findsNothing);
+    });
+
+    testWidgets('picking a device and saving posts the choice', (tester) async {
+      stubDevices();
+      await open(tester);
+      await scrollTo(tester, find.text('MICROPHONE'));
+      await tester.ensureVisible(find.text('System default').first);
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('System default').first);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('USB Headset').first);
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('SAVE'));
+      await settle(tester);
+
+      final post = backend.requests
+          .singleWhere((r) => r.path == '/voice/devices' && r.method == 'POST');
+      final body = jsonDecode(post.body) as Map<String, dynamic>;
+      expect(body['input_device'], 'USB Headset');
+      expect(body['output_device'], isNull);
+    });
+
+    testWidgets('an unchanged selection posts nothing', (tester) async {
+      stubDevices();
+      await open(tester);
+
+      await tester.tap(find.text('SAVE'));
+      await settle(tester);
+
+      expect(
+        backend.requests.where(
+            (r) => r.path == '/voice/devices' && r.method == 'POST'),
+        isEmpty,
+      );
+    });
+  });
+
   testWidgets('the scrollable content keeps clear of the desktop scrollbar',
       (tester) async {
     // The scroll behavior draws the scrollbar inside the viewport, over
