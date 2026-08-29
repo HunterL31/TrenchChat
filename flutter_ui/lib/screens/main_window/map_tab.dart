@@ -36,7 +36,19 @@ bool isPeerNode(MapNode node) =>
     node.kind == MapNodeKind.self ||
     (node.isTrenchChat && node.kind != MapNodeKind.interface_);
 
+/// A peer square is filled for a TrenchChat client and outlined for any other
+/// Reticulum node, so the two read apart at a glance without touching the
+/// quality color the square is painted in.
+PaintingStyle mapPeerStyle(MapNode node) =>
+    node.isTrenchChat ? PaintingStyle.fill : PaintingStyle.stroke;
+
+/// A transport diamond is already filled by quality, so a TrenchChat client
+/// that also relays gets a small accent dot at its corner instead.
+bool showsTrenchChatDot(MapNode node) =>
+    node.isTrenchChat && node.kind == MapNodeKind.transport;
+
 const double _nodeHalf = 5.0;
+const double _tcMarkerRadius = 2.0;
 const double _labelMaxWidth = 140.0;
 const double _labelHeight = 14.0;
 const double _labelGap = 6.0;
@@ -477,6 +489,8 @@ class _MapTabState extends State<MapTab> {
                       ('UNKNOWN', 0),
                     ])
                       _legendEntry(tc, label, quality),
+                    _kindLegendEntry(tc, 'TRENCHCHAT', filled: true),
+                    _kindLegendEntry(tc, 'OTHER NODE', filled: false),
                   ],
                 ),
               ),
@@ -493,6 +507,34 @@ class _MapTabState extends State<MapTab> {
         mainAxisSize: MainAxisSize.min,
         children: [
           Container(width: 8, height: 8, color: mapQualityColor(quality, colors: tc)),
+          const SizedBox(width: 4),
+          Text(
+            label,
+            style: TextStyle(
+              fontSize: TCType.textMicro,
+              color: tc.textSecondary,
+              letterSpacing: TCType.letterSpacingFor(TCType.textMicro, TCType.trackingWide),
+            ),
+          ),
+          const SizedBox(width: 10),
+        ],
+      );
+
+  /// The filled/outlined half of the legend: which nodes on the map run
+  /// TrenchChat, independent of the quality color they are painted in.
+  Widget _kindLegendEntry(TCSectionColors tc, String label,
+          {required bool filled}) =>
+      Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            width: 8,
+            height: 8,
+            decoration: BoxDecoration(
+              color: filled ? tc.textSecondary : null,
+              border: Border.all(color: tc.textSecondary),
+            ),
+          ),
           const SizedBox(width: 4),
           Text(
             label,
@@ -618,12 +660,16 @@ class _NetworkMapPainter extends CustomPainter {
         );
       case MapNodeKind.transport:
         canvas.drawPath(diamond, Paint()..color = mapQualityColor(node.quality, colors: colors));
+        if (showsTrenchChatDot(node)) {
+          canvas.drawCircle(Offset(pos.dx + half, pos.dy - half), _tcMarkerRadius,
+              Paint()..color = colors.accentPrimary);
+        }
       case MapNodeKind.peer:
         canvas.drawRect(
           rect,
           Paint()
             ..color = mapQualityColor(node.quality, colors: colors)
-            ..style = PaintingStyle.stroke
+            ..style = mapPeerStyle(node)
             ..strokeWidth = 1.5,
         );
       case MapNodeKind.unknown:

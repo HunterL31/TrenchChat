@@ -361,6 +361,48 @@ void main() {
       expect(tester.takeException(), isNull);
     });
 
+    testWidgets('a TrenchChat peer square paints filled, another node hollow',
+        (tester) async {
+      final topo = {
+        'nodes': [
+          {'id': 'self', 'label': '', 'kind': 'self', 'hops': 0, 'quality': 4},
+          {'id': 'tc', 'label': 'tc', 'kind': 'peer', 'hops': 1, 'quality': 4,
+           'trenchchat': true},
+          {'id': 'plain', 'label': 'plain', 'kind': 'peer', 'hops': 1, 'quality': 4,
+           'trenchchat': false},
+        ],
+        'edges': <Map<String, dynamic>>[],
+        'interfaces': <Map<String, dynamic>>[],
+        'stats': {'node_count': 3, 'path_count': 0, 'interface_count': 0},
+      };
+      backend.routes['GET /network/map'] = topo;
+      await tester.pumpWidget(harness());
+      await settle(tester);
+
+      final painter = mapPaint(tester).painter!;
+      final layout = layoutMapNodes(NetworkMapData.fromJson(topo));
+      final width = layout.size.width.ceil();
+      final height = layout.size.height.ceil();
+      final byteData = await tester.runAsync(() async {
+        final recorder = ui.PictureRecorder();
+        painter.paint(Canvas(recorder), Size(width.toDouble(), height.toDouble()));
+        final image = await recorder.endRecording().toImage(width, height);
+        return image.toByteData(format: ui.ImageByteFormat.rawStraightRgba);
+      });
+      expect(byteData, isNotNull);
+
+      int alphaAt(String id) {
+        final at = layout.positions[id]!;
+        final i = (at.dy.round() * width + at.dx.round()) * 4;
+        return byteData!.getUint8(i + 3);
+      }
+
+      // No edges in this topology, so a node's own center is the only thing
+      // that can paint there: opaque means the square was filled.
+      expect(alphaAt('tc'), 255);
+      expect(alphaAt('plain'), 0);
+    });
+
     testWidgets('legend swatches show the five tier colors', (tester) async {
       backend.routes['GET /network/map'] = tierTopology();
       await tester.pumpWidget(harness());
@@ -379,6 +421,24 @@ void main() {
             .first);
         expect(swatch.color, mapQualityColor(quality), reason: 'swatch for $label');
       }
+    });
+
+    testWidgets('the legend distinguishes TrenchChat nodes from other nodes',
+        (tester) async {
+      backend.routes['GET /network/map'] = tierTopology();
+      await tester.pumpWidget(harness());
+      await settle(tester);
+
+      BoxDecoration swatchFor(String label) {
+        final row = find.ancestor(of: find.text(label), matching: find.byType(Row)).first;
+        final swatch = tester.widget<Container>(
+            find.descendant(of: row, matching: find.byType(Container)).first);
+        return swatch.decoration! as BoxDecoration;
+      }
+
+      expect(swatchFor('TRENCHCHAT').color, isNotNull);
+      expect(swatchFor('OTHER NODE').color, isNull);
+      expect(swatchFor('OTHER NODE').border, isNotNull);
     });
   });
 
