@@ -120,6 +120,15 @@ Config keys (all under `"voice"` in `~/.trenchchat/config.json`):
 `input_device`, `output_device`, `mode` ("vad"/"ptt"), `bitrate`
 (16000/24000), `vad_threshold_db`.
 
+Devices are stored by name; `null` means the system default. The client's
+Settings picker drives `GET`/`POST /voice/devices`
+(`actions.list_audio_devices` / `set_audio_devices`); a change rebuilds a
+live pipeline in place via `voice_mgr.restart_audio()`. Names are resolved
+at pipeline start (`core/audio/devices.py`), so a missing or unplugged
+device falls back to the default instead of erroring the session, and a
+stream that dies mid-call is rebuilt by a cooldown-limited watchdog in
+`tick()`.
+
 ## Testing
 
 - `tests/test_voice.py` — signalling/roster over the in-process LXMF shim.

@@ -43,6 +43,7 @@ from trenchchat.network.voice_wire import (
 )
 
 VOICE_STATE_REFRESH_SECS = 60.0
+AUDIO_RESTART_COOLDOWN_SECS = 5.0
 VOICE_ROSTER_TTL_SECS = 180.0
 VOICE_SIGNAL_MAX_AGE_SECS = 120.0
 VOICE_STATE_MIN_INTERVAL_SECS = 2.0
@@ -95,6 +96,7 @@ class VoiceManager:
         self._state_dirty = False
         self._audio_pipeline = None
         self._audio_error = ""
+        self._last_audio_restart = 0.0
 
         self._tx_packets = 0
         self._rx_frames: dict[str, int] = {}
@@ -227,6 +229,17 @@ class VoiceManager:
             self._state_dirty = True
         self._notify_roster(channel_hash_hex)
 
+    def restart_audio(self) -> None:
+        """Rebuild the audio pipeline mid-session — after a device change,
+        or when a stream died under an unplugged device. Device names are
+        re-resolved on start, so a vanished device falls back to the system
+        default. No-op outside a session."""
+        if self._session_channel is None:
+            return
+        self._last_audio_restart = time.time()
+        self._stop_audio()
+        self._start_audio()
+
     # --- roster read model ---
 
     def _link_only_peers(self, channel_hash_hex: str, known: set[str]) -> list[dict]:
@@ -298,9 +311,27 @@ class VoiceManager:
             if self._transport is not None:
                 self._transport.tick()
                 self._redial_and_reauthorize(channel_hash_hex, now)
+            self._check_audio_health(now)
 
         self._prune_rosters(now)
         self._update_speaking(now)
+
+    def _check_audio_health(self, now: float) -> None:
+        """Rebuild the pipeline when a device stream has died mid-session
+        (unplug); the rebuild re-resolves devices and falls back to the
+        default. Cooldown-limited so a persistently failing device cannot
+        thrash."""
+        pipeline = self._audio_pipeline
+        if pipeline is None:
+            return
+        probe = getattr(pipeline, "healthy", None)
+        if probe is None or probe():
+            return
+        if now - self._last_audio_restart < AUDIO_RESTART_COOLDOWN_SECS:
+            return
+        RNS.log("TrenchChat [voice]: audio stream died (device unplugged?); "
+                "rebuilding pipeline", RNS.LOG_WARNING)
+        self.restart_audio()
 
     def frame_stats(self) -> dict:
         """Transmit/receive counters plus per-sender receive quality.

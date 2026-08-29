@@ -200,6 +200,39 @@ def set_voice_muted(voice_mgr, muted: bool) -> None:
     voice_mgr.set_muted(muted)
 
 
+def list_audio_devices(config) -> dict:
+    """PortAudio devices plus the configured selection, for a device picker.
+
+    Selections are device names; None means the system default. A selected
+    name that is no longer present stays selected — the pipeline falls back
+    to the default until the device returns.
+    """
+    from trenchchat.core.audio.devices import list_devices
+
+    info = list_devices()
+    info["selected"] = {
+        "input": config.voice_input_device,
+        "output": config.voice_output_device,
+    }
+    return info
+
+
+def set_audio_devices(config, voice_mgr, input_device: str | None,
+                      output_device: str | None) -> bool:
+    """Persist the voice device choice and rebuild any live audio pipeline.
+
+    None means the system default. Returns True when anything changed.
+    """
+    changed = (config.voice_input_device != input_device
+               or config.voice_output_device != output_device)
+    if not changed:
+        return False
+    config.voice_input_device = input_device
+    config.voice_output_device = output_device
+    voice_mgr.restart_audio()
+    return True
+
+
 # ---------------------------------------------------------------------------
 # Servers
 #

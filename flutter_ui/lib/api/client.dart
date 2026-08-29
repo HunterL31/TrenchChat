@@ -352,6 +352,29 @@ class ApiClient {
     return VoiceStatus.fromJson(_decode(res) as Map<String, dynamic>);
   }
 
+  Future<AudioDevices> getVoiceDevices() async {
+    final res = await _http.get(_u('/voice/devices'));
+    return AudioDevices.fromJson(_decode(res) as Map<String, dynamic>);
+  }
+
+  /// Persists the device choice (null means the system default) and rebuilds
+  /// any live audio pipeline, so a mid-call switch takes effect immediately.
+  Future<AudioDevices> setVoiceDevices({
+    String? inputDevice,
+    String? outputDevice,
+  }) async {
+    final res = await _http.post(
+      _u('/voice/devices'),
+      headers: _jsonHeaders,
+      body: jsonEncode({
+        'input_device': inputDevice,
+        'output_device': outputDevice,
+      }),
+    );
+    final body = _decode(res) as Map<String, dynamic>;
+    return AudioDevices.fromJson(body['devices'] as Map<String, dynamic>);
+  }
+
   Future<List<Friend>> getFriends() async {
     final res = await _http.get(_u('/friends'));
     return (_decode(res) as List<dynamic>)

@@ -1388,6 +1388,19 @@ class AppState extends ChangeNotifier {
     }
   }
 
+  /// Saves the voice device choice (null = system default); the backend
+  /// rebuilds a live pipeline in place. Returns true on success.
+  Future<bool> setVoiceDevices({String? inputDevice, String? outputDevice}) async {
+    try {
+      await api.setVoiceDevices(
+          inputDevice: inputDevice, outputDevice: outputDevice);
+      return true;
+    } catch (e) {
+      _reportActionError(e);
+      return false;
+    }
+  }
+
   /// Sets the display name and re-announces. Returns true on success.
   Future<bool> saveDisplayName(String displayName) async {
     try {

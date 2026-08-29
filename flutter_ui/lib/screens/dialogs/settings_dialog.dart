@@ -5,12 +5,14 @@
 import 'package:flutter/material.dart';
 
 import '../../api/models/settings.dart';
+import '../../api/models/voice.dart';
 import '../../app_state.dart';
 import '../../theme/section_theme.dart';
 import '../../theme/theme_spec.dart';
 import '../../theme/tokens.dart';
 import '../../widgets/tc_button.dart';
 import '../../widgets/tc_checkbox.dart';
+import '../../widgets/tc_context_menu.dart';
 import '../../widgets/tc_dialog.dart';
 import '../../widgets/tc_text_field.dart';
 import 'appearance_dialog.dart';
@@ -47,6 +49,12 @@ class _SettingsDialogContentState extends State<_SettingsDialogContent> {
 
   bool _propEnabled = false;
 
+  /// GET /voice/devices snapshot; unavailable until loaded (or when the
+  /// backend has no audio stack, in which case [AudioDevices.reason] says why).
+  AudioDevices _devices = AudioDevices.unavailable;
+  String? _inputDevice;
+  String? _outputDevice;
+
   /// Session-local stand-in for the lockbox PIN state -- the lockbox has no
   /// API surface yet (locked-start design still open), so the ported PIN
   /// dialogs are exercised against this rather than persisted.
@@ -69,12 +77,21 @@ class _SettingsDialogContentState extends State<_SettingsDialogContent> {
   Future<void> _load() async {
     try {
       final settings = await widget.state.api.getSettings();
+      // A backend without the audio stack still answers, with a reason;
+      // only a transport failure leaves the section in its unloaded state.
+      AudioDevices devices = AudioDevices.unavailable;
+      try {
+        devices = await widget.state.api.getVoiceDevices();
+      } catch (_) {}
       if (!mounted) return;
       setState(() {
         _displayName.text = widget.state.meDisplayName;
         _propEnabled = settings.propagationEnabled;
         _nodeName.text = settings.propagationNodeName;
         _storageLimit.text = '${settings.propagationStorageLimitMb}';
+        _devices = devices;
+        _inputDevice = devices.selectedInput;
+        _outputDevice = devices.selectedOutput;
         _loading = false;
       });
     } catch (e) {
@@ -109,9 +126,15 @@ class _SettingsDialogContentState extends State<_SettingsDialogContent> {
       propagationNodeName: _nodeName.text.trim(),
       propagationStorageLimitMb: storageMb,
     ));
+    final devicesChanged = _devices.available &&
+        (_inputDevice != _devices.selectedInput ||
+            _outputDevice != _devices.selectedOutput);
+    final okDevices = !devicesChanged ||
+        await widget.state.setVoiceDevices(
+            inputDevice: _inputDevice, outputDevice: _outputDevice);
 
     if (!mounted) return;
-    if (!okName || !okSettings) {
+    if (!okName || !okSettings || !okDevices) {
       setState(() {
         _busy = false;
         _error = widget.state.takeActionError() ?? 'Could not save settings.';
@@ -330,6 +353,34 @@ class _SettingsDialogContentState extends State<_SettingsDialogContent> {
                     const SizedBox(height: 16),
                     Container(height: 1, color: tc.borderSubtle),
                     const SizedBox(height: 12),
+                    _sectionLabel(tc, 'VOICE'),
+                    const SizedBox(height: 8),
+                    if (!_devices.available)
+                      Text(
+                        _devices.reason.isEmpty
+                            ? 'Audio devices are not available.'
+                            : 'Audio devices are not available — ${_devices.reason}',
+                        style: TextStyle(
+                            fontSize: TCType.textBodySm, color: tc.textSecondary),
+                      )
+                    else ...[
+                      _devicePicker(tc, 'MICROPHONE', _devices.input,
+                          _inputDevice, (v) => setState(() => _inputDevice = v)),
+                      const SizedBox(height: 10),
+                      _devicePicker(tc, 'SPEAKERS', _devices.output,
+                          _outputDevice, (v) => setState(() => _outputDevice = v)),
+                      const SizedBox(height: 8),
+                      Text(
+                        'A device change takes effect immediately, even in a '
+                        'live call. If a chosen device is unplugged, voice '
+                        'falls back to the system default.',
+                        style: TextStyle(
+                            fontSize: TCType.textMicro, color: tc.textTertiary),
+                      ),
+                    ],
+                    const SizedBox(height: 16),
+                    Container(height: 1, color: tc.borderSubtle),
+                    const SizedBox(height: 12),
                     _sectionLabel(tc, 'ABOUT'),
                     const SizedBox(height: 8),
                     _readonlyRow(tc, 'Version', _version),
@@ -390,6 +441,62 @@ class _SettingsDialogContentState extends State<_SettingsDialogContent> {
 
   Future<void> _onLockNow() async {
     await showUnlockDialog(context, verifyPin: (pin) => pin == _sessionPin);
+  }
+
+  static const String _systemDefaultLabel = 'System default';
+
+  /// One device row: label plus a button showing the current choice that
+  /// opens the device list as a menu (null selection = system default).
+  Widget _devicePicker(TCSectionColors tc, String label, List<String> devices,
+      String? selected, ValueChanged<String?> onSelected) {
+    // An unplugged device stays selectable, so reopening the dialog does not
+    // silently drop a choice the pipeline is already falling back from.
+    final options = [
+      if (selected != null && !devices.contains(selected)) selected,
+      ...devices,
+    ];
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          label,
+          style: TextStyle(
+            fontSize: TCType.textCaption,
+            color: tc.textSecondary,
+            letterSpacing:
+                TCType.letterSpacingFor(TCType.textCaption, TCType.trackingWide),
+          ),
+        ),
+        const SizedBox(height: 6),
+        Align(
+          alignment: Alignment.centerLeft,
+          child: Builder(
+            builder: (buttonContext) => TcGhostButton(
+              label: selected ?? _systemDefaultLabel,
+              onPressed: () {
+                final box = buttonContext.findRenderObject() as RenderBox?;
+                final position = box?.localToGlobal(Offset.zero) ?? Offset.zero;
+                showTcContextMenu(
+                  context: buttonContext,
+                  position: position,
+                  items: [
+                    TcContextMenuItem(
+                      label: _systemDefaultLabel,
+                      onTap: () => onSelected(null),
+                    ),
+                    for (final device in options)
+                      TcContextMenuItem(
+                        label: device,
+                        onTap: () => onSelected(device),
+                      ),
+                  ],
+                );
+              },
+            ),
+          ),
+        ),
+      ],
+    );
   }
 
   Widget _sectionLabel(TCSectionColors tc, String label) => Text(

@@ -84,18 +84,15 @@ class AudioPipeline:
         import sounddevice as sd
 
         self._running = True
-        self._in_stream = sd.RawInputStream(
-            samplerate=48000, channels=1, dtype="int16",
-            blocksize=FRAME_SAMPLES,
-            device=_voice_setting(self._config, "input_device", None),
-            callback=self._on_input_block,
-        )
-        self._out_stream = sd.RawOutputStream(
-            samplerate=48000, channels=1, dtype="int16",
-            blocksize=FRAME_SAMPLES,
-            device=_voice_setting(self._config, "output_device", None),
-            callback=self._on_output_block,
-        )
+        try:
+            self._in_stream = self._open_stream(
+                sd.RawInputStream, "input", self._on_input_block)
+            self._out_stream = self._open_stream(
+                sd.RawOutputStream, "output", self._on_output_block)
+        except Exception:
+            self._close_streams()
+            self._running = False
+            raise
         self._encode_thread = threading.Thread(
             target=self._encode_loop, daemon=True, name="voice-encode")
         self._playout_thread = threading.Thread(
@@ -105,11 +102,33 @@ class AudioPipeline:
         self._encode_thread.start()
         self._playout_thread.start()
 
+    def _open_stream(self, stream_cls, kind: str, callback):
+        """Open a stream on the configured device, falling back to the
+        system default when that device is missing or fails to open."""
+        from trenchchat.core.audio.devices import resolve_device
+
+        configured = _voice_setting(self._config, f"{kind}_device", None)
+        device = resolve_device(configured, kind)
+        kwargs = dict(samplerate=48000, channels=1, dtype="int16",
+                      blocksize=FRAME_SAMPLES, callback=callback)
+        try:
+            return stream_cls(device=device, **kwargs)
+        except Exception as e:
+            if device is None:
+                raise
+            RNS.log(f"TrenchChat [voice]: {kind} device {configured!r} "
+                    f"failed to open ({e}); falling back to default",
+                    RNS.LOG_WARNING)
+            return stream_cls(device=None, **kwargs)
+
     def stop(self) -> None:
         self._running = False
         for thread in (self._encode_thread, self._playout_thread):
             if thread is not None:
                 thread.join(timeout=2.0)
+        self._close_streams()
+
+    def _close_streams(self) -> None:
         for stream in (self._in_stream, self._out_stream):
             if stream is not None:
                 try:
@@ -120,6 +139,21 @@ class AudioPipeline:
                             RNS.LOG_DEBUG)
         self._in_stream = None
         self._out_stream = None
+
+    def healthy(self) -> bool:
+        """False once either PortAudio stream has died (device unplugged);
+        the owner rebuilds the pipeline, re-resolving devices."""
+        if not self._running:
+            return True
+        for stream in (self._in_stream, self._out_stream):
+            if stream is None:
+                return False
+            try:
+                if not stream.active:
+                    return False
+            except Exception:
+                return False
+        return True
 
     def set_muted(self, muted: bool) -> None:
         self._muted = muted

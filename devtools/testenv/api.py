@@ -219,6 +219,11 @@ class VoiceToneRequest(BaseModel):
     enabled: bool
 
 
+class VoiceDevicesRequest(BaseModel):
+    input_device: str | None = None
+    output_device: str | None = None
+
+
 def _channel_to_dict(row) -> dict[str, Any]:
     keys = row.keys()
     return {
@@ -1764,6 +1769,20 @@ def create_app(backend: Backend, *, token: str | None = None,
             "stats": backend.voice_mgr.frame_stats(),
             "audio": backend.voice_mgr.audio_status(),
         }
+
+    @app.get("/voice/devices")
+    def get_voice_devices():
+        return actions.list_audio_devices(backend.config)
+
+    @app.post("/voice/devices")
+    def set_voice_devices(req: VoiceDevicesRequest):
+        # Persists the choice and rebuilds a live pipeline in place, so a
+        # mid-call device switch takes effect without leaving the session.
+        actions.set_audio_devices(
+            backend.config, backend.voice_mgr,
+            req.input_device, req.output_device,
+        )
+        return {"ok": True, "devices": actions.list_audio_devices(backend.config)}
 
     @app.post("/voice/test_tone")
     def set_test_tone(req: VoiceToneRequest):

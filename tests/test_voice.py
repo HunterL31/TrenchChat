@@ -429,3 +429,80 @@ class TestVoiceResourceRelease:
 
         assert seen["session_at_stop"] is None, \
             "the transport stopped while the session was still authorising links"
+
+
+# ---------------------------------------------------------------------------
+# Audio pipeline rebuild: device changes and unplug recovery
+# ---------------------------------------------------------------------------
+
+class _CountingPipeline:
+    def __init__(self):
+        self.started = False
+        self.stopped = False
+        self.muted = None
+        self.alive = True
+
+    def start(self):
+        self.started = True
+
+    def stop(self):
+        self.stopped = True
+
+    def set_muted(self, muted):
+        self.muted = muted
+
+    def healthy(self):
+        return self.alive
+
+
+class TestAudioRestart:
+    def _join_with_counting_audio(self, peer_factory):
+        peers, ch_hash = _setup_open_channel(peer_factory, names=("alice",))
+        alice = peers[0]
+        built = []
+
+        def factory(config, on_encoded, on_speaking_self):
+            pipeline = _CountingPipeline()
+            built.append(pipeline)
+            return pipeline
+
+        alice.voice_mgr._audio_factory = factory
+        assert alice.voice_mgr.join_voice(ch_hash)
+        return alice, built
+
+    def test_restart_audio_rebuilds_the_pipeline(self, peer_factory):
+        alice, built = self._join_with_counting_audio(peer_factory)
+        assert len(built) == 1 and built[0].started
+
+        alice.voice_mgr.restart_audio()
+
+        assert built[0].stopped, "the old pipeline was left running"
+        assert len(built) == 2 and built[1].started
+        assert alice.voice_mgr.audio_status()["available"] is True
+
+    def test_restart_audio_is_a_noop_outside_a_session(self, peer_factory):
+        alice = peer_factory("alice")
+        built = []
+        alice.voice_mgr._audio_factory = lambda *a: built.append(a)
+
+        alice.voice_mgr.restart_audio()
+        assert built == []
+
+    def test_tick_rebuilds_a_dead_pipeline(self, peer_factory):
+        alice, built = self._join_with_counting_audio(peer_factory)
+        built[0].alive = False
+        alice.voice_mgr._last_audio_restart = 0.0  # cooldown long expired
+
+        alice.voice_mgr.tick()
+
+        assert built[0].stopped
+        assert len(built) == 2 and built[1].started
+
+    def test_tick_respects_the_restart_cooldown(self, peer_factory):
+        alice, built = self._join_with_counting_audio(peer_factory)
+        built[0].alive = False
+        alice.voice_mgr._last_audio_restart = time.time()
+
+        alice.voice_mgr.tick()
+
+        assert len(built) == 1, "a restart thrashed inside the cooldown"

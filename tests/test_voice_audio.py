@@ -221,3 +221,157 @@ class TestPlayoutSurvivesABadFrame:
         loud = np.full(960, 30000, dtype=np.int16).tobytes()
         summed = np.frombuffer(mix([loud, loud]), dtype=np.int16)
         assert summed[0] == 32767
+
+
+# ---------------------------------------------------------------------------
+# Device enumeration and resolution
+# ---------------------------------------------------------------------------
+
+_DEVICE_TABLE = [
+    {"name": "Built-in Mic", "max_input_channels": 2, "max_output_channels": 0},
+    {"name": "Built-in Speakers", "max_input_channels": 0,
+     "max_output_channels": 2},
+    {"name": "USB Headset", "max_input_channels": 1, "max_output_channels": 2},
+]
+
+
+class _FakeSounddevice:
+    def __init__(self, devices=_DEVICE_TABLE):
+        self._devices = devices
+
+    def query_devices(self):
+        return self._devices
+
+
+class TestDeviceListing:
+    def test_groups_by_direction(self, monkeypatch):
+        from trenchchat.core.audio import devices
+        monkeypatch.setitem(sys.modules, "sounddevice", _FakeSounddevice())
+
+        info = devices.list_devices()
+        assert info["available"] is True
+        assert info["input"] == ["Built-in Mic", "USB Headset"]
+        assert info["output"] == ["Built-in Speakers", "USB Headset"]
+
+    def test_reports_reason_when_stack_missing(self, monkeypatch):
+        from trenchchat.core.audio import devices
+        monkeypatch.setitem(sys.modules, "sounddevice", None)
+
+        info = devices.list_devices()
+        assert info["available"] is False
+        assert info["reason"]
+        assert info["input"] == [] and info["output"] == []
+
+
+class TestDeviceResolution:
+    def test_none_means_default(self, monkeypatch):
+        from trenchchat.core.audio import devices
+        monkeypatch.setitem(sys.modules, "sounddevice", _FakeSounddevice())
+        assert devices.resolve_device(None, "input") is None
+
+    def test_name_resolves_to_index_for_its_direction(self, monkeypatch):
+        from trenchchat.core.audio import devices
+        monkeypatch.setitem(sys.modules, "sounddevice", _FakeSounddevice())
+        assert devices.resolve_device("USB Headset", "input") == 2
+        assert devices.resolve_device("USB Headset", "output") == 2
+        assert devices.resolve_device("Built-in Mic", "input") == 0
+
+    def test_name_in_wrong_direction_falls_back(self, monkeypatch):
+        from trenchchat.core.audio import devices
+        monkeypatch.setitem(sys.modules, "sounddevice", _FakeSounddevice())
+        assert devices.resolve_device("Built-in Mic", "output") is None
+
+    def test_unplugged_name_falls_back(self, monkeypatch):
+        from trenchchat.core.audio import devices
+        monkeypatch.setitem(sys.modules, "sounddevice", _FakeSounddevice())
+        assert devices.resolve_device("Gone Headset", "input") is None
+
+    def test_valid_index_passes_through_and_stale_falls_back(self, monkeypatch):
+        from trenchchat.core.audio import devices
+        monkeypatch.setitem(sys.modules, "sounddevice", _FakeSounddevice())
+        assert devices.resolve_device(0, "input") == 0
+        assert devices.resolve_device(0, "output") is None
+        assert devices.resolve_device(99, "input") is None
+
+    def test_query_failure_falls_back(self, monkeypatch):
+        from trenchchat.core.audio import devices
+        monkeypatch.setitem(sys.modules, "sounddevice", None)
+        assert devices.resolve_device("USB Headset", "input") is None
+
+
+# ---------------------------------------------------------------------------
+# Pipeline device open fallback and health probe
+# ---------------------------------------------------------------------------
+
+class _VoiceConfig:
+    def __init__(self, input_device=None, output_device=None):
+        self.voice_input_device = input_device
+        self.voice_output_device = output_device
+
+
+class _FakeStream:
+    def __init__(self, device=None, **kwargs):
+        self.device = device
+        self.active = True
+
+    def start(self):
+        pass
+
+    def stop(self):
+        self.active = False
+
+    def close(self):
+        pass
+
+
+class TestPipelineDeviceFallback:
+    def _pipeline(self, config):
+        from trenchchat.core.audio.engine import AudioPipeline
+        return AudioPipeline(config, lambda s, f: None, lambda s: None,
+                             codec_factory=lambda: None)
+
+    def test_open_uses_the_resolved_device(self, monkeypatch):
+        monkeypatch.setitem(sys.modules, "sounddevice", _FakeSounddevice())
+        pipeline = self._pipeline(_VoiceConfig(input_device="USB Headset"))
+
+        stream = pipeline._open_stream(_FakeStream, "input", lambda *a: None)
+        assert stream.device == 2
+
+    def test_open_failure_on_a_chosen_device_falls_back(self, monkeypatch):
+        monkeypatch.setitem(sys.modules, "sounddevice", _FakeSounddevice())
+        pipeline = self._pipeline(_VoiceConfig(input_device="USB Headset"))
+
+        class _Flaky(_FakeStream):
+            def __init__(self, device=None, **kwargs):
+                if device is not None:
+                    raise RuntimeError("device disappeared")
+                super().__init__(device=device, **kwargs)
+
+        stream = pipeline._open_stream(_Flaky, "input", lambda *a: None)
+        assert stream.device is None
+
+    def test_open_failure_on_the_default_raises(self, monkeypatch):
+        monkeypatch.setitem(sys.modules, "sounddevice", _FakeSounddevice())
+        pipeline = self._pipeline(_VoiceConfig())
+
+        class _Broken(_FakeStream):
+            def __init__(self, device=None, **kwargs):
+                raise RuntimeError("no devices at all")
+
+        with pytest.raises(RuntimeError):
+            pipeline._open_stream(_Broken, "input", lambda *a: None)
+
+    def test_healthy_tracks_stream_liveness(self):
+        pipeline = self._pipeline(_VoiceConfig())
+        assert pipeline.healthy() is True  # not running yet
+
+        pipeline._running = True
+        pipeline._in_stream = _FakeStream()
+        pipeline._out_stream = _FakeStream()
+        assert pipeline.healthy() is True
+
+        pipeline._out_stream.active = False
+        assert pipeline.healthy() is False
+
+        pipeline._out_stream = None
+        assert pipeline.healthy() is False
