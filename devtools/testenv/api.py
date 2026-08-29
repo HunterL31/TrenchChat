@@ -922,7 +922,7 @@ def create_app(backend: Backend, *, token: str | None = None,
         return {"ok": True, "added": added, "restart_required": True}
 
     @app.get("/directory")
-    def search_directory(q: str = ""):
+    def search_directory(q: str = "", scope: str = actions.DIRECTORY_SCOPE_ALL):
         results = backend.user_directory.search(q)
         seen = {r["identity_hash"] for r in results}
         # The announce-fed directory is in-memory, so it starts empty after a
@@ -953,9 +953,24 @@ def create_app(backend: Backend, *, token: str | None = None,
             seen.add(peer_hex)
             results.append({"identity_hash": peer_hex, "display_name": name})
         results.sort(key=lambda r: (r["display_name"].lower(), r["identity_hash"]))
+        results = _scoped_directory(results, scope)
         for r in results:
             r["is_online"] = backend.presence_mgr.is_online(r["identity_hash"])
         return results
+
+    def _scoped_directory(results: list[dict], scope: str) -> list[dict]:
+        if scope == actions.DIRECTORY_SCOPE_FRIENDS:
+            friend_hashes = {f["identity_hash"] for f in backend.friends_mgr.get_friends()}
+            shared_hashes: set[str] = set()
+        elif scope == actions.DIRECTORY_SCOPE_SHARED:
+            friend_hashes = set()
+            shared_hashes = actions.shared_channel_peers(backend.storage,
+                                                         backend.identity.hash_hex)
+        else:
+            return results
+        return actions.filter_directory_scope(results, scope,
+                                              friend_hashes=friend_hashes,
+                                              shared_hashes=shared_hashes)
 
     @app.get("/me/avatar")
     def get_own_avatar():

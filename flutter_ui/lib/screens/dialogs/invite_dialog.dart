@@ -5,6 +5,7 @@
 // local table, so per-keystroke queries are cheap.
 import 'package:flutter/material.dart';
 
+import '../../api/client.dart';
 import '../../api/models/invite.dart';
 import '../../app_state.dart';
 import '../../theme/section_theme.dart';
@@ -76,6 +77,7 @@ class _InviteDialogContentState extends State<_InviteDialogContent> {
   String? _selectedHash;
   String? _error;
   bool _busy = false;
+  String _scope = directoryScopeAll;
 
   List<DirectoryEntry> get _entries => widget.state.directory;
 
@@ -97,7 +99,7 @@ class _InviteDialogContentState extends State<_InviteDialogContent> {
   void _onSearchChanged() => _query(_search.text.trim());
 
   Future<void> _query(String q) async {
-    await widget.state.loadDirectory(q);
+    await widget.state.loadDirectory(q, scope: _scope);
     if (!mounted) return;
     setState(() {
       if (_selectedHash != null &&
@@ -105,6 +107,24 @@ class _InviteDialogContentState extends State<_InviteDialogContent> {
         _selectedHash = null;
       }
     });
+  }
+
+  void _setScope(String scope) {
+    if (_scope == scope) return;
+    setState(() => _scope = scope);
+    _query(_search.text.trim());
+  }
+
+  String get _emptyMessage {
+    switch (_scope) {
+      case directoryScopeFriends:
+        return 'No accepted friends match. Add a friend to invite them here.';
+      case directoryScopeShared:
+        return 'No users from your channels match.';
+      default:
+        return 'No TrenchChat users discovered yet. Users appear here '
+            'once their announce has been received.';
+    }
   }
 
   String get _manualNormalized =>
@@ -171,6 +191,16 @@ class _InviteDialogContentState extends State<_InviteDialogContent> {
           autofocus: true,
         ),
         const SizedBox(height: 8),
+        Row(
+          children: [
+            _scopeChip('ALL', directoryScopeAll),
+            const SizedBox(width: 6),
+            _scopeChip('FRIENDS', directoryScopeFriends),
+            const SizedBox(width: 6),
+            _scopeChip('SHARED', directoryScopeShared),
+          ],
+        ),
+        const SizedBox(height: 8),
         Container(
           height: 150,
           decoration: BoxDecoration(
@@ -182,8 +212,7 @@ class _InviteDialogContentState extends State<_InviteDialogContent> {
                   child: Padding(
                     padding: const EdgeInsets.all(12),
                     child: Text(
-                      'No TrenchChat users discovered yet. Users appear here '
-                      'once their announce has been received.',
+                      _emptyMessage,
                       textAlign: TextAlign.center,
                       style: TextStyle(
                           fontSize: TCType.textCaption, color: tc.textTertiary),
@@ -208,6 +237,15 @@ class _InviteDialogContentState extends State<_InviteDialogContent> {
           ),
         ],
       ],
+    );
+  }
+
+  Widget _scopeChip(String label, String scope) {
+    final tc = SectionTheme.of(context);
+    return TcGhostButton(
+      label: label,
+      accent: _scope == scope ? tc.accentPrimary : null,
+      onPressed: () => _setScope(scope),
     );
   }
 
