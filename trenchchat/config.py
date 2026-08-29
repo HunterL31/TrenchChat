@@ -37,6 +37,7 @@ _DEFAULTS = {
         "mode": "vad",
         "bitrate": 16000,
         "vad_threshold_db": -45.0,
+        "event_sounds": True,
     },
     "nomad_node": {
         "enabled": False,
@@ -305,6 +306,16 @@ class Config:
     @voice_vad_threshold_db.setter
     def voice_vad_threshold_db(self, value: float):
         self._data["voice"]["vad_threshold_db"] = float(value)
+        self.save()
+
+    @property
+    def voice_event_sounds(self) -> bool:
+        """Play the local join/leave blips during a voice session."""
+        return bool(self._data["voice"]["event_sounds"])
+
+    @voice_event_sounds.setter
+    def voice_event_sounds(self, value: bool):
+        self._data["voice"]["event_sounds"] = bool(value)
         self.save()
 
     # --- nomad node hosting ---

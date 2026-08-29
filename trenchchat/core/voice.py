@@ -171,6 +171,7 @@ class VoiceManager:
         if self._transport is not None:
             self._transport.start(channel_hash_hex)
         self._start_audio()
+        self._play_cue(join=True)
         self._broadcast(MT_VOICE_JOIN, channel_hash_hex)
         self._last_state_sent = now
         if self._transport is not None:
@@ -532,7 +533,11 @@ class VoiceManager:
 
         if msg_type == MT_VOICE_LEAVE:
             with self._lock:
-                self._rosters.get(channel_hash_hex, {}).pop(sender_hex, None)
+                departed = self._rosters.get(channel_hash_hex, {}).pop(
+                    sender_hex, None)
+            if departed is not None and \
+                    channel_hash_hex == self._session_channel:
+                self._play_cue(join=False)
             if self._transport is not None and \
                     channel_hash_hex == self._session_channel:
                 self._transport.disconnect(sender_hex)
@@ -557,6 +562,10 @@ class VoiceManager:
             codec = codec.decode(errors="replace")
 
         with self._lock:
+            # A cue only for a genuine newcomer: a JOIN re-broadcast for a
+            # peer already on the roster, or occupants learned via their
+            # STATE replies to our own join, must not blip.
+            newcomer = sender_hex not in self._rosters.get(channel_hash_hex, {})
             self._upsert_entry(channel_hash_hex, sender_hex, muted=muted,
                                joined_at=float(joined_at), now=now,
                                codec=codec)
@@ -564,6 +573,8 @@ class VoiceManager:
         if channel_hash_hex == self._session_channel:
             if msg_type == MT_VOICE_JOIN:
                 self._send_state_to(sender_hex, channel_hash_hex)
+                if newcomer:
+                    self._play_cue(join=True)
             if self._transport is not None:
                 self._transport.connect(sender_hex)
 
@@ -731,6 +742,7 @@ class VoiceManager:
     def _prune_rosters(self, now: float):
         changed: list[str] = []
         stale_conns: list[str] = []
+        session_departures = 0
         with self._lock:
             for channel_hash_hex, roster in self._rosters.items():
                 expired = [
@@ -744,6 +756,12 @@ class VoiceManager:
                     stale_conns.append(peer_hex)
                 if expired:
                     changed.append(channel_hash_hex)
+                    if channel_hash_hex == self._session_channel:
+                        session_departures += len(expired)
+        # A timed-out peer left without saying so; same blip as a polite
+        # leave, once per departed peer.
+        for _ in range(session_departures):
+            self._play_cue(join=False)
         # An expired roster entry with no live link is a peer we have stopped
         # hearing from: without this the connection stays, and every re-dial
         # of it is another mesh-wide path request.
@@ -778,6 +796,22 @@ class VoiceManager:
                 self._notify_speaking(channel_hash_hex, peer_hex, False)
 
     # --- audio pipeline ---
+
+    def _play_cue(self, *, join: bool) -> None:
+        """Local join/leave blip, mixed into playout. Silent with
+        voice.event_sounds off, without a pipeline, or on a pipeline that
+        cannot play cues. Our own leave is silent by design: the pipeline
+        stops immediately, so a cue would only ever be cut off."""
+        if not getattr(self._config, "voice_event_sounds", True):
+            return
+        player = getattr(self._audio_pipeline, "play_cue", None)
+        if player is None:
+            return
+        try:
+            from trenchchat.core.audio.cues import join_cue, leave_cue
+            player(join_cue() if join else leave_cue())
+        except Exception as e:
+            RNS.log(f"TrenchChat [voice]: cue error: {e}", RNS.LOG_DEBUG)
 
     def _start_audio(self):
         factory = self._audio_factory

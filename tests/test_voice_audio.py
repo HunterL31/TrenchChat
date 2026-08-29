@@ -629,3 +629,40 @@ class TestVoiceLibPath:
         libpath.ensure_voice_libs_findable(tmp_path / "absent")
 
         assert ctypes.util.find_library is before
+
+
+class TestVoiceCues:
+    def test_cues_are_frame_aligned_and_distinct(self):
+        from trenchchat.core.audio import cues
+        from trenchchat.core.audio.engine import FRAME_PCM_BYTES
+
+        join, leave = cues.join_cue(), cues.leave_cue()
+        for cue in (join, leave):
+            assert cue, "an empty cue is silence"
+            assert all(len(frame) == FRAME_PCM_BYTES for frame in cue)
+            assert any(frame.strip(b"\x00") for frame in cue), \
+                "cue contains no audible samples"
+        assert join != leave
+
+    def test_pipeline_mixes_a_cue_with_no_peers_talking(self):
+        pytest.importorskip("numpy")
+        from trenchchat.core.audio.engine import AudioPipeline
+        from trenchchat.core.audio.mixer import mix
+
+        pipeline = AudioPipeline(_VoiceConfig(), lambda s, f: None,
+                                 lambda s: None, codec_factory=lambda: None)
+        frame = b"\x01\x00" * 960
+        pipeline.play_cue([frame])
+
+        pipeline._playout_tick(mix)
+
+        assert pipeline._pcm_out.get_nowait() == frame
+
+    def test_cue_backlog_is_capped(self):
+        from trenchchat.core.audio.engine import AudioPipeline, _MAX_CUE_FRAMES
+
+        pipeline = AudioPipeline(_VoiceConfig(), lambda s, f: None,
+                                 lambda s: None, codec_factory=lambda: None)
+        pipeline.play_cue([b"\x00" * 1920] * (_MAX_CUE_FRAMES * 3))
+
+        assert len(pipeline._cue_frames) == _MAX_CUE_FRAMES

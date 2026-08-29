@@ -124,7 +124,14 @@ mode (default) transmission is gated on voice activity above
 
 Config keys (all under `"voice"` in `~/.trenchchat/config.json`):
 `input_device`, `output_device`, `mode` ("vad"/"ptt"), `bitrate`
-(16000/24000), `vad_threshold_db`.
+(16000/24000), `vad_threshold_db`, `event_sounds`.
+
+`event_sounds` (default on) plays a local rising blip when someone enters
+the session and a falling one when someone leaves — a genuine roster
+transition only, never a state refresh, and a timeout counts as a leave.
+The cues are synthesized (`core/audio/cues.py`) and mixed into playout, so
+they follow the chosen output device; your own leave is silent because the
+pipeline stops with the session.
 
 Devices are stored by name; `null` means the system default. The client's
 Settings picker drives `GET`/`POST /voice/devices`

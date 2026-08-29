@@ -20,6 +20,7 @@ out, while loss and jitter both read clean.
 """
 
 import array
+import collections
 import math
 import queue
 import struct
@@ -41,6 +42,9 @@ _SPEAKING_HANGOVER_SECS = 0.3
 _DEFAULT_VAD_THRESHOLD_DB = -45.0
 _SEQ_MODULUS = 1 << 16
 _PLAYOUT_ACTIVE_WINDOW_SECS = 0.5
+# Overlapping event cues queue behind each other; more than this and the
+# oldest are dropped rather than chiming long after the events.
+_MAX_CUE_FRAMES = 50
 
 
 def _rms_db(pcm: bytes) -> float:
@@ -164,6 +168,8 @@ class AudioPipeline:
         self._last_push: dict[str, float] = {}
         self._counters = _PlayoutCounters()
         self._peer_lock = threading.Lock()
+        self._cue_frames: collections.deque = collections.deque(
+            maxlen=_MAX_CUE_FRAMES)
         self._in_stream = None
         self._out_stream = None
         self._input_error = ""
@@ -320,6 +326,12 @@ class AudioPipeline:
         """
         return self._counters.snapshot()
 
+    def play_cue(self, frames: list[bytes]) -> None:
+        """Queue a short local event sound (playout-sized PCM frames) to
+        be mixed in with the live streams; a deque cap drops the oldest
+        under a cue pileup."""
+        self._cue_frames.extend(frames)
+
     # --- device callbacks (never block, never do real work) ---
 
     def _on_input_block(self, indata, frames, time_info, status) -> None:
@@ -447,6 +459,12 @@ class AudioPipeline:
                 )
                 continue
             decoded.append(pcm)
+        try:
+            cue = self._cue_frames.popleft()
+            if len(cue) == FRAME_PCM_BYTES:
+                decoded.append(cue)
+        except IndexError:
+            pass
         if decoded:
             try:
                 self._pcm_out.put_nowait(mix(decoded))
@@ -490,6 +508,7 @@ class TonePipeline:
         self._seq = 0
         self._phase = 0.0
         self.rx_counts: dict[str, int] = {}
+        self.cue_count = 0
         self._jitter: dict[str, JitterBuffer] = {}
         self._decoders: dict[str, object] = {}
         self._last_push: dict[str, float] = {}
@@ -547,6 +566,10 @@ class TonePipeline:
     def playout_stats(self) -> dict:
         """Per-peer playout continuity, as AudioPipeline.playout_stats."""
         return self._counters.snapshot()
+
+    def play_cue(self, frames: list[bytes]) -> None:
+        """Deviceless: count the cue instead of playing it."""
+        self.cue_count += len(frames)
 
     def _loop(self) -> None:
         cadence = _Cadence(VOICE_FRAME_MS * VOICE_FRAMES_PER_PACKET / 1000.0)
