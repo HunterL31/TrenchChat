@@ -20,6 +20,9 @@ import '../../widgets/tc_context_menu.dart';
 import '../../widgets/tc_icon.dart';
 import '../dialogs/add_friend_dialog.dart';
 
+/// Share of the tab the request blocks may take between them before scrolling.
+const double _requestsMaxFraction = 0.5;
+
 String friendLabel(Friend f) {
   if (f.nickname.isNotEmpty) return f.nickname;
   if (f.displayName.isNotEmpty) return f.displayName;
@@ -46,94 +49,112 @@ class FriendsTab extends StatelessWidget {
     final friends = state.friends;
     final incoming = state.friendRequests.incoming;
     final outgoing = state.friendRequests.outgoing;
+    final blockCount = (incoming.isEmpty ? 0 : 1) + (outgoing.isEmpty ? 0 : 1);
     return Container(
       color: tc.bgApp,
       padding: const EdgeInsets.all(18),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Row(
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          // A request block sizes to its rows and scrolls past this cap, so a
+          // long queue can never push the friends list off the tab.
+          final blockCap = blockCount == 0
+              ? 0.0
+              : constraints.maxHeight * _requestsMaxFraction / blockCount;
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              Text(
-                'FRIENDS',
-                style: TextStyle(
-                  fontSize: TCType.textCaption,
-                  color: tc.textSecondary,
-                  letterSpacing: TCType.letterSpacingFor(TCType.textCaption, TCType.trackingWider),
-                ),
-              ),
-              const Spacer(),
-              TcGhostButton(
-                icon: TcIcons.plus,
-                label: 'ADD',
-                onPressed: () => showAddFriendDialog(context, state),
-              ),
-            ],
-          ),
-          const SizedBox(height: 12),
-          if (incoming.isNotEmpty) ...[
-            _RequestBlock(
-              // A peer with no friend-request concept asks by messaging, so
-              // the heading says which happened rather than assuming.
-              label: incoming.every((r) => r.isMessageRequest)
-                  ? 'SENT YOU A MESSAGE'
-                  : 'ASKING TO BE ADDED',
-              requests: incoming,
-              trailing: (r) => Row(
-                mainAxisSize: MainAxisSize.min,
+              Row(
                 children: [
-                  TcGhostButton(
-                    label: 'ACCEPT',
-                    onPressed: () => state.acceptFriendRequest(r.identityHash),
+                  Text(
+                    'FRIENDS',
+                    style: TextStyle(
+                      fontSize: TCType.textCaption,
+                      color: tc.textSecondary,
+                      letterSpacing:
+                          TCType.letterSpacingFor(TCType.textCaption, TCType.trackingWider),
+                    ),
                   ),
-                  const SizedBox(width: 6),
+                  const Spacer(),
                   TcGhostButton(
-                    label: 'DECLINE',
-                    onPressed: () => state.declineFriendRequest(r.identityHash),
+                    icon: TcIcons.plus,
+                    label: 'ADD',
+                    onPressed: () => showAddFriendDialog(context, state),
                   ),
                 ],
               ),
-            ),
-            const SizedBox(height: 12),
-          ],
-          if (outgoing.isNotEmpty) ...[
-            _RequestBlock(
-              label: 'WAITING ON THEM',
-              requests: outgoing,
-              trailing: (r) => TcGhostButton(
-                label: 'CANCEL',
-                onPressed: () => state.cancelFriendRequest(r.identityHash),
-              ),
-            ),
-            const SizedBox(height: 12),
-          ],
-          Expanded(
-            child: Container(
-              decoration: BoxDecoration(
-                color: tc.bgSurface,
-                border: Border.all(color: tc.borderSubtle),
-              ),
-              child: friends.isEmpty
-                  ? Center(
-                      child: Text(
-                        'No saved friends yet.',
-                        style: TextStyle(fontSize: TCType.textBodySm, color: tc.textTertiary),
-                      ),
-                    )
-                  : ListView(
-                      padding: const EdgeInsets.symmetric(vertical: 4),
+              const SizedBox(height: 12),
+              if (incoming.isNotEmpty) ...[
+                ConstrainedBox(
+                  constraints: BoxConstraints(maxHeight: blockCap),
+                  child: _RequestBlock(
+                    // A peer with no friend-request concept asks by messaging,
+                    // so the heading says which happened rather than assuming.
+                    label: incoming.every((r) => r.isMessageRequest)
+                        ? 'SENT YOU A MESSAGE'
+                        : 'ASKING TO BE ADDED',
+                    requests: incoming,
+                    trailing: (r) => Row(
+                      mainAxisSize: MainAxisSize.min,
                       children: [
-                        for (final f in friends)
-                          _FriendRow(
-                            friend: f,
-                            state: state,
-                            onOpenNomadPage: onOpenNomadPage,
-                          ),
+                        TcGhostButton(
+                          label: 'ACCEPT',
+                          onPressed: () => state.acceptFriendRequest(r.identityHash),
+                        ),
+                        const SizedBox(width: 6),
+                        TcGhostButton(
+                          label: 'DECLINE',
+                          onPressed: () => state.declineFriendRequest(r.identityHash),
+                        ),
                       ],
                     ),
-            ),
-          ),
-        ],
+                  ),
+                ),
+                const SizedBox(height: 12),
+              ],
+              if (outgoing.isNotEmpty) ...[
+                ConstrainedBox(
+                  constraints: BoxConstraints(maxHeight: blockCap),
+                  child: _RequestBlock(
+                    label: 'WAITING ON THEM',
+                    requests: outgoing,
+                    trailing: (r) => TcGhostButton(
+                      label: 'CANCEL',
+                      onPressed: () => state.cancelFriendRequest(r.identityHash),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 12),
+              ],
+              Expanded(
+                child: Container(
+                  decoration: BoxDecoration(
+                    color: tc.bgSurface,
+                    border: Border.all(color: tc.borderSubtle),
+                  ),
+                  child: friends.isEmpty
+                      ? Center(
+                          child: Text(
+                            'No saved friends yet.',
+                            style:
+                                TextStyle(fontSize: TCType.textBodySm, color: tc.textTertiary),
+                          ),
+                        )
+                      : ListView(
+                          padding: const EdgeInsets.symmetric(vertical: 4),
+                          children: [
+                            for (final f in friends)
+                              _FriendRow(
+                                friend: f,
+                                state: state,
+                                onOpenNomadPage: onOpenNomadPage,
+                              ),
+                          ],
+                        ),
+                ),
+              ),
+            ],
+          );
+        },
       ),
     );
   }
@@ -236,6 +257,7 @@ class _RequestBlock extends StatelessWidget {
   Widget build(BuildContext context) {
     final tc = SectionTheme.of(context);
     return Column(
+      mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         Text(
@@ -247,79 +269,84 @@ class _RequestBlock extends StatelessWidget {
           ),
         ),
         const SizedBox(height: 6),
-        Container(
-          decoration: BoxDecoration(
-            color: tc.bgSurface,
-            border: Border.all(color: tc.borderSubtle),
-          ),
-          child: Column(
-            children: [
-              for (final r in requests)
-                Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-                  child: Row(
-                    children: [
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Row(
-                              children: [
-                                Flexible(
-                                  child: Text(
-                                    _requestLabel(r),
-                                    overflow: TextOverflow.ellipsis,
-                                    style: TextStyle(
-                                        fontSize: 13, color: tc.textSecondary),
-                                  ),
-                                ),
-                                // A client with no friend-request concept can
-                                // only ask by messaging, so say which it was.
-                                if (r.isMessageRequest && !r.fromTrenchchat) ...[
-                                  const SizedBox(width: 6),
-                                  Text(
-                                    'LXMF',
-                                    style: TextStyle(
-                                      fontSize: TCType.textMicro,
-                                      color: tc.textTertiary,
-                                      letterSpacing: TCType.letterSpacingFor(
-                                          TCType.textMicro, TCType.trackingWide),
+        Flexible(
+          fit: FlexFit.loose,
+          child: Container(
+            decoration: BoxDecoration(
+              color: tc.bgSurface,
+              border: Border.all(color: tc.borderSubtle),
+            ),
+            child: ListView(
+              shrinkWrap: true,
+              padding: EdgeInsets.zero,
+              children: [
+                for (final r in requests)
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Row(
+                                children: [
+                                  Flexible(
+                                    child: Text(
+                                      _requestLabel(r),
+                                      overflow: TextOverflow.ellipsis,
+                                      style: TextStyle(
+                                          fontSize: 13, color: tc.textSecondary),
                                     ),
                                   ),
+                                  // A client with no friend-request concept can
+                                  // only ask by messaging, so say which it was.
+                                  if (r.isMessageRequest && !r.fromTrenchchat) ...[
+                                    const SizedBox(width: 6),
+                                    Text(
+                                      'LXMF',
+                                      style: TextStyle(
+                                        fontSize: TCType.textMicro,
+                                        color: tc.textTertiary,
+                                        letterSpacing: TCType.letterSpacingFor(
+                                            TCType.textMicro, TCType.trackingWide),
+                                      ),
+                                    ),
+                                  ],
                                 ],
-                              ],
-                            ),
-                            if (r.message != null && r.message!.isNotEmpty)
-                              Text(
-                                r.messageCount > 1
-                                    ? '${r.message}  (+${r.messageCount - 1} more)'
-                                    : r.message!,
-                                maxLines: 2,
-                                overflow: TextOverflow.ellipsis,
-                                style: TextStyle(
-                                  fontSize: TCType.textMicro,
-                                  color: tc.textTertiary,
-                                ),
-                              )
-                            else if (r.note.isNotEmpty)
-                              Text(
-                                r.note,
-                                maxLines: 2,
-                                overflow: TextOverflow.ellipsis,
-                                style: TextStyle(
-                                  fontSize: TCType.textMicro,
-                                  color: tc.textTertiary,
-                                ),
                               ),
-                          ],
+                              if (r.message != null && r.message!.isNotEmpty)
+                                Text(
+                                  r.messageCount > 1
+                                      ? '${r.message}  (+${r.messageCount - 1} more)'
+                                      : r.message!,
+                                  maxLines: 2,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: TextStyle(
+                                    fontSize: TCType.textMicro,
+                                    color: tc.textTertiary,
+                                  ),
+                                )
+                              else if (r.note.isNotEmpty)
+                                Text(
+                                  r.note,
+                                  maxLines: 2,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: TextStyle(
+                                    fontSize: TCType.textMicro,
+                                    color: tc.textTertiary,
+                                  ),
+                                ),
+                            ],
+                          ),
                         ),
-                      ),
-                      const SizedBox(width: 8),
-                      trailing(r),
-                    ],
+                        const SizedBox(width: 8),
+                        trailing(r),
+                      ],
+                    ),
                   ),
-                ),
-            ],
+              ],
+            ),
           ),
         ),
       ],
