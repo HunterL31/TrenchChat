@@ -166,36 +166,47 @@ class AudioPipeline:
         self._peer_lock = threading.Lock()
         self._in_stream = None
         self._out_stream = None
+        self._input_error = ""
+        self._output_error = ""
         self._encode_thread = None
         self._playout_thread = None
         self._speaking = False
         self._last_voiced_at = 0.0
 
     def start(self) -> None:
+        """Open capture and playback independently and run what opened.
+
+        A dead microphone must not cost playback (nor the reverse): each
+        direction that fails start-to-finish — configured device and the
+        default alike — is recorded in device_status() and its worker
+        thread is simply not started. Only both directions failing raises.
+        """
         import sounddevice as sd
 
         self._running = True
-        try:
-            self._in_stream = self._open_stream(
-                sd.RawInputStream, "input", self._on_input_block)
-            self._out_stream = self._open_stream(
-                sd.RawOutputStream, "output", self._on_output_block)
-        except Exception:
-            self._close_streams()
+        self._in_stream = self._open_stream(
+            sd.RawInputStream, "input", self._on_input_block)
+        self._out_stream = self._open_stream(
+            sd.RawOutputStream, "output", self._on_output_block)
+        if self._in_stream is None and self._out_stream is None:
             self._running = False
-            raise
-        self._encode_thread = threading.Thread(
-            target=self._encode_loop, daemon=True, name="voice-encode")
-        self._playout_thread = threading.Thread(
-            target=self._playout_loop, daemon=True, name="voice-playout")
-        self._in_stream.start()
-        self._out_stream.start()
-        self._encode_thread.start()
-        self._playout_thread.start()
+            raise RuntimeError(
+                f"input: {self._input_error}; output: {self._output_error}")
+        if self._in_stream is not None:
+            self._encode_thread = threading.Thread(
+                target=self._encode_loop, daemon=True, name="voice-encode")
+            self._in_stream.start()
+            self._encode_thread.start()
+        if self._out_stream is not None:
+            self._playout_thread = threading.Thread(
+                target=self._playout_loop, daemon=True, name="voice-playout")
+            self._out_stream.start()
+            self._playout_thread.start()
 
     def _open_stream(self, stream_cls, kind: str, callback):
-        """Open a stream on the configured device, falling back to the
-        system default when that device is missing or fails to open."""
+        """Open one direction's stream on the configured device, falling
+        back to the system default; None (with the error recorded) when
+        the default fails too."""
         from trenchchat.core.audio.devices import resolve_device
 
         configured = _voice_setting(self._config, f"{kind}_device", None)
@@ -203,14 +214,44 @@ class AudioPipeline:
         kwargs = dict(samplerate=48000, channels=1, dtype="int16",
                       blocksize=FRAME_SAMPLES, callback=callback)
         try:
-            return stream_cls(device=device, **kwargs)
-        except Exception as e:
-            if device is None:
-                raise
-            RNS.log(f"TrenchChat [voice]: {kind} device {configured!r} "
-                    f"failed to open ({e}); falling back to default",
-                    RNS.LOG_WARNING)
-            return stream_cls(device=None, **kwargs)
+            stream = stream_cls(device=device, **kwargs)
+            self._set_direction_error(kind, "")
+            return stream
+        except Exception as first:
+            error = str(first)
+            if device is not None:
+                RNS.log(f"TrenchChat [voice]: {kind} device {configured!r} "
+                        f"failed to open ({first}); falling back to default",
+                        RNS.LOG_WARNING)
+                try:
+                    stream = stream_cls(device=None, **kwargs)
+                    self._set_direction_error(kind, "")
+                    return stream
+                except Exception as second:
+                    error = f"{configured!r}: {first}; default: {second}"
+        RNS.log(f"TrenchChat [voice]: no usable {kind} device ({error})",
+                RNS.LOG_WARNING)
+        self._set_direction_error(kind, error)
+        return None
+
+    def _set_direction_error(self, kind: str, error: str) -> None:
+        if kind == "input":
+            self._input_error = error
+        else:
+            self._output_error = error
+
+    def device_status(self) -> dict:
+        """Which directions are running, and why a dead one failed.
+
+        A direction that failed at start stays down for this pipeline;
+        a device change (restart_audio) or re-join retries it.
+        """
+        return {
+            "input_ok": self._in_stream is not None,
+            "output_ok": self._out_stream is not None,
+            "input_error": self._input_error,
+            "output_error": self._output_error,
+        }
 
     def stop(self) -> None:
         self._running = False
@@ -232,13 +273,15 @@ class AudioPipeline:
         self._out_stream = None
 
     def healthy(self) -> bool:
-        """False once either PortAudio stream has died (device unplugged);
-        the owner rebuilds the pipeline, re-resolving devices."""
+        """False once a PortAudio stream that did open has died (device
+        unplugged); the owner rebuilds the pipeline, re-resolving devices.
+        A direction that never opened is a recorded failure, not a death —
+        counting it would make the watchdog rebuild forever."""
         if not self._running:
             return True
         for stream in (self._in_stream, self._out_stream):
             if stream is None:
-                return False
+                continue
             try:
                 if not stream.active:
                     return False

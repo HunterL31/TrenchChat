@@ -9,6 +9,7 @@ import 'package:flutter_ui/widgets/tc_icon.dart';
 Widget _harness({
   bool muted = false,
   bool audioError = false,
+  String audioWarning = '',
   String audioReason = '',
   VoidCallback? onToggleMute,
   VoidCallback? onLeave,
@@ -20,6 +21,7 @@ Widget _harness({
           quality: LinkQualityLevel.excellent,
           muted: muted,
           audioError: audioError,
+          audioWarning: audioWarning,
           audioReason: audioReason,
           onToggleMute: onToggleMute ?? () {},
           onLeave: onLeave ?? () {},
@@ -56,6 +58,17 @@ void main() {
   testWidgets('audio error surfaces the listening-only warning', (tester) async {
     await tester.pumpWidget(_harness(audioError: true));
     expect(find.text('NO AUDIO DEVICE — LISTENING ONLY'), findsOneWidget);
+  });
+
+  testWidgets('a specific warning headline replaces the generic one',
+      (tester) async {
+    await tester.pumpWidget(_harness(
+      audioError: true,
+      audioWarning: 'MIC UNAVAILABLE — LISTENING ONLY',
+    ));
+
+    expect(find.text('MIC UNAVAILABLE — LISTENING ONLY'), findsOneWidget);
+    expect(find.text('NO AUDIO DEVICE — LISTENING ONLY'), findsNothing);
   });
 
   testWidgets("the backend's audio failure reason is shown under the warning",

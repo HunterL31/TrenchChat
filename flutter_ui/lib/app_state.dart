@@ -112,10 +112,33 @@ class AppState extends ChangeNotifier {
   bool voiceAudioError = false;
   Timer? _voicePollTimer;
 
-  /// The backend's stated cause for a dead audio pipeline (missing library,
+  /// One-line headline for the voice panel's audio warning, empty when the
+  /// pipeline is fully up. Distinguishes total failure from one direction
+  /// down — the pipeline runs whichever of mic/speakers opened.
+  String get voiceAudioWarning {
+    if (voiceStatus.channel == null) return '';
+    if (!voiceStatus.audioAvailable) return 'NO AUDIO — CAPTURE AND PLAYBACK DOWN';
+    if (!voiceStatus.inputOk && !voiceStatus.outputOk) {
+      return 'NO AUDIO — CAPTURE AND PLAYBACK DOWN';
+    }
+    if (!voiceStatus.inputOk) return 'MIC UNAVAILABLE — LISTENING ONLY';
+    if (!voiceStatus.outputOk) return 'AUDIO OUTPUT UNAVAILABLE — MIC STILL LIVE';
+    return '';
+  }
+
+  /// The backend's stated cause for the warning above (missing library,
   /// device open failure, ...), straight from GET /voice/status. Empty until
   /// the status refresh after an audio_error lands.
-  String get voiceAudioReason => voiceStatus.audioReason;
+  String get voiceAudioReason {
+    if (voiceStatus.audioReason.isNotEmpty) return voiceStatus.audioReason;
+    if (!voiceStatus.inputOk && voiceStatus.inputError.isNotEmpty) {
+      return voiceStatus.inputError;
+    }
+    if (!voiceStatus.outputOk && voiceStatus.outputError.isNotEmpty) {
+      return voiceStatus.outputError;
+    }
+    return '';
+  }
 
   /// Per-channel debounce for reaction refreshes. A sync backfill or a burst
   /// of reactions fires one event each; without coalescing that is one full
@@ -764,7 +787,10 @@ class AppState extends ChangeNotifier {
       voiceMuted = voiceStatus.muted;
       // Only meaningful inside a session: with no call up there is no pipeline
       // to run, and the backend reports that as unavailable too.
-      voiceAudioError = voiceStatus.channel != null && !voiceStatus.audioAvailable;
+      voiceAudioError = voiceStatus.channel != null &&
+          (!voiceStatus.audioAvailable ||
+              !voiceStatus.inputOk ||
+              !voiceStatus.outputOk);
       notifyListeners();
     } catch (_) {
       // Next poll tick will catch it up.

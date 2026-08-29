@@ -506,3 +506,45 @@ class TestAudioRestart:
         alice.voice_mgr.tick()
 
         assert len(built) == 1, "a restart thrashed inside the cooldown"
+
+
+class TestDegradedAudioStatus:
+    """A pipeline can run with one direction down; the status must say so
+    and the session callback must surface it."""
+
+    class _HalfDeafPipeline(_CountingPipeline):
+        def device_status(self):
+            return {"input_ok": False, "output_ok": True,
+                    "input_error": "no capture device", "output_error": ""}
+
+    def test_direction_state_reaches_audio_status(self, peer_factory):
+        peers, ch_hash = _setup_open_channel(peer_factory, names=("alice",))
+        alice = peers[0]
+        alice.voice_mgr._audio_factory = \
+            lambda *a: self._HalfDeafPipeline()
+        states = []
+        alice.voice_mgr.add_session_callback(states.append)
+
+        assert alice.voice_mgr.join_voice(ch_hash)
+
+        status = alice.voice_mgr.audio_status()
+        assert status["available"] is True
+        assert status["input_ok"] is False
+        assert status["output_ok"] is True
+        assert status["input_error"] == "no capture device"
+        assert "audio_error" in states, \
+            "a degraded start surfaced nothing to the client"
+
+    def test_pipeline_without_device_status_is_fully_ok(self, peer_factory):
+        peers, ch_hash = _setup_open_channel(peer_factory, names=("alice",))
+        alice = peers[0]
+        alice.voice_mgr._audio_factory = lambda *a: _CountingPipeline()
+        states = []
+        alice.voice_mgr.add_session_callback(states.append)
+
+        assert alice.voice_mgr.join_voice(ch_hash)
+
+        status = alice.voice_mgr.audio_status()
+        assert status["available"] is True
+        assert status["input_ok"] is True and status["output_ok"] is True
+        assert "audio_error" not in states

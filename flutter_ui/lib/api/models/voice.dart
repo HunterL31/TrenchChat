@@ -80,6 +80,10 @@ class VoiceStatus {
     required this.rxQuality,
     required this.audioAvailable,
     required this.audioReason,
+    this.inputOk = true,
+    this.outputOk = true,
+    this.inputError = '',
+    this.outputError = '',
   });
 
   /// Channel hash of the live session, or null when not in voice.
@@ -89,6 +93,13 @@ class VoiceStatus {
   final Map<String, VoicePeerQuality> rxQuality;
   final bool audioAvailable;
   final String audioReason;
+
+  /// Per-direction device state: the pipeline runs whichever halves
+  /// opened, so the mic and the speakers can fail independently.
+  final bool inputOk;
+  final bool outputOk;
+  final String inputError;
+  final String outputError;
 
   static const idle = VoiceStatus(
     channel: null,
@@ -112,6 +123,10 @@ class VoiceStatus {
       ),
       audioAvailable: audio['available'] as bool? ?? true,
       audioReason: audio['reason'] as String? ?? '',
+      inputOk: audio['input_ok'] as bool? ?? true,
+      outputOk: audio['output_ok'] as bool? ?? true,
+      inputError: audio['input_error'] as String? ?? '',
+      outputError: audio['output_error'] as String? ?? '',
     );
   }
 }

@@ -390,10 +390,36 @@ class VoiceManager:
             return {}
 
     def audio_status(self) -> dict:
-        if self._audio_pipeline is not None:
-            return {"available": True, "reason": ""}
-        return {"available": False,
-                "reason": self._audio_error or "no audio pipeline"}
+        """Pipeline availability plus per-direction device state.
+
+        available means a pipeline exists at all; input_ok/output_ok say
+        which halves are actually running, with the open failure recorded
+        per direction. A pipeline without devices to report (the tone
+        pipeline) counts as fully ok.
+        """
+        pipeline = self._audio_pipeline
+        if pipeline is None:
+            return {"available": False,
+                    "reason": self._audio_error or "no audio pipeline",
+                    "input_ok": False, "output_ok": False,
+                    "input_error": "", "output_error": ""}
+        status = {"available": True, "reason": "",
+                  "input_ok": True, "output_ok": True,
+                  "input_error": "", "output_error": ""}
+        status.update(self._device_status(pipeline))
+        return status
+
+    @staticmethod
+    def _device_status(pipeline) -> dict:
+        reader = getattr(pipeline, "device_status", None)
+        if reader is None:
+            return {}
+        try:
+            return reader()
+        except Exception as e:
+            RNS.log(f"TrenchChat [voice]: device status error: {e}",
+                    RNS.LOG_DEBUG)
+            return {}
 
     # --- permission enforcement ---
 
@@ -770,6 +796,10 @@ class VoiceManager:
                 self._audio_pipeline.set_muted(self._muted)
                 self._audio_pipeline.start()
                 self._audio_error = ""
+                status = self._device_status(self._audio_pipeline)
+                if not status.get("input_ok", True) or \
+                        not status.get("output_ok", True):
+                    self._notify_session(SESSION_AUDIO_ERROR)
                 return
             self._audio_error = "no audio pipeline available"
         except Exception as e:

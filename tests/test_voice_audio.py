@@ -493,7 +493,8 @@ class TestPipelineDeviceFallback:
         stream = pipeline._open_stream(_Flaky, "input", lambda *a: None)
         assert stream.device is None
 
-    def test_open_failure_on_the_default_raises(self, monkeypatch):
+    def test_open_failure_on_the_default_reports_the_direction_down(
+            self, monkeypatch):
         monkeypatch.setitem(sys.modules, "sounddevice", _FakeSounddevice())
         pipeline = self._pipeline(_VoiceConfig())
 
@@ -501,8 +502,10 @@ class TestPipelineDeviceFallback:
             def __init__(self, device=None, **kwargs):
                 raise RuntimeError("no devices at all")
 
-        with pytest.raises(RuntimeError):
-            pipeline._open_stream(_Broken, "input", lambda *a: None)
+        assert pipeline._open_stream(_Broken, "input", lambda *a: None) is None
+        status = pipeline.device_status()
+        assert status["input_ok"] is False
+        assert "no devices at all" in status["input_error"]
 
     def test_healthy_tracks_stream_liveness(self):
         pipeline = self._pipeline(_VoiceConfig())
@@ -516,5 +519,71 @@ class TestPipelineDeviceFallback:
         pipeline._out_stream.active = False
         assert pipeline.healthy() is False
 
+        # A direction that never opened is a recorded failure, not a death:
+        # the watchdog must not rebuild forever over it.
         pipeline._out_stream = None
-        assert pipeline.healthy() is False
+        assert pipeline.healthy() is True
+
+
+class _DirectionalSounddevice(_FakeSounddevice):
+    """Fake sounddevice whose stream classes fail per direction."""
+
+    def __init__(self, *, input_fails=False, output_fails=False):
+        super().__init__()
+        fake = self
+
+        class RawInputStream(_FakeStream):
+            def __init__(self, device=None, **kwargs):
+                if input_fails:
+                    raise RuntimeError("no capture device")
+                super().__init__(device=device, **kwargs)
+
+        class RawOutputStream(_FakeStream):
+            def __init__(self, device=None, **kwargs):
+                if output_fails:
+                    raise RuntimeError("no playback device")
+                super().__init__(device=device, **kwargs)
+
+        fake.RawInputStream = RawInputStream
+        fake.RawOutputStream = RawOutputStream
+
+
+class TestPerDirectionStart:
+    """A dead microphone must not cost playback, nor the reverse."""
+
+    def _started(self, monkeypatch, **fails):
+        from trenchchat.core.audio.engine import AudioPipeline
+        monkeypatch.setitem(sys.modules, "sounddevice",
+                            _DirectionalSounddevice(**fails))
+        pipeline = AudioPipeline(_VoiceConfig(), lambda s, f: None,
+                                 lambda s: None, codec_factory=lambda: None)
+        pipeline.start()
+        return pipeline
+
+    def test_dead_input_still_plays_back(self, monkeypatch):
+        pipeline = self._started(monkeypatch, input_fails=True)
+        try:
+            status = pipeline.device_status()
+            assert status["input_ok"] is False
+            assert status["output_ok"] is True
+            assert "no capture device" in status["input_error"]
+            assert pipeline._out_stream is not None
+            assert pipeline._encode_thread is None
+            assert pipeline.healthy() is True
+        finally:
+            pipeline.stop()
+
+    def test_dead_output_still_captures(self, monkeypatch):
+        pipeline = self._started(monkeypatch, output_fails=True)
+        try:
+            status = pipeline.device_status()
+            assert status["input_ok"] is True
+            assert status["output_ok"] is False
+            assert pipeline._in_stream is not None
+            assert pipeline._playout_thread is None
+        finally:
+            pipeline.stop()
+
+    def test_both_directions_dead_raises(self, monkeypatch):
+        with pytest.raises(RuntimeError):
+            self._started(monkeypatch, input_fails=True, output_fails=True)

@@ -107,9 +107,12 @@ Rules for the client, same as every other manager:
   `GET /channels/{h}/my_permissions`; its voice UI lives in
   `channel_column.dart` (roster section) and `voice_panel.dart`
   (session panel), with quality polled from `GET /voice/status`.
-- `"audio_error"` means the session is up but capture/playback failed
-  (missing system library, no device); show recv-only/muted state, don't
-  treat it as a failed join.
+- `"audio_error"` means the session is up but some of the audio pipeline
+  is not (missing system library, a device that failed to open); never a
+  failed join. Capture and playback open independently, so
+  `audio_status()`'s `input_ok`/`output_ok` (+ per-direction error
+  strings) say whether this is listening-only, capture-only, or no audio
+  at all — surface which, not just that.
 - "In voice but unreachable" is an honest state: signalling says a peer is
   present while no link can reach them. Show it (grayed entry) rather than
   hiding the peer.

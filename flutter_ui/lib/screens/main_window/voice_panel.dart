@@ -18,6 +18,7 @@ class VoicePanel extends StatelessWidget {
     required this.quality,
     required this.muted,
     required this.audioError,
+    this.audioWarning = '',
     this.audioReason = '',
     required this.onToggleMute,
     required this.onLeave,
@@ -27,11 +28,16 @@ class VoicePanel extends StatelessWidget {
   final LinkQualityLevel quality;
   final bool muted;
 
-  /// The session is up but the backend has no working audio device;
-  /// we're in the call listening-only (and effectively silent).
+  /// The session is up but some of the audio pipeline is not: mic,
+  /// speakers, or both. [audioWarning] names which.
   final bool audioError;
 
-  /// The backend's stated cause for the dead pipeline (audio_status().reason);
+  /// Headline for the warning ("MIC UNAVAILABLE — LISTENING ONLY", ...);
+  /// empty falls back to a generic line for the moment between the
+  /// audio_error event and the status refresh that carries detail.
+  final String audioWarning;
+
+  /// The backend's stated cause (device open failure, missing library);
   /// shown under the warning so the failure is diagnosable from the panel.
   final String audioReason;
   final VoidCallback? onToggleMute;
@@ -71,7 +77,9 @@ class VoicePanel extends StatelessWidget {
             Padding(
               padding: const EdgeInsets.only(top: 4),
               child: Text(
-                'NO AUDIO DEVICE — LISTENING ONLY',
+                audioWarning.isNotEmpty
+                    ? audioWarning
+                    : 'NO AUDIO DEVICE — LISTENING ONLY',
                 style: TextStyle(
                   fontSize: TCType.textMicro,
                   color: tc.statusWarn,
