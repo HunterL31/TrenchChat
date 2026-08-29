@@ -1,5 +1,6 @@
 import 'dart:math' as math;
 
+import 'package:flutter/painting.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:flutter_ui/api/models/network_map.dart';
@@ -113,5 +114,23 @@ void main() {
   test('quality tiers map to distinct colors, unknown included', () {
     final colors = [4, 3, 2, 1, 0].map(mapQualityColor).toSet();
     expect(colors, hasLength(5));
+  });
+
+  test('a TrenchChat peer paints filled, any other Reticulum node outlined', () {
+    MapNode peer({required bool trenchchat}) => MapNode.fromJson(
+        {'id': 'p', 'label': 'p', 'kind': 'peer', 'hops': 1, 'trenchchat': trenchchat});
+
+    expect(mapPeerStyle(peer(trenchchat: true)), PaintingStyle.fill);
+    expect(mapPeerStyle(peer(trenchchat: false)), PaintingStyle.stroke);
+  });
+
+  test('only a TrenchChat transport gets the accent dot', () {
+    MapNode node(String kind, {required bool trenchchat}) => MapNode.fromJson(
+        {'id': 'n', 'label': 'n', 'kind': kind, 'hops': 1, 'trenchchat': trenchchat});
+
+    expect(showsTrenchChatDot(node('transport', trenchchat: true)), isTrue);
+    expect(showsTrenchChatDot(node('transport', trenchchat: false)), isFalse);
+    // A peer carries the distinction in its fill, not a second marker.
+    expect(showsTrenchChatDot(node('peer', trenchchat: true)), isFalse);
   });
 }
