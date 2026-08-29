@@ -10,11 +10,17 @@ missing history it can't reach right now.
 Nothing here touches the network -- it only observes calls SyncManager already
 makes.  A channel's state is derived from its peer records:
 
+    open-join channel                -> LIVE (never synced, by design)
     any peer still pending           -> SYNCING
     a known gap or a truncated batch -> INCOMPLETE
     at least one peer answered       -> SYNCED
     every peer unreachable           -> WAITING
     asked, nobody answered           -> INCOMPLETE
+
+LIVE says sync does not apply: an open-join channel is live-only (IRC-like),
+so "not synced" is its permanent, correct condition rather than a gap.
+Without it a public channel would read as UNKNOWN forever, which looks like
+a fault.
 
 SYNCED requires a peer to have actually answered.  A peer with nothing to send
 replies with an empty sync response for exactly this reason: without it,
@@ -40,6 +46,8 @@ from enum import Enum
 
 import RNS
 
+from trenchchat.core.permissions import is_open_join, permissions_from_json
+
 # How long a peer has to answer a sync request before it's counted as silent.
 # Sized against SYNC_RESPONSE_WINDOW_SECS in sync.py, which is how long the
 # response itself stays answerable.
@@ -53,6 +61,7 @@ class SyncState(str, Enum):
     SYNCED     = "synced"        # a peer answered and reported nothing further
     INCOMPLETE = "incomplete"    # known gap we can't close right now
     WAITING    = "waiting"       # no reachable peer to sync from
+    LIVE       = "live"          # open-join channel: live-only, never synced
 
 
 class PeerSyncState(str, Enum):
@@ -227,11 +236,23 @@ class SyncStatusTracker:
 
     def get_state(self, channel_hash_hex: str) -> SyncState:
         """Return the overall sync state of a channel."""
+        if self._is_live_only(channel_hash_hex):
+            return SyncState.LIVE
         with self._lock:
             return self._derive_locked(channel_hash_hex)
 
     def get_status(self, channel_hash_hex: str) -> dict:
         """Return the full status of a channel, including per-peer detail."""
+        if self._is_live_only(channel_hash_hex):
+            return {
+                "channel_hash":    channel_hash_hex,
+                "state":           SyncState.LIVE.value,
+                "peers":           [],
+                "pending_peers":   0,
+                "answered_peers":  0,
+                "received_count":  0,
+                "last_synced_at":  0.0,
+            }
         with self._lock:
             rec = self._channels.get(channel_hash_hex)
             state = self._derive_locked(channel_hash_hex)
@@ -260,6 +281,18 @@ class SyncStatusTracker:
         }
 
     # --- private helpers ---
+
+    def _is_live_only(self, channel_hash_hex: str) -> bool:
+        """True for open-join channels, whose permanent state is LIVE.
+
+        Checked in the public getters rather than baked into the records:
+        a channel's access mode can change, and the records SyncManager
+        feeds this tracker already stop or start with it.
+        """
+        channel = self._storage.get_channel(channel_hash_hex)
+        if channel is None:
+            return False
+        return is_open_join(permissions_from_json(channel["permissions"]))
 
     def _set_gap(self, channel_hash_hex: str, present: bool) -> None:
         with self._lock:

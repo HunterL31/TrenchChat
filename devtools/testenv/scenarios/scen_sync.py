@@ -9,9 +9,12 @@ whose TestTransport delivers in-process, instantly and in order:
   2. missed-delivery hint -- a third party serves what the sender never could
   3. timestamp sync       -- a reconnecting peer pulls from any online peer
 
-These run on public channels, so no tenure filtering is in play: what a
-responder is willing to serve is not the variable under test here, reaching
-the peer at all is.
+Mechanisms 2 and 3 serve invite-only channels only -- a public channel is
+live-only, like IRC -- so those scenarios run on invite-only channels, with
+every member admitted before the traffic under test (their tenure then
+covers it, and no full_sync grant is needed). sync1 stays public: it
+exercises mechanism 1, which still applies there. sync12 asserts the public
+live-only contract itself.
 
 See docs/testenv-scenarios.md for the matrix these implement.
 """
@@ -47,8 +50,10 @@ def _send_batch(peer, channel_hash: str, prefix: str, count: int) -> set[str]:
     return contents
 
 
-@scenario("sync1", "A link-dropped peer receives what it missed")
+@scenario("sync1", "A link-dropped peer receives what it missed from its sender")
 def c1(env):
+    """Mechanism 1, the one mechanism a public channel still has: the sender
+    is online when B returns, so its own pending retry redelivers."""
     a, b, c = env.peers("A", "B", "C")
     ch = public_channel(a, [b, c], "c1-public")
 
@@ -68,7 +73,7 @@ def c2(env):
     """Mechanism 2. B misses three messages, then A goes offline before B
     returns -- so whatever B ends up with came from C or D, not the sender."""
     a, b, c, d = env.peers("A", "B", "C", "D")
-    ch = public_channel(a, [b, c, d], "c2-public")
+    ch = invite_only_channel(a, [b, c, d], "c2-private")
 
     go_offline(b)
     missed = _send_batch(a, ch, "c2", 3)
@@ -100,7 +105,7 @@ def c3(env):
     """Mechanism 3 from a cold start. Unlike sync1's link drop, nothing survives
     in memory -- no pending queue, no sync status, no subscriber cache."""
     a, b, c = env.peers("A", "B", "C")
-    ch = public_channel(a, [b, c], "c3-public")
+    ch = invite_only_channel(a, [b, c], "c3-private")
 
     before = _send_batch(a, ch, "c3-pre", 2)
     all_hold([b, c], ch, before, timeout=DISCOVERY_TIMEOUT)
@@ -127,7 +132,7 @@ def c4(env):
     the requester must chain its own follow-up. Without that chaining D stops
     at 50 of 60."""
     a, d = env.peers("A", "D")
-    ch = public_channel(a, [d], "c4-public")
+    ch = invite_only_channel(a, [d], "c4-private")
 
     go_offline(d)
     backlog = _send_batch(a, ch, "c4", TRUNCATING_BACKLOG)
@@ -152,7 +157,7 @@ def c5(env):
     """Disjoint history: nobody holds everything B and C each need, so a
     channel-wide watermark would strand one of them."""
     a, b, c = env.peers("A", "B", "C")
-    ch = public_channel(a, [b, c], "c5-public")
+    ch = invite_only_channel(a, [b, c], "c5-private")
 
     go_offline(b)
     first = _send_batch(a, ch, "c5-first", 5)
@@ -180,7 +185,7 @@ def c7(env):
     """SyncStatusTracker is what a client shows the user. Records the state a
     channel lands in after a normal offline round trip."""
     a, b = env.peers("A", "B")
-    ch = public_channel(a, [b], "c7-public")
+    ch = invite_only_channel(a, [b], "c7-private")
 
     go_offline(b)
     missed = _send_batch(a, ch, "c7", 3)
@@ -259,7 +264,7 @@ def c10(env):
     all four at once -- every peer keeps writing locally with nothing
     reachable."""
     a, b, c, d = env.peers("A", "B", "C", "D")
-    ch = public_channel(a, [b, c, d], "c10-public")
+    ch = invite_only_channel(a, [b, c, d], "c10-private")
 
     a.send(ch, "before-partition")
     all_hold([b, c, d], ch, {"before-partition"}, timeout=DISCOVERY_TIMEOUT)
@@ -298,7 +303,7 @@ def c11(env):
     docs/testenv-scenarios.md.
     """
     a, b, c, d = env.peers("A", "B", "C", "D")
-    ch = public_channel(a, [b, c, d], "c11-public")
+    ch = invite_only_channel(a, [b, c, d], "c11-private")
 
     a.send(ch, "seed")
     all_hold([b, c, d], ch, {"seed"}, timeout=DISCOVERY_TIMEOUT)
@@ -323,3 +328,29 @@ def c11(env):
         raise ScenarioFailure(f"four-way reconcile incomplete: "
                               f"{diff_report(everyone, ch, expected)}")
     return {"reconcile_secs": round(elapsed, 1), "messages": len(expected)}
+
+
+@scenario("sync12", "A public channel serves no history once the sender is gone")
+def c12(env):
+    """The live-only contract itself, the inversion of sync2: with the sender
+    offline, no third party may fill the gap on a public channel. Whatever B
+    is missing stays missing, and the tracker says why: the channel is live,
+    not unsynced."""
+    a, b, c = env.peers("A", "B", "C")
+    ch = public_channel(a, [b, c], "c12-public")
+
+    go_offline(b)
+    missed = _send_batch(a, ch, "c12", 3)
+    all_hold([c], ch, missed, timeout=DISCOVERY_TIMEOUT)
+
+    go_offline(a)
+    go_online(b)
+
+    hold_for(lambda: b.contents(ch) == set(),
+             "a returning peer to stay without the history it missed", 30.0)
+    state = b.sync_status(ch).get("state")
+    if state != "live":
+        raise ScenarioFailure(
+            f"a public channel reports sync state {state!r}, expected 'live'"
+        )
+    return {"held_back": len(missed), "sync_state": state}

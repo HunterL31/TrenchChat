@@ -6,6 +6,13 @@ Three mechanisms work together:
   2. MT_MISSED_DELIVERY broadcast     — sender tells online peers which subscriber missed a message
   3. MT_SYNC_REQUEST / MT_SYNC_RESPONSE — reconnecting peer pulls missing messages from any peer
 
+Mechanisms 2 and 3 only run on invite-only channels. An open-join (public)
+channel is live-only, like an IRC channel: a message reaches whoever is
+present, and nobody backfills it later — no hints are kept or accepted for
+it, no sync request is ever sent for it, and a request for one is refused.
+Mechanism 1 still applies: it retries a delivery the sender already
+addressed, which is transport reliability rather than history.
+
 Flow when B reconnects:
   - PeerAnnounceHandler fires on_peer_appeared(B)
   - SyncManager calls messaging.flush_pending(B)      [Mechanism 1]
@@ -352,6 +359,8 @@ class SyncManager:
         channel-wide watermark -- see A1 in test_sync_multipeer.py for why a
         shared watermark strands disjoint history held by different peers.
         """
+        if self._live_only(channel_hash_hex):
+            return
         with self._sync_policy_lock:
             previous = self._sync_policy.get(channel_hash_hex)
         if previous is not None and previous != self._sync_policy_for(channel_hash_hex):
@@ -412,6 +421,8 @@ class SyncManager:
         # advanced past everything this one holds (A1, test_sync_multipeer.py).
         for sub in self._storage.get_subscriptions():
             channel_hash_hex = sub["channel_hash"]
+            if self._live_only(channel_hash_hex):
+                continue
             if peer_hex not in self._get_channel_peers(channel_hash_hex):
                 continue
             if not self._announce_sync_due(channel_hash_hex, peer_hex):
@@ -429,6 +440,8 @@ class SyncManager:
         Broadcast a MT_MISSED_DELIVERY hint to all currently-reachable
         subscribers so they can serve the message when B reconnects.
         """
+        if self._live_only(channel_hash_hex):
+            return
         for dest_hex in subscriber_hashes:
             if dest_hex in (self._identity.hash_hex, missed_peer_hex):
                 continue
@@ -510,6 +523,21 @@ class SyncManager:
 
     # --- handlers ---
 
+    def _live_only(self, channel_hash_hex: str) -> bool:
+        """True for open-join channels, which keep no shared history.
+
+        A public channel works like an IRC channel: a message reaches whoever
+        is present and nobody backfills it later. Both sides enforce it — no
+        request is sent for such a channel, and a request or hint for one is
+        refused — so a modified client cannot pull or push history through a
+        peer that plays by the rules. An unknown channel is not live-only;
+        the participation check already fails closed for it.
+        """
+        channel = self._storage.get_channel(channel_hash_hex)
+        if channel is None:
+            return False
+        return is_open_join(permissions_from_json(channel["permissions"]))
+
     def _peer_may_participate(self, channel_hash_hex: str, peer_hex: str) -> bool:
         """Return True if peer_hex is entitled to take part in this channel's sync.
 
@@ -528,6 +556,13 @@ class SyncManager:
     def _handle_missed_delivery(self, fields: dict, channel_hash_hex: str,
                                 sender_hex: str):
         if not self._peer_may_participate(channel_hash_hex, sender_hex):
+            return
+        if self._live_only(channel_hash_hex):
+            RNS.log(
+                f"TrenchChat [sync]: ignoring a missed-delivery hint from "
+                f"{sender_hex[:12]}… for live-only channel {channel_hash_hex[:12]}…",
+                RNS.LOG_DEBUG,
+            )
             return
         missed_for = _coerce_str(fields.get(F_MISSED_FOR, ""))
         missed_msg_id = _coerce_str(fields.get(F_MISSED_MSG_ID, ""))
@@ -564,6 +599,14 @@ class SyncManager:
             RNS.log(
                 f"TrenchChat [sync]: refusing request from {requester_hex[:12]}… "
                 f"for {channel_hash_hex[:12]}… — not a participant",
+                RNS.LOG_DEBUG,
+            )
+            return
+        if self._live_only(channel_hash_hex):
+            RNS.log(
+                f"TrenchChat [sync]: refusing request from {requester_hex[:12]}… "
+                f"for {channel_hash_hex[:12]}… — live-only channel, no history "
+                f"is served",
                 RNS.LOG_DEBUG,
             )
             return
@@ -867,6 +910,15 @@ class SyncManager:
     def _handle_sync_response(self, fields: dict, channel_hash_hex: str,
                               responder_hex: str = ""):
         if not self._storage.is_subscribed(channel_hash_hex):
+            return
+
+        if self._live_only(channel_hash_hex):
+            RNS.log(
+                f"TrenchChat [sync]: dropping sync response for "
+                f"{channel_hash_hex[:12]}… — live-only channel, history is "
+                f"not accepted",
+                RNS.LOG_DEBUG,
+            )
             return
 
         # Membership can change while a request is in flight, and tenure only
@@ -1396,6 +1448,8 @@ class SyncManager:
 
         for channel_hash_hex, peers in stale.items():
             if not self._storage.is_subscribed(channel_hash_hex):
+                continue
+            if self._live_only(channel_hash_hex):
                 continue
             for peer_hex in peers:
                 self._expire_pending_requests(channel_hash_hex, peer_hex, now)

@@ -90,7 +90,8 @@ class AppState extends ChangeNotifier {
 
   /// Per-channel sync state from the backend's SyncStatusTracker. "incomplete"
   /// means history is known to be missing -- including rows a peer served that
-  /// we refused as unverifiable, which would otherwise be silent.
+  /// we refused as unverifiable, which would otherwise be silent. Open-join
+  /// channels report "live": they are live-only and never synced.
   final Map<String, String> syncStateByChannel = {};
   final Map<String, Uint8List?> avatarCache = {};
 

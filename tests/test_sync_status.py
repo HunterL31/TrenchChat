@@ -9,7 +9,7 @@ import time
 
 import pytest
 
-from tests.helpers import sign_as, wait_for
+from tests.helpers import mirrored_invite_channel, sign_as, wait_for
 from trenchchat.core import sync_status
 from trenchchat.core.messaging import _compute_message_id
 from trenchchat.core.protocol import (
@@ -26,7 +26,7 @@ OTHER_PEER = "cc" * 16
 @pytest.fixture
 def tracker(tmp_path):
     storage = Storage(db_path=tmp_path / "status.db")
-    storage.upsert_channel(CHANNEL, "status", "", PEER, "public", time.time())
+    storage.upsert_channel(CHANNEL, "status", "", PEER, "invite", time.time())
     storage.subscribe(CHANNEL)
     yield SyncStatusTracker(storage)
     storage.close()
@@ -49,13 +49,6 @@ def _insert_message(storage, ch_hash, sender_hex, content, ts=None):
         author_sig=sign_as(sender_hex, ch_hash, msg_id, ts, content),
     )
     return msg_id
-
-
-def _seed_channel_on_peer(peer, ch_hash, channel_name, creator_hash,
-                          access_mode="public"):
-    peer.storage.upsert_channel(ch_hash, channel_name, "", creator_hash,
-                                access_mode, time.time())
-    peer.storage.subscribe(ch_hash)
 
 
 # ---------------------------------------------------------------------------
@@ -151,6 +144,34 @@ class TestStateDerivation:
         assert tracker.get_state(CHANNEL) == SyncState.SYNCED
 
 
+class TestLiveState:
+    """Open-join channels are live-only: sync never applies to them, and the
+    tracker reports that as a state of its own instead of UNKNOWN."""
+
+    def test_open_join_channel_reports_live(self, tmp_path):
+        storage = Storage(db_path=tmp_path / "live.db")
+        storage.upsert_channel(CHANNEL, "live", "", PEER, "public", time.time())
+        storage.subscribe(CHANNEL)
+        tracker = SyncStatusTracker(storage)
+        try:
+            assert tracker.get_state(CHANNEL) == SyncState.LIVE
+
+            status = tracker.get_status(CHANNEL)
+            assert status["state"] == SyncState.LIVE.value
+            assert status["peers"] == []
+            assert status["pending_peers"] == 0
+            assert status["answered_peers"] == 0
+            assert status["received_count"] == 0
+        finally:
+            storage.close()
+
+    def test_invite_channel_does_not_report_live(self, tracker):
+        assert tracker.get_state(CHANNEL) == SyncState.UNKNOWN
+        tracker.request_sent(CHANNEL, PEER)
+        tracker.response_received(CHANNEL, PEER, received=1, inserted=1, truncated=False)
+        assert tracker.get_state(CHANNEL) == SyncState.SYNCED
+
+
 # ---------------------------------------------------------------------------
 # Reporting
 # ---------------------------------------------------------------------------
@@ -241,9 +262,7 @@ class TestSyncManagerIntegration:
         bob = peer_factory("bob")
         carol = peer_factory("carol")
 
-        ch_hash = alice.channel_mgr.create_channel("status-empty", "", "public")
-        _seed_channel_on_peer(carol, ch_hash, "status-empty", alice.identity.hash_hex)
-        _seed_channel_on_peer(bob, ch_hash, "status-empty", alice.identity.hash_hex)
+        ch_hash = mirrored_invite_channel("status-empty", alice, bob, carol)
 
         bob.sync_mgr._send_sync_request(carol.identity.hash_hex, ch_hash, time.time())
 
@@ -257,9 +276,7 @@ class TestSyncManagerIntegration:
         bob = peer_factory("bob")
         carol = peer_factory("carol")
 
-        ch_hash = alice.channel_mgr.create_channel("status-count", "", "public")
-        _seed_channel_on_peer(carol, ch_hash, "status-count", alice.identity.hash_hex)
-        _seed_channel_on_peer(bob, ch_hash, "status-count", alice.identity.hash_hex)
+        ch_hash = mirrored_invite_channel("status-count", alice, bob, carol)
 
         window_start = time.time()
         for i in range(3):
@@ -282,8 +299,7 @@ class TestSyncManagerIntegration:
         alice = peer_factory("alice")
         bob = peer_factory("bob")
 
-        ch_hash = alice.channel_mgr.create_channel("status-waiting", "", "public")
-        _seed_channel_on_peer(bob, ch_hash, "status-waiting", alice.identity.hash_hex)
+        ch_hash = mirrored_invite_channel("status-waiting", alice, bob)
 
         unknown_peer = "de" * 16
         sent = bob.sync_mgr._send_sync_request(unknown_peer, ch_hash, time.time())
@@ -299,8 +315,7 @@ class TestSyncManagerIntegration:
         alice = peer_factory("alice")
         bob = peer_factory("bob")
 
-        ch_hash = alice.channel_mgr.create_channel("status-unsent", "", "public")
-        _seed_channel_on_peer(bob, ch_hash, "status-unsent", alice.identity.hash_hex)
+        ch_hash = mirrored_invite_channel("status-unsent", alice, bob)
 
         unknown_peer = "de" * 16
         bob.sync_mgr._send_sync_request(unknown_peer, ch_hash, time.time())
@@ -319,9 +334,7 @@ class TestSyncManagerIntegration:
         bob = peer_factory("bob")
         carol = peer_factory("carol")
 
-        ch_hash = alice.channel_mgr.create_channel("status-gap", "", "public")
-        _seed_channel_on_peer(carol, ch_hash, "status-gap", alice.identity.hash_hex)
-        _seed_channel_on_peer(bob, ch_hash, "status-gap", alice.identity.hash_hex)
+        ch_hash = mirrored_invite_channel("status-gap", alice, bob, carol)
 
         msg_id = _insert_message(alice.storage, ch_hash, alice.identity.hash_hex,
                                  "Bob will miss this")

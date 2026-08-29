@@ -86,11 +86,11 @@ def a4(env):
     return {}
 
 
-@scenario("public5", "A late public-channel joiner has no sync trigger", kind=PROBE)
+@scenario("public5", "A late public-channel joiner gets no history, ever")
 def a5(env):
-    """Matrix row public5. join_public_channel() only subscribes -- no
-    channel_joined callback fires, so nothing requests history. Measures how
-    long backfill actually takes and what triggers it."""
+    """Public channels are live-only: joining subscribes to what comes next
+    and nothing more. The pre-join backlog must never arrive, and the sync
+    tracker must say why -- the channel is live, not stuck unsynced."""
     a, b, c, d = env.peers("A", "B", "C", "D")
     ch = a.create_channel("a5-public", "public")
     _join_all([b, c], ch, a)
@@ -102,27 +102,24 @@ def a5(env):
 
     _await_discovery([d], ch)
     d.join(ch)
-    immediate = len(d.contents(ch))
+    if d.contents(ch):
+        raise ScenarioFailure("history was present the instant D joined")
 
-    arrived, elapsed = settle(lambda: d.contents(ch) == backlog,
-                              "D to backfill the pre-join history", BACKFILL_TIMEOUT)
-    notes = {
-        "held_at_join": immediate,
-        "backfilled": arrived,
-        "backfill_secs": round(elapsed, 1) if arrived else None,
-        "final_count": len(d.contents(ch)),
-        "sync_state": d.sync_status(ch).get("state"),
-    }
-    if immediate > 0:
-        notes["surprise"] = "history was present the instant D joined"
-    return notes
+    hold_for(lambda: d.contents(ch) == set(),
+             "the late joiner to stay without pre-join history", 30.0)
+    state = d.sync_status(ch).get("state")
+    if state != "live":
+        raise ScenarioFailure(
+            f"a public channel reports sync state {state!r}, expected 'live'"
+        )
+    return {"backlog_held_back": len(backlog), "sync_state": state}
 
 
-@scenario("public6", "full_sync makes no difference on a public channel", kind=PROBE)
+@scenario("public6", "full_sync makes no difference on a public channel")
 def a6(env):
-    """Matrix row public6. Public channels never open tenure, so the tenure filter
-    full_sync gates never engages. Runs both channels side by side; the
-    finding is whether they differ."""
+    """A public channel serves no history at all, so a full_sync grant there
+    is inert: both channels hold back the backlog from a late joiner. Runs
+    both side by side; the failure mode is either one backfilling."""
     a, d = env.peers("A", "D")
     plain = a.create_channel("a6-plain", "public")
     granted = a.create_channel("a6-fullsync", "public")
@@ -141,21 +138,10 @@ def a6(env):
     d.join(plain)
     d.join(granted)
 
-    got_plain, plain_secs = settle(lambda: d.contents(plain) == backlog,
-                                   "D to backfill the plain channel", BACKFILL_TIMEOUT)
-    got_granted, granted_secs = settle(lambda: d.contents(granted) == backlog,
-                                       "D to backfill the full_sync channel",
-                                       BACKFILL_TIMEOUT)
-    notes = {
-        "member_perms_granted": a.permissions(granted)["member"],
-        "plain_backfilled": got_plain,
-        "plain_secs": round(plain_secs, 1) if got_plain else None,
-        "fullsync_backfilled": got_granted,
-        "fullsync_secs": round(granted_secs, 1) if got_granted else None,
-    }
-    if got_plain != got_granted:
-        notes["surprise"] = "full_sync changed the outcome on a public channel"
-    return notes
+    hold_for(lambda: d.contents(plain) == set() and d.contents(granted) == set(),
+             "both public channels to hold back their backlog", 30.0)
+    return {"member_perms_granted": a.permissions(granted)["member"],
+            "backlog_held_back": len(backlog)}
 
 
 @scenario("public7", "Leaving stops delivery without erasing received history")
@@ -308,10 +294,7 @@ def a11(env):
     wait_until(lambda: "after-return" in c.contents(ch),
                "C to receive it too", DISCOVERY_TIMEOUT)
 
-    # Public history is served to any subscriber (public6), so the message B
-    # missed may follow by backfill; that is a property to record, not the
-    # subject.
-    backfilled, secs = settle(lambda: "while-away" in b.contents(ch),
-                              "the missed message to backfill", 45.0)
-    return {"missed_backfilled": backfilled,
-            "backfill_secs": round(secs, 1) if backfilled else None}
+    # Live-only: the message B missed while away must never follow it back.
+    hold_for(lambda: "while-away" not in b.contents(ch),
+             "the missed message to stay missed on a live-only channel", 30.0)
+    return {"missed_stayed_missed": True}

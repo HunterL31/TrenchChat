@@ -119,13 +119,13 @@ currently implies, and the scenario exists to confirm it.
 | public2 | A,B | A creates; B joins | A's subscriber set = {B}; B receives the signed subscriber list; B's roster view includes A |
 | public3 | A,B,C,D | A creates; B, C join; A sends 3 | B and C hold all 3; D holds none |
 | public4 | A,B,C,D | B (subscriber, not owner) sends 1 | A and C hold it; D does not — recipients are the subscriber set plus self |
-| public5 | A,B,C,D | A creates; B, C join; A sends 5; **then** D joins | ⚠ **Confirmed.** D holds 0 at the instant it joins — public join calls `subscription_mgr.subscribe()` only, no `channel_joined` callback, so nothing requests sync. Backfill lands on A's next peer announce: measured 1.0s and 9.1s on two runs, tracking the 10s heartbeat phase. Scales to a 60s worst case in the real app |
-| public6 | A,B,C,D | A6a: A creates public, grants `full_sync` to member, sends 5, D joins. A6b: identical without `full_sync` | ⚠ **Confirmed.** Both channels backfilled all 5 to D, with and without the grant. Public channels never open tenure, so `has_any_tenure` is false and tenure filtering — the only thing `full_sync` gates — never engages |
+| public5 | A,B,C,D | A creates; B, C join; A sends 5; **then** D joins | ✅ D holds 0 at join and **stays at 0** over a 30s hold: public channels are live-only, nothing backfills, and D's sync state reads `live`. Strict since the live-only change (was a probe recording 1.0–9.1s announce-driven backfill) |
+| public6 | A,B,C,D | A6a: A creates public, grants `full_sync` to member, sends 5, D joins. A6b: identical without `full_sync` | ✅ Neither channel backfills anything over a 30s hold — a public channel serves no history at all, so the grant is inert (and the UI no longer offers it there). Strict since the live-only change |
 | public7 | A,B,C | B leaves; A sends 2 | A removes B from subscribers; C holds both; B holds neither |
 | public8 | A,B,C,D | All 4 joined and the subscriber set has converged; each sends 2 in turn | All four converge on 9 messages (a seed plus 8). Roster settle measured at 0.5–4.0s |
 | public9 | A,B,C,D | A (owner) leaves its own channel, then C sends | C's message still reaches B and D — the subscriber lists they already hold are unaffected by the owner leaving. The departed owner does not receive it and stays unsubscribed |
 | public10 | A,B,C,D | B, C join; C goes offline; D joins (C misses the broadcast); C returns | C learns about D and its next send reaches D. Recovery measured at 0.5s, 1.0s and 18.1s across runs — LXMF's own retry backoff, not an application-level repair |
-| public11 | A,B,C | B leaves; A sends; B rejoins; A sends again | ✅ The round trip public7 stops halfway through: the post-return send reaches B again, and the message B missed while away followed by backfill on every run (2.0–8.1s). 4/4 runs |
+| public11 | A,B,C | B leaves; A sends; B rejoins; A sends again | ✅ The post-return send reaches B again, and the message B missed while away **stays missed** over a 30s hold — live-only channels never backfill. Re-specified with the live-only change (previously it backfilled in 2.0–8.1s) |
 
 ### `invite` — Invite-only channels and membership
 
@@ -194,14 +194,20 @@ grants themselves.
 The reason this environment exists. All three sync mechanisms only run on a
 degraded or interrupted link.
 
-| ID | Peers | Actions | Expected result |
-|---|---|---|---|
-Built: sync1–sync5, sync7–sync11. C6 (deep-sync cooldown) and C12 (a 7-day-old window)
+**Re-specified for live-only public channels**: hints and timestamp sync now
+serve invite-only channels only, so sync2–sync5, sync7, sync10 and sync11 run
+on invite-only channels (members admitted before the traffic under test, so
+tenure covers it without `full_sync`). sync1 stays public — it exercises the
+sender's own pending retry, the one mechanism a public channel keeps — and
+sync12 asserts the live-only contract itself. The timings below predate the
+conversion and stand until the family is re-run.
+
+Built: sync1–sync5, sync7–sync12. C6 (deep-sync cooldown) and C13 (a 7-day-old window)
 need control of the clock and stay deferred.
 
 | ID | Peers | Actions | Expected result |
 |---|---|---|---|
-| sync1 | A,B,C | B goes offline (link drop); A sends 3; B goes online | ✅ B receives all 3, in 1.0–5.0s |
+| sync1 | A,B,C | B goes offline (link drop); A sends 3; B goes online | ✅ B receives all 3 — from its sender's pending retry; a public channel has no other path. 17.1s post-conversion (1.0–5.0s when hints/sync also served it) |
 | sync2 | A,B,C,D | B offline; A sends 3; A offline; B online (only C, D reachable) | ✅ **Fixed**, after three causes. 12/12 after the last one; recovery is 26–41s when the first ask is served and ~120s when it takes a retry. Was failing half of all runs. See below |
 | sync3 | A,B,C | Same as sync1 but B is **killed and restarted** instead of link-dropped | ✅ B ends with its own history plus what it missed, in 3.5s, via the cold path |
 | sync4 | A,D | D offline; A sends 60 (> `MAX_RESPONSE_MESSAGES` = 50); D online | ✅ D ends with all 60 and `state == synced`, in 18.1s — the truncated batch does chain its follow-up |
@@ -211,7 +217,8 @@ need control of the clock and stay deferred.
 | sync8 | A,D | D joins without `full_sync`; A grants `full_sync` to member | ✅ The backlog arrives 3.0s after the grant, without D restarting |
 | sync9 | A,B,C | A kicks C; C requests sync | ✅ C's transcript stays frozen at the kick |
 | sync11 | A,B,C,D | All 4 offline simultaneously, each sends 2 locally, all come online | ❌ **Still fails.** One watermark defect found and fixed (below); the scenario itself reconciles only sometimes. 1 pass in 5 runs |
-| C12 | A,B | B offline past `SYNC_WINDOW_SECS` (7 days, clock-shifted); B online | Deferred — needs clock control |
+| sync12 | A,B,C | **Public** channel; B offline; A sends 3; A offline; B online | ✅ B ends with nothing over a 30s hold — no third party serves a public channel's history — and its sync state reads `live`. New with the live-only change, 54s |
+| C13 | A,B | B offline past `SYNC_WINDOW_SECS` (7 days, clock-shifted); B online | Deferred — needs clock control |
 
 #### sync11 — still open
 
@@ -276,7 +283,7 @@ the first ask is served and ~120s when it takes a retry.
 | links3 | A,B,C,D | A broadband, B `satellite`, C `lora_fast`, D `serial`; each sends 1 | ✅ Converged in 4.5s across four differently-shaped links |
 | links4 | A,B | B on `lossy`, dropped offline mid-burst | ✅ Caught up all 10 in 28.2s |
 | links5 | A,B,C,D | All four on `lora_fast` (5.5 kbps) | ✅ Converged in 12.6s |
-| links6 | A,B,C | B on `lossy`; A sends 15 — **the link never drops** | ✅ Converged in 19.6s. The README's stated reason for the lossy profile: retry and hints reached the way a bad radio does, not by killing a link |
+| links6 | A,B,C | B on `lossy`; A sends 15 on an **invite-only** channel — **the link never drops** | ✅ Converged in 19.6s (measured pre-conversion). The README's stated reason for the lossy profile: retry and hints reached the way a bad radio does, not by killing a link. Invite-only since the live-only change, because hints and sync no longer serve public channels |
 | links7 | A,B | B on `packet_radio` (AX.25 1200 baud, 5% loss) | ✅ Three messages in 10.1s. The worst link the app claims to support for text |
 | links8 | A,B | B on `lora_long` (SF10, 1.0 kbps) | ✅ Three messages in 11.1s |
 | links9 | A,B | `custom` profile with explicit bitrate/latency/jitter/loss | ✅ Applied exactly as asked (32 kbps · 120±20ms · 8% loss); converged in 2.0s |
@@ -437,8 +444,8 @@ loses honest history with nothing but a log line to show for it.
 
 | ID | Peers | Actions | Expected result |
 |---|---|---|---|
-| integrity1 | A,B,C,D | C offline; A sends 2; A's process killed; C online and backfills from B | ✅ C accepts and correctly attributes history whose author is gone, in 11.1s. A relay's own signature is not what C checks |
-| integrity2 | A,B,C,D | B owns the channel; A sends, then dies; D wiped to a **new identity**, joins and backfills | ✅ **Was a confirmed gap, now fixed.** As a probe it measured 4.0s for the live owner's message and *never* for the dead author's. Responders now send each batch's author keys, and D holds both. Strict since |
+| integrity1 | A,B,C,D | C offline (invite-only channel); A sends 2; A's process killed; C online and backfills from B | ✅ C accepts and correctly attributes history whose author is gone, in 11.1s (measured pre-conversion). A relay's own signature is not what C checks. Invite-only since the live-only change |
+| integrity2 | A,B,C,D | B owns an invite-only channel with member `full_sync`; A sends, then dies; D wiped to a **new identity**, re-invited, backfills | ✅ **Was a confirmed gap, now fixed.** As a probe it measured 4.0s for the live owner's message and *never* for the dead author's. Responders now send each batch's author keys, and D holds both. Strict since. Invite-only + `full_sync` since the live-only change (a wiped identity has no tenure before its re-invite) |
 | integrity3 | A,B,C,D | A sends a real 64×64 JPEG | ✅ All three receivers hold it with `image_stripped: false` and can fetch the bytes. The signature covers the attachment, so the two travel together |
 | integrity4 | A,B,C,D | A sends a 68-byte PNG declaring 20000×20000 (400M pixels) | ✅ Delivered as text with no attachment on all four. The sender's own API is the gate: `prepare_image` fails closed rather than forwarding bytes it could not re-encode |
 
@@ -641,6 +648,7 @@ Everything the matrix turned up, across all ten families.
 | **The equal-version tiebreak compared against a sentinel** — it re-derives the *stored* document's signer rather than trusting its signature map, but rebuilt that document without `joined_at`, `departed` or `channels`. The payload no longer matched the signature, nothing validated, and the `0xff…` fallback lost every tie — so any equal-version document from a trusted signer was re-applied over the one already held | Fixed: every signed field is carried across, present-or-absent as stored. Latent while equal-version documents were rare; the membership resync made them routine and servers4 went 0/5. 5/5 after the fix. Regression tests in `tests/test_invites.py` |
 | **A message from an unaccepted sender vanished** — dropped where the gate refused it, while LXMF had already proved the packet, so the sender's client showed it delivered. A client speaking only plain LXMF cannot send `MT_FRIEND_REQUEST`, so messaging was its only way to ask and it had no way at all | Fixed: the message is held as a request carrying its text, shown wherever a friend request is, and filed into the conversation on accept. The gate is untouched — holding grants nothing. Bounded where the row is written, because this path is deliberately exempt from the router's control throttle. interop4 fails without it; `tests/test_adversarial.py::TestAdversarialMessageRequests` pins the bounds |
 | **Rejections were silent** — `_validate_document` returned `None` with no log for a failed signature or an unrecallable signer, and the auto-join block aborted without one for a name mismatch or a missing channel name. From outside, a rejected document is indistinguishable from one never sent | Fixed: each of those paths logs a warning naming the scope and the reason |
+| **public5 / public6** — a public-channel join fired no sync request but backfill still arrived on the next announce, and `full_sync` had no effect there while any subscriber could pull full history | **Resolved by design** rather than by fixing the trigger: public channels are now live-only (no hints, no sync, no backfill — `docs/offline-sync.md`), which removes both the inconsistent backfill and the history-scraping property `full_sync` could not gate. Both scenarios rewritten strict against the new contract; the affected sync scenarios moved to invite-only channels |
 
 ### Open
 
@@ -652,8 +660,6 @@ Everything the matrix turned up, across all ten families.
 | **invite17** — leaving an invite-only channel propagates to nobody: `leave_channel()` unsubscribes locally and notifies only the creator's *subscriber* set, and no member-list update is published | **Confirmed** (probe). Every roster — the leaver's own included — keeps the departed member, and senders keep addressing it; only the leaver's `is_subscribed` gate goes quiet. A UI reading the roster shows a ghost member indefinitely. A self-removal document would hit the same trusted-signer wall as invite16, so the fix likely belongs to the owner or an admin noticing the goodbye |
 | **voice11** — `loss_pct`, the metric `docs/voice.md` designates for the UI's per-peer quality indicator, cannot see a starved link. It counts gaps between frames that arrived, so a link delivering 8% of the audio reports ~6% loss, and `link_state` still reads `streaming` | **Confirmed** across three runs. Delivery ratio (frames received against ~48/s) is the signal that shows it; `frame_stats()` has the raw counts but exposes no rate |
 | **voice5 / voice4** — a voice participant whose link drops shows `connecting` indefinitely rather than `unreachable`, and one whose process dies lingers for the roster TTL — 180s in production | **Confirmed.** Neither is wrong, but a UI showing "connecting…" for three minutes after someone crashed is not the honest state `docs/voice.md` asks for |
-| **public5** — a public-channel join fires no sync request; backfill waits on the next peer announce | **Confirmed, and deliberately left.** 0 messages at join, backfill at 1.0s / 9.1s tracking the 10s heartbeat; up to 60s in the real client, and at SF7 it never arrived at all (see the LoRa pass). Deferred by decision — public-channel behaviour is being left alone for now |
-| **public6** — `full_sync` has no effect on public channels; any subscriber can pull full history | **Confirmed, and deliberately left.** Identical backfill with and without the grant, and the UI offers the toggle regardless — so it reads as a privacy control that is not one. Deferred by decision, same as public5 |
 
 ### Predictions the runs refuted
 
@@ -708,13 +714,20 @@ How to run it, when a scenario is the right tool, and how to add one live in
 
 ## Status
 
-All twelve families built and run: **98 scenarios, 76 strict and 22 probes.**
+⚠ **The live-only public-channel change re-specified part of this suite and
+the affected families have not been re-run since.** sync2–5/7/10/11, links6,
+integrity1/2 moved to invite-only channels; public5/6/11 and the new sync12
+now assert that public channels never backfill. Rows touched by the change
+say so; every measured timing on them predates it. Re-run `public`, `sync`,
+`links` and `integrity` before trusting those rows again.
+
+All twelve families built and run: **99 scenarios, 79 strict and 20 probes.**
 
 | Family | Scenarios | Result |
 |---|---|---|
-| `public` — public channels | 11 (7 strict, 4 probes) | All passing, three consecutive clean runs |
+| `public` — public channels | 11 (9 strict, 2 probes) | Was all passing over three consecutive clean runs; public5, public6 (now strict) and public11 re-specified for live-only, pending a re-run |
 | `invite` — invite-only and membership | 20 (17 strict, 3 probes) | All passing; invite11 rewritten to the narrowed `kick` rule; invite16 and invite17 (probes) record the ineffective member `invite` grant and the invisible leave; invite19 and invite20 each found a real defect, 5/5 after the fix |
-| `sync` — offline and sync | 10 (9 strict, 1 probe) | 8/9 — **sync11 fails**, 2 passes in 7 runs. sync2 fixed, 12/12 |
+| `sync` — offline and sync | 11 (10 strict, 1 probe) | 8/9 before the live-only conversion — **sync11 fails**, 2 passes in 7 runs; sync2 fixed, 12/12. sync2–5/7/10/11 now invite-only and sync12 new, pending a re-run |
 | `links` — degraded links | 10 (5 strict, 5 probes) | All passing, on genuinely shaped links |
 | `servers` — servers | 8 (7 strict, 1 probe) | All passing; servers7 is the reported channel-invite defect, 5/5 after the fix |
 | `social` — reactions, presence, identity | 10 (9 strict, 1 probe) | All passing; social3's prediction refuted |
@@ -725,10 +738,11 @@ All twelve families built and run: **98 scenarios, 76 strict and 22 probes.**
 | `nomad` — page browsing and hosting | 3 (2 strict, 1 probe) | All passing, 4/4 runs each; nomad3 confirmed bounded offline failure and recovery |
 | `interop` — direct messages with other LXMF clients | 4 (4 strict) | All passing against a real bare RNS+LXMF client; interop4 found a real gap, 5/5 after the fix |
 
-**75 of 76 strict scenarios pass.** The one failure is a real defect, left
-strict and failing on purpose, so `--family sync` exits non-zero until it is
-resolved: sync11, intermittently (2 passes in 7). invite11 is now passing on
-the narrowed `kick` rule described above.
+**75 of 76 strict scenarios passed as of the last full run**, which predates
+the live-only conversion. The one failure is a real defect, left strict and
+failing on purpose, so `--family sync` exits non-zero until it is resolved:
+sync11, intermittently (2 passes in 7). invite11 is now passing on the
+narrowed `kick` rule described above.
 
 Re-run against `main` after the August security audit merged (PR 52): the suite
 is unchanged at 53/55, so the audit regressed nothing here. Its one effect on
@@ -752,3 +766,5 @@ Remaining work:
    message from a peer whose clock runs fast, and nothing tests it.
 6. Re-run the LoRa pass: it predates the `api` and `integrity` families and all
    five fixes, several of which are timing-sensitive by construction.
+7. Re-run `public`, `sync`, `links` and `integrity` after the live-only
+   public-channel change and replace the pre-conversion timings above.

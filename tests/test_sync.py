@@ -6,33 +6,37 @@ Covers:
   - Sync request / sync response (hint-targeted and timestamp fallback)
   - flush_pending
   - Startup sync via request_sync_all
+  - Public (open-join) channels being live-only: no hints, no sync
+
+Hints and sync only serve invite-only channels, so the sync-mechanics tests
+run on one, usually built with helpers.mirrored_invite_channel. Public
+channels appear only where their own live-only contract, or the pending
+retry that still applies to them, is under test.
 """
 
+import hashlib
 import time
 
 import pytest
 
 from tests.helpers import (
+    mirrored_invite_channel,
+    seed_channel_on_peer,
     sign_as,
     wait_for,
     wait_for_member,
     wait_for_message,
 )
 from trenchchat.core.messaging import _compute_message_id
+from trenchchat.core.permissions import (
+    FULL_SYNC, PRESET_PRIVATE, ROLE_ADMIN, ROLE_MEMBER, ROLE_OWNER, SEND_MESSAGE,
+)
 from trenchchat.core.sync import MAX_REACTIONS_PER_MESSAGE
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-def _seed_channel_on_peer(peer, ch_hash, channel_name, creator_hash,
-                           access_mode="public"):
-    """Give a peer knowledge of a channel and subscribe them to it."""
-    peer.storage.upsert_channel(ch_hash, channel_name, "", creator_hash,
-                                access_mode, time.time())
-    peer.storage.subscribe(ch_hash)
-
 
 def _insert_message(storage, ch_hash, sender_hex, content, ts=None):
     """Insert a message directly into storage and return its message_id."""
@@ -67,7 +71,7 @@ class TestMissedDeliveryHints:
         bob = peer_factory("bob")
         carol = peer_factory("carol")
 
-        ch_hash = alice.channel_mgr.create_channel("hint-test", "", "public")
+        ch_hash = mirrored_invite_channel("hint-test", alice, bob, carol)
 
         ts = time.time()
         msg_id = _insert_message(alice.storage, ch_hash, alice.identity.hash_hex,
@@ -94,8 +98,7 @@ class TestMissedDeliveryHints:
         bob = peer_factory("bob")
         carol = peer_factory("carol")
 
-        ch_hash = alice.channel_mgr.create_channel("broadcast-hint", "", "public")
-        _seed_channel_on_peer(carol, ch_hash, "broadcast-hint", alice.identity.hash_hex)
+        ch_hash = mirrored_invite_channel("broadcast-hint", alice, bob, carol)
 
         ts = time.time()
         msg_id = _insert_message(alice.storage, ch_hash, alice.identity.hash_hex,
@@ -130,9 +133,7 @@ class TestSyncRequestResponse:
         bob = peer_factory("bob")
         carol = peer_factory("carol")
 
-        ch_hash = alice.channel_mgr.create_channel("sync-test", "", "public")
-        _seed_channel_on_peer(carol, ch_hash, "sync-test", alice.identity.hash_hex)
-        _seed_channel_on_peer(bob, ch_hash, "sync-test", alice.identity.hash_hex)
+        ch_hash = mirrored_invite_channel("sync-test", alice, bob, carol)
 
         ts = time.time()
         content = "Missed by Bob"
@@ -157,9 +158,7 @@ class TestSyncRequestResponse:
         bob = peer_factory("bob")
         carol = peer_factory("carol")
 
-        ch_hash = alice.channel_mgr.create_channel("fallback-sync", "", "public")
-        _seed_channel_on_peer(carol, ch_hash, "fallback-sync", alice.identity.hash_hex)
-        _seed_channel_on_peer(bob, ch_hash, "fallback-sync", alice.identity.hash_hex)
+        ch_hash = mirrored_invite_channel("fallback-sync", alice, bob, carol)
 
         window_start = time.time()
         msg_ids = []
@@ -190,9 +189,7 @@ class TestSyncRequestResponse:
         bob = peer_factory("bob")
         carol = peer_factory("carol")
 
-        ch_hash = alice.channel_mgr.create_channel("capped-sync", "", "public")
-        _seed_channel_on_peer(carol, ch_hash, "capped-sync", alice.identity.hash_hex)
-        _seed_channel_on_peer(bob, ch_hash, "capped-sync", alice.identity.hash_hex)
+        ch_hash = mirrored_invite_channel("capped-sync", alice, bob, carol)
 
         window_start = time.time()
         total = MAX_RESPONSE_MESSAGES + 10
@@ -243,9 +240,7 @@ class TestSyncRequestResponse:
         bob = peer_factory("bob")
         carol = peer_factory("carol")
 
-        ch_hash = alice.channel_mgr.create_channel("continue-sync", "", "public")
-        _seed_channel_on_peer(carol, ch_hash, "continue-sync", alice.identity.hash_hex)
-        _seed_channel_on_peer(bob, ch_hash, "continue-sync", alice.identity.hash_hex)
+        ch_hash = mirrored_invite_channel("continue-sync", alice, bob, carol)
 
         window_start = time.time()
         total = MAX_RESPONSE_MESSAGES + 10
@@ -283,9 +278,7 @@ class TestSyncRequestResponse:
         bob = peer_factory("bob")
         carol = peer_factory("carol")
 
-        ch_hash = alice.channel_mgr.create_channel("budget-sync", "", "public")
-        _seed_channel_on_peer(carol, ch_hash, "budget-sync", alice.identity.hash_hex)
-        _seed_channel_on_peer(bob, ch_hash, "budget-sync", alice.identity.hash_hex)
+        ch_hash = mirrored_invite_channel("budget-sync", alice, bob, carol)
 
         requests = []
 
@@ -345,9 +338,7 @@ class TestSyncRequestResponse:
         bob = peer_factory("bob")
         carol = peer_factory("carol")
 
-        ch_hash = alice.channel_mgr.create_channel("ack-sync", "", "public")
-        _seed_channel_on_peer(carol, ch_hash, "ack-sync", alice.identity.hash_hex)
-        _seed_channel_on_peer(bob, ch_hash, "ack-sync", alice.identity.hash_hex)
+        ch_hash = mirrored_invite_channel("ack-sync", alice, bob, carol)
 
         responses = []
         original = carol.sync_mgr._send_raw
@@ -376,7 +367,7 @@ class TestSyncRequestResponse:
         carol = peer_factory("carol")
 
         ch_hash = alice.channel_mgr.create_channel("closed-ack", "", "invite")
-        _seed_channel_on_peer(carol, ch_hash, "closed-ack", alice.identity.hash_hex,
+        seed_channel_on_peer(carol, ch_hash, "closed-ack", alice.identity.hash_hex,
                               access_mode="invite")
 
         responses = []
@@ -403,9 +394,7 @@ class TestSyncRequestResponse:
         bob = peer_factory("bob")
         carol = peer_factory("carol")
 
-        ch_hash = alice.channel_mgr.create_channel("idem-sync", "", "public")
-        _seed_channel_on_peer(carol, ch_hash, "idem-sync", alice.identity.hash_hex)
-        _seed_channel_on_peer(bob, ch_hash, "idem-sync", alice.identity.hash_hex)
+        ch_hash = mirrored_invite_channel("idem-sync", alice, bob, carol)
 
         window_start = time.time()
         ts = window_start + 1
@@ -430,9 +419,7 @@ class TestSyncRequestResponse:
         bob = peer_factory("bob")
         carol = peer_factory("carol")
 
-        ch_hash = alice.channel_mgr.create_channel("clear-hints", "", "public")
-        _seed_channel_on_peer(carol, ch_hash, "clear-hints", alice.identity.hash_hex)
-        _seed_channel_on_peer(bob, ch_hash, "clear-hints", alice.identity.hash_hex)
+        ch_hash = mirrored_invite_channel("clear-hints", alice, bob, carol)
 
         ts = time.time()
         msg_id = _insert_message(carol.storage, ch_hash, alice.identity.hash_hex,
@@ -459,9 +446,7 @@ class TestSyncRequestResponse:
         bob = peer_factory("bob")
         carol = peer_factory("carol")
 
-        ch_hash = alice.channel_mgr.create_channel("hint-shadow", "", "public")
-        _seed_channel_on_peer(carol, ch_hash, "hint-shadow", alice.identity.hash_hex)
-        _seed_channel_on_peer(bob, ch_hash, "hint-shadow", alice.identity.hash_hex)
+        ch_hash = mirrored_invite_channel("hint-shadow", alice, bob, carol)
 
         ts = time.time()
         carol.storage.record_missed_delivery(ch_hash, bob.identity.hash_hex,
@@ -480,9 +465,7 @@ class TestSyncRequestResponse:
         bob = peer_factory("bob")
         carol = peer_factory("carol")
 
-        ch_hash = alice.channel_mgr.create_channel("hint-plus-sweep", "", "public")
-        _seed_channel_on_peer(carol, ch_hash, "hint-plus-sweep", alice.identity.hash_hex)
-        _seed_channel_on_peer(bob, ch_hash, "hint-plus-sweep", alice.identity.hash_hex)
+        ch_hash = mirrored_invite_channel("hint-plus-sweep", alice, bob, carol)
 
         ts = time.time()
         hinted_id = _insert_message(carol.storage, ch_hash, alice.identity.hash_hex,
@@ -510,9 +493,7 @@ class TestSyncRequestResponse:
         bob = peer_factory("bob")
         carol = peer_factory("carol")
 
-        ch_hash = alice.channel_mgr.create_channel("busy-hint", "", "public")
-        _seed_channel_on_peer(carol, ch_hash, "busy-hint", alice.identity.hash_hex)
-        _seed_channel_on_peer(bob, ch_hash, "busy-hint", alice.identity.hash_hex)
+        ch_hash = mirrored_invite_channel("busy-hint", alice, bob, carol)
 
         ts = time.time()
         for i in range(1, MAX_RESPONSE_MESSAGES + 10):
@@ -547,9 +528,7 @@ class TestSyncRequestResponse:
         bob = peer_factory("bob")
         carol = peer_factory("carol")
 
-        ch_hash = alice.channel_mgr.create_channel("hint-throttle", "", "public")
-        _seed_channel_on_peer(carol, ch_hash, "hint-throttle", alice.identity.hash_hex)
-        _seed_channel_on_peer(bob, ch_hash, "hint-throttle", alice.identity.hash_hex)
+        ch_hash = mirrored_invite_channel("hint-throttle", alice, bob, carol)
 
         ts = time.time()
         for i in range(1, MAX_RESPONSE_MESSAGES + 11):
@@ -593,9 +572,7 @@ class TestSyncRequestResponse:
         bob = peer_factory("bob")
         carol = peer_factory("carol")
 
-        ch_hash = alice.channel_mgr.create_channel("no-rewind", "", "public")
-        _seed_channel_on_peer(carol, ch_hash, "no-rewind", alice.identity.hash_hex)
-        _seed_channel_on_peer(bob, ch_hash, "no-rewind", alice.identity.hash_hex)
+        ch_hash = mirrored_invite_channel("no-rewind", alice, bob, carol)
 
         ts = time.time()
         old_id = _insert_message(carol.storage, ch_hash, alice.identity.hash_hex,
@@ -626,8 +603,7 @@ class TestDeepSyncRateLimit:
         alice = peer_factory("alice")
         bob = peer_factory("bob")
 
-        ch_hash = alice.channel_mgr.create_channel("deep-sync-ch", "", "public")
-        _seed_channel_on_peer(bob, ch_hash, "deep-sync-ch", alice.identity.hash_hex)
+        ch_hash = mirrored_invite_channel("deep-sync-ch", alice, bob)
 
         old_ts = time.time() - SYNC_WINDOW_SECS - 3600
         msg_id = _insert_message(alice.storage, ch_hash, alice.identity.hash_hex,
@@ -649,8 +625,7 @@ class TestDeepSyncRateLimit:
         alice = peer_factory("alice")
         bob = peer_factory("bob")
 
-        ch_hash = alice.channel_mgr.create_channel("deep-sync-throttle-ch", "", "public")
-        _seed_channel_on_peer(bob, ch_hash, "deep-sync-throttle-ch", alice.identity.hash_hex)
+        ch_hash = mirrored_invite_channel("deep-sync-throttle-ch", alice, bob)
 
         old_ts = time.time() - SYNC_WINDOW_SECS - 3600
         first_id = _insert_message(alice.storage, ch_hash, alice.identity.hash_hex,
@@ -677,8 +652,7 @@ class TestDeepSyncRateLimit:
         alice = peer_factory("alice")
         bob = peer_factory("bob")
 
-        ch_hash = alice.channel_mgr.create_channel("recent-sync-ch", "", "public")
-        _seed_channel_on_peer(bob, ch_hash, "recent-sync-ch", alice.identity.hash_hex)
+        ch_hash = mirrored_invite_channel("recent-sync-ch", alice, bob)
 
         window_start = time.time()
         first_id = _insert_message(alice.storage, ch_hash, alice.identity.hash_hex,
@@ -708,7 +682,8 @@ class TestFlushPending:
         bob = peer_factory("bob")
 
         ch_hash = alice.channel_mgr.create_channel("flush-manual", "", "public")
-        _seed_channel_on_peer(bob, ch_hash, "flush-manual", alice.identity.hash_hex)
+        seed_channel_on_peer(bob, ch_hash, "flush-manual", alice.identity.hash_hex,
+                              access_mode="public")
 
         ts = time.time()
         content = "Manually queued"
@@ -754,7 +729,8 @@ class TestFlushPending:
         bob = peer_factory("bob")
 
         ch_hash = alice.channel_mgr.create_channel("flush-clear", "", "public")
-        _seed_channel_on_peer(bob, ch_hash, "flush-clear", alice.identity.hash_hex)
+        seed_channel_on_peer(bob, ch_hash, "flush-clear", alice.identity.hash_hex,
+                              access_mode="public")
 
         ts = time.time()
         msg_id = _compute_message_id("Clear me", alice.identity.hash_hex, ts)
@@ -790,9 +766,7 @@ class TestFlushPending:
         bob   = peer_factory("bob")
         carol = peer_factory("carol")
 
-        ch_hash = alice.channel_mgr.create_channel("flush-fail-hint", "", "public")
-        _seed_channel_on_peer(bob,   ch_hash, "flush-fail-hint", alice.identity.hash_hex)
-        _seed_channel_on_peer(carol, ch_hash, "flush-fail-hint", alice.identity.hash_hex)
+        ch_hash = mirrored_invite_channel("flush-fail-hint", alice, bob, carol)
 
         ts = time.time()
         content = "Will fail on flush"
@@ -867,17 +841,13 @@ class TestStartupSync:
         bob = peer_factory("bob")
         carol = peer_factory("carol")
 
-        ch_hash = alice.channel_mgr.create_channel("startup-sync", "", "public")
-        _seed_channel_on_peer(carol, ch_hash, "startup-sync", alice.identity.hash_hex)
-        _seed_channel_on_peer(bob, ch_hash, "startup-sync", alice.identity.hash_hex)
+        ch_hash = mirrored_invite_channel("startup-sync", alice, bob, carol)
 
         window_start = time.time()
         ts = window_start + 1
         msg_id = _insert_message(carol.storage, ch_hash, alice.identity.hash_hex,
                                   "Startup sync message", ts)
 
-        # Manually add Carol as a known subscriber so sync_mgr can find her
-        bob.subscription_mgr._subscribers[ch_hash] = {carol.identity.hash_hex}
         bob.storage.update_last_sync(ch_hash)
 
         bob.sync_mgr.request_sync_all()
@@ -1083,11 +1053,6 @@ class TestSyncOnChannelJoin:
 # ---------------------------------------------------------------------------
 # Membership tenure — sync filtering
 # ---------------------------------------------------------------------------
-
-from trenchchat.core.permissions import (
-    FULL_SYNC, PRESET_PRIVATE, ROLE_ADMIN, ROLE_MEMBER, ROLE_OWNER, SEND_MESSAGE,
-)
-
 
 def _confirm_membership(peer, ch_hash, timeout: float = 5.0):
     """Confirm a membership an admin created for us without an invite.
@@ -1566,14 +1531,14 @@ class TestTenureSyncFiltering:
 
     def test_no_tenure_data_allows_sync_without_filtering(self, peer_factory):
         """
-        When no tenure data exists for a channel (e.g. open-join channel or
-        legacy data), sync proceeds without filtering — no false rejections.
+        When no tenure data exists for a channel (e.g. one bootstrapped
+        before tenure tracking), sync proceeds without filtering — no false
+        rejections.
         """
         alice = peer_factory("alice")
         bob = peer_factory("bob")
 
-        ch_hash = alice.channel_mgr.create_channel("no-tenure-sync", "", "public")
-        _seed_channel_on_peer(bob, ch_hash, "no-tenure-sync", alice.identity.hash_hex)
+        ch_hash = mirrored_invite_channel("no-tenure-sync", alice, bob)
 
         ts = time.time()
         msg_id = _insert_message(alice.storage, ch_hash, alice.identity.hash_hex,
@@ -1655,14 +1620,8 @@ class TestImageSync:
         alice = peer_factory("alice")
         bob = peer_factory("bob")
 
-        ch_hash = alice.channel_mgr.create_channel("img-sync", "", "public")
-        _seed_channel_on_peer(bob, ch_hash, "img-sync", alice.identity.hash_hex)
+        ch_hash = mirrored_invite_channel("img-sync", alice, bob)
 
-        # Timestamped after channel creation, not before -- create_channel()
-        # opens the owner's own tenure at creation time, so a message
-        # "sent" earlier than that would describe an impossible timeline
-        # (Alice sending in a channel before it existed) and gets correctly
-        # rejected as untenured by the sync tenure filter.
         ts = time.time()
         img_id = _compute_message_id("synced image", alice.identity.hash_hex, ts)
         # Insert directly with image data
@@ -1761,8 +1720,7 @@ class TestReactionSync:
         alice = peer_factory("alice")
         bob = peer_factory("bob")
 
-        ch_hash = alice.channel_mgr.create_channel("reaction-sync", "", "public")
-        _seed_channel_on_peer(bob, ch_hash, "reaction-sync", alice.identity.hash_hex)
+        ch_hash = mirrored_invite_channel("reaction-sync", alice, bob)
 
         ts = time.time()
         rx_id = _compute_message_id("reacted message", alice.identity.hash_hex, ts)
@@ -1930,10 +1888,7 @@ class TestAnnounceSyncCooldown:
     def _shared_channel(self, peer_factory):
         alice = peer_factory("alice")
         bob = peer_factory("bob")
-        ch_hash = alice.channel_mgr.create_channel("announce-cooldown", "", "public")
-        _seed_channel_on_peer(bob, ch_hash, "announce-cooldown",
-                              alice.identity.hash_hex)
-        bob.subscription_mgr._subscribers[ch_hash] = {alice.identity.hash_hex}
+        ch_hash = mirrored_invite_channel("announce-cooldown", alice, bob)
         return alice, bob, ch_hash
 
     def _spy_requests(self, peer):
@@ -1993,7 +1948,8 @@ class TestAnnounceSyncCooldown:
         """One peer's cooldown must not swallow another peer's first request."""
         alice, bob, ch_hash = self._shared_channel(peer_factory)
         carol = peer_factory("carol")
-        bob.subscription_mgr._subscribers[ch_hash].add(carol.identity.hash_hex)
+        bob.storage.upsert_member(ch_hash, carol.identity.hash_hex, "",
+                                  role=ROLE_MEMBER)
         seen = self._spy_requests(bob)
 
         bob.sync_mgr.on_peer_appeared(alice.identity.hash_hex)
@@ -2001,3 +1957,184 @@ class TestAnnounceSyncCooldown:
 
         assert seen.count((alice.identity.hash_hex, ch_hash)) == 1
         assert seen.count((carol.identity.hash_hex, ch_hash)) == 1
+
+
+# ---------------------------------------------------------------------------
+# Public channels are live-only
+# ---------------------------------------------------------------------------
+
+class TestPublicChannelsAreLiveOnly:
+    """An open-join channel keeps no shared history, like an IRC channel.
+
+    No sync request is ever sent for one, a request for one is refused, and
+    missed-delivery hints are neither recorded, broadcast, nor accepted.
+    Both sides enforce it, so a modified client can't pull or push history
+    through a peer that plays by the rules. Only the sender's own pending
+    retry (TestFlushPending) redelivers a missed message.
+    """
+
+    def test_no_sync_requests_go_out_for_a_public_channel(self, peer_factory):
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+
+        ch_hash = hashlib.sha256(b"live-no-requests").hexdigest()[:32]
+        seed_channel_on_peer(bob, ch_hash, "live-no-requests",
+                              alice.identity.hash_hex, access_mode="public")
+        bob.subscription_mgr._subscribers[ch_hash] = {alice.identity.hash_hex}
+
+        seen = []
+        bob.sync_mgr._send_sync_request = \
+            lambda *args, **kwargs: seen.append(args) or True
+
+        bob.sync_mgr.request_sync_all()
+        bob.sync_mgr.on_peer_appeared(alice.identity.hash_hex)
+        bob.sync_mgr._request_sync_for_channel(ch_hash, 0.0)
+
+        assert seen == [], \
+            "a sync request went out for a live-only public channel"
+
+    def test_sync_request_for_a_public_channel_is_refused(self, peer_factory):
+        """Core enforcement: any peer may participate in an open-join
+        channel, so only the live-only gate stands between a requester and
+        the transcript."""
+        from trenchchat.core.protocol import (
+            F_CHANNEL_HASH, F_MSG_TYPE, F_SYNC_WINDOW_START, MT_SYNC_REQUEST,
+        )
+
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+
+        ch_hash = alice.channel_mgr.create_channel("live-refuse", "", "public")
+        _insert_message(alice.storage, ch_hash, alice.identity.hash_hex,
+                        "not served to anyone", time.time())
+
+        sent = []
+        alice.sync_mgr._send_raw = lambda dest, fields: sent.append(fields) or True
+
+        alice.sync_mgr._handle_sync_request(
+            {
+                F_MSG_TYPE:          MT_SYNC_REQUEST,
+                F_CHANNEL_HASH:      bytes.fromhex(ch_hash),
+                F_SYNC_WINDOW_START: 0.0,
+            },
+            ch_hash,
+            bob.identity.hash_hex,
+        )
+
+        assert sent == [], \
+            "a sync request for a live-only public channel was answered"
+
+    def test_hints_are_not_recorded_or_broadcast_for_a_public_channel(
+        self, peer_factory
+    ):
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+        carol = peer_factory("carol")
+
+        ch_hash = alice.channel_mgr.create_channel("live-no-hints", "", "public")
+        ts = time.time()
+        msg_id = _insert_message(alice.storage, ch_hash,
+                                 alice.identity.hash_hex, "missed live", ts)
+
+        sent = []
+        alice.sync_mgr._send_raw = lambda dest, fields: sent.append(fields) or True
+
+        alice.sync_mgr._on_missed_delivery_event(
+            channel_hash_hex=ch_hash,
+            missed_peer_hex=bob.identity.hash_hex,
+            msg_id=msg_id,
+            subscriber_hashes=[alice.identity.hash_hex, bob.identity.hash_hex,
+                               carol.identity.hash_hex],
+        )
+
+        assert sent == [], "a hint was broadcast for a live-only public channel"
+        assert alice.storage.get_missed_message_ids(
+            ch_hash, bob.identity.hash_hex
+        ) == [], "a hint was recorded for a live-only public channel"
+
+    def test_inbound_hint_for_a_public_channel_is_dropped(self, peer_factory):
+        from trenchchat.core.protocol import (
+            F_MISSED_FOR, F_MISSED_MSG_ID, F_MSG_TYPE, MT_MISSED_DELIVERY,
+        )
+
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+        carol = peer_factory("carol")
+
+        ch_hash = hashlib.sha256(b"live-hint-drop").hexdigest()[:32]
+        seed_channel_on_peer(carol, ch_hash, "live-hint-drop",
+                              alice.identity.hash_hex, access_mode="public")
+
+        msg_id = _compute_message_id("anything", alice.identity.hash_hex, time.time())
+        carol.sync_mgr._handle_missed_delivery(
+            {
+                F_MSG_TYPE:      MT_MISSED_DELIVERY,
+                F_MISSED_FOR:    bob.identity.hash_hex,
+                F_MISSED_MSG_ID: msg_id,
+            },
+            ch_hash,
+            alice.identity.hash_hex,
+        )
+
+        assert carol.storage.get_missed_message_ids(
+            ch_hash, bob.identity.hash_hex
+        ) == [], "an inbound hint for a live-only public channel was recorded"
+
+    def test_sync_response_for_a_public_channel_is_dropped(self, peer_factory):
+        """Defence in depth: even a response answering a real outstanding
+        request is refused once the channel is open-join."""
+        from trenchchat.core.protocol import (
+            F_CHANNEL_HASH, F_MSG_TYPE, F_SYNC_MESSAGES, F_SYNC_TRUNCATED,
+            MT_SYNC_RESPONSE,
+        )
+
+        import msgpack
+
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+        carol = peer_factory("carol")
+
+        ch_hash = hashlib.sha256(b"live-response-drop").hexdigest()[:32]
+        seed_channel_on_peer(bob, ch_hash, "live-response-drop",
+                              alice.identity.hash_hex, access_mode="public")
+        bob.sync_mgr._record_pending_request(ch_hash, carol.identity.hash_hex, 0.0)
+
+        ts = time.time()
+        content = "history nobody asked to keep"
+        msg_id = _compute_message_id(content, alice.identity.hash_hex, ts)
+        bob.sync_mgr._handle_sync_response(
+            {
+                F_MSG_TYPE:       MT_SYNC_RESPONSE,
+                F_CHANNEL_HASH:   bytes.fromhex(ch_hash),
+                F_SYNC_MESSAGES:  msgpack.packb([{
+                    "sender_hash":  alice.identity.hash_hex,
+                    "sender_name":  "Alice",
+                    "content":      content,
+                    "timestamp":    ts,
+                    "message_id":   msg_id,
+                    "reply_to":     None,
+                    "last_seen_id": None,
+                    "author_sig":   sign_as(alice.identity.hash_hex, ch_hash,
+                                            msg_id, ts, content),
+                }], use_bin_type=True),
+                F_SYNC_TRUNCATED: False,
+            },
+            ch_hash,
+            carol.identity.hash_hex,
+        )
+
+        assert not bob.storage.message_exists(msg_id), \
+            "a sync response for a live-only public channel was accepted"
+
+    def test_public_channel_reports_live_sync_state(self, peer_factory):
+        from trenchchat.core.sync_status import SyncState
+
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+
+        public_ch = alice.channel_mgr.create_channel("live-state", "", "public")
+        assert alice.sync_mgr.status.get_state(public_ch) == SyncState.LIVE
+        assert alice.sync_mgr.status.get_status(public_ch)["state"] == "live"
+
+        invite_ch = mirrored_invite_channel("live-state-invite", alice, bob)
+        assert alice.sync_mgr.status.get_state(invite_ch) != SyncState.LIVE

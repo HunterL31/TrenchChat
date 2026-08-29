@@ -4,6 +4,8 @@ TrenchChat delivers messages by sending an individual LXMF packet directly to ea
 
 This document describes the three-layer mechanism that ensures an offline peer receives all missed messages when they reconnect.
 
+**Scope: mechanisms 2 and 3 serve invite-only channels only.** A public (open-join) channel is live-only, like an IRC channel — see "Public channels are live-only" below. Mechanism 1 applies to both kinds.
+
 ---
 
 ## The Problem
@@ -147,7 +149,7 @@ Fields:
 
 `last_sync_at` is updated whenever B successfully receives a sync response, so subsequent syncs only request the incremental gap.
 
-Any online peer that is subscribed (or is a member of an invite-only channel) responds. The responder's logic:
+Any online, subscribed member of the (invite-only) channel responds. The responder's logic:
 
 1. **Resolve hints**: `storage.get_missed_message_ids(channel_hash, B_hash)`, then look those ids up directly (`storage.get_messages_by_ids`). These name exact messages B missed, including ones older than B's window.
 2. **Sweep**: `_collect_permitted_rows(...)` from `window_start`, capped at 50.
@@ -187,6 +189,7 @@ Sync is otherwise invisible: a freshly joined channel shows an empty pane while 
 | `INCOMPLETE` | a known gap: a truncated batch, or a hint naming us |
 | `WAITING` | no reachable peer to sync from |
 | `UNKNOWN` | never attempted |
+| `LIVE` | open-join channel: live-only, never synced by design |
 
 `SYNCED` requires a peer to have actually answered — a silent peer never counts as up to date, which is what the empty response above exists to make possible.
 
@@ -257,9 +260,25 @@ Auto-joining a channel via an accepted invite fires an additional sync trigger, 
 
 ---
 
+## Public channels are live-only
+
+An open-join channel keeps no shared history: a message reaches whoever is present when it is sent, and nobody backfills it later. `SyncManager._live_only` gates every hint and sync path on both sides — no hint is recorded, broadcast, or accepted for an open-join channel, no sync request is ever sent for one, a request for one is refused, and a response for one is dropped. Enforcing it on the responder as well as the requester is what makes it hold against a modified client: a peer that plays by the rules never serves a public channel's transcript, whoever asks.
+
+Why this is the design rather than a gap:
+
+- An open-join channel has an unbounded, unauthenticated audience — anyone who hears the announce can subscribe. Serving history there turned every member into an archive that any stranger could walk backwards through by subscribing and asking; the tenure and `full_sync` controls that bound this on invite-only channels have nothing to attach to when there is no membership. That is also why `offered_permissions` never offers `full_sync` on an open-join channel.
+- The expectation matches the medium: like an IRC channel, what you see is what happened while you were around. Local scrollback of what a client itself witnessed is kept as before — the channel's messages are still stored and displayed; they are just never replayed to anyone else.
+- The mesh cost of sync — deep timestamp sweeps, hint broadcasts to every subscriber — scales with audience size, and public channels are exactly where the audience is unbounded.
+
+Mechanism 1 still applies: pending retry re-sends a delivery the sender already addressed to a subscriber of record, which is transport reliability rather than history. A peer that was briefly unreachable still gets the message from its sender; a peer whose sender gave up or restarted does not, and no third party fills the gap.
+
+`SyncStatusTracker` reports such a channel as `LIVE` rather than leaving it `UNKNOWN` forever — "not synced" is its permanent, correct condition, not a fault.
+
+---
+
 ## Access Control
 
-- **Public channels**: sync requests are honored for any peer who is subscribed (`storage.is_subscribed()`). No tenure tracking applies — membership there is a simple subscribe/unsubscribe flag, not a timestamped interval.
+- **Public channels**: not synced at all — see above.
 - **Invite-only channels**: access control is timestamp-based, not just membership-based, via the `membership_tenure` table (`channel_hash, identity_hash, joined_at, left_at`) and `storage.was_member_at(channel_hash, identity_hash, timestamp)`. Two independent checks apply to each candidate message in a sync response:
   1. **Sender tenure**: was the message's claimed author actually a member of the channel *at the message's timestamp*? Rejects messages from someone who has since been kicked, or whose claimed authorship predates them ever joining.
   2. **Requester tenure**: was the peer *asking* for sync actually a member at that timestamp? Off by default — see `full_sync` below — this is what stops a newly-invited member from using the sync protocol to backfill history from before they joined, the same way an invite-only channel's `members` table stops them from reading a live channel dump.

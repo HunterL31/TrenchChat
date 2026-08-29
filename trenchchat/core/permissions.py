@@ -138,8 +138,8 @@ def offered_permissions(perms: dict, role: str) -> tuple[str, ...]:
     """Permissions worth showing for *role* on a channel with *perms*.
 
     Narrower than grantable_to: FULL_SYNC decides how much history a member
-    may pull, and an open-join channel serves its history to any subscriber,
-    so offering the toggle there presents a privacy control that is not one.
+    may pull, and an open-join channel is live-only — it never serves
+    history at all — so the toggle would do nothing there.
     """
     offered = grantable_to(role)
     if is_open_join(perms):

@@ -23,7 +23,7 @@ See docs/testenv-scenarios.md for the matrix these implement.
 
 from asserts import diff_report, settle, wait_until, ScenarioFailure
 from flows import (
-    go_offline, go_online, public_channel, set_link_profile,
+    go_offline, go_online, invite_only_channel, public_channel, set_link_profile,
     BROADBAND, CUSTOM, LORA_FAST, LORA_LONG, LOSSY, PACKET_RADIO, SATELLITE, SERIAL,
 )
 from scenario import PROBE, scenario
@@ -158,9 +158,10 @@ def d6(env):
     """The README's stated reason for the lossy profile. The sync family reaches the
     retry and hint paths by dropping links and killing processes; this reaches
     them the way a real bad radio does -- the link stays nominally up the whole
-    time and simply loses 15% of frames."""
+    time and simply loses 15% of frames. Invite-only, because hints and sync
+    only serve invite-only channels now."""
     a, b, c = env.peers("A", "B", "C")
-    ch = public_channel(a, [b, c], "d6-public")
+    ch = invite_only_channel(a, [b, c], "d6-private")
 
     summary = set_link_profile(env, b, LOSSY)
     if not b.net_status()["online"]:

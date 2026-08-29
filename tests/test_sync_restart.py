@@ -7,13 +7,20 @@ managers over the same on-disk identity file and storage.db via a second
 peer_factory() call for the same name -- see _restart_peer() below.
 Everything SyncManager, Messaging and SubscriptionManager hold in memory is
 lost on restart; everything Storage persisted to SQLite survives.
+
+Sync only serves invite-only channels (public channels are live-only), so
+these tests run on one, built with helpers.mirrored_invite_channel -- the
+seeded channel, subscription and member rows live in the peer's SQLite DB
+and therefore survive a restart.
 """
 
 import time
 
 import msgpack
 
-from tests.helpers import sign_as, wait_for, wait_for_message, wait_for_subscriber
+from tests.helpers import (
+    mirrored_invite_channel, sign_as, wait_for, wait_for_message,
+)
 from trenchchat.core.messaging import _compute_message_id
 from trenchchat.core.permissions import PRESET_PRIVATE, ROLE_MEMBER, ROLE_OWNER, SEND_MESSAGE
 from trenchchat.core.protocol import (
@@ -29,14 +36,6 @@ from trenchchat.core.sync_status import SyncState
 # ---------------------------------------------------------------------------
 # Helpers (copied from tests/test_sync.py -- established pattern)
 # ---------------------------------------------------------------------------
-
-def _seed_channel_on_peer(peer, ch_hash, channel_name, creator_hash,
-                           access_mode="public"):
-    """Give a peer knowledge of a channel and subscribe them to it."""
-    peer.storage.upsert_channel(ch_hash, channel_name, "", creator_hash,
-                                access_mode, time.time())
-    peer.storage.subscribe(ch_hash)
-
 
 def _insert_message(storage, ch_hash, sender_hex, content, ts=None):
     """Insert a message directly into storage and return its message_id."""
@@ -94,9 +93,7 @@ class TestRestartMidBackfill:
         bob = peer_factory("bob")
         carol = peer_factory("carol")
 
-        ch_hash = alice.channel_mgr.create_channel("restart-midsync", "", "public")
-        _seed_channel_on_peer(carol, ch_hash, "restart-midsync", alice.identity.hash_hex)
-        _seed_channel_on_peer(bob, ch_hash, "restart-midsync", alice.identity.hash_hex)
+        ch_hash = mirrored_invite_channel("restart-midsync", alice, bob, carol)
 
         window_start = time.time()
         total = MAX_RESPONSE_MESSAGES + 10
@@ -169,9 +166,7 @@ class TestRestartLosesPendingQueue:
         bob = peer_factory("bob")
         carol = peer_factory("carol")
 
-        ch_hash = alice.channel_mgr.create_channel("restart-pending-queue", "", "public")
-        _seed_channel_on_peer(bob, ch_hash, "restart-pending-queue", alice.identity.hash_hex)
-        _seed_channel_on_peer(carol, ch_hash, "restart-pending-queue", alice.identity.hash_hex)
+        ch_hash = mirrored_invite_channel("restart-pending-queue", alice, bob, carol)
 
         ts = time.time()
         content = "queued for offline Bob"
@@ -221,9 +216,7 @@ class TestRestartLosesPendingQueue:
         alice = peer_factory("alice")
         bob = peer_factory("bob")
 
-        ch_hash = alice.channel_mgr.create_channel("restart-pending-sole-holder", "", "public")
-        _seed_channel_on_peer(bob, ch_hash, "restart-pending-sole-holder",
-                              alice.identity.hash_hex)
+        ch_hash = mirrored_invite_channel("restart-pending-sole-holder", alice, bob)
 
         ts = time.time()
         content = "only Alice has this"
@@ -265,30 +258,20 @@ class TestRestartLosesPendingQueue:
 
 
 # ---------------------------------------------------------------------------
-# C3 -- restart loses SubscriptionManager._subscribers (expected FAIL)
+# C3 -- restart must not lose peer discovery
 # ---------------------------------------------------------------------------
 
-class TestRestartLosesSubscriberSet:
-    def test_restart_drops_public_channel_peer_discovery(self, peer_factory):
-        """SubscriptionManager._subscribers is in-memory only. Before a
-        restart, Bob learns of Carol as a fellow public-channel subscriber
-        via Alice's (the owner's) subscriber_list broadcast. After Bob
-        restarts, _get_channel_peers should still be able to find Carol.
+class TestRestartKeepsPeerDiscovery:
+    def test_restart_keeps_channel_peer_discovery(self, peer_factory):
+        """_get_channel_peers reads the members table, which is persisted, so
+        Bob must still find Carol as a fellow member after a restart.
         """
         alice = peer_factory("alice")
         bob = peer_factory("bob")
         carol = peer_factory("carol")
 
-        ch_hash = alice.channel_mgr.create_channel("restart-peer-discovery", "", "public")
-        bob.storage.upsert_channel(ch_hash, "restart-peer-discovery", "",
-                                   alice.identity.hash_hex, "public", time.time())
-        carol.storage.upsert_channel(ch_hash, "restart-peer-discovery", "",
-                                     alice.identity.hash_hex, "public", time.time())
-        bob.subscription_mgr.subscribe(ch_hash, alice.identity.hash_hex)
-        carol.subscription_mgr.subscribe(ch_hash, alice.identity.hash_hex)
+        ch_hash = mirrored_invite_channel("restart-peer-discovery", alice, bob, carol)
 
-        assert wait_for_subscriber(bob, ch_hash, carol.identity.hash_hex, timeout=5), \
-            "Bob never learned of Carol as a fellow subscriber before restart"
         assert carol.identity.hash_hex in bob.sync_mgr._get_channel_peers(ch_hash)
 
         bob = _restart_peer(peer_factory, bob)
@@ -296,31 +279,20 @@ class TestRestartLosesSubscriberSet:
         peers_after = bob.sync_mgr._get_channel_peers(ch_hash)
         assert carol.identity.hash_hex in peers_after, (
             "Carol dropped out of _get_channel_peers after Bob's restart -- "
-            f"peers_after={peers_after}; only the channel creator survives a "
-            "restart because SubscriptionManager._subscribers is in-memory only"
+            f"peers_after={peers_after}; member rows live in SQLite and must "
+            "survive a restart"
         )
 
-    def test_restart_prevents_startup_sync_from_reaching_a_fellow_subscriber(
-        self, peer_factory
-    ):
-        """End-to-end consequence: request_sync_all() at startup must still be
-        able to recover a message that only a fellow (non-creator) subscriber
-        holds, even after a restart drops the in-memory subscriber set.
+    def test_startup_sync_reaches_a_fellow_member_after_restart(self, peer_factory):
+        """End-to-end consequence: request_sync_all() at startup must be able
+        to recover a message that only a fellow (non-creator) member holds,
+        even after a restart wiped everything held in memory.
         """
         alice = peer_factory("alice")
         bob = peer_factory("bob")
         carol = peer_factory("carol")
 
-        ch_hash = alice.channel_mgr.create_channel("restart-startup-sync", "", "public")
-        bob.storage.upsert_channel(ch_hash, "restart-startup-sync", "",
-                                   alice.identity.hash_hex, "public", time.time())
-        carol.storage.upsert_channel(ch_hash, "restart-startup-sync", "",
-                                     alice.identity.hash_hex, "public", time.time())
-        bob.subscription_mgr.subscribe(ch_hash, alice.identity.hash_hex)
-        carol.subscription_mgr.subscribe(ch_hash, alice.identity.hash_hex)
-
-        assert wait_for_subscriber(bob, ch_hash, carol.identity.hash_hex, timeout=5), \
-            "Bob never learned of Carol as a fellow subscriber before restart"
+        ch_hash = mirrored_invite_channel("restart-startup-sync", alice, bob, carol)
 
         msg_id = _insert_message(carol.storage, ch_hash, carol.identity.hash_hex,
                                  "carol only has this", time.time())
@@ -330,9 +302,8 @@ class TestRestartLosesSubscriberSet:
 
         assert wait_for_message(bob.storage, ch_hash, msg_id, timeout=5), (
             "Bob never recovered Carol's message after restart: "
-            "request_sync_all() only asked the channel creator (Alice), not "
-            "Carol, because the in-memory subscriber set used by "
-            "_get_channel_peers was reset by the restart"
+            "request_sync_all() must discover Carol from the persisted "
+            "members table, not from any in-memory state"
         )
 
 
@@ -351,10 +322,14 @@ class TestRestartResetsDeepSyncCooldown:
         alice = peer_factory("alice")
         bob = peer_factory("bob")
 
-        ch_hash = alice.channel_mgr.create_channel("restart-deep-cooldown", "", "public")
-        _seed_channel_on_peer(bob, ch_hash, "restart-deep-cooldown", alice.identity.hash_hex)
+        ch_hash = mirrored_invite_channel("restart-deep-cooldown", alice, bob)
 
         old_ts = time.time() - SYNC_WINDOW_SECS - 3600
+        # Tenure opened before the fabricated history: Storage's startup
+        # tenure backfill would otherwise stamp joined_at=now on restart and
+        # withhold every ancient message from Bob.
+        for member in (alice, bob):
+            alice.storage.open_tenure(ch_hash, member.identity.hash_hex, old_ts - 100)
         first_id = _insert_message(alice.storage, ch_hash, alice.identity.hash_hex,
                                    "first ancient", old_ts)
 
@@ -390,8 +365,7 @@ class TestRestartLosesSyncStatus:
         alice = peer_factory("alice")
         bob = peer_factory("bob")
 
-        ch_hash = alice.channel_mgr.create_channel("restart-status-gap", "", "public")
-        _seed_channel_on_peer(bob, ch_hash, "restart-status-gap", alice.identity.hash_hex)
+        ch_hash = mirrored_invite_channel("restart-status-gap", alice, bob)
 
         missed_id = "ab" * 32
         bob.storage.record_missed_delivery(ch_hash, bob.identity.hash_hex, missed_id)
@@ -424,7 +398,7 @@ class TestParamsByIdEvictionCap:
         """
         alice = peer_factory("alice")
 
-        ch_hash = alice.channel_mgr.create_channel("params-cap", "", "public")
+        ch_hash = mirrored_invite_channel("params-cap", alice)
 
         alice.messaging.send_message(
             channel_hash_hex=ch_hash, content="filler 0",
@@ -475,9 +449,7 @@ class TestPageBoundaryTimestampCollision:
         bob = peer_factory("bob")
         carol = peer_factory("carol")
 
-        ch_hash = alice.channel_mgr.create_channel("page-boundary-tie", "", "public")
-        _seed_channel_on_peer(carol, ch_hash, "page-boundary-tie", alice.identity.hash_hex)
-        _seed_channel_on_peer(bob, ch_hash, "page-boundary-tie", alice.identity.hash_hex)
+        ch_hash = mirrored_invite_channel("page-boundary-tie", alice, bob, carol)
 
         window_start = time.time()
         msg_ids = []
@@ -594,8 +566,7 @@ class TestContinuationBudgetExhaustion:
         bob = peer_factory("bob")
         carol = peer_factory("carol")
 
-        ch_hash = alice.channel_mgr.create_channel("budget-status", "", "public")
-        _seed_channel_on_peer(bob, ch_hash, "budget-status", alice.identity.hash_hex)
+        ch_hash = mirrored_invite_channel("budget-status", alice, bob, carol)
 
         bob.sync_mgr._send_raw = lambda dest_hex, fields: True
 
@@ -648,8 +619,7 @@ class TestContinuationBudgetResetByStrayRequest:
         carol = peer_factory("carol")  # channel creator/responder
         bob = peer_factory("bob")
 
-        ch_hash = carol.channel_mgr.create_channel("continuation-reset", "", "public")
-        _seed_channel_on_peer(bob, ch_hash, "continuation-reset", carol.identity.hash_hex)
+        ch_hash = mirrored_invite_channel("continuation-reset", carol, bob)
 
         requests = []
 
@@ -730,9 +700,7 @@ class TestMalformedSyncResponseLeavesPeerPending:
         bob = peer_factory("bob")
         carol = peer_factory("carol")
 
-        ch_hash = alice.channel_mgr.create_channel("malformed-absent", "", "public")
-        _seed_channel_on_peer(carol, ch_hash, "malformed-absent", alice.identity.hash_hex)
-        _seed_channel_on_peer(bob, ch_hash, "malformed-absent", alice.identity.hash_hex)
+        ch_hash = mirrored_invite_channel("malformed-absent", alice, bob, carol)
 
         bob.sync_mgr._send_sync_request(carol.identity.hash_hex, ch_hash, time.time())
         assert bob.sync_mgr.status.get_state(ch_hash) == SyncState.SYNCING
@@ -755,9 +723,7 @@ class TestMalformedSyncResponseLeavesPeerPending:
         bob = peer_factory("bob")
         carol = peer_factory("carol")
 
-        ch_hash = alice.channel_mgr.create_channel("malformed-badpack", "", "public")
-        _seed_channel_on_peer(carol, ch_hash, "malformed-badpack", alice.identity.hash_hex)
-        _seed_channel_on_peer(bob, ch_hash, "malformed-badpack", alice.identity.hash_hex)
+        ch_hash = mirrored_invite_channel("malformed-badpack", alice, bob, carol)
 
         bob.sync_mgr._send_sync_request(carol.identity.hash_hex, ch_hash, time.time())
         assert bob.sync_mgr.status.get_state(ch_hash) == SyncState.SYNCING
@@ -785,9 +751,7 @@ class TestMalformedSyncResponseLeavesPeerPending:
         bob = peer_factory("bob")
         carol = peer_factory("carol")
 
-        ch_hash = alice.channel_mgr.create_channel("malformed-notalist", "", "public")
-        _seed_channel_on_peer(carol, ch_hash, "malformed-notalist", alice.identity.hash_hex)
-        _seed_channel_on_peer(bob, ch_hash, "malformed-notalist", alice.identity.hash_hex)
+        ch_hash = mirrored_invite_channel("malformed-notalist", alice, bob, carol)
 
         bob.sync_mgr._send_sync_request(carol.identity.hash_hex, ch_hash, time.time())
         assert bob.sync_mgr.status.get_state(ch_hash) == SyncState.SYNCING
@@ -828,9 +792,7 @@ class TestWatermarkAdvancesPastFailedInsert:
         bob = peer_factory("bob")
         carol = peer_factory("carol")
 
-        ch_hash = alice.channel_mgr.create_channel("watermark-insert-fail", "", "public")
-        _seed_channel_on_peer(carol, ch_hash, "watermark-insert-fail", alice.identity.hash_hex)
-        _seed_channel_on_peer(bob, ch_hash, "watermark-insert-fail", alice.identity.hash_hex)
+        ch_hash = mirrored_invite_channel("watermark-insert-fail", alice, bob, carol)
 
         ts = time.time()
         ok_id_1 = _compute_message_id("ok 1", alice.identity.hash_hex, ts + 1)

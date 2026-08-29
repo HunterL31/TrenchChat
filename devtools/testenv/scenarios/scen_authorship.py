@@ -21,13 +21,18 @@ import zlib
 
 from asserts import all_hold, settle, wait_until, ScenarioFailure
 from flows import (
-    await_discovery, go_offline, go_online, join_all, public_channel,
-    BACKFILL_TIMEOUT, DISCOVERY_TIMEOUT, RECONNECT_TIMEOUT,
+    go_offline, go_online, invite_and_accept, invite_only_channel,
+    public_channel, BACKFILL_TIMEOUT, DISCOVERY_TIMEOUT, RECONNECT_TIMEOUT,
 )
 from scenario import PROBE, scenario
 
 # Long enough for a fresh identity to boot, announce and be announced to.
 RESET_SETTLE = 150.0
+
+# integrity2's wiped joiner needs full_sync: the history under test predates
+# its join, and only that grant lets sync reach back past it.
+ADMIN_WITH_FULL_SYNC = ["send_message", "invite", "kick", "manage_roles", "full_sync"]
+MEMBER_WITH_FULL_SYNC = ["send_message", "full_sync"]
 
 # Declared 20000x20000 -- 400M pixels, ten times MAX_IMAGE_PIXELS -- in 68
 # bytes. The byte cap cannot see this; only reading the header can.
@@ -70,7 +75,7 @@ def j1(env):
     messages it will never ask for again.
     """
     a, b, c, d = env.peers("A", "B", "C", "D")
-    ch = public_channel(a, [b, c, d], "j1-public")
+    ch = invite_only_channel(a, [b, c, d], "j1-private")
 
     go_offline(c)
 
@@ -108,7 +113,9 @@ def j2(env):
 
     D is wiped to a brand-new identity after A is dead, so it has never seen
     A's announce and holds nothing of A in either its own key cache or RNS's.
-    The channel stays discoverable because B owns it, not A.
+    The channel survives A because B owns it, not A, and B re-invites the new
+    D; full_sync is granted to the member role so sync may reach back past
+    D's join at all.
 
     This ran as a probe first and confirmed the gap it predicted: D backfilled
     everything the live owner wrote and silently lost everything the departed
@@ -117,7 +124,9 @@ def j2(env):
     send each batch's author keys alongside it, so it is strict.
     """
     a, b, c, d = env.peers("A", "B", "C", "D")
-    ch = public_channel(b, [a, c], "j2-public")
+    ch = invite_only_channel(b, [a, c], "j2-private",
+                             permissions=(ADMIN_WITH_FULL_SYNC,
+                                          MEMBER_WITH_FULL_SYNC))
 
     by_a = {"only-A-wrote-this"}
     by_b = {"only-B-wrote-this"}
@@ -133,8 +142,8 @@ def j2(env):
     env.wait_alive(d, RESET_SETTLE)
     d.forget_hash()
 
-    await_discovery([d], ch, RESET_SETTLE)
-    join_all([d], ch, b)
+    b.invite(ch, d.hash)
+    invite_and_accept(b, d, ch)
 
     got_b, b_secs = settle(lambda: by_b <= d.contents(ch),
                            "D to backfill what the live owner authored",

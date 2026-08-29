@@ -14,13 +14,17 @@ These tests pin down that recovery path and its edges: hint durability across
 a restart, what happens when the sole holder's hints are lost, the horizon of
 the sync window, relay chains at 4+ peers, and the responder never clearing a
 hint once served.
+
+Hints and sync only serve invite-only channels (public channels are
+live-only), so every test runs on one, built with
+helpers.mirrored_invite_channel.
 """
 
 import time
 
 import pytest
 
-from tests.helpers import sign_as, wait_for, wait_for_message
+from tests.helpers import mirrored_invite_channel, sign_as, wait_for, wait_for_message
 from trenchchat.core.messaging import _compute_message_id
 from trenchchat.core.protocol import (
     F_CHANNEL_HASH, F_MSG_TYPE, F_SYNC_MESSAGES, F_SYNC_WINDOW_START,
@@ -33,14 +37,6 @@ from trenchchat.core.sync_status import SyncState
 # ---------------------------------------------------------------------------
 # Helpers (duplicated from tests/test_sync.py -- established pattern)
 # ---------------------------------------------------------------------------
-
-def _seed_channel_on_peer(peer, ch_hash, channel_name, creator_hash,
-                           access_mode="public"):
-    """Give a peer knowledge of a channel and subscribe them to it."""
-    peer.storage.upsert_channel(ch_hash, channel_name, "", creator_hash,
-                                access_mode, time.time())
-    peer.storage.subscribe(ch_hash)
-
 
 def _insert_message(storage, ch_hash, sender_hex, content, ts=None):
     """Insert a message directly into storage and return its message_id."""
@@ -81,9 +77,7 @@ class TestSenderOnlyHintRecovery:
         carol = peer_factory("carol")
         dave = peer_factory("dave")
 
-        ch_hash = alice.channel_mgr.create_channel("b1-motivating", "", "public")
-        for peer in (bob, carol, dave):
-            _seed_channel_on_peer(peer, ch_hash, "b1-motivating", alice.identity.hash_hex)
+        ch_hash = mirrored_invite_channel("b1-motivating", alice, bob, carol, dave)
 
         ts = time.time()
         msg_id = _insert_message(carol.storage, ch_hash, carol.identity.hash_hex,
@@ -143,9 +137,7 @@ class TestHintDurabilityAcrossRestart:
         bob = peer_factory("bob")
         carol = peer_factory("carol")
 
-        ch_hash = alice.channel_mgr.create_channel("b2-restart", "", "public")
-        _seed_channel_on_peer(bob, ch_hash, "b2-restart", alice.identity.hash_hex)
-        _seed_channel_on_peer(carol, ch_hash, "b2-restart", alice.identity.hash_hex)
+        ch_hash = mirrored_invite_channel("b2-restart", alice, bob, carol)
 
         ts = time.time()
         msg_id = _insert_message(carol.storage, ch_hash, alice.identity.hash_hex,
@@ -174,9 +166,7 @@ class TestHintDurabilityAcrossRestart:
         bob = peer_factory("bob")
         carol = peer_factory("carol")
 
-        ch_hash = alice.channel_mgr.create_channel("b4-old-hint", "", "public")
-        _seed_channel_on_peer(bob, ch_hash, "b4-old-hint", alice.identity.hash_hex)
-        _seed_channel_on_peer(carol, ch_hash, "b4-old-hint", alice.identity.hash_hex)
+        ch_hash = mirrored_invite_channel("b4-old-hint", alice, bob, carol)
 
         ts = time.time()
         msg_id = _insert_message(carol.storage, ch_hash, alice.identity.hash_hex,
@@ -226,9 +216,7 @@ class TestHintHolderDataLoss:
         bob = peer_factory("bob")
         carol = peer_factory("carol")
 
-        ch_hash = alice.channel_mgr.create_channel("b3-wiped", "", "public")
-        _seed_channel_on_peer(bob, ch_hash, "b3-wiped", alice.identity.hash_hex)
-        _seed_channel_on_peer(carol, ch_hash, "b3-wiped", alice.identity.hash_hex)
+        ch_hash = mirrored_invite_channel("b3-wiped", alice, bob, carol)
 
         ts = time.time()
         msg_id = _insert_message(carol.storage, ch_hash, carol.identity.hash_hex,
@@ -267,9 +255,7 @@ class TestRelayChain:
         carol = peer_factory("carol")
         dave = peer_factory("dave")
 
-        ch_hash = alice.channel_mgr.create_channel("b5-relay", "", "public")
-        for peer in (bob, carol, dave):
-            _seed_channel_on_peer(peer, ch_hash, "b5-relay", alice.identity.hash_hex)
+        ch_hash = mirrored_invite_channel("b5-relay", alice, bob, carol, dave)
 
         ts = time.time()
         content = "delivered to Carol and Dave, missed by Bob"
@@ -335,9 +321,7 @@ class TestUnresolvableHintAtFourPeerScale:
         carol = peer_factory("carol")
         dave = peer_factory("dave")
 
-        ch_hash = alice.channel_mgr.create_channel("b6-unresolvable", "", "public")
-        for peer in (bob, carol, dave):
-            _seed_channel_on_peer(peer, ch_hash, "b6-unresolvable", alice.identity.hash_hex)
+        ch_hash = mirrored_invite_channel("b6-unresolvable", alice, bob, carol, dave)
 
         ts = time.time()
         carol.storage.record_missed_delivery(ch_hash, bob.identity.hash_hex, "de" * 32)
@@ -389,9 +373,7 @@ class TestResponderSideHintClearedOnceServed:
         bob = peer_factory("bob")
         carol = peer_factory("carol")
 
-        ch_hash = alice.channel_mgr.create_channel("b7-repeat-hint", "", "public")
-        _seed_channel_on_peer(bob, ch_hash, "b7-repeat-hint", alice.identity.hash_hex)
-        _seed_channel_on_peer(carol, ch_hash, "b7-repeat-hint", alice.identity.hash_hex)
+        ch_hash = mirrored_invite_channel("b7-repeat-hint", alice, bob, carol)
 
         ts = time.time()
         hinted_id = _insert_message(carol.storage, ch_hash, alice.identity.hash_hex,

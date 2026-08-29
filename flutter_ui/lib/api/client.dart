@@ -273,8 +273,9 @@ class ApiClient {
   }
 
   /// The channel's overall sync state -- `synced`, `incomplete`, `syncing`,
-  /// `waiting` or `unknown`. WS `sync_status` events carry the same value;
-  /// this is the read for a client that just started.
+  /// `waiting`, `unknown`, or `live` (an open-join channel, which is
+  /// live-only and never synced). WS `sync_status` events carry the same
+  /// value; this is the read for a client that just started.
   Future<String> getSyncState(String channelHashHex) async {
     final res = await _http.get(_u('/channels/$channelHashHex/sync_status'));
     final body = _decode(res) as Map<String, dynamic>;

@@ -140,7 +140,11 @@ Full detail in `docs/offline-sync.md`. Summary:
    timestamp; any online member can respond, checking hints first, then falling back to a bounded
    timestamp query (`SYNC_WINDOW_DAYS = 7`).
 
-All three are channel-only; direct messages use none of them (see above).
+All three are channel-only; direct messages use none of them (see above). Mechanisms 2 and 3 are
+additionally **invite-only-channel-only**: a public (open-join) channel is live-only, like IRC —
+no hints, no sync, no backfill, enforced on both requester and responder sides
+(`SyncManager._live_only`); only pending retry redelivers there. `SyncStatusTracker` reports such
+channels as `live`.
 
 Peer reconnect is detected via `PeerAnnounceHandler` (`trenchchat/network/announce.py`), which drives
 all three mechanisms.

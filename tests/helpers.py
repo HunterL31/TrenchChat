@@ -2,13 +2,45 @@
 Shared test utilities for TrenchChat integration tests.
 """
 
+import hashlib
 import time
+
 import RNS
 
 from tests.conftest import TestPeer, signing_identity
 from trenchchat.core.authorship import sign_message
-from trenchchat.core.permissions import is_open_join, permissions_from_json
+from trenchchat.core.permissions import (
+    ROLE_MEMBER, ROLE_OWNER, is_open_join, permissions_from_json,
+)
 from trenchchat.core.storage import Storage
+
+
+def seed_channel_on_peer(peer, ch_hash: str, channel_name: str,
+                         creator_hash: str, access_mode: str = "invite",
+                         members=()):
+    """Give a peer knowledge of a channel, subscribe them, and seed its roster."""
+    peer.storage.upsert_channel(ch_hash, channel_name, "", creator_hash,
+                                access_mode, time.time())
+    peer.storage.subscribe(ch_hash)
+    for member_hex in members:
+        role = ROLE_OWNER if member_hex == creator_hash else ROLE_MEMBER
+        peer.storage.upsert_member(ch_hash, member_hex, "", role=role)
+
+
+def mirrored_invite_channel(name: str, *peers) -> str:
+    """An invite-only channel mirrored onto every peer, everyone a member.
+
+    Sync only serves invite-only channels, so sync-mechanics tests run on
+    one. Built by seeding rather than create_channel(), so no tenure rows
+    exist anywhere and the tenure filter stays out of tests about other
+    mechanics. The first peer is the channel's owner.
+    """
+    ch_hash = hashlib.sha256(name.encode()).hexdigest()[:32]
+    creator_hash = peers[0].identity.hash_hex
+    member_hexes = [p.identity.hash_hex for p in peers]
+    for p in peers:
+        seed_channel_on_peer(p, ch_hash, name, creator_hash, members=member_hexes)
+    return ch_hash
 
 
 def wait_for(predicate, timeout: float = 10.0, interval: float = 0.2,

@@ -7,13 +7,22 @@ on_peer_appeared in trenchchat/core/sync.py) loops over every peer on a
 channel. These tests exercise what happens when several responders hold
 disjoint, overlapping, or differently-permissioned views of the same
 channel's history.
+
+Sync only serves invite-only channels (public channels are live-only), so
+every scenario runs on one, built with helpers.mirrored_invite_channel.
 """
 
 import time
 
 import RNS
 
-from tests.helpers import sign_as, wait_for, wait_for_member, wait_for_message
+from tests.helpers import (
+    mirrored_invite_channel,
+    sign_as,
+    wait_for,
+    wait_for_member,
+    wait_for_message,
+)
 from trenchchat.core.messaging import _compute_message_id
 from trenchchat.core.sync_status import SyncState
 
@@ -21,13 +30,6 @@ from trenchchat.core.sync_status import SyncState
 # ---------------------------------------------------------------------------
 # Helpers (duplicated from tests/test_sync.py -- module-local by convention)
 # ---------------------------------------------------------------------------
-
-def _seed_channel_on_peer(peer, ch_hash, channel_name, creator_hash,
-                           access_mode="public"):
-    """Give a peer knowledge of a channel and subscribe them to it."""
-    peer.storage.upsert_channel(ch_hash, channel_name, "", creator_hash,
-                                access_mode, time.time())
-    peer.storage.subscribe(ch_hash)
 
 
 def _insert_message(storage, ch_hash, sender_hex, content, ts=None):
@@ -78,14 +80,8 @@ class TestDisjointHistoryFanout:
         carol = peer_factory("carol")
         dave = peer_factory("dave")
 
-        ch_hash = alice.channel_mgr.create_channel("disjoint-natural", "", "public")
-        _seed_channel_on_peer(carol, ch_hash, "disjoint-natural", alice.identity.hash_hex)
-        _seed_channel_on_peer(dave, ch_hash, "disjoint-natural", alice.identity.hash_hex)
-        _seed_channel_on_peer(bob, ch_hash, "disjoint-natural", alice.identity.hash_hex)
+        ch_hash = mirrored_invite_channel("disjoint-natural", alice, bob, carol, dave)
         bob.storage.update_last_sync(ch_hash, 0.0)
-        bob.subscription_mgr._subscribers[ch_hash] = {
-            carol.identity.hash_hex, dave.identity.hash_hex,
-        }
 
         base = time.time()
         carol_ids = [
@@ -135,10 +131,7 @@ class TestDisjointHistoryFanout:
         carol = peer_factory("carol")
         dave = peer_factory("dave")
 
-        ch_hash = alice.channel_mgr.create_channel("disjoint-deterministic", "", "public")
-        _seed_channel_on_peer(carol, ch_hash, "disjoint-deterministic", alice.identity.hash_hex)
-        _seed_channel_on_peer(dave, ch_hash, "disjoint-deterministic", alice.identity.hash_hex)
-        _seed_channel_on_peer(bob, ch_hash, "disjoint-deterministic", alice.identity.hash_hex)
+        ch_hash = mirrored_invite_channel("disjoint-deterministic", alice, bob, carol, dave)
         bob.storage.update_last_sync(ch_hash, 0.0)
 
         base = time.time()
@@ -222,13 +215,7 @@ class TestSameRoundDuplicateAnswers:
         carol = peer_factory("carol")
         dave = peer_factory("dave")
 
-        ch_hash = alice.channel_mgr.create_channel("dup-round", "", "public")
-        _seed_channel_on_peer(carol, ch_hash, "dup-round", alice.identity.hash_hex)
-        _seed_channel_on_peer(dave, ch_hash, "dup-round", alice.identity.hash_hex)
-        _seed_channel_on_peer(bob, ch_hash, "dup-round", alice.identity.hash_hex)
-        bob.subscription_mgr._subscribers[ch_hash] = {
-            carol.identity.hash_hex, dave.identity.hash_hex,
-        }
+        ch_hash = mirrored_invite_channel("dup-round", alice, bob, carol, dave)
 
         window_start = time.time()
         shared_ids = []
@@ -283,13 +270,7 @@ class TestTruncationAcrossResponders:
         carol = peer_factory("carol")
         dave = peer_factory("dave")
 
-        ch_hash = alice.channel_mgr.create_channel("trunc-mix", "", "public")
-        _seed_channel_on_peer(carol, ch_hash, "trunc-mix", alice.identity.hash_hex)
-        _seed_channel_on_peer(dave, ch_hash, "trunc-mix", alice.identity.hash_hex)
-        _seed_channel_on_peer(bob, ch_hash, "trunc-mix", alice.identity.hash_hex)
-        bob.subscription_mgr._subscribers[ch_hash] = {
-            carol.identity.hash_hex, dave.identity.hash_hex,
-        }
+        ch_hash = mirrored_invite_channel("trunc-mix", alice, bob, carol, dave)
 
         window_start = time.time()
         carol_total = MAX_RESPONSE_MESSAGES + 10
@@ -341,10 +322,7 @@ class TestDeepSyncCooldownPerResponder:
         carol = peer_factory("carol")
         dave = peer_factory("dave")
 
-        ch_hash = alice.channel_mgr.create_channel("deep-per-responder", "", "public")
-        _seed_channel_on_peer(carol, ch_hash, "deep-per-responder", alice.identity.hash_hex)
-        _seed_channel_on_peer(dave, ch_hash, "deep-per-responder", alice.identity.hash_hex)
-        _seed_channel_on_peer(bob, ch_hash, "deep-per-responder", alice.identity.hash_hex)
+        ch_hash = mirrored_invite_channel("deep-per-responder", alice, bob, carol, dave)
 
         old_ts = time.time() - SYNC_WINDOW_SECS - 3600
         carol_id = _insert_message(carol.storage, ch_hash, alice.identity.hash_hex,
@@ -397,10 +375,7 @@ class TestDeepSyncAllThrottled:
         carol = peer_factory("carol")
         dave = peer_factory("dave")
 
-        ch_hash = alice.channel_mgr.create_channel("all-throttled", "", "public")
-        _seed_channel_on_peer(carol, ch_hash, "all-throttled", alice.identity.hash_hex)
-        _seed_channel_on_peer(dave, ch_hash, "all-throttled", alice.identity.hash_hex)
-        _seed_channel_on_peer(bob, ch_hash, "all-throttled", alice.identity.hash_hex)
+        ch_hash = mirrored_invite_channel("all-throttled", alice, bob, carol, dave)
 
         responses = {"carol": [], "dave": []}
         for name, peer in (("carol", carol), ("dave", dave)):
@@ -460,9 +435,7 @@ class TestHintFanout:
         dave = peer_factory("dave")
         erin = peer_factory("erin")
 
-        ch_hash = alice.channel_mgr.create_channel("hint-fanout", "", "public")
-        for peer in (carol, dave, erin, bob):
-            _seed_channel_on_peer(peer, ch_hash, "hint-fanout", alice.identity.hash_hex)
+        ch_hash = mirrored_invite_channel("hint-fanout", alice, bob, carol, dave, erin)
 
         ts = time.time()
         content = "missed by bob"
@@ -491,9 +464,6 @@ class TestHintFanout:
                 timeout=5,
             ), f"{peer.name} never stored the missed-delivery hint"
 
-        bob.subscription_mgr._subscribers[ch_hash] = {
-            carol.identity.hash_hex, dave.identity.hash_hex, erin.identity.hash_hex,
-        }
         # Window start is past the message's own timestamp, so only the
         # hint -- not the plain timestamp sweep -- can resolve it.
         bob.sync_mgr._request_sync_for_channel(ch_hash, ts + 1)
@@ -534,13 +504,7 @@ class TestCollectivelyCompleteIndividuallyEmpty:
         carol = peer_factory("carol")
         dave = peer_factory("dave")
 
-        ch_hash = alice.channel_mgr.create_channel("collectively-complete", "", "public")
-        _seed_channel_on_peer(carol, ch_hash, "collectively-complete",
-                              alice.identity.hash_hex)
-        _seed_channel_on_peer(dave, ch_hash, "collectively-complete",
-                              alice.identity.hash_hex)
-        _seed_channel_on_peer(bob, ch_hash, "collectively-complete",
-                              alice.identity.hash_hex)
+        ch_hash = mirrored_invite_channel("collectively-complete", alice, bob, carol, dave)
 
         base = time.time()
         carol_ids = []
@@ -556,9 +520,6 @@ class TestCollectivelyCompleteIndividuallyEmpty:
 
         watermark = base + 20
         bob.storage.update_last_sync(ch_hash, watermark)
-        bob.subscription_mgr._subscribers[ch_hash] = {
-            carol.identity.hash_hex, dave.identity.hash_hex,
-        }
 
         bob.sync_mgr._request_sync_for_channel(ch_hash, watermark)
 
@@ -686,9 +647,7 @@ class TestResponderAcquiresOlderHistoryLater:
         bob = peer_factory("bob")
         carol = peer_factory("carol")
 
-        ch_hash = alice.channel_mgr.create_channel("late-older-history", "", "public")
-        _seed_channel_on_peer(bob, ch_hash, "late-older-history", alice.identity.hash_hex)
-        _seed_channel_on_peer(carol, ch_hash, "late-older-history", alice.identity.hash_hex)
+        ch_hash = mirrored_invite_channel("late-older-history", alice, bob, carol)
 
         base = time.time()
 
@@ -765,8 +724,7 @@ class TestRejectedRowBoundsTheWatermark:
         bob = peer_factory("bob")
         carol = peer_factory("carol")
 
-        ch_hash = alice.channel_mgr.create_channel("late-key", "", "public")
-        _seed_channel_on_peer(bob, ch_hash, "late-key", alice.identity.hash_hex)
+        ch_hash = mirrored_invite_channel("late-key", alice, bob, carol)
 
         base = time.time() - 60
         alice_hex = alice.identity.hash_hex
@@ -846,10 +804,7 @@ class TestAuthorKeyTravelsWithTheBatch:
         relay = peer_factory("relay")
         newcomer = peer_factory("newcomer")
 
-        ch_hash = author.channel_mgr.create_channel("outlives-author", "", "public")
-        _seed_channel_on_peer(relay, ch_hash, "outlives-author", author.identity.hash_hex)
-        _seed_channel_on_peer(newcomer, ch_hash, "outlives-author",
-                              author.identity.hash_hex)
+        ch_hash = mirrored_invite_channel("outlives-author", author, relay, newcomer)
 
         ts = time.time() - 30
         author_hex = author.identity.hash_hex
@@ -971,8 +926,7 @@ class TestSyncAnswerSurvivesAnUnresolvedPath:
         alice = peer_factory("alice")
         bob = peer_factory("bob")
 
-        ch_hash = alice.channel_mgr.create_channel("answer-held", "", "public")
-        _seed_channel_on_peer(bob, ch_hash, "answer-held", alice.identity.hash_hex)
+        ch_hash = mirrored_invite_channel("answer-held", alice, bob)
 
         ts = time.time() - 30
         _insert_message(alice.storage, ch_hash, alice.identity.hash_hex,
@@ -1021,8 +975,7 @@ class TestUnansweredRequestIsAskedAgain:
         alice = peer_factory("alice")
         bob = peer_factory("bob")
 
-        ch_hash = alice.channel_mgr.create_channel("silent-refusal", "", "public")
-        _seed_channel_on_peer(bob, ch_hash, "silent-refusal", alice.identity.hash_hex)
+        ch_hash = mirrored_invite_channel("silent-refusal", alice, bob)
 
         asked = []
         real_send = bob.sync_mgr._send_sync_request
@@ -1054,9 +1007,7 @@ class TestUnansweredRequestIsAskedAgain:
         alice = peer_factory("alice")
         bob = peer_factory("bob")
 
-        ch_hash = alice.channel_mgr.create_channel("silent-refusal-e2e", "", "public")
-        _seed_channel_on_peer(bob, ch_hash, "silent-refusal-e2e",
-                              alice.identity.hash_hex)
+        ch_hash = mirrored_invite_channel("silent-refusal-e2e", alice, bob)
         _insert_message(alice.storage, ch_hash, alice.identity.hash_hex,
                         "sent while bob was away", time.time() - 30)
 
@@ -1088,7 +1039,7 @@ class TestSyncRetryIsBounded:
         from trenchchat.core.sync import MAX_SYNC_RETRIES
 
         alice = peer_factory("alice")
-        ch_hash = alice.channel_mgr.create_channel("public", "", "public")
+        ch_hash = mirrored_invite_channel("retry-budget", alice)
         silent = "ab" * 16
 
         sent = []
@@ -1117,7 +1068,7 @@ class TestSyncRetryIsBounded:
         none, so its answer is dropped while still burning the responder's
         deep-sync budget for that pair."""
         alice = peer_factory("alice")
-        ch_hash = alice.channel_mgr.create_channel("public", "", "public")
+        ch_hash = mirrored_invite_channel("retry-queue", alice)
         unreachable = "cd" * 16
 
         monkeypatch.setattr("trenchchat.core.sync.RNS.Identity.recall",

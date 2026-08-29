@@ -5,6 +5,9 @@ Group F targets the class of bug that motivated this file: a channel
 reporting "up to date" in the UI while messages are silently missing.
 Group G targets transport/identity edges in the pending-request ledger,
 router quarantine, and the missed-delivery hint path.
+
+Hints and sync only serve invite-only channels (public ones are live-only),
+so every test here runs on one, built with helpers.mirrored_invite_channel.
 """
 
 import time
@@ -14,7 +17,14 @@ import pytest
 import RNS
 import LXMF
 
-from tests.helpers import sign_as, delivery_dest_hash_hex, wait_for, wait_for_message
+from tests.helpers import (
+    delivery_dest_hash_hex,
+    mirrored_invite_channel,
+    seed_channel_on_peer,
+    sign_as,
+    wait_for,
+    wait_for_message,
+)
 from trenchchat.core import sync_status
 from trenchchat.core.image import MAX_IMAGE_BYTES
 from trenchchat.core.messaging import _compute_message_id
@@ -27,16 +37,8 @@ from trenchchat.core.sync_status import SyncState
 
 
 # ---------------------------------------------------------------------------
-# Helpers (duplicated from tests/test_sync.py per the established pattern)
+# Helpers
 # ---------------------------------------------------------------------------
-
-def _seed_channel_on_peer(peer, ch_hash, channel_name, creator_hash,
-                           access_mode="public"):
-    """Give a peer knowledge of a channel and subscribe them to it."""
-    peer.storage.upsert_channel(ch_hash, channel_name, "", creator_hash,
-                                access_mode, time.time())
-    peer.storage.subscribe(ch_hash)
-
 
 def _insert_message(storage, ch_hash, sender_hex, content, ts=None):
     """Insert a message directly into storage and return its message_id."""
@@ -116,9 +118,7 @@ class TestPruneHasNoProductionCaller:
         bob = peer_factory("bob")
         carol = peer_factory("carol")
 
-        ch_hash = alice.channel_mgr.create_channel("f1-stall", "", "public")
-        _seed_channel_on_peer(bob, ch_hash, "f1-stall", alice.identity.hash_hex)
-        _seed_channel_on_peer(carol, ch_hash, "f1-stall", alice.identity.hash_hex)
+        ch_hash = mirrored_invite_channel("f1-stall", alice, bob, carol)
 
         # Simulate a peer that received the request but never answers --
         # crashed, buggy, or malicious.
@@ -151,9 +151,7 @@ class TestPruneHasNoProductionCaller:
         bob = peer_factory("bob")
         carol = peer_factory("carol")
 
-        ch_hash = alice.channel_mgr.create_channel("f1-manual-prune", "", "public")
-        _seed_channel_on_peer(bob, ch_hash, "f1-manual-prune", alice.identity.hash_hex)
-        _seed_channel_on_peer(carol, ch_hash, "f1-manual-prune", alice.identity.hash_hex)
+        ch_hash = mirrored_invite_channel("f1-manual-prune", alice, bob, carol)
 
         carol.sync_mgr._handle_sync_request = lambda *a, **kw: None
         bob.sync_mgr._send_sync_request(carol.identity.hash_hex, ch_hash, time.time())
@@ -176,8 +174,9 @@ class TestSyncedIsScopedToKnownPeers:
         Dave, and Eve are the only peers Bob's local view knows about for
         this channel, and each genuinely has nothing new for him -- they
         answer honestly with an empty list. Frank is a real member holding a
-        message Bob has never seen, but Frank's announce never reached Bob,
-        so Bob's local peer list never included him and he was never asked.
+        message Bob has never seen, but the member-list update naming Frank
+        never reached Bob, so Bob's local roster never included him and he
+        was never asked.
 
         On a partition-tolerant mesh there is no way to enumerate every peer
         who might hold history, so an unknown peer like Frank is out of
@@ -195,9 +194,10 @@ class TestSyncedIsScopedToKnownPeers:
         eve = peer_factory("eve")
         frank = peer_factory("frank")
 
-        ch_hash = alice.channel_mgr.create_channel("f2-scale", "", "public")
-        for peer in (bob, carol, dave, eve, frank):
-            _seed_channel_on_peer(peer, ch_hash, "f2-scale", alice.identity.hash_hex)
+        ch_hash = mirrored_invite_channel("f2-scale", alice, bob, carol, dave, eve)
+        seed_channel_on_peer(frank, ch_hash, "f2-scale", alice.identity.hash_hex,
+                             members=[alice.identity.hash_hex,
+                                      frank.identity.hash_hex])
 
         _insert_message(
             frank.storage, ch_hash, alice.identity.hash_hex,
@@ -221,7 +221,7 @@ class TestSyncedIsScopedToKnownPeers:
         assert status["answered_peers"] == 3, (
             "the SYNCED claim should be backed by exactly the three peers "
             f"Bob actually knew about and asked, got {status['answered_peers']} -- "
-            "Frank is correctly out of scope since his announce never reached Bob"
+            "Frank is correctly out of scope since Bob's roster never held him"
         )
 
 
@@ -246,10 +246,7 @@ class TestPartialMultiResponderHonesty:
         dave = peer_factory("dave")
         unreachable_hex = "ee" * 16
 
-        ch_hash = alice.channel_mgr.create_channel("f3-partial", "", "public")
-        _seed_channel_on_peer(bob, ch_hash, "f3-partial", alice.identity.hash_hex)
-        _seed_channel_on_peer(carol, ch_hash, "f3-partial", alice.identity.hash_hex)
-        _seed_channel_on_peer(dave, ch_hash, "f3-partial", alice.identity.hash_hex)
+        ch_hash = mirrored_invite_channel("f3-partial", alice, bob, carol, dave)
 
         dave.sync_mgr._handle_sync_request = lambda *a, **kw: None
 
@@ -278,32 +275,38 @@ class TestPartialMultiResponderHonesty:
         )
 
 
-class TestPublicChannelAfterRestart:
+class TestInviteChannelAfterRestart:
     def test_empty_local_peer_cache_after_restart_reports_waiting(self, peer_factory):
         """
-        SubscriptionManager._subscribers is in-memory only.  After a restart,
-        a public channel with real subscribers on the network looks
-        peer-less to the local process, and note_no_peers() reports WAITING.
+        _get_channel_peers draws on stored member rows plus the in-memory
+        subscriber cache, and SubscriptionManager._subscribers is wiped by a
+        restart.  An owner whose stored roster names nobody but themselves
+        (Carol is a real member out on the network, but the member-list
+        update naming her never landed locally) is left with only that
+        cache, so their post-restart sync round finds no peers at all and
+        note_no_peers() reports WAITING.
 
         Bob owns this channel (not just subscribes to it): _get_channel_peers
         always adds the stored channel's creator_hash regardless of the
-        subscriber cache, so a peer who merely joined someone else's public
-        channel always finds at least the creator and never actually reaches
-        an empty peer set here -- only the owner's own post-restart view can
-        be genuinely peer-less.  This confirms the current code path; see
-        the accompanying report for whether WAITING (implying "asked, nobody
-        reachable") or a distinct UNKNOWN/stale-cache state would be the more
-        honest label for "we don't actually know who's out there any more".
+        roster, so a mere member always finds at least the creator and never
+        actually reaches an empty peer set here -- only the owner's own
+        post-restart view can be genuinely peer-less.  This confirms the
+        current code path; see the accompanying report for whether WAITING
+        (implying "asked, nobody reachable") or a distinct UNKNOWN/stale-cache
+        state would be the more honest label for "we don't actually know
+        who's out there any more".
         """
         bob = peer_factory("bob")
         carol = peer_factory("carol")
 
-        ch_hash = bob.channel_mgr.create_channel("f4-restart", "", "public")
-        _seed_channel_on_peer(carol, ch_hash, "f4-restart", bob.identity.hash_hex)
+        ch_hash = mirrored_invite_channel("f4-restart", bob)
+        seed_channel_on_peer(carol, ch_hash, "f4-restart", bob.identity.hash_hex,
+                             members=[bob.identity.hash_hex,
+                                      carol.identity.hash_hex])
 
-        # Bob previously knew Carol as a subscriber, then "restarted" --
-        # SubscriptionManager's in-memory table is wiped, exactly as it would
-        # be by a fresh process over the same on-disk storage.
+        # Bob previously knew Carol via the in-memory cache, then "restarted"
+        # -- SubscriptionManager's table is wiped, exactly as it would be by
+        # a fresh process over the same on-disk storage.
         bob.subscription_mgr._subscribers[ch_hash] = {carol.identity.hash_hex}
         bob.subscription_mgr._subscribers.clear()
 
@@ -333,9 +336,7 @@ class TestPendingRequestKeyCollision:
         bob = peer_factory("bob")
         carol = peer_factory("carol")
 
-        ch_hash = alice.channel_mgr.create_channel("g1-overwrite", "", "public")
-        _seed_channel_on_peer(bob, ch_hash, "g1-overwrite", alice.identity.hash_hex)
-        _seed_channel_on_peer(carol, ch_hash, "g1-overwrite", alice.identity.hash_hex)
+        ch_hash = mirrored_invite_channel("g1-overwrite", alice, bob, carol)
 
         ts = time.time()
 
@@ -393,8 +394,7 @@ class TestPendingRequestKeyCollision:
         bob = peer_factory("bob")
         carol = peer_factory("carol")
 
-        ch_hash = alice.channel_mgr.create_channel("g1-keyforms", "", "public")
-        _seed_channel_on_peer(bob, ch_hash, "g1-keyforms", alice.identity.hash_hex)
+        ch_hash = mirrored_invite_channel("g1-keyforms", alice, bob, carol)
 
         bob.sync_mgr._record_pending_request(ch_hash, carol.identity.hash_hex, time.time())
 
@@ -434,8 +434,7 @@ class TestQuarantineExpiry:
         alice = peer_factory("alice")
         bob = peer_factory("bob")
 
-        ch_hash = alice.channel_mgr.create_channel("g2-baseline", "", "public")
-        _seed_channel_on_peer(bob, ch_hash, "g2-baseline", alice.identity.hash_hex)
+        ch_hash = mirrored_invite_channel("g2-baseline", alice, bob)
 
         msg_id = _insert_message(alice.storage, ch_hash, alice.identity.hash_hex,
                                  "hint target")
@@ -469,8 +468,7 @@ class TestQuarantineExpiry:
         alice = peer_factory("alice")
         bob = peer_factory("bob")
 
-        ch_hash = alice.channel_mgr.create_channel("g2-ttl", "", "public")
-        _seed_channel_on_peer(bob, ch_hash, "g2-ttl", alice.identity.hash_hex)
+        ch_hash = mirrored_invite_channel("g2-ttl", alice, bob)
 
         msg_id = _insert_message(alice.storage, ch_hash, alice.identity.hash_hex,
                                  "hint target 2")
@@ -513,9 +511,7 @@ class TestMissedDeliveryHintNoRetry:
         bob = peer_factory("bob")
         dave = peer_factory("dave")
 
-        ch_hash = alice.channel_mgr.create_channel("g3-hint-drop", "", "public")
-        _seed_channel_on_peer(bob, ch_hash, "g3-hint-drop", alice.identity.hash_hex)
-        _seed_channel_on_peer(dave, ch_hash, "g3-hint-drop", alice.identity.hash_hex)
+        ch_hash = mirrored_invite_channel("g3-hint-drop", alice, bob, dave)
 
         msg_id = _insert_message(alice.storage, ch_hash, alice.identity.hash_hex,
                                  "Bob missed this")
@@ -571,9 +567,7 @@ class TestOversizedImageViaSync:
         bob = peer_factory("bob")
         carol = peer_factory("carol")
 
-        ch_hash = alice.channel_mgr.create_channel("g4-oversized-sync", "", "public")
-        _seed_channel_on_peer(bob, ch_hash, "g4-oversized-sync", alice.identity.hash_hex)
-        _seed_channel_on_peer(carol, ch_hash, "g4-oversized-sync", alice.identity.hash_hex)
+        ch_hash = mirrored_invite_channel("g4-oversized-sync", alice, bob, carol)
 
         ts = time.time()
         bob.sync_mgr._send_sync_request(carol.identity.hash_hex, ch_hash, ts)
