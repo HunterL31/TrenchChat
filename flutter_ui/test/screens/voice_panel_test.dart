@@ -9,6 +9,7 @@ import 'package:flutter_ui/widgets/tc_icon.dart';
 Widget _harness({
   bool muted = false,
   bool audioError = false,
+  String audioReason = '',
   VoidCallback? onToggleMute,
   VoidCallback? onLeave,
 }) =>
@@ -19,6 +20,7 @@ Widget _harness({
           quality: LinkQualityLevel.excellent,
           muted: muted,
           audioError: audioError,
+          audioReason: audioReason,
           onToggleMute: onToggleMute ?? () {},
           onLeave: onLeave ?? () {},
         ),
@@ -54,6 +56,20 @@ void main() {
   testWidgets('audio error surfaces the listening-only warning', (tester) async {
     await tester.pumpWidget(_harness(audioError: true));
     expect(find.text('NO AUDIO DEVICE — LISTENING ONLY'), findsOneWidget);
+  });
+
+  testWidgets("the backend's audio failure reason is shown under the warning",
+      (tester) async {
+    const reason = 'input device USB Headset failed to open';
+    await tester.pumpWidget(_harness(audioError: true, audioReason: reason));
+
+    expect(find.text('NO AUDIO DEVICE — LISTENING ONLY'), findsOneWidget);
+    expect(find.text(reason), findsOneWidget);
+  });
+
+  testWidgets('no reason line without an audio error', (tester) async {
+    await tester.pumpWidget(_harness(audioReason: 'stale reason'));
+    expect(find.text('stale reason'), findsNothing);
   });
 
   testWidgets('mute and leave callbacks fire', (tester) async {

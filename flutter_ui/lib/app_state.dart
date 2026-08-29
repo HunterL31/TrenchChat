@@ -112,6 +112,11 @@ class AppState extends ChangeNotifier {
   bool voiceAudioError = false;
   Timer? _voicePollTimer;
 
+  /// The backend's stated cause for a dead audio pipeline (missing library,
+  /// device open failure, ...), straight from GET /voice/status. Empty until
+  /// the status refresh after an audio_error lands.
+  String get voiceAudioReason => voiceStatus.audioReason;
+
   /// Per-channel debounce for reaction refreshes. A sync backfill or a burst
   /// of reactions fires one event each; without coalescing that is one full
   /// message re-fetch per reaction.
@@ -1615,6 +1620,9 @@ class AppState extends ChangeNotifier {
           case 'audio_error':
             voiceAudioError = true;
             notifyListeners();
+            // The event carries no detail; the status endpoint has the
+            // pipeline's stated reason.
+            unawaited(refreshVoiceStatus());
         }
     }
   }

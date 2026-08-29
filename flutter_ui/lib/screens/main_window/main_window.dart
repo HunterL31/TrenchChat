@@ -362,6 +362,7 @@ class _MainWindowState extends State<MainWindow> {
                 quality: state.voiceQualityLevel,
                 muted: state.voiceMuted,
                 audioError: state.voiceAudioError,
+                audioReason: state.voiceAudioReason,
                 onToggleMute: () => state.toggleVoiceMute(),
                 onLeave: () => state.leaveVoice(),
               )

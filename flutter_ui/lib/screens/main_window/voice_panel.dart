@@ -9,6 +9,7 @@ import '../../theme/tokens.dart';
 import '../../widgets/signal_meter.dart';
 import '../../widgets/tc_button.dart';
 import '../../widgets/tc_icon.dart';
+import '../../widgets/tc_tooltip.dart';
 
 class VoicePanel extends StatelessWidget {
   const VoicePanel({
@@ -17,6 +18,7 @@ class VoicePanel extends StatelessWidget {
     required this.quality,
     required this.muted,
     required this.audioError,
+    this.audioReason = '',
     required this.onToggleMute,
     required this.onLeave,
   });
@@ -28,6 +30,10 @@ class VoicePanel extends StatelessWidget {
   /// The session is up but the backend has no working audio device;
   /// we're in the call listening-only (and effectively silent).
   final bool audioError;
+
+  /// The backend's stated cause for the dead pipeline (audio_status().reason);
+  /// shown under the warning so the failure is diagnosable from the panel.
+  final String audioReason;
   final VoidCallback? onToggleMute;
   final VoidCallback? onLeave;
 
@@ -61,7 +67,7 @@ class VoicePanel extends StatelessWidget {
               ),
             ],
           ),
-          if (audioError)
+          if (audioError) ...[
             Padding(
               padding: const EdgeInsets.only(top: 4),
               child: Text(
@@ -74,6 +80,23 @@ class VoicePanel extends StatelessWidget {
                 ),
               ),
             ),
+            if (audioReason.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(top: 2),
+                child: TcTooltip(
+                  message: audioReason,
+                  child: Text(
+                    audioReason,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: TCType.textMicro,
+                      color: tc.textTertiary,
+                    ),
+                  ),
+                ),
+              ),
+          ],
           const SizedBox(height: 6),
           Row(
             children: [
