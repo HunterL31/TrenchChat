@@ -10,7 +10,7 @@ from unittest.mock import patch
 import pytest
 
 from trenchchat.core.discovery import (
-    _to_jsonable, build_pinned_config, pin_discovered_interface,
+    _to_jsonable, build_pinned_config, pin_discovered_interface, sort_discovered,
 )
 from trenchchat.core.interfaces_config import (
     SUGGESTED_DEFAULTS,
@@ -119,6 +119,88 @@ def test_to_jsonable_hexes_bytes_and_flags_pinnable():
 def test_to_jsonable_radio_types_not_pinnable():
     out = _to_jsonable(_discovered_entry(type="RNodeInterface"))
     assert out["pinnable"] is False
+
+
+# ---------------------------------------------------------------------------
+# sort_discovered
+# ---------------------------------------------------------------------------
+
+def _listed(name: str, **overrides) -> dict:
+    entry = {
+        "name": name,
+        "discovery_hash": name,
+        "pinnable": True,
+        "status": "available",
+        "hops": 1,
+        "value": 10,
+        "last_heard": 1000.0,
+    }
+    entry.update(overrides)
+    return entry
+
+
+def _order(entries: list[dict]) -> list[str]:
+    return [e["name"] for e in sort_discovered(entries)]
+
+
+def test_sort_puts_pinnable_first():
+    entries = [_listed("radio", pinnable=False), _listed("hub")]
+    assert _order(entries) == ["hub", "radio"]
+
+
+def test_sort_pinnable_beats_every_other_tier():
+    entries = [
+        _listed("hub", status="stale", hops=9, value=0, last_heard=0),
+        _listed("radio", pinnable=False),
+    ]
+    assert _order(entries) == ["hub", "radio"]
+
+
+def test_sort_ranks_status_available_unknown_stale():
+    entries = [
+        _listed("c", status="stale"),
+        _listed("a", status="available"),
+        _listed("b", status="unknown"),
+    ]
+    assert _order(entries) == ["a", "b", "c"]
+
+
+def test_sort_unrecognized_and_missing_status_rank_worst():
+    entries = [_listed("weird", status="wat"), _listed("gone"), _listed("ok")]
+    del entries[1]["status"]
+    assert _order(entries) == ["ok", "gone", "weird"]
+
+
+def test_sort_prefers_fewer_hops_and_known_hops():
+    entries = [_listed("far", hops=5), _listed("unknown"), _listed("near", hops=1)]
+    del entries[1]["hops"]
+    assert _order(entries) == ["near", "far", "unknown"]
+
+
+def test_sort_prefers_higher_value_then_recent_last_heard():
+    entries = [_listed("low", value=1), _listed("none"), _listed("high", value=50)]
+    del entries[1]["value"]
+    assert _order(entries) == ["high", "low", "none"]
+
+    entries = [_listed("old", last_heard=10.0), _listed("never"), _listed("new")]
+    del entries[1]["last_heard"]
+    assert _order(entries) == ["new", "old", "never"]
+
+
+def test_sort_tiebreaks_by_name_then_hash():
+    entries = [
+        _listed("b", discovery_hash="02"),
+        _listed("a", discovery_hash="ff"),
+        _listed("a", discovery_hash="01"),
+    ]
+    ordered = sort_discovered(entries)
+    assert [(e["name"], e["discovery_hash"]) for e in ordered] == [
+        ("a", "01"), ("a", "ff"), ("b", "02"),
+    ]
+
+
+def test_sort_survives_entries_with_no_keys_at_all():
+    assert sort_discovered([{}, _listed("hub")])[0]["name"] == "hub"
 
 
 # ---------------------------------------------------------------------------
