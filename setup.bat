@@ -70,6 +70,6 @@ echo Installing dependencies...
 echo.
 echo Setup complete. Launching TrenchChat...
 echo.
-.venv\Scripts\python main.py %*
+.venv\Scripts\python main_flutter.py %*
 
 endlocal

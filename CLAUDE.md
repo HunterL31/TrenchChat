@@ -10,10 +10,8 @@ There is no server: every client is a peer, addressed by a cryptographic identit
 unicast LXMF packets sent directly to each subscriber (no broadcast/multicast layer). It runs over
 whatever transport Reticulum supports (LoRa, packet radio, TCP/IP, serial, etc).
 
-**The active client UI is the Flutter app in `flutter_ui/`** (web + desktop), launched via
-`main_flutter.py`. The PyQt6 GUI (`trenchchat/gui/`, `main.py`) is **legacy** — kept working until
-the migration finishes, but new UI work targets `flutter_ui/`, and features reach it through the
-API layer (see "Flutter client" below), not through new Qt code.
+**The client UI is the Flutter app in `flutter_ui/`** (web + desktop), launched via
+`main_flutter.py`. Features reach it through the API layer (see "Flutter client" below).
 
 ## Commands
 
@@ -27,10 +25,6 @@ setup.bat           # Windows
 .venv\Scripts\python main_flutter.py # Windows
 # Opens the built desktop binary if present, else the web client in a browser.
 # --port / --browser / --no-ui / --version; needs flutter_ui/build/web (flutter build web) or a desktop build.
-
-# Run the legacy Qt app
-.venv/bin/python main.py
-# -v/--verbose enables TrenchChat debug logging; --rns-debug enables full RNS firehose logging
 
 # Run the full Python test suite (required after any change to trenchchat/)
 .venv/bin/python -m pytest tests/ -v          # Linux/macOS
@@ -73,18 +67,17 @@ needed for normal development.
 `lockbox.py` (PIN-based encryption gate), `link_quality.py`, `image.py`,
 `fileutils.py`, `voice.py` (live group voice: LXMF signalling + roster; frames flow over RNS Links
 via `network/voice_transport.py`, audio primitives in `core/audio/` — see `docs/voice.md`).
-UI code — the Flutter client and the legacy Qt GUI (`trenchchat/gui/`) alike —
-must never construct LXMF messages or touch protocol fields directly: it reads `Storage`-backed
-state for display and delegates all mutations to the relevant core manager (the Flutter client via
-the HTTP/WS API, the Qt GUI directly). RNS/LXMF callbacks fire on background threads; Qt code must
-marshal into the main thread via signals, and the API layer marshals into asyncio via `EventBus`.
+UI code must never construct LXMF messages or touch protocol fields directly: it reads
+`Storage`-backed state for display and delegates all mutations to the relevant core manager via
+the HTTP/WS API. RNS/LXMF callbacks fire on background threads; the API layer marshals them into
+asyncio via `EventBus`.
 
-### Flutter client (`flutter_ui/`) — the active UI
+### Flutter client (`flutter_ui/`)
 
 - Dart/Flutter app; talks to a Python backend over HTTP + WebSocket. The backend is
   `devtools/testenv/api.py` (`create_app(backend, token=...)` — every endpoint
-  requires that token; see `docs/security-improvements.md`), whose endpoints call the same
-  `trenchchat/core/actions.py` functions and managers the Qt GUI calls — never reimplement logic
+  requires that token; see `docs/security-improvements.md`), whose endpoints call
+  `trenchchat/core/actions.py` functions and the core managers — never reimplement logic
   in an endpoint or a widget. New features reach the client as: core manager/action → api.py
   endpoint → `lib/api/client.dart` + `lib/app_state.dart` → screen.
 - `main_flutter.py` bundles backend + client for real use; `devtools/testenv/serve_profile.py`
@@ -150,13 +143,13 @@ all three mechanisms.
 Every permission (`SEND_MESSAGE`, `INVITE`, `KICK`, `MANAGE_ROLES`, `MANAGE_CHANNEL`, ...) must be
 checked at all three layers, because a gap at any one layer lets a bad client or bug bypass it:
 
-1. **GUI gate** — hide the control (convenience only, never sufficient alone).
-2. **GUI outbound guard** — re-check in the action handler before calling core.
+1. **Client gate** — hide the control in the Flutter UI (convenience only, never sufficient alone).
+2. **Outbound guard** — re-check in the `actions.py` function / API endpoint before calling core.
 3. **Core inbound enforcement** — the core manager rejects the operation regardless of caller; this is
    the only layer that protects against a malicious peer calling in directly.
 
 When adding a new permission, add all three layers plus an adversarial test in
-`tests/test_adversarial.py` that calls the core method directly, bypassing the GUI. See
+`tests/test_adversarial.py` that calls the core method directly, bypassing the client. See
 `.claude/rules/permission-enforcement.md` for the full mapping of existing permissions to their
 enforcement points.
 
@@ -212,7 +205,7 @@ Full detail in `.claude/rules/code-standards.md`. Highlights not obvious from sk
 ## Working in this repo
 
 - New core functionality is prototyped in `devtools/testenv/` against a real two-peer network first,
-  then ported to the GUI once it works — see `.claude/rules/feature-development-workflow.md`.
+  then wired into the Flutter client once it works — see `.claude/rules/feature-development-workflow.md`.
 - Run the full test suite after any change to `trenchchat/` and don't consider the task done until it
   passes — see `.claude/rules/run-tests-after-changes.md`.
 - New functionality needs a test in the matching `tests/test_*.py` file (bug fixes need a regression

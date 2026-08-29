@@ -1,8 +1,7 @@
-// PIN dialogs -- port of trenchchat/gui/pin_dialog.py: UnlockDialog,
-// SetPinDialog, ChangePinDialog. The lockbox has no API surface yet (see the
-// migration board's PIN card: locked-start vs out-of-band key is an open
-// design question), so verification is injected via [verifyPin] and nothing
-// is persisted; the dialogs and their limits are the port.
+// PIN dialogs: UnlockDialog, SetPinDialog, ChangePinDialog. The lockbox
+// has no API surface yet (locked-start vs out-of-band key is an open
+// design question), so verification is injected via [verifyPin] and
+// nothing is persisted; the dialogs and their limits are the port.
 import 'dart:async';
 
 import 'package:flutter/material.dart';

@@ -500,8 +500,8 @@ class TestAdversarialManageChannel:
     def test_actions_edit_channel_permissions_rejects_unauthorized_local_caller(self, peer_factory):
         """
         Direct-call coverage for actions.edit_channel_permissions -- the
-        shared entry point both main_window.py's _on_edit_permissions and
-        devtools/testenv/api.py's update_permissions call. Its own
+        shared entry point devtools/testenv/api.py's update_permissions
+        calls. Its own
         MANAGE_CHANNEL check (not the signed-document path the other
         MANAGE_CHANNEL tests in this class cover) is what stands between a
         modified/compromised local client and rewriting the local
@@ -1652,8 +1652,9 @@ class TestAdversarialReactions:
 class TestAdversarialPayloadLimits:
     def test_oversized_inbound_image_is_dropped(self, peer_factory):
         """
-        Attachment bytes are stored and later handed to Qt's image decoders.
-        Avatars and emoji are both capped on receipt; message images were not.
+        Attachment bytes are stored and later handed to the client's image
+        decoders. Avatars and emoji are both capped on receipt; message
+        images were not.
         """
         alice, bob, ch_hash = _setup_channel_with_member(
             peer_factory, member_perms=[SEND_MESSAGE]

@@ -47,8 +47,7 @@ APP_VERSION = os.environ.get("APP_VERSION", "0.0.0")
 hidden_imports = (
     collect_submodules("RNS")
     + collect_submodules("LXMF")
-    + collect_submodules(
-        "trenchchat", filter=lambda name: not name.startswith("trenchchat.gui"))
+    + collect_submodules("trenchchat")
     + collect_submodules("uvicorn")
     + collect_submodules("websockets")
     + [
@@ -140,7 +139,6 @@ a = Analysis(
     excludes=[
         # Exclude heavy packages that are not used
         "tkinter",
-        "PyQt6",
         "pydoc",
         "doctest",
         "ftplib",

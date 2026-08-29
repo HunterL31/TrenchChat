@@ -12,9 +12,9 @@ participant, on receiving the join, unicasts one voice_state describing
 itself. The roster is therefore an eventually-consistent presence hint;
 established and identified links are the ground truth for who is heard.
 
-Callbacks fire on background threads. GUI consumers must marshal into Qt
-via signals and gate the join control on has_permission(channel, self,
-VOICE_CHAT).
+Callbacks fire on background threads. UI consumers must marshal onto
+their own main thread and gate the join control on
+has_permission(channel, self, VOICE_CHAT).
 """
 
 import threading

@@ -61,13 +61,13 @@ which drives the same encode/transmit path with a generated 440 Hz tone.
 
 ## Frontend contract
 
-Construction (already wired in `main.py`):
+Construction (already wired in `devtools/testenv/backend_core.py`):
 
 ```python
 voice_transport = RNSVoiceTransport(identity)
 voice_mgr = VoiceManager(identity, storage, router, subscription_mgr,
                          config, transport=voice_transport)
-# plus a 1 s QTimer driving voice_mgr.tick()
+# plus a 1 s ticker driving voice_mgr.tick()
 ```
 
 API surface:
@@ -91,13 +91,14 @@ voice_mgr.add_speaking_callback(cb)   # cb(channel_hash_hex, peer_hex, speaking)
 voice_mgr.add_session_callback(cb)    # cb("joined" | "left" | "audio_error")
 ```
 
-Rules for the GUI, same as every other manager:
+Rules for the client, same as every other manager:
 
-- **Callbacks fire on background threads.** Emit Qt signals; never touch
-  widgets directly from them (`.claude/rules/gui-conventions.md`).
+- **Callbacks fire on background threads.** Marshal onto the consumer's
+  own main thread (the API layer does this via `EventBus`); never touch
+  UI state directly from them.
 - **Gate the join control** on `storage.has_permission(channel_hash,
   self_hex, VOICE_CHAT)` (open-join channels need no permission row) —
-  that is the GUI layer of the three-layer enforcement
+  that is the client layer of the three-layer enforcement
   (`.claude/rules/permission-enforcement.md`). The Flutter client
   implements this gate in `main_window.dart` via
   `GET /channels/{h}/my_permissions`; its voice UI lives in

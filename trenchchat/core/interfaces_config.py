@@ -1,10 +1,8 @@
 """
 Reticulum interface config file reading and writing.
 
-Pure ConfigObj manipulation, no Qt. trenchchat/gui/interfaces_widget.py builds
-the editing UI on top of this and owns the QMessageBox error paths and the
-restart-required copy; devtools/testenv/api.py's write endpoints call the
-same functions directly.
+Pure ConfigObj manipulation; devtools/testenv/api.py's interfaces
+endpoints call these functions directly.
 """
 
 import os

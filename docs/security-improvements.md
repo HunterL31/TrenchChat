@@ -147,7 +147,7 @@ but bearer credentials. Now:
 ### Payload limits
 - Inbound `F_IMAGE_DATA` is capped on both the direct and sync paths; avatars
   (16 KB) and emoji (64 KB) were capped, message attachments were not, and those
-  bytes are handed to Qt's C++ image decoders.
+  bytes are handed to the client's image decoders.
 - `Image.MAX_IMAGE_PIXELS` set; GIF frame extraction bounded.
 - Image sanitisation no longer fails open — when PIL rejects an image the
   original bytes are not forwarded. The re-encode is the only sanitisation in

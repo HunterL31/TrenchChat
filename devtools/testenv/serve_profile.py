@@ -10,10 +10,10 @@ Binds to localhost by default. The API drives the served identity, so a wider
 bind puts that identity on the network with only the token in front of it --
 pass --host deliberately, not by habit.
 
-Uses ~/.trenchchat and the default Reticulum config, wired exactly like
-main.py. Close the desktop client first: both processes would announce the
-same identity and contend for the same database. PIN-locked profiles are
-refused -- there is no headless unlock path yet.
+Uses ~/.trenchchat and the default Reticulum config. Close the desktop
+client first: both processes would announce the same identity and contend
+for the same database. PIN-locked profiles are refused -- there is no
+headless unlock path yet.
 """
 
 import argparse
@@ -34,7 +34,7 @@ _DEFAULT_WEB_DIR = _REPO_ROOT / "flutter_ui" / "build" / "web"
 # on 8801-8808 -- so a real-profile server can run alongside it.
 _DEFAULT_PORT = 8810
 
-# Mirrors main_window.py's startup sync delay.
+# Give peer links a moment to come up before the startup sync.
 _STARTUP_SYNC_DELAY_SECS = 3.0
 
 
@@ -73,8 +73,8 @@ def main():
 
     from trenchchat.network.router import REANNOUNCE_INTERVAL_SECS
 
-    # Same startup sequence as main.py: announce everything, then keep
-    # reannouncing.
+    # Same startup sequence as main_flutter.py: announce everything, then
+    # keep reannouncing.
     backend.announce()
     backend.start_heartbeat(interval=REANNOUNCE_INTERVAL_SECS)
     backend.start_presence_pruner()

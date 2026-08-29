@@ -1,10 +1,8 @@
 """
 Reticulum topology gathering for the network map.
 
-Pure data functions with no Qt dependency, so every frontend can use them:
-the Qt dialog in trenchchat/gui/network_map.py, and the headless testenv API
-that backs the Flutter client. Importing the Qt module instead would drag
-PyQt6 into environments that deliberately do not install it.
+Pure data functions consumed by the testenv API that backs the Flutter
+client.
 """
 
 import RNS
@@ -17,7 +15,7 @@ _MAX_NODES = 120   # cap to keep the graph readable
 
 
 # ---------------------------------------------------------------------------
-# Data gathering (pure functions — testable without Qt)
+# Data gathering (pure functions)
 # ---------------------------------------------------------------------------
 
 def gather_network_data(rns: RNS.Reticulum, self_hex: str,

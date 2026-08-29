@@ -1,5 +1,5 @@
-// The channel row's right-click menu, ported from the Qt client's channel
-// menu: what it offers depends on what this reader may actually do there, and
+// The channel row's right-click menu:
+// what it offers depends on what this reader may actually do there, and
 // every entry hands back the channel the menu was opened on -- the rows are
 // otherwise plain values and callbacks, like the rest of ChannelColumn.
 import 'package:flutter/gestures.dart';

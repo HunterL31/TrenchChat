@@ -44,12 +44,12 @@ from trenchchat.core.fileutils import atomic_write_bytes, secure_file
 _SALT_PATH = DATA_DIR / "lock.salt"
 _VERIFY_PATH = DATA_DIR / "lock.verify"
 
-# Minimum accepted PIN length. Enforced here so headless/non-Qt callers get the
-# same floor the Qt pin dialog applies.
+# Minimum accepted PIN length. Enforced here so every caller gets the same
+# floor the client's pin dialog applies.
 MIN_PIN_LENGTH = 4
 
-# Consecutive wrong guesses before a cooldown, and the cooldown length. Mirrors
-# the Qt dialog's limits so the core layer protects every caller, not just it.
+# Consecutive wrong guesses before a cooldown, and the cooldown length.
+# Enforced here so the core layer protects every caller, not just the client.
 MAX_UNLOCK_ATTEMPTS = 5
 LOCKOUT_SECS = 30
 

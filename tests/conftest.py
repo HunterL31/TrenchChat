@@ -315,9 +315,9 @@ def peer_factory(rns_instance, tmp_path):
             voice_transport=voice_transport,
         )
 
-        # Drive VoiceManager.tick the way main.py's QTimer / the testenv
-        # ticker thread would, so fallback dialing, roster TTL expiry and
-        # speaking decay behave under wait_for polling.
+        # Drive VoiceManager.tick the way the testenv ticker thread would,
+        # so fallback dialing, roster TTL expiry and speaking decay behave
+        # under wait_for polling.
         ticker_stop = threading.Event()
 
         def _voice_ticker():

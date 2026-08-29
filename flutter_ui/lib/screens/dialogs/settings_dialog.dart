@@ -1,7 +1,7 @@
-// Settings dialog -- port of trenchchat/gui/settings.py's SettingsDialog
-// Identity and Propagation Node tabs over GET/POST /settings and
-// POST /me/display_name. The Qt dialog's avatar picker (needs a native file
-// dialog) and Security/PIN tab (no API surface) are not in this spike.
+// Settings dialog -- Identity and Propagation Node tabs over GET/POST
+// /settings and POST /me/display_name. An avatar picker (needs a native
+// file dialog) and a Security/PIN tab (no API surface) are not in this
+// spike.
 import 'package:flutter/material.dart';
 
 import '../../api/models/settings.dart';

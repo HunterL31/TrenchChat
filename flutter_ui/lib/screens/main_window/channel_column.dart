@@ -103,8 +103,7 @@ class ChannelColumn extends StatelessWidget {
   /// anything else brightens the row and adds the same count pill DM rows use.
   final Map<String, int> unreadCounts;
 
-  /// The right-click menu for one channel row, mirroring the Qt client's
-  /// channel menu (main_window.py's _on_channel_context_menu). Leaving is
+  /// The right-click menu for one channel row. Leaving is
   /// offered for standalone channels only: membership of a server's channel
   /// belongs to the server, so there is no such thing as leaving one of them.
   List<TcContextMenuItem> _menuFor(Channel channel) {

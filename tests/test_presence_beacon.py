@@ -177,7 +177,7 @@ def test_inbound_beacon_is_inert_for_invite_manager(peer_factory):
 
 
 def test_router_add_outbound_callback_fires_with_dest_identity_hex(peer_factory):
-    """Router.add_outbound_callback (what main.py/backend_core.py wire to
+    """Router.add_outbound_callback (what backend_core.py wires to
     beacon.record_sent) must fire on every send with the recipient's raw
     identity hex -- the same value PresenceBeacon keys last_sent by.
 

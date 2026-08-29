@@ -1,5 +1,5 @@
-// Mirrors trenchchat/gui/channel_view.py's _name_color() exactly, so the Qt
-// client and this UI agree on every sender's display color.
+// Deterministic sender display colors: every client derives the same color
+// for the same identity hash.
 import 'dart:convert';
 
 import 'package:crypto/crypto.dart';

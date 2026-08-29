@@ -13,7 +13,6 @@
 # Bump deliberately, and re-run the full test suite when you do.
 rns==1.4.2
 lxmf==1.1.1
-PyQt6==6.10.2
 msgpack==1.1.2
 configobj==5.0.9
 sqlcipher3==0.6.2

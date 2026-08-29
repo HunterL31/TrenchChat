@@ -24,21 +24,20 @@ log() { echo "[session-start] $*"; }
 
 # --- system libraries ---------------------------------------------------
 # libopus/libportaudio: tests/test_voice_audio.py imports opuslib, which
-# dlopen()s them. libegl1: PyQt6 needs it to import at all, so the legacy Qt
-# tests fail collection without it.
+# dlopen()s them.
 # ldconfig's output is captured once rather than piped into grep: `grep -q`
 # exits on its first match and SIGPIPEs ldconfig, which `set -o pipefail`
 # then reads as a failed check.
 LDCONFIG_CACHE="$(ldconfig -p 2>/dev/null || true)"
 have_lib() { case "$LDCONFIG_CACHE" in *"$1"*) return 0 ;; *) return 1 ;; esac; }
 
-if have_lib libopus && have_lib libportaudio && have_lib libEGL; then
+if have_lib libopus && have_lib libportaudio; then
     log "system libraries: present"
 else
-    log "installing system libraries (libopus, PortAudio, EGL)..."
+    log "installing system libraries (libopus, PortAudio)..."
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -qq
-    apt-get install -y -qq libopus0 libportaudio2 libegl1
+    apt-get install -y -qq libopus0 libportaudio2
 fi
 
 # --- Python venv --------------------------------------------------------

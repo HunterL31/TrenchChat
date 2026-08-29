@@ -1,4 +1,4 @@
-// Goldens for the windows ported from the Qt client: Settings, Members,
+// Goldens for the app's windows: Settings, Members,
 // Invite, incoming invite, permissions, emoji picker, unlock, and the IFACE
 // and MAP tabs. Data comes from the canned MockClient transport in
 // fake_backend.dart, so the suite stays offline like the rest of the golden

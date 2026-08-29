@@ -14,8 +14,8 @@ would, no manual key exchange required (each pane already knows every
 other tester's identity hash).
 
 Every action the UI takes calls the same trenchchat.core.actions /
-manager entry points the Qt GUI calls (see api.py) -- there is no
-separate reimplementation to drift out of sync.
+manager entry points the real client's API calls (see api.py) -- there is
+no separate reimplementation to drift out of sync.
 
 Click "Reset environment" to kill every tester and the hub, wipe their
 data directories back to a fresh-install state, and relaunch them.
