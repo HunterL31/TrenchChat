@@ -11,10 +11,11 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
 class RecordedRequest {
-  const RecordedRequest(this.method, this.path, this.body);
+  const RecordedRequest(this.method, this.path, this.body, [this.query = const {}]);
   final String method;
   final String path;
   final String body;
+  final Map<String, String> query;
 }
 
 /// A canned failure: assign one as a route to exercise an error path
@@ -39,7 +40,8 @@ class FakeBackend {
   String get baseUrl => 'http://fake.test';
 
   http.Client client() => MockClient((req) async {
-        requests.add(RecordedRequest(req.method, req.url.path, req.body));
+        requests.add(RecordedRequest(
+            req.method, req.url.path, req.body, req.url.queryParameters));
         final handler = routes['${req.method} ${req.url.path}'];
         if (handler == null) {
           return http.Response(jsonEncode({'error': 'not found'}), 404,

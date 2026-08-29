@@ -109,6 +109,50 @@ void main() {
     expect(inviteButton(tester).onPressed, isNotNull);
   });
 
+  testWidgets('scope chips re-query the directory with the chosen scope',
+      (tester) async {
+    await open(tester);
+
+    List<String> scopes() => backend.requests
+        .where((r) => r.path == '/directory')
+        .map((r) => r.query['scope'] ?? '')
+        .toList();
+    expect(scopes(), isNotEmpty);
+    expect(scopes().every((s) => s == 'all'), isTrue);
+
+    await tester.tap(find.widgetWithText(TcGhostButton, 'FRIENDS'));
+    await settle(tester);
+    expect(scopes().last, 'friends');
+
+    await tester.tap(find.widgetWithText(TcGhostButton, 'SHARED'));
+    await settle(tester);
+    expect(scopes().last, 'shared');
+
+    await tester.tap(find.widgetWithText(TcGhostButton, 'ALL'));
+    await settle(tester);
+    expect(scopes().last, 'all');
+  });
+
+  testWidgets('a filtered-out selection is cleared and manual entry survives '
+      'a scope change', (tester) async {
+    await open(tester);
+
+    await tester.tap(find.text('Alice'));
+    await tester.pump();
+    expect(inviteButton(tester).onPressed, isNotNull);
+
+    backend.routes['GET /directory'] = <dynamic>[];
+    await tester.tap(find.widgetWithText(TcGhostButton, 'FRIENDS'));
+    await settle(tester);
+
+    expect(find.text('Alice'), findsNothing);
+    expect(inviteButton(tester).onPressed, isNull);
+
+    await tester.enterText(find.byType(TextField).last, _peerHash);
+    await tester.pump();
+    expect(inviteButton(tester).onPressed, isNotNull);
+  });
+
   testWidgets('rejects inviting your own identity hash', (tester) async {
     const selfHash = 'a9f13c02e7d84b119876543210fedcba';
     state.meHashHex = selfHash;

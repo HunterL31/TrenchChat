@@ -20,6 +20,10 @@ from trenchchat.core.permissions import (
 
 MAX_THEME_NAME_LEN = 64
 
+DIRECTORY_SCOPE_ALL = "all"
+DIRECTORY_SCOPE_FRIENDS = "friends"
+DIRECTORY_SCOPE_SHARED = "shared"
+
 
 def create_channel(channel_mgr, invite_mgr, name: str, description: str,
                    permissions: dict) -> str:
@@ -328,6 +332,41 @@ def channel_roster_hexes(storage, subscription_mgr,
     if is_open_join(perms):
         return sorted(subscription_mgr.get_subscribers(channel_hash_hex))
     return [row["identity_hash"] for row in storage.get_members(channel_hash_hex)]
+
+
+def shared_channel_peers(storage, self_hash_hex: str) -> set[str]:
+    """Identity hashes sharing at least one channel with this node.
+
+    Unions the members table with the durable subscriber copy across the
+    channels this node is subscribed to, so both access modes are covered.
+    Direct-message conversations keep no subscriptions row, so they never
+    contribute a peer here.
+    """
+    subscribed = {row["channel_hash"] for row in storage.get_subscriptions()}
+    all_subscribers = storage.get_all_channel_subscribers()
+
+    peers: set[str] = set()
+    for channel_hash in subscribed:
+        peers.update(row["identity_hash"] for row in storage.get_members(channel_hash))
+        peers.update(all_subscribers.get(channel_hash, set()))
+    peers.discard(self_hash_hex)
+    return peers
+
+
+def filter_directory_scope(results: list[dict], scope: str, *,
+                           friend_hashes: set[str],
+                           shared_hashes: set[str]) -> list[dict]:
+    """Narrow directory results to friends or shared-channel peers.
+
+    Any scope other than "friends" or "shared" leaves the list untouched.
+    """
+    if scope == DIRECTORY_SCOPE_FRIENDS:
+        keep = friend_hashes
+    elif scope == DIRECTORY_SCOPE_SHARED:
+        keep = shared_hashes
+    else:
+        return results
+    return [r for r in results if r.get("identity_hash") in keep]
 
 
 # ---------------------------------------------------------------------------

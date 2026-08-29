@@ -598,3 +598,73 @@ class TestAudioDevices:
         assert changed is False
         assert voice_mgr.restarts == 0, \
             "an unchanged selection rebuilt a live pipeline"
+
+
+class TestSharedChannelPeers:
+    """actions.shared_channel_peers backs GET /directory?scope=shared."""
+
+    @pytest.fixture
+    def db(self, tmp_path):
+        from trenchchat.core.storage import Storage
+        s = Storage(db_path=tmp_path / "shared.db")
+        yield s
+        s.close()
+
+    SELF = "aa" * 16
+    MEMBER = "bb" * 16
+    SUBSCRIBER = "cc" * 16
+    STRANGER = "dd" * 16
+
+    def _channel(self, db, hash_hex, perms=PRESET_PRIVATE, subscribe=True):
+        db.upsert_channel(hash_hex, "ch", "", self.SELF, dict(perms), time.time())
+        if subscribe:
+            db.subscribe(hash_hex)
+
+    def test_unions_members_and_durable_subscribers(self, db):
+        self._channel(db, "11" * 16)
+        self._channel(db, "22" * 16, perms=PRESET_OPEN)
+        db.upsert_member("11" * 16, self.MEMBER, "Bob")
+        db.upsert_member("11" * 16, self.SELF, "Me")
+        db.add_channel_subscriber("22" * 16, self.SUBSCRIBER)
+
+        assert actions.shared_channel_peers(db, self.SELF) == {
+            self.MEMBER, self.SUBSCRIBER,
+        }
+
+    def test_excludes_self_and_unshared_channels(self, db):
+        self._channel(db, "11" * 16)
+        db.upsert_member("11" * 16, self.SELF, "Me")
+        self._channel(db, "33" * 16, subscribe=False)
+        db.upsert_member("33" * 16, self.STRANGER, "Nope")
+        db.add_channel_subscriber("33" * 16, self.STRANGER)
+
+        assert actions.shared_channel_peers(db, self.SELF) == set()
+
+    def test_no_channels_is_empty(self, db):
+        assert actions.shared_channel_peers(db, self.SELF) == set()
+
+
+class TestFilterDirectoryScope:
+    RESULTS = [
+        {"identity_hash": "aa" * 16, "display_name": "Friend"},
+        {"identity_hash": "bb" * 16, "display_name": "Shared"},
+        {"identity_hash": "cc" * 16, "display_name": "Stranger"},
+    ]
+    FRIENDS = {"aa" * 16}
+    SHARED = {"bb" * 16}
+
+    def _filter(self, scope):
+        return actions.filter_directory_scope(
+            list(self.RESULTS), scope,
+            friend_hashes=self.FRIENDS, shared_hashes=self.SHARED,
+        )
+
+    def test_friends_scope_keeps_only_friends(self):
+        assert [r["display_name"] for r in self._filter("friends")] == ["Friend"]
+
+    def test_shared_scope_keeps_only_shared_channel_peers(self):
+        assert [r["display_name"] for r in self._filter("shared")] == ["Shared"]
+
+    def test_all_and_unknown_scopes_pass_everything_through(self):
+        assert len(self._filter("all")) == 3
+        assert len(self._filter("bogus")) == 3

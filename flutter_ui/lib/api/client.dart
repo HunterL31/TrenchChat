@@ -24,6 +24,11 @@ import 'models/server.dart';
 import 'models/settings.dart';
 import 'models/voice.dart';
 
+/// Directory scopes accepted by GET /directory.
+const String directoryScopeAll = 'all';
+const String directoryScopeFriends = 'friends';
+const String directoryScopeShared = 'shared';
+
 /// Thrown for any non-2xx response. [message] prefers the backend's own
 /// `{"error": "..."}` body (used for expected failures like a permission
 /// gate), falling back to FastAPI's validation `{"detail": ...}` shape or a
@@ -642,8 +647,12 @@ class ApiClient {
     _decode(res);
   }
 
-  Future<List<DirectoryEntry>> searchDirectory(String query) async {
-    final res = await _http.get(_u('/directory?q=${Uri.encodeQueryComponent(query)}'));
+  /// [scope] narrows the result to `friends` or `shared` (peers sharing a
+  /// channel with this node); anything else returns the whole directory.
+  Future<List<DirectoryEntry>> searchDirectory(String query,
+      {String scope = directoryScopeAll}) async {
+    final res = await _http.get(_u('/directory?q=${Uri.encodeQueryComponent(query)}'
+        '&scope=${Uri.encodeQueryComponent(scope)}'));
     return (_decode(res) as List<dynamic>)
         .map((e) => DirectoryEntry.fromJson(e as Map<String, dynamic>))
         .toList();

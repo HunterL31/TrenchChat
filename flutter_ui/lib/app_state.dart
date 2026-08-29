@@ -1131,10 +1131,12 @@ class AppState extends ChangeNotifier {
   }
 
   /// Runs a directory search and caches the result in [directory] so live
-  /// [DirectoryUpdatedEvent]s can patch it in place.
-  Future<void> loadDirectory(String query) async {
+  /// [DirectoryUpdatedEvent]s can patch it in place. [scope] narrows the
+  /// result to friends or peers sharing a channel with this node.
+  Future<void> loadDirectory(String query,
+      {String scope = directoryScopeAll}) async {
     try {
-      directory = await api.searchDirectory(query);
+      directory = await api.searchDirectory(query, scope: scope);
     } catch (_) {
       // Directory unavailable is not fatal; the manual-hash path still works.
       directory = [];
