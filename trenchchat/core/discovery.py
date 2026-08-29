@@ -21,13 +21,18 @@ _LISTED_KEYS = (
     "latitude", "longitude", "height", "transport", "config_entry",
 )
 
+# Best first; anything unrecognized or missing ranks worst.
+_STATUS_RANK = {"available": 0, "unknown": 1, "stale": 2}
+_WORST_STATUS_RANK = len(_STATUS_RANK)
+
+_UNKNOWN_HOPS = float("inf")
+
 
 def list_discovered_interfaces() -> list[dict]:
     """Return the RNS instance's discovered interfaces as JSON-safe dicts.
 
-    Sorted best-first by RNS (status, then stamp value, then last heard).
-    Returns an empty list when discovery is unavailable or nothing has been
-    discovered yet.
+    Sorted best-match first by sort_discovered. Returns an empty list when
+    discovery is unavailable or nothing has been discovered yet.
     """
     try:
         discovery = RNS.Discovery.InterfaceDiscovery(discover_interfaces=False)
@@ -36,7 +41,35 @@ def list_discovered_interfaces() -> list[dict]:
         RNS.log(f"TrenchChat [discovery]: could not list discovered interfaces: {e}",
                 RNS.LOG_WARNING)
         return []
-    return [_to_jsonable(info) for info in raw]
+    return sort_discovered([_to_jsonable(info) for info in raw])
+
+
+def sort_discovered(entries: list[dict]) -> list[dict]:
+    """Return the entries ordered best match first.
+
+    Pinnable entries come first, then better status, fewer hops, higher stamp
+    value and more recent contact; name and discovery hash keep it stable.
+    """
+    return sorted(entries, key=discovery_sort_key)
+
+
+def discovery_sort_key(entry: dict) -> tuple:
+    """Best-match sort key for a discovered-interface dict."""
+    return (
+        0 if entry.get("pinnable") else 1,
+        _STATUS_RANK.get(entry.get("status"), _WORST_STATUS_RANK),
+        _as_number(entry.get("hops"), _UNKNOWN_HOPS),
+        -_as_number(entry.get("value"), 0),
+        -_as_number(entry.get("last_heard"), 0),
+        str(entry.get("name") or ""),
+        str(entry.get("discovery_hash") or ""),
+    )
+
+
+def _as_number(value, fallback: float) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return fallback
+    return float(value)
 
 
 def _to_jsonable(info: dict) -> dict:
