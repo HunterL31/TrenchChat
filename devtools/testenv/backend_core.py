@@ -257,7 +257,10 @@ class Backend:
         )
         self.router.add_outbound_callback(self.presence_beacon.record_sent)
         self.user_directory = UserDirectory(self.identity.hash_hex)
-        self.avatar_mgr = AvatarManager(self.identity, self.config, self.storage, self.router)
+        self.avatar_mgr = AvatarManager(
+            self.identity, self.config, self.storage, self.router,
+            is_trenchchat=actions.trenchchat_peer_gate(self.storage, self.user_directory),
+        )
         self.friends_mgr = FriendsManager(self.storage, self.identity.hash_hex,
                                           self.presence_mgr, identity=self.identity,
                                           router=self.router)

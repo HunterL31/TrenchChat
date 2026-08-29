@@ -12,6 +12,8 @@ These functions take already-constructed manager/storage objects and are
 free of any GUI framework dependency.
 """
 
+from collections.abc import Callable
+
 from trenchchat.core.node_browser import parse_nomad_url
 from trenchchat.core.permissions import (
     CREATE_CHANNEL, KICK, MANAGE_CHANNEL, MANAGE_ROLES, SEND_MESSAGE,
@@ -351,6 +353,23 @@ def shared_channel_peers(storage, self_hash_hex: str) -> set[str]:
         peers.update(all_subscribers.get(channel_hash, set()))
     peers.discard(self_hash_hex)
     return peers
+
+
+def trenchchat_peer_gate(storage, directory=None) -> Callable[[str], bool]:
+    """Return a predicate telling whether a peer hash is a TrenchChat client.
+
+    True for a peer that announced as a trenchchat.user, appears in a channel
+    member or subscriber record, or has spoken the direct-message envelope.
+    An LXMF delivery announce alone proves nothing: Sideband, MeshChat and
+    every other LXMF client announce on the same aspect, and anything sent to
+    them unasked shows up as an empty message or raw binary.
+    """
+    def _is_trenchchat(peer_hex: str) -> bool:
+        if directory is not None and directory.contains(peer_hex):
+            return True
+        return storage.is_trenchchat_peer(peer_hex)
+
+    return _is_trenchchat
 
 
 def filter_directory_scope(results: list[dict], scope: str, *,

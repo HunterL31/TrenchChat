@@ -5,6 +5,8 @@ Profile pictures are:
   - Stored locally as 128x128 JPEG blobs (own avatar in Config, peers in SQLite)
   - Transmitted as a dedicated LXMF control message (MT_AVATAR_UPDATE)
   - Sent once per peer per avatar version -- not attached to every chat message
+  - Sent only to peers known to run TrenchChat; every LXMF client announces on
+    lxmf.delivery, and an unasked avatar reaches the others as raw binary
   - Delivered immediately to reachable peers on change; deferred to
     flush_avatar() when a peer reappears after being offline
 
@@ -22,6 +24,7 @@ Receive rate limiting: at most one inbound avatar update accepted per peer per
 import io
 import threading
 import time
+from collections.abc import Callable
 
 import RNS
 import LXMF
@@ -89,11 +92,22 @@ class AvatarManager:
     """Manages sending, receiving, caching, and delivery tracking of user avatars."""
 
     def __init__(self, identity: Identity, config: Config,
-                 storage: Storage, router: Router):
+                 storage: Storage, router: Router,
+                 is_trenchchat: Callable[[str], bool] | None = None):
+        """*is_trenchchat* decides which peers may be sent an avatar.
+
+        Every LXMF client on the mesh announces on lxmf.delivery, so the
+        peer-appeared path hears Sideband, MeshChat and everything else too;
+        without the predicate an avatar push reaches them as an empty message
+        with a binary attachment. None keeps every peer allowed, which is what
+        a storage-only construction gets -- both frontends pass
+        actions.trenchchat_peer_gate().
+        """
         self._identity = identity
         self._config = config
         self._storage = storage
         self._router = router
+        self._is_trenchchat = is_trenchchat
 
         self._avatar_callbacks: list = []
         self._lock = threading.Lock()
@@ -389,7 +403,19 @@ class AvatarManager:
         whose RNS path is unknown, or whose delivery is later reported failed,
         is held for retry (see flush_avatar) instead of being left on a stale
         avatar until our next change.
+
+        The single choke point for every avatar send, solicited or not, so the
+        TrenchChat check sits here: a peer that fails it is neither sent to nor
+        queued, or its announce would simply fire the send later.
         """
+        if not self._peer_is_trenchchat(peer_hex):
+            RNS.log(
+                f"TrenchChat [avatar]: not sending to {peer_hex[:12]}… — "
+                f"not a known TrenchChat peer",
+                RNS.LOG_DEBUG,
+            )
+            return
+
         try:
             identity_hash = bytes.fromhex(peer_hex)
             delivery_dest_hash = RNS.Destination.hash(identity_hash, "lxmf", "delivery")
@@ -430,6 +456,21 @@ class AvatarManager:
                 f"TrenchChat [avatar]: send error to {peer_hex[:12]}…: {e}",
                 RNS.LOG_WARNING,
             )
+
+    def _peer_is_trenchchat(self, peer_hex: str) -> bool:
+        """Whether this peer may be sent an avatar. Fails closed on error: a
+        skipped push is retried on the peer's next announce."""
+        if self._is_trenchchat is None:
+            return True
+        try:
+            return bool(self._is_trenchchat(peer_hex))
+        except Exception as e:
+            RNS.log(
+                f"TrenchChat [avatar]: TrenchChat check for {peer_hex[:12]}… "
+                f"errored: {e}",
+                RNS.LOG_WARNING,
+            )
+            return False
 
     def _queue_pending(self, peer_hex: str, avatar_version: int) -> None:
         """Hold a peer for avatar-delivery retry, within a fixed bound."""
