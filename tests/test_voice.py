@@ -548,3 +548,25 @@ class TestDegradedAudioStatus:
         assert status["available"] is True
         assert status["input_ok"] is True and status["output_ok"] is True
         assert "audio_error" not in states
+
+
+class TestUnavailableAudioReason:
+    def test_missing_audio_stack_reason_reaches_audio_status(
+            self, peer_factory, monkeypatch):
+        """create_pipeline logs why the stack is missing and returns None;
+        the specific reason (not a generic line) must reach the client."""
+        from trenchchat.core import audio
+
+        peers, ch_hash = _setup_open_channel(peer_factory, names=("alice",))
+        alice = peers[0]
+        assert alice.voice_mgr._audio_factory is None  # default factory path
+        monkeypatch.setattr(audio, "create_pipeline", lambda *a: None)
+        monkeypatch.setattr(
+            audio, "audio_available",
+            lambda: (False, "opus codec unavailable: libopus not found"))
+
+        assert alice.voice_mgr.join_voice(ch_hash)
+
+        status = alice.voice_mgr.audio_status()
+        assert status["available"] is False
+        assert status["reason"] == "opus codec unavailable: libopus not found"

@@ -801,13 +801,28 @@ class VoiceManager:
                         not status.get("output_ok", True):
                     self._notify_session(SESSION_AUDIO_ERROR)
                 return
-            self._audio_error = "no audio pipeline available"
+            self._audio_error = self._unavailable_reason()
         except Exception as e:
             RNS.log(f"TrenchChat [voice]: audio start failed: {e}",
                     RNS.LOG_ERROR)
             self._audio_pipeline = None
             self._audio_error = str(e)
         self._notify_session(SESSION_AUDIO_ERROR)
+
+    def _unavailable_reason(self) -> str:
+        """Why the default factory built no pipeline: the failed import
+        (sounddevice/numpy/opus), re-probed because create_pipeline only
+        logs it, and the client needs it in audio_status()."""
+        if self._audio_factory is None:
+            try:
+                from trenchchat.core.audio import audio_available
+                available, reason = audio_available()
+                if not available and reason:
+                    return reason
+            except Exception as e:
+                RNS.log(f"TrenchChat [voice]: availability probe error: {e}",
+                        RNS.LOG_DEBUG)
+        return "no audio pipeline available"
 
     def _stop_audio(self):
         pipeline = self._audio_pipeline
