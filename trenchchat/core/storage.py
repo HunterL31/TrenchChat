@@ -1354,6 +1354,27 @@ class Storage:
         rows = self._fetchall("SELECT DISTINCT identity_hash FROM members")
         return {row["identity_hash"] for row in rows}
 
+    def is_trenchchat_peer(self, identity_hash: str) -> bool:
+        """Whether durable local state proves this identity runs TrenchChat.
+
+        Three sources, any of which only a TrenchChat client can produce: a
+        channel member list, the durable subscriber copy, and a direct-message
+        peer that has sent the TrenchChat envelope. A friends row is
+        deliberately not one -- a contact can be any LXMF client.
+
+        Single-row lookups rather than get_trenchchat_peer_identities(), which
+        materialises every member: this runs on every announce heard.
+        """
+        for sql in (
+            "SELECT 1 FROM members WHERE identity_hash = ? LIMIT 1",
+            "SELECT 1 FROM channel_subscribers WHERE identity_hash = ? LIMIT 1",
+            "SELECT 1 FROM dm_conversations WHERE peer_hash = ? "
+            "AND peer_is_trenchchat = 1 LIMIT 1",
+        ):
+            if self._fetchone(sql, (identity_hash,)) is not None:
+                return True
+        return False
+
     def get_display_name_for_identity(self, identity_hash: str) -> str | None:
         """Return the most recently stored display name for an identity across all channels.
 

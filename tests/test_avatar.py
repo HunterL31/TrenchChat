@@ -8,6 +8,7 @@ Covers:
   - Receive rate limiting on inbound MT_AVATAR_UPDATE messages
   - Delivery tracking (clear on change, flush_avatar deferred delivery)
   - Inbound avatar storage in peer_avatars table
+  - The TrenchChat gate on every outbound avatar
 """
 
 import io
@@ -20,6 +21,7 @@ import pytest
 from PIL import Image
 
 from trenchchat.config import Config
+from trenchchat.core import actions
 from trenchchat.core.avatar import (
     AvatarManager,
     AVATAR_SIZE_PX,
@@ -31,6 +33,7 @@ from trenchchat.core.avatar import (
 from trenchchat.core.protocol import F_MSG_TYPE, F_AVATAR_DATA, F_AVATAR_VERSION, MT_AVATAR_UPDATE
 from trenchchat.core.permissions import PRESET_PRIVATE, ROLE_MEMBER
 from trenchchat.core.storage import Storage
+from trenchchat.core.user_directory import UserDirectory
 
 
 # ---------------------------------------------------------------------------
@@ -97,6 +100,26 @@ def avatar_mgr(tmp_path, config):
     router.delivery_destination = MagicMock()
     mgr = AvatarManager(identity, config, storage, router)
     yield mgr
+    storage.close()
+
+
+@pytest.fixture
+def gated_avatar_mgr(tmp_path, config):
+    """AvatarManager wired to the real TrenchChat gate, as both frontends wire it.
+
+    Yields (manager, user_directory) so a test can register the evidence that
+    makes a peer a TrenchChat client.
+    """
+    identity = _make_identity_mock("aa" * 16)
+    storage = Storage(db_path=tmp_path / "gated.db")
+    directory = UserDirectory(identity.hash_hex)
+    router = MagicMock()
+    router.delivery_destination = MagicMock()
+    mgr = AvatarManager(
+        identity, config, storage, router,
+        is_trenchchat=actions.trenchchat_peer_gate(storage, directory),
+    )
+    yield mgr, directory
     storage.close()
 
 
@@ -545,6 +568,95 @@ class TestDeliveryRetry:
         assert peer_hex not in avatar_mgr._pending
         assert avatar_mgr._storage.get_avatar_delivery_version(peer_hex) == 1
         avatar_mgr._router.send.assert_called_once()
+
+
+class TestOnlyTrenchChatPeersArePushedAvatars:
+    """PeerAnnounceHandler fires for every LXMF client on the mesh -- Sideband,
+    MeshChat, anything -- so an ungated flush pushed our avatar blob to clients
+    that show it as an empty message with raw binary attached."""
+
+    def _own_avatar(self, config) -> None:
+        config.avatar_bytes = compress_avatar(_make_test_jpeg())
+        config.avatar_version = 4
+
+    def _flush(self, mgr: AvatarManager, peer_hex: str) -> None:
+        """flush_avatar through the real send path, with RNS stubbed out."""
+        with patch("trenchchat.core.avatar.RNS.Identity.recall",
+                   return_value=MagicMock()), \
+                patch("trenchchat.core.avatar.RNS.Transport.request_path"), \
+                patch("trenchchat.core.avatar.RNS.Destination"), \
+                patch("trenchchat.core.avatar.LXMF.LXMessage"):
+            mgr.flush_avatar(peer_hex)
+
+    def test_foreign_lxmf_client_is_neither_sent_to_nor_queued(
+            self, gated_avatar_mgr, config):
+        mgr, _directory = gated_avatar_mgr
+        self._own_avatar(config)
+        peer_hex = "bd" * 16
+
+        self._flush(mgr, peer_hex)
+
+        mgr._router.send.assert_not_called()
+        assert peer_hex not in mgr._pending, \
+            "a foreign client's announce queued an avatar blob to fire later"
+        assert mgr._storage.get_avatar_delivery_version(peer_hex) is None
+
+    def test_directory_peer_is_sent_the_avatar(self, gated_avatar_mgr, config):
+        mgr, directory = gated_avatar_mgr
+        self._own_avatar(config)
+        peer_hex = "be" * 16
+        directory.record_user(peer_hex, "Announced peer")
+
+        self._flush(mgr, peer_hex)
+
+        mgr._router.send.assert_called_once()
+        assert mgr._storage.get_avatar_delivery_version(peer_hex) == 4
+
+    def test_channel_member_is_sent_the_avatar(self, gated_avatar_mgr, config):
+        mgr, _directory = gated_avatar_mgr
+        self._own_avatar(config)
+        peer_hex = "bf" * 16
+        _share_channel_with(mgr, peer_hex)
+
+        self._flush(mgr, peer_hex)
+
+        mgr._router.send.assert_called_once()
+
+    def test_channel_subscriber_is_sent_the_avatar(self, gated_avatar_mgr, config):
+        mgr, _directory = gated_avatar_mgr
+        self._own_avatar(config)
+        peer_hex = "ca" * 16
+        channel_hex = "ce" * 16
+        mgr._storage.upsert_channel(
+            hash=channel_hex, name="public", description="",
+            creator_hash="aa" * 16, permissions=PRESET_PRIVATE, created_at=0.0,
+        )
+        mgr._storage.add_channel_subscriber(channel_hex, peer_hex)
+
+        self._flush(mgr, peer_hex)
+
+        mgr._router.send.assert_called_once()
+
+    def test_fanout_skips_a_foreign_peer(self, gated_avatar_mgr, config):
+        """set_avatar()'s fan-out goes through the same gate: a peer a lookup
+        offers but nothing durable backs is not sent to either."""
+        mgr, _directory = gated_avatar_mgr
+        member_hex = "da" * 16
+        _share_channel_with(mgr, member_hex)
+        stranger_hex = "db" * 16
+
+        with patch("trenchchat.core.avatar.RNS.Identity.recall",
+                   return_value=MagicMock()), \
+                patch("trenchchat.core.avatar.RNS.Transport.request_path"), \
+                patch("trenchchat.core.avatar.RNS.Destination"), \
+                patch("trenchchat.core.avatar.LXMF.LXMessage"):
+            mgr.set_avatar(compress_avatar(_make_test_jpeg()),
+                           lambda _ch: {stranger_hex})
+
+        assert mgr._router.send.call_count == 1
+        assert mgr._storage.get_avatar_delivery_version(member_hex) is not None
+        assert mgr._storage.get_avatar_delivery_version(stranger_hex) is None
+        assert stranger_hex not in mgr._pending
 
 
 class TestAvatarStorageIsBounded:
