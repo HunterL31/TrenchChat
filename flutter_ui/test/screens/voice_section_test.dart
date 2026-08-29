@@ -27,6 +27,7 @@ VoiceParticipant _participant(
 Widget _harness({
   List<VoiceParticipant> voiceParticipants = const [],
   VoidCallback? onJoinVoice,
+  Widget? voiceSessionPanel,
 }) =>
     MaterialApp(
       home: Scaffold(
@@ -39,6 +40,7 @@ Widget _harness({
           onSelectChannel: (_) {},
           voiceParticipants: voiceParticipants,
           onJoinVoice: onJoinVoice,
+          voiceSessionPanel: voiceSessionPanel,
         ),
       ),
     );
@@ -55,9 +57,36 @@ void main() {
     var fired = false;
     await tester.pumpWidget(_harness(onJoinVoice: () => fired = true));
 
-    expect(find.text('▾ VOICE — 0'), findsOneWidget);
+    expect(find.text('VOICE'), findsOneWidget);
     await tester.tap(find.text('JOIN VOICE'));
     expect(fired, isTrue);
+  });
+
+  testWidgets('the section sits outside the scrolling channel list',
+      (tester) async {
+    await tester.pumpWidget(_harness(
+      voiceParticipants: [_participant(_kAlice, name: 'Alice')],
+    ));
+
+    // Pinned below the list: not a descendant of the column's ListView.
+    expect(
+      find.descendant(of: find.byType(ListView), matching: find.text('Alice')),
+      findsNothing,
+    );
+    expect(find.text('Alice'), findsOneWidget);
+  });
+
+  testWidgets('a session panel slots in under the roster', (tester) async {
+    const panelKey = Key('session-panel');
+    await tester.pumpWidget(_harness(
+      voiceParticipants: [_participant(_kAlice, name: 'Alice')],
+      voiceSessionPanel: const SizedBox(key: panelKey, height: 10),
+    ));
+
+    expect(find.byKey(panelKey), findsOneWidget);
+    final panelY = tester.getTopLeft(find.byKey(panelKey)).dy;
+    final rosterY = tester.getTopLeft(find.text('Alice')).dy;
+    expect(panelY, greaterThan(rosterY));
   });
 
   testWidgets('roster shows names, count, and a muted icon', (tester) async {
@@ -68,7 +97,7 @@ void main() {
       ],
     ));
 
-    expect(find.text('▾ VOICE — 2'), findsOneWidget);
+    expect(find.text('VOICE — 2'), findsOneWidget);
     expect(find.text('Alice'), findsOneWidget);
     expect(find.text('bbbb…bbbb'), findsOneWidget); // short hash fallback
     expect(

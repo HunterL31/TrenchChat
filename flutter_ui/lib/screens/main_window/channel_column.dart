@@ -40,6 +40,7 @@ class ChannelColumn extends StatelessWidget {
     this.onStartDm,
     this.voiceParticipants = const [],
     this.onJoinVoice,
+    this.voiceSessionPanel,
     this.syncStates = const {},
     this.channelPermissions = const {},
     this.onViewMembers,
@@ -81,6 +82,11 @@ class ChannelColumn extends StatelessWidget {
   /// Joins the selected channel's voice session; null hides the affordance
   /// (no channel, no voice permission, or already in a call).
   final VoidCallback? onJoinVoice;
+
+  /// The live-session panel (mute/leave controls), slotted in under the
+  /// VOICE section so the whole voice area reads as one block; null when
+  /// not in a call.
+  final Widget? voiceSessionPanel;
 
   /// Channel hash -> sync state as reported by the backend. Only
   /// `incomplete` draws anything; every other state is the quiet case.
@@ -230,33 +236,18 @@ class ChannelColumn extends StatelessWidget {
                       onDelete: onDeleteDm == null ? null : () => onDeleteDm!(d),
                     ),
                 ],
-                if (voiceParticipants.isNotEmpty || onJoinVoice != null) ...[
-                  Padding(
-                    padding: const EdgeInsets.fromLTRB(14, 12, 14, 6),
-                    child: Text(
-                      '▾ VOICE — ${voiceParticipants.length}',
-                      style: TextStyle(
-                        fontSize: TCType.textMicro,
-                        color: tc.textSecondary,
-                        letterSpacing:
-                            TCType.letterSpacingFor(TCType.textMicro, TCType.trackingWider),
-                      ),
-                    ),
-                  ),
-                  for (final p in voiceParticipants) _VoiceRow(participant: p),
-                  if (onJoinVoice != null)
-                    Padding(
-                      padding: const EdgeInsets.fromLTRB(14, 4, 14, 6),
-                      child: TcGhostButton(
-                        icon: TcIcons.headset,
-                        label: 'JOIN VOICE',
-                        onPressed: onJoinVoice,
-                      ),
-                    ),
-                ],
               ],
             ),
           ),
+          // Voice gets its own pinned section below the scroll list rather
+          // than a block wedged in after the DMs: always in the same place,
+          // visibly separated, and adjacent to the session panel when live.
+          if (voiceParticipants.isNotEmpty || onJoinVoice != null)
+            _VoiceSection(
+              participants: voiceParticipants,
+              onJoinVoice: onJoinVoice,
+            ),
+          ?voiceSessionPanel,
           if (_addMenuItems().isNotEmpty)
             Container(
               decoration: BoxDecoration(
@@ -356,6 +347,45 @@ class _UnreadPill extends StatelessWidget {
       child: Text(
         '$count',
         style: TextStyle(fontSize: TCType.textMicro, color: tc.bgApp),
+      ),
+    );
+  }
+}
+
+/// The dedicated voice area: section label with occupancy, the roster, and
+/// the join affordance. Pinned at the foot of the column, separated by a
+/// top border, so it never scrolls away or mingles with the channel lists.
+class _VoiceSection extends StatelessWidget {
+  const _VoiceSection({required this.participants, this.onJoinVoice});
+
+  final List<VoiceParticipant> participants;
+  final VoidCallback? onJoinVoice;
+
+  @override
+  Widget build(BuildContext context) {
+    final tc = SectionTheme.of(context);
+    return Container(
+      decoration: BoxDecoration(
+        border: Border(top: BorderSide(color: tc.borderSubtle)),
+      ),
+      padding: const EdgeInsets.only(bottom: 6),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          _SectionLabel(
+            participants.isEmpty ? 'VOICE' : 'VOICE — ${participants.length}',
+          ),
+          for (final p in participants) _VoiceRow(participant: p),
+          if (onJoinVoice != null)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(14, 4, 14, 0),
+              child: TcGhostButton(
+                icon: TcIcons.headset,
+                label: 'JOIN VOICE',
+                onPressed: onJoinVoice,
+              ),
+            ),
+        ],
       ),
     );
   }
