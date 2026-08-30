@@ -100,7 +100,7 @@ class AvatarManager:
         peer-appeared path hears Sideband, MeshChat and everything else too;
         without the predicate an avatar push reaches them as an empty message
         with a binary attachment. None keeps every peer allowed, which is what
-        a storage-only construction gets -- both frontends pass
+        a storage-only construction gets -- the backend passes
         actions.trenchchat_peer_gate().
         """
         self._identity = identity
