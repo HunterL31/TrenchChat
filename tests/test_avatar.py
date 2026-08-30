@@ -105,7 +105,7 @@ def avatar_mgr(tmp_path, config):
 
 @pytest.fixture
 def gated_avatar_mgr(tmp_path, config):
-    """AvatarManager wired to the real TrenchChat gate, as both frontends wire it.
+    """AvatarManager wired to the real TrenchChat gate, as the backend wires it.
 
     Yields (manager, user_directory) so a test can register the evidence that
     makes a peer a TrenchChat client.
