@@ -349,6 +349,67 @@ void main() {
     });
   });
 
+  group('surviving a tab switch', () {
+    // Switching tabs unmounts BrowserTab entirely, so anything it kept in
+    // its own State is gone when the user comes back.
+    Future<void> openPage(WidgetTester tester) async {
+      backend.routes['GET /nomad/page/$_node'] = {
+        'ok': true,
+        'content_b64': base64Encode(utf8.encode('the page I was reading')),
+        'fetched_at': 1.0,
+      };
+      await tester.pumpWidget(_harness(state));
+      await settle(tester);
+      await tester.tap(find.text('Test Node'));
+      await settle(tester);
+      _emitFetchEvent(state, 'f1', 'done');
+      await settle(tester);
+    }
+
+    testWidgets('coming back lands on the page, not the node list',
+        (tester) async {
+      await openPage(tester);
+      expect(find.textContaining('the page I was reading'), findsOneWidget);
+
+      // Leave the tab, then come back: a fresh BrowserTab, same AppState.
+      await tester.pumpWidget(const MaterialApp(home: SizedBox()));
+      await settle(tester);
+      await tester.pumpWidget(_harness(state));
+      await settle(tester);
+
+      expect(find.textContaining('the page I was reading'), findsOneWidget);
+      expect(find.text('Test Node'), findsNothing);
+    });
+
+    testWidgets('back still works after coming back', (tester) async {
+      await openPage(tester);
+      await tester.pumpWidget(const MaterialApp(home: SizedBox()));
+      await settle(tester);
+      await tester.pumpWidget(_harness(state));
+      await settle(tester);
+
+      await tester.tap(find.text('NODES'));
+      await settle(tester);
+
+      expect(find.text('Test Node'), findsOneWidget);
+    });
+
+    testWidgets('a page pruned from the cache is fetched again',
+        (tester) async {
+      await openPage(tester);
+      backend.routes.remove('GET /nomad/page/$_node');
+      backend.requests.clear();
+
+      await tester.pumpWidget(const MaterialApp(home: SizedBox()));
+      await settle(tester);
+      await tester.pumpWidget(_harness(state));
+      await settle(tester);
+
+      expect(backend.requests.where((r) => r.path == '/nomad/browse'),
+          isNotEmpty);
+    });
+  });
+
   testWidgets('a link carrying anchor= opens the next page at that anchor',
       (tester) async {
     backend.routes['GET /nomad/page/$_node'] = {

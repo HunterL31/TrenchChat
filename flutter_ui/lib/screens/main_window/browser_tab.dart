@@ -32,8 +32,6 @@ class BrowserTab extends StatefulWidget {
 
 class _BrowserTabState extends State<BrowserTab> {
   final TextEditingController _address = TextEditingController();
-  final List<({String nodeHash, String path})> _history = [];
-  int _historyIndex = -1;
 
   String? _activeFetchId;
   String? _fileFetchId;
@@ -67,9 +65,7 @@ class _BrowserTabState extends State<BrowserTab> {
   NomadHosting? _hosting;
 
   ({String nodeHash, String path})? get _current =>
-      _historyIndex >= 0 && _historyIndex < _history.length
-          ? _history[_historyIndex]
-          : null;
+      widget.state.nomadLocation;
 
   @override
   void initState() {
@@ -83,6 +79,24 @@ class _BrowserTabState extends State<BrowserTab> {
     final pending = widget.state.takePendingNomadUrl();
     if (pending != null) {
       Future.microtask(() => _go(pending));
+      return;
+    }
+    // Remounted on the page we left: the trail survived in AppState, the
+    // rendered page did not, so read it back rather than showing an empty
+    // pane over a location we still claim to be on.
+    final resumed = _current;
+    if (resumed != null) {
+      _address.text = '${resumed.nodeHash}:${resumed.path}';
+      Future.microtask(() => _resume(resumed));
+    }
+  }
+
+  /// Restores the page for a location we are already on. Falls back to
+  /// fetching when it has been pruned from the cache since.
+  Future<void> _resume(({String nodeHash, String path}) location) async {
+    final shown = await _showCached(location.nodeHash, location.path);
+    if (!shown && mounted) {
+      _go('${location.nodeHash}:${location.path}');
     }
   }
 
@@ -215,13 +229,7 @@ class _BrowserTabState extends State<BrowserTab> {
     final path = target.path;
     // A repeat visit while the same fetch is still in flight reuses its id;
     // only push history when the location actually changes.
-    if (_current == null ||
-        _current!.nodeHash != nodeHash ||
-        _current!.path != path) {
-      _history.removeRange(_historyIndex + 1, _history.length);
-      _history.add((nodeHash: nodeHash, path: path));
-      _historyIndex = _history.length - 1;
-    }
+    widget.state.pushNomadLocation(nodeHash, path);
     if (widget.state.nomadIdentify[nodeHash] == null) {
       widget.state.loadNomadIdentify(nodeHash);
     }
@@ -247,11 +255,9 @@ class _BrowserTabState extends State<BrowserTab> {
   }
 
   Future<void> _navigateHistory(int delta) async {
-    final target = _historyIndex + delta;
-    if (target < 0 || target >= _history.length) return;
-    final entry = _history[target];
+    final entry = widget.state.stepNomadHistory(delta);
+    if (entry == null) return;
     setState(() {
-      _historyIndex = target;
       _error = null;
       _activeFetchId = null;
       _loading = false;
@@ -272,9 +278,8 @@ class _BrowserTabState extends State<BrowserTab> {
   }
 
   void _home() {
+    widget.state.clearNomadHistory();
     setState(() {
-      _history.clear();
-      _historyIndex = -1;
       _page = null;
       _pageLocation = null;
       _pageBackground = null;
@@ -410,11 +415,14 @@ class _BrowserTabState extends State<BrowserTab> {
         children: [
           TcGhostButton(
               label: '<',
-              onPressed: _historyIndex > 0 ? () => _navigateHistory(-1) : null),
+              onPressed: widget.state.nomadHistoryIndex > 0
+                  ? () => _navigateHistory(-1)
+                  : null),
           const SizedBox(width: 4),
           TcGhostButton(
               label: '>',
-              onPressed: _historyIndex < _history.length - 1
+              onPressed: widget.state.nomadHistoryIndex <
+                      widget.state.nomadHistory.length - 1
                   ? () => _navigateHistory(1)
                   : null),
           const SizedBox(width: 4),

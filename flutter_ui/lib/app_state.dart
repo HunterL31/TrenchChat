@@ -971,6 +971,46 @@ class AppState extends ChangeNotifier {
   /// "not asked yet", which the UI shows as anonymous.
   final Map<String, NomadIdentify> nomadIdentify = {};
 
+  /// Where the browser has been, and where in that it currently sits.
+  ///
+  /// Held here rather than in the NET tab's own State because switching to
+  /// another tab unmounts that widget: keeping the trail in the tab meant
+  /// every trip to CHAT and back landed on the node list again.
+  final List<({String nodeHash, String path})> nomadHistory = [];
+  int nomadHistoryIndex = -1;
+
+  ({String nodeHash, String path})? get nomadLocation =>
+      nomadHistoryIndex >= 0 && nomadHistoryIndex < nomadHistory.length
+          ? nomadHistory[nomadHistoryIndex]
+          : null;
+
+  /// Records a visit, dropping any forward history as a browser does.
+  void pushNomadLocation(String nodeHash, String path) {
+    final current = nomadLocation;
+    if (current != null &&
+        current.nodeHash == nodeHash &&
+        current.path == path) {
+      return;
+    }
+    nomadHistory.removeRange(nomadHistoryIndex + 1, nomadHistory.length);
+    nomadHistory.add((nodeHash: nodeHash, path: path));
+    nomadHistoryIndex = nomadHistory.length - 1;
+  }
+
+  /// Moves back or forward, returning where that lands. Null when there is
+  /// nothing that way.
+  ({String nodeHash, String path})? stepNomadHistory(int delta) {
+    final target = nomadHistoryIndex + delta;
+    if (target < 0 || target >= nomadHistory.length) return null;
+    nomadHistoryIndex = target;
+    return nomadHistory[target];
+  }
+
+  void clearNomadHistory() {
+    nomadHistory.clear();
+    nomadHistoryIndex = -1;
+  }
+
   Future<NomadIdentify?> loadNomadIdentify(String nodeHash) async {
     try {
       final status = await api.getNomadIdentify(nodeHash);
