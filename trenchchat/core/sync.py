@@ -290,6 +290,7 @@ class SyncManager:
         self._status = SyncStatusTracker(storage)
 
         messaging.set_missed_delivery_callback(self._on_missed_delivery_event)
+        messaging.add_message_callback(self._on_message_stored)
         router.add_delivery_callback(self._on_lxmf_message)
         invite_mgr.add_member_list_callback(self._on_member_list_updated)
         invite_mgr.add_channel_joined_callback(self._on_channel_joined)
@@ -370,6 +371,26 @@ class SyncManager:
             peer_since = since_ts if since_ts is not None else \
                 self._storage.get_peer_sync_progress(channel_hash_hex, peer_hex)
             self._send_sync_request(peer_hex, channel_hash_hex, peer_since)
+
+    def _on_message_stored(self, channel_hash_hex: str, message_id: str):
+        """Clear a hinted gap once the messages it named have all arrived.
+
+        A hint says a message never reached us; the sender's own retry queue
+        usually delivers it directly, which is not a sync response. Clearing
+        the gap only from sync left every hinted channel reading INCOMPLETE
+        for the rest of the session, long after the message turned up.
+        """
+        if not self._status.has_gap(channel_hash_hex):
+            return
+        my_hex = self._identity.hash_hex
+        outstanding = self._storage.get_missed_message_ids(channel_hash_hex, my_hex)
+        # No hints means the gap was recorded for rows we refused, which the
+        # arrival of some other message says nothing about.
+        if not outstanding or any(not self._storage.has_message(channel_hash_hex, mid)
+                                  for mid in outstanding):
+            return
+        self._storage.clear_missed_deliveries(channel_hash_hex, my_hex)
+        self._status.clear_gap(channel_hash_hex)
 
     def _on_member_list_updated(self, channel_hash_hex: str):
         """Clear pending outbound messages for this channel if we were removed.
@@ -543,7 +564,8 @@ class SyncManager:
             )
             return
         self._storage.record_missed_delivery(channel_hash_hex, missed_for, missed_msg_id)
-        if missed_for == self._identity.hash_hex:
+        if (missed_for == self._identity.hash_hex
+                and not self._storage.has_message(channel_hash_hex, missed_msg_id)):
             self._status.note_gap(channel_hash_hex)
 
     def _handle_sync_request(self, fields: dict, channel_hash_hex: str,

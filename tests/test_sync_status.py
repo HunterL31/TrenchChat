@@ -141,7 +141,7 @@ class TestStateDerivation:
         monkeypatch.setattr(sync_status, "PEER_RESPONSE_TIMEOUT_SECS", -1)
         tracker.request_sent(CHANNEL, PEER)
         tracker.prune()
-        assert tracker.get_state(CHANNEL) == SyncState.INCOMPLETE
+        assert tracker.get_state(CHANNEL) != SyncState.SYNCED
 
     def test_prune_leaves_answered_peers_alone(self, tracker, monkeypatch):
         monkeypatch.setattr(sync_status, "PEER_RESPONSE_TIMEOUT_SECS", -1)
@@ -383,3 +383,166 @@ class TestRejectedRowsAreNotCaughtUp:
 
         status = tracker.get_status(ch)
         assert status["peers"][0]["messages_rejected"] == 2
+
+
+class TestSilenceIsNotAGap:
+    """A peer that never answers is not evidence that history is missing.
+
+    Regression: every channel with another member reported INCOMPLETE once
+    PEER_RESPONSE_TIMEOUT_SECS had passed, because an offline member -- or
+    one whose responder silently refused -- was recorded as a gap in our own
+    history. INCOMPLETE now needs real evidence; silence only holds the
+    channel short of SYNCED.
+    """
+
+    def test_a_silent_peer_reports_waiting(self, tracker, monkeypatch):
+        monkeypatch.setattr(sync_status, "PEER_RESPONSE_TIMEOUT_SECS", -1)
+        tracker.request_sent(CHANNEL, PEER)
+        tracker.prune()
+
+        assert tracker.get_state(CHANNEL) == SyncState.WAITING
+
+    def test_an_answer_alongside_silence_still_reports_waiting(self, tracker, monkeypatch):
+        monkeypatch.setattr(sync_status, "PEER_RESPONSE_TIMEOUT_SECS", -1)
+        tracker.request_sent(CHANNEL, PEER)
+        tracker.request_sent(CHANNEL, OTHER_PEER)
+        tracker.response_received(CHANNEL, PEER, received=0, inserted=0, truncated=False)
+        tracker.prune()
+
+        assert tracker.get_state(CHANNEL) == SyncState.WAITING
+
+    def test_a_silent_peer_settles_once_it_answers(self, tracker, monkeypatch):
+        monkeypatch.setattr(sync_status, "PEER_RESPONSE_TIMEOUT_SECS", -1)
+        tracker.request_sent(CHANNEL, PEER)
+        tracker.prune()
+        tracker.request_sent(CHANNEL, PEER)
+        tracker.response_received(CHANNEL, PEER, received=0, inserted=0, truncated=False)
+
+        assert tracker.get_state(CHANNEL) == SyncState.SYNCED
+
+    def test_a_known_gap_still_shows_through_silence(self, tracker, monkeypatch):
+        monkeypatch.setattr(sync_status, "PEER_RESPONSE_TIMEOUT_SECS", -1)
+        tracker.request_sent(CHANNEL, PEER)
+        tracker.note_gap(CHANNEL)
+        tracker.prune()
+
+        assert tracker.get_state(CHANNEL) == SyncState.INCOMPLETE
+
+    def test_a_truncated_batch_still_shows_through_silence(self, tracker, monkeypatch):
+        monkeypatch.setattr(sync_status, "PEER_RESPONSE_TIMEOUT_SECS", -1)
+        tracker.request_sent(CHANNEL, PEER)
+        tracker.response_received(CHANNEL, PEER, received=50, inserted=50, truncated=True)
+        tracker.request_sent(CHANNEL, OTHER_PEER)
+        tracker.prune()
+
+        assert tracker.get_state(CHANNEL) == SyncState.INCOMPLETE
+
+
+class TestOfflinePeerIsNotReportedAsMissingHistory:
+    """The end-to-end shape of the same regression, through SyncManager.
+
+    The backend prunes every 15s, so a member who is simply offline turned
+    every channel they belong to into "history incomplete" five minutes into
+    a session, with nothing actually missing.
+    """
+
+    def test_a_peer_that_never_answers_does_not_claim_missing_history(
+        self, peer_factory, monkeypatch
+    ):
+        monkeypatch.setattr(sync_status, "PEER_RESPONSE_TIMEOUT_SECS", 0.05)
+
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+        carol = peer_factory("carol")
+
+        ch_hash = alice.channel_mgr.create_channel("offline-peer", "", "public")
+        _seed_channel_on_peer(bob, ch_hash, "offline-peer", alice.identity.hash_hex)
+        _seed_channel_on_peer(carol, ch_hash, "offline-peer", alice.identity.hash_hex)
+
+        carol.sync_mgr._handle_sync_request = lambda *a, **kw: None
+        bob.sync_mgr._send_sync_request(carol.identity.hash_hex, ch_hash, time.time())
+        time.sleep(0.2)
+
+        bob.sync_mgr.status.prune()
+
+        assert bob.sync_mgr.status.get_state(ch_hash) == SyncState.WAITING, (
+            "a peer that never answered was reported as a gap in our history"
+        )
+
+
+class TestHintedGapClearsWhenTheMessageArrives:
+    """A hint is evidence of a gap only until the message it names turns up.
+
+    The sender's own retry queue usually delivers it directly, which is not a
+    sync response -- so a gap cleared only by sync stuck for the session.
+    """
+
+    def test_a_hint_for_a_message_we_already_hold_is_not_a_gap(self, peer_factory):
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+        carol = peer_factory("carol")
+
+        ch_hash = alice.channel_mgr.create_channel("hint-held", "", "public")
+        _seed_channel_on_peer(bob, ch_hash, "hint-held", alice.identity.hash_hex)
+        _seed_channel_on_peer(carol, ch_hash, "hint-held", alice.identity.hash_hex)
+
+        msg_id = _insert_message(bob.storage, ch_hash, alice.identity.hash_hex,
+                                 "Bob already has this")
+        carol.sync_mgr._send_raw(bob.identity.hash_hex, {
+            F_MSG_TYPE:      MT_MISSED_DELIVERY,
+            F_CHANNEL_HASH:  bytes.fromhex(ch_hash),
+            F_MISSED_FOR:    bob.identity.hash_hex,
+            F_MISSED_MSG_ID: msg_id,
+        })
+
+        assert not wait_for(
+            lambda: bob.sync_mgr.status.get_state(ch_hash) == SyncState.INCOMPLETE,
+            timeout=2,
+        ), "a hint naming a message Bob already holds marked his channel incomplete"
+
+    def test_the_gap_clears_when_the_message_arrives_by_ordinary_delivery(
+        self, peer_factory
+    ):
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+        carol = peer_factory("carol")
+
+        ch_hash = alice.channel_mgr.create_channel("hint-then-delivery", "", "public")
+        _seed_channel_on_peer(bob, ch_hash, "hint-then-delivery", alice.identity.hash_hex)
+        _seed_channel_on_peer(carol, ch_hash, "hint-then-delivery", alice.identity.hash_hex)
+
+        ts = time.time()
+        content = "Delivered late, by retry"
+        msg_id = _insert_message(alice.storage, ch_hash, alice.identity.hash_hex,
+                                 content, ts)
+        alice.messaging._pending[bob.identity.hash_hex] = [{
+            "channel_hash_hex":  ch_hash,
+            "content":           content,
+            "timestamp":         ts,
+            "msg_id":            msg_id,
+            "display_name":      "Alice",
+            "reply_to":          None,
+            "last_seen_id":      None,
+            "subscriber_hashes": [bob.identity.hash_hex],
+            "author_sig":        sign_as(alice.identity.hash_hex, ch_hash,
+                                         msg_id, ts, content),
+        }]
+
+        carol.sync_mgr._send_raw(bob.identity.hash_hex, {
+            F_MSG_TYPE:      MT_MISSED_DELIVERY,
+            F_CHANNEL_HASH:  bytes.fromhex(ch_hash),
+            F_MISSED_FOR:    bob.identity.hash_hex,
+            F_MISSED_MSG_ID: msg_id,
+        })
+        assert wait_for(
+            lambda: bob.sync_mgr.status.get_state(ch_hash) == SyncState.INCOMPLETE,
+            timeout=5,
+        ), "the hint did not mark Bob's channel incomplete"
+
+        alice.messaging.flush_pending(bob.identity.hash_hex)
+
+        assert wait_for(
+            lambda: bob.sync_mgr.status.get_state(ch_hash) != SyncState.INCOMPLETE,
+            timeout=5,
+        ), "the gap survived the arrival of the very message its hint named"
+        assert bob.storage.get_missed_message_ids(ch_hash, bob.identity.hash_hex) == []

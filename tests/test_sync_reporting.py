@@ -91,12 +91,12 @@ def _sync_response_fields(messages: list[dict], truncated: bool = False,
 # Group F — status honesty
 # ---------------------------------------------------------------------------
 
-class TestPruneHasNoProductionCaller:
-    """F1: SyncStatusTracker.prune() is never called outside tests.
+class TestPruneMustBeDrivenFromOutside:
+    """F1: SyncStatusTracker resolves a stalled request only when pruned.
 
-    Confirmed by grep across the repo: devtools/testenv/backend_core.py's
-    periodic tick prunes presence and the user directory, never
-    sync_mgr.status. Nothing else calls prune().
+    The backend drives it from its periodic tick (backend_core.py); the
+    manager itself never does, so a peer wired up without that tick -- every
+    TestPeer here -- reports a stalled request as SYNCING indefinitely.
     """
 
     def test_stalled_request_stays_syncing_forever_without_a_prune_caller(
@@ -104,10 +104,10 @@ class TestPruneHasNoProductionCaller:
     ):
         """
         A peer that never answers should eventually stop being reported as
-        actively syncing. But since nothing in production calls prune(), a
-        channel with a permanently silent peer reports SYNCING forever, long
-        past PEER_RESPONSE_TIMEOUT_SECS -- the user never sees any signal
-        that the sync stalled.
+        actively syncing. Without a prune caller, a channel with a
+        permanently silent peer reports SYNCING forever, long past
+        PEER_RESPONSE_TIMEOUT_SECS -- the user never sees any signal that the
+        sync stalled.
         """
         monkeypatch.setattr(sync_status, "PEER_RESPONSE_TIMEOUT_SECS", 0.05)
 
@@ -131,8 +131,8 @@ class TestPruneHasNoProductionCaller:
 
         assert bob.sync_mgr.status.get_state(ch_hash) == SyncState.SYNCING, (
             "expected the stalled request to still report SYNCING because "
-            "nothing in production calls prune() -- if this now fails, a "
-            "production caller for SyncStatusTracker.prune() may have been added"
+            "nothing prunes this peer -- if this now fails, SyncManager may "
+            "have started calling SyncStatusTracker.prune() itself"
         )
 
     def test_manual_prune_correctly_resolves_the_single_peer_case(
@@ -141,8 +141,9 @@ class TestPruneHasNoProductionCaller:
         """
         The tracker's own prune() logic is sound in isolation (single
         outstanding peer): calling it manually turns the stalled request into
-        the honest INCOMPLETE state. This isolates F1 to "nothing calls it",
-        not "it doesn't work".
+        the honest WAITING state -- still short of an answer, but not a claim
+        that history is missing. This isolates F1 to who calls it, not
+        whether it works.
         """
         monkeypatch.setattr(sync_status, "PEER_RESPONSE_TIMEOUT_SECS", 0.05)
 
@@ -160,8 +161,8 @@ class TestPruneHasNoProductionCaller:
 
         bob.sync_mgr.status.prune()
 
-        assert bob.sync_mgr.status.get_state(ch_hash) == SyncState.INCOMPLETE, (
-            "prune() itself did not resolve a stalled single-peer request to INCOMPLETE"
+        assert bob.sync_mgr.status.get_state(ch_hash) == SyncState.WAITING, (
+            "prune() itself did not resolve a stalled single-peer request to WAITING"
         )
 
 
