@@ -58,6 +58,7 @@ class _MicronViewState extends State<MicronView> {
   /// One entry per `` `{...} `` line, keyed by its index in the document.
   final Map<int, _PartialState> _partials = {};
 
+
   @override
   void initState() {
     super.initState();
@@ -535,6 +536,13 @@ class _MicronViewState extends State<MicronView> {
           child: TextField(
             controller: controller,
             obscureText: field.masked,
+            // Micron fields wrap: upstream builds every one of them
+            // multiline, so a long answer runs down the box rather than off
+            // the side of it. A masked field stays on one line, because
+            // Flutter will not obscure text it has to wrap.
+            maxLines: field.masked ? 1 : null,
+            keyboardType:
+                field.masked ? TextInputType.text : TextInputType.multiline,
             style: style.copyWith(backgroundColor: null, color: tc.textPrimary),
             cursorColor: tc.borderAccent,
             decoration: const InputDecoration(

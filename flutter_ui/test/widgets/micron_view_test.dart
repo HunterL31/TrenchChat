@@ -137,6 +137,40 @@ void main() {
     expect(find.textContaining('\u00A0', findRichText: true), findsOneWidget);
   });
 
+  group('text fields', () {
+    TextField fieldOf(WidgetTester tester) =>
+        tester.widget<TextField>(find.byType(TextField));
+
+    testWidgets('a field wraps, as every micron field upstream does',
+        (tester) async {
+      // Upstream builds them multiline, so a long answer runs down the box
+      // instead of off the side of it.
+      await tester.pumpWidget(_harness('Post: `<40|body`>'));
+      expect(fieldOf(tester).maxLines, isNull);
+    });
+
+    testWidgets('a masked field stays on one line', (tester) async {
+      // Flutter will not obscure text it has to wrap.
+      await tester.pumpWidget(_harness('Pass: `<!16|secret`>'));
+      expect(fieldOf(tester).maxLines, 1);
+    });
+
+    testWidgets('a long answer grows the box downward, not sideways',
+        (tester) async {
+      await tester.pumpWidget(_harness('Post: `<40|body`>'));
+      await tester.enterText(find.byType(TextField), 'short');
+      await tester.pumpAndSettle();
+      final oneLine = tester.getSize(find.byType(TextField));
+
+      await tester.enterText(find.byType(TextField), 'wrap me ' * 40);
+      await tester.pumpAndSettle();
+      final wrapped = tester.getSize(find.byType(TextField));
+
+      expect(wrapped.height, greaterThan(oneLine.height));
+      expect(wrapped.width, oneLine.width);
+    });
+  });
+
   group('page colours', () {
     testWidgets('a #!bg= header paints behind the page', (tester) async {
       await tester.pumpWidget(_harness('#!bg=123\nhello'));
