@@ -1046,6 +1046,23 @@ class AppState extends ChangeNotifier {
     }
   }
 
+  /// Saves a contact from the LXMF address a bot or foreign client
+  /// advertises. Null means the call failed; otherwise 'added' or
+  /// 'resolving' -- an address only becomes a contact once the announce
+  /// behind it has been heard.
+  Future<String?> addLxmfAddress(String lxmfHash,
+      {String nickname = '', String note = ''}) async {
+    try {
+      final state =
+          await api.addLxmfAddress(lxmfHash, nickname: nickname, note: note);
+      await loadFriends();
+      return state;
+    } catch (e) {
+      _reportActionError(e);
+      return null;
+    }
+  }
+
   /// Asks a peer to add us. Both sides have to hold the other before a direct
   /// message passes either way, so this is the start of that, not the end.
   Future<bool> sendFriendRequest(String identityHashHex,

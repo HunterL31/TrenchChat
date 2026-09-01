@@ -350,6 +350,66 @@ def test_a_message_from_a_stranger_is_held_not_dropped(peer_factory):
     assert b.friends_mgr.is_friend(a.identity.hash_hex) is False
 
 
+def test_a_contact_added_by_lxmf_address_can_be_messaged_and_answered(
+        peer_factory):
+    """The whole point of taking an LXMF address: a bot publishes one, and
+    what comes back has to reach us. Resolving it to an identity makes the
+    contact ordinary, so the answer lands in a conversation rather than in
+    the holding pen."""
+    import RNS
+
+    me = peer_factory("alice")
+    bot = peer_factory("bob")
+    bot_address = RNS.Destination.hash(
+        bytes.fromhex(bot.identity.hash_hex), "lxmf", "delivery").hex()
+    assert bot_address != bot.identity.hash_hex
+
+    result = me.friends_mgr.add_lxmf_address(bot_address, "the bot")
+    assert result == {"state": "added",
+                      "identity_hash": bot.identity.hash_hex}
+
+    me.messaging.send_direct(bot.identity.hash_hex, "!verify me")
+    assert wait_for(lambda: bool(
+        bot.storage.get_message_requests(me.identity.hash_hex)))
+
+    # The bot answers, the only way it knows how.
+    bot.friends_mgr.add_friend(me.identity.hash_hex)
+    bot.messaging.send_direct(me.identity.hash_hex, "your code is 12345")
+
+    conversation = me.direct_mgr.open_conversation(bot.identity.hash_hex)
+    assert wait_for(lambda: any(
+        m["content"] == "your code is 12345"
+        for m in me.storage.get_messages(conversation)))
+
+
+def test_a_reply_is_held_even_while_our_own_request_is_outstanding(
+        peer_factory):
+    """Regression: an outstanding friend request used to drop everything the
+    peer said, on the theory that their answer belonged to the request. A bot
+    cannot answer a friend request -- it answers with words, and those were
+    the only reply it could make."""
+    bot = peer_factory("alice")
+    me = peer_factory("bob")
+    # Asked, and never answered: a bot has no MT_FRIEND_ACCEPT to send, so
+    # our request just sits there. Set directly because a TrenchChat test
+    # peer cannot help but answer it.
+    me.storage.upsert_friend(bot.identity.hash_hex, "", "", FRIEND_PENDING_OUT)
+    assert me.storage.get_friend_state(bot.identity.hash_hex) \
+        == FRIEND_PENDING_OUT
+
+    bot.friends_mgr.add_friend(me.identity.hash_hex)
+    bot.messaging.send_direct(me.identity.hash_hex, "your code is 12345")
+
+    assert wait_for(lambda: bool(
+        me.storage.get_message_requests(bot.identity.hash_hex)))
+    held = me.storage.get_message_requests(bot.identity.hash_hex)
+    assert [h["body"] for h in held] == ["your code is 12345"]
+    # Our own request is still ours to track; holding their words is not us
+    # deciding the handshake went the other way.
+    assert me.storage.get_friend_state(bot.identity.hash_hex) \
+        == FRIEND_PENDING_OUT
+
+
 def test_a_held_message_shows_up_as_an_incoming_request(peer_factory):
     a = peer_factory("alice")
     b = peer_factory("bob")

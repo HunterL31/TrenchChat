@@ -7,6 +7,7 @@ import time
 from unittest.mock import patch
 
 import pytest
+import RNS
 
 from trenchchat.core.friends import FRIEND_SEEN_WRITE_INTERVAL_SECS, FriendsManager
 from trenchchat.core.presence import PRESENCE_TIMEOUT_SECS, PresenceManager
@@ -459,3 +460,104 @@ def test_existing_friends_survive_the_state_migration(tmp_path):
     assert s2.get_friend_state(PEER_A) == FRIEND_ACCEPTED
     assert FriendsManager(s2, SELF_HEX).is_friend(PEER_A) is True
     s2.close()
+
+
+# ---------------------------------------------------------------------------
+# Adding a contact from an LXMF address
+# ---------------------------------------------------------------------------
+
+class _FakeIdentity:
+    def __init__(self, hash_hex):
+        self.hash = bytes.fromhex(hash_hex)
+
+
+def test_an_lxmf_address_resolves_to_an_ordinary_contact(peer_factory,
+                                                         monkeypatch):
+    """An LXMF address is a delivery hash, not an identity hash, and one
+    cannot be computed from the other -- but the announce carries the
+    identity, so recalling it turns the address into a normal contact."""
+    a = peer_factory("alice")
+    peer_identity = "cc" * 16
+    lxmf_address = "dd" * 16
+    monkeypatch.setattr(RNS.Identity, "recall",
+                        staticmethod(lambda h: _FakeIdentity(peer_identity)))
+
+    result = a.friends_mgr.add_lxmf_address(lxmf_address, "the bot")
+
+    assert result == {"state": "added", "identity_hash": peer_identity}
+    assert a.friends_mgr.is_friend(peer_identity) is True
+    assert a.friends_mgr.is_friend(lxmf_address) is False
+
+
+def test_an_unresolved_address_waits_instead_of_failing(peer_factory,
+                                                        monkeypatch):
+    requested = []
+    monkeypatch.setattr(RNS.Identity, "recall", staticmethod(lambda h: None))
+    monkeypatch.setattr(RNS.Transport, "request_path",
+                        staticmethod(lambda h, *a, **k: requested.append(h)))
+
+    a = peer_factory("alice")
+    lxmf_address = "dd" * 16
+
+    result = a.friends_mgr.add_lxmf_address(lxmf_address)
+
+    assert result["state"] == "resolving"
+    assert requested == [bytes.fromhex(lxmf_address)]
+    assert a.friends_mgr.resolving_addresses() == [lxmf_address]
+
+
+def test_a_tick_finishes_an_address_once_its_path_arrives(peer_factory,
+                                                          monkeypatch):
+    monkeypatch.setattr(RNS.Identity, "recall", staticmethod(lambda h: None))
+    monkeypatch.setattr(RNS.Transport, "request_path",
+                        staticmethod(lambda h, *a, **k: None))
+    a = peer_factory("alice")
+    peer_identity = "cc" * 16
+    lxmf_address = "dd" * 16
+    a.friends_mgr.add_lxmf_address(lxmf_address, "the bot")
+
+    monkeypatch.setattr(RNS.Identity, "recall",
+                        staticmethod(lambda h: _FakeIdentity(peer_identity)))
+    a.friends_mgr.tick()
+
+    assert a.friends_mgr.is_friend(peer_identity) is True
+    assert a.friends_mgr.resolving_addresses() == []
+
+
+def test_a_malformed_address_is_refused_outright(peer_factory):
+    a = peer_factory("alice")
+    assert a.friends_mgr.add_lxmf_address("nonsense")["state"] == "invalid"
+
+
+def test_our_own_address_is_refused_rather_than_retried_forever(
+        peer_factory, monkeypatch):
+    a = peer_factory("alice")
+    monkeypatch.setattr(
+        RNS.Identity, "recall",
+        staticmethod(lambda h: _FakeIdentity(a.identity.hash_hex)))
+
+    result = a.friends_mgr.add_lxmf_address("dd" * 16)
+
+    assert result["state"] == "invalid"
+    assert a.friends_mgr.is_friend(a.identity.hash_hex) is False
+    assert a.friends_mgr.resolving_addresses() == []
+
+
+def test_an_address_that_resolves_to_us_leaves_the_queue(peer_factory,
+                                                         monkeypatch):
+    """It resolves like any other; it is just not a contact, and leaving it
+    queued would retry it on every tick for the life of the process."""
+    monkeypatch.setattr(RNS.Identity, "recall", staticmethod(lambda h: None))
+    monkeypatch.setattr(RNS.Transport, "request_path",
+                        staticmethod(lambda h, *a, **k: None))
+    a = peer_factory("alice")
+    a.friends_mgr.add_lxmf_address("dd" * 16)
+    assert a.friends_mgr.resolving_addresses() == ["dd" * 16]
+
+    monkeypatch.setattr(
+        RNS.Identity, "recall",
+        staticmethod(lambda h: _FakeIdentity(a.identity.hash_hex)))
+    a.friends_mgr.tick()
+
+    assert a.friends_mgr.resolving_addresses() == []
+    assert a.friends_mgr.is_friend(a.identity.hash_hex) is False

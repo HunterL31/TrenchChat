@@ -14,6 +14,7 @@ import 'package:flutter/material.dart';
 import '../../app_state.dart';
 import '../../theme/section_theme.dart';
 import '../../theme/theme_spec.dart';
+import '../../theme/tokens.dart';
 import '../../widgets/tc_button.dart';
 import '../../widgets/tc_dialog.dart';
 import '../../widgets/tc_text_field.dart';
@@ -51,6 +52,11 @@ class _AddFriendDialogContentState extends State<_AddFriendDialogContent> {
   final _message = TextEditingController();
   String? _error;
   bool _busy = false;
+
+  /// Which kind of hash the field holds. They are the same shape and one
+  /// cannot be told from the other, so the user says which -- pasting an
+  /// LXMF address as an identity hash addresses nothing at all.
+  bool _isLxmfAddress = false;
   late final bool _isEdit;
 
   bool get _hashReadOnly => widget.identityHash != null;
@@ -81,13 +87,18 @@ class _AddFriendDialogContentState extends State<_AddFriendDialogContent> {
   Future<void> _submit() async {
     final hash = _hash.text.trim();
     if (hash.isEmpty) {
-      setState(() => _error = 'Identity hash cannot be empty.');
+      setState(() => _error = '${_isLxmfAddress ? "LXMF address" : "Identity "
+          "hash"} cannot be empty.');
       return;
     }
     setState(() {
       _busy = true;
       _error = null;
     });
+    if (_isLxmfAddress && !_isEdit) {
+      await _submitLxmfAddress(hash);
+      return;
+    }
     final ok = _isEdit
         ? await widget.state
             .updateFriend(hash, nickname: _nickname.text.trim(), note: _note.text.trim())
@@ -97,6 +108,34 @@ class _AddFriendDialogContentState extends State<_AddFriendDialogContent> {
       setState(() {
         _busy = false;
         _error = widget.state.takeActionError() ?? 'Could not save friend.';
+      });
+      return;
+    }
+    Navigator.pop(context);
+  }
+
+  /// An LXMF address has to be resolved to an identity before it is a
+  /// contact, which needs the peer's announce. Saying so beats a silent
+  /// nothing when the peer has not been heard yet.
+  Future<void> _submitLxmfAddress(String hash) async {
+    final state = await widget.state.addLxmfAddress(
+      hash,
+      nickname: _nickname.text.trim(),
+      note: _note.text.trim(),
+    );
+    if (!mounted) return;
+    if (state == null) {
+      setState(() {
+        _busy = false;
+        _error = widget.state.takeActionError() ?? 'Could not save contact.';
+      });
+      return;
+    }
+    if (state == 'resolving') {
+      setState(() {
+        _busy = false;
+        _error = 'Looking for that address on the mesh. It becomes a contact '
+            'once its announce arrives — try again in a moment.';
       });
       return;
     }
@@ -136,7 +175,9 @@ class _AddFriendDialogContentState extends State<_AddFriendDialogContent> {
       errorText: _error,
       actions: [
         TcGhostButton(label: 'CANCEL', onPressed: () => Navigator.pop(context)),
-        if (!_isEdit)
+        // A bot has no friend-request handshake to answer, so the ask is
+        // meaningless for an address and hidden rather than left to fail.
+        if (!_isEdit && !_isLxmfAddress)
           TcGhostButton(
             label: 'REQUEST',
             onPressed: _busy ? null : _sendRequest,
@@ -148,13 +189,25 @@ class _AddFriendDialogContentState extends State<_AddFriendDialogContent> {
       ],
       children: [
         TcTextField(
-          label: 'Identity hash',
+          label: _isLxmfAddress ? 'LXMF address' : 'Identity hash',
           controller: _hash,
           hintText: 'a1b2c3…',
           autofocus: !_hashReadOnly,
           readOnly: _hashReadOnly,
           onSubmitted: (_) => _submit(),
         ),
+        if (!_isEdit) ...[
+          const SizedBox(height: 6),
+          _AddressKindToggle(
+            isLxmf: _isLxmfAddress,
+            onChanged: _busy
+                ? null
+                : (value) => setState(() {
+                      _isLxmfAddress = value;
+                      _error = null;
+                    }),
+          ),
+        ],
         const SizedBox(height: 12),
         TcTextField(
           label: 'Nickname',
@@ -177,6 +230,56 @@ class _AddFriendDialogContentState extends State<_AddFriendDialogContent> {
             controller: _message,
             hintText: 'optional, sent with the request',
             onSubmitted: (_) => _sendRequest(),
+          ),
+        ],
+      ],
+    );
+  }
+}
+
+
+/// Which kind of hash was pasted. An LXMF address (what NomadNet, Sideband
+/// and bots advertise) and an identity hash are both 32 hex characters, and
+/// neither can be derived from the other, so nothing but the user can say
+/// which one this is.
+class _AddressKindToggle extends StatelessWidget {
+  const _AddressKindToggle({required this.isLxmf, required this.onChanged});
+
+  final bool isLxmf;
+  final ValueChanged<bool>? onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    final tc = SectionTheme.of(context);
+    return Row(
+      children: [
+        for (final option in const [
+          (label: 'IDENTITY HASH', lxmf: false),
+          (label: 'LXMF ADDRESS', lxmf: true),
+        ]) ...[
+          GestureDetector(
+            onTap: onChanged == null ? null : () => onChanged!(option.lxmf),
+            child: Container(
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+              margin: const EdgeInsets.only(right: 6),
+              decoration: BoxDecoration(
+                color: isLxmf == option.lxmf ? tc.bgSelected : null,
+                border: Border.all(
+                    color: isLxmf == option.lxmf
+                        ? tc.borderAccent
+                        : tc.borderSubtle),
+              ),
+              child: Text(
+                option.label,
+                style: TextStyle(
+                  fontSize: TCType.textMicro,
+                  color: isLxmf == option.lxmf
+                      ? tc.textEmphasis
+                      : tc.textTertiary,
+                ),
+              ),
+            ),
           ),
         ],
       ],

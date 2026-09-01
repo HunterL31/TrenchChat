@@ -76,4 +76,82 @@ void main() {
     expect((jsonDecode(posted.single.body) as Map)['identity_hash'], _hash);
     expect(find.text('Add Friend'), findsNothing); // dialog closed on success
   });
+
+  group('adding by LXMF address', () {
+    testWidgets('the field says which kind of hash it wants', (tester) async {
+      await tester.pumpWidget(_harness(state));
+      await tester.tap(find.text('open'));
+      await tester.pumpAndSettle();
+      expect(find.text('Identity hash'), findsOneWidget);
+
+      await tester.tap(find.text('LXMF ADDRESS'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('LXMF address'), findsOneWidget);
+      expect(find.text('Identity hash'), findsNothing);
+    });
+
+    testWidgets('REQUEST is hidden for an address, which cannot answer one',
+        (tester) async {
+      await tester.pumpWidget(_harness(state));
+      await tester.tap(find.text('open'));
+      await tester.pumpAndSettle();
+      expect(find.text('REQUEST'), findsOneWidget);
+
+      await tester.tap(find.text('LXMF ADDRESS'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('REQUEST'), findsNothing);
+    });
+
+    testWidgets('an address is sent to the resolving endpoint, not /friends',
+        (tester) async {
+      backend.routes['POST /friends/lxmf'] = {
+        'ok': true,
+        'state': 'added',
+        'identity_hash': _hash,
+      };
+      await tester.pumpWidget(_harness(state));
+      await tester.tap(find.text('open'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('LXMF ADDRESS'));
+      await tester.pumpAndSettle();
+      tester.testTextInput.enterText(_hash);
+      await tester.pump();
+
+      await tester.tap(find.text('ADD'));
+      await tester.pumpAndSettle();
+
+      expect(backend.requests.where((r) => r.path == '/friends/lxmf'),
+          isNotEmpty);
+      // GET /friends is the refresh afterwards; the save itself must not
+      // have gone to the identity-hash endpoint.
+      expect(
+          backend.requests.where(
+              (r) => r.method == 'POST' && r.path == '/friends'),
+          isEmpty);
+    });
+
+    testWidgets('an address with no announce yet says so and stays open',
+        (tester) async {
+      backend.routes['POST /friends/lxmf'] = {
+        'ok': true,
+        'state': 'resolving',
+        'identity_hash': null,
+      };
+      await tester.pumpWidget(_harness(state));
+      await tester.tap(find.text('open'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('LXMF ADDRESS'));
+      await tester.pumpAndSettle();
+      tester.testTextInput.enterText(_hash);
+      await tester.pump();
+
+      await tester.tap(find.text('ADD'));
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('once its announce arrives'), findsOneWidget);
+      expect(find.text('LXMF address'), findsOneWidget);
+    });
+  });
 }

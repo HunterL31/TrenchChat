@@ -907,6 +907,21 @@ class ApiClient {
     return NomadIdentify.fromJson(_decode(res) as Map<String, dynamic>);
   }
 
+  /// Saves a contact from an LXMF address. Returns the resolution state:
+  /// 'added' once the identity behind it is known, 'resolving' while the
+  /// path request is out.
+  Future<String> addLxmfAddress(String lxmfHash,
+      {String nickname = '', String note = ''}) async {
+    final res = await _http.post(
+      _u('/friends/lxmf'),
+      headers: _jsonHeaders,
+      body: jsonEncode(
+          {'lxmf_hash': lxmfHash, 'nickname': nickname, 'note': note}),
+    );
+    final body = _decode(res) as Map<String, dynamic>;
+    return body['state'] as String? ?? 'resolving';
+  }
+
   Future<List<NomadBookmark>> getNomadBookmarks() async {
     final res = await _http.get(_u('/nomad/bookmarks'));
     return (_decode(res) as List<dynamic>)

@@ -95,6 +95,12 @@ class AddFriendRequest(BaseModel):
     note: str = ""
 
 
+class AddLxmfAddressRequest(BaseModel):
+    lxmf_hash: str
+    nickname: str = ""
+    note: str = ""
+
+
 class UpdateFriendRequest(BaseModel):
     nickname: str | None = None
     note: str | None = None
@@ -1051,6 +1057,15 @@ def create_app(backend: Backend, *, token: str | None = None,
     @app.get("/friends/requests")
     def list_friend_requests():
         return backend.friends_mgr.get_pending_requests()
+
+    @app.post("/friends/lxmf")
+    def add_lxmf_address(req: AddLxmfAddressRequest):
+        result = backend.friends_mgr.add_lxmf_address(
+            req.lxmf_hash, req.nickname, req.note)
+        if result["state"] == "invalid":
+            return JSONResponse(
+                {"ok": False, "error": "invalid LXMF address"}, status_code=400)
+        return {"ok": True, **result}
 
     @app.post("/friends/requests")
     def send_friend_request(req: FriendRequestRequest):

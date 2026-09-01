@@ -3797,18 +3797,41 @@ class TestAdversarialMessageRequests:
         assert [m["content"] for m in alice.storage.get_messages(conversation)] \
             == ["a real message"]
 
-    def test_a_peer_we_asked_does_not_open_a_second_queue(self, peer_factory):
-        """Their answer belongs to the request we sent, and accepting a message
-        request from them would take the handshake's decision out of the user's
-        hands."""
+    def test_a_peer_we_asked_cannot_move_the_handshake_by_talking(
+            self, peer_factory):
+        """Their words used to be dropped outright while a request of ours was
+        outstanding, which also threw away the only reply a bot can make (see
+        test_direct_messages). They are held now -- but holding them must still
+        move nothing: not our request's state, not the gate, not a
+        conversation. Only the user accepting does that."""
         alice = peer_factory("alice")
         mallory = peer_factory("mallory")
-        alice.storage.upsert_friend(mallory.identity.hash_hex, "", "",
-                                    FRIEND_PENDING_OUT)
+        mallory_hex = mallory.identity.hash_hex
+        alice.storage.upsert_friend(mallory_hex, "", "", FRIEND_PENDING_OUT)
 
         self._stranger_says(mallory, alice, "just accept already")
 
-        assert alice.storage.get_message_requests(mallory.identity.hash_hex) == []
-        assert alice.storage.get_friend_state(mallory.identity.hash_hex) \
-            == FRIEND_PENDING_OUT
-        assert alice.friends_mgr.is_friend(mallory.identity.hash_hex) is False
+        assert [h["body"] for h in
+                alice.storage.get_message_requests(mallory_hex)] \
+            == ["just accept already"]
+        # Our request is still ours: holding what they said is not us
+        # deciding the handshake went the other way.
+        assert alice.storage.get_friend_state(mallory_hex) == FRIEND_PENDING_OUT
+        assert alice.friends_mgr.is_friend(mallory_hex) is False
+        assert alice.direct_mgr.may_dm(mallory_hex) is False
+        assert alice.direct_mgr.open_conversation(mallory_hex) is None
+
+    def test_a_peer_we_asked_is_bounded_like_any_other_sender(
+            self, peer_factory):
+        """Holding their words opens a queue they can write to, so the
+        per-sender bound has to cover them too."""
+        alice = peer_factory("alice")
+        mallory = peer_factory("mallory")
+        mallory_hex = mallory.identity.hash_hex
+        alice.storage.upsert_friend(mallory_hex, "", "", FRIEND_PENDING_OUT)
+
+        for i in range(MAX_HELD_PER_SENDER + 5):
+            self._stranger_says(mallory, alice, f"message {i}")
+
+        held = alice.storage.get_message_requests(mallory_hex)
+        assert len(held) <= MAX_HELD_PER_SENDER
