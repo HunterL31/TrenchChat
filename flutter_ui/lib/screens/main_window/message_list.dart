@@ -353,7 +353,10 @@ class _MessageListState extends State<MessageList> {
     );
     return Stack(
       children: [
-        Positioned.fill(child: list),
+        // Selectable so a code, a hash or a link someone sent can be copied
+        // out. The pill stays outside it: a button you can drag-select is a
+        // button that fights you.
+        Positioned.fill(child: SelectionArea(child: list)),
         if (_showNewPill)
           Positioned(
             left: 0,
