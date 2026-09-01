@@ -48,6 +48,7 @@ class FakeNodeTransport(NodeTransportBase):
         self.unreachable: set[str] = set(unreachable or ())
         self.timeout_paths: set[str] = set(timeout_paths or ())
         self.providers: dict = {}
+        self.request_data: dict[str, dict | None] = {}
         self.hosting_name: str | None = None
         self.announce_count = 0
         self._pending: dict[str, int] = {}   # node_hex -> in-flight count
@@ -57,7 +58,9 @@ class FakeNodeTransport(NodeTransportBase):
     # --- fetching ---
 
     def fetch(self, fetch_id: str, node_hash_hex: str, path: str, *,
-              max_size: int, timeout: float = NODE_FETCH_TIMEOUT_SECS) -> None:
+              max_size: int, timeout: float = NODE_FETCH_TIMEOUT_SECS,
+              data: dict | None = None) -> None:
+        self.request_data[fetch_id] = data
         if not is_valid_request_path(path):
             self._notify_result(fetch_id, False, None, FETCH_BAD_PATH)
             return

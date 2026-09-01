@@ -480,12 +480,12 @@ class _RecordingNodeBrowser:
     def __init__(self):
         self.calls: list = []
 
-    def fetch_page(self, node_hex, path):
-        self.calls.append(("page", node_hex, path))
+    def fetch_page(self, node_hex, path, data=None):
+        self.calls.append(("page", node_hex, path, data))
         return "fid1"
 
-    def fetch_file(self, node_hex, path):
-        self.calls.append(("file", node_hex, path))
+    def fetch_file(self, node_hex, path, data=None):
+        self.calls.append(("file", node_hex, path, data))
         return "fid2"
 
 
@@ -495,7 +495,7 @@ def test_browse_nomad_url_dispatches_page_fetch():
     result = actions.browse_nomad_url(browser, f"{node}:/page/x.mu")
     assert result == {"fetch_id": "fid1", "node_hash": node,
                       "path": "/page/x.mu", "kind": "page"}
-    assert browser.calls == [("page", node, "/page/x.mu")]
+    assert browser.calls == [("page", node, "/page/x.mu", None)]
 
 
 def test_browse_nomad_url_dispatches_file_fetch():
@@ -503,7 +503,7 @@ def test_browse_nomad_url_dispatches_file_fetch():
     node = "ab" * 16
     result = actions.browse_nomad_url(browser, f"{node}:/file/data.bin")
     assert result["kind"] == "file"
-    assert browser.calls == [("file", node, "/file/data.bin")]
+    assert browser.calls == [("file", node, "/file/data.bin", None)]
 
 
 def test_browse_nomad_url_resolves_relative_against_current_node():
@@ -512,6 +512,14 @@ def test_browse_nomad_url_resolves_relative_against_current_node():
     result = actions.browse_nomad_url(browser, ":/page/x.mu",
                                       current_node_hex=node)
     assert result["node_hash"] == node
+
+
+def test_browse_nomad_url_passes_request_data_through():
+    browser = _RecordingNodeBrowser()
+    node = "ab" * 16
+    actions.browse_nomad_url(browser, f"{node}:/page/x.mu",
+                             request_data={"field_a": "1"})
+    assert browser.calls == [("page", node, "/page/x.mu", {"field_a": "1"})]
 
 
 def test_browse_nomad_url_relative_without_current_node_raises():

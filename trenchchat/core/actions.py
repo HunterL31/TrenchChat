@@ -601,11 +601,13 @@ def _validate_theme_name(name: str) -> str:
 
 
 def browse_nomad_url(node_browser, url: str, *,
-                     current_node_hex: str | None = None) -> dict:
+                     current_node_hex: str | None = None,
+                     request_data: dict | None = None) -> dict:
     """Parse a nomad URL and start the fetch it names.
 
     Accepts "<hash>:/page/x.mu", a relative ":/page/x.mu" (resolved against
-    current_node_hex), or a bare "<hash>" (meaning /page/index.mu). Returns
+    current_node_hex), or a bare "<hash>" (meaning /page/index.mu).
+    request_data carries the page's submitted input fields. Returns
     {"fetch_id", "node_hash", "path", "kind"}. Raises ValueError for a
     malformed URL or a relative URL with no current node.
     """
@@ -616,10 +618,10 @@ def browse_nomad_url(node_browser, url: str, *,
         node_hex = current_node_hex
     if path.startswith("/file/"):
         kind = "file"
-        fetch_id = node_browser.fetch_file(node_hex, path)
+        fetch_id = node_browser.fetch_file(node_hex, path, request_data)
     else:
         kind = "page"
-        fetch_id = node_browser.fetch_page(node_hex, path)
+        fetch_id = node_browser.fetch_page(node_hex, path, request_data)
     return {"fetch_id": fetch_id, "node_hash": node_hex, "path": path,
             "kind": kind}
 

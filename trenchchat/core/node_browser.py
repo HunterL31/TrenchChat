@@ -38,6 +38,15 @@ CACHE_PRUNE_INTERVAL_SECS = 300.0
 # the delivery; after the grace it is gone, honouring the author's intent.
 NO_CACHE_GRACE_SECS = 60.0
 
+# NomadNet's shorthand for the nomadnetwork.node destination type. Other
+# schemes (lxmf@, rrc://, p:) name destinations this browser does not dial.
+NODE_SCHEME_PREFIX = "nnn@"
+
+# Ceilings on what a page's input fields can put on the wire.
+MAX_REQUEST_FIELDS = 32
+MAX_REQUEST_KEY_LEN = 64
+MAX_REQUEST_VALUE_LEN = 4096
+
 FETCH_QUEUED = "queued"
 FETCH_FETCHING = "fetching"
 FETCH_DONE = "done"
@@ -64,12 +73,15 @@ def parse_nomad_url(url: str) -> tuple[str | None, str]:
     """Split a nomad URL into (node_hash_hex | None, request_path). Strict.
 
     Accepts "<hash>:/page/x.mu", ":/page/x.mu" (current-node relative),
-    "/page/x.mu", bare "<hash>" or "<hash>:" (meaning /page/index.mu).
+    "/page/x.mu", bare "<hash>" or "<hash>:" (meaning /page/index.mu), each
+    optionally carrying NomadNet's "nnn@" node-destination prefix.
     Raises ValueError on anything else.
     """
     if not isinstance(url, str):
         raise ValueError("url must be a string")
     url = url.strip()
+    if url.lower().startswith(NODE_SCHEME_PREFIX):
+        url = url[len(NODE_SCHEME_PREFIX):]
     if not url:
         raise ValueError("empty url")
 
@@ -112,6 +124,27 @@ def page_cache_expiry(payload: bytes, now: float) -> float | None:
     return now + seconds
 
 
+def sanitize_request_data(data) -> dict | None:
+    """The subset of a submitted payload a node will actually look at.
+
+    NomadNet hands "field_" and "var_" entries to node-side scripts as
+    environment variables and ignores everything else, so anything else is
+    dropped here rather than put on the wire. None when nothing survives.
+    """
+    if not isinstance(data, dict) or not data:
+        return None
+    clean: dict[str, str] = {}
+    for key, value in data.items():
+        if len(clean) >= MAX_REQUEST_FIELDS:
+            break
+        if not isinstance(key, str) or not isinstance(value, str):
+            continue
+        if not (key.startswith("field_") or key.startswith("var_")):
+            continue
+        clean[key[:MAX_REQUEST_KEY_LEN]] = value[:MAX_REQUEST_VALUE_LEN]
+    return clean or None
+
+
 def _validate_node_hex(value: str) -> str:
     value = value.strip().lower()
     if len(value) != 32:
@@ -124,11 +157,13 @@ def _validate_node_hex(value: str) -> str:
 
 
 class _FetchState:
-    def __init__(self, fetch_id: str, node_hex: str, path: str, kind: str):
+    def __init__(self, fetch_id: str, node_hex: str, path: str, kind: str,
+                 data: dict | None = None):
         self.fetch_id = fetch_id
         self.node_hex = node_hex
         self.path = path
         self.kind = kind
+        self.data = data
 
 
 class NodeBrowserManager:
@@ -199,29 +234,37 @@ class NodeBrowserManager:
 
     # --- browsing ---
 
-    def fetch_page(self, node_hash_hex: str, path: str) -> str:
-        return self._start_fetch(node_hash_hex, path, "page", MAX_PAGE_BYTES)
+    def fetch_page(self, node_hash_hex: str, path: str,
+                   data: dict | None = None) -> str:
+        return self._start_fetch(node_hash_hex, path, "page", MAX_PAGE_BYTES,
+                                 data=data)
 
-    def fetch_file(self, node_hash_hex: str, path: str) -> str:
-        return self._start_fetch(node_hash_hex, path, "file", MAX_FILE_BYTES)
+    def fetch_file(self, node_hash_hex: str, path: str,
+                   data: dict | None = None) -> str:
+        return self._start_fetch(node_hash_hex, path, "file", MAX_FILE_BYTES,
+                                 data=data)
 
     def _start_fetch(self, node_hash_hex: str, path: str, kind: str,
-                     max_size: int) -> str:
+                     max_size: int, data: dict | None = None) -> str:
         node_hex = _validate_node_hex(node_hash_hex)
         if not is_valid_request_path(path):
             raise ValueError(f"invalid request path: {path!r}")
         if not path.startswith(f"/{kind}/"):
             raise ValueError(f"path {path!r} is not a /{kind}/ request")
+        data = sanitize_request_data(data)
         with self._lock:
             for state in self._fetches.values():
-                if state.node_hex == node_hex and state.path == path:
+                # A repeat visit joins the in-flight fetch, but a different
+                # payload is a different request, not the same one again.
+                if (state.node_hex == node_hex and state.path == path
+                        and state.data == data):
                     return state.fetch_id
             fetch_id = os.urandom(8).hex()
             self._fetches[fetch_id] = _FetchState(fetch_id, node_hex, path,
-                                                  kind)
+                                                  kind, data)
         self._notify_fetch(fetch_id, node_hex, path, FETCH_QUEUED, 0.0, None)
         self._transport.fetch(fetch_id, node_hex, path, max_size=max_size,
-                              timeout=NODE_FETCH_TIMEOUT_SECS)
+                              timeout=NODE_FETCH_TIMEOUT_SECS, data=data)
         return fetch_id
 
     def _on_fetch_result(self, fetch_id: str, ok: bool,

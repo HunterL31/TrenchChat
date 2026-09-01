@@ -115,6 +115,7 @@ class PinPropagationNodeRequest(BaseModel):
 class NomadBrowseRequest(BaseModel):
     url: str
     current_node: str | None = None
+    data: dict[str, str] | None = None
 
 
 class NomadFetchRequest(BaseModel):
@@ -1162,7 +1163,8 @@ def create_app(backend: Backend, *, token: str | None = None,
     @app.post("/nomad/browse")
     def nomad_browse(req: NomadBrowseRequest):
         result = actions.browse_nomad_url(
-            backend.node_browser, req.url, current_node_hex=req.current_node)
+            backend.node_browser, req.url, current_node_hex=req.current_node,
+            request_data=req.data)
         return {"ok": True, **result}
 
     @app.post("/nomad/fetch")

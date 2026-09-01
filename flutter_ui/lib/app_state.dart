@@ -862,11 +862,14 @@ class AppState extends ChangeNotifier {
     }
   }
 
-  /// Starts a fetch for a nomad URL. Returns the fetch id to watch in
+  /// Starts a fetch for a nomad URL, carrying the request data a page's
+  /// input fields produced. Returns the fetch id to watch in
   /// [nomadFetches], or null when the URL was rejected.
-  Future<String?> browseNomad(String url, {String? currentNode}) async {
+  Future<String?> browseNomad(String url,
+      {String? currentNode, Map<String, String>? data}) async {
     try {
-      final result = await api.browseNomad(url, currentNode: currentNode);
+      final result =
+          await api.browseNomad(url, currentNode: currentNode, data: data);
       if (!result.ok || result.fetchId == null) return null;
       // On a warm link the WS done event can beat this continuation; an
       // entry already present is fresher than "queued" and must survive.

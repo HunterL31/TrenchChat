@@ -83,7 +83,8 @@ class NodeTransportBase:
         self._progress_cb = cb
 
     def fetch(self, fetch_id: str, node_hash_hex: str, path: str, *,
-              max_size: int, timeout: float = NODE_FETCH_TIMEOUT_SECS) -> None:
+              max_size: int, timeout: float = NODE_FETCH_TIMEOUT_SECS,
+              data: dict | None = None) -> None:
         raise NotImplementedError
 
     def cancel(self, fetch_id: str) -> None:
@@ -130,14 +131,16 @@ class _Fetch:
     """One in-flight or queued page/file request."""
 
     def __init__(self, fetch_id: str, node_hex: str, path: str,
-                 max_size: int, timeout: float):
+                 max_size: int, timeout: float, data: dict | None = None):
         self.fetch_id = fetch_id
         self.node_hex = node_hex
         self.path = path
         self.max_size = max_size
         self.timeout = timeout
+        self.data = data
         self.created_at = time.time()
         self.receipt = None
+        self.redialed = False
 
 
 class _NodeConn:
@@ -178,11 +181,12 @@ class RNSNodeTransport(NodeTransportBase):
     # --- fetching ---
 
     def fetch(self, fetch_id: str, node_hash_hex: str, path: str, *,
-              max_size: int, timeout: float = NODE_FETCH_TIMEOUT_SECS) -> None:
+              max_size: int, timeout: float = NODE_FETCH_TIMEOUT_SECS,
+              data: dict | None = None) -> None:
         if not is_valid_request_path(path):
             self._notify_result(fetch_id, False, None, FETCH_BAD_PATH)
             return
-        fetch = _Fetch(fetch_id, node_hash_hex, path, max_size, timeout)
+        fetch = _Fetch(fetch_id, node_hash_hex, path, max_size, timeout, data)
         dial_now = False
         flush_now = False
         with self._lock:
@@ -268,6 +272,35 @@ class RNSNodeTransport(NodeTransportBase):
                     f"failed: {e}", RNS.LOG_WARNING)
             self._defer_dial(node_hex)
 
+    def _redial_for(self, fetch: _Fetch) -> bool:
+        """Requeue a fetch that burnt on a dead link and dial a fresh one.
+
+        A link the remote has already dropped still looks established here
+        until RNS notices, so the first request on it fails to send. Retry
+        once per fetch; a second failure is a real one.
+        """
+        if fetch.redialed:
+            return False
+        fetch.redialed = True
+        link = None
+        with self._lock:
+            conn = self._conns.get(fetch.node_hex)
+            if conn is None:
+                return False
+            if conn.link is not None:
+                self._by_link.pop(id(conn.link), None)
+                link = conn.link
+                conn.link = None
+            conn.state = _IDLE
+            conn.dial_attempts = 0
+            conn.next_dial_at = 0.0
+            conn.queued.append(fetch)
+        self._teardown_link(link)
+        RNS.log(f"TrenchChat [nomad]: link to {fetch.node_hex[:12]}… was "
+                f"dead, redialing", RNS.LOG_DEBUG)
+        self._dial(fetch.node_hex)
+        return True
+
     def _defer_dial(self, node_hex: str) -> None:
         # Exhaustion never fails queued fetches here: on a cold path, RNS
         # resolution can outlast the whole backoff ladder while the node is
@@ -279,12 +312,22 @@ class RNSNodeTransport(NodeTransportBase):
                 return
             self._register_link_failure(conn)
 
-    def _register_link_failure(self, conn: _NodeConn) -> None:
-        """Caller holds the lock. Schedules the next dial with backoff."""
+    def _register_link_failure(self, conn: _NodeConn, *,
+                               arm_backoff: bool = True) -> None:
+        """Caller holds the lock. Schedules the next dial.
+
+        The backoff ladder answers dials that never landed. A link that was
+        established and later closed says nothing about reachability, so it
+        clears the ladder instead of climbing it.
+        """
         if conn.link is not None:
             self._by_link.pop(id(conn.link), None)
             conn.link = None
         conn.state = _IDLE
+        if not arm_backoff:
+            conn.dial_attempts = 0
+            conn.next_dial_at = 0.0
+            return
         backoff = NODE_REDIAL_BACKOFF[
             min(conn.dial_attempts, len(NODE_REDIAL_BACKOFF) - 1)]
         conn.dial_attempts += 1
@@ -338,7 +381,7 @@ class RNSNodeTransport(NodeTransportBase):
         try:
             receipt = link.request(
                 fetch.path,
-                data=None,
+                data=fetch.data,
                 response_callback=self._on_response,
                 failed_callback=self._on_request_failed,
                 progress_callback=self._on_request_progress,
@@ -350,6 +393,8 @@ class RNSNodeTransport(NodeTransportBase):
                     RNS.LOG_WARNING)
             receipt = False
         if receipt is False or receipt is None:
+            if self._redial_for(fetch):
+                return
             self._notify_result(fetch.fetch_id, False, None, FETCH_SEND_FAILED)
             return
         fetch.receipt = receipt
@@ -416,7 +461,7 @@ class RNSNodeTransport(NodeTransportBase):
                       if f.node_hex == node_hex]
             for fetch in failed:
                 self._active.pop(id(fetch.receipt), None)
-            self._register_link_failure(conn)
+            self._register_link_failure(conn, arm_backoff=False)
         for fetch in failed:
             self._notify_result(fetch.fetch_id, False, None, FETCH_LINK_CLOSED)
 

@@ -12,10 +12,11 @@ import RNS
 from trenchchat.config import Config
 from trenchchat.core.identity import Identity
 from trenchchat.network.announce import NodeAnnounceHandler
+from trenchchat.network import node_transport
 from trenchchat.network.node_transport import (
-    FETCH_BAD_PATH, FETCH_UNREACHABLE, MAX_SERVED_RESPONSE_BYTES,
-    NODE_REDIAL_BACKOFF, NODE_SERVE_RATE_LIMIT, NodeTransportBase,
-    RNSNodeTransport, is_valid_request_path,
+    FETCH_BAD_PATH, FETCH_SEND_FAILED, FETCH_UNREACHABLE,
+    MAX_SERVED_RESPONSE_BYTES, NODE_REDIAL_BACKOFF, NODE_SERVE_RATE_LIMIT,
+    NodeTransportBase, RNSNodeTransport, is_valid_request_path,
 )
 
 
@@ -221,6 +222,80 @@ def test_fetch_queued_past_deadline_is_unreachable(transport, monkeypatch):
                     timeout=0.0)
     transport.tick()
     assert ("f1", False, FETCH_UNREACHABLE) in results
+
+
+class _DeadLink:
+    """A link the remote has already dropped: it still looks established
+    here, and every request on it fails to send."""
+
+    def __init__(self):
+        self.torn_down = False
+
+    def request(self, *args, **kwargs):
+        return False
+
+    def teardown(self):
+        self.torn_down = True
+
+
+def _linked_conn(transport, node_hex, link):
+    conn = node_transport._NodeConn(node_hex)
+    conn.state = node_transport._LINKED
+    conn.link = link
+    transport._conns[node_hex] = conn
+    transport._by_link[id(link)] = node_hex
+    return conn
+
+
+def test_dead_link_redials_instead_of_failing(transport, monkeypatch):
+    results = _collect_results(transport)
+    requested = []
+    monkeypatch.setattr(RNS.Identity, "recall", staticmethod(lambda h: None))
+    monkeypatch.setattr(RNS.Transport, "request_path",
+                        staticmethod(lambda h, *a, **k: requested.append(h)))
+    node_hex = "ab" * 16
+    link = _DeadLink()
+    _linked_conn(transport, node_hex, link)
+
+    transport.fetch("f1", node_hex, "/page/index.mu", max_size=1024)
+
+    assert results == []
+    assert link.torn_down
+    assert requested == [bytes.fromhex(node_hex)]
+    assert [f.fetch_id for f in transport._conns[node_hex].queued] == ["f1"]
+
+
+def test_a_second_dead_link_fails_the_fetch(transport, monkeypatch):
+    results = _collect_results(transport)
+    monkeypatch.setattr(RNS.Identity, "recall", staticmethod(lambda h: None))
+    monkeypatch.setattr(RNS.Transport, "request_path",
+                        staticmethod(lambda h, *a, **k: None))
+    node_hex = "cd" * 16
+    _linked_conn(transport, node_hex, _DeadLink())
+    transport.fetch("f1", node_hex, "/page/index.mu", max_size=1024)
+
+    conn = transport._conns[node_hex]
+    second = _DeadLink()
+    conn.state = node_transport._LINKED
+    conn.link = second
+    transport._by_link[id(second)] = node_hex
+    transport._flush_queued(node_hex)
+
+    assert results == [("f1", False, FETCH_SEND_FAILED)]
+
+
+def test_an_orderly_close_clears_the_backoff_ladder(transport):
+    node_hex = "ef" * 16
+    link = _DeadLink()
+    conn = _linked_conn(transport, node_hex, link)
+    conn.dial_attempts = 3
+    conn.next_dial_at = time.time() + 999
+
+    transport._on_link_closed(link)
+
+    assert conn.state == node_transport._IDLE
+    assert conn.dial_attempts == 0
+    assert conn.next_dial_at == 0.0
 
 
 # ---------------------------------------------------------------------------

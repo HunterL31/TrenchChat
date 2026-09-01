@@ -11,6 +11,7 @@ import pytest
 from trenchchat.config import Config
 from trenchchat.core.node_browser import (
     DEFAULT_INDEX_MU, NodeBrowserManager, parse_nomad_url,
+    sanitize_request_data,
 )
 from trenchchat.core.storage import Storage
 
@@ -65,6 +66,40 @@ def test_parse_bare_hash_means_index():
 
 def test_parse_uppercase_hash_normalised():
     assert parse_nomad_url(NODE_A.upper()) == (NODE_A, "/page/index.mu")
+
+
+def test_parse_accepts_the_nnn_scheme():
+    assert parse_nomad_url(f"nnn@{NODE_A}:/page/x.mu") == (NODE_A, "/page/x.mu")
+    assert parse_nomad_url(f"NNN@{NODE_A}") == (NODE_A, "/page/index.mu")
+
+
+@pytest.mark.parametrize("url", [
+    f"lxmf@{NODE_A}",
+    "rrc://aabb/room",
+    "p:32",
+    "#anchor",
+    "nnn@",
+])
+def test_parse_rejects_other_schemes(url):
+    with pytest.raises(ValueError):
+        parse_nomad_url(url)
+
+
+# ---------------------------------------------------------------------------
+# Request data
+# ---------------------------------------------------------------------------
+
+def test_sanitize_keeps_only_field_and_var_entries():
+    assert sanitize_request_data({
+        "field_name": "ok", "var_mode": "view", "PATH": "/bin", "other": "x",
+    }) == {"field_name": "ok", "var_mode": "view"}
+
+
+def test_sanitize_drops_non_string_values_and_empty_payloads():
+    assert sanitize_request_data({"field_a": 5}) is None
+    assert sanitize_request_data({}) is None
+    assert sanitize_request_data(None) is None
+    assert sanitize_request_data("field_a=1") is None
 
 
 @pytest.mark.parametrize("url", [
@@ -128,6 +163,20 @@ def test_fetch_page_done_caches_and_notifies(manager, registry):
     assert wait_for(lambda: any(e[3] == "done" for e in events))
     row = manager.get_cached_page(NODE_B, "/page/index.mu")
     assert bytes(row["content"]) == b"# hello"
+
+
+def test_fetch_carries_request_data_to_the_transport(manager, registry):
+    _host(registry, NODE_B, {"/page/f.mu": lambda: b"ok"})
+    fetch_id = manager.fetch_page(NODE_B, "/page/f.mu",
+                                  {"field_user": "nomad", "junk": "x"})
+    assert manager._transport.request_data[fetch_id] == {"field_user": "nomad"}
+
+
+def test_a_different_payload_is_a_different_fetch(manager, registry):
+    _host(registry, NODE_B, {"/page/x.mu": lambda: b"ok"})
+    first = manager.fetch_page(NODE_B, "/page/x.mu", {"field_a": "1"})
+    second = manager.fetch_page(NODE_B, "/page/x.mu", {"field_a": "2"})
+    assert first != second
 
 
 def test_fetch_failure_surfaces_reason(manager, registry):
