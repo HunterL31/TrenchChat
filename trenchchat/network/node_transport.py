@@ -23,7 +23,11 @@ NOMAD_APP_NAME = "nomadnetwork"
 NOMAD_ASPECT_NODE = "node"
 
 NODE_REDIAL_BACKOFF = (2.0, 5.0, 10.0, 30.0)
-NODE_LINK_IDLE_SECS = 60.0
+# A link is kept for the whole time a node is being read, not just between
+# back-to-back requests: nomadnet holds one open until you browse elsewhere,
+# and a node operator sees link churn from a slow reader as a new handshake
+# per page. Idle links are still dropped, just not mid-visit.
+NODE_LINK_IDLE_SECS = 300.0
 NODE_FETCH_TIMEOUT_SECS = 60.0
 NODE_ANNOUNCE_INTERVAL_SECS = 900.0
 MAX_QUEUED_FETCHES_PER_NODE = 8

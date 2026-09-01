@@ -477,8 +477,12 @@ def test_set_display_name_reannounces_both_destinations():
 class _RecordingNodeBrowser:
     """Records which fetch the browse action dispatched."""
 
-    def __init__(self):
-        self.calls: list = []
+    def __init__(self, fresh_pages=()):
+        self.calls = []
+        self.fresh = set(fresh_pages)
+
+    def has_fresh_page(self, node_hex, path):
+        return (node_hex, path) in self.fresh
 
     def fetch_page(self, node_hex, path, data=None):
         self.calls.append(("page", node_hex, path, data))
@@ -494,7 +498,7 @@ def test_browse_nomad_url_dispatches_page_fetch():
     node = "ab" * 16
     result = actions.browse_nomad_url(browser, f"{node}:/page/x.mu")
     assert result == {"fetch_id": "fid1", "node_hash": node,
-                      "path": "/page/x.mu", "kind": "page"}
+                      "path": "/page/x.mu", "kind": "page", "cached": False}
     assert browser.calls == [("page", node, "/page/x.mu", None)]
 
 
@@ -512,6 +516,36 @@ def test_browse_nomad_url_resolves_relative_against_current_node():
     result = actions.browse_nomad_url(browser, ":/page/x.mu",
                                       current_node_hex=node)
     assert result["node_hash"] == node
+
+
+def test_browse_nomad_url_serves_a_page_inside_its_declared_lifetime():
+    """A page that declared #!c= is answered from cache without asking the
+    node again, the way nomadnet's browser does."""
+    node = "ab" * 16
+    browser = _RecordingNodeBrowser(fresh_pages={(node, "/page/x.mu")})
+    result = actions.browse_nomad_url(browser, f"{node}:/page/x.mu")
+    assert result["cached"] is True
+    assert result["fetch_id"] is None
+    assert browser.calls == []
+
+
+def test_browse_nomad_url_refresh_always_asks_the_node():
+    node = "ab" * 16
+    browser = _RecordingNodeBrowser(fresh_pages={(node, "/page/x.mu")})
+    result = actions.browse_nomad_url(browser, f"{node}:/page/x.mu",
+                                      refresh=True)
+    assert result["cached"] is False
+    assert browser.calls == [("page", node, "/page/x.mu", None)]
+
+
+def test_browse_nomad_url_submitted_fields_always_ask_the_node():
+    """Submitted data is a request, not a re-read: a cached copy cannot be
+    the answer to it."""
+    node = "ab" * 16
+    browser = _RecordingNodeBrowser(fresh_pages={(node, "/page/x.mu")})
+    actions.browse_nomad_url(browser, f"{node}:/page/x.mu",
+                             request_data={"field_a": "1"})
+    assert browser.calls == [("page", node, "/page/x.mu", {"field_a": "1"})]
 
 
 def test_browse_nomad_url_passes_request_data_through():

@@ -339,6 +339,13 @@ class NodeBrowserManager:
     def get_cached_page(self, node_hash_hex: str, path: str):
         return self._storage.get_nomad_page(node_hash_hex, path)
 
+    def has_fresh_page(self, node_hash_hex: str, path: str) -> bool:
+        """Whether a cached copy is still inside the lifetime its author
+        declared with #!c=. Pages that declare none are never fresh: the
+        header is the node's own permission to skip asking it again."""
+        row = self._storage.get_nomad_page(node_hash_hex, path)
+        return row is not None and row["expires_at"] is not None
+
     def get_cached_file(self, node_hash_hex: str, path: str):
         return self._storage.get_nomad_file(node_hash_hex, path)
 

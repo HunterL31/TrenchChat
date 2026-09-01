@@ -116,6 +116,7 @@ class NomadBrowseRequest(BaseModel):
     url: str
     current_node: str | None = None
     data: dict[str, str] | None = None
+    refresh: bool = False
 
 
 class NomadFetchRequest(BaseModel):
@@ -1164,7 +1165,7 @@ def create_app(backend: Backend, *, token: str | None = None,
     def nomad_browse(req: NomadBrowseRequest):
         result = actions.browse_nomad_url(
             backend.node_browser, req.url, current_node_hex=req.current_node,
-            request_data=req.data)
+            request_data=req.data, refresh=req.refresh)
         return {"ok": True, **result}
 
     @app.post("/nomad/fetch")

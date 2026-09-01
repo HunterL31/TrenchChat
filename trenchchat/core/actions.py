@@ -602,14 +602,19 @@ def _validate_theme_name(name: str) -> str:
 
 def browse_nomad_url(node_browser, url: str, *,
                      current_node_hex: str | None = None,
-                     request_data: dict | None = None) -> dict:
+                     request_data: dict | None = None,
+                     refresh: bool = False) -> dict:
     """Parse a nomad URL and start the fetch it names.
 
     Accepts "<hash>:/page/x.mu", a relative ":/page/x.mu" (resolved against
     current_node_hex), or a bare "<hash>" (meaning /page/index.mu).
-    request_data carries the page's submitted input fields. Returns
-    {"fetch_id", "node_hash", "path", "kind"}. Raises ValueError for a
-    malformed URL or a relative URL with no current node.
+    request_data carries the page's submitted input fields. A page still
+    inside the lifetime it declared with #!c= is answered from cache without
+    asking the node again, as nomadnet's browser does; refresh=True and any
+    submitted data always go to the node. Returns {"fetch_id", "node_hash",
+    "path", "kind", "cached"}, where fetch_id is None for a cache hit.
+    Raises ValueError for a malformed URL or a relative URL with no current
+    node.
     """
     node_hex, path = parse_nomad_url(url)
     if node_hex is None:
@@ -621,9 +626,13 @@ def browse_nomad_url(node_browser, url: str, *,
         fetch_id = node_browser.fetch_file(node_hex, path, request_data)
     else:
         kind = "page"
+        if (not refresh and not request_data
+                and node_browser.has_fresh_page(node_hex, path)):
+            return {"fetch_id": None, "node_hash": node_hex, "path": path,
+                    "kind": kind, "cached": True}
         fetch_id = node_browser.fetch_page(node_hex, path, request_data)
     return {"fetch_id": fetch_id, "node_hash": node_hex, "path": path,
-            "kind": kind}
+            "kind": kind, "cached": False}
 
 
 def set_node_hosting(node_browser, *, enabled: bool | None = None,

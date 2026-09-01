@@ -58,8 +58,11 @@ void main() {
       'path': '/page/index.mu',
       'kind': 'page',
     };
-    final fetchId = await state.browseNomad('$_node:/page/index.mu');
-    expect(fetchId, 'f1');
+    final target = await state.browseNomad('$_node:/page/index.mu');
+    expect(target!.fetchId, 'f1');
+    expect(target.nodeHash, _node);
+    expect(target.path, '/page/index.mu');
+    expect(target.cached, isFalse);
     expect(state.nomadFetches['f1']!.status, 'queued');
 
     state.applyEvent(TcEvent.tryParse(jsonEncode({
@@ -81,8 +84,8 @@ void main() {
   test('a rejected URL surfaces an action error, not a crash', () async {
     backend.routes['POST /nomad/browse'] =
         const FakeError(400, {'ok': false, 'error': 'invalid request path'});
-    final fetchId = await state.browseNomad('$_node:/etc/passwd');
-    expect(fetchId, isNull);
+    final target = await state.browseNomad('$_node:/etc/passwd');
+    expect(target, isNull);
     expect(state.takeActionError(), contains('invalid request path'));
   });
 
@@ -175,8 +178,41 @@ void main() {
       'progress': 1.0,
       'reason': null,
     }))!);
-    final fetchId = await state.browseNomad('$_node:/page/index.mu');
-    expect(fetchId, 'f2');
+    final target = await state.browseNomad('$_node:/page/index.mu');
+    expect(target!.fetchId, 'f2');
     expect(state.nomadFetches['f2']!.status, 'done');
+  });
+
+  test('a page answered from its own declared cache starts no fetch', () async {
+    // The backend serves a page still inside its #!c= lifetime without
+    // asking the node again, so there is no fetch to wait on.
+    backend.routes['POST /nomad/browse'] = {
+      'ok': true,
+      'fetch_id': null,
+      'node_hash': _node,
+      'path': '/page/index.mu',
+      'kind': 'page',
+      'cached': true,
+    };
+    final target = await state.browseNomad('$_node:/page/index.mu');
+    expect(target!.cached, isTrue);
+    expect(target.fetchId, isNull);
+    expect(target.nodeHash, _node);
+    expect(state.nomadFetches, isEmpty);
+  });
+
+  test('RELOAD asks the node again instead of taking the cache', () async {
+    backend.routes['POST /nomad/browse'] = {
+      'ok': true,
+      'fetch_id': 'f3',
+      'node_hash': _node,
+      'path': '/page/index.mu',
+      'kind': 'page',
+      'cached': false,
+    };
+    await state.browseNomad('$_node:/page/index.mu', refresh: true);
+    final sent = backend.requests.last;
+    expect(sent.path, '/nomad/browse');
+    expect(sent.body, contains('"refresh":true'));
   });
 }

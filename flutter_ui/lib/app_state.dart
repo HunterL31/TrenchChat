@@ -862,27 +862,39 @@ class AppState extends ChangeNotifier {
     }
   }
 
-  /// Starts a fetch for a nomad URL, carrying the request data a page's
-  /// input fields produced. Returns the fetch id to watch in
-  /// [nomadFetches], or null when the URL was rejected.
-  Future<String?> browseNomad(String url,
-      {String? currentNode, Map<String, String>? data}) async {
+  /// Opens a nomad URL, carrying the request data a page's input fields
+  /// produced. Returns where it resolved to and the fetch id to watch in
+  /// [nomadFetches] -- null when the backend answered from a cache the page
+  /// itself declared, so there is nothing to wait for. Null overall means
+  /// the URL was rejected.
+  Future<({String? fetchId, String nodeHash, String path, bool cached})?>
+      browseNomad(String url,
+          {String? currentNode,
+          Map<String, String>? data,
+          bool refresh = false}) async {
     try {
-      final result =
-          await api.browseNomad(url, currentNode: currentNode, data: data);
-      if (!result.ok || result.fetchId == null) return null;
+      final result = await api.browseNomad(url,
+          currentNode: currentNode, data: data, refresh: refresh);
+      if (!result.ok) return null;
+      final location = (
+        fetchId: result.fetchId,
+        nodeHash: result.nodeHash ?? '',
+        path: result.path ?? '/page/index.mu',
+        cached: result.cached,
+      );
+      if (result.fetchId == null) return location;
       // On a warm link the WS done event can beat this continuation; an
       // entry already present is fresher than "queued" and must survive.
       nomadFetches.putIfAbsent(
           result.fetchId!,
           () => NomadFetchStatus(
-                nodeHash: result.nodeHash ?? '',
-                path: result.path ?? '',
+                nodeHash: location.nodeHash,
+                path: location.path,
                 status: 'queued',
                 progress: 0,
               ));
       notifyListeners();
-      return result.fetchId;
+      return location;
     } catch (e) {
       _reportActionError(e);
       return null;

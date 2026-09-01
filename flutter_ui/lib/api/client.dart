@@ -846,9 +846,10 @@ class ApiClient {
         .toList();
   }
 
-  Future<({bool ok, String? fetchId, String? nodeHash, String? path})>
-      browseNomad(String url,
-          {String? currentNode, Map<String, String>? data}) async {
+  Future<({bool ok, String? fetchId, String? nodeHash, String? path,
+      bool cached})> browseNomad(String url,
+          {String? currentNode, Map<String, String>? data,
+          bool refresh = false}) async {
     final res = await _http.post(
       _u('/nomad/browse'),
       headers: _jsonHeaders,
@@ -856,6 +857,7 @@ class ApiClient {
         'url': url,
         'current_node': currentNode,
         if (data != null && data.isNotEmpty) 'data': data,
+        if (refresh) 'refresh': true,
       }),
     );
     final body = _decode(res) as Map<String, dynamic>;
@@ -864,6 +866,7 @@ class ApiClient {
       fetchId: body['fetch_id'] as String?,
       nodeHash: body['node_hash'] as String?,
       path: body['path'] as String?,
+      cached: body['cached'] as bool? ?? false,
     );
   }
 

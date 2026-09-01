@@ -170,19 +170,19 @@ class _BrowserTabState extends State<BrowserTab> {
     return page != null;
   }
 
-  Future<void> _go(String url, {Map<String, String>? data}) async {
+  Future<void> _go(String url,
+      {Map<String, String>? data, bool refresh = false}) async {
     if (url.trim().isEmpty) return;
-    final fetchId = await widget.state.browseNomad(url.trim(),
-        currentNode: _current?.nodeHash, data: data);
+    final target = await widget.state.browseNomad(url.trim(),
+        currentNode: _current?.nodeHash, data: data, refresh: refresh);
     if (!mounted) return;
-    if (fetchId == null) {
+    if (target == null) {
       setState(() =>
           _error = widget.state.takeActionError() ?? 'Could not open that URL.');
       return;
     }
-    final status = widget.state.nomadFetches[fetchId];
-    final nodeHash = status?.nodeHash ?? '';
-    final path = status?.path ?? '/page/index.mu';
+    final nodeHash = target.nodeHash;
+    final path = target.path;
     // A repeat visit while the same fetch is still in flight reuses its id;
     // only push history when the location actually changes.
     if (_current == null ||
@@ -193,15 +193,20 @@ class _BrowserTabState extends State<BrowserTab> {
       _historyIndex = _history.length - 1;
     }
     setState(() {
-      _activeFetchId = fetchId;
-      _loading = true;
+      _activeFetchId = target.fetchId;
+      _loading = target.fetchId != null;
       _error = null;
       _info = null;
       _progress = 0;
       _address.text = '$nodeHash:$path';
     });
     // Stale-while-revalidate: show whatever we already have immediately.
+    // For a page the node told us to cache there is nothing else coming.
     _showCached(nodeHash, path);
+    if (target.fetchId == null) {
+      _syncPolling();
+      return;
+    }
     // The fetch may have finished before _activeFetchId was assigned, in
     // which case its terminal event already fired and nothing else will;
     // claim it now rather than waiting for an unrelated notification.
@@ -225,10 +230,12 @@ class _BrowserTabState extends State<BrowserTab> {
     if (!cached && mounted) _go('${entry.nodeHash}:${entry.path}');
   }
 
+  /// RELOAD always goes back to the node, even for a page still inside the
+  /// lifetime it declared -- that is what the button is for.
   void _reload() {
     final current = _current;
     if (current == null) return;
-    _go('${current.nodeHash}:${current.path}');
+    _go('${current.nodeHash}:${current.path}', refresh: true);
   }
 
   void _home() {
@@ -644,16 +651,17 @@ class _BrowserTabState extends State<BrowserTab> {
   /// When it lands, the authenticated download URL goes to the clipboard --
   /// the same interim answer main_window's _openLink gives for web links.
   Future<void> _fetchFile(String url) async {
-    final fetchId = await widget.state
+    final target = await widget.state
         .browseNomad(url, currentNode: _current?.nodeHash);
     if (!mounted) return;
-    if (fetchId == null) {
+    // Files are never answered from cache, so a fetch id is always expected.
+    if (target?.fetchId == null) {
       setState(() =>
           _error = widget.state.takeActionError() ?? 'Could not fetch file.');
       return;
     }
     setState(() {
-      _fileFetchId = fetchId;
+      _fileFetchId = target!.fetchId;
       _info = 'Fetching file…';
     });
     _syncPolling();
