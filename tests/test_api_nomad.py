@@ -132,6 +132,26 @@ class TestNodesAndBrowse:
                           json={"url": "https://example.com/"})
         assert res.status_code == 400
 
+    def test_fetch_status_answers_a_client_that_missed_the_event(
+            self, client, backend, registry):
+        """The event socket can be down for the whole fetch; the status
+        endpoint is how a client finds out anyway."""
+        _serve(registry, {"/page/index.mu": lambda: b">Hello"})
+        fetch_id = client.post("/nomad/browse", headers=AUTH,
+                               json={"url": f"{NODE}:/page/index.mu"}
+                               ).json()["fetch_id"]
+        assert wait_for(
+            lambda: client.get(f"/nomad/fetch/{fetch_id}", headers=AUTH)
+            .json().get("status") == "done")
+        body = client.get(f"/nomad/fetch/{fetch_id}", headers=AUTH).json()
+        assert body["node_hash"] == NODE
+        assert body["path"] == "/page/index.mu"
+
+    def test_unknown_fetch_is_404_with_reason(self, client):
+        res = client.get(f"/nomad/fetch/{'00' * 8}", headers=AUTH)
+        assert res.status_code == 404
+        assert res.json()["reason"] == "unknown"
+
     def test_uncached_page_is_404_with_reason(self, client):
         res = client.get(f"/nomad/page/{NODE}", headers=AUTH,
                          params={"path": "/page/none.mu"})

@@ -3,6 +3,8 @@
 // backend (POST /nomad/browse) and complete via nomad_fetch WS events; the
 // page content itself is pulled from the cache endpoint afterwards, so a
 // previously seen page renders instantly and refreshes in place.
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -44,6 +46,12 @@ class _BrowserTabState extends State<BrowserTab> {
   double _progress = 0;
   bool _loading = false;
 
+  /// Fetch results arrive as WebSocket events, which are gone for good if the
+  /// socket is down when one fires. This asks the backend directly while
+  /// anything is in flight, so a dropped socket costs latency, not the page.
+  Timer? _pollTimer;
+  static const Duration _pollInterval = Duration(seconds: 2);
+
   ({String nodeHash, String path})? get _current =>
       _historyIndex >= 0 && _historyIndex < _history.length
           ? _history[_historyIndex]
@@ -66,8 +74,27 @@ class _BrowserTabState extends State<BrowserTab> {
   @override
   void dispose() {
     widget.state.removeListener(_onStateChanged);
+    _pollTimer?.cancel();
     _address.dispose();
     super.dispose();
+  }
+
+  /// Runs only while a fetch is outstanding.
+  void _syncPolling() {
+    final waiting = _activeFetchId != null || _fileFetchId != null;
+    if (waiting && _pollTimer == null) {
+      _pollTimer = Timer.periodic(_pollInterval, (_) => _pollFetches());
+    } else if (!waiting) {
+      _pollTimer?.cancel();
+      _pollTimer = null;
+    }
+  }
+
+  void _pollFetches() {
+    if (!mounted) return;
+    for (final fetchId in {_activeFetchId, _fileFetchId}) {
+      if (fetchId != null) widget.state.pollNomadFetch(fetchId);
+    }
   }
 
   /// Rebuilds on every AppState notification (node list, bookmarks),
@@ -83,24 +110,45 @@ class _BrowserTabState extends State<BrowserTab> {
     final fetchId = _activeFetchId;
     final status = fetchId == null ? null : widget.state.nomadFetches[fetchId];
     if (status == null) {
+      _syncPolling();
       setState(() {});
       return;
     }
     if (!status.isTerminal) {
+      _syncPolling();
       setState(() => _progress = status.progress);
       return;
     }
     widget.state.takeNomadFetch(fetchId!);
     _activeFetchId = null;
+    _syncPolling();
     if (status.status == 'done') {
       setState(() {});
       _showCached(status.nodeHash, status.path, doneLoading: true);
     } else {
-      setState(() {
-        _loading = false;
-        _error = _friendlyReason(status.reason);
-      });
+      // A fetch the backend has forgotten may still have landed in the cache
+      // before this client lost track of it; show that rather than an error.
+      _recoverOrFail(status);
     }
+  }
+
+  Future<void> _recoverOrFail(NomadFetchStatus status) async {
+    if (status.reason == 'forgotten' && status.nodeHash.isNotEmpty) {
+      final shown = await _showCached(status.nodeHash, status.path);
+      if (!mounted) return;
+      if (shown) {
+        setState(() {
+          _loading = false;
+          _error = null;
+        });
+        return;
+      }
+    }
+    if (!mounted) return;
+    setState(() {
+      _loading = false;
+      _error = _friendlyReason(status.reason);
+    });
   }
 
   /// Shows the cached copy of a location, if there is one. Returns whether
@@ -220,6 +268,7 @@ class _BrowserTabState extends State<BrowserTab> {
         'bad_path' => 'That page path is not valid.',
         'bad_response' => 'The node sent something that is not a page.',
         'send_failed' => 'The link to the node could not carry the request.',
+        'forgotten' => 'Lost track of that fetch. Reload to try again.',
         _ => 'The page could not be fetched.',
       };
 
@@ -607,6 +656,7 @@ class _BrowserTabState extends State<BrowserTab> {
       _fileFetchId = fetchId;
       _info = 'Fetching file…';
     });
+    _syncPolling();
   }
 
   void _advanceFileFetch() {
@@ -615,6 +665,7 @@ class _BrowserTabState extends State<BrowserTab> {
     if (status == null || !status.isTerminal) return;
     widget.state.takeNomadFetch(fetchId!);
     _fileFetchId = null;
+    _syncPolling();
     if (status.status == 'done') {
       final uri = widget.state.api.nomadFileUri(status.nodeHash, status.path);
       _copyFileUrl(uri.toString());

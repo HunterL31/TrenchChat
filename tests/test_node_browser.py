@@ -10,7 +10,7 @@ import pytest
 
 from trenchchat.config import Config
 from trenchchat.core.node_browser import (
-    DEFAULT_INDEX_MU, NodeBrowserManager, parse_nomad_url,
+    DEFAULT_INDEX_MU, SETTLED_FETCH_MAX, NodeBrowserManager, parse_nomad_url,
     sanitize_request_data,
 )
 from trenchchat.core.storage import Storage
@@ -177,6 +177,48 @@ def test_a_different_payload_is_a_different_fetch(manager, registry):
     first = manager.fetch_page(NODE_B, "/page/x.mu", {"field_a": "1"})
     second = manager.fetch_page(NODE_B, "/page/x.mu", {"field_a": "2"})
     assert first != second
+
+
+def test_fetch_status_reports_an_outcome_after_the_event_is_gone(
+        manager, registry):
+    """The fetch event is published once over a socket that can be down.
+    Asking afterwards has to still answer, or a client that missed it waits
+    for something that will never come again."""
+    _host(registry, NODE_B, {"/page/x.mu": lambda: b"hello"})
+    fetch_id = manager.fetch_page(NODE_B, "/page/x.mu")
+    assert manager.fetch_status(fetch_id)["status"] in ("queued", "fetching")
+    assert wait_for(
+        lambda: manager.fetch_status(fetch_id)["status"] == "done")
+    status = manager.fetch_status(fetch_id)
+    assert status["node_hash"] == NODE_B and status["path"] == "/page/x.mu"
+    assert status["reason"] is None
+
+
+def test_fetch_status_remembers_why_a_fetch_failed(manager, registry):
+    fetch_id = manager.fetch_page(NODE_B, "/page/x.mu")   # nobody hosts NODE_B
+    assert wait_for(
+        lambda: manager.fetch_status(fetch_id)["status"] == "failed")
+    assert manager.fetch_status(fetch_id)["reason"] is not None
+
+
+def test_fetch_status_is_none_for_an_unknown_id(manager):
+    assert manager.fetch_status("00" * 8) is None
+
+
+def test_settled_fetches_do_not_grow_without_bound(manager, registry):
+    count = SETTLED_FETCH_MAX + 6
+    _host(registry, NODE_B,
+          {f"/page/{i}.mu": lambda: b"x" for i in range(count)})
+    ids = [manager.fetch_page(NODE_B, f"/page/{i}.mu") for i in range(count)]
+
+    def all_settled():
+        live = [manager.fetch_status(i) for i in ids]
+        return not any(s and s["status"] in ("queued", "fetching")
+                       for s in live)
+
+    assert wait_for(all_settled)
+    remembered = sum(1 for i in ids if manager.fetch_status(i) is not None)
+    assert remembered == SETTLED_FETCH_MAX
 
 
 def test_fetch_failure_surfaces_reason(manager, registry):

@@ -1178,6 +1178,16 @@ def create_app(backend: Backend, *, token: str | None = None,
         return {"ok": True, "fetch_id": fetch_id, "node_hash": req.node_hash,
                 "path": req.path, "kind": kind}
 
+    @app.get("/nomad/fetch/{fetch_id}")
+    def get_nomad_fetch(fetch_id: str):
+        status = backend.node_browser.fetch_status(fetch_id)
+        if status is None:
+            return JSONResponse(
+                {"ok": False, "error": "unknown fetch", "reason": "unknown"},
+                status_code=404,
+            )
+        return {"ok": True, **status}
+
     @app.get("/nomad/page/{node_hash}")
     def get_nomad_page(node_hash: str, path: str = "/page/index.mu"):
         row = backend.node_browser.get_cached_page(node_hash, path)

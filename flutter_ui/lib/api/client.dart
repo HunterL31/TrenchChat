@@ -867,6 +867,21 @@ class ApiClient {
     );
   }
 
+  /// How a fetch is doing, straight from the backend. Null once the backend
+  /// has forgotten it. The event socket can drop; this cannot.
+  Future<NomadFetchStatus?> getNomadFetch(String fetchId) async {
+    final res = await _http.get(_u('/nomad/fetch/$fetchId'));
+    if (res.statusCode == 404) return null;
+    final body = _decode(res) as Map<String, dynamic>;
+    return NomadFetchStatus(
+      nodeHash: body['node_hash'] as String? ?? '',
+      path: body['path'] as String? ?? '',
+      status: body['status'] as String? ?? '',
+      progress: (body['progress'] as num?)?.toDouble() ?? 0,
+      reason: body['reason'] as String?,
+    );
+  }
+
   /// The cached copy of a fetched page, or null when nothing is cached yet.
   Future<NomadPage?> getNomadPage(String nodeHash, String path) async {
     final res = await _http

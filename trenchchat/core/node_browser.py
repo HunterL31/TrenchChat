@@ -30,6 +30,7 @@ MAX_FILE_BYTES = 5 * 1024 * 1024
 PAGE_CACHE_MAX_ROWS = 500
 FILE_CACHE_MAX_BYTES = 50 * 1024 * 1024
 NODE_LIST_MAX_ROWS = 200
+SETTLED_FETCH_MAX = 64
 NODE_NAME_MAX_LEN = 64
 CACHE_PRUNE_INTERVAL_SECS = 300.0
 
@@ -164,6 +165,15 @@ class _FetchState:
         self.path = path
         self.kind = kind
         self.data = data
+        self.status = FETCH_QUEUED
+        self.progress = 0.0
+        self.reason: str | None = None
+        self.settled_at = 0.0
+
+    def snapshot(self) -> dict:
+        return {"fetch_id": self.fetch_id, "node_hash": self.node_hex,
+                "path": self.path, "kind": self.kind, "status": self.status,
+                "progress": self.progress, "reason": self.reason}
 
 
 class NodeBrowserManager:
@@ -178,6 +188,10 @@ class NodeBrowserManager:
             else NodeTransportBase()
         self._lock = threading.RLock()
         self._fetches: dict[str, _FetchState] = {}
+        # Terminal outcomes are kept for a while after the fetch leaves
+        # _fetches: a client whose event socket was down when the fetch
+        # finished has no other way to learn how it ended.
+        self._settled: dict[str, _FetchState] = {}
         self._node_callbacks: list = []
         self._fetch_callbacks: list = []
         self._last_prune = time.time()
@@ -267,6 +281,18 @@ class NodeBrowserManager:
                               timeout=NODE_FETCH_TIMEOUT_SECS, data=data)
         return fetch_id
 
+    def _settle(self, state: _FetchState, status: str, progress: float,
+                reason: str | None) -> None:
+        """Caller must not hold the lock. Records a fetch's final outcome."""
+        with self._lock:
+            state.status = status
+            state.progress = progress
+            state.reason = reason
+            state.settled_at = time.time()
+            self._settled[state.fetch_id] = state
+            while len(self._settled) > SETTLED_FETCH_MAX:
+                self._settled.pop(next(iter(self._settled)))
+
     def _on_fetch_result(self, fetch_id: str, ok: bool,
                          payload: bytes | None, reason: str | None) -> None:
         with self._lock:
@@ -281,19 +307,34 @@ class NodeBrowserManager:
             else:
                 self._storage.put_nomad_file(state.node_hex, state.path,
                                              payload)
+            self._settle(state, FETCH_DONE, 1.0, None)
             self._notify_fetch(fetch_id, state.node_hex, state.path,
                                FETCH_DONE, 1.0, None)
         else:
+            self._settle(state, FETCH_FAILED, 0.0, reason)
             self._notify_fetch(fetch_id, state.node_hex, state.path,
                                FETCH_FAILED, 0.0, reason)
 
     def _on_fetch_progress(self, fetch_id: str, progress: float) -> None:
         with self._lock:
             state = self._fetches.get(fetch_id)
+            if state is not None:
+                state.status = FETCH_FETCHING
+                state.progress = progress
         if state is None:
             return
         self._notify_fetch(fetch_id, state.node_hex, state.path,
                            FETCH_FETCHING, progress, None)
+
+    def fetch_status(self, fetch_id: str) -> dict | None:
+        """How a fetch is doing, or how it ended. None once forgotten.
+
+        Fetch events are published over a socket that can drop, and nothing
+        replays them, so this is what a client polls to find out on its own.
+        """
+        with self._lock:
+            state = self._fetches.get(fetch_id) or self._settled.get(fetch_id)
+            return state.snapshot() if state is not None else None
 
     def get_cached_page(self, node_hash_hex: str, path: str):
         return self._storage.get_nomad_page(node_hash_hex, path)

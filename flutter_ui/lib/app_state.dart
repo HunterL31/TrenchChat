@@ -889,6 +889,33 @@ class AppState extends ChangeNotifier {
     }
   }
 
+  /// Asks the backend how a fetch ended and applies the answer exactly as a
+  /// [NomadFetchEvent] would. Fetch events are published over a socket that
+  /// can drop while a page is in flight, and nothing replays them, so the
+  /// browser polls this rather than waiting forever for an event that is
+  /// already gone.
+  Future<void> pollNomadFetch(String fetchId) async {
+    try {
+      final status = await api.getNomadFetch(fetchId);
+      if (status == null) {
+        // The backend no longer knows this fetch: report it terminally so the
+        // browser stops waiting and can fall back to whatever it has cached.
+        nomadFetches[fetchId] = NomadFetchStatus(
+          nodeHash: nomadFetches[fetchId]?.nodeHash ?? '',
+          path: nomadFetches[fetchId]?.path ?? '',
+          status: 'failed',
+          progress: 0,
+          reason: 'forgotten',
+        );
+      } else {
+        nomadFetches[fetchId] = status;
+      }
+      notifyListeners();
+    } catch (_) {
+      // A failed poll is not an outcome; the next tick tries again.
+    }
+  }
+
   Future<NomadPage?> fetchCachedNomadPage(String nodeHash, String path) async {
     try {
       return await api.getNomadPage(nodeHash, path);
