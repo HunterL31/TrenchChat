@@ -20,6 +20,7 @@ import '../../widgets/tc_button.dart';
 import '../../widgets/tc_icon.dart';
 import '../dialogs/confirm_dialog.dart';
 import '../dialogs/nomad_hosting_dialog.dart';
+import '../dialogs/rename_bookmark_dialog.dart';
 
 class BrowserTab extends StatefulWidget {
   const BrowserTab({super.key, required this.state});
@@ -347,12 +348,35 @@ class _BrowserTabState extends State<BrowserTab> {
   Future<void> _toggleBookmark() async {
     final current = _current;
     if (current == null) return;
-    final node = widget.state.nomadNodes[current.nodeHash];
-    final label = node?.displayName.isNotEmpty == true
-        ? node!.displayName
-        : current.path;
+    await widget.state.toggleNomadBookmark(
+        current.nodeHash, current.path, _defaultBookmarkLabel(current));
+  }
+
+  /// What to call a bookmark when the user has not said.
+  ///
+  /// The node's name alone was the same string for every page on it, which
+  /// made a shelf of bookmarks to one node unreadable. A page's own heading
+  /// names the page; failing that the node and the file it came from do.
+  String _defaultBookmarkLabel(({String nodeHash, String path}) location) {
+    final page = _page;
+    if (page != null &&
+        _pageLocation?.nodeHash == location.nodeHash &&
+        _pageLocation?.path == location.path) {
+      final title = micronPageTitle(page.source);
+      if (title.isNotEmpty) return title;
+    }
+    final node = widget.state.nomadNodes[location.nodeHash]?.displayName ?? '';
+    final basename = location.path.split('/').last;
+    if (node.isNotEmpty && basename.isNotEmpty) return '$node — $basename';
+    return location.path;
+  }
+
+  Future<void> _renameBookmark(NomadBookmark mark) async {
+    final label = await showRenameBookmarkDialog(
+        context, widget.state, current: mark.label);
+    if (label == null || !mounted) return;
     await widget.state
-        .toggleNomadBookmark(current.nodeHash, current.path, label);
+        .renameNomadBookmark(mark.nodeHash, mark.path, label.trim());
   }
 
   String _friendlyReason(String? reason) => switch (reason) {
@@ -646,6 +670,9 @@ class _BrowserTabState extends State<BrowserTab> {
               style: TextStyle(
                   fontSize: TCType.textCaption, color: tc.textTertiary),
             ),
+            const SizedBox(width: 8),
+            TcGhostButton(
+                label: 'RENAME', onPressed: () => _renameBookmark(mark)),
           ],
         ),
       ),

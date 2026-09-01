@@ -218,6 +218,78 @@ void main() {
     });
   });
 
+  group('bookmarks', () {
+    Future<void> openPageTitled(WidgetTester tester, String micron) async {
+      backend.routes['GET /nomad/page/$_node'] = {
+        'ok': true,
+        'content_b64': base64Encode(utf8.encode(micron)),
+        'fetched_at': 1.0,
+      };
+      await tester.pumpWidget(_harness(state));
+      await settle(tester);
+      await tester.tap(find.text('Test Node'));
+      await settle(tester);
+      _emitFetchEvent(state, 'f1', 'done');
+      await settle(tester);
+    }
+
+    testWidgets('a bookmark is named after the page, not the node',
+        (tester) async {
+      // The node's name is the same string for every page on it, which made
+      // a shelf of bookmarks to one node unreadable.
+      backend.routes['POST /nomad/bookmarks'] = {'ok': true};
+      await openPageTitled(tester, '>Thread: antenna advice\nbody');
+
+      await tester.tap(find.text('☆'));
+      await settle(tester);
+
+      final sent = backend.requests.lastWhere(
+          (r) => r.method == 'POST' && r.path == '/nomad/bookmarks');
+      expect(sent.body, contains('Thread: antenna advice'));
+    });
+
+    testWidgets('a page with no heading falls back to the node and file',
+        (tester) async {
+      backend.routes['POST /nomad/bookmarks'] = {'ok': true};
+      await openPageTitled(tester, 'just body text, no heading');
+
+      await tester.tap(find.text('☆'));
+      await settle(tester);
+
+      final sent = backend.requests.lastWhere(
+          (r) => r.method == 'POST' && r.path == '/nomad/bookmarks');
+      expect(sent.body, contains('Test Node'));
+      expect(sent.body, contains('index.mu'));
+    });
+
+    testWidgets('a bookmark can be renamed', (tester) async {
+      backend.routes['GET /nomad/bookmarks'] = [
+        {
+          'node_hash': _node,
+          'path': '/page/forum/thread.mu',
+          'label': '/page/forum/thread.mu',
+          'added_at': 1.0,
+        }
+      ];
+      backend.routes['POST /nomad/bookmarks'] = {'ok': true};
+      await tester.pumpWidget(_harness(state));
+      await settle(tester);
+      expect(find.text('RENAME'), findsOneWidget);
+
+      await tester.tap(find.text('RENAME'));
+      await settle(tester);
+      tester.testTextInput.enterText('Antenna thread');
+      await tester.pump();
+      await tester.tap(find.text('SAVE'));
+      await settle(tester);
+
+      final sent = backend.requests.lastWhere(
+          (r) => r.method == 'POST' && r.path == '/nomad/bookmarks');
+      expect(sent.body, contains('Antenna thread'));
+      expect(sent.body, contains('/page/forum/thread.mu'));
+    });
+  });
+
   group('identifying to a node', () {
     void identifyState({required bool enabled, bool identified = false}) {
       backend.routes['GET /nomad/identify/$_node'] = {

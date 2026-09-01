@@ -1142,6 +1142,18 @@ class AppState extends ChangeNotifier {
     }
   }
 
+  /// Renames a bookmark. The backend upserts on (node, path), so saving the
+  /// same location with a new label is the rename.
+  Future<void> renameNomadBookmark(
+      String nodeHash, String path, String label) async {
+    try {
+      await api.addNomadBookmark(nodeHash, path, label);
+      await loadNomadBookmarks();
+    } catch (e) {
+      _reportActionError(e);
+    }
+  }
+
   bool isNomadBookmarked(String nodeHash, String path) => nomadBookmarks
       .any((b) => b.nodeHash == nodeHash && b.path == path);
 

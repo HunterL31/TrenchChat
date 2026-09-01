@@ -37,6 +37,20 @@ MicronDocument parseMicron(String source) {
   );
 }
 
+/// The page's own title: the text of its first heading, tags stripped. Empty
+/// when it has no heading, which is the only thing a page is obliged to have
+/// none of.
+String micronPageTitle(String source) {
+  final doc = parseMicron(source);
+  for (final index in doc.headingLines) {
+    final line = doc.lines[index];
+    if (line is! MicronHeadingLine) continue;
+    final text = line.segments.map((s) => s.text).join().trim();
+    if (text.isNotEmpty) return text;
+  }
+  return '';
+}
+
 /// The background a page declares for itself, for an embedder that paints
 /// the space around the document as well as behind it.
 Color? micronPageBackground(String source) => _pageColor(source, '#!bg=');
