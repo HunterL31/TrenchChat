@@ -13,6 +13,7 @@ timeouts, and a per-fetch delivery delay.
 
 import threading
 import time
+from pathlib import Path
 
 from trenchchat.network.node_transport import (
     FETCH_BAD_PATH, FETCH_BAD_RESPONSE, FETCH_BUSY, FETCH_TIMEOUT,
@@ -108,6 +109,13 @@ class FakeNodeTransport(NodeTransportBase):
             payload = provider()
         except Exception:
             payload = None
+        # A file provider hands back its Path; the real transport streams it
+        # and the receiving side reads the bytes out of the response handle.
+        if isinstance(payload, Path):
+            try:
+                payload = payload.read_bytes()
+            except OSError:
+                payload = None
         if not isinstance(payload, bytes):
             self._notify_result(fetch_id, False, None, FETCH_BAD_RESPONSE)
             return

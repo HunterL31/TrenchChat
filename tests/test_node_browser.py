@@ -333,7 +333,10 @@ def test_hosting_refresh_picks_up_new_pages(manager):
     assert {p["path"] for p in status["pages"]} == \
         {"/page/index.mu", "/page/about.mu"}
     assert {f["path"] for f in status["files"]} == {"/file/data.bin"}
-    assert manager._transport.providers["/file/data.bin"]() == b"\x01"
+    # Files are provided as a Path so the transport can stream them with a
+    # name attached; pages stay plain bytes.
+    assert manager._transport.providers["/file/data.bin"]().read_bytes() == \
+        b"\x01"
 
 
 def test_hosting_restored_from_config(tmp_path, registry):

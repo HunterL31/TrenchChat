@@ -472,9 +472,15 @@ class NodeBrowserManager:
         return result
 
     def _build_providers(self) -> dict:
+        """Served path to a provider returning the response for it.
+
+        A page's provider returns its bytes; a file's returns its Path, which
+        the transport streams with the name in the response metadata -- the
+        shape nomadnet's browser needs to save a download.
+        """
         pages, files = self._scan_pages_dir()
 
-        def make_provider(real_path: Path):
+        def make_page_provider(real_path: Path):
             def provider() -> bytes | None:
                 try:
                     return real_path.read_bytes()
@@ -482,9 +488,16 @@ class NodeBrowserManager:
                     return None
             return provider
 
+        def make_file_provider(real_path: Path):
+            def provider() -> Path:
+                return real_path
+            return provider
+
         providers = {}
-        for served_path, (real, _) in {**pages, **files}.items():
-            providers[served_path] = make_provider(real)
+        for served_path, (real, _) in pages.items():
+            providers[served_path] = make_page_provider(real)
+        for served_path, (real, _) in files.items():
+            providers[served_path] = make_file_provider(real)
         return providers
 
     # --- housekeeping ---

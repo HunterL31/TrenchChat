@@ -14,7 +14,7 @@ from trenchchat.core.identity import Identity
 from trenchchat.network.announce import NodeAnnounceHandler
 from trenchchat.network import node_transport
 from trenchchat.network.node_transport import (
-    FETCH_BAD_PATH, FETCH_SEND_FAILED, FETCH_UNREACHABLE,
+    FETCH_BAD_PATH, FETCH_BAD_RESPONSE, FETCH_SEND_FAILED, FETCH_UNREACHABLE,
     MAX_SERVED_RESPONSE_BYTES, NODE_REDIAL_BACKOFF, NODE_SERVE_RATE_LIMIT,
     NodeTransportBase, RNSNodeTransport, is_valid_request_path,
 )
@@ -222,6 +222,103 @@ def test_fetch_queued_past_deadline_is_unreachable(transport, monkeypatch):
                     timeout=0.0)
     transport.tick()
     assert ("f1", False, FETCH_UNREACHABLE) in results
+
+
+class _FakeReceipt:
+    """Stands in for an RNS RequestReceipt with a given response shape."""
+
+    def __init__(self, response, metadata=None):
+        self.response = response
+        self.metadata = metadata
+
+
+def _capture_result(transport, receipt):
+    """Register a fetch against a receipt and run the response callback."""
+    results = _collect_results(transport)
+    fetch = node_transport._Fetch("f1", "ab" * 16, "/file/x.bin",
+                                  max_size=1024, timeout=10)
+    transport._active[id(receipt)] = fetch
+    transport._on_response(receipt)
+    return results
+
+
+def test_page_response_of_plain_bytes_is_delivered(transport):
+    receipt = _FakeReceipt(b"# hello")
+    assert _capture_result(transport, receipt) == [("f1", True, None)]
+
+
+def test_file_response_is_read_out_of_its_handle(transport, tmp_path):
+    """nomadnet answers a /file/ request with an open handle plus metadata,
+    and RNS deletes the temp file the moment this callback returns."""
+    blob = tmp_path / "payload.bin"
+    blob.write_bytes(b"file bytes")
+    delivered = []
+    transport.set_fetch_result_callback(
+        lambda fid, ok, payload, reason: delivered.append((ok, payload)))
+    fetch = node_transport._Fetch("f1", "ab" * 16, "/file/x.bin",
+                                  max_size=1024, timeout=10)
+    with blob.open("rb") as handle:
+        receipt = _FakeReceipt(handle, metadata={"name": b"payload.bin"})
+        transport._active[id(receipt)] = fetch
+        transport._on_response(receipt)
+    assert delivered == [(True, b"file bytes")]
+
+
+def test_legacy_name_and_data_file_response_is_delivered(transport):
+    """Older nomadnet nodes answer with [name, data] instead of a handle."""
+    delivered = []
+    transport.set_fetch_result_callback(
+        lambda fid, ok, payload, reason: delivered.append((ok, payload)))
+    fetch = node_transport._Fetch("f1", "ab" * 16, "/file/x.bin",
+                                  max_size=1024, timeout=10)
+    receipt = _FakeReceipt(["payload.bin", b"file bytes"])
+    transport._active[id(receipt)] = fetch
+    transport._on_response(receipt)
+    assert delivered == [(True, b"file bytes")]
+
+
+def test_response_of_an_unusable_shape_is_reported(transport):
+    receipt = _FakeReceipt({"not": "a payload"})
+    assert _capture_result(transport, receipt) == [
+        ("f1", False, FETCH_BAD_RESPONSE)]
+
+
+def test_served_file_carries_a_handle_and_its_name(transport, tmp_path):
+    """A nomadnet browser handed raw bytes reads response[0] as a filename
+    and drops the download; it needs the handle-plus-name shape."""
+    blob = tmp_path / "notes.txt"
+    blob.write_bytes(b"served bytes")
+    transport.start_hosting("Node", {"/file/notes.txt": lambda: blob})
+
+    response = transport._serve("/file/notes.txt", None, b"rid", b"lid",
+                                None, time.time())
+
+    assert isinstance(response, list) and len(response) == 2
+    handle, metadata = response
+    assert metadata == {"name": b"notes.txt"}
+    with handle:
+        assert handle.read() == b"served bytes"
+
+
+def test_served_page_stays_plain_bytes(transport, tmp_path):
+    transport.start_hosting("Node", {"/page/index.mu": lambda: b"# page"})
+    response = transport._serve("/page/index.mu", None, b"rid", b"lid",
+                                None, time.time())
+    assert response == b"# page"
+
+
+def test_an_oversized_file_is_refused_without_reading_it(transport, tmp_path):
+    blob = tmp_path / "big.bin"
+    blob.write_bytes(b"x" * 16)
+    transport.start_hosting("Node", {"/file/big.bin": lambda: blob})
+    monkey = MAX_SERVED_RESPONSE_BYTES
+    assert monkey > 16   # sanity: the cap is what refuses, not the size
+    node_transport.MAX_SERVED_RESPONSE_BYTES = 4
+    try:
+        assert transport._serve("/file/big.bin", None, b"rid", b"lid", None,
+                                time.time()) is None
+    finally:
+        node_transport.MAX_SERVED_RESPONSE_BYTES = monkey
 
 
 class _DeadLink:

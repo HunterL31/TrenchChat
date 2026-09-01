@@ -16,6 +16,7 @@ voice_transport.py's layering: callbacks up, tick() down.
 
 import threading
 import time
+from pathlib import Path
 
 import RNS
 
@@ -32,6 +33,10 @@ NODE_FETCH_TIMEOUT_SECS = 60.0
 NODE_ANNOUNCE_INTERVAL_SECS = 900.0
 MAX_QUEUED_FETCHES_PER_NODE = 8
 MAX_REQUEST_PATH_LEN = 256
+
+# nomadnet's own ceiling for compressing a file response. Above it the cost
+# is not worth paying, and most large files are already compressed.
+NODE_FILE_AUTO_COMPRESS = 32_000_000
 
 NODE_SERVE_RATE_LIMIT = 8
 NODE_SERVE_RATE_WINDOW = 1.0
@@ -69,6 +74,30 @@ def is_valid_request_path(path) -> bool:
     if not path.isprintable():
         return False
     return True
+
+
+def _response_bytes(receipt) -> bytes | None:
+    """The payload of a request response, whatever shape it arrived in.
+
+    A page is plain bytes. A file is not: nomadnet serves it as
+    [open(path), {"name": ...}], which RNS delivers as an open handle on a
+    temp file it deletes as soon as this callback returns -- so it has to be
+    read here, not later. Older nodes answer with [name, data] instead.
+    None for anything else.
+    """
+    data = receipt.response
+    if hasattr(data, "read"):
+        try:
+            data = data.read()
+        except OSError as e:
+            RNS.log(f"TrenchChat [nomad]: could not read file response: {e}",
+                    RNS.LOG_WARNING)
+            return None
+    elif isinstance(data, (list, tuple)) and len(data) == 2:
+        data = data[1]
+    if isinstance(data, str):
+        data = data.encode("utf-8")
+    return data if isinstance(data, bytes) else None
 
 
 class NodeTransportBase:
@@ -420,10 +449,8 @@ class RNSNodeTransport(NodeTransportBase):
         fetch = self._pop_active(receipt)
         if fetch is None:
             return
-        data = receipt.response
-        if isinstance(data, str):
-            data = data.encode("utf-8")
-        if not isinstance(data, bytes):
+        data = _response_bytes(receipt)
+        if data is None:
             self._notify_result(fetch.fetch_id, False, None,
                                 FETCH_BAD_RESPONSE)
             return
@@ -573,6 +600,8 @@ class RNSNodeTransport(NodeTransportBase):
                 path,
                 response_generator=self._serve,
                 allow=RNS.Destination.ALLOW_ALL,
+                auto_compress=(NODE_FILE_AUTO_COMPRESS
+                               if path.startswith("/file/") else True),
             )
         self._providers = {p: fn for p, fn in providers.items()
                            if is_valid_request_path(p)}
@@ -641,6 +670,8 @@ class RNSNodeTransport(NodeTransportBase):
             RNS.log(f"TrenchChat [nomad]: serve error for {path}: {e}",
                     RNS.LOG_WARNING)
             return None
+        if isinstance(payload, Path):
+            return self._serve_file(path, payload)
         if not isinstance(payload, bytes):
             return None
         if len(payload) > MAX_SERVED_RESPONSE_BYTES:
@@ -648,3 +679,30 @@ class RNSNodeTransport(NodeTransportBase):
                     f"{path} ({len(payload)} bytes)", RNS.LOG_WARNING)
             return None
         return payload
+
+    def _serve_file(self, path: str, real: Path):
+        """A file response: an open handle plus the name it should be saved
+        under.
+
+        This is the only shape nomadnet's browser can save -- handed raw
+        bytes it reads response[0] as a filename, gets an integer, and drops
+        the download with an exception. RNS streams from the handle and
+        closes it.
+        """
+        try:
+            size = real.stat().st_size
+        except OSError as e:
+            RNS.log(f"TrenchChat [nomad]: cannot stat {path}: {e}",
+                    RNS.LOG_WARNING)
+            return None
+        if size > MAX_SERVED_RESPONSE_BYTES:
+            RNS.log(f"TrenchChat [nomad]: refusing to serve oversized "
+                    f"{path} ({size} bytes)", RNS.LOG_WARNING)
+            return None
+        try:
+            handle = real.open("rb")
+        except OSError as e:
+            RNS.log(f"TrenchChat [nomad]: cannot open {path}: {e}",
+                    RNS.LOG_WARNING)
+            return None
+        return [handle, {"name": real.name.encode("utf-8")}]

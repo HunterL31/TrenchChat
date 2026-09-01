@@ -62,8 +62,10 @@ def test_seed_enables_hosting_with_named_pages(backend):
         "/page/index.mu", "/page/about.mu", "/page/art.mu", "/page/fields.mu",
         "/page/table.mu", "/file/notes.txt"}
     assert b"Tester A" in transport.providers["/page/about.mu"]()
-    assert demo_files()["notes.txt"].encode() == \
-        transport.providers["/file/notes.txt"]()
+    # A file provider yields its Path, not its bytes: that is what lets the
+    # transport answer with the handle-plus-name shape nomadnet can save.
+    served = transport.providers["/file/notes.txt"]()
+    assert served.read_bytes() == demo_files()["notes.txt"].encode()
 
 
 def test_seed_survives_a_second_run(backend):

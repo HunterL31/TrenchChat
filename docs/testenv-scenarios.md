@@ -590,6 +590,18 @@ resolution, link establishment, and the request/response transfer itself.
 The manual interop check — browsing a real pip `nomadnet` node and being
 browsed back by it — is documented in `scen_nomad.py` and not automated.
 
+Run against `nomadnet` 1.2.9 (rns 1.5.2) on 2026-09-01, joined to the testenv
+hub, in both directions. Pages were fine from the start. Files were broken
+both ways, and the shape is the reason: a node answers a `/file/` request
+with `[open(path), {"name": ...}]`, which RNS delivers as an open handle on a
+temp file it deletes the moment the response callback returns. We required
+`bytes`, so every file from a real node failed as `bad_response`; and we
+answered with raw bytes, which sends nomadnet's `file_received` down its
+legacy `[name, data]` branch to do `basename(<int>)` and drop the download
+with a `TypeError`. Both fixed, and re-verified by running nomadnet's own
+`file_received` against our response. Pages remain plain bytes on both
+sides — the handle-and-metadata shape is for files only.
+
 | ID | Peers | Actions | Expected result |
 |---|---|---|---|
 | nomad1 | A,B | A enables hosting; B browses the node's index | ✅ B discovers the node from the announce and fetches the default `index.mu` in 0.5s. 4/4 runs |
