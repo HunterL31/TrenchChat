@@ -28,6 +28,15 @@ cryptography==46.0.5
 sounddevice==0.5.2
 numpy==2.2.6
 opuslib==3.0.1
+# The client talks to the backend over HTTP and a WebSocket, so the server
+# stack is a runtime dependency of main_flutter.py, not a dev extra. uvicorn
+# picks its WebSocket implementation at runtime: without one it answers the
+# client's upgrade with "Unsupported upgrade request" and every live update
+# silently stops, so websockets is pinned here rather than left to the
+# [standard] extra.
+fastapi==0.141.1
+uvicorn==0.52.4
+websockets==17.1
 # The tray icon the app drops to when its window closes (trenchchat/tray.py).
 # Backends: win32 and AppKit natively, AppIndicator/GTK/XEmbed on Linux, where
 # a desktop with no notification area leaves the launcher without a tray.

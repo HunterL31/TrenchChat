@@ -159,6 +159,26 @@ class ClientWindow:
         self._on_closed()
 
 
+def _require_websocket_support() -> None:
+    """Refuse to start without a WebSocket implementation for uvicorn.
+
+    Every live update -- messages, presence, page fetch results -- rides the
+    event socket. Without one of these installed uvicorn still serves HTTP
+    and answers the upgrade with "Unsupported upgrade request", so the app
+    looks healthy while the client sits in RECONNECTING forever. Failing
+    here names the cause instead.
+    """
+    import importlib.util
+
+    if any(importlib.util.find_spec(mod) for mod in ("websockets", "wsproto")):
+        return
+    sys.exit(
+        "error: no WebSocket library found, so live updates cannot work.\n"
+        "  Install one into this interpreter and start again:\n"
+        f"    {sys.executable} -m pip install \"uvicorn[standard]\"\n"
+    )
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Launch the TrenchChat backend and Flutter client together")
@@ -196,6 +216,8 @@ def main():
 
     from api import create_app, generate_token
     from backend_core import Backend
+
+    _require_websocket_support()
 
     desktop_binary = None if args.browser else find_desktop_binary()
     if desktop_binary is None and not _WEB_DIR.is_dir():
