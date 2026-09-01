@@ -25,20 +25,26 @@ IDENTITY = "ab" * 16
 def test_demo_pages_name_their_tester():
     pages = demo_pages("Tester B", IDENTITY)
     assert set(pages) == {"index.mu", "about.mu", "art.mu", "fields.mu",
-                          "echo.mu", "table.mu"}
+                          "echo.mu", "table.mu", "live.mu", "side.mu"}
     assert IDENTITY in pages["index.mu"]
     assert IDENTITY in pages["about.mu"]
     for name in ("index.mu", "about.mu", "art.mu", "fields.mu"):
         assert "Tester B" in pages[name]
 
 
-def test_demo_index_links_to_every_page_it_ships():
+def test_every_demo_page_is_reachable_from_the_index():
+    """A page nothing points at cannot be exercised from the UI. Reachable
+    means a link or a partial names it, at any depth from the index."""
     pages = demo_pages("Tester B", IDENTITY)
-    index = pages["index.mu"]
-    for name in pages:
-        if name in ("index.mu", "echo.mu"):
-            continue
-        assert f"/page/{name}" in index, name
+    reached = {"index.mu"}
+    frontier = ["index.mu"]
+    while frontier:
+        source = pages[frontier.pop()]
+        for name in pages:
+            if f"/page/{name}" in source and name not in reached:
+                reached.add(name)
+                frontier.append(name)
+    assert reached == set(pages)
 
 
 @pytest.fixture
@@ -46,10 +52,12 @@ def backend(tmp_path):
     config = Config(data_dir=tmp_path)
     storage = Storage(db_path=tmp_path / "storage.db")
     transport = FakeNodeTransport("11" * 16, FakeNodeRegistry())
-    browser = NodeBrowserManager(None, storage, config, transport=transport)
+    identity = SimpleNamespace(hash_hex=IDENTITY)
+    browser = NodeBrowserManager(identity, storage, config,
+                                 transport=transport)
     yield SimpleNamespace(
         node_browser=browser,
-        identity=SimpleNamespace(hash_hex=IDENTITY),
+        identity=identity,
     )
     storage.close()
 
@@ -60,7 +68,8 @@ def test_seed_enables_hosting_with_named_pages(backend):
     assert transport.hosting_name == "Tester A's demo node"
     assert set(transport.providers) >= {
         "/page/index.mu", "/page/about.mu", "/page/art.mu", "/page/fields.mu",
-        "/page/table.mu", "/file/notes.txt"}
+        "/page/table.mu", "/page/live.mu", "/page/side.mu",
+        "/file/notes.txt"}
     assert b"Tester A" in transport.providers["/page/about.mu"]()
     # A file provider yields its Path, not its bytes: that is what lets the
     # transport answer with the handle-plus-name shape nomadnet can save.

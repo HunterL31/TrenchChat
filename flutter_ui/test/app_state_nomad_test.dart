@@ -215,4 +215,94 @@ void main() {
     expect(sent.path, '/nomad/browse');
     expect(sent.body, contains('"refresh":true'));
   });
+
+  group('partials', () {
+    setUp(() {
+      backend.routes['POST /nomad/browse'] = {
+        'ok': true,
+        'fetch_id': 'p1',
+        'node_hash': _node,
+        'path': '/page/side.mu',
+        'kind': 'page',
+        'cached': false,
+      };
+      backend.routes['GET /nomad/fetch/p1'] = {
+        'ok': true,
+        'fetch_id': 'p1',
+        'node_hash': _node,
+        'path': '/page/side.mu',
+        'kind': 'page',
+        'status': 'done',
+        'progress': 1.0,
+        'reason': null,
+      };
+      backend.routes['GET /nomad/page/$_node'] = {
+        'ok': true,
+        'content_b64': base64Encode(utf8.encode('side content')),
+        'fetched_at': 1.0,
+      };
+    });
+
+    test('a partial is fetched and read back as micron source', () async {
+      final source = await state.loadNomadPartial(':/page/side.mu',
+          currentNode: _node,
+          interval: const Duration(milliseconds: 1));
+      expect(source, 'side content');
+      final browse = backend.requests
+          .firstWhere((r) => r.path == '/nomad/browse');
+      // The refresh interval is the page author's; the page cache must not
+      // hold a partial at its last value.
+      expect(browse.body, contains('"refresh":true'));
+    });
+
+    test('a partial the node never answers yields nothing', () async {
+      backend.routes['GET /nomad/fetch/p1'] = {
+        'ok': true,
+        'fetch_id': 'p1',
+        'node_hash': _node,
+        'path': '/page/side.mu',
+        'kind': 'page',
+        'status': 'failed',
+        'progress': 0.0,
+        'reason': 'timeout',
+      };
+      final source = await state.loadNomadPartial(':/page/side.mu',
+          currentNode: _node,
+          interval: const Duration(milliseconds: 1));
+      expect(source, isNull);
+    });
+
+    test('a partial answered from cache needs no fetch at all', () async {
+      backend.routes['POST /nomad/browse'] = {
+        'ok': true,
+        'fetch_id': null,
+        'node_hash': _node,
+        'path': '/page/side.mu',
+        'kind': 'page',
+        'cached': true,
+      };
+      final source = await state.loadNomadPartial(':/page/side.mu',
+          currentNode: _node,
+          interval: const Duration(milliseconds: 1));
+      expect(source, 'side content');
+      expect(state.nomadFetches, isEmpty);
+    });
+
+    test('awaitNomadFetch gives up rather than waiting forever', () async {
+      backend.routes['GET /nomad/fetch/p1'] = {
+        'ok': true,
+        'fetch_id': 'p1',
+        'node_hash': _node,
+        'path': '/page/side.mu',
+        'kind': 'page',
+        'status': 'fetching',
+        'progress': 0.5,
+        'reason': null,
+      };
+      final status = await state.awaitNomadFetch('p1',
+          timeout: const Duration(milliseconds: 20),
+          interval: const Duration(milliseconds: 1));
+      expect(status, isNull);
+    });
+  });
 }

@@ -86,6 +86,7 @@ class NomadHosting {
   const NomadHosting({
     required this.enabled,
     required this.nodeName,
+    required this.nodeHash,
     required this.pagesDir,
     required this.pages,
     required this.files,
@@ -93,6 +94,10 @@ class NomadHosting {
 
   final bool enabled;
   final String nodeName;
+
+  /// The destination hash our own pages are served under -- what to browse
+  /// to read them back.
+  final String nodeHash;
   final String pagesDir;
   final List<NomadHostedEntry> pages;
   final List<NomadHostedEntry> files;
@@ -100,6 +105,7 @@ class NomadHosting {
   factory NomadHosting.fromJson(Map<String, dynamic> json) => NomadHosting(
         enabled: json['enabled'] as bool? ?? false,
         nodeName: json['node_name'] as String? ?? '',
+        nodeHash: json['node_hash'] as String? ?? '',
         pagesDir: json['pages_dir'] as String? ?? '',
         pages: [
           for (final entry in (json['pages'] as List<dynamic>? ?? []))

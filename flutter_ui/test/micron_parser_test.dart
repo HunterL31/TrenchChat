@@ -14,6 +14,7 @@ String _textOf(MicronLine line) => switch (line) {
         rows.map((r) => r.map((c) => c.map((s) => s.text).join()).join('|'))
             .join('\n'),
       MicronDividerLine() => '',
+      MicronPartialLine(:final url) => url,
     };
 
 MicronField _fieldOf(MicronLine line) =>
@@ -81,9 +82,11 @@ void main() {
       expect(_textOf(doc.lines.single), '>not a heading');
     });
 
-    test('partial lines are skipped', () {
+    test('partial lines become a line of their own', () {
       final doc = parseMicron('`{part`5}');
-      expect(doc.lines, isEmpty);
+      final partial = doc.lines.single as MicronPartialLine;
+      expect(partial.url, 'part');
+      expect(partial.refreshSecs, 5);
     });
   });
 
@@ -289,6 +292,134 @@ void main() {
     test('an unterminated table still renders its rows', () {
       final doc = parseMicron('`t\n| a | b |');
       expect(doc.lines.single, isA<MicronTableLine>());
+    });
+
+    test('the block tag carries its own alignment and width', () {
+      final doc = parseMicron('`tc60\n| a | b |\n`t');
+      final table = doc.lines.single as MicronTableLine;
+      expect(table.align, MicronAlign.center);
+      expect(table.maxWidth, 60);
+    });
+
+    test('a bare `t block has neither', () {
+      final doc = parseMicron('`t\n| a | b |\n`t');
+      final table = doc.lines.single as MicronTableLine;
+      expect(table.align, MicronAlign.defaultAlign);
+      expect(table.maxWidth, isNull);
+    });
+
+    test('a width with no alignment letter still reads', () {
+      final table = parseMicron('`t30\n| a |\n`t').lines.single
+          as MicronTableLine;
+      expect(table.align, MicronAlign.defaultAlign);
+      expect(table.maxWidth, 30);
+    });
+
+    test('nonsense arguments are dropped, not applied', () {
+      final table = parseMicron('`txyz\n| a |\n`t').lines.single
+          as MicronTableLine;
+      expect(table.align, MicronAlign.defaultAlign);
+      expect(table.maxWidth, isNull);
+    });
+
+    test('a second table does not inherit the first one\'s arguments', () {
+      final doc = parseMicron('`tr40\n| a |\n`t\n`t\n| b |\n`t');
+      final second = doc.lines[1] as MicronTableLine;
+      expect(second.align, MicronAlign.defaultAlign);
+      expect(second.maxWidth, isNull);
+    });
+  });
+
+  group('page colours', () {
+    test('#!fg= and #!bg= headers set the page colours', () {
+      final doc = parseMicron('#!bg=222\n#!fg=ddd\nhello');
+      expect(doc.background, const Color(0xFF222222));
+      expect(doc.foreground, const Color(0xFFDDDDDD));
+    });
+
+    test('a six-digit spec is read as truecolor', () {
+      final doc = parseMicron('#!bg=102030\nhello');
+      expect(doc.background, const Color(0xFF102030));
+    });
+
+    test('a page with no headers has no colours of its own', () {
+      final doc = parseMicron('hello');
+      expect(doc.background, isNull);
+      expect(doc.foreground, isNull);
+    });
+
+    test('a malformed spec is ignored', () {
+      final doc = parseMicron('#!bg=nonsense\n#!fg=12\nhello');
+      expect(doc.background, isNull);
+      expect(doc.foreground, isNull);
+    });
+
+    test('the header line itself is still a comment', () {
+      final doc = parseMicron('#!bg=222\nhello');
+      expect(doc.lines, hasLength(1));
+      expect(_textOf(doc.lines.single), 'hello');
+    });
+  });
+
+  group('partials', () {
+    test('a bare partial names only its url', () {
+      final doc = parseMicron('`{:/page/side.mu}');
+      final partial = doc.lines.single as MicronPartialLine;
+      expect(partial.url, ':/page/side.mu');
+      expect(partial.refreshSecs, isNull);
+      expect(partial.id, isNull);
+      expect(partial.fields, isEmpty);
+    });
+
+    test('a partial carries its refresh interval and fields', () {
+      final doc = parseMicron('`{:/page/side.mu`5`pid=side|name|mode=live}');
+      final partial = doc.lines.single as MicronPartialLine;
+      expect(partial.refreshSecs, 5);
+      expect(partial.id, 'side');
+      expect(partial.fields, ['pid=side', 'name', 'mode=live']);
+    });
+
+    test('pid is submitted as well as naming the partial', () {
+      // Upstream leaves pid= in the field list, so a node-side page can see
+      // which partial asked; dropping it would send the node less.
+      final doc = parseMicron('`{:/page/side.mu`0`pid=side}');
+      final partial = doc.lines.single as MicronPartialLine;
+      expect(partial.id, 'side');
+      expect(partial.fields, ['pid=side']);
+    });
+
+    test('a sub-second interval means do not refresh', () {
+      final doc = parseMicron('`{:/page/side.mu`0.2}');
+      expect((doc.lines.single as MicronPartialLine).refreshSecs, isNull);
+    });
+
+    test('a truncated or empty partial is dropped', () {
+      expect(parseMicron('`{:/page/side.mu').lines, isEmpty);
+      expect(parseMicron('`{}').lines, isEmpty);
+    });
+
+    test('a partial takes the section depth it sits in', () {
+      final doc = parseMicron('>>Section\n`{:/page/side.mu}');
+      expect((doc.lines[1] as MicronPartialLine).depth, 2);
+    });
+  });
+
+  group('display safety', () {
+    test('bidi overrides are stripped from text', () {
+      // U+202E would reverse everything after it, so a link label could be
+      // made to read as a different destination than the one it names.
+      final doc = parseMicron('safe \u202Ereversed\u202C tail');
+      expect(_textOf(doc.lines.single), 'safe reversed tail');
+    });
+
+    test('bidi overrides are stripped from literal blocks too', () {
+      final doc = parseMicron('`=\nart \u202Ehere\n`=');
+      expect(_textOf(doc.lines.single), 'art here');
+    });
+
+    test('zero-width joiners survive, so emoji sequences still render', () {
+      final doc = parseMicron('a\u200Db');
+      expect(_textOf(doc.lines.single), 'a\u200Db');
     });
   });
 

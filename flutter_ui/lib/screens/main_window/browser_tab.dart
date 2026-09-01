@@ -11,6 +11,7 @@ import 'package:flutter/services.dart';
 import '../../api/models/nomad.dart';
 import '../../app_state.dart';
 import '../../format.dart';
+import '../../micron/micron_parser.dart';
 import '../../micron/micron_view.dart';
 import '../../theme/section_theme.dart';
 import '../../theme/theme_spec.dart';
@@ -41,6 +42,14 @@ class _BrowserTabState extends State<BrowserTab> {
   /// to the location being browsed -- a fetch in flight must never leave the
   /// previous page on screen looking like the answer.
   ({String nodeHash, String path})? _pageLocation;
+
+  /// [_page]'s own `#!bg=` colour, parsed once when the page lands so the
+  /// whole pane can carry it rather than only the text column.
+  Color? _pageBackground;
+
+  /// The anchor a link's `anchor=` variable asked the next page to open at,
+  /// held until that page renders.
+  String? _pendingAnchor;
   String? _error;
   String? _info;
   double _progress = 0;
@@ -51,6 +60,10 @@ class _BrowserTabState extends State<BrowserTab> {
   /// anything is in flight, so a dropped socket costs latency, not the page.
   Timer? _pollTimer;
   static const Duration _pollInterval = Duration(seconds: 2);
+
+  /// Our own hosting, so the node list can offer the pages we serve. They
+  /// are read straight off disk -- a node cannot dial itself.
+  NomadHosting? _hosting;
 
   ({String nodeHash, String path})? get _current =>
       _historyIndex >= 0 && _historyIndex < _history.length
@@ -65,9 +78,19 @@ class _BrowserTabState extends State<BrowserTab> {
       widget.state.loadNomadNodes();
     }
     widget.state.loadNomadBookmarks();
+    _loadHosting();
     final pending = widget.state.takePendingNomadUrl();
     if (pending != null) {
       Future.microtask(() => _go(pending));
+    }
+  }
+
+  Future<void> _loadHosting() async {
+    try {
+      final hosting = await widget.state.api.getNomadHosting();
+      if (mounted) setState(() => _hosting = hosting);
+    } catch (_) {
+      // Hosting is only an extra row here; the node list stands without it.
     }
   }
 
@@ -161,6 +184,7 @@ class _BrowserTabState extends State<BrowserTab> {
       if (page != null) {
         _page = page;
         _pageLocation = (nodeHash: nodeHash, path: path);
+        _pageBackground = micronPageBackground(page.source);
       }
       if (doneLoading) {
         _loading = false;
@@ -173,6 +197,11 @@ class _BrowserTabState extends State<BrowserTab> {
   Future<void> _go(String url,
       {Map<String, String>? data, bool refresh = false}) async {
     if (url.trim().isEmpty) return;
+    // Micron's own convention: a link carrying anchor= names where in the
+    // page it lands should open. The node never sees it as a scroll
+    // instruction -- it is an ordinary request variable -- so it is read
+    // here as well as sent.
+    _pendingAnchor = data?['var_anchor'];
     final target = await widget.state.browseNomad(url.trim(),
         currentNode: _current?.nodeHash, data: data, refresh: refresh);
     if (!mounted) return;
@@ -244,6 +273,7 @@ class _BrowserTabState extends State<BrowserTab> {
       _historyIndex = -1;
       _page = null;
       _pageLocation = null;
+      _pageBackground = null;
       _error = null;
       _info = null;
       _activeFetchId = null;
@@ -252,6 +282,7 @@ class _BrowserTabState extends State<BrowserTab> {
     });
     widget.state.loadNomadNodes();
     widget.state.loadNomadBookmarks();
+    _loadHosting();
   }
 
   Future<void> _toggleBookmark() async {
@@ -274,6 +305,8 @@ class _BrowserTabState extends State<BrowserTab> {
         'busy' => 'Too many requests to this node are already in flight.',
         'bad_path' => 'That page path is not valid.',
         'bad_response' => 'The node sent something that is not a page.',
+        'not_found' => 'Your node does not serve that path. Add the file '
+            'under its pages directory and press RELOAD.',
         'send_failed' => 'The link to the node could not carry the request.',
         'forgotten' => 'Lost track of that fetch. Reload to try again.',
         _ => 'The page could not be fetched.',
@@ -371,7 +404,10 @@ class _BrowserTabState extends State<BrowserTab> {
           const SizedBox(width: 4),
           TcGhostButton(
             label: 'HOST',
-            onPressed: () => showNomadHostingDialog(context, widget.state),
+            onPressed: () async {
+              await showNomadHostingDialog(context, widget.state);
+              await _loadHosting();
+            },
           ),
         ],
       ),
@@ -429,9 +465,17 @@ class _BrowserTabState extends State<BrowserTab> {
     final bookmarks = widget.state.nomadBookmarks;
     final nodes = widget.state.nomadNodes.values.toList()
       ..sort((a, b) => b.lastSeen.compareTo(a.lastSeen));
+    final hosting = _hosting;
     return ListView(
       padding: const EdgeInsets.all(14),
       children: [
+        if (hosting != null &&
+            hosting.enabled &&
+            hosting.nodeHash.isNotEmpty) ...[
+          _sectionLabel(tc, 'YOUR NODE'),
+          _ownNodeRow(tc, hosting),
+          const SizedBox(height: 16),
+        ],
         if (bookmarks.isNotEmpty) ...[
           _sectionLabel(tc, 'BOOKMARKS'),
           for (final mark in bookmarks) _bookmarkRow(tc, mark),
@@ -450,6 +494,43 @@ class _BrowserTabState extends State<BrowserTab> {
           ),
         for (final node in nodes) _nodeRow(tc, node),
       ],
+    );
+  }
+
+  Widget _ownNodeRow(TCSectionColors tc, NomadHosting hosting) {
+    return InkWell(
+      onTap: () => _go(hosting.nodeHash),
+      child: Container(
+        padding: const EdgeInsets.symmetric(vertical: 8),
+        decoration: BoxDecoration(
+          border: Border(bottom: BorderSide(color: tc.borderSubtle)),
+        ),
+        child: Row(
+          children: [
+            TcIcon(TcIcons.globe, size: 14, color: tc.borderAccent),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                hosting.nodeName.isNotEmpty ? hosting.nodeName : 'your node',
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                    fontSize: TCType.textBodySm, color: tc.textEmphasis),
+              ),
+            ),
+            Text(
+              _shortHash(hosting.nodeHash),
+              style: TextStyle(
+                  fontSize: TCType.textCaption, color: tc.textTertiary),
+            ),
+            const SizedBox(width: 10),
+            Text(
+              'served from disk',
+              style: TextStyle(
+                  fontSize: TCType.textCaption, color: tc.textTertiary),
+            ),
+          ],
+        ),
+      ),
     );
   }
 
@@ -555,10 +636,18 @@ class _BrowserTabState extends State<BrowserTab> {
         _pageLocation?.nodeHash == current.nodeHash &&
         _pageLocation?.path == current.path;
     if (!showing) return _pendingPane(tc, current);
-    return SelectionArea(
-      child: SingleChildScrollView(
-        padding: const EdgeInsets.all(16),
-        child: MicronView(source: page.source, onLinkTap: _onMicronLink),
+    return Container(
+      color: _pageBackground,
+      child: SelectionArea(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.all(16),
+          child: MicronView(
+            source: page.source,
+            onLinkTap: _onMicronLink,
+            onPartialLoad: _loadPartial,
+            initialAnchor: _pendingAnchor,
+          ),
+        ),
       ),
     );
   }
@@ -640,12 +729,14 @@ class _BrowserTabState extends State<BrowserTab> {
       return 'That is a link to an RRC voice hub, which this browser does '
           'not open.';
     }
-    if (lower.startsWith('p:')) {
-      return 'That link refreshes a page partial, which this browser does '
-          'not render yet.';
-    }
     return null;
   }
+
+  /// Fetches one partial's page. Resolved against the node being browsed,
+  /// so a partial can name a path the way a link does.
+  Future<String?> _loadPartial(String url, Map<String, String> data) =>
+      widget.state.loadNomadPartial(url,
+          currentNode: _current?.nodeHash, data: data);
 
   /// Fetches a /file/ link into the backend cache without leaving the page.
   /// When it lands, the authenticated download URL goes to the clipboard --

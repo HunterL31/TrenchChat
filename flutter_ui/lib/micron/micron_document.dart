@@ -113,10 +113,46 @@ class MicronDividerLine extends MicronLine {
 
 /// A `` `t `` block: rows of cells, each cell a run of styled segments.
 class MicronTableLine extends MicronLine {
-  const MicronTableLine(this.rows, this.aligns, this.depth);
+  const MicronTableLine(this.rows, this.aligns, this.depth,
+      {this.align = MicronAlign.defaultAlign, this.maxWidth});
   final List<List<List<MicronSegment>>> rows;
+
+  /// Per-column alignment from the rule row, when the table has one.
   final List<MicronAlign> aligns;
   final int depth;
+
+  /// Where the whole table sits, from the block tag's own argument
+  /// (`` `tc ``, `` `tr ``).
+  final MicronAlign align;
+
+  /// Widest the table may draw, in characters, from `` `tc60 `` and friends.
+  final int? maxWidth;
+}
+
+/// A `` `{url`refresh`fields} `` include: content the node serves separately,
+/// fetched after the page it sits in and optionally re-fetched on a timer.
+class MicronPartialLine extends MicronLine {
+  const MicronPartialLine({
+    required this.url,
+    required this.depth,
+    this.id,
+    this.refreshSecs,
+    this.fields = const [],
+  });
+
+  final String url;
+  final int depth;
+
+  /// The `pid=` name a `p:` link uses to refresh this one by hand.
+  final String? id;
+
+  /// Refresh interval in seconds. Null for load-once; micron ignores any
+  /// interval under a second.
+  final double? refreshSecs;
+
+  /// Field names and `name=value` variables to submit, as a link carries.
+  /// Includes the `pid=` entry, which upstream submits too.
+  final List<String> fields;
 }
 
 class MicronLiteralLine extends MicronLine {
@@ -126,9 +162,17 @@ class MicronLiteralLine extends MicronLine {
 
 class MicronDocument {
   const MicronDocument(this.lines,
-      {this.anchors = const {}, this.headingLines = const []});
+      {this.anchors = const {},
+      this.headingLines = const [],
+      this.foreground,
+      this.background});
 
   final List<MicronLine> lines;
+
+  /// Page-wide colours from the `#!fg=` / `#!bg=` headers. Null means the
+  /// enclosing theme decides.
+  final Color? foreground;
+  final Color? background;
 
   /// Anchor name to the index in [lines] it marks. Explicit `` `: `` anchors
   /// and heading slugs share one namespace; the first declared wins.

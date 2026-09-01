@@ -602,6 +602,28 @@ with a `TypeError`. Both fixed, and re-verified by running nomadnet's own
 `file_received` against our response. Pages remain plain bytes on both
 sides — the handle-and-metadata shape is for files only.
 
+A second parity pass on 2026-09-01 closed the remaining micron and browsing
+gaps: `#!bg=`/`#!fg=` page colours, `` `{...} `` partials with their refresh
+timers and `p:` reload links, the `anchor=` link variable, table block
+arguments (`` `tc70 ``), section right-indent, the file name a node puts in
+its response metadata, and browsing your own node. Each was checked against
+nomadnet's own code rather than its documentation — the demo site's markup
+is fed through upstream's `parse_partial`, its `#!bg=` header scan and its
+table-argument reader, and all three read exactly what ours read. Two things
+are worth knowing. A partial is an ordinary page request on the same link,
+so nothing new reaches the wire and no scenario covers it separately. And
+your own node is never dialled: RNS cannot link a destination to itself, so
+`NodeBrowserManager._serve_loopback` reads the pages directory and answers
+through the ordinary fetch machinery, which is also why a page of your own
+is re-read on every visit rather than served from its `#!c=` cache.
+
+One deliberate divergence: nomadnet strips Unicode combining and format
+characters from everything it renders, zero-width joiners included, which
+also breaks emoji sequences. We strip only the characters that actually
+mislead a reader — the bidirectional overrides and isolates, which let a
+page reorder what is displayed so a link label reads as a destination it
+does not name — and leave joiners alone.
+
 | ID | Peers | Actions | Expected result |
 |---|---|---|---|
 | nomad1 | A,B | A enables hosting; B browses the node's index | ✅ B discovers the node from the announce and fetches the default `index.mu` in 0.5s. 4/4 runs |

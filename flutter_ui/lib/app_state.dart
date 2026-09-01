@@ -928,6 +928,45 @@ class AppState extends ChangeNotifier {
     }
   }
 
+  /// Fetches one micron page and waits for it, returning its source.
+  ///
+  /// The browser's own navigation is event-driven, but a `` `{...} `` partial
+  /// is a fetch nothing on screen is waiting on, so this is the one place
+  /// that blocks until an answer arrives. refresh=true because the interval
+  /// a partial declares is the author's, not the page cache's.
+  Future<String?> loadNomadPartial(String url,
+      {String? currentNode,
+      Map<String, String>? data,
+      Duration interval = const Duration(seconds: 1)}) async {
+    final target = await browseNomad(url,
+        currentNode: currentNode, data: data, refresh: true);
+    if (target == null) return null;
+    final fetchId = target.fetchId;
+    if (fetchId != null) {
+      final status = await awaitNomadFetch(fetchId, interval: interval);
+      if (status?.status != 'done') return null;
+    }
+    final page = await fetchCachedNomadPage(target.nodeHash, target.path);
+    return page?.source;
+  }
+
+  /// Waits for a fetch to end, polling when no event arrives. Null once the
+  /// timeout passes. Either way the fetch's entry is taken, so a partial on
+  /// a refresh timer cannot fill [nomadFetches] with its own history.
+  Future<NomadFetchStatus?> awaitNomadFetch(String fetchId,
+      {Duration timeout = const Duration(seconds: 90),
+      Duration interval = const Duration(seconds: 1)}) async {
+    final deadline = DateTime.now().add(timeout);
+    while (DateTime.now().isBefore(deadline)) {
+      final status = nomadFetches[fetchId];
+      if (status != null && status.isTerminal) return takeNomadFetch(fetchId);
+      await Future<void>.delayed(interval);
+      await pollNomadFetch(fetchId);
+    }
+    takeNomadFetch(fetchId);
+    return null;
+  }
+
   Future<NomadPage?> fetchCachedNomadPage(String nodeHash, String path) async {
     try {
       return await api.getNomadPage(nodeHash, path);

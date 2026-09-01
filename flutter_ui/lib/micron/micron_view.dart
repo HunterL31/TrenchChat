@@ -4,7 +4,10 @@
 // own micron tags where given, falling back to the enclosing SectionTheme.
 //
 // Anchors are the view's own business: a `#name` link scrolls this document
-// rather than fetching anything, so it never reaches [onLinkTap].
+// rather than fetching anything, so it never reaches [onLinkTap]. So is a
+// `p:` link, which refreshes a partial already on the page.
+import 'dart:async';
+
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 
@@ -15,7 +18,13 @@ import 'micron_document.dart';
 import 'micron_parser.dart';
 
 class MicronView extends StatefulWidget {
-  const MicronView({super.key, required this.source, this.onLinkTap});
+  const MicronView({
+    super.key,
+    required this.source,
+    this.onLinkTap,
+    this.onPartialLoad,
+    this.initialAnchor,
+  });
 
   final String source;
 
@@ -23,6 +32,15 @@ class MicronView extends StatefulWidget {
   /// :/page/x.mu, ...) and the request data its field list collected, empty
   /// when it carries none. Null renders links as plain styled text.
   final void Function(String url, Map<String, String> data)? onLinkTap;
+
+  /// Fetches the micron source of a `` `{...} `` partial, or null when it
+  /// could not be fetched. Null leaves partials as an unloaded placeholder.
+  final Future<String?> Function(String url, Map<String, String> data)?
+      onPartialLoad;
+
+  /// Anchor to scroll to once the document is laid out -- what a link's
+  /// `anchor=` variable asks for when it lands on a new page.
+  final String? initialAnchor;
 
   @override
   State<MicronView> createState() => _MicronViewState();
@@ -37,6 +55,9 @@ class _MicronViewState extends State<MicronView> {
   final Map<String, Set<String>> _checkboxes = {};
   final Map<String, String> _radios = {};
 
+  /// One entry per `` `{...} `` line, keyed by its index in the document.
+  final Map<int, _PartialState> _partials = {};
+
   @override
   void initState() {
     super.initState();
@@ -48,6 +69,8 @@ class _MicronViewState extends State<MicronView> {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.source != widget.source) {
       _load(widget.source);
+    } else if (oldWidget.initialAnchor != widget.initialAnchor) {
+      _scheduleInitialAnchor();
     }
   }
 
@@ -55,11 +78,13 @@ class _MicronViewState extends State<MicronView> {
   void dispose() {
     _disposeRecognizers();
     _disposeFields();
+    _disposePartials();
     super.dispose();
   }
 
   void _load(String source) {
     _disposeFields();
+    _disposePartials();
     _lineKeys.clear();
     _doc = parseMicron(source);
     for (final index in [..._doc.anchors.values, ..._doc.headingLines]) {
@@ -81,6 +106,13 @@ class _MicronViewState extends State<MicronView> {
         }
       }
     }
+    // After the fields: a partial submits them, so they have to exist by
+    // the time its first fetch goes out.
+    for (var i = 0; i < _doc.lines.length; i++) {
+      final line = _doc.lines[i];
+      if (line is MicronPartialLine) _startPartial(i, line);
+    }
+    _scheduleInitialAnchor();
   }
 
   void _disposeFields() {
@@ -90,6 +122,23 @@ class _MicronViewState extends State<MicronView> {
     _textFields.clear();
     _checkboxes.clear();
     _radios.clear();
+  }
+
+  void _disposePartials() {
+    for (final partial in _partials.values) {
+      partial.timer?.cancel();
+    }
+    _partials.clear();
+  }
+
+  /// Jumps to [MicronView.initialAnchor] once there is a laid-out document
+  /// to jump within -- the anchor arrives with the page, before its widgets.
+  void _scheduleInitialAnchor() {
+    final anchor = widget.initialAnchor;
+    if (anchor == null || anchor.isEmpty) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _jumpToAnchor(anchor, -1);
+    });
   }
 
   void _disposeRecognizers() {
@@ -103,8 +152,57 @@ class _MicronViewState extends State<MicronView> {
         MicronTextLine() => line.segments,
         MicronHeadingLine() => line.segments,
         MicronTableLine() => line.rows.expand((row) => row.expand((c) => c)),
-        MicronDividerLine() || MicronLiteralLine() => const [],
+        MicronDividerLine() ||
+        MicronLiteralLine() ||
+        MicronPartialLine() =>
+          const [],
       };
+
+  void _startPartial(int index, MicronPartialLine line) {
+    final partial = _PartialState();
+    _partials[index] = partial;
+    final refresh = line.refreshSecs;
+    if (refresh != null) {
+      partial.timer = Timer.periodic(
+          Duration(milliseconds: (refresh * 1000).round()),
+          (_) => _loadPartial(index, line));
+    }
+    _loadPartial(index, line);
+  }
+
+  Future<void> _loadPartial(int index, MicronPartialLine line) async {
+    final loader = widget.onPartialLoad;
+    final partial = _partials[index];
+    if (loader == null || partial == null || partial.loading) return;
+    // Not setState: the first load runs from initState, and the placeholder
+    // this flag selects is what the first build draws anyway.
+    partial.loading = true;
+    String? source;
+    try {
+      source = await loader(line.url, _requestData(line.fields));
+    } catch (_) {
+      source = null;
+    }
+    // The document may have been replaced while this was in flight.
+    if (!mounted || _partials[index] != partial) return;
+    setState(() {
+      partial.loading = false;
+      partial.doc = source == null ? null : parseMicron(source);
+      partial.failed = source == null;
+    });
+  }
+
+  /// Reloads every partial a `p:` link names. Unknown ids are ignored, as
+  /// upstream ignores them.
+  void _refreshPartials(List<String> ids) {
+    for (var i = 0; i < _doc.lines.length; i++) {
+      final line = _doc.lines[i];
+      if (line is MicronPartialLine && line.id != null &&
+          ids.contains(line.id)) {
+        _loadPartial(i, line);
+      }
+    }
+  }
 
   static const double _sectionIndent = 16;
   static const double _lineHeight = 1.45;
@@ -131,14 +229,32 @@ class _MicronViewState extends State<MicronView> {
     // Spans are rebuilt below; recognizers from the previous frame's spans
     // are no longer reachable and must not leak.
     _disposeRecognizers();
-    final tc = SectionTheme.of(context);
-    return Column(
+    final tc = _pageColors(SectionTheme.of(context));
+    final body = Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         for (var i = 0; i < _doc.lines.length; i++)
           _lineWidget(tc, _doc.lines[i], i),
       ],
     );
+    final background = _doc.background;
+    if (background == null) return body;
+    return Container(color: background, child: body);
+  }
+
+  /// The page's own `#!fg=` colour replaces the theme's text colours for
+  /// everything the page did not colour itself -- dividers included, as
+  /// upstream draws them in the page colour rather than a dimmer one. A
+  /// page that chooses its background needs every glyph to follow.
+  TCSectionColors _pageColors(TCSectionColors tc) {
+    final fg = _doc.foreground;
+    if (fg == null) return tc;
+    return tc.copyWithTokens({
+      'textPrimary': fg,
+      'textEmphasis': fg,
+      'textSecondary': fg,
+      'textTertiary': fg,
+    });
   }
 
   Widget _lineWidget(TCSectionColors tc, MicronLine line, int index) {
@@ -157,6 +273,7 @@ class _MicronViewState extends State<MicronView> {
           ),
         ),
       MicronTextLine() => _textLine(tc, line, index, key),
+      MicronPartialLine() => _partial(tc, line, index, key),
     };
   }
 
@@ -200,11 +317,7 @@ class _MicronViewState extends State<MicronView> {
     final style = TextStyle(fontSize: TCType.textBodySm, color: tc.textTertiary);
     return Padding(
       key: key,
-      padding: EdgeInsets.only(
-        left: _indent(line.depth),
-        top: 4,
-        bottom: 4,
-      ),
+      padding: _sectionPadding(line.depth, top: 4, bottom: 4),
       child: LayoutBuilder(
         builder: (context, constraints) {
           final charWidth = _charWidth(context, style);
@@ -229,33 +342,78 @@ class _MicronViewState extends State<MicronView> {
       color: tc.textPrimary,
       height: _lineHeight,
     );
+    final maxWidth = line.maxWidth;
     return Padding(
       key: key,
-      padding: EdgeInsets.only(left: _indent(line.depth), top: 4, bottom: 4),
-      child: SingleChildScrollView(
-        scrollDirection: Axis.horizontal,
-        child: Table(
-          defaultColumnWidth: const IntrinsicColumnWidth(),
-          border: TableBorder.all(color: tc.borderSubtle),
+      padding: _sectionPadding(line.depth, top: 4, bottom: 4),
+      child: Align(
+        alignment: _blockAlignment(line.align),
+        child: ConstrainedBox(
+          constraints: BoxConstraints(
+            maxWidth: maxWidth == null
+                ? double.infinity
+                : maxWidth * _charWidth(context, base),
+          ),
+          child: SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            child: Table(
+              defaultColumnWidth: const IntrinsicColumnWidth(),
+              border: TableBorder.all(color: tc.borderSubtle),
+              children: [
+                for (final row in line.rows)
+                  TableRow(
+                    children: [
+                      for (var c = 0; c < row.length; c++)
+                        Padding(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 8, vertical: 3),
+                          child: Text.rich(
+                            TextSpan(
+                                children: _spans(tc, row[c], index, base: base)),
+                            textAlign: _textAlign(c < line.aligns.length
+                                ? line.aligns[c]
+                                : MicronAlign.left),
+                          ),
+                        ),
+                    ],
+                  ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// A partial's own content, or what is happening to it: micron shows an
+  /// hourglass while one loads and says so when one cannot be fetched.
+  Widget _partial(
+      TCSectionColors tc, MicronPartialLine line, int index, Key? key) {
+    final partial = _partials[index];
+    final doc = partial?.doc;
+    if (doc != null) {
+      return Padding(
+        key: key,
+        padding: _sectionPadding(line.depth),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            for (final row in line.rows)
-              TableRow(
-                children: [
-                  for (var c = 0; c < row.length; c++)
-                    Padding(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 8, vertical: 3),
-                      child: Text.rich(
-                        TextSpan(children: _spans(tc, row[c], index, base: base)),
-                        textAlign: _textAlign(c < line.aligns.length
-                            ? line.aligns[c]
-                            : MicronAlign.left),
-                      ),
-                    ),
-                ],
-              ),
+            for (final inner in doc.lines) _lineWidget(tc, inner, -1),
           ],
         ),
+      );
+    }
+    final style = TextStyle(
+        fontSize: TCType.textBodySm,
+        color: tc.textTertiary,
+        height: _lineHeight);
+    final failed = partial?.failed ?? false;
+    return Padding(
+      key: key,
+      padding: _sectionPadding(line.depth),
+      child: Text(
+        failed ? 'Could not load ${line.url}' : '⧖',
+        style: failed ? style.copyWith(color: tc.statusDanger) : style,
       ),
     );
   }
@@ -274,7 +432,7 @@ class _MicronViewState extends State<MicronView> {
     );
     return Padding(
       key: key,
-      padding: EdgeInsets.only(left: _indent(line.depth)),
+      padding: _sectionPadding(line.depth),
       child: Text.rich(
         TextSpan(children: _spans(tc, line.segments, index, base: base)),
         textAlign: _textAlign(line.align),
@@ -283,6 +441,21 @@ class _MicronViewState extends State<MicronView> {
   }
 
   double _indent(int depth) => depth > 1 ? (depth - 1) * _sectionIndent : 0;
+
+  /// Micron indents a section from both margins, so a divider inside one is
+  /// shorter than the page and its text wraps earlier.
+  EdgeInsets _sectionPadding(int depth, {double top = 0, double bottom = 0}) =>
+      EdgeInsets.only(
+          left: _indent(depth),
+          right: _indent(depth),
+          top: top,
+          bottom: bottom);
+
+  Alignment _blockAlignment(MicronAlign align) => switch (align) {
+        MicronAlign.center => Alignment.topCenter,
+        MicronAlign.right => Alignment.topRight,
+        MicronAlign.left || MicronAlign.defaultAlign => Alignment.topLeft,
+      };
 
   TextAlign _textAlign(MicronAlign align) => switch (align) {
         MicronAlign.center => TextAlign.center,
@@ -414,6 +587,10 @@ class _MicronViewState extends State<MicronView> {
       _jumpToAnchor(url.substring(1), lineIndex);
       return;
     }
+    if (url.startsWith('p:')) {
+      _refreshPartials(url.substring(2).split(':'));
+      return;
+    }
     widget.onLinkTap?.call(url, _requestData(fields));
   }
 
@@ -470,4 +647,14 @@ class _MicronViewState extends State<MicronView> {
     }
     return data;
   }
+}
+
+/// What one `` `{...} `` line is showing right now.
+class _PartialState {
+  /// Parsed when the content lands, not per build: a partial on a one-second
+  /// refresh would otherwise re-parse itself on every frame of the page.
+  MicronDocument? doc;
+  bool loading = false;
+  bool failed = false;
+  Timer? timer;
 }

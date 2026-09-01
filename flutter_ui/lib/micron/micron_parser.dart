@@ -6,9 +6,6 @@
 // the degenerate result of hostile input is a plain-text document (the
 // decodeThemeCode precedent). Formatting state persists across lines, as
 // upstream's does, until a reset tag or end of document.
-//
-// Deliberately not implemented, degrading to plain content: `{ partials
-// (nomadnet server-side includes; the line is skipped).
 import 'dart:ui' show Color;
 
 import 'micron_document.dart';
@@ -31,8 +28,41 @@ MicronDocument parseMicron(String source) {
   }
   final trailing = _closeTable(state);
   if (trailing != null) lines.add(trailing);
-  return MicronDocument(lines, anchors: anchors, headingLines: headingLines);
+  return MicronDocument(
+    lines,
+    anchors: anchors,
+    headingLines: headingLines,
+    foreground: _pageColor(source, '#!fg='),
+    background: _pageColor(source, '#!bg='),
+  );
 }
+
+/// The background a page declares for itself, for an embedder that paints
+/// the space around the document as well as behind it.
+Color? micronPageBackground(String source) => _pageColor(source, '#!bg=');
+
+/// A page-wide colour header, wherever in the document it appears. Micron
+/// takes the first one and accepts either a 3- or a 6-digit spec.
+Color? _pageColor(String source, String header) {
+  final start = source.indexOf(header);
+  if (start < 0) return null;
+  var end = source.indexOf('\n', start);
+  if (end < 0) end = source.length;
+  final spec = source.substring(start + header.length, end).trim();
+  if (spec.length == 3) return _parseColor3(spec);
+  if (spec.length == 6) return _parseHex6(spec);
+  return null;
+}
+
+/// Bidirectional overrides and isolates let a page reorder what a reader
+/// sees without changing the text, so a link label can be made to read as
+/// something else entirely. Nomadnet strips a wider set (zero-width joiners
+/// included, which breaks emoji); these are the characters that actually
+/// mislead.
+final RegExp _displaySpoofing =
+    RegExp(r'[\u202A-\u202E\u2066-\u2069\uFEFF]');
+
+String _safeText(String text) => text.replaceAll(_displaySpoofing, '');
 
 /// Micron's own heading-to-anchor rule: strip tags, then collapse every run
 /// of non-alphanumerics into a single hyphen and lowercase the result.
@@ -53,6 +83,8 @@ class _ParserState {
   bool literal = false;
   bool table = false;
   final List<String> tableBuffer = [];
+  MicronAlign tableAlign = MicronAlign.defaultAlign;
+  int? tableMaxWidth;
   int depth = 0;
   MicronAlign align = MicronAlign.defaultAlign;
   MicronStyle style = MicronStyle.plain;
@@ -66,7 +98,7 @@ MicronLine? _parseLine(String line, _ParserState state) {
   }
   if (state.literal) {
     // Upstream unescapes the one sequence that could end literal mode.
-    return MicronLiteralLine(line == r'\`=' ? '`=' : line);
+    return MicronLiteralLine(_safeText(line == r'\`=' ? '`=' : line));
   }
   if (line.isEmpty) {
     return MicronTextLine(const [], state.align, state.depth);
@@ -95,6 +127,7 @@ MicronLine? _parseLine(String line, _ParserState state) {
       if (state.table) return _closeTable(state);
       state.table = true;
       state.tableBuffer.clear();
+      _readTableArgs(line.substring(2), state);
       return null;
     }
     if (state.table) {
@@ -102,7 +135,7 @@ MicronLine? _parseLine(String line, _ParserState state) {
       return null;
     }
     if (line.startsWith('`{')) {
-      return null;
+      return _parsePartial(line.substring(2), state);
     }
     if (first == '<') {
       state.depth = 0;
@@ -145,7 +178,7 @@ List<MicronSegment> _inline(String line, _ParserState state,
 
   void flush() {
     if (part.isNotEmpty) {
-      output.add(MicronSegment(part.toString(), state.style));
+      output.add(MicronSegment(_safeText(part.toString()), state.style));
       part.clear();
     }
   }
@@ -262,6 +295,10 @@ List<MicronSegment> _inline(String line, _ParserState state,
 MicronTableLine? _closeTable(_ParserState state) {
   if (!state.table) return null;
   state.table = false;
+  final align = state.tableAlign;
+  final maxWidth = state.tableMaxWidth;
+  state.tableAlign = MicronAlign.defaultAlign;
+  state.tableMaxWidth = null;
   final raw = List<String>.from(state.tableBuffer);
   state.tableBuffer.clear();
 
@@ -289,7 +326,64 @@ MicronTableLine? _closeTable(_ParserState state) {
     for (final row in rows)
       [for (final cell in row) _inline(cell, state, pre: false)]
   ];
-  return MicronTableLine(parsed, aligns, state.depth);
+  return MicronTableLine(parsed, aligns, state.depth,
+      align: align, maxWidth: maxWidth);
+}
+
+/// Reads the block tag's own arguments: an alignment letter and a maximum
+/// width in characters, as in `` `tc60 ``. Malformed arguments are dropped.
+void _readTableArgs(String args, _ParserState state) {
+  state.tableAlign = MicronAlign.defaultAlign;
+  state.tableMaxWidth = null;
+  if (args.isEmpty) return;
+  switch (args[0]) {
+    case 'l':
+      state.tableAlign = MicronAlign.left;
+      args = args.substring(1);
+    case 'c':
+      state.tableAlign = MicronAlign.center;
+      args = args.substring(1);
+    case 'r':
+      state.tableAlign = MicronAlign.right;
+      args = args.substring(1);
+  }
+  final width = int.tryParse(args.trim());
+  if (width != null && width > 0) state.tableMaxWidth = width;
+}
+
+/// Reads `` `{url`refresh`fields} `` starting after the opening tag. Null
+/// when the tag is truncated or names no URL, which drops the line.
+MicronPartialLine? _parsePartial(String rest, _ParserState state) {
+  final end = rest.indexOf('}');
+  if (end == -1) return null;
+  final pieces = rest.substring(0, end).split('`');
+  final url = pieces[0].trim();
+  if (url.isEmpty) return null;
+
+  double? refresh;
+  if (pieces.length >= 2) {
+    refresh = double.tryParse(pieces[1].trim());
+    // Micron's own floor: a sub-second interval means "do not refresh".
+    if (refresh != null && refresh < 1) refresh = null;
+  }
+
+  final fields = <String>[];
+  String? id;
+  if (pieces.length >= 3 && pieces[2].isNotEmpty) {
+    for (final field in pieces[2].split('|')) {
+      if (field.isEmpty) continue;
+      // pid= names the partial for `p:` links and is also submitted, as
+      // upstream submits it -- a node-side page can see which one asked.
+      if (field.startsWith('pid=')) id = field.substring(4);
+      fields.add(field);
+    }
+  }
+  return MicronPartialLine(
+      url: url,
+      depth: state.depth,
+      id: id,
+      refreshSecs: refresh,
+      fields: fields);
 }
 
 bool _isRuleCell(String cell) =>

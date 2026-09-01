@@ -3,10 +3,11 @@
 Gives every fresh dev environment something to browse in the NET tab with
 no manual provisioning: each tester serves a small micron site that names
 the tester it belongs to and exercises the awkward parts of the markup --
-every link form, anchors, input fields, a table, literal blocks and
-background-coloured bars. Hosting stays enabled through the config so
-restarts re-announce it. Opt-in via TC_TESTENV_NOMAD_DEMO so the scenario
-suite's testers stay unhosted unless a scenario asks.
+every link form, anchors, input fields, a table, literal blocks,
+background-coloured bars, page colour headers and a partial. Hosting stays
+enabled through the config so restarts re-announce it. Opt-in via
+TC_TESTENV_NOMAD_DEMO so the scenario suite's testers stay unhosted unless a
+scenario asks.
 """
 
 from trenchchat.core import actions
@@ -35,6 +36,7 @@ A bar drawn the way micron draws bars, out of coloured spaces:
 `[Mesh art`:/page/art.mu]
 `[Input fields`:/page/fields.mu]
 `[A table`:/page/table.mu]
+`[Partials and colours`:/page/live.mu]
 
 >>Every link form
 
@@ -42,6 +44,7 @@ Absolute: `[the index of this node`{node}:/page/index.mu]
 Scheme:   `[the same page, nnn@ form`nnn@{node}:/page/index.mu]
 Bare:     `[{node}:/page/index.mu]
 Anchor:   `[jump to the bottom`#the-bottom]
+Cross:    `[open the table page at its heading`:/page/table.mu`anchor=a-table]
 Next:     `[continue to the next heading`#]
 File:     `[a file this node serves`:/file/notes.txt]
 Missing:  `[a page nobody serves`:/page/nowhere.mu]
@@ -70,6 +73,7 @@ nomadnetwork.node protocol.
 -
 
 `[Back to the index`:/page/index.mu]
+`[Back to the index, opened at its bottom`:/page/index.mu`anchor=the-bottom]
 """
 
 _ART_MU = """\
@@ -150,17 +154,47 @@ On a node running an executable page, the submitted fields would arrive as
 _TABLE_MU = """\
 >A table
 
-`t
+`tc70
 | Page | What it exercises | Size |
 | ---- | :---------------: | ---: |
 | `[index`:/page/index.mu] | link forms, anchors, bars | small |
 | `[fields`:/page/fields.mu] | text, checkbox, radio | `!small`! |
 | `[art`:/page/art.mu] | literal blocks | tiny |
+| `[live`:/page/live.mu] | partials, page colours | small |
 `t
 
 -
 
 `[Back to the index`:/page/index.mu]
+"""
+
+_LIVE_MU = """\
+#!bg=101418
+#!fg=cde
+>Partials and colours
+
+This page sets its own colours with the `F0a0#!bg=`f and `F0a0#!fg=`f
+headers, so it reads the same here as it does in NomadNet.
+
+Below is a `!partial`!: a second page fetched on its own and dropped in
+where the tag sits. This one names itself `F0a0side`f, so the link under
+it can reload just that block without reloading the page.
+
+-
+
+`{{:/page/side.mu`0`pid=side}}
+
+-
+
+`[Reload the partial`p:side]
+`[Back to the index`:/page/index.mu]
+"""
+
+_SIDE_MU = """\
+`B333`F0f0 loaded from /page/side.mu `f`b
+
+A partial is an ordinary page. Nothing marks it as one -- the tag in the
+page that includes it decides where it lands and how often it is refetched.
 """
 
 _NOTES_TXT = """\
@@ -183,6 +217,8 @@ def demo_pages(tester_name: str, identity_hex: str) -> dict[str, str]:
         "fields.mu": _FIELDS_MU.format(**fields),
         "echo.mu": _ECHO_MU.format(**fields),
         "table.mu": _TABLE_MU.format(**fields),
+        "live.mu": _LIVE_MU.format(**fields),
+        "side.mu": _SIDE_MU.format(**fields),
     }
 
 
