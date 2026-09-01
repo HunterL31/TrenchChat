@@ -252,8 +252,13 @@ def test_an_offline_peer_goes_through_a_propagation_node(peer_factory, monkeypat
     b = peer_factory("bob")
     befriend(a, b)
 
-    # Presence says the peer is away, and a node is available to hold it.
+    # A peer presence can speak for: one that has identified itself as
+    # TrenchChat, and is not online now. Without that it is only a peer
+    # presence has never heard of, which is not the same thing.
     a.messaging.set_presence_manager(a.presence_mgr)
+    a.direct_mgr.open_conversation(b.identity.hash_hex)
+    a.direct_mgr.note_trenchchat_peer(b.identity.hash_hex)
+    assert a.presence_mgr.is_online(b.identity.hash_hex) is False
     monkeypatch.setattr(type(a.router), "outbound_propagation_node",
                         property(lambda self: b"\x01" * 16))
 
@@ -261,6 +266,31 @@ def test_an_offline_peer_goes_through_a_propagation_node(peer_factory, monkeypat
     assert a.messaging.get_delivery_state(sent) == DELIVERY_PROPAGATED
     conversation = a.direct_mgr.conversation_hash(b.identity.hash_hex)
     assert a.storage.get_message(conversation, sent) is not None
+
+
+def test_a_peer_presence_never_heard_of_is_tried_directly(peer_factory,
+                                                          monkeypatch):
+    """Regression: presence only knows peers that send beacons. A bot or
+    another client's user sends none, so "not online" meant "never heard of"
+    and every first message went to a propagation node to be pulled by
+    someone who may never pull it."""
+    a = peer_factory("alice")
+    b = peer_factory("bob")
+    befriend(a, b)
+    a.messaging.set_presence_manager(a.presence_mgr)
+    # Never seen, and never identified as TrenchChat -- presence has no
+    # opinion, but the path is resolved.
+    assert a.presence_mgr.is_online(b.identity.hash_hex) is False
+    monkeypatch.setattr(type(a.router), "outbound_propagation_node",
+                        property(lambda self: b"\x01" * 16))
+
+    sent = a.messaging.send_direct(b.identity.hash_hex, "!verify me")
+
+    assert a.messaging.get_delivery_state(sent) == DELIVERY_DELIVERED
+    assert wait_for(lambda: any(
+        m["content"] == "!verify me"
+        for m in b.storage.get_messages(
+            b.direct_mgr.conversation_hash(a.identity.hash_hex))))
 
 
 def test_no_missed_delivery_hint_is_broadcast_for_a_conversation(peer_factory):

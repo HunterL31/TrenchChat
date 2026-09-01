@@ -184,6 +184,25 @@ that peer collects them.
 
 Consequences worth stating plainly:
 
+- **"Propagated" is not "delivered", and never becomes it.** LXMF marks a
+  propagated message `SENT` when the node accepts it (`__mark_propagated`),
+  and there is no proof from the recipient to advance it — the state machine
+  simply has no path from there to `DELIVERED`. So `DELIVERY_PROPAGATED` means
+  a node took custody, nothing more. Whether the peer ever collects it is not
+  observable from the sending side; the only confirmation is an answer coming
+  back. Anything the UI says beyond that would be a claim it cannot support.
+- **It only arrives if the recipient uses that same node.** Held mail is
+  pulled, so a message left with a node the peer never syncs from sits there
+  until it expires. Nothing tells either end that happened.
+- **Which is why choosing propagation matters.** `_peer_is_reachable` decides,
+  and it used to ask presence alone. Presence only knows peers that send
+  TrenchChat beacons, so for a bot or another client's user it always answered
+  "not online" — meaning "never heard of" — and the first message to them went
+  to a node rather than to the peer sitting right there. Presence now decides
+  only for a peer that has identified itself as TrenchChat; for everyone else
+  a resolved path does. The asymmetry justifies it: a direct attempt that
+  fails falls back to propagation by itself, while a needless propagation is a
+  message nobody may ever collect.
 - **The node learns the pair.** It sees both endpoints' delivery addresses, the
   size, and the timing. It cannot read the content, which is encrypted end to
   end to the recipient — but the fact that these two identities corresponded,
