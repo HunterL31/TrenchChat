@@ -595,6 +595,7 @@ browsed back by it — is documented in `scen_nomad.py` and not automated.
 | nomad1 | A,B | A enables hosting; B browses the node's index | ✅ B discovers the node from the announce and fetches the default `index.mu` in 0.5s. 4/4 runs |
 | nomad2 | A,B | A page and a 16 KB file added to A's directory; A rescans; B fetches both | ✅ Rescan serves the new paths; page and file each fetch in 0.5s and the file round-trips byte-identical. 4/4 runs |
 | nomad3 | A,B | B fetches once; A goes offline; B requests an uncached page; A returns; B fetches a new page | ⚠ **Confirmed.** The offline fetch never arrives and never hangs — the dial ladder gives up within its bounded backoff (browse accepted, nothing after 90s). After A returns, a fresh page fetch succeeds in 20.1s, tracking path re-resolution. Probe |
+| nomad4 | A,B | B fetches A's index; a new page is written into A's directory; A's process is restarted; B fetches the new page | ✅ Hosting comes back from config on boot and the new page fetches in 0.5s over a fresh link. 4/4 runs. Note: it passes with the dead-link redial disabled too — RNS closes the link when the host dies, so this is not that fix's guard (`tests/test_node_transport.py` is) |
 
 ## The LoRa pass
 
@@ -744,7 +745,7 @@ All twelve families built and run: **99 scenarios, 77 strict and 22 probes.**
 | `voice` — live group voice | 13 (10 strict, 3 probes) | All passing; voice13 found a real cadence defect, 5/5 after the fix; voice4, voice5 and voice11 recorded gaps |
 | `api` — the API surface | 4 (3 strict, 1 probe) | All passing; api4 records the shared-token property |
 | `integrity` — message integrity | 4 (4 strict) | All passing; integrity2 found a real gap, now fixed and strict |
-| `nomad` — page browsing and hosting | 3 (2 strict, 1 probe) | All passing, 4/4 runs each; nomad3 confirmed bounded offline failure and recovery |
+| `nomad` — page browsing and hosting | 4 (3 strict, 1 probe) | All passing, 4/4 runs each; nomad3 confirmed bounded offline failure and recovery |
 | `interop` — direct messages with other LXMF clients | 4 (4 strict) | All passing against a real bare RNS+LXMF client; interop4 found a real gap, 5/5 after the fix |
 
 **76 of 77 strict scenarios pass.** The one failure is a real defect, left

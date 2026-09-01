@@ -164,3 +164,32 @@ def n3(env):
     except Exception as e:
         notes["surprise"] = f"retry after host returned failed: {e}"
     return notes
+
+
+@scenario("nomad4", "A restarted host serves again and a new page fetches",
+          peers="AB")
+def n4(env):
+    """Covers hosting restored from config on boot, and a fetch over the link
+    that replaces the one the reboot killed.
+
+    It is deliberately not the guard for the dead-link redial: RNS closes the
+    link when the host process dies, so the browser dials fresh here and the
+    scenario passes with the redial disabled. The redial answers the window
+    before RNS has noticed, which only tests/test_node_transport.py can
+    stage.
+    """
+    a, b = env.peers("A", "B")
+    node_hash = _host_and_discover(a, b, "n4 node")
+    _fetch_page(b, node_hash, "/page/index.mu")
+
+    # Written before the restart so the reboot's directory scan serves it,
+    # and never fetched before, so it can only arrive over a fresh link.
+    pages = _pages_dir(a) / "pages"
+    pages.mkdir(parents=True, exist_ok=True)
+    (pages / "after.mu").write_text(">Back from a restart\n", encoding="utf-8")
+
+    env.orch.restart(a.tag)
+    env.wait_alive(a)
+
+    _, secs = _fetch_page(b, node_hash, "/page/after.mu", timeout=180.0)
+    return {"fetch_after_restart_secs": round(secs, 1)}
