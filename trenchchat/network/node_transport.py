@@ -33,6 +33,7 @@ NODE_FETCH_TIMEOUT_SECS = 60.0
 NODE_ANNOUNCE_INTERVAL_SECS = 900.0
 MAX_QUEUED_FETCHES_PER_NODE = 8
 MAX_REQUEST_PATH_LEN = 256
+MAX_FILENAME_LEN = 128
 
 # nomadnet's own ceiling for compressing a file response. Above it the cost
 # is not worth paying, and most large files are already compressed.
@@ -52,6 +53,7 @@ FETCH_TOO_LARGE = "too_large"
 FETCH_LINK_CLOSED = "link_closed"
 FETCH_SEND_FAILED = "send_failed"
 FETCH_BAD_RESPONSE = "bad_response"
+FETCH_NOT_FOUND = "not_found"
 FETCH_IDENTITY_MISMATCH = "identity_mismatch"
 FETCH_CANCELLED = "cancelled"
 
@@ -76,28 +78,58 @@ def is_valid_request_path(path) -> bool:
     return True
 
 
-def _response_bytes(receipt) -> bytes | None:
-    """The payload of a request response, whatever shape it arrived in.
+def _response_payload(receipt) -> tuple[bytes | None, str | None]:
+    """A request response as (bytes, name the node gave it).
 
     A page is plain bytes. A file is not: nomadnet serves it as
     [open(path), {"name": ...}], which RNS delivers as an open handle on a
     temp file it deletes as soon as this callback returns -- so it has to be
-    read here, not later. Older nodes answer with [name, data] instead.
-    None for anything else.
+    read here, not later -- with the name alongside in the receipt metadata.
+    Older nodes answer with [name, data] instead. (None, None) for anything
+    else.
     """
     data = receipt.response
+    name = _response_name(getattr(receipt, "metadata", None))
     if hasattr(data, "read"):
         try:
             data = data.read()
         except OSError as e:
             RNS.log(f"TrenchChat [nomad]: could not read file response: {e}",
                     RNS.LOG_WARNING)
-            return None
+            return None, None
     elif isinstance(data, (list, tuple)) and len(data) == 2:
+        if name is None:
+            name = _clean_filename(data[0])
         data = data[1]
     if isinstance(data, str):
         data = data.encode("utf-8")
-    return data if isinstance(data, bytes) else None
+    if not isinstance(data, bytes):
+        return None, None
+    return data, name
+
+
+def _response_name(metadata) -> str | None:
+    """The file name in a response's metadata, if it carries a usable one."""
+    if not isinstance(metadata, dict):
+        return None
+    return _clean_filename(metadata.get("name"))
+
+
+def _clean_filename(value) -> str | None:
+    """A node-supplied name reduced to a bare, printable basename.
+
+    The name is chosen by the remote and ends up in a Content-Disposition
+    header, so nothing that could steer a path or a header survives.
+    """
+    if isinstance(value, bytes):
+        value = value.decode("utf-8", errors="replace")
+    if not isinstance(value, str):
+        return None
+    value = value.replace("\\", "/").rsplit("/", 1)[-1]
+    value = "".join(c for c in value
+                    if c.isprintable() and c not in '"\\')
+    value = value.strip().strip(".")
+    return value[:MAX_FILENAME_LEN] or None
 
 
 class NodeTransportBase:
@@ -108,7 +140,7 @@ class NodeTransportBase:
         self._progress_cb = None
 
     def set_fetch_result_callback(self, cb) -> None:
-        """cb(fetch_id, ok: bool, payload: bytes | None, reason: str | None)"""
+        """cb(fetch_id, ok, payload: bytes | None, reason, filename)"""
         self._result_cb = cb
 
     def set_fetch_progress_callback(self, cb) -> None:
@@ -141,11 +173,12 @@ class NodeTransportBase:
     # shared helpers for subclasses
 
     def _notify_result(self, fetch_id: str, ok: bool, payload: bytes | None,
-                       reason: str | None) -> None:
+                       reason: str | None,
+                       filename: str | None = None) -> None:
         if self._result_cb is None:
             return
         try:
-            self._result_cb(fetch_id, ok, payload, reason)
+            self._result_cb(fetch_id, ok, payload, reason, filename)
         except Exception as e:
             RNS.log(f"TrenchChat [nomad]: result callback error: {e}",
                     RNS.LOG_ERROR)
@@ -449,12 +482,12 @@ class RNSNodeTransport(NodeTransportBase):
         fetch = self._pop_active(receipt)
         if fetch is None:
             return
-        data = _response_bytes(receipt)
+        data, filename = _response_payload(receipt)
         if data is None:
             self._notify_result(fetch.fetch_id, False, None,
                                 FETCH_BAD_RESPONSE)
             return
-        self._notify_result(fetch.fetch_id, True, data, None)
+        self._notify_result(fetch.fetch_id, True, data, None, filename)
 
     def _on_request_failed(self, receipt) -> None:
         fetch = self._pop_active(receipt)

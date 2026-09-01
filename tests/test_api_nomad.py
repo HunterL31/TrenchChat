@@ -11,6 +11,7 @@ import base64
 import sys
 import warnings
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -65,7 +66,8 @@ def backend(tmp_path, registry):
     storage = Storage(db_path=tmp_path / "storage.db")
     transport = FakeNodeTransport("11" * 16, registry)
     backend.node_browser = NodeBrowserManager(
-        None, storage, config, transport=transport)
+        SimpleNamespace(hash_hex="11" * 16), storage, config,
+        transport=transport)
     yield backend
     transport.join_threads()
     storage.close()
@@ -176,6 +178,24 @@ class TestFileEndpoint:
             "application/octet-stream")
         assert 'filename="data.bin"' in res.headers["content-disposition"]
         assert "attachment" in res.headers["content-disposition"]
+
+    def test_download_uses_the_name_the_node_gave_the_file(
+            self, client, backend, registry, tmp_path):
+        """A node serves /file/<path> under whatever name it chooses; the
+        download must carry that name, not the path's basename."""
+        blob = tmp_path / "Quarterly Report.pdf"
+        blob.write_bytes(b"%PDF")
+        _serve(registry, {"/file/dl": lambda: blob})
+        client.post("/nomad/fetch", headers=AUTH,
+                    json={"node_hash": NODE, "path": "/file/dl"})
+        assert wait_for(lambda: backend.node_browser.get_cached_file(
+            NODE, "/file/dl") is not None)
+
+        res = client.get(f"/nomad/file/{NODE}", headers=AUTH,
+                         params={"path": "/file/dl"})
+
+        assert 'filename="Quarterly Report.pdf"' in \
+            res.headers["content-disposition"]
 
     def test_uncached_file_is_404(self, client):
         res = client.get(f"/nomad/file/{NODE}", headers=AUTH,

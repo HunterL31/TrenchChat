@@ -156,7 +156,8 @@ def test_stop_hosting_clears_providers(transport):
 def _collect_results(transport):
     results = []
     transport.set_fetch_result_callback(
-        lambda fid, ok, payload, reason: results.append((fid, ok, reason)))
+        lambda fid, ok, payload, reason, name=None:
+        results.append((fid, ok, reason)))
     return results
 
 
@@ -247,34 +248,52 @@ def test_page_response_of_plain_bytes_is_delivered(transport):
     assert _capture_result(transport, receipt) == [("f1", True, None)]
 
 
+def _collect_payloads(transport):
+    delivered = []
+    transport.set_fetch_result_callback(
+        lambda fid, ok, payload, reason, name=None:
+        delivered.append((ok, payload, name)))
+    return delivered
+
+
 def test_file_response_is_read_out_of_its_handle(transport, tmp_path):
     """nomadnet answers a /file/ request with an open handle plus metadata,
     and RNS deletes the temp file the moment this callback returns."""
     blob = tmp_path / "payload.bin"
     blob.write_bytes(b"file bytes")
-    delivered = []
-    transport.set_fetch_result_callback(
-        lambda fid, ok, payload, reason: delivered.append((ok, payload)))
+    delivered = _collect_payloads(transport)
     fetch = node_transport._Fetch("f1", "ab" * 16, "/file/x.bin",
                                   max_size=1024, timeout=10)
     with blob.open("rb") as handle:
         receipt = _FakeReceipt(handle, metadata={"name": b"payload.bin"})
         transport._active[id(receipt)] = fetch
         transport._on_response(receipt)
-    assert delivered == [(True, b"file bytes")]
+    assert delivered == [(True, b"file bytes", "payload.bin")]
 
 
 def test_legacy_name_and_data_file_response_is_delivered(transport):
     """Older nomadnet nodes answer with [name, data] instead of a handle."""
-    delivered = []
-    transport.set_fetch_result_callback(
-        lambda fid, ok, payload, reason: delivered.append((ok, payload)))
+    delivered = _collect_payloads(transport)
     fetch = node_transport._Fetch("f1", "ab" * 16, "/file/x.bin",
                                   max_size=1024, timeout=10)
     receipt = _FakeReceipt(["payload.bin", b"file bytes"])
     transport._active[id(receipt)] = fetch
     transport._on_response(receipt)
-    assert delivered == [(True, b"file bytes")]
+    assert delivered == [(True, b"file bytes", "payload.bin")]
+
+
+@pytest.mark.parametrize("given,expected", [
+    (b"notes.txt", "notes.txt"),
+    ("../../etc/passwd", "passwd"),
+    (rb"C:\\windows\\system32\\evil.exe", "evil.exe"),
+    ('re"port.txt', "report.txt"),
+    ("", None),
+    ("...", None),
+    (12345, None),
+])
+def test_a_node_supplied_name_is_reduced_to_a_bare_basename(given, expected):
+    """The name comes from the remote and ends up in a download header."""
+    assert node_transport._clean_filename(given) == expected
 
 
 def test_response_of_an_unusable_shape_is_reported(transport):

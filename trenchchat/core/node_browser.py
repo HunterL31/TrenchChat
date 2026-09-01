@@ -11,6 +11,12 @@ DATA_DIR/nomad_pages/files/ as "/file/...", mirroring nomadnet's node
 directory layout so an existing node dir can be copied straight in. Unlike
 nomadnet, pages starting with "#!" are served as plain bytes — no CGI
 execution.
+
+Our own node is browsed without a link: RNS will not link a destination to
+itself, so a request for it is answered from the pages directory instead
+(_serve_loopback), which is also nomadnet's answer to the same problem. It
+reads bytes, where nomadnet's loopback runs an executable page — the same
+non-goal as above, and the reason a "#!" page previews here as its source.
 """
 
 import os
@@ -21,8 +27,9 @@ from pathlib import Path
 import RNS
 
 from trenchchat.network.node_transport import (
-    NODE_FETCH_TIMEOUT_SECS, NOMAD_APP_NAME, NOMAD_ASPECT_NODE,
-    NodeTransportBase, is_valid_request_path,
+    FETCH_NOT_FOUND, FETCH_TOO_LARGE, NODE_FETCH_TIMEOUT_SECS,
+    NOMAD_APP_NAME, NOMAD_ASPECT_NODE, NodeTransportBase,
+    is_valid_request_path,
 )
 
 MAX_PAGE_BYTES = 512 * 1024
@@ -266,6 +273,8 @@ class NodeBrowserManager:
         if not path.startswith(f"/{kind}/"):
             raise ValueError(f"path {path!r} is not a /{kind}/ request")
         data = sanitize_request_data(data)
+        if node_hex == self.my_node_hash:
+            return self._serve_loopback(node_hex, path, kind, max_size, data)
         with self._lock:
             for state in self._fetches.values():
                 # A repeat visit joins the in-flight fetch, but a different
@@ -294,7 +303,8 @@ class NodeBrowserManager:
                 self._settled.pop(next(iter(self._settled)))
 
     def _on_fetch_result(self, fetch_id: str, ok: bool,
-                         payload: bytes | None, reason: str | None) -> None:
+                         payload: bytes | None, reason: str | None,
+                         filename: str | None = None) -> None:
         with self._lock:
             state = self._fetches.pop(fetch_id, None)
         if state is None:
@@ -306,7 +316,7 @@ class NodeBrowserManager:
                     expires_at=page_cache_expiry(payload, time.time()))
             else:
                 self._storage.put_nomad_file(state.node_hex, state.path,
-                                             payload)
+                                             payload, filename)
             self._settle(state, FETCH_DONE, 1.0, None)
             self._notify_fetch(fetch_id, state.node_hex, state.path,
                                FETCH_DONE, 1.0, None)
@@ -352,6 +362,45 @@ class NodeBrowserManager:
     def known_nodes(self) -> list:
         return self._storage.get_nomad_nodes()
 
+    @property
+    def my_node_hash(self) -> str:
+        """The node destination hash our own pages are served under."""
+        return nomad_node_hash_for_identity(self._identity.hash_hex)
+
+    def _serve_loopback(self, node_hex: str, path: str, kind: str,
+                        max_size: int, data: dict | None) -> str:
+        """Answer a request for our own node from the pages directory.
+
+        Dialling ourselves cannot work -- RNS will not link a destination to
+        itself -- so the one way to read your own node is to read the files
+        it serves, which is what nomadnet's browser does for its loopback
+        too. The result goes through the ordinary fetch machinery so a
+        client cannot tell the difference.
+        """
+        fetch_id = os.urandom(8).hex()
+        with self._lock:
+            self._fetches[fetch_id] = _FetchState(fetch_id, node_hex, path,
+                                                  kind, data)
+        self._notify_fetch(fetch_id, node_hex, path, FETCH_QUEUED, 0.0, None)
+        pages, files = self._scan_pages_dir()
+        entry = (files if kind == "file" else pages).get(path)
+        if entry is None:
+            self._on_fetch_result(fetch_id, False, None, FETCH_NOT_FOUND)
+            return fetch_id
+        real, size = entry
+        if size > max_size:
+            self._on_fetch_result(fetch_id, False, None, FETCH_TOO_LARGE)
+            return fetch_id
+        try:
+            payload = real.read_bytes()
+        except OSError as e:
+            RNS.log(f"TrenchChat [nomad]: cannot read own {path}: {e}",
+                    RNS.LOG_WARNING)
+            self._on_fetch_result(fetch_id, False, None, FETCH_NOT_FOUND)
+            return fetch_id
+        self._on_fetch_result(fetch_id, True, payload, None, real.name)
+        return fetch_id
+
     def node_for_identity(self, identity_hash_hex: str):
         """The discovered node a peer hosts, or None when never heard."""
         try:
@@ -385,6 +434,7 @@ class NodeBrowserManager:
         return {
             "enabled": self._config.nomad_hosting_enabled,
             "node_name": self._config.nomad_node_name,
+            "node_hash": self.my_node_hash,
             "pages_dir": str(self.pages_root),
             "pages": [{"path": p, "size": size}
                       for p, (_, size) in sorted(pages.items())],

@@ -5,10 +5,12 @@ directory scan (the serve-side traversal boundary).
 """
 
 import os
+from types import SimpleNamespace
 
 import pytest
 
 from trenchchat.config import Config
+from trenchchat.core import actions
 from trenchchat.core.node_browser import (
     DEFAULT_INDEX_MU, SETTLED_FETCH_MAX, NodeBrowserManager, parse_nomad_url,
     sanitize_request_data,
@@ -20,6 +22,7 @@ from tests.helpers import wait_for
 
 NODE_A = "aa" * 16
 NODE_B = "bb" * 16
+SELF_IDENTITY = SimpleNamespace(hash_hex="11" * 16)
 
 
 @pytest.fixture
@@ -32,7 +35,8 @@ def manager(tmp_path, registry):
     config = Config(data_dir=tmp_path)
     storage = Storage(db_path=tmp_path / "storage.db")
     transport = FakeNodeTransport("11" * 16, registry, node_hex=NODE_A)
-    mgr = NodeBrowserManager(None, storage, config, transport=transport)
+    mgr = NodeBrowserManager(SELF_IDENTITY, storage, config,
+                             transport=transport)
     yield mgr
     transport.join_threads()
     storage.close()
@@ -339,18 +343,78 @@ def test_hosting_refresh_picks_up_new_pages(manager):
         b"\x01"
 
 
+# ---------------------------------------------------------------------------
+# Loopback -- browsing our own node
+# ---------------------------------------------------------------------------
+
+def test_own_node_is_read_from_disk_not_dialled(manager, registry):
+    manager.set_hosting(enabled=True, node_name="Mine")
+    (manager.pages_root / "pages" / "about.mu").write_text(">About me")
+    manager.refresh_hosted_pages()
+
+    fetch_id = manager.fetch_page(manager.my_node_hash, "/page/about.mu")
+
+    assert manager.fetch_status(fetch_id)["status"] == "done"
+    row = manager.get_cached_page(manager.my_node_hash, "/page/about.mu")
+    assert bytes(row["content"]) == b">About me"
+    assert registry.fetch_log == []
+
+
+def test_own_node_serves_files_with_their_name(manager):
+    manager.set_hosting(enabled=True, node_name="Mine")
+    (manager.pages_root / "files" / "notes.txt").write_bytes(b"local bytes")
+    manager.refresh_hosted_pages()
+
+    manager.fetch_file(manager.my_node_hash, "/file/notes.txt")
+
+    row = manager.get_cached_file(manager.my_node_hash, "/file/notes.txt")
+    assert bytes(row["content"]) == b"local bytes"
+    assert row["filename"] == "notes.txt"
+
+
+def test_own_node_reports_a_page_it_does_not_serve(manager):
+    manager.set_hosting(enabled=True, node_name="Mine")
+    fetch_id = manager.fetch_page(manager.my_node_hash, "/page/nowhere.mu")
+    status = manager.fetch_status(fetch_id)
+    assert (status["status"], status["reason"]) == ("failed", "not_found")
+
+
+def test_own_node_is_reread_after_an_edit(manager):
+    """A cached page inside its #!c= lifetime is served without asking the
+    node -- but our own node is the authority, so an edit must show."""
+    manager.set_hosting(enabled=True, node_name="Mine")
+    page = manager.pages_root / "pages" / "live.mu"
+    page.write_text("#!c=3600\nfirst")
+    manager.refresh_hosted_pages()
+    url = f"{manager.my_node_hash}:/page/live.mu"
+    actions.browse_nomad_url(manager, url)
+
+    page.write_text("#!c=3600\nsecond")
+    result = actions.browse_nomad_url(manager, url)
+
+    assert result["cached"] is False
+    row = manager.get_cached_page(manager.my_node_hash, "/page/live.mu")
+    assert bytes(row["content"]) == b"#!c=3600\nsecond"
+
+
+def test_hosting_status_names_our_own_node(manager):
+    assert manager.hosting_status()["node_hash"] == manager.my_node_hash
+
+
 def test_hosting_restored_from_config(tmp_path, registry):
     config = Config(data_dir=tmp_path)
     storage = Storage(db_path=tmp_path / "storage.db")
     transport = FakeNodeTransport("22" * 16, registry)
-    mgr = NodeBrowserManager(None, storage, config, transport=transport)
+    mgr = NodeBrowserManager(SELF_IDENTITY, storage, config,
+                             transport=transport)
     mgr.set_hosting(enabled=True, node_name="Persistent")
     storage.close()
 
     config2 = Config(data_dir=tmp_path)
     storage2 = Storage(db_path=tmp_path / "storage.db")
     transport2 = FakeNodeTransport("33" * 16, registry)
-    NodeBrowserManager(None, storage2, config2, transport=transport2)
+    NodeBrowserManager(SELF_IDENTITY, storage2, config2,
+                       transport=transport2)
     assert transport2.hosting_name == "Persistent"
     assert "/page/index.mu" in transport2.providers
     storage2.close()

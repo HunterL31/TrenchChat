@@ -110,8 +110,11 @@ class FakeNodeTransport(NodeTransportBase):
         except Exception:
             payload = None
         # A file provider hands back its Path; the real transport streams it
-        # and the receiving side reads the bytes out of the response handle.
+        # with the name in the response metadata, and the receiving side
+        # reads the bytes out of the response handle.
+        filename = None
         if isinstance(payload, Path):
+            filename = payload.name
             try:
                 payload = payload.read_bytes()
             except OSError:
@@ -123,7 +126,7 @@ class FakeNodeTransport(NodeTransportBase):
             self._notify_result(fetch_id, False, None, FETCH_TOO_LARGE)
             return
         self._notify_progress(fetch_id, 1.0)
-        self._notify_result(fetch_id, True, payload, None)
+        self._notify_result(fetch_id, True, payload, None, filename)
 
     def cancel(self, fetch_id: str) -> None:
         pass

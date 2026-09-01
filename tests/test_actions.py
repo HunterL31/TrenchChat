@@ -477,6 +477,8 @@ def test_set_display_name_reannounces_both_destinations():
 class _RecordingNodeBrowser:
     """Records which fetch the browse action dispatched."""
 
+    my_node_hash = "ff" * 16
+
     def __init__(self, fresh_pages=()):
         self.calls = []
         self.fresh = set(fresh_pages)

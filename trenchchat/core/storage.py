@@ -356,11 +356,14 @@ CREATE TABLE IF NOT EXISTS nomad_page_cache (
     PRIMARY KEY (node_hash, path)
 );
 
+-- filename is the name the serving node gave the file in its response
+-- metadata; NULL when it gave none and the path's basename is all there is.
 CREATE TABLE IF NOT EXISTS nomad_file_cache (
     node_hash  TEXT NOT NULL,
     path       TEXT NOT NULL,
     content    BLOB NOT NULL,
     fetched_at REAL NOT NULL,
+    filename   TEXT,
     PRIMARY KEY (node_hash, path)
 );
 
@@ -503,6 +506,7 @@ class Storage:
         self._migrate_friend_state()
         self._migrate_dm_peer_kind()
         self._migrate_nomad_page_expiry()
+        self._migrate_nomad_file_name()
         self._migrate_channel_last_read()
         # _scope() reads channels.server_hash, so this must run after
         # _migrate_servers() has ensured that column exists.
@@ -678,6 +682,14 @@ class Storage:
         if not self._has_column("nomad_page_cache", "expires_at"):
             self._conn.execute(
                 "ALTER TABLE nomad_page_cache ADD COLUMN expires_at REAL"
+            )
+            self._conn.commit()
+
+    def _migrate_nomad_file_name(self):
+        """Add filename to nomad_file_cache for existing databases."""
+        if not self._has_column("nomad_file_cache", "filename"):
+            self._conn.execute(
+                "ALTER TABLE nomad_file_cache ADD COLUMN filename TEXT"
             )
             self._conn.commit()
 
@@ -2538,15 +2550,18 @@ class Storage:
                     ORDER BY fetched_at DESC LIMIT ?)
             """, (max_rows,))
 
-    def put_nomad_file(self, node_hash: str, path: str, content: bytes) -> None:
+    def put_nomad_file(self, node_hash: str, path: str, content: bytes,
+                       filename: str | None = None) -> None:
         with self._tx():
             self._conn.execute("""
-                INSERT INTO nomad_file_cache (node_hash, path, content, fetched_at)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO nomad_file_cache
+                    (node_hash, path, content, fetched_at, filename)
+                VALUES (?, ?, ?, ?, ?)
                 ON CONFLICT(node_hash, path) DO UPDATE SET
                     content=excluded.content,
-                    fetched_at=excluded.fetched_at
-            """, (node_hash, path, content, time.time()))
+                    fetched_at=excluded.fetched_at,
+                    filename=excluded.filename
+            """, (node_hash, path, content, time.time(), filename))
 
     def get_nomad_file(self, node_hash: str, path: str) -> sqlite3.Row | None:
         return self._fetchone(

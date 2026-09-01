@@ -626,7 +626,10 @@ def browse_nomad_url(node_browser, url: str, *,
         fetch_id = node_browser.fetch_file(node_hex, path, request_data)
     else:
         kind = "page"
+        # Our own node reads from disk every time: it is the authority on
+        # what it serves, and a cache hit would hide an edit.
         if (not refresh and not request_data
+                and node_hex != node_browser.my_node_hash
                 and node_browser.has_fresh_page(node_hex, path)):
             return {"fetch_id": None, "node_hash": node_hex, "path": path,
                     "kind": kind, "cached": True}

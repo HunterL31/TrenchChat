@@ -1211,7 +1211,9 @@ def create_app(backend: Backend, *, token: str | None = None,
                 {"ok": False, "error": "not cached", "reason": "not_cached"},
                 status_code=404,
             )
-        basename = path.rsplit("/", 1)[-1] or "download"
+        # The name the node gave the file, when it gave one; the path's
+        # basename is only the fallback.
+        basename = row["filename"] or path.rsplit("/", 1)[-1] or "download"
         safe_name = "".join(
             c for c in basename if c.isprintable() and c not in '"\\')[:128]
         return Response(
