@@ -13,6 +13,16 @@ whatever transport Reticulum supports (LoRa, packet radio, TCP/IP, serial, etc).
 **The client UI is the Flutter app in `flutter_ui/`** (web + desktop), launched via
 `main_flutter.py`. Features reach it through the API layer (see "Flutter client" below).
 
+## Above all else: the Zen of Reticulum
+
+Every design decision is checked against the [Zen of Reticulum](https://reticulum.network/manual/zen.html)
+first, and that check outranks every other rule here: no center, every peer hostile, every byte
+costly, store-and-forward over request/response, identity over location, intent over medium, and a
+tool that is never neutral. A feature that reintroduces a server, a tracker, or an assumption of
+bandwidth has removed the point of the project even if every test passes. The seven checks to apply
+before writing anything, with the code in this repo that already answers them, are in
+**`.claude/rules/reticulum-zen.md`** — read it before designing a feature, not after.
+
 ## Commands
 
 ```bash
@@ -206,6 +216,8 @@ Full detail in `.claude/rules/code-standards.md`. Highlights not obvious from sk
 
 ## Working in this repo
 
+- Check the design against the Zen of Reticulum before writing it; it outranks every other rule
+  here — see `.claude/rules/reticulum-zen.md`.
 - New core functionality is prototyped in `devtools/testenv/` against a real two-peer network first,
   then wired into the Flutter client once it works — see `.claude/rules/feature-development-workflow.md`.
 - Run the full test suite after any change to `trenchchat/` and don't consider the task done until it
