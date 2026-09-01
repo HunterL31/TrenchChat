@@ -10,15 +10,23 @@ missing history it can't reach right now.
 Nothing here touches the network -- it only observes calls SyncManager already
 makes.  A channel's state is derived from its peer records:
 
-    any peer still pending           -> SYNCING
-    a known gap or a truncated batch -> INCOMPLETE
-    at least one peer answered       -> SYNCED
-    every peer unreachable           -> WAITING
-    asked, nobody answered           -> INCOMPLETE
+    any peer still pending             -> SYNCING
+    a known gap or a truncated batch   -> INCOMPLETE
+    every peer we reached answered     -> SYNCED
+    anything else                      -> WAITING
 
 SYNCED requires a peer to have actually answered.  A peer with nothing to send
 replies with an empty sync response for exactly this reason: without it,
 "caught up" and "never answered" are the same silence.
+
+INCOMPLETE is a claim about history, not about peers, so it is only ever made
+on evidence that something is missing: a hint naming us, rows we refused, or a
+responder that said it holds more.  A peer that never answered is not that
+evidence -- a member being offline is ordinary, and a responder can refuse
+silently (its deep-sync cooldown does) -- so silence leaves the channel WAITING
+on an answer rather than accusing it of missing history.  Reporting silence as
+a gap marked every channel with an absent member INCOMPLETE within minutes of
+a session starting, which is how the state stopped meaning anything.
 
 An answer whose rows we refused is not an answer either.  Rows dropped for
 failing verification are history we know we are missing, so they mark the
@@ -52,7 +60,7 @@ class SyncState(str, Enum):
     SYNCING    = "syncing"       # at least one request outstanding
     SYNCED     = "synced"        # a peer answered and reported nothing further
     INCOMPLETE = "incomplete"    # known gap we can't close right now
-    WAITING    = "waiting"       # no reachable peer to sync from
+    WAITING    = "waiting"       # still short of an answer from some peer
 
 
 class PeerSyncState(str, Enum):
@@ -230,6 +238,12 @@ class SyncStatusTracker:
         with self._lock:
             return self._derive_locked(channel_hash_hex)
 
+    def has_gap(self, channel_hash_hex: str) -> bool:
+        """True if history is currently known to be missing on this channel."""
+        with self._lock:
+            rec = self._channels.get(channel_hash_hex)
+            return bool(rec and rec.gap)
+
     def get_status(self, channel_hash_hex: str) -> dict:
         """Return the full status of a channel, including per-peer detail."""
         with self._lock:
@@ -288,17 +302,14 @@ class SyncStatusTracker:
             return SyncState.SYNCING
         if rec.gap or any(p.truncated for p in rec.peers.values()):
             return SyncState.INCOMPLETE
-        if PeerSyncState.ANSWERED in states:
-            # One peer answering says nothing about what a peer that went
-            # silent was holding, so a single answer can't certify the channel
-            # while others never replied.
-            if all(s in (PeerSyncState.ANSWERED, PeerSyncState.UNREACHABLE)
-                   for s in states):
-                return SyncState.SYNCED
-            return SyncState.INCOMPLETE
-        if states and all(s == PeerSyncState.UNREACHABLE for s in states):
-            return SyncState.WAITING
-        return SyncState.INCOMPLETE
+        # One peer answering says nothing about what a peer that went silent
+        # was holding, so a single answer can't certify the channel while
+        # others never replied -- but not knowing is WAITING, not a gap.
+        if (PeerSyncState.ANSWERED in states
+                and all(s in (PeerSyncState.ANSWERED, PeerSyncState.UNREACHABLE)
+                        for s in states)):
+            return SyncState.SYNCED
+        return SyncState.WAITING
 
     def _snapshot_locked(self, channel_hash_hex: str) -> tuple:
         """Comparable summary used to decide whether a change is worth reporting."""

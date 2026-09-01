@@ -184,11 +184,15 @@ Sync is otherwise invisible: a freshly joined channel shows an empty pane while 
 |-------|---------|
 | `SYNCING` | at least one request outstanding |
 | `SYNCED` | a peer answered and reported nothing further |
-| `INCOMPLETE` | a known gap: a truncated batch, or a hint naming us |
-| `WAITING` | no reachable peer to sync from |
+| `INCOMPLETE` | a known gap: a truncated batch, rows we refused, or a hint naming us |
+| `WAITING` | no answer to go on: every peer unreachable, or asked and silent |
 | `UNKNOWN` | never attempted |
 
 `SYNCED` requires a peer to have actually answered — a silent peer never counts as up to date, which is what the empty response above exists to make possible.
+
+`INCOMPLETE` is a claim about history, not about peers, so it needs evidence that something is missing. A peer that never answered is not evidence: a member being offline is ordinary, and a responder can refuse silently — its deep-sync cooldown does. Silence leaves the channel `WAITING`, and it settles as soon as any answer arrives. Reporting silence as a gap marked every channel with an absent member `INCOMPLETE` a few minutes into every session.
+
+A hint is evidence only until the message it names turns up. The sender's own retry queue usually delivers it directly, which is not a sync response, so the gap clears on the message arriving by any route — not only through sync.
 
 `SYNCED` is scoped to peers we know about. A peer whose announce never reached us is never asked and can't be accounted for — on a partition-tolerant mesh there's no way to enumerate everyone who might hold history. `SYNCED` means "every peer we know about answered and had nothing more," not "no history exists anywhere." `get_status()`'s `answered_peers` count says how many peers back that claim.
 

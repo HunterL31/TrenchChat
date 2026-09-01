@@ -74,3 +74,19 @@ changes — not a changelog, not a restatement of every commit, not a walkthroug
 of the diff. If a reviewer needs more detail than a slim description gives
 them, that detail belongs in the code or the commit history, not padding in
 the PR body.
+
+## Never link a Claude session in a PR description
+
+A `claude.ai/code/session_...` link is useless to everyone reading the PR —
+only its author can open it — and it goes stale the moment the session ends.
+Leave it out of PR titles, bodies, and PR comments.
+
+```
+# ❌
+Fixes the sync badge.
+
+https://claude.ai/code/session_01ABC...
+
+# ✅
+Fixes the sync badge.
+```
