@@ -138,3 +138,34 @@ class NomadFetchStatus {
 
   bool get isTerminal => status == 'done' || status == 'failed';
 }
+
+/// Whether we reveal our identity to one node, and whether the link open to
+/// it right now already has.
+class NomadIdentify {
+  const NomadIdentify({
+    required this.nodeHash,
+    required this.enabled,
+    required this.identified,
+    required this.identityHash,
+  });
+
+  final String nodeHash;
+
+  /// The stored choice, which identifies every future link to this node.
+  final bool enabled;
+
+  /// Whether the link open now carries the proof. False with [enabled] true
+  /// means no link is up; the next one will identify.
+  final bool identified;
+
+  /// The hash the node would see -- what a forum registers an account
+  /// against, and what it can log about this visit forever.
+  final String identityHash;
+
+  factory NomadIdentify.fromJson(Map<String, dynamic> json) => NomadIdentify(
+        nodeHash: json['node_hash'] as String? ?? '',
+        enabled: json['enabled'] as bool? ?? false,
+        identified: json['identified'] as bool? ?? false,
+        identityHash: json['identity_hash'] as String? ?? '',
+      );
+}

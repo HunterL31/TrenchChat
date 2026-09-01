@@ -967,6 +967,36 @@ class AppState extends ChangeNotifier {
     return null;
   }
 
+  /// Identify state per node, loaded when a node is opened. Absent means
+  /// "not asked yet", which the UI shows as anonymous.
+  final Map<String, NomadIdentify> nomadIdentify = {};
+
+  Future<NomadIdentify?> loadNomadIdentify(String nodeHash) async {
+    try {
+      final status = await api.getNomadIdentify(nodeHash);
+      nomadIdentify[nodeHash] = status;
+      notifyListeners();
+      return status;
+    } catch (e) {
+      _reportActionError(e);
+      return null;
+    }
+  }
+
+  /// Turns identifying to one node on or off. Opt-in per node: this is the
+  /// only path that ever reveals our identity to a node operator.
+  Future<NomadIdentify?> setNomadIdentify(String nodeHash, bool enabled) async {
+    try {
+      final status = await api.setNomadIdentify(nodeHash, enabled);
+      nomadIdentify[nodeHash] = status;
+      notifyListeners();
+      return status;
+    } catch (e) {
+      _reportActionError(e);
+      return null;
+    }
+  }
+
   Future<NomadPage?> fetchCachedNomadPage(String nodeHash, String path) async {
     try {
       return await api.getNomadPage(nodeHash, path);

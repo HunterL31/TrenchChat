@@ -18,6 +18,7 @@ import '../../theme/theme_spec.dart';
 import '../../theme/tokens.dart';
 import '../../widgets/tc_button.dart';
 import '../../widgets/tc_icon.dart';
+import '../dialogs/confirm_dialog.dart';
 import '../dialogs/nomad_hosting_dialog.dart';
 
 class BrowserTab extends StatefulWidget {
@@ -221,6 +222,9 @@ class _BrowserTabState extends State<BrowserTab> {
       _history.add((nodeHash: nodeHash, path: path));
       _historyIndex = _history.length - 1;
     }
+    if (widget.state.nomadIdentify[nodeHash] == null) {
+      widget.state.loadNomadIdentify(nodeHash);
+    }
     setState(() {
       _activeFetchId = target.fetchId;
       _loading = target.fetchId != null;
@@ -261,10 +265,10 @@ class _BrowserTabState extends State<BrowserTab> {
 
   /// RELOAD always goes back to the node, even for a page still inside the
   /// lifetime it declared -- that is what the button is for.
-  void _reload() {
+  Future<void> _reload() async {
     final current = _current;
     if (current == null) return;
-    _go('${current.nodeHash}:${current.path}', refresh: true);
+    await _go('${current.nodeHash}:${current.path}', refresh: true);
   }
 
   void _home() {
@@ -283,6 +287,56 @@ class _BrowserTabState extends State<BrowserTab> {
     widget.state.loadNomadNodes();
     widget.state.loadNomadBookmarks();
     _loadHosting();
+  }
+
+  /// Turns identifying to the node being browsed on or off.
+  ///
+  /// Identifying is irreversible in the only sense that matters: the node
+  /// operator learns this identity visited and can keep that forever, so
+  /// turning it on asks first and turning it off says what it does not undo.
+  Future<void> _toggleIdentify() async {
+    final current = _current;
+    if (current == null) return;
+    final status = widget.state.nomadIdentify[current.nodeHash] ??
+        await widget.state.loadNomadIdentify(current.nodeHash);
+    if (!mounted || status == null) return;
+    final turningOn = !status.enabled;
+
+    final confirmed = await showTcConfirmDialog(
+      context,
+      widget.state,
+      title: turningOn ? 'Identify to this node?' : 'Stop identifying?',
+      message: turningOn
+          ? 'This node will see your identity hash '
+              '${status.identityHash} on every page you open here, and can '
+              'keep a record of it. Pages that need an account — a forum, '
+              'anything with a login — use it as your account. Nothing '
+              'about your Reticulum instance or your other nodes is '
+              'revealed, and no other node is affected.'
+          : 'This node stops seeing your identity from the next page you '
+              'open — the connection carrying it is dropped. What it '
+              'already recorded about this identity stays recorded.',
+      confirmLabel: turningOn ? 'IDENTIFY' : 'STOP',
+    );
+    if (!confirmed || !mounted) return;
+
+    final updated =
+        await widget.state.setNomadIdentify(current.nodeHash, turningOn);
+    if (!mounted) return;
+    if (updated == null) {
+      setState(() => _error =
+          widget.state.takeActionError() ?? 'Could not change identifying.');
+      return;
+    }
+    // The page the node served was rendered for whoever it thought we were,
+    // and navigating clears the banner -- so reload first, then say so.
+    if (turningOn) await _reload();
+    if (!mounted) return;
+    setState(() => _info = turningOn
+        ? (updated.identified
+            ? 'Identified to this node. This page is how it sees you now.'
+            : 'Identifying from the next connection to this node.')
+        : 'No longer identifying to this node.');
   }
 
   Future<void> _toggleBookmark() async {
@@ -345,6 +399,8 @@ class _BrowserTabState extends State<BrowserTab> {
     final current = _current;
     final bookmarked = current != null &&
         widget.state.isNomadBookmarked(current.nodeHash, current.path);
+    final identified = current != null &&
+        (widget.state.nomadIdentify[current.nodeHash]?.enabled ?? false);
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
       decoration: BoxDecoration(
@@ -400,6 +456,12 @@ class _BrowserTabState extends State<BrowserTab> {
           TcGhostButton(
             label: bookmarked ? '★' : '☆',
             onPressed: current == null ? null : _toggleBookmark,
+          ),
+          const SizedBox(width: 4),
+          TcGhostButton(
+            icon: TcIcons.lock,
+            label: identified ? 'ID ✓' : 'ID',
+            onPressed: current == null ? null : _toggleIdentify,
           ),
           const SizedBox(width: 4),
           TcGhostButton(

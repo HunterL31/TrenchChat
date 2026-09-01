@@ -5,10 +5,11 @@ Speaks Nomad Network's node protocol for full interop: nodes are RNS
 destinations on the "nomadnetwork.node" aspect, pages and files are served
 as request/response over links ("/page/index.mu", "/file/<name>"). Fetching
 dials the node destination directly (announces carry the destination hash,
-so no lxmf-delivery indirection) and never identifies — browsing is
-anonymous. Hosting registers one request handler per served file; RNS
-dispatches requests by exact path hash, so unregistered paths simply have
-no handler.
+so no lxmf-delivery indirection) and is anonymous unless the caller asks
+for a node by name: identify_policy names the nodes our identity may be
+revealed to, and nothing else ever calls Link.identify. Hosting registers
+one request handler per served file; RNS dispatches requests by exact path
+hash, so unregistered paths simply have no handler.
 
 This module never touches Storage or core managers, matching
 voice_transport.py's layering: callbacks up, tick() down.
@@ -138,6 +139,17 @@ class NodeTransportBase:
     def __init__(self):
         self._result_cb = None
         self._progress_cb = None
+        self._identify_policy = None
+
+    def _may_identify(self, node_hex: str) -> bool:
+        if self._identify_policy is None:
+            return False
+        try:
+            return bool(self._identify_policy(node_hex))
+        except Exception as e:
+            RNS.log(f"TrenchChat [nomad]: identify policy error: {e}",
+                    RNS.LOG_ERROR)
+            return False
 
     def set_fetch_result_callback(self, cb) -> None:
         """cb(fetch_id, ok, payload: bytes | None, reason, filename)"""
@@ -146,6 +158,19 @@ class NodeTransportBase:
     def set_fetch_progress_callback(self, cb) -> None:
         """cb(fetch_id, progress: float) with progress in 0.0-1.0"""
         self._progress_cb = cb
+
+    def set_identify_policy(self, policy) -> None:
+        """policy(node_hash_hex) -> bool: may we identify to this node?"""
+        self._identify_policy = policy
+
+    def identify(self, node_hash_hex: str) -> bool:
+        raise NotImplementedError
+
+    def is_identified(self, node_hash_hex: str) -> bool:
+        raise NotImplementedError
+
+    def drop_link(self, node_hash_hex: str) -> bool:
+        raise NotImplementedError
 
     def fetch(self, fetch_id: str, node_hash_hex: str, path: str, *,
               max_size: int, timeout: float = NODE_FETCH_TIMEOUT_SECS,
@@ -220,6 +245,8 @@ class _NodeConn:
         self.next_dial_at = 0.0
         self.last_used = time.time()
         self.queued: list[_Fetch] = []
+        # Per link, not per node: a new link starts anonymous again.
+        self.identified = False
 
     @property
     def exhausted(self) -> bool:
@@ -358,6 +385,7 @@ class RNSNodeTransport(NodeTransportBase):
                 link = conn.link
                 conn.link = None
             conn.state = _IDLE
+            conn.identified = False
             conn.dial_attempts = 0
             conn.next_dial_at = 0.0
             conn.queued.append(fetch)
@@ -390,6 +418,7 @@ class RNSNodeTransport(NodeTransportBase):
             self._by_link.pop(id(conn.link), None)
             conn.link = None
         conn.state = _IDLE
+        conn.identified = False
         if not arm_backoff:
             conn.dial_attempts = 0
             conn.next_dial_at = 0.0
@@ -429,7 +458,75 @@ class RNSNodeTransport(NodeTransportBase):
                 return
             conn.state = _LINKED
             conn.dial_attempts = 0
+        # Before the queued requests, so the node has our identity by the
+        # time it renders the first page -- the order nomadnet uses too.
+        if self._may_identify(node_hex):
+            self._identify_on(node_hex, link)
         self._flush_queued(node_hex)
+
+    def identify(self, node_hash_hex: str) -> bool:
+        """Reveal our identity to a node over the link already open to it.
+
+        Gated by the same policy as an establishing link, so there is one
+        answer to "may this node know us" and no way past it. Returns
+        whether the proof went out; False when no link is up, in which case
+        the stored choice is what identifies the next one.
+        """
+        if not self._may_identify(node_hash_hex):
+            return False
+        with self._lock:
+            conn = self._conns.get(node_hash_hex)
+            link = conn.link if conn is not None and conn.state == _LINKED \
+                else None
+        if link is None:
+            return False
+        return self._identify_on(node_hash_hex, link)
+
+    def _identify_on(self, node_hex: str, link) -> bool:
+        """Send the link-identify proof and record that this link carries it."""
+        try:
+            link.identify(self._identity.rns_identity)
+        except Exception as e:
+            RNS.log(f"TrenchChat [nomad]: could not identify to "
+                    f"{node_hex[:12]}…: {e}", RNS.LOG_WARNING)
+            return False
+        with self._lock:
+            conn = self._conns.get(node_hex)
+            if conn is not None and conn.link is link:
+                conn.identified = True
+        RNS.log(f"TrenchChat [nomad]: identified to {node_hex[:12]}…",
+                RNS.LOG_NOTICE)
+        return True
+
+    def drop_link(self, node_hash_hex: str) -> bool:
+        """Close the link to a node, so the next request opens a fresh one.
+
+        A link cannot un-identify: the proof is sent once and the node
+        reads it on every request the link carries. Dropping it is the only
+        way to stop identifying without waiting for the idle timeout.
+        Queued and in-flight fetches are left alone -- they fail or finish
+        on the closing link, and the caller is changing a setting, not
+        cancelling a page.
+        """
+        link = None
+        with self._lock:
+            conn = self._conns.get(node_hash_hex)
+            if conn is None or conn.link is None:
+                return False
+            link = conn.link
+            self._by_link.pop(id(link), None)
+            conn.link = None
+            conn.state = _IDLE
+            conn.identified = False
+        self._teardown_link(link)
+        return True
+
+    def is_identified(self, node_hash_hex: str) -> bool:
+        """Whether the link currently open to a node carries our identity."""
+        with self._lock:
+            conn = self._conns.get(node_hash_hex)
+            return bool(conn is not None and conn.state == _LINKED
+                        and conn.identified)
 
     def _flush_queued(self, node_hex: str) -> None:
         with self._lock:

@@ -124,6 +124,11 @@ class NomadFetchRequest(BaseModel):
     path: str = "/page/index.mu"
 
 
+class NomadIdentifyRequest(BaseModel):
+    node_hash: str
+    enabled: bool
+
+
 class NomadBookmarkRequest(BaseModel):
     node_hash: str
     path: str
@@ -1226,6 +1231,16 @@ def create_app(backend: Backend, *, token: str | None = None,
                     f'attachment; filename="{safe_name or "download"}"',
             },
         )
+
+    @app.get("/nomad/identify/{node_hash}")
+    def get_nomad_identify(node_hash: str):
+        return backend.node_browser.identify_status(node_hash)
+
+    @app.post("/nomad/identify")
+    def set_nomad_identify(req: NomadIdentifyRequest):
+        status = actions.set_node_identify(
+            backend.node_browser, req.node_hash, req.enabled)
+        return {"ok": True, **status}
 
     @app.get("/nomad/bookmarks")
     def list_nomad_bookmarks():

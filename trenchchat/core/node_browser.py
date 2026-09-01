@@ -205,6 +205,7 @@ class NodeBrowserManager:
 
         self._transport.set_fetch_result_callback(self._on_fetch_result)
         self._transport.set_fetch_progress_callback(self._on_fetch_progress)
+        self._transport.set_identify_policy(self._may_identify)
 
         if config.nomad_hosting_enabled:
             try:
@@ -408,6 +409,48 @@ class NodeBrowserManager:
         except ValueError:
             return None
         return self._storage.get_nomad_node(node_hex)
+
+    # --- identifying to a node ---
+
+    def _may_identify(self, node_hash_hex: str) -> bool:
+        """The transport's gate: never true for a node the user has not
+        chosen, so browsing stays anonymous by default."""
+        try:
+            node_hex = _validate_node_hex(node_hash_hex)
+        except ValueError:
+            return False
+        return self._storage.get_nomad_identify(node_hex)
+
+    def identify_status(self, node_hash_hex: str) -> dict:
+        """What this node knows about us, and what it would learn next.
+
+        "enabled" is the stored choice; "identified" is whether the link
+        open right now actually carries the proof.
+        """
+        node_hex = _validate_node_hex(node_hash_hex)
+        return {
+            "node_hash": node_hex,
+            "enabled": self._storage.get_nomad_identify(node_hex),
+            "identified": self._transport.is_identified(node_hex),
+            "identity_hash": self._identity.hash_hex,
+        }
+
+    def set_identify(self, node_hash_hex: str, enabled: bool) -> dict:
+        """Choose whether to reveal our identity to one node.
+
+        Turning it on identifies over the link already open, so the next
+        page renders as the node sees us without waiting for a reconnect.
+        Turning it off drops that link: a link cannot un-identify, so
+        leaving it up would keep reporting us for as long as it lived. What
+        the node already recorded is beyond reach either way.
+        """
+        node_hex = _validate_node_hex(node_hash_hex)
+        self._storage.set_nomad_identify(node_hex, enabled)
+        if enabled:
+            self._transport.identify(node_hex)
+        else:
+            self._transport.drop_link(node_hex)
+        return self.identify_status(node_hex)
 
     # --- bookmarks ---
 

@@ -367,6 +367,15 @@ CREATE TABLE IF NOT EXISTS nomad_file_cache (
     PRIMARY KEY (node_hash, path)
 );
 
+-- Local-only. identify records the deliberate choice to reveal our identity
+-- to one node; it is never sent anywhere, and lives apart from nomad_nodes
+-- so the announce-driven prune cannot drop a choice the user made.
+CREATE TABLE IF NOT EXISTS nomad_node_prefs (
+    node_hash  TEXT PRIMARY KEY,
+    identify   INTEGER NOT NULL DEFAULT 0,
+    updated_at REAL NOT NULL
+);
+
 -- Local-only, like friends. Nothing here is ever sent to a peer.
 CREATE TABLE IF NOT EXISTS nomad_bookmarks (
     node_hash TEXT NOT NULL,
@@ -2583,6 +2592,25 @@ class Storage:
                         "DELETE FROM nomad_file_cache "
                         "WHERE node_hash = ? AND path = ?",
                         (row["node_hash"], row["path"]))
+
+    # --- per-node browsing preferences ---
+
+    def set_nomad_identify(self, node_hash: str, enabled: bool) -> None:
+        """Record whether to reveal our identity to one node."""
+        with self._tx():
+            self._conn.execute("""
+                INSERT INTO nomad_node_prefs (node_hash, identify, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(node_hash) DO UPDATE SET
+                    identify=excluded.identify,
+                    updated_at=excluded.updated_at
+            """, (node_hash, 1 if enabled else 0, time.time()))
+
+    def get_nomad_identify(self, node_hash: str) -> bool:
+        row = self._fetchone(
+            "SELECT identify FROM nomad_node_prefs WHERE node_hash = ?",
+            (node_hash,))
+        return bool(row["identify"]) if row is not None else False
 
     def get_nomad_bookmarks(self) -> list[sqlite3.Row]:
         return self._fetchall(

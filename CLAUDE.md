@@ -66,7 +66,9 @@ needed for normal development.
 `user_directory.py`, `friends.py`, `direct.py` (one-to-one conversations), `propagation.py`,
 `lockbox.py` (PIN-based encryption gate), `link_quality.py`, `image.py`,
 `fileutils.py`, `voice.py` (live group voice: LXMF signalling + roster; frames flow over RNS Links
-via `network/voice_transport.py`, audio primitives in `core/audio/` — see `docs/voice.md`).
+via `network/voice_transport.py`, audio primitives in `core/audio/` — see `docs/voice.md`),
+`node_browser.py` (Nomad Network page browsing and hosting over `network/node_transport.py`;
+browsing is anonymous unless the user opts a specific node into identify-on-connect).
 UI code must never construct LXMF messages or touch protocol fields directly: it reads
 `Storage`-backed state for display and delegates all mutations to the relevant core manager via
 the HTTP/WS API. RNS/LXMF callbacks fire on background threads; the API layer marshals them into

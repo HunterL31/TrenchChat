@@ -204,6 +204,38 @@ class TestFileEndpoint:
 
 
 @needs_backend
+class TestIdentify:
+    def test_a_node_is_anonymous_until_asked(self, client):
+        res = client.get(f"/nomad/identify/{NODE}", headers=AUTH)
+        assert res.status_code == 200
+        assert res.json()["enabled"] is False
+        assert res.json()["identified"] is False
+
+    def test_enabling_identify_round_trips(self, client, backend):
+        res = client.post("/nomad/identify", headers=AUTH,
+                          json={"node_hash": NODE, "enabled": True})
+        assert res.json()["ok"] is True
+        assert res.json()["enabled"] is True
+        assert res.json()["identity_hash"] == backend.node_browser \
+            .identify_status(NODE)["identity_hash"]
+        assert client.get(f"/nomad/identify/{NODE}",
+                          headers=AUTH).json()["enabled"] is True
+
+    def test_disabling_identify_round_trips(self, client):
+        client.post("/nomad/identify", headers=AUTH,
+                    json={"node_hash": NODE, "enabled": True})
+        res = client.post("/nomad/identify", headers=AUTH,
+                          json={"node_hash": NODE, "enabled": False})
+        assert res.json()["enabled"] is False
+
+    def test_the_endpoints_need_the_token(self, client):
+        assert client.get(f"/nomad/identify/{NODE}").status_code == 401
+        assert client.post("/nomad/identify",
+                           json={"node_hash": NODE,
+                                 "enabled": True}).status_code == 401
+
+
+@needs_backend
 class TestBookmarks:
     def test_bookmark_roundtrip(self, client):
         res = client.post("/nomad/bookmarks", headers=AUTH,

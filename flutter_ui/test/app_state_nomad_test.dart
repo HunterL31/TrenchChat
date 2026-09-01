@@ -216,6 +216,44 @@ void main() {
     expect(sent.body, contains('"refresh":true'));
   });
 
+  group('identify', () {
+    test('loading records the node state', () async {
+      backend.routes['GET /nomad/identify/$_node'] = {
+        'node_hash': _node,
+        'enabled': true,
+        'identified': false,
+        'identity_hash': 'ab' * 16,
+      };
+      final status = await state.loadNomadIdentify(_node);
+      expect(status!.enabled, isTrue);
+      expect(status.identified, isFalse);
+      expect(state.nomadIdentify[_node]!.identityHash, 'ab' * 16);
+    });
+
+    test('setting sends the node hash and the choice', () async {
+      backend.routes['POST /nomad/identify'] = {
+        'ok': true,
+        'node_hash': _node,
+        'enabled': true,
+        'identified': true,
+        'identity_hash': 'ab' * 16,
+      };
+      final status = await state.setNomadIdentify(_node, true);
+      expect(status!.identified, isTrue);
+      final sent = backend.requests.last;
+      expect(sent.path, '/nomad/identify');
+      expect(sent.body, contains('"node_hash":"$_node"'));
+      expect(sent.body, contains('"enabled":true'));
+    });
+
+    test('a refused change surfaces an error and stores nothing', () async {
+      final status = await state.setNomadIdentify(_node, true);
+      expect(status, isNull);
+      expect(state.nomadIdentify[_node], isNull);
+      expect(state.takeActionError(), isNotNull);
+    });
+  });
+
   group('partials', () {
     setUp(() {
       backend.routes['POST /nomad/browse'] = {

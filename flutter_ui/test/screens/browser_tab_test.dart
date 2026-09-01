@@ -218,6 +218,137 @@ void main() {
     });
   });
 
+  group('identifying to a node', () {
+    void identifyState({required bool enabled, bool identified = false}) {
+      backend.routes['GET /nomad/identify/$_node'] = {
+        'node_hash': _node,
+        'enabled': enabled,
+        'identified': identified,
+        'identity_hash': 'ab' * 16,
+      };
+    }
+
+    Future<void> openNode(WidgetTester tester) async {
+      backend.routes['GET /nomad/page/$_node'] = {
+        'ok': true,
+        'content_b64': base64Encode(utf8.encode('a page')),
+        'fetched_at': 1.0,
+      };
+      await tester.pumpWidget(_harness(state));
+      await settle(tester);
+      await tester.tap(find.text('Test Node'));
+      await settle(tester);
+      _emitFetchEvent(state, 'f1', 'done');
+      await settle(tester);
+    }
+
+    testWidgets('the control reads as anonymous until asked', (tester) async {
+      identifyState(enabled: false);
+      await openNode(tester);
+      expect(find.text('ID'), findsOneWidget);
+      expect(find.text('ID ✓'), findsNothing);
+    });
+
+    testWidgets('a node already identified to shows as such', (tester) async {
+      identifyState(enabled: true, identified: true);
+      await openNode(tester);
+      expect(find.text('ID ✓'), findsOneWidget);
+    });
+
+    testWidgets('cancelling the confirmation identifies to nothing',
+        (tester) async {
+      identifyState(enabled: false);
+      await openNode(tester);
+      await tester.tap(find.text('ID'));
+      await settle(tester);
+      expect(find.textContaining('Identify to this node?'), findsOneWidget);
+
+      await tester.tap(find.text('CANCEL'));
+      await settle(tester);
+
+      expect(backend.requests.where((r) => r.method == 'POST' &&
+          r.path == '/nomad/identify'), isEmpty);
+    });
+
+    testWidgets('confirming sends the identity and reloads the page',
+        (tester) async {
+      identifyState(enabled: false);
+      backend.routes['POST /nomad/identify'] = {
+        'ok': true,
+        'node_hash': _node,
+        'enabled': true,
+        'identified': true,
+        'identity_hash': 'ab' * 16,
+      };
+      await openNode(tester);
+      await tester.tap(find.text('ID'));
+      await settle(tester);
+      await tester.tap(find.text('IDENTIFY'));
+      await settle(tester);
+
+      final sent = backend.requests.lastWhere(
+          (r) => r.method == 'POST' && r.path == '/nomad/identify');
+      expect(sent.body, contains('"enabled":true'));
+      // The page was rendered for whoever the node thought we were.
+      expect(backend.requests.where((r) => r.body.contains('"refresh":true')),
+          isNotEmpty);
+    });
+
+    testWidgets('the confirmation survives the reload it triggers',
+        (tester) async {
+      // Regression: navigating clears the info banner, so setting it before
+      // reloading meant the user never saw that identifying had worked.
+      identifyState(enabled: false);
+      backend.routes['POST /nomad/identify'] = {
+        'ok': true,
+        'node_hash': _node,
+        'enabled': true,
+        'identified': true,
+        'identity_hash': 'ab' * 16,
+      };
+      await openNode(tester);
+      await tester.tap(find.text('ID'));
+      await settle(tester);
+      await tester.tap(find.text('IDENTIFY'));
+      await settle(tester);
+
+      expect(find.textContaining('how it sees you now'), findsOneWidget);
+    });
+
+    testWidgets('the warning names the identity the node would learn',
+        (tester) async {
+      identifyState(enabled: false);
+      await openNode(tester);
+      await tester.tap(find.text('ID'));
+      await settle(tester);
+      expect(find.textContaining('ab' * 16), findsOneWidget);
+    });
+
+    testWidgets('turning it off says what it does not undo', (tester) async {
+      identifyState(enabled: true, identified: true);
+      backend.routes['POST /nomad/identify'] = {
+        'ok': true,
+        'node_hash': _node,
+        'enabled': false,
+        'identified': false,
+        'identity_hash': 'ab' * 16,
+      };
+      await openNode(tester);
+      await tester.tap(find.text('ID ✓'));
+      await settle(tester);
+      expect(find.textContaining('stops seeing your identity'),
+          findsOneWidget);
+      expect(find.textContaining('stays recorded'), findsOneWidget);
+
+      await tester.tap(find.text('STOP'));
+      await settle(tester);
+
+      final sent = backend.requests.lastWhere(
+          (r) => r.method == 'POST' && r.path == '/nomad/identify');
+      expect(sent.body, contains('"enabled":false'));
+    });
+  });
+
   testWidgets('a link carrying anchor= opens the next page at that anchor',
       (tester) async {
     backend.routes['GET /nomad/page/$_node'] = {

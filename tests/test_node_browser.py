@@ -344,6 +344,85 @@ def test_hosting_refresh_picks_up_new_pages(manager):
 
 
 # ---------------------------------------------------------------------------
+# Identifying to a node
+# ---------------------------------------------------------------------------
+
+def test_browsing_is_anonymous_until_asked(manager):
+    manager.fetch_page(NODE_B, "/page/index.mu")
+    manager._transport.join_threads()
+    status = manager.identify_status(NODE_B)
+    assert status["enabled"] is False
+    assert status["identified"] is False
+
+
+def test_identify_is_per_node_not_global(manager):
+    manager.set_identify(NODE_B, True)
+    assert manager.identify_status(NODE_B)["enabled"] is True
+    assert manager.identify_status(NODE_A)["enabled"] is False
+
+
+def test_enabling_identify_reveals_over_the_open_link(manager, registry):
+    host = FakeNodeTransport("99" * 16, registry, node_hex=NODE_B)
+    host.start_hosting("Host", {"/page/index.mu": lambda: b">Hi"})
+    manager.fetch_page(NODE_B, "/page/index.mu")
+    manager._transport.join_threads()
+    assert manager.identify_status(NODE_B)["identified"] is False
+
+    status = manager.set_identify(NODE_B, True)
+
+    assert status["identified"] is True
+
+
+def test_identify_survives_for_the_next_link(manager):
+    """The stored choice is what identifies a link opened later, which is
+    the whole point of the flag rather than a one-shot action."""
+    manager.set_identify(NODE_B, True)
+    manager.fetch_page(NODE_B, "/page/index.mu")
+    manager._transport.join_threads()
+    assert manager.identify_status(NODE_B)["identified"] is True
+
+
+def test_turning_identify_off_stops_reporting_us_at_once(manager, registry):
+    """Not just the next link: the open one keeps reporting us for as long
+    as it lives, so turning it off has to close it."""
+    host = FakeNodeTransport("99" * 16, registry, node_hex=NODE_B)
+    host.start_hosting("Host", {"/page/index.mu": lambda: b">Hi"})
+    manager.set_identify(NODE_B, True)
+    manager.fetch_page(NODE_B, "/page/index.mu")
+    manager._transport.join_threads()
+    assert manager.identify_status(NODE_B)["identified"] is True
+
+    status = manager.set_identify(NODE_B, False)
+
+    assert status["enabled"] is False
+    assert status["identified"] is False
+    assert manager._transport._may_identify(NODE_B) is False
+
+
+def test_identify_status_names_the_identity_a_node_would_learn(manager):
+    status = manager.identify_status(NODE_B)
+    assert status["identity_hash"] == SELF_IDENTITY.hash_hex
+
+
+def test_identify_survives_the_node_list_being_pruned(manager):
+    """The node list is announce-driven and pruned; a choice the user made
+    must not be dropped with it."""
+    manager.set_identify(NODE_B, True)
+    manager.record_node_announce(NODE_B, "B")
+    manager.record_node_announce(NODE_A, "A")
+
+    manager._storage.prune_nomad_nodes(1)
+
+    assert manager._storage.get_nomad_node(NODE_B) is None
+    assert manager.identify_status(NODE_B)["enabled"] is True
+
+
+def test_identify_rejects_a_hash_that_is_not_one(manager):
+    with pytest.raises(ValueError):
+        manager.set_identify("not-a-hash", True)
+
+
+# ---------------------------------------------------------------------------
 # Loopback -- browsing our own node
 # ---------------------------------------------------------------------------
 

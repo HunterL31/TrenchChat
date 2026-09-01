@@ -646,6 +646,16 @@ def set_node_hosting(node_browser, *, enabled: bool | None = None,
     return node_browser.set_hosting(enabled=enabled, node_name=node_name)
 
 
+def set_node_identify(node_browser, node_hash: str, enabled: bool) -> dict:
+    """Turn identifying to one node on or off, and report where that leaves us.
+
+    Opt-in per node, as nomadnet's directory flag is: identifying tells that
+    operator, provably, that this identity visited, so it is never a default
+    and never applied to a node the user did not name.
+    """
+    return node_browser.set_identify(node_hash, enabled)
+
+
 def friends_with_pages(friends_mgr, node_browser) -> list[dict]:
     """The friends list, each entry carrying "nomad_node_hash" when that
     friend's node has been heard on the mesh (None otherwise), so a client

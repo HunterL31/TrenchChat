@@ -893,6 +893,20 @@ class ApiClient {
     return NomadPage.fromJson(_decode(res) as Map<String, dynamic>);
   }
 
+  Future<NomadIdentify> getNomadIdentify(String nodeHash) async {
+    final res = await _http.get(_u('/nomad/identify/$nodeHash'));
+    return NomadIdentify.fromJson(_decode(res) as Map<String, dynamic>);
+  }
+
+  Future<NomadIdentify> setNomadIdentify(String nodeHash, bool enabled) async {
+    final res = await _http.post(
+      _u('/nomad/identify'),
+      headers: _jsonHeaders,
+      body: jsonEncode({'node_hash': nodeHash, 'enabled': enabled}),
+    );
+    return NomadIdentify.fromJson(_decode(res) as Map<String, dynamic>);
+  }
+
   Future<List<NomadBookmark>> getNomadBookmarks() async {
     final res = await _http.get(_u('/nomad/bookmarks'));
     return (_decode(res) as List<dynamic>)

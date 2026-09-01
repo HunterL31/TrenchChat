@@ -354,6 +354,23 @@ class _DeadLink:
         self.torn_down = True
 
 
+class _RecordingLink:
+    """An established link that records every identify proof sent on it."""
+
+    def __init__(self):
+        self.identified_as = []
+        self.torn_down = False
+
+    def identify(self, identity):
+        self.identified_as.append(identity)
+
+    def request(self, *args, **kwargs):
+        return object()
+
+    def teardown(self):
+        self.torn_down = True
+
+
 def _linked_conn(transport, node_hex, link):
     conn = node_transport._NodeConn(node_hex)
     conn.state = node_transport._LINKED
@@ -460,3 +477,118 @@ def test_node_announce_handler_callback_error_swallowed(transport):
     handler = NodeAnnounceHandler(bad_cb)
     handler.received_announce(
         b"\x03" * 16, transport._identity.rns_identity, b"name", b"ph")
+
+
+# ---------------------------------------------------------------------------
+# Identifying to a node
+# ---------------------------------------------------------------------------
+
+def test_no_identify_policy_means_no_identify(transport):
+    """The default is anonymity: with nothing configured, a link must never
+    carry our identity."""
+    link = _RecordingLink()
+    _linked_conn(transport, "ab" * 16, link)
+
+    transport._on_outbound_established(link)
+
+    assert link.identified_as == []
+    assert transport.is_identified("ab" * 16) is False
+
+
+def test_a_link_identifies_on_establish_when_the_policy_allows_it(transport):
+    node_hex = "ab" * 16
+    transport.set_identify_policy(lambda n: n == node_hex)
+    link = _RecordingLink()
+    _linked_conn(transport, node_hex, link)
+
+    transport._on_outbound_established(link)
+
+    assert link.identified_as == [transport._identity.rns_identity]
+    assert transport.is_identified(node_hex) is True
+
+
+def test_the_policy_is_consulted_per_node(transport):
+    allowed, other = "ab" * 16, "cd" * 16
+    transport.set_identify_policy(lambda n: n == allowed)
+    other_link = _RecordingLink()
+    _linked_conn(transport, other, other_link)
+
+    transport._on_outbound_established(other_link)
+
+    assert other_link.identified_as == []
+
+
+def test_identify_on_demand_uses_the_open_link(transport):
+    node_hex = "ab" * 16
+    transport.set_identify_policy(lambda n: True)
+    link = _RecordingLink()
+    _linked_conn(transport, node_hex, link)
+
+    assert transport.identify(node_hex) is True
+    assert link.identified_as == [transport._identity.rns_identity]
+
+
+def test_identify_with_no_link_is_a_no_op(transport):
+    transport.set_identify_policy(lambda n: True)
+    assert transport.identify("ab" * 16) is False
+
+
+def test_identify_on_demand_still_obeys_the_policy(transport):
+    """One answer to "may this node know us", with no way past it: a caller
+    cannot identify to a node the policy does not name."""
+    node_hex = "ab" * 16
+    transport.set_identify_policy(lambda n: False)
+    link = _RecordingLink()
+    _linked_conn(transport, node_hex, link)
+
+    assert transport.identify(node_hex) is False
+    assert link.identified_as == []
+
+
+def test_a_policy_that_raises_leaves_the_link_anonymous(transport):
+    """A broken policy must fail closed -- the failure mode of the other
+    direction is revealing an identity nobody asked to reveal."""
+    def boom(node_hex):
+        raise RuntimeError("policy exploded")
+
+    transport.set_identify_policy(boom)
+    link = _RecordingLink()
+    _linked_conn(transport, "ab" * 16, link)
+
+    transport._on_outbound_established(link)
+
+    assert link.identified_as == []
+
+
+def test_a_dropped_link_takes_its_identification_with_it(transport):
+    """identify() is per link, so a reconnect starts anonymous unless the
+    policy says otherwise -- is_identified must not outlive the link."""
+    node_hex = "ab" * 16
+    transport.set_identify_policy(lambda n: True)
+    link = _RecordingLink()
+    _linked_conn(transport, node_hex, link)
+    transport._on_outbound_established(link)
+    assert transport.is_identified(node_hex) is True
+
+    transport._on_link_closed(link)
+
+    assert transport.is_identified(node_hex) is False
+
+
+def test_dropping_a_link_ends_the_identification_it_carried(transport):
+    """A link cannot un-identify: the proof is read on every request it
+    carries, so stopping means closing it."""
+    node_hex = "ab" * 16
+    transport.set_identify_policy(lambda n: True)
+    link = _RecordingLink()
+    _linked_conn(transport, node_hex, link)
+    transport._on_outbound_established(link)
+
+    assert transport.drop_link(node_hex) is True
+
+    assert link.torn_down is True
+    assert transport.is_identified(node_hex) is False
+
+
+def test_dropping_a_link_that_is_not_there_is_a_no_op(transport):
+    assert transport.drop_link("ab" * 16) is False

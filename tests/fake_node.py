@@ -53,6 +53,9 @@ class FakeNodeTransport(NodeTransportBase):
         self.hosting_name: str | None = None
         self.announce_count = 0
         self._pending: dict[str, int] = {}   # node_hex -> in-flight count
+        # Nodes a link has been opened to, and those it revealed us to.
+        self.linked: set[str] = set()
+        self.identified: set[str] = set()
         self._lock = threading.RLock()
         self._threads: list[threading.Thread] = []
 
@@ -77,6 +80,9 @@ class FakeNodeTransport(NodeTransportBase):
             return
         with self.registry.lock:
             self.registry.fetch_log.append((self.self_hex, node_hash_hex, path))
+        self.linked.add(node_hash_hex)
+        if self._may_identify(node_hash_hex):
+            self.identified.add(node_hash_hex)
 
         def _resolve():
             time.sleep(self._delay)
@@ -130,6 +136,28 @@ class FakeNodeTransport(NodeTransportBase):
 
     def cancel(self, fetch_id: str) -> None:
         pass
+
+    # --- identifying ---
+
+    def identify(self, node_hash_hex: str) -> bool:
+        """Records the proof a real link would carry, gated by the same
+        policy the RNS transport consults."""
+        if node_hash_hex not in self.linked:
+            return False
+        if not self._may_identify(node_hash_hex):
+            return False
+        self.identified.add(node_hash_hex)
+        return True
+
+    def is_identified(self, node_hash_hex: str) -> bool:
+        return node_hash_hex in self.identified
+
+    def drop_link(self, node_hash_hex: str) -> bool:
+        """A closed link takes its identification with it, as a real one does."""
+        had_link = node_hash_hex in self.linked
+        self.linked.discard(node_hash_hex)
+        self.identified.discard(node_hash_hex)
+        return had_link
 
     # --- hosting ---
 

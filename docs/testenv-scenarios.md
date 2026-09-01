@@ -617,6 +617,35 @@ your own node is never dialled: RNS cannot link a destination to itself, so
 through the ordinary fetch machinery, which is also why a page of your own
 is re-read on every visit rather than served from its `#!c=` cache.
 
+Identify-on-connect was verified the same way, against a real nomadnet
+1.2.9 node serving an executable page that echoes its `remote_identity`
+environment variable — the same variable a forum like rns.recipes keys an
+account to. Browsing anonymously, the page reported `ANONYMOUS`; after
+enabling identify for that node, the very next request on the *same* link
+reported our exact identity hash; tearing the link down and fetching again
+identified the fresh link from the stored choice alone. So both models
+work: nomadnet's directory checkbox (persisted, applies to the next link)
+and MeshChat's fingerprint button (identifies the link already open). We do
+not need nomadnet's disconnect-and-reconnect step, because `Link.identify`
+is legal on an active link and the node reads `remote_identity` per request.
+
+Turning it off is the half worth spelling out, because the obvious
+implementation is wrong: a link cannot un-identify. The proof is sent once
+and the node reads it on every request that link carries, so clearing the
+stored flag alone would keep reporting the identity for as long as the link
+lived — up to `NODE_LINK_IDLE_SECS`, and indefinitely while the user keeps
+reading. `set_identify(..., False)` therefore drops the link, and the same
+probe confirms the next page comes back `ANONYMOUS` rather than at the next
+idle timeout.
+
+It is opt-in per node and defaults to off, which is where the design choice
+sits: identifying tells that operator, provably and permanently, that this
+identity visited, so a bug that identified by accident is not recoverable by
+turning the setting back off. The transport therefore fails closed — no
+policy, a policy that raises, or a node the policy does not name all leave
+the link anonymous, and `tests/test_node_transport.py` asserts each of those
+three against a link that records every proof sent on it.
+
 One deliberate divergence: nomadnet strips Unicode combining and format
 characters from everything it renders, zero-width joiners included, which
 also breaks emoji sequences. We strip only the characters that actually
