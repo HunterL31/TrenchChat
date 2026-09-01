@@ -1,7 +1,7 @@
 """
 Synthesized UI event sounds for voice sessions.
 
-Two short two-tone blips — rising for a join, falling for a leave — built
+Two short two-tone blips (rising for a join, falling for a leave) built
 in code so the repo carries no audio assets. Each cue is a list of
 playout-sized PCM frames the pipeline mixes in with the live streams.
 """

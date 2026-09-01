@@ -1,5 +1,5 @@
 """
-The voice device endpoints of the HTTP/WS API — the surface the Flutter
+The voice device endpoints of the HTTP/WS API, the surface the Flutter
 settings picker codes against. Like test_api_theme.py these need no peer:
 the backend is stubbed down to the config and voice manager the device
 actions touch.

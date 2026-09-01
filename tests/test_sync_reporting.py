@@ -88,7 +88,7 @@ def _sync_response_fields(messages: list[dict], truncated: bool = False,
 
 
 # ---------------------------------------------------------------------------
-# Group F — status honesty
+# Group F: status honesty
 # ---------------------------------------------------------------------------
 
 class TestPruneMustBeDrivenFromOutside:
@@ -316,7 +316,7 @@ class TestPublicChannelAfterRestart:
 
 
 # ---------------------------------------------------------------------------
-# Group G — transport / identity edges
+# Group G: transport / identity edges
 # ---------------------------------------------------------------------------
 
 class TestPendingRequestKeyCollision:

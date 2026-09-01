@@ -1,5 +1,5 @@
 """
-Adversarial tests — bad clients that deliberately bypass permission restrictions.
+Adversarial tests, bad clients that deliberately bypass permission restrictions.
 
 Each test simulates a peer that ignores the normal UI/API flow and directly
 crafts or injects protocol messages as if it were a malicious or buggy client.
@@ -28,7 +28,7 @@ Scenarios covered:
   MANAGE_CHANNEL
     - Member without MANAGE_CHANNEL calls broadcast_permissions directly
       (the core does not gate broadcast_permissions on MANAGE_CHANNEL, but
-       the permissions it embeds are already in the DB — so a member can't
+       the permissions it embeds are already in the DB, so a member can't
        change the DB without MANAGE_CHANNEL; this test confirms that)
 
   MEMBER LIST INTEGRITY
@@ -153,7 +153,7 @@ class TestAdversarialSendMessage:
         ch_hash = alice.channel_mgr.create_channel("members-only", "", "invite")
         alice.invite_mgr.publish_member_list(ch_hash)
 
-        # Carol is not a member — she just knows the channel hash
+        # Carol is not a member, she just knows the channel hash
         carol.storage.upsert_channel(ch_hash, "members-only", "",
                                      alice.identity.hash_hex, "invite", time.time())
         carol.storage.subscribe(ch_hash)
@@ -209,7 +209,7 @@ class TestAdversarialInvite:
     def test_member_without_invite_cannot_approve_join(self, peer_factory):
         """
         Bob is a member but lacks INVITE permission.
-        He calls publish_member_list(add_members=[carol]) directly — the core
+        He calls publish_member_list(add_members=[carol]) directly, the core
         must accept the add_members (INVITE gates join-request approval, not
         direct adds by the owner), but when Bob tries to handle a join_request
         on Alice's behalf the _handle_join_request check must block him.
@@ -237,7 +237,7 @@ class TestAdversarialInvite:
             F_EXPIRY_TS:    expiry,
             F_ADMIN_HASH:   alice.identity.hash,
         }
-        # Bob's invite_mgr receives the join request — he lacks INVITE
+        # Bob's invite_mgr receives the join request, he lacks INVITE
         bob.invite_mgr._handle_join_request(fields, ch_hash)
 
         time.sleep(0.3)
@@ -428,7 +428,7 @@ class TestAdversarialManageChannel:
         evil_perms[ROLE_MEMBER] = list(ALL_PERMISSIONS)  # grant members everything
         bob.storage.set_channel_permissions(ch_hash, evil_perms)
 
-        # Bob broadcasts the change — his doc is signed by a non-admin key
+        # Bob broadcasts the change, his doc is signed by a non-admin key
         bob.invite_mgr.broadcast_permissions(ch_hash)
 
         time.sleep(0.3)
@@ -524,7 +524,7 @@ class TestAdversarialManageChannel:
 
 
 # ---------------------------------------------------------------------------
-# INVITE TOKEN — cross-channel and cross-invitee misuse
+# INVITE TOKEN: cross-channel and cross-invitee misuse
 # ---------------------------------------------------------------------------
 
 class TestAdversarialTokenMisuse:
@@ -715,7 +715,7 @@ class TestAdversarialMemberListIntegrity:
     def test_crafted_doc_cannot_add_self_to_owners(self, peer_factory):
         """
         Bob crafts a doc that adds himself to the owners list, signed by Bob.
-        Must be rejected — Bob is not a trusted signer.
+        Must be rejected, Bob is not a trusted signer.
         """
         alice, bob, ch_hash = _setup_channel_with_member(
             peer_factory, member_perms=[SEND_MESSAGE]
@@ -795,7 +795,7 @@ class TestAdversarialMemberListIntegrity:
             "signatures":   {bob.identity.hash: bob_sig},
         }
 
-        # Determine which signer hash is lower — that doc should win
+        # Determine which signer hash is lower, that doc should win
         if alice.identity.hash < bob.identity.hash:
             winner_doc, loser_doc = alice_doc, bob_doc
             winner_name = "alice"
@@ -863,7 +863,7 @@ class TestAdversarialMemberListIntegrity:
 
 
 # ---------------------------------------------------------------------------
-# MEMBERSHIP TENURE — sync replay by kicked members
+# MEMBERSHIP TENURE: sync replay by kicked members
 # ---------------------------------------------------------------------------
 
 class TestAdversarialTenure:
@@ -876,7 +876,7 @@ class TestAdversarialTenure:
             peer_factory, member_perms=[SEND_MESSAGE]
         )
         # publish_member_list in _setup already created tenure rows for alice and bob.
-        # No need to manually open tenure — doing so would create stale open intervals.
+        # No need to manually open tenure, doing so would create stale open intervals.
         assert alice.storage.has_any_tenure(ch_hash), \
             "Tenure should be populated by publish_member_list"
 
@@ -999,7 +999,7 @@ class TestAdversarialTenure:
         alice, bob, ch_hash = _setup_channel_with_member(
             peer_factory, member_perms=[SEND_MESSAGE]
         )
-        # publish_member_list already created tenure rows — confirm they exist
+        # publish_member_list already created tenure rows, confirm they exist
         assert alice.storage.has_any_tenure(ch_hash)
 
         # Alice kicks Bob
@@ -1059,7 +1059,7 @@ class TestAdversarialTenure:
         valid_content = "Message before kick — valid"
         valid_msg_id = _compute_message_id(valid_content, bob.identity.hash_hex, valid_ts)
 
-        # Alice kicks Bob — the kick published_at must be > valid_ts
+        # Alice kicks Bob: the kick published_at must be > valid_ts
         time.sleep(0.01)  # ensure kick timestamp is strictly after valid_ts
         alice.invite_mgr.publish_member_list(
             ch_hash, remove_members=[bob.identity.hash]
@@ -1072,7 +1072,7 @@ class TestAdversarialTenure:
         assert kick_published_at > valid_ts, \
             "Test setup error: kick_published_at must be after valid_ts"
 
-        # Sync delivers the pre-kick message — must be accepted.
+        # Sync delivers the pre-kick message, must be accepted.
         # Responses are only applied in answer to a request we issued, so
         # solicit one first; an unsolicited response is covered separately by
         # TestAdversarialSyncInjection.
@@ -1350,7 +1350,7 @@ class TestAdversarialUnauthenticatedDelivery:
 
 
 # ---------------------------------------------------------------------------
-# SYNC INJECTION — unsolicited history and unauthorised hints
+# SYNC INJECTION: unsolicited history and unauthorised hints
 # ---------------------------------------------------------------------------
 
 class TestAdversarialSyncInjection:
@@ -1546,7 +1546,7 @@ class TestAdversarialSyncInjection:
 
 
 # ---------------------------------------------------------------------------
-# REACTIONS — membership and SEND_MESSAGE
+# REACTIONS: membership and SEND_MESSAGE
 # ---------------------------------------------------------------------------
 
 class TestAdversarialReactions:
@@ -1691,7 +1691,7 @@ class TestAdversarialPayloadLimits:
 
 
 # ---------------------------------------------------------------------------
-# ADMIN ADVERSARY — a trusted signer exceeding their own permissions
+# ADMIN ADVERSARY: a trusted signer exceeding their own permissions
 # ---------------------------------------------------------------------------
 
 def _setup_channel_with_admin(peer_factory, *, admin_perms=None):
@@ -2004,7 +2004,7 @@ class TestAdversarialAdminSigner:
 class TestAdversarialTokenReuse:
     """
     The token is an unforgeable Ed25519 signature bound to invitee, channel
-    and expiry — but it is a bearer credential, so unforgeable is not the same
+    and expiry, but it is a bearer credential, so unforgeable is not the same
     as un-replayable.
     """
 
@@ -2068,7 +2068,7 @@ class TestAdversarialTokenReuse:
     def test_kicked_admin_loses_signing_authority(self, peer_factory):
         """
         remove_members stripped only `members`, leaving the kicked admin in
-        `admins` — and trusted_signers is derived from exactly that list, so
+        `admins`, and trusted_signers is derived from exactly that list, so
         they could sign themselves straight back in.
         """
         alice, bob, ch_hash = _setup_channel_with_admin(peer_factory)
@@ -2537,7 +2537,7 @@ class TestAdversarialRoster:
             "a roster entry with a fabricated hash was materialised"
 
     def test_legitimate_roster_entry_is_accepted(self, peer_factory):
-        """Control case — the defences must not reject honest rosters."""
+        """Control case: the defences must not reject honest rosters."""
         alice, bob, s = _server_with_member(peer_factory)
         existing = bob.storage.get_member_list_version(s)
         good = _roster_row(alice.identity.hash, "general")

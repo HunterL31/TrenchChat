@@ -85,7 +85,7 @@ class TestInviteTokens:
         RNS.Identity.recall() only returns identities learned from the network;
         it never returns the local identity.  Before this fix, an admin handling
         their own join request would get None from recall() and log
-        "identity not known, path requested" — causing the invite to be silently
+        "identity not known, path requested", causing the invite to be silently
         dropped even though both peers were connected.
         """
         alice = peer_factory("alice")
@@ -309,7 +309,7 @@ class TestMemberListVersioning:
                                    "invite", time.time())
         bob.storage.subscribe(ch_hash)
 
-        # Now add Carol — Bob should receive the updated list
+        # Now add Carol: Bob should receive the updated list
         alice.invite_mgr.publish_member_list(ch_hash, add_members=[carol.identity.hash])
 
         assert wait_for_member(bob.storage, ch_hash, carol.identity.hash_hex, timeout=5), \
@@ -318,7 +318,7 @@ class TestMemberListVersioning:
 
 class TestDocumentFormatCompatibility:
     """The v4 roster field must not change what a standalone channel puts on
-    the wire — that is the regression guarantee for every existing channel."""
+    the wire; that is the regression guarantee for every existing channel."""
 
     def test_standalone_payload_is_byte_identical_without_roster(self):
         from trenchchat.core.invite import _signed_payload

@@ -37,7 +37,7 @@ def resolve_device(configured: str | int | None, kind: str) -> int | None:
 
     kind is "input" or "output". None means the system default; so does a
     name or index that no longer matches a present device with channels in
-    that direction — falling back keeps voice working after an unplug.
+    that direction; falling back keeps voice working after an unplug.
     """
     if configured is None:
         return None

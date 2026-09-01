@@ -2,9 +2,9 @@
 Gossip-based message gap sync.
 
 Three mechanisms work together:
-  1. Messaging.flush_pending()        — sender retries queued messages when peer reappears
-  2. MT_MISSED_DELIVERY broadcast     — sender tells online peers which subscriber missed a message
-  3. MT_SYNC_REQUEST / MT_SYNC_RESPONSE — reconnecting peer pulls missing messages from any peer
+  1. Messaging.flush_pending(): sender retries queued messages when peer reappears
+  2. MT_MISSED_DELIVERY broadcast: sender tells online peers which subscriber missed a message
+  3. MT_SYNC_REQUEST / MT_SYNC_RESPONSE: reconnecting peer pulls missing messages from any peer
 
 Flow when B reconnects:
   - PeerAnnounceHandler fires on_peer_appeared(B)

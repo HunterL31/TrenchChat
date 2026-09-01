@@ -1081,7 +1081,7 @@ class TestSyncOnChannelJoin:
 
 
 # ---------------------------------------------------------------------------
-# Membership tenure — sync filtering
+# Membership tenure: sync filtering
 # ---------------------------------------------------------------------------
 
 from trenchchat.core.permissions import (
@@ -1172,7 +1172,7 @@ class TestTenureSyncFiltering:
             received_at=gap_ts,
         )
 
-        # Alice requests sync from Carol — Carol must NOT serve the gap message
+        # Alice requests sync from Carol, Carol must NOT serve the gap message
         alice.storage.open_tenure(ch_hash, alice.identity.hash_hex, join_ts)
         alice.storage.open_tenure(ch_hash, bob.identity.hash_hex, join_ts)
         alice.sync_mgr._send_sync_request(carol.identity.hash_hex, ch_hash, join_ts)
@@ -1224,7 +1224,7 @@ class TestTenureSyncFiltering:
         carol.storage.close_tenure(ch_hash, bob.identity.hash_hex, kick_ts)
         carol.storage.remove_member(ch_hash, bob.identity.hash_hex)
 
-        # Alice requests sync — Carol should serve the pre-kick message
+        # Alice requests sync: Carol should serve the pre-kick message
         alice.storage.open_tenure(ch_hash, alice.identity.hash_hex, join_ts)
         alice.storage.open_tenure(ch_hash, bob.identity.hash_hex, join_ts)
         alice.sync_mgr._send_sync_request(carol.identity.hash_hex, ch_hash, join_ts)
@@ -1567,7 +1567,7 @@ class TestTenureSyncFiltering:
     def test_no_tenure_data_allows_sync_without_filtering(self, peer_factory):
         """
         When no tenure data exists for a channel (e.g. open-join channel or
-        legacy data), sync proceeds without filtering — no false rejections.
+        legacy data), sync proceeds without filtering, no false rejections.
         """
         alice = peer_factory("alice")
         bob = peer_factory("bob")
@@ -1579,7 +1579,7 @@ class TestTenureSyncFiltering:
         msg_id = _insert_message(alice.storage, ch_hash, alice.identity.hash_hex,
                                   "No tenure check needed", ts + 1)
 
-        # No tenure rows — has_any_tenure returns False, filter is bypassed
+        # No tenure rows: has_any_tenure returns False, filter is bypassed
         assert not bob.storage.has_any_tenure(ch_hash)
 
         bob.sync_mgr._send_sync_request(alice.identity.hash_hex, ch_hash, ts)

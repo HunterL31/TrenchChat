@@ -3,7 +3,7 @@ Wire format for voice frame packets sent over RNS Links.
 
 This is the link-plane counterpart of trenchchat/core/protocol.py: the
 single place voice packet types and layouts are defined, deliberately
-dependency-free. Packets are fixed binary, not msgpack — every packet must
+dependency-free. Packets are fixed binary, not msgpack, every packet must
 fit a single link MDU (431 bytes on rns 1.4.2) and audio framing overhead
 matters at 25 packets per second per stream.
 

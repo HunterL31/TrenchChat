@@ -10,7 +10,7 @@ from pathlib import Path
 
 import RNS
 
-# Owner read+write only — no group or other access.
+# Owner read+write only: no group or other access.
 OWNER_RW_MODE = 0o600
 
 
@@ -53,7 +53,7 @@ def secure_file(path: Path) -> None:
 
     If the operation fails for any reason (e.g. the file lives on a
     filesystem that does not support permissions) the error is logged as a
-    warning and silently ignored — a permission failure must never prevent
+    warning and silently ignored, a permission failure must never prevent
     the application from starting.
     """
     try:

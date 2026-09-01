@@ -1,5 +1,5 @@
 """
-Integration tests for servers — collections of channels sharing one membership.
+Integration tests for servers, collections of channels sharing one membership.
 
 The contract under test:
   - one invite to a server admits a peer to every channel in it

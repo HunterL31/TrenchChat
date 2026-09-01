@@ -65,7 +65,7 @@ class TestDiscordComparableProfile:
         assert VOICE_FRAME_MS == DISCORD_FRAME_MS
 
     def test_discord_default_bitrate_fits_wire_format(self):
-        """64 kbps — Discord's default voice bitrate — must be usable:
+        """64 kbps (Discord's default voice bitrate) must be usable:
         every encoded frame within the per-frame cap, and size-aware
         bundling keeping every packet within one link MDU even across
         VBR peaks."""
@@ -236,7 +236,7 @@ class TestRxQualityMetrics:
 
         loss and jitter are clocked by sequence number, so a sender emitting
         every frame but 25% slower than its own seq spacing claims scores 0%
-        loss and near-zero jitter — while the listener's jitter buffer drains,
+        loss and near-zero jitter, while the listener's jitter buffer drains,
         starves and refills, which is audible as the stream cutting in and out.
         Wall-clock rate is the only metric here that sees it.
         """

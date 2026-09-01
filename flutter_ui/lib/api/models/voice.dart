@@ -131,7 +131,7 @@ class VoiceStatus {
   }
 }
 
-/// GET /voice/devices — the PortAudio devices the backend can capture from
+/// GET /voice/devices, the PortAudio devices the backend can capture from
 /// and play to, plus the configured selection (null = system default).
 class AudioDevices {
   const AudioDevices({

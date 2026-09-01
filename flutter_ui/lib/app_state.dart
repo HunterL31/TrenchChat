@@ -114,7 +114,7 @@ class AppState extends ChangeNotifier {
 
   /// One-line headline for the voice panel's audio warning, empty when the
   /// pipeline is fully up. Distinguishes total failure from one direction
-  /// down — the pipeline runs whichever of mic/speakers opened.
+  /// down; the pipeline runs whichever of mic/speakers opened.
   String get voiceAudioWarning {
     if (voiceStatus.channel == null) return '';
     if (!voiceStatus.audioAvailable) return 'NO AUDIO — CAPTURE AND PLAYBACK DOWN';

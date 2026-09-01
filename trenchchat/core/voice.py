@@ -3,7 +3,7 @@ Live group voice sessions.
 
 Every channel implicitly has one voice room. Signalling rides LXMF control
 messages (join/leave/state) and is deliberately low-rate; audio frames never
-touch LXMF — they flow over RNS Links managed by a VoiceTransport
+touch LXMF, they flow over RNS Links managed by a VoiceTransport
 (trenchchat/network/voice_transport.py) injected at construction.
 
 Every signalling message asserts state about the sender only; nobody relays
@@ -236,7 +236,7 @@ class VoiceManager:
         self._notify_roster(channel_hash_hex)
 
     def restart_audio(self) -> None:
-        """Rebuild the audio pipeline mid-session — after a device change,
+        """Rebuild the audio pipeline mid-session, after a device change,
         or when a stream died under an unplugged device. Device names are
         re-resolved on start, so a vanished device falls back to the system
         default. No-op outside a session."""
@@ -344,7 +344,7 @@ class VoiceManager:
 
         rx_quality per peer: received/lost/late frame counts, loss_pct,
         smoothed inter-arrival jitter in ms (RFC 3550-style, using frame
-        sequence numbers as the send clock), and rate_fps — frames per
+        sequence numbers as the send clock), and rate_fps, frames per
         second of wall clock, None until a peer has been heard for
         RATE_MIN_SPAN_SECS. Everything but rate_fps is clocked by sequence
         number, so a uniformly slow sender scores clean on all of them
@@ -438,7 +438,7 @@ class VoiceManager:
         """Core inbound enforcement: may this peer participate in voice?
 
         Unknown channels fail closed. Open-join channels have no member
-        table to check against, so any authenticated sender is allowed —
+        table to check against, so any authenticated sender is allowed,
         the same semantics send_message uses.
         """
         channel = self._storage.get_channel(channel_hash_hex)
@@ -551,7 +551,7 @@ class VoiceManager:
             self._notify_roster(channel_hash_hex)
             return
 
-        # JOIN and STATE both upsert the sender's own entry — never anyone
+        # JOIN and STATE both upsert the sender's own entry, never anyone
         # else's, so a forged message can't assert third-party presence.
         muted = bool(fields.get(F_VOICE_MUTED, False))
         joined_at = fields.get(F_VOICE_JOINED_AT)

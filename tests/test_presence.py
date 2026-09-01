@@ -186,7 +186,7 @@ def test_prune_does_not_fire_for_fresh_peers():
         mgr.record_seen(PEER_A)
         events.clear()
 
-        # Prune before timeout — PEER_A should stay
+        # Prune before timeout: PEER_A should stay
         mock_time.time.return_value = now + PRESENCE_TIMEOUT_SECS - 5
         mgr.prune()
 
@@ -278,7 +278,7 @@ def test_callback_exception_does_not_propagate():
 
 
 # ---------------------------------------------------------------------------
-# record_offline — a peer's graceful-shutdown notice
+# record_offline: a peer's graceful-shutdown notice
 # ---------------------------------------------------------------------------
 
 def test_record_offline_marks_peer_offline():

@@ -7,7 +7,7 @@ other waits (and falls back to dialing if nothing arrives in time, covering
 one-way reachability). The initiator identifies itself on the link and sends
 VP_HELLO; the responder authorizes via an injected callback and answers
 VP_ACCEPT. Only then do audio frames flow, as fire-and-forget unreliable
-packets — losses are concealed by the codec, never retransmitted.
+packets; losses are concealed by the codec, never retransmitted.
 
 This module never touches Storage or core managers; authorization is a
 callback so the layering matches network/router.py.
@@ -477,7 +477,7 @@ class RNSVoiceTransport(VoiceTransportBase):
 
             # The canonical link between a pair is the one initiated by the
             # smaller identity hash. If we are the canonical initiator and
-            # have a live attempt of our own, refuse this duplicate — both
+            # have a live attempt of our own, refuse this duplicate, both
             # sides then deterministically converge on our link.
             own_attempt_live = conn.link is not None and conn.link is not link \
                 and conn.state in (_DIALING, _LINKED, _STREAMING)

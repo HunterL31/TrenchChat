@@ -117,7 +117,7 @@ class TestSubscriberListBroadcast:
         carol.subscription_mgr.subscribe(ch_hash, owner_hash_hex=alice.identity.hash_hex)
         assert wait_for_subscriber(alice, ch_hash, carol.identity.hash_hex, timeout=5)
 
-        # Now Bob subscribes — Alice broadcasts the updated list to Carol and Bob
+        # Now Bob subscribes: Alice broadcasts the updated list to Carol and Bob
         bob.subscription_mgr.subscribe(ch_hash, owner_hash_hex=alice.identity.hash_hex)
         assert wait_for_subscriber(alice, ch_hash, bob.identity.hash_hex, timeout=5)
 

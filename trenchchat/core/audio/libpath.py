@@ -4,7 +4,7 @@ Point ctypes at voice libraries dropped into the repo.
 opuslib resolves libopus with ctypes.util.find_library at import time,
 which only searches system locations. The frozen app ships the library
 and hooks the search (packaging/hooks/rthook_voice_libs.py); a source
-checkout gets the same by placing the library in packaging/voicelibs/ —
+checkout gets the same by placing the library in packaging/voicelibs/,
 the one workable spot on Windows, which has no package manager to
 install libopus from.
 """
@@ -19,7 +19,7 @@ _hooked_dirs: set[Path] = set()
 def ensure_voice_libs_findable(lib_dir: Path | None = None) -> None:
     """Extend ctypes.util.find_library to check the repo's voicelibs dir.
 
-    Must run before opuslib is imported — it binds find_library's result
+    Must run before opuslib is imported, it binds find_library's result
     once, at its own import. A missing directory is a no-op; hooking the
     same directory twice is too.
     """

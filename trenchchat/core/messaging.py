@@ -2,40 +2,40 @@
 Send and receive channel messages over LXMF.
 
 LXMF fields layout:
-    0x01  channel_hash      bytes[16]   — which channel
-    0x02  display_name      str         — sender display name
-    0x03  timestamp         float       — sender wall-clock Unix epoch
-    0x04  message_id        bytes[32]   — SHA-256 of content+sender+timestamp; hex in storage
-    0x05  reply_to          bytes[32]   — message_id of the message being replied to, or None
-    0x06  last_seen_id      bytes[32]   — message_id of the latest msg sender had seen, or None
-    0x07  sync_window_start float       — unix timestamp: start of sync window (sync_request)
-    0x08  sync_messages     bytes       — msgpack list[dict] of full message records (sync_response)
-    0x09  missed_for        str         — identity hex of peer who missed a message (missed_delivery)
-    0x0A  missed_msg_id     bytes[32]   — message_id that was not delivered (missed_delivery)
-    0x0D  image_data        bytes|None  — JPEG image attachment payload (max 320 KB)
-    0x15  invite_issued_ts  float       — when an invite token was issued, bound into
+    0x01  channel_hash      bytes[16]:  which channel
+    0x02  display_name      str:        sender display name
+    0x03  timestamp         float:      sender wall-clock Unix epoch
+    0x04  message_id        bytes[32]:  SHA-256 of content+sender+timestamp; hex in storage
+    0x05  reply_to          bytes[32]:  message_id of the message being replied to, or None
+    0x06  last_seen_id      bytes[32]:  message_id of the latest msg sender had seen, or None
+    0x07  sync_window_start float:      start of the sync window, unix timestamp (sync_request)
+    0x08  sync_messages     bytes:      msgpack list[dict] of full message records (sync_response)
+    0x09  missed_for        str:        identity hex of peer who missed a message (missed_delivery)
+    0x0A  missed_msg_id     bytes[32]:  message_id that was not delivered (missed_delivery)
+    0x0D  image_data        bytes|None: JPEG image attachment payload (max 320 KB)
+    0x15  invite_issued_ts  float:      when an invite token was issued, bound into
                                           its signature so a departure recorded after it
                                           invalidates it at every peer
-    0x28  scope_kind        str         — "server" when a control message targets a
+    0x28  scope_kind        str, "server" when a control message targets a
                                           server scope; absent means a single channel
-    0x43  reaction_unicode  str         — reaction key for a standard unicode emoji;
+    0x43  reaction_unicode  str, reaction key for a standard unicode emoji;
                                           mutually exclusive with 0x0E emoji_hash,
                                           which only carries a custom emoji (reaction)
-    0x50  sync_truncated    bool        — responder capped this batch and holds more
+    0x50  sync_truncated    bool, responder capped this batch and holds more
                                           history (sync_response)
-    0x51  sync_scan_cursor  float       — furthest timestamp the responder's sweep
+    0x51  sync_scan_cursor  float, furthest timestamp the responder's sweep
                                           reached, even if withheld outright; only set
                                           when truncated (sync_response)
-    0x60  voice_state       str         — "joined" | "left" (voice signalling)
-    0x61  voice_muted       bool        — sender's current mute state
-    0x62  voice_joined_at   float       — when the sender joined the voice session
-    0x63  voice_codec       str         — codec the sender transmits ("opus")
-    0x70  author_sig        bytes[64]   — author's Ed25519 signature binding the
+    0x60  voice_state       str, "joined" | "left" (voice signalling)
+    0x61  voice_muted       bool, sender's current mute state
+    0x62  voice_joined_at   float, when the sender joined the voice session
+    0x63  voice_codec       str, codec the sender transmits ("opus")
+    0x70  author_sig        bytes[64], author's Ed25519 signature binding the
                                           message to its author (see authorship.py)
-    0x71  author_keys       dict        — {author hex: public key} sent with a sync
+    0x71  author_keys       dict, {author hex: public key} sent with a sync
                                           batch, so a relayed message stays checkable
                                           after its author leaves
-    0x80  friend_note       str         — optional intro line on a friend request
+    0x80  friend_note       str, optional intro line on a friend request
                                           (friends.py); never on a chat message
 
 A direct message uses none of the fields above. It is a plain LXMF message --
@@ -494,7 +494,7 @@ class Messaging:
             delivery_dest_hash = RNS.Destination.hash(identity_hash, "lxmf", "delivery")
             dest_identity = RNS.Identity.recall(delivery_dest_hash)
             if dest_identity is None:
-                # Still unreachable — put back
+                # Still unreachable: put back
                 self._pending[dest_hex] = queued
                 return
             for params in queued:

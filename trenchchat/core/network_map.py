@@ -23,18 +23,18 @@ def gather_network_data(rns: RNS.Reticulum, self_hex: str,
     """
     Query the RNS instance for the current network topology.
 
-    storage   — optional Storage instance; when provided, peer nodes are labelled
+    storage: optional Storage instance; when provided, peer nodes are labelled
                 with the display name stored in the members table (i.e. the name
                 seen in channel member lists) in preference to the announce app_data.
-    directory — optional UserDirectory; identities it contains (fed by
+    directory: optional UserDirectory; identities it contains (fed by
                 trenchchat.user announces) are marked as TrenchChat clients.
 
     Returns a dict with keys:
-      nodes  — list[dict]: id, label, kind ('self'|'transport'|'peer'|'unknown'),
+      nodes: list[dict] with id, label, kind ('self'|'transport'|'peer'|'unknown'),
                hops, quality, trenchchat (bool: known TrenchChat client)
-      edges  — list[dict]: src, dst, hops, direct (bool)
-      interfaces — list[dict]: name, type, status, rxb, txb
-      stats  — dict: node_count, path_count, interface_count
+      edges: list[dict] with src, dst, hops, direct (bool)
+      interfaces: list[dict] with name, type, status, rxb, txb
+      stats: dict with node_count, path_count, interface_count
     """
     nodes: dict[str, dict] = {}   # hash_hex -> node dict
     edges: list[dict] = []
@@ -120,7 +120,7 @@ def gather_network_data(rns: RNS.Reticulum, self_hex: str,
                                        else bytes.fromhex(dest_hex))
         identity_hex: str | None = identity.hash.hex() if identity is not None else None
 
-        # If we already have a node for this identity, reuse it — skip adding a
+        # If we already have a node for this identity, reuse it, skip adding a
         # duplicate node and redirect edges to the canonical one.
         if identity_hex and identity_hex in identity_to_node:
             canonical_id = identity_to_node[identity_hex]
@@ -146,7 +146,7 @@ def gather_network_data(rns: RNS.Reticulum, self_hex: str,
                     "trenchchat":   _is_trenchchat(identity_hex, member_identities, directory),
                 }
             elif identity_hex and nodes[dest_hex].get("identity_hex") is None:
-                # A later path-table entry resolved the identity — backfill it.
+                # A later path-table entry resolved the identity, backfill it.
                 nodes[dest_hex]["identity_hex"] = identity_hex
                 nodes[dest_hex]["label"] = _make_label(dest_hex, identity, kind, storage)
                 nodes[dest_hex]["trenchchat"] = _is_trenchchat(
@@ -309,7 +309,7 @@ def _make_label(hex_id: str, identity, kind: str, storage=None) -> str:
     if identity is not None:
         identity_hex = identity.hash.hex()
 
-    # 1. Storage lookup — name from any channel's member list
+    # 1. Storage lookup: name from any channel's member list
     if storage is not None and identity_hex is not None:
         try:
             stored_name = storage.get_display_name_for_identity(identity_hex)

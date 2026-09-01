@@ -252,7 +252,7 @@ class TestSendMessagePermission:
         alice.storage.set_channel_permissions(ch_hash, no_send_perms)
         bob.storage.set_channel_permissions(ch_hash, no_send_perms)
 
-        # Bob tries to send — Alice's receiver should drop it.
+        # Bob tries to send, Alice's receiver should drop it.
         bob.messaging.send_message(
             channel_hash_hex=ch_hash,
             content="Should be dropped",

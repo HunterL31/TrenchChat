@@ -5,8 +5,8 @@ A scenario is one row of docs/testenv-scenarios.md: an ordered sequence of
 client actions and the state every peer must converge on.
 
 Two kinds:
-  - "strict" — the expected result is settled behavior. Failing is a bug.
-  - "probe"  — the expected result is a prediction about behavior no test
+  - "strict": the expected result is settled behavior. Failing is a bug.
+  - "probe": the expected result is a prediction about behavior no test
                covers yet. It records what actually happened and never fails
                the run; a surprise here is a finding, not a regression.
 """

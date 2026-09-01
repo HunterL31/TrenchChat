@@ -112,7 +112,7 @@ class TestTransport:
             dest_hash_hex = dest_hash.hex()
             recipient_router = self._peers.get(dest_hash_hex)
             if recipient_router is None:
-                # Unknown destination — simulate delivery failure
+                # Unknown destination: simulate delivery failure
                 lxm.state = LXMF.LXMessage.FAILED
                 if getattr(lxm, "failed_callback", None):
                     lxm.failed_callback(lxm)
