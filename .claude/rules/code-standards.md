@@ -102,6 +102,27 @@ descriptions, commit messages) follows one standard above all else: clean,
 concise, simple wording. Say the thing in as few plain words as possible. No
 filler, no hedging, no jargon where a plain word works.
 
+### No em dashes
+
+The em dash is banned in every piece of prose here: docstrings, comments, markdown,
+commit messages, PR descriptions. Use a colon before a definition or a label, a
+semicolon between two independent clauses, parentheses around an aside, and a comma
+for the rest.
+
+```python
+# ❌
+# LXMF may deliver this as bytes — always coerce.
+
+# ✅
+# LXMF may deliver this as bytes; always coerce.
+```
+
+That is one rule from a longer anti-slop standard: no intensifiers standing in for
+evidence, no hedging on settled facts, no filler openers, and headings that name
+their content instead of teasing it. The full list is the `no-ai-slop` skill.
+Invoke it before writing or editing prose here when it is available; these rules
+hold regardless.
+
 ### Docstrings
 
 Every module, public class, and public method must have a docstring. Use
