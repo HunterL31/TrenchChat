@@ -37,13 +37,13 @@ dest = RNS.Destination(
 ## Constructing LXMessages
 
 - Set `desired_method=LXMF.LXMessage.DIRECT` for all peer-to-peer messages.
-- Wrap the field dict with `protocol.pack_fields()` — TrenchChat's field keys sit in
+- Wrap the field dict with `protocol.pack_fields()`, TrenchChat's field keys sit in
   LXMF's reserved range and must never appear as bare LXMF field keys on the wire.
   The receiving `Router` unwraps once, so inbound handlers see the inner dict.
   Direct messages are the exception: they use LXMF's standard fields directly
   (`pack_dm_envelope`), so foreign clients can read them.
 - Use `lxm.content` (the constructor's `content` arg) for human-readable text only.
-- Control messages carry no human-readable content — pass `""` as content.
+- Control messages carry no human-readable content, pass `""` as content.
 
 ```python
 lxm = LXMF.LXMessage(
@@ -56,7 +56,7 @@ lxm.fields = pack_fields({ F_MSG_TYPE: MT_SUBSCRIBE, F_CHANNEL_HASH: channel_has
 self._router.send(lxm)
 ```
 
-## Path requests — no blocking
+## Path requests: no blocking
 
 When `Identity.recall()` returns `None`, request the path and return immediately.
 **Never** block with `time.sleep()` waiting for a path to resolve.
@@ -93,7 +93,7 @@ class MyAnnounceHandler:
 
 ## Logging
 
-Always use `RNS.log()` — never `print()` or the stdlib `logging` module.
+Always use `RNS.log()`, never `print()` or the stdlib `logging` module.
 Prefix every message with `"TrenchChat:"` (or `"TrenchChat [subsystem]:"` for
 subsystem-specific messages) so log lines are easy to grep.
 
@@ -103,10 +103,10 @@ RNS.log("TrenchChat [invite]: join request received", RNS.LOG_NOTICE)
 ```
 
 Log level guide:
-- `LOG_DEBUG`  — verbose trace, disabled in normal operation
-- `LOG_NOTICE` — normal lifecycle events (connected, announced, joined)
-- `LOG_WARNING` — recoverable problems (path unknown, parse error, rejected message)
-- `LOG_ERROR`  — unexpected failures that may affect correctness
+- `LOG_DEBUG`: verbose trace, disabled in normal operation
+- `LOG_NOTICE`: normal lifecycle events (connected, announced, joined)
+- `LOG_WARNING`: recoverable problems (path unknown, parse error, rejected message)
+- `LOG_ERROR`: unexpected failures that may affect correctness
 
 ## Resolving sender identity from an inbound LXMessage
 

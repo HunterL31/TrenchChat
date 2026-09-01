@@ -30,14 +30,14 @@ layer allows a bad client (or a bug) to bypass the restriction.
 Direct messages are gated by mutual friendship rather than a channel permission, but the same
 three-layer shape applies: the client offers a conversation only for an accepted friend, the
 `/dms` endpoints refuse a non-friend with 403 (`actions.send_direct_message`), and
-`Messaging._on_direct_message` drops anything inbound from a peer this node does not hold —
+`Messaging._on_direct_message` drops anything inbound from a peer this node does not hold,
 which is the only layer that holds against a peer calling in directly. See
 `docs/direct-messages.md`; the adversarial cases are
 `tests/test_adversarial.py::TestDirectMessageGate`.
 
 ## Rules
 
-- The client gate is **convenience only** — never rely on it as the sole check.
+- The client gate is **convenience only**; never rely on it as the sole check.
 - The core enforcement layer must work correctly even if called directly
   (e.g. from tests, sync, or a malicious peer).
 - For invite-only channels, `SEND_MESSAGE` is only enforced when the sender

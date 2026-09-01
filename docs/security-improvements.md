@@ -1,8 +1,8 @@
-# TrenchChat — Application-Layer Security
+# TrenchChat: Application-Layer Security
 
 This document records the application-layer security posture of TrenchChat: what
 has been hardened, and what is still open. None of it concerns Reticulum or
-LXMF cryptography — X25519 + AES-256 for transport, Ed25519 for signing — which
+LXMF cryptography (X25519 + AES-256 for transport, Ed25519 for signing), which
 is not in question. Every item here is about how the application *uses* that
 crypto.
 
@@ -18,7 +18,7 @@ proposed fixes. One of those proposals rested on a false premise; see
 **Status: fixed.**
 
 LXMF signs every message, and TrenchChat read the sender from
-`message.source_hash` — but never checked whether that signature actually
+`message.source_hash`, but never checked whether that signature actually
 validated. Both halves of the problem are in the library's behaviour:
 
 - `LXMessage.unpack_from_bytes` records a failed signature check on the message
@@ -29,17 +29,17 @@ validated. Both halves of the problem are in the library's behaviour:
   not delivery.
 
 `source_hash` is attacker-chosen wire data. Setting it to a victim's LXMF
-delivery hash — publicly derivable from the identity hash shown in the UI —
+delivery hash (publicly derivable from the identity hash shown in the UI)
 makes `RNS.Identity.recall()` return that victim's *real* identity, so
 `sender_hex` becomes their identity hash. The signature check fails, and
 previously nothing looked.
 
-This defeated essentially every other control in the codebase, because they all
+This defeated every other control in the codebase, because they all
 compare against a value derived from `source_hash`.
 
 **Fix** (`network/router.py`): `_on_message_received` authenticates before
-dispatching to any callback. Invalid signatures are dropped. `SOURCE_UNKNOWN` —
-the sender's identity is not known yet, which is not evidence of forgery — is
+dispatching to any callback. Invalid signatures are dropped. `SOURCE_UNKNOWN`
+(the sender's identity is not known yet, which is not evidence of forgery) is
 held in a bounded quarantine, a path request is issued, and the message is
 **re-unpacked from its original bytes** when the identity resolves so LXMF
 re-runs the real check. Arrival of a path is not itself evidence of anything.
@@ -91,7 +91,7 @@ outbound traffic and replaying an old one resurrected removed subscribers.
 - **Missed-delivery hints** accepted from non-members.
 
 ### Reactions and emoji
-Reactions bypassed membership and `SEND_MESSAGE` entirely — the only check was
+Reactions bypassed membership and `SEND_MESSAGE` entirely; the only check was
 `is_subscribed`, which says nothing about the sender, and the `remove` path let
 an outsider delete other people's reactions. Emoji requests had no authorization
 and no rate limit, allowing library enumeration and amplification.
@@ -104,7 +104,7 @@ which a modified client does not run. `_signer_may_apply` now diffs against
 
 - `MANAGE_CHANNEL` previously had no core enforcement anywhere, and
   `broadcast_permissions` had no check on either side, so any admin could
-  rewrite every role's permissions network-wide — including flipping
+  rewrite every role's permissions network-wide, including flipping
   `open_join`, which disables the `send_message` gate and the sync membership
   check for every recipient.
 - Owner-list mutations were ungated: an admin could add themselves as owner and
@@ -118,7 +118,7 @@ which a modified client does not run. `_signer_may_apply` now diffs against
   its signature verifies. Permission sets are shape-validated before storage.
 
 ### Invite tokens
-Tokens are Ed25519 signatures bound to invitee, channel and expiry — unforgeable,
+Tokens are Ed25519 signatures bound to invitee, channel and expiry, unforgeable,
 but bearer credentials. Now:
 - **Single use**, via a `spent_invite_tokens` table; the insert is the atomic
   claim, so a replay cannot also win it.
@@ -134,14 +134,14 @@ but bearer credentials. Now:
 ### Correctness and robustness
 - `_accept_document`'s version check and apply are serialised. LXMF delivers on
   background threads, so two documents could both pass the version check against
-  the same stale value and the loser's roster would overwrite the winner's — a
+  the same stale value and the loser's roster would overwrite the winner's, a
   silent rollback to an older signed document.
 - The roster is built before the version is committed. A malformed member entry
   previously raised after the version had advanced, leaving the members table
   stale and permanently wedging the channel.
 - `permissions_from_json` no longer raises; it falls back to the most
   restrictive preset. It is called on the GUI thread outside any try/except.
-- `load_private_key`'s return value is checked — it returns `False` rather than
+- `load_private_key`'s return value is checked, it returns `False` rather than
   raising, so a corrupt identity file previously surfaced as something unrelated.
 
 ### Payload limits
@@ -149,7 +149,7 @@ but bearer credentials. Now:
   (16 KB) and emoji (64 KB) were capped, message attachments were not, and those
   bytes are handed to the client's image decoders.
 - `Image.MAX_IMAGE_PIXELS` set; GIF frame extraction bounded.
-- Image sanitisation no longer fails open — when PIL rejects an image the
+- Image sanitisation no longer fails open, when PIL rejects an image the
   original bytes are not forwarded. The re-encode is the only sanitisation in
   the pipeline and it was bypassed precisely on the inputs it exists to catch.
 - `avatar_version` is compared before overwrite.
@@ -171,7 +171,7 @@ but bearer credentials. Now:
   the wrapper it installed also sat in front of the node's *own* inbound mail,
   dropping messages the propagation node then deleted its copy of. An earlier
   entry here claimed that second half was fixed; it was not. Nothing may wrap
-  `lxmf_propagation` — `TestPropagationRelayCannotBeFiltered` in
+  `lxmf_propagation`, `TestPropagationRelayCannotBeFiltered` in
   `tests/test_actions.py` holds that line.
 
 ### Supply chain
@@ -186,14 +186,14 @@ rather than relied on transitively via `rns`.
 `_validate_document` anchors a document to, in order: a stored member list, the
 channel's `creator_hash`, or an invite this user actively accepted (recorded in
 `accepted_invites` when the join request is sent). If none of those exist the
-document is **rejected** — there is no longer any fallback to its own signers.
+document is **rejected**; there is no longer any fallback to its own signers.
 
 That fallback could not simply be deleted, because an admin adding a member
 unilaterally produces a document the recipient has no other way to anchor, and
 that is a supported flow. Such a document is now *held* rather than applied:
 nothing is written, the channel is not created and not subscribed to, and the
-user is prompted through the existing invite bar (`admin… added you to #channel
-— join?`). Confirming records the anchor and applies the document; declining
+user is prompted through the existing invite bar (`admin… added you to #channel,
+join?`). Confirming records the anchor and applies the document; declining
 discards it. A held document that does not name the recipient is dropped
 outright.
 
@@ -209,35 +209,35 @@ serves, and none of them authenticated anything.
 
 - **Session token required.** `create_app(backend, token=...)` mints one per
   process (`generate_token()`), accepted as `Authorization: Bearer`, an
-  `X-TC-Token` header, or a `?token=` query parameter — the last because a
+  `X-TC-Token` header, or a `?token=` query parameter, the last because a
   browser can set headers on neither a WebSocket handshake nor an `<img>` src.
   Paths served by a mount (the built web client) stay public; the client has to
   load before it can present a token.
 - **CORS is an explicit allowlist**, never `*`. With no credentials to protect,
-  a wildcard let any page the user visited read every response — which defeated
+  a wildcard let any page the user visited read every response, which defeated
   the localhost bind entirely.
 - **The WebSocket checks token and Origin** before `accept()`. Browsers apply
   neither CORS nor same-origin policy to a WS handshake, and that socket
   streams every inbound message.
-- **Binds default to `127.0.0.1`** — `serve_profile.py` (which serves the *real*
+- **Binds default to `127.0.0.1`**: `serve_profile.py` (which serves the *real*
   profile) defaulted to `0.0.0.0`, as did the orchestrator and its workers.
   `--host` still widens them deliberately; `remote_host.sh` passes it, since
   tailnet hosting is its purpose.
 - **Image sanitisation fails closed** in the send endpoint. It forwarded the
-  original bytes when `prepare_image()` raised — precisely on the inputs the
-  re-encode exists to catch — while claiming to mirror the Qt handler, which
+  original bytes when `prepare_image()` raised (precisely on the inputs the
+  re-encode exists to catch) while claiming to mirror the Qt handler, which
   fails closed.
 
 Covered by `tests/test_api_security.py` (token required, CORS, WS origin,
 static assets stay public, bind defaults, and a route added to the app after
-`create_app` returns — which is how `main_flutter.py` adds `/ui/open`).
+`create_app` returns, which is how `main_flutter.py` adds `/ui/open`).
 
 **The token is also written to `~/.trenchchat/launcher.json`** (owner-only,
 `atomic_write_bytes`) so a second launch can ask the instance in the tray to
 open a window instead of starting a second node over the same identity and
 database. This adds no exposure: a reader of that file can already read the
 identity keypair and the message database beside it. It does mean the token
-now outlives a single request — a stale file names a port that answers
+now outlives a single request, a stale file names a port that answers
 nothing, and the launcher starts normally when it does.
 
 ## Fixed: replay, amplification and unbounded values
@@ -245,7 +245,7 @@ nothing, and the launcher starts normally when it does.
 - **Subscriber-list versions persist** (`subscriber_list_versions`). The
   watermark was in-memory only, so a restart re-opened the replay it exists to
   stop: a captured older list stays validly signed forever, and applying one
-  resurrects removed subscribers — who are exactly who delivery is aimed at.
+  resurrects removed subscribers, who are exactly who delivery is aimed at.
   The version check now also commits under the same lock it read, closing a
   rollback race between two concurrent lists.
 - **`MT_SUBSCRIBE` only re-broadcasts on an actual change.** Re-subscribing
@@ -253,12 +253,12 @@ nothing, and the launcher starts normally when it does.
 - **Peer timestamps are bounded** (`protocol.wire_timestamp`). `F_TIMESTAMP` is
   self-asserted; unbounded, a far-future value pinned a message to the top of
   the transcript and, through sync, advanced the requester's persisted
-  watermark past history it never received — after which that peer was never
+  watermark past history it never received, after which that peer was never
   asked for anything older again. Direct delivery substitutes our own clock;
   sync drops the row, because accepting it would move a watermark.
 - **A sync row that stored nothing no longer advances the watermark.**
   `message_id` is globally unique, so a failed insert can mean the message
-  belongs to another channel entirely — `Storage.has_message` now decides.
+  belongs to another channel entirely, `Storage.has_message` now decides.
 - **Response truncation never splits a timestamp group.** The resume point is a
   bare float and `get_messages_after` filters on a strict `>`, so half a group
   past the cut was skipped by every later sweep.
@@ -267,7 +267,7 @@ nothing, and the launcher starts normally when it does.
   broadcast on the shared mesh. Released messages now also pass the control
   throttle instead of arriving as one burst.
 - **Emoji responses must answer a request we made**, and the shared-channel
-  check names the requester on open-join channels — it previously returned true
+  check names the requester on open-join channels, it previously returned true
   for anyone whenever we were in any public channel, which made it vacuous.
 - **Per-identity throttle maps are capped.** Identities are free to mint, so
   these cannot be bounded by how many peers talk to us.
@@ -276,11 +276,11 @@ nothing, and the launcher starts normally when it does.
 - **Inbound images are checked against a decode bound**
   (`image.inbound_image_is_sane`). The byte cap bounds the payload, not the
   raster: a file well under it can declare enormous dimensions or thousands of
-  frames, and those bytes go to the client's own decoder. Header only — no
+  frames, and those bytes go to the client's own decoder. Header only, no
   pixel data is decoded. Applies to message images, sync images and avatars.
 - **`_signer_may_apply` fails closed** when the stored document will not parse,
   and **standalone channel metadata is creator-bound** the way servers and
-  roster entries already were — `creator_hash` arrives unsigned and then serves
+  roster entries already were, `creator_hash` arrives unsigned and then serves
   as a trusted-signer fallback.
 - **Encrypting or decrypting the database removes the plaintext `-wal`/`-shm`
   sidecars**, which held recently written rows in the clear.
@@ -333,14 +333,14 @@ message, and the status claim, each with a positive control) and
 ## Fixed: the August 2026 second pass
 
 A second audit over the same tree, subsystem by subsystem. The first pass had
-hardened *document forgery* — signatures, versioning, trusted-signer
-anchoring — and that held: nothing below forges anything. What it found were
+hardened *document forgery* (signatures, versioning, trusted-signer
+anchoring), and that held: nothing below forges anything. What it found were
 four patterns the first pass had not systematically looked for.
 
 **Authority taken from data that is authenticated but not authorized.**
 
 - `KICK` alone deposed the owner. A role is derived from `doc["members"]`, so
-  an identity absent from it has no row and therefore no permissions —
+  an identity absent from it has no row and therefore no permissions,
   including the owner short-circuit. `_signer_may_apply` gated removals on
   `KICK` and never asked *who* was being removed, so an admin could publish a
   document identical to the stored one except that the owner was dropped from
@@ -349,7 +349,7 @@ four patterns the first pass had not systematically looked for.
   only with `MANAGE_ROLES`.
 - An unsigned channel announce wrote the `permissions` column. `upsert_channel`
   protected `creator_hash` and `server_hash` from being overwritten this way
-  but not `permissions`, so a demoted creator — still holding the destination —
+  but not `permissions`, so a demoted creator (still holding the destination)
   could announce their private channel as public and flip `open_join`, after
   which the message handler stops checking membership and `SEND_MESSAGE`
   entirely. A known channel's announce now refreshes only name and
@@ -357,7 +357,7 @@ four patterns the first pass had not systematically looked for.
   than the payload.
 - Tenure was repaired from message timestamps. `_repair_tenure_from_message_history`
   widened a member's join time to cover any older stored message from them,
-  but that timestamp is self-asserted and bounded only against the future — so
+  but that timestamp is self-asserted and bounded only against the future, so
   one backdated message bought history from before they joined. It now uses
   `received_at`, which is our own clock.
 - `kick` and `manage_roles` were grantable to the base member role, where the
@@ -381,7 +381,7 @@ four patterns the first pass had not systematically looked for.
 **Wire values used unvalidated in ordering and windowing.**
 
 - A member-list `version` of `float("inf")` was stored and then compared
-  greater than every later document forever — no kick, promotion or join could
+  greater than every later document forever, no kick, promotion or join could
   be applied to that channel again, and the poisoned peer re-broadcast it.
   Version must now be a bounded int and `published_at` must pass
   `wire_timestamp`.
@@ -401,15 +401,15 @@ four patterns the first pass had not systematically looked for.
   never sync at all while each attempt put tens of megabytes on the air.
 - Emoji was the one image ingestion path that never checked the declared
   decode, and it is the one rendered inline and re-served to whoever asks.
-  Fetching also had no membership gate and no throttle — the path is exempt
-  from the control rate limit by design — so one message from a stranger bought
+  Fetching also had no membership gate and no throttle; the path is exempt
+  from the control rate limit by design, so one message from a stranger bought
   an outbound request per token it named.
 - `inbound_image_is_sane` was not header-only: `Image.open` walks a TIFF's
   whole IFD chain and fully decodes an ICO frame. Format is now checked by
   magic bytes first, which also closes the fail-open case for a format Pillow
   cannot read but a browser can.
-- Quarantine path requests were throttled per source, keyed on `source_hash` —
-  unverified at that point — so rotating it made every bucket fresh. A global
+- Quarantine path requests were throttled per source, keyed on `source_hash`
+  (unverified at that point), so rotating it made every bucket fresh. A global
   ceiling is the bound that actually holds.
 
 **Also fixed:** a decoded voice frame of the wrong length reached the mixer and
@@ -431,8 +431,8 @@ capped.
 it writes a `pending_in` row plus a UI prompt carrying attacker-chosen text
 (`F_FRIEND_NOTE`, capped at 140 characters). What bounds it today: the router's
 per-sender control throttle (60/min), a cap of
-`MAX_PENDING_FRIEND_REQUESTS` rows evicted oldest-first, and the fact that a
-request grants nothing — only the local user accepting does.
+`MAX_PENDING_FRIEND_REQUESTS` rows evicted oldest-first, and that a request
+grants nothing: only the local user accepting does.
 
 What is not bounded: identities are free to mint, so a sender rotating them
 can keep the pending queue churning at the throttle's rate, and declining does
@@ -442,7 +442,7 @@ out for now.
 
 Note what an accept cannot do: `MT_FRIEND_ACCEPT` from an identity we never
 asked is ignored outright (`FriendsManager._handle_accept`), so the direct-
-message gate is never one unsolicited control message away from anybody —
+message gate is never one unsolicited control message away from anybody,
 `tests/test_adversarial.py::TestDirectMessageGate` pins this.
 
 ### 0a-bis. Messages from unaccepted senders are held, on a path with no throttle
@@ -454,7 +454,7 @@ message request, because a client speaking only plain LXMF cannot send
 
 The surface this adds is the same shape as 0a, with one difference that matters:
 **a direct message carries no `F_MSG_TYPE`, so it is deliberately exempt from
-the router's per-sender control throttle** — a limit there would drop
+the router's per-sender control throttle**; a limit there would drop
 conversation. Friend requests are paced by that throttle and by
 `MAX_PENDING_FRIEND_REQUESTS`; this queue has only the caps, so all of them are
 enforced where the row is written rather than by any caller:
@@ -467,7 +467,7 @@ including under rotating identities.
 Attachments are not held at all, so nothing from an unaccepted sender is stored
 that a person did not choose to receive as text. Holding grants nothing: the
 sender stays unaccepted, no conversation exists, and no reply can pass until the
-user accepts — the same property 0a records for a request.
+user accepts, the same property 0a records for a request.
 
 The missing throttle is therefore deliberate and compensated, not an oversight.
 
@@ -476,7 +476,7 @@ The missing throttle is therefore deliberate and compensated, not an oversight.
 Direct messages to an offline friend go through an LXMF propagation node,
 which sees both endpoints' delivery addresses, the message size and the timing,
 though never the content. This is inherent to storing a message for an absent
-recipient, not a defect in the implementation — but it is a metadata exposure
+recipient, not a defect in the implementation, but it is a metadata exposure
 channels do not have, since a channel's sync responder was already a member.
 Preferring the fewest-hop node keeps it as local as the mesh allows.
 
@@ -489,7 +489,7 @@ all, not whether this particular sender can be vouched for.
 
 A peer that holds a roster for a closed channel but has never recorded tenure
 data therefore applies no tenure filtering at all. When that peer is the
-*responder*, the requester's own re-check still catches it — that is the
+*responder*, the requester's own re-check still catches it; that is the
 defence, and it is covered by
 `tests/test_sync_permissions_inflight.py::TestTenureFailOpenAsymmetry`. When
 the *requester* is also tenure-blind, nothing in the exchange checks tenure and
@@ -498,7 +498,7 @@ a message from a member kicked elsewhere in the mesh is accepted.
 Failing closed on "closed channel with no tenure rows" is **not** the fix: a
 roster without tenure is a legitimate state (bootstrapped or seeded peers,
 channels predating the feature), and rejecting sync there breaks working
-peers — `tests/test_adversarial.py::test_sync_response_cannot_be_replayed`
+peers, `tests/test_adversarial.py::test_sync_response_cannot_be_replayed`
 pins exactly that case. A real fix needs per-identity provenance rather than a
 channel-level flag, so that "I cannot vouch for this sender" is distinguishable
 from "this channel has no tenure history".
@@ -513,7 +513,7 @@ Without a PIN the private key and the entire message database are stored in
 plaintext. That is disclosed in the Settings UI, but it is the default.
 
 When a PIN is set the KDF is PBKDF2-HMAC-SHA256 at 600k iterations with a
-16-byte random salt — but the PIN is constrained to **4–8 numeric digits**
+16-byte random salt, but the PIN is constrained to **4–8 numeric digits**
 (`gui/pin_dialog.py`), a keyspace of 10⁴–10⁸. No iteration count rescues ~13
 bits of entropy; a 4-digit PIN falls in about a second on one GPU.
 `lock.verify` compounds this: a Fernet token over a hardcoded sentinel sitting
@@ -522,19 +522,19 @@ the GUI dialog, resets after each cooldown, and `lockbox.unlock()` is
 unthrottled.
 
 **Recommended:** allow a real passphrase (keep a PIN option but require
-meaningful length), move to a memory-hard KDF — `cryptography` already ships
-`Scrypt` — remove the oracle, and enforce lockout in `lockbox.unlock()` with a
+meaningful length), move to a memory-hard KDF (`cryptography` already ships
+`Scrypt`), remove the oracle, and enforce lockout in `lockbox.unlock()` with a
 persistent, escalating counter. Needs a versioned KDF marker and a re-key
 migration for existing databases, so it belongs in its own change.
 
 Related: enabling a PIN leaves the pre-existing plaintext database recoverable
 from free disk sectors, since the old file is unlinked rather than overwritten.
 
-### 2. Display-name spoofing (largely addressed)
+### 2. Display-name spoofing, largely addressed
 
 `F_DISPLAY_NAME` is self-asserted and never verified. The earlier version of
 this document recommended showing a short hash badge alongside every display
-name; that is **already implemented** — `gui/channel_view.py` renders every
+name; that is **already implemented**, `gui/channel_view.py` renders every
 message header as `Alice [a3f1c2d4]`. Combined with signature enforcement, the
 identity hash shown is now authenticated rather than merely claimed.
 
@@ -549,20 +549,20 @@ display name arrives under a different hash.
 A directly delivered reaction cannot be spoofed: `reaction.py` keys the reactor
 to the LXMF-authenticated sender and ignores any payload-supplied identity. The
 synced path is weaker. `sync.py::_apply_synced_reactions` trusts the payload's
-`reactor` field, authorised only by `may_react` — is that identity a member who
-*could* react — not that the identity actually did. So a relaying peer serving a
+`reactor` field, authorised only by `may_react` (is that identity a member who
+*could* react), not that the identity actually did. So a relaying peer serving a
 sync response can attribute a reaction to any other member. The blast radius is
 small (a forged reaction decorating an existing message; no message forgery, no
 deletion), which is why it is filed here rather than as a fix.
 
 `test_adversarial.py::test_a_reaction_from_a_real_member_is_kept` currently pins
-third-party reaction backfill as *intended* — a member's reaction propagates
-even when relayed by someone else — so this gap is the price of that feature as
+third-party reaction backfill as *intended* (a member's reaction propagates
+even when relayed by someone else), so this gap is the price of that feature as
 built. Closing it without losing backfill needs per-reaction signatures (the
 reactor signs `(channel_hash, message_id, emoji, reactor, at)`, verified on
 sync-apply): a wire-format addition, forward-compatible but a protocol change.
-The cheaper alternative — trust a synced reaction only when the relayer is the
-reactor — closes the gap but drops offline backfill of other members' reactions.
+The cheaper alternative (trust a synced reaction only when the relayer is the
+reactor) closes the gap but drops offline backfill of other members' reactions.
 Left open pending that product/protocol call. The earlier
 `security-audit-2026-08.md` wrongly listed this as closed; corrected there.
 
@@ -576,7 +576,7 @@ rediscovered as findings.
 - 14 `except Exception:` blocks across `core/` and `network/` swallow failures
   silently. Fail-closed where it matters, but a systematic verification failure
   is indistinguishable from a single malformed message.
-- macOS builds are unsigned (`trenchchat.spec` sets `codesign_identity=None`) —
+- macOS builds are unsigned (`trenchchat.spec` sets `codesign_identity=None`),
   a distribution-trust matter rather than an application one.
 - Inbound image bytes of a recognised format that do not parse are stored
   as-is. Bytes of *no* recognised format are now refused outright, so this is
@@ -586,7 +586,7 @@ rediscovered as findings.
   call rather than a straight win. `inbound_image_is_sane` covers the
   resource-exhaustion half of this today.
 - `INVITE` is not enforced on direct member *additions* in a member-list
-  document, only on the token/join-request path — so it does not restrain a
+  document, only on the token/join-request path, so it does not restrain a
   modified admin client. `tests/test_adversarial.py::
   test_member_without_invite_cannot_approve_join` pins this as intended;
   revisit if a deployment ever relies on withholding `INVITE` from an admin.
@@ -612,7 +612,7 @@ handler that rejected everything could not pass.
 
 ## Server rosters are capability claims
 
-A server's member-list document carries a *roster* — a signed list of the
+A server's member-list document carries a *roster*, a signed list of the
 channels in that server. On accept each entry becomes a local channel row
 parented under the server, and membership, roles and permissions all resolve up
 to that server. Every roster entry is therefore a capability claim.
@@ -621,7 +621,7 @@ A malicious roster naming a channel the receiver is already in would hand the
 server's members that channel's membership and history. Four independent
 defences apply:
 
-1. `channels.server_hash` is write-once — absent from `upsert_channel`'s
+1. `channels.server_hash` is write-once, absent from `upsert_channel`'s
    `ON CONFLICT` clause, so no upsert can re-parent an existing channel.
 2. Any roster hash already known locally under a different `server_hash` is
    refused outright.

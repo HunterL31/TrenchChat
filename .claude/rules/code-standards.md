@@ -41,9 +41,9 @@ def send_message(self, channel_hash_hex, content, reply_to=None):
 
 ## Naming
 
-- `snake_case` — functions, variables, module names
-- `PascalCase` — classes
-- `UPPER_SNAKE_CASE` — module-level constants
+- `snake_case`: functions, variables, module names
+- `PascalCase`: classes
+- `UPPER_SNAKE_CASE`: module-level constants
 - Prefix private attributes and methods with a single underscore (`_foo`).
 
 ## Error handling
@@ -97,15 +97,15 @@ self._messaging.notify_message_received(channel_hash_hex, msg_id)
 
 ## Docstrings, comments, and other non-code prose
 
-Any prose that lives in the repo but isn't code — docstrings, comments, PR
-descriptions, commit messages — follows one standard above all else: clean,
+Any prose that lives in the repo but isn't code (docstrings, comments, PR
+descriptions, commit messages) follows one standard above all else: clean,
 concise, simple wording. Say the thing in as few plain words as possible. No
 filler, no hedging, no jargon where a plain word works.
 
 ### Docstrings
 
 Every module, public class, and public method must have a docstring. Use
-plain prose — not reStructuredText or Google-style parameter blocks.
+plain prose, not reStructuredText or Google-style parameter blocks.
 One-liners are fine for simple methods; multi-line only when the behavior is
 genuinely non-obvious, and even then, as short as it can be while staying
 clear.
@@ -118,14 +118,14 @@ def flush_pending(self, dest_hex: str) -> None:
 ### Comments
 
 Keep comments to a minimum. Only write one when it explains genuinely confusing
-code — a non-obvious constraint, a subtle invariant, a workaround for a specific
+code, a non-obvious constraint, a subtle invariant, a workaround for a specific
 bug, or behavior that would surprise a reader. Well-named identifiers and clear
 code should speak for themselves. When a comment is warranted, keep it as short
-and plain as a good docstring — the same standard applies.
+and plain as a good docstring; the same standard applies.
 
 Do not use comments to justify design decisions, explain what the code does, or
 narrate the current task/fix. That belongs in the PR description or commit
-message — written with the same clean, concise, simple standard — not in the
+message (written with the same clean, concise, simple standard), not in the
 source; comments in the source rot as the codebase evolves.
 
 ```python

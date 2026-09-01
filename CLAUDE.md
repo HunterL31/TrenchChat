@@ -21,7 +21,7 @@ costly, store-and-forward over request/response, identity over location, intent 
 tool that is never neutral. A feature that reintroduces a server, a tracker, or an assumption of
 bandwidth has removed the point of the project even if every test passes. The seven checks to apply
 before writing anything, with the code in this repo that already answers them, are in
-**`.claude/rules/reticulum-zen.md`** — read it before designing a feature, not after.
+**`.claude/rules/reticulum-zen.md`**; read it before designing a feature, not after.
 
 ## Commands
 
@@ -58,13 +58,13 @@ needed for normal development.
 - Every user has a stable Ed25519/X25519 keypair (`trenchchat/core/identity.py`) stored at
   `~/.trenchchat/identity`. The **identity hash** and the **LXMF delivery destination hash** are
   different values: `delivery_dest_hash = RNS.Destination.hash(identity_hash_bytes, "lxmf", "delivery")`.
-  `RNS.Identity.recall()` takes a destination hash, not an identity hash — get this wrong and lookups
+  `RNS.Identity.recall()` takes a destination hash, not an identity hash; get this wrong and lookups
   silently fail. See `.claude/rules/reticulum-lxmf-guidelines.md` for the exact patterns to follow
   (path requests must never block with `time.sleep`; use fire-and-forget + retry queue instead).
 - Channels are addressed by a hash derived from the creator's identity + channel name. Public channels
   are announced on the mesh; invite-only channels are not, and use a versioned, signed member-list
   document instead (`trenchchat/core/invite.py`).
-- All LXMF field keys and message-type strings live in **`trenchchat/core/protocol.py`** — the single
+- All LXMF field keys and message-type strings live in **`trenchchat/core/protocol.py`**, the single
   source of truth, deliberately dependency-free to avoid circular imports. Never redefine a field
   constant elsewhere; the field layout docstring at the top of `trenchchat/core/messaging.py` documents
   the registry. Chat messages carry no `F_MSG_TYPE`; control messages always do.
@@ -76,7 +76,7 @@ needed for normal development.
 `user_directory.py`, `friends.py`, `direct.py` (one-to-one conversations), `propagation.py`,
 `lockbox.py` (PIN-based encryption gate), `link_quality.py`, `image.py`,
 `fileutils.py`, `voice.py` (live group voice: LXMF signalling + roster; frames flow over RNS Links
-via `network/voice_transport.py`, audio primitives in `core/audio/` — see `docs/voice.md`),
+via `network/voice_transport.py`, audio primitives in `core/audio/`; see `docs/voice.md`),
 `node_browser.py` (Nomad Network page browsing and hosting over `network/node_transport.py`;
 browsing is anonymous unless the user opts a specific node into identify-on-connect).
 UI code must never construct LXMF messages or touch protocol fields directly: it reads
@@ -87,16 +87,16 @@ asyncio via `EventBus`.
 ### Flutter client (`flutter_ui/`)
 
 - Dart/Flutter app; talks to a Python backend over HTTP + WebSocket. The backend is
-  `devtools/testenv/api.py` (`create_app(backend, token=...)` — every endpoint
+  `devtools/testenv/api.py` (`create_app(backend, token=...)`, every endpoint
   requires that token; see `docs/security-improvements.md`), whose endpoints call
-  `trenchchat/core/actions.py` functions and the core managers — never reimplement logic
+  `trenchchat/core/actions.py` functions and the core managers; never reimplement logic
   in an endpoint or a widget. New features reach the client as: core manager/action → api.py
   endpoint → `lib/api/client.dart` + `lib/app_state.dart` → screen.
 - `main_flutter.py` bundles backend + client for real use; `devtools/testenv/serve_profile.py`
   serves a real profile for browser testing; `devtools/testenv/remote_host.sh` hosts the stack
   from a container over Tailscale.
 - Closing the client window does not stop the node: the launcher keeps the backend running
-  behind a tray icon (`trenchchat/tray.py`, optional — a machine with no tray, or a pystray
+  behind a tray icon (`trenchchat/tray.py`, optional; a machine with no tray, or a pystray
   backend whose icon has no menu to quit from, gets None and the old quit-with-the-window
   behaviour; in practice that means Windows and macOS) and reopens the window there. That makes a
   second launch likely, so it hands off to the running instance instead of starting a second
@@ -106,22 +106,22 @@ asyncio via `EventBus`.
 - Tests: `flutter analyze && flutter test` after any `flutter_ui/` change. Widget tests inject
   `AppState(baseUrl, httpClient: backend.client())` with `test/fake_backend.dart` (MockClient);
   flutter_test stubs real HTTP. Golden baselines are Windows-rendered: 4 goldens permanently fail
-  on Linux from ~0.1% anti-aliasing drift (primitives ×3 + regions channel_header) — leave them
+  on Linux from ~0.1% anti-aliasing drift (primitives ×3 + regions channel_header); leave them
   unless their content genuinely changed, and regenerate goldens on Windows when possible.
 
-### Direct messages — mutual friends only, propagation instead of sync
+### Direct messages: mutual friends only, propagation instead of sync
 
 Full detail in `docs/direct-messages.md`. A conversation exists between two identities that each
 hold the other as an **accepted** friend (`friends.state`); both ends check it independently
 (`DirectMessageManager.may_dm`), so one-sided trust delivers nothing. Its address is
-`naming.dm_hash_for(a, b)` — derived from the pair and never sent: the receiver derives it from the
+`naming.dm_hash_for(a, b)`, derived from the pair and never sent: the receiver derives it from the
 sender it just authenticated, so a peer cannot inject into a conversation it is not half of.
 
-A DM is a **plain LXMF message** — text in `content`, attachment in LXMF's `FIELD_IMAGE`, and
-TrenchChat's additions inside `FIELD_CUSTOM_TYPE`/`FIELD_CUSTOM_DATA` (`protocol.pack_dm_envelope`)
-— so Sideband and other LXMF clients can hold up the other half. It is the one message type that
+A DM is a **plain LXMF message**, text in `content`, attachment in LXMF's `FIELD_IMAGE`, and
+TrenchChat's additions inside `FIELD_CUSTOM_TYPE`/`FIELD_CUSTOM_DATA` (`protocol.pack_dm_envelope`),
+so Sideband and other LXMF clients can hold up the other half. It is the one message type that
 leaves the TrenchChat world; everything else travels msgpack-packed inside the same custom-payload
-fields under `protocol.ENVELOPE_TYPE` (`pack_fields`/`unpack_fields` — the registry's numbers are
+fields under `protocol.ENVELOPE_TYPE` (`pack_fields`/`unpack_fields`; the registry's numbers are
 internal to that envelope and never appear as LXMF field keys). Never add TrenchChat field
 numbers to a DM. A conversation gets a `channels` row (`kind='dm'`) because `messages` references
 one, and deliberately no `subscriptions` row: that absence is what keeps it out of sync, presence
@@ -129,19 +129,19 @@ beacons and avatar broadcast, all of which enumerate `get_subscriptions()`.
 
 A conversation has no third member to backfill it, so a message to an offline friend goes through an
 LXMF **propagation node** (`core/propagation.py`: `PropagationNodes` picks one from
-`lxmf.propagation` announces and remembers it across restarts — a node announces only when switched
+`lxmf.propagation` announces and remembers it across restarts; a node announces only when switched
 on, never on a timer; `PropagationCollector` owns when to ask, because held mail is *pulled, never
 pushed*). Never add a DM to any of the three sync mechanisms below.
 
-### Offline sync — three independent, complementary mechanisms
+### Offline sync: three independent, complementary mechanisms
 
 Full detail in `docs/offline-sync.md`. Summary:
-1. **Pending retry** (`messaging.py`) — sender queues messages for a peer whose path is unknown or
+1. **Pending retry** (`messaging.py`): sender queues messages for a peer whose path is unknown or
    whose delivery timed out; flushed when the peer's presence is detected again (in-memory only).
-2. **Missed-delivery hints** (`sync.py` + `missed_deliveries` table) — sender broadcasts a hint to
+2. **Missed-delivery hints** (`sync.py` + `missed_deliveries` table): sender broadcasts a hint to
    currently-reachable subscribers naming which peer missed which message; any of them can serve it
    later via sync.
-3. **Timestamp-fallback sync** — on reconnect, a peer requests everything since its last sync
+3. **Timestamp-fallback sync**: on reconnect, a peer requests everything since its last sync
    timestamp; any online member can respond, checking hints first, then falling back to a bounded
    timestamp query (`SYNC_WINDOW_DAYS = 7`).
 
@@ -150,14 +150,14 @@ All three are channel-only; direct messages use none of them (see above).
 Peer reconnect is detected via `PeerAnnounceHandler` (`trenchchat/network/announce.py`), which drives
 all three mechanisms.
 
-### Permission enforcement — three independent layers, always
+### Permission enforcement: three independent layers, always
 
 Every permission (`SEND_MESSAGE`, `INVITE`, `KICK`, `MANAGE_ROLES`, `MANAGE_CHANNEL`, ...) must be
 checked at all three layers, because a gap at any one layer lets a bad client or bug bypass it:
 
-1. **Client gate** — hide the control in the Flutter UI (convenience only, never sufficient alone).
-2. **Outbound guard** — re-check in the `actions.py` function / API endpoint before calling core.
-3. **Core inbound enforcement** — the core manager rejects the operation regardless of caller; this is
+1. **Client gate**: hide the control in the Flutter UI (convenience only, never sufficient alone).
+2. **Outbound guard**: re-check in the `actions.py` function / API endpoint before calling core.
+3. **Core inbound enforcement**: the core manager rejects the operation regardless of caller; this is
    the only layer that protects against a malicious peer calling in directly.
 
 When adding a new permission, add all three layers plus an adversarial test in
@@ -168,7 +168,7 @@ enforcement points.
 ### Member-list document security (`trenchchat/core/invite.py`)
 
 `_validate_document` must check the signer against the **previously stored** member list (not the
-incoming doc's own admin/owner claims — trusting those lets an attacker grant themselves authority).
+incoming doc's own admin/owner claims; trusting those lets an attacker grant themselves authority).
 Fallback order when no stored list exists: stored list → channel's `creator_hash` → (only if no local
 record exists at all) the doc's own signers, for first-invite bootstrap. `_accept_document` must verify
 `doc["channel_hash"]` matches the target channel before validating signatures. Permissions-only changes
@@ -181,7 +181,7 @@ which wipes display names and can demote the owner). Full rationale in
 `docs/security-improvements.md` documents three known, not-yet-fixed gaps and design options for each:
 unsigned subscriber-list updates on public channels (spoofable), display-name spoofing (self-asserted,
 unverified), and no rate limiting on inbound control messages. Reticulum/LXMF's crypto (X25519 +
-AES-256, Ed25519 signing) is not in question — these are all application-layer trust gaps. Read this
+AES-256, Ed25519 signing) is not in question; these are all application-layer trust gaps. Read this
 doc before touching `subscription.py`'s `MT_SUBSCRIBER_LIST` handling or any control-message ingestion
 path.
 
@@ -193,7 +193,7 @@ session-scoped `RNS.Reticulum` instance; a `TestTransport` shim intercepts `rout
 directly to the recipient's callbacks (async, via a thread, matching real LXMF timing) instead of
 going over the network. `tests/helpers.py` has `wait_for`-style polling helpers for the resulting
 eventual-consistency assertions. **Tests are the specification**: never weaken or delete a test to make
-it pass — a failing test after a change means the change conflicts with intended behavior; fix the
+it pass: a failing test after a change means the change conflicts with intended behavior; fix the
 implementation, or if the behavior change is intentional, replace the test with one covering the new
 contract.
 
@@ -202,7 +202,7 @@ contract.
 Full detail in `.claude/rules/code-standards.md`. Highlights not obvious from skimming the code:
 - Import order: stdlib / third-party / local, each group blank-line separated.
 - Type hints on all public signatures; `X | None`, not `Optional[X]`.
-- LXMF may deliver string fields as `bytes` depending on msgpack encoding — always coerce with
+- LXMF may deliver string fields as `bytes` depending on msgpack encoding; always coerce with
   `isinstance(value, bytes)` → `.decode(errors="replace")`; extract a helper if this appears more than
   twice in one function.
 - Never reach into another class's `_private` attributes; add a public method instead.
@@ -211,24 +211,24 @@ Full detail in `.claude/rules/code-standards.md`. Highlights not obvious from sk
 - Logging is always `RNS.log(...)`, never `print`/stdlib `logging`, prefixed `"TrenchChat:"` (or
   `"TrenchChat [subsystem]:"`).
 - 100-column line limit.
-- Comments are kept to a minimum — only to explain genuinely confusing code, never to justify
+- Comments are kept to a minimum, only to explain genuinely confusing code, never to justify
   design decisions.
 
 ## Working in this repo
 
 - Check the design against the Zen of Reticulum before writing it; it outranks every other rule
-  here — see `.claude/rules/reticulum-zen.md`.
+  here; see `.claude/rules/reticulum-zen.md`.
 - New core functionality is prototyped in `devtools/testenv/` against a real two-peer network first,
-  then wired into the Flutter client once it works — see `.claude/rules/feature-development-workflow.md`.
+  then wired into the Flutter client once it works; see `.claude/rules/feature-development-workflow.md`.
 - Run the full test suite after any change to `trenchchat/` and don't consider the task done until it
-  passes — see `.claude/rules/run-tests-after-changes.md`.
+  passes; see `.claude/rules/run-tests-after-changes.md`.
 - New functionality needs a test in the matching `tests/test_*.py` file (bug fixes need a regression
-  test; new permissions need an adversarial test) — see `.claude/rules/test-coverage-for-new-features.md`.
+  test; new permissions need an adversarial test); see `.claude/rules/test-coverage-for-new-features.md`.
 - Behaviour that depends on real timing, real paths or more than two peers also needs a scenario in
-  `devtools/testenv/scenarios/` — see `.claude/rules/scenario-testing.md`. pytest is the fast
+  `devtools/testenv/scenarios/`; see `.claude/rules/scenario-testing.md`. pytest is the fast
   specification; the scenario suite is the honest one, and a fix is not proven by a single pass.
 - Never commit, push, merge, rebase, or tag without an explicit request, and never push directly to
-  `main` (protected — always a feature branch + PR) — see `.claude/rules/git-safety.md`.
-- A new file in `docs/` needs reasoning that can't be recovered from the code — a trust model, a
+  `main` (protected, always a feature branch + PR); see `.claude/rules/git-safety.md`.
+- A new file in `docs/` needs reasoning that can't be recovered from the code, a trust model, a
   rejected alternative, a deliberate non-fix. Plans, proposals and test plans get deleted once the
-  work lands — see `.claude/rules/docs-worth-committing.md`.
+  work lands; see `.claude/rules/docs-worth-committing.md`.

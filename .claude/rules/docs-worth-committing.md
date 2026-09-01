@@ -13,7 +13,7 @@ belongs in a docstring, a commit message, or a PR description instead.
   network guarantees, what it refuses to. Nothing in the code states this,
   and every later decision depends on it.
 - **A rejected alternative.** The design that looks obvious, was tried or
-  considered, and lost — and why. Without it the next person re-proposes it.
+  considered, and lost, and why. Without it the next person re-proposes it.
 - **A deliberate non-fix.** A known gap left open on purpose, with the trade
   that made leaving it correct. This is the highest-value thing in `docs/`;
   it is also the thing most often lost.
@@ -27,7 +27,7 @@ belongs in a docstring, a commit message, or a PR description instead.
 - **A description of what the code does.** The code says that, and it stays
   true when the code changes.
 - **A plan for work now finished.** Task lists, phased rollouts, effort
-  estimates, "recommended priority" — delete these when the work lands.
+  estimates, "recommended priority", delete these when the work lands.
 - **A proposal whose decisions have been made.** Once implemented, fold any
   durable reasoning into the docstring beside the code and delete the
   proposal. A spec that must match the code byte-for-byte (a signing digest,
@@ -40,7 +40,7 @@ belongs in a docstring, a commit message, or a PR description instead.
 
 `security-improvements.md` is the record of what is fixed and what is open;
 it gets edited, not superseded. A dated audit or review sits beside it only
-for what a living record cannot carry — the trust model it judged against and
+for what a living record cannot carry, the trust model it judged against and
 the ground it cleared. When a document's subject is finished, delete the
 document rather than leaving it to be mistaken for current.
 
