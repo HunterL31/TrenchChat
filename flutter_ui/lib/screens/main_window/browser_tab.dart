@@ -34,6 +34,11 @@ class _BrowserTabState extends State<BrowserTab> {
   String? _activeFetchId;
   String? _fileFetchId;
   NomadPage? _page;
+
+  /// Where [_page] came from. The page pane only shows content that belongs
+  /// to the location being browsed -- a fetch in flight must never leave the
+  /// previous page on screen looking like the answer.
+  ({String nodeHash, String path})? _pageLocation;
   String? _error;
   String? _info;
   double _progress = 0;
@@ -98,23 +103,29 @@ class _BrowserTabState extends State<BrowserTab> {
     }
   }
 
-  Future<void> _showCached(String nodeHash, String path,
+  /// Shows the cached copy of a location, if there is one. Returns whether
+  /// there was.
+  Future<bool> _showCached(String nodeHash, String path,
       {bool doneLoading = false}) async {
     final page = await widget.state.fetchCachedNomadPage(nodeHash, path);
-    if (!mounted) return;
+    if (!mounted) return page != null;
     setState(() {
-      if (page != null) _page = page;
+      if (page != null) {
+        _page = page;
+        _pageLocation = (nodeHash: nodeHash, path: path);
+      }
       if (doneLoading) {
         _loading = false;
         _error = page == null ? 'Fetched page could not be read back.' : null;
       }
     });
+    return page != null;
   }
 
-  Future<void> _go(String url) async {
+  Future<void> _go(String url, {Map<String, String>? data}) async {
     if (url.trim().isEmpty) return;
-    final fetchId = await widget.state
-        .browseNomad(url.trim(), currentNode: _current?.nodeHash);
+    final fetchId = await widget.state.browseNomad(url.trim(),
+        currentNode: _current?.nodeHash, data: data);
     if (!mounted) return;
     if (fetchId == null) {
       setState(() =>
@@ -149,19 +160,21 @@ class _BrowserTabState extends State<BrowserTab> {
     _onStateChanged();
   }
 
-  void _navigateHistory(int delta) {
+  Future<void> _navigateHistory(int delta) async {
     final target = _historyIndex + delta;
     if (target < 0 || target >= _history.length) return;
     final entry = _history[target];
     setState(() {
       _historyIndex = target;
-      _page = null;
       _error = null;
       _activeFetchId = null;
       _loading = false;
       _address.text = '${entry.nodeHash}:${entry.path}';
     });
-    _showCached(entry.nodeHash, entry.path);
+    // A page pruned from the cache since it was visited has to be fetched
+    // again; _go will not re-push history for the location we just moved to.
+    final cached = await _showCached(entry.nodeHash, entry.path);
+    if (!cached && mounted) _go('${entry.nodeHash}:${entry.path}');
   }
 
   void _reload() {
@@ -175,6 +188,7 @@ class _BrowserTabState extends State<BrowserTab> {
       _history.clear();
       _historyIndex = -1;
       _page = null;
+      _pageLocation = null;
       _error = null;
       _info = null;
       _activeFetchId = null;
@@ -205,6 +219,7 @@ class _BrowserTabState extends State<BrowserTab> {
         'busy' => 'Too many requests to this node are already in flight.',
         'bad_path' => 'That page path is not valid.',
         'bad_response' => 'The node sent something that is not a page.',
+        'send_failed' => 'The link to the node could not carry the request.',
         _ => 'The page could not be fetched.',
       };
 
@@ -478,14 +493,12 @@ class _BrowserTabState extends State<BrowserTab> {
 
   Widget _pageView(TCSectionColors tc) {
     final page = _page;
-    if (page == null) {
-      return Center(
-        child: Text(
-          _loading ? 'LOCATING NODE…' : 'No page loaded.',
-          style: TextStyle(fontSize: TCType.textCaption, color: tc.textTertiary),
-        ),
-      );
-    }
+    final current = _current;
+    final showing = page != null &&
+        current != null &&
+        _pageLocation?.nodeHash == current.nodeHash &&
+        _pageLocation?.path == current.path;
+    if (!showing) return _pendingPane(tc, current);
     return SelectionArea(
       child: SingleChildScrollView(
         padding: const EdgeInsets.all(16),
@@ -494,12 +507,88 @@ class _BrowserTabState extends State<BrowserTab> {
     );
   }
 
-  void _onMicronLink(String url) {
-    if (url.contains(':/file/') || url.startsWith('/file/')) {
-      _fetchFile(url);
+  /// What the page pane shows while a location has no content of its own:
+  /// which location is being fetched, or that nothing came back for it.
+  Widget _pendingPane(
+      TCSectionColors tc, ({String nodeHash, String path})? current) {
+    if (current == null) {
+      return Center(
+        child: Text('No page loaded.',
+            style:
+                TextStyle(fontSize: TCType.textCaption, color: tc.textTertiary)),
+      );
+    }
+    return Center(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            _loading ? 'FETCHING' : 'NOTHING CACHED FOR',
+            style: TextStyle(
+              fontSize: TCType.textCaption,
+              color: tc.textSecondary,
+              letterSpacing: TCType.letterSpacingFor(
+                  TCType.textCaption, TCType.trackingWider),
+            ),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            '${_shortHash(current.nodeHash)}:${current.path}',
+            style:
+                TextStyle(fontSize: TCType.textBodySm, color: tc.textEmphasis),
+          ),
+          const SizedBox(height: 10),
+          if (_loading)
+            ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 460),
+              child: Text(
+                'Pages come back over the mesh — a distant node can take a '
+                'while, and one that does not serve this path never answers.',
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                    fontSize: TCType.textCaption, color: tc.textTertiary),
+              ),
+            )
+          // The error banner carries its own RETRY; a second one here would
+          // be two buttons for one action.
+          else if (_error == null)
+            TcGhostButton(label: 'RETRY', onPressed: _reload),
+        ],
+      ),
+    );
+  }
+
+  void _onMicronLink(String url, Map<String, String> data) {
+    final target = url.trim();
+    final unsupported = _unsupportedScheme(target);
+    if (unsupported != null) {
+      setState(() => _info = unsupported);
       return;
     }
-    _go(url);
+    if (target.contains(':/file/') || target.startsWith('/file/')) {
+      _fetchFile(target);
+      return;
+    }
+    _go(target, data: data);
+  }
+
+  /// Micron links can name destinations other than a node's pages. Saying
+  /// which is better than the URL parser's complaint about hex digits.
+  String? _unsupportedScheme(String url) {
+    final lower = url.toLowerCase();
+    if (lower.startsWith('lxmf@')) {
+      return 'That link opens an LXMF conversation. TrenchChat messages '
+          'mutual friends — add the peer from the FRIENDS tab first.';
+    }
+    if (lower.startsWith('rrc://')) {
+      return 'That is a link to an RRC voice hub, which this browser does '
+          'not open.';
+    }
+    if (lower.startsWith('p:')) {
+      return 'That link refreshes a page partial, which this browser does '
+          'not render yet.';
+    }
+    return null;
   }
 
   /// Fetches a /file/ link into the backend cache without leaving the page.
@@ -528,15 +617,29 @@ class _BrowserTabState extends State<BrowserTab> {
     _fileFetchId = null;
     if (status.status == 'done') {
       final uri = widget.state.api.nomadFileUri(status.nodeHash, status.path);
-      Clipboard.setData(ClipboardData(text: uri.toString()));
-      setState(() => _info =
-          'File cached — download URL copied to clipboard.');
+      _copyFileUrl(uri.toString());
     } else {
       setState(() {
         _info = null;
         _error = _friendlyReason(status.reason);
       });
     }
+  }
+
+  /// Clipboard access is a permission the browser can refuse, so the banner
+  /// reports what actually happened rather than assuming.
+  Future<void> _copyFileUrl(String url) async {
+    var copied = true;
+    try {
+      await Clipboard.setData(ClipboardData(text: url));
+    } catch (_) {
+      copied = false;
+    }
+    if (!mounted) return;
+    setState(() => _info = copied
+        ? 'File cached — download URL copied to clipboard.'
+        : 'File cached, but this browser refused clipboard access, so the '
+            'download URL could not be copied.');
   }
 
   String _shortHash(String hash) =>

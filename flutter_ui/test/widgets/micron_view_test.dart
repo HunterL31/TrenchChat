@@ -4,7 +4,8 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'package:flutter_ui/micron/micron_view.dart';
 
-Widget _harness(String source, {void Function(String)? onLinkTap}) =>
+Widget _harness(String source,
+        {void Function(String, Map<String, String>)? onLinkTap}) =>
     MaterialApp(
       home: Scaffold(
         body: SingleChildScrollView(
@@ -39,7 +40,7 @@ void main() {
     final tapped = <String>[];
     await tester.pumpWidget(_harness(
       'go `[here`aabb:/page/next.mu] now',
-      onLinkTap: tapped.add,
+      onLinkTap: (url, _) => tapped.add(url),
     ));
     final span = _findLinkSpan(tester, 'here');
     expect(span, isNotNull);
@@ -66,8 +67,66 @@ void main() {
         find.textContaining('first page', findRichText: true), findsNothing);
   });
 
-  testWidgets('input fields render as inert placeholders', (tester) async {
-    await tester.pumpWidget(_harness('Name: `<24|user`guest>'));
-    expect(find.textContaining('[ guest ]', findRichText: true), findsOneWidget);
+  testWidgets('a text field is editable and submits what was typed',
+      (tester) async {
+    Map<String, String>? sent;
+    await tester.pumpWidget(_harness(
+      'Name: `<24|user`guest>\n`[Send`:/page/e.mu`*]',
+      onLinkTap: (_, data) => sent = data,
+    ));
+    expect(find.byType(TextField), findsOneWidget);
+    await tester.enterText(find.byType(TextField), 'nomad');
+    await tester.pump();
+    (_findLinkSpan(tester, 'Send')!.recognizer as TapGestureRecognizer).onTap!();
+    expect(sent, {'field_user': 'nomad'});
+  });
+
+  testWidgets('a masked field hides its starting text', (tester) async {
+    await tester.pumpWidget(_harness('`<!16|pin`hunter2>'));
+    final field = tester.widget<TextField>(find.byType(TextField));
+    expect(field.obscureText, isTrue);
+  });
+
+  testWidgets('a checkbox submits its value only when checked',
+      (tester) async {
+    Map<String, String>? sent;
+    await tester.pumpWidget(_harness(
+      '`<?|opt|yes`>\n`[Send`:/page/e.mu`*]',
+      onLinkTap: (_, data) => sent = data,
+    ));
+    (_findLinkSpan(tester, 'Send')!.recognizer as TapGestureRecognizer).onTap!();
+    expect(sent, isEmpty);
+    await tester.tap(find.text('[ ]'));
+    await tester.pump();
+    (_findLinkSpan(tester, 'Send')!.recognizer as TapGestureRecognizer).onTap!();
+    expect(sent, {'field_opt': 'yes'});
+  });
+
+  testWidgets('a link field list picks only the named fields and variables',
+      (tester) async {
+    Map<String, String>? sent;
+    await tester.pumpWidget(_harness(
+      '`<a`one>`<b`two>\n`[Send`:/page/e.mu`a|mode=view]',
+      onLinkTap: (_, data) => sent = data,
+    ));
+    (_findLinkSpan(tester, 'Send')!.recognizer as TapGestureRecognizer).onTap!();
+    expect(sent, {'field_a': 'one', 'var_mode': 'view'});
+  });
+
+  testWidgets('an anchor link scrolls instead of navigating', (tester) async {
+    final tapped = <String>[];
+    await tester.pumpWidget(_harness(
+      '`[Jump`#the-end]\n${'filler\n' * 200}>The end',
+      onLinkTap: (url, _) => tapped.add(url),
+    ));
+    (_findLinkSpan(tester, 'Jump')!.recognizer as TapGestureRecognizer).onTap!();
+    await tester.pumpAndSettle();
+    expect(tapped, isEmpty);
+  });
+
+  testWidgets('a background-coloured space run keeps its width',
+      (tester) async {
+    await tester.pumpWidget(_harness('`B900 `Bf00 `b'));
+    expect(find.textContaining('\u00A0', findRichText: true), findsOneWidget);
   });
 }

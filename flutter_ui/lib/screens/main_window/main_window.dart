@@ -215,11 +215,20 @@ class _MainWindowState extends State<MainWindow> {
       widget.state.openNomadUrl(url);
       return;
     }
-    await Clipboard.setData(ClipboardData(text: url));
+    // Clipboard access is a permission a browser can refuse; say which
+    // happened rather than throwing into the void.
+    var copied = true;
+    try {
+      await Clipboard.setData(ClipboardData(text: url));
+    } catch (_) {
+      copied = false;
+    }
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
-        content: Text('Link copied: $url'),
+        content: Text(copied
+            ? 'Link copied: $url'
+            : 'Could not reach the clipboard to copy that link.'),
         behavior: SnackBarBehavior.floating,
         duration: const Duration(seconds: 2),
       ),

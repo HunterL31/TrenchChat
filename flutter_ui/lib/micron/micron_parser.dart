@@ -7,9 +7,8 @@
 // decodeThemeCode precedent). Formatting state persists across lines, as
 // upstream's does, until a reset tag or end of document.
 //
-// Deliberately not implemented, degrading to plain content: `t tables
-// (marker line skipped, rows render as text) and `{ partials (nomadnet
-// server-side includes; the line is skipped).
+// Deliberately not implemented, degrading to plain content: `{ partials
+// (nomadnet server-side includes; the line is skipped).
 import 'dart:ui' show Color;
 
 import 'micron_document.dart';
@@ -17,18 +16,47 @@ import 'micron_document.dart';
 MicronDocument parseMicron(String source) {
   final state = _ParserState();
   final lines = <MicronLine>[];
+  final anchors = <String, int>{};
+  final headingLines = <int>[];
   for (final raw in source.split('\n')) {
     final parsed = _parseLine(raw, state);
-    if (parsed != null) lines.add(parsed);
+    if (parsed == null) continue;
+    final index = lines.length;
+    for (final name in state.pendingAnchors) {
+      anchors.putIfAbsent(name, () => index);
+    }
+    state.pendingAnchors.clear();
+    if (parsed is MicronHeadingLine) headingLines.add(index);
+    lines.add(parsed);
   }
-  return MicronDocument(lines);
+  final trailing = _closeTable(state);
+  if (trailing != null) lines.add(trailing);
+  return MicronDocument(lines, anchors: anchors, headingLines: headingLines);
 }
+
+/// Micron's own heading-to-anchor rule: strip tags, then collapse every run
+/// of non-alphanumerics into a single hyphen and lowercase the result.
+String slugifyMicron(String text) {
+  final stripped = text.replaceAll(_tagPattern, '');
+  return stripped
+      .replaceAll(RegExp(r'[^A-Za-z0-9]+'), '-')
+      .replaceAll(RegExp(r'^-+|-+$'), '')
+      .toLowerCase();
+}
+
+final RegExp _tagPattern = RegExp(r'`[FB]T[0-9a-fA-F]{6}'
+    r'|`[FB][0-9a-fA-F]{3}'
+    r'|`:[A-Za-z0-9_\-]*'
+    r'|`[!*_=fbacrl`<>{]');
 
 class _ParserState {
   bool literal = false;
+  bool table = false;
+  final List<String> tableBuffer = [];
   int depth = 0;
   MicronAlign align = MicronAlign.defaultAlign;
   MicronStyle style = MicronStyle.plain;
+  final List<String> pendingAnchors = [];
 }
 
 MicronLine? _parseLine(String line, _ParserState state) {
@@ -63,7 +91,17 @@ MicronLine? _parseLine(String line, _ParserState state) {
   }
 
   if (!preEscape) {
-    if (line.startsWith('`t') || line.startsWith('`{')) {
+    if (line.startsWith('`t')) {
+      if (state.table) return _closeTable(state);
+      state.table = true;
+      state.tableBuffer.clear();
+      return null;
+    }
+    if (state.table) {
+      state.tableBuffer.add(line);
+      return null;
+    }
+    if (line.startsWith('`{')) {
       return null;
     }
     if (first == '<') {
@@ -78,6 +116,8 @@ MicronLine? _parseLine(String line, _ParserState state) {
       state.depth = level;
       final rest = line.substring(level);
       if (rest.isEmpty) return null;
+      final slug = slugifyMicron(rest);
+      if (slug.isNotEmpty) state.pendingAnchors.add(slug);
       final segments = _inline(rest, state, pre: false);
       return MicronHeadingLine(segments, level, state.align);
     }
@@ -144,11 +184,12 @@ List<MicronSegment> _inline(String line, _ParserState state,
         case 'a':
           state.align = MicronAlign.defaultAlign;
         case ':':
-          // Anchor declaration: consume the name, render nothing.
           var end = i + 1;
           while (end < line.length && _isAnchorChar(line[end])) {
             end++;
           }
+          final name = line.substring(i + 1, end);
+          if (name.isNotEmpty) state.pendingAnchors.add(name);
           i = end - 1;
         case '[':
           final end = line.indexOf(']', i);
@@ -158,36 +199,30 @@ List<MicronSegment> _inline(String line, _ParserState state,
             final pieces = linkData.split('`');
             String label;
             String url;
+            List<String>? fields;
             if (pieces.length == 1) {
               url = pieces[0];
               label = '';
             } else if (pieces.length >= 2 && pieces.length <= 3) {
-              // A third piece carries form fields; ignored until forms land.
               label = pieces[0];
               url = pieces[1];
+              if (pieces.length == 3 && pieces[2].isNotEmpty) {
+                fields = pieces[2].split('|');
+              }
             } else {
               url = '';
               label = '';
             }
             if (url.isNotEmpty) {
               output.add(MicronSegment(label.isEmpty ? url : label, state.style,
-                  linkUrl: url));
+                  linkUrl: url, linkFields: fields));
             }
           }
         case '<':
-          // Input field: `<flags|name`data> -- inert placeholder here.
-          final backtick = line.indexOf('`', i + 1);
-          final end = backtick == -1 ? -1 : line.indexOf('>', backtick);
-          if (backtick != -1 && end != -1) {
-            final data = line.substring(backtick + 1, end);
-            // ASCII brackets: the bundled terminal fonts have no glyph for
-            // fancier field markers, which render as tofu.
-            output.add(MicronSegment(
-              '[ ${data.isEmpty ? ' ' : data} ]',
-              state.style,
-              isField: true,
-            ));
-            i = end;
+          final field = _readField(line, i);
+          if (field != null) {
+            output.add(MicronSegment('', state.style, field: field.field));
+            i = field.end;
           }
         default:
           // Unknown tag: dropped, matching upstream's forward tolerance.
@@ -219,6 +254,115 @@ List<MicronSegment> _inline(String line, _ParserState state,
   }
   flush();
   return output;
+}
+
+/// Ends the open table block and renders what it buffered. Null when the
+/// block held nothing a table can be made of, which drops it silently as
+/// upstream does.
+MicronTableLine? _closeTable(_ParserState state) {
+  if (!state.table) return null;
+  state.table = false;
+  final raw = List<String>.from(state.tableBuffer);
+  state.tableBuffer.clear();
+
+  final rows = <List<String>>[];
+  for (final line in raw) {
+    final trimmed = line.trim();
+    if (trimmed.isEmpty) continue;
+    var cells = trimmed.split('|');
+    if (cells.isNotEmpty && cells.first.trim().isEmpty) cells = cells.sublist(1);
+    if (cells.isNotEmpty && cells.last.trim().isEmpty) {
+      cells = cells.sublist(0, cells.length - 1);
+    }
+    if (cells.isEmpty) continue;
+    rows.add(cells.map((c) => c.trim()).toList());
+  }
+  if (rows.isEmpty) return null;
+
+  var aligns = <MicronAlign>[];
+  if (rows.length > 1 && rows[1].every(_isRuleCell)) {
+    aligns = rows[1].map(_ruleAlign).toList();
+    rows.removeAt(1);
+  }
+
+  final parsed = [
+    for (final row in rows)
+      [for (final cell in row) _inline(cell, state, pre: false)]
+  ];
+  return MicronTableLine(parsed, aligns, state.depth);
+}
+
+bool _isRuleCell(String cell) =>
+    cell.isNotEmpty && RegExp(r'^:?-{2,}:?$').hasMatch(cell);
+
+MicronAlign _ruleAlign(String cell) {
+  final left = cell.startsWith(':');
+  final right = cell.endsWith(':');
+  if (left && right) return MicronAlign.center;
+  if (right) return MicronAlign.right;
+  return MicronAlign.left;
+}
+
+class _ParsedField {
+  const _ParsedField(this.field, this.end);
+  final MicronField field;
+  final int end;
+}
+
+/// Reads `` `<flags|name|value|*`data> `` starting at the `<`. Returns null
+/// when the tag is truncated or has no name, which drops it as upstream does.
+_ParsedField? _readField(String line, int start) {
+  final backtick = line.indexOf('`', start + 1);
+  if (backtick == -1) return null;
+  final end = line.indexOf('>', backtick);
+  if (end == -1) return null;
+
+  final head = line.substring(start + 1, backtick);
+  final data = line.substring(backtick + 1, end);
+
+  var kind = MicronFieldKind.text;
+  var name = head;
+  var value = '';
+  var width = 24;
+  var masked = false;
+  var preChecked = false;
+
+  if (head.contains('|')) {
+    final parts = head.split('|');
+    var flags = parts[0];
+    name = parts.length > 1 ? parts[1] : '';
+    if (flags.contains('^')) {
+      kind = MicronFieldKind.radio;
+      flags = flags.replaceAll('^', '');
+    } else if (flags.contains('?')) {
+      kind = MicronFieldKind.checkbox;
+      flags = flags.replaceAll('?', '');
+    } else if (flags.contains('!')) {
+      flags = flags.replaceAll('!', '');
+      masked = true;
+    }
+    if (flags.isNotEmpty) {
+      final parsed = int.tryParse(flags);
+      if (parsed != null) width = parsed.clamp(1, 256);
+    }
+    if (parts.length > 2) value = parts[2];
+    if (parts.length > 3 && parts[3] == '*') preChecked = true;
+  }
+
+  if (name.isEmpty) return null;
+  final isToggle = kind != MicronFieldKind.text;
+  return _ParsedField(
+    MicronField(
+      name: name,
+      kind: kind,
+      value: isToggle ? (value.isNotEmpty ? value : data) : '',
+      initial: isToggle ? '' : data,
+      width: width,
+      masked: masked,
+      preChecked: preChecked,
+    ),
+    end,
+  );
 }
 
 bool _isAnchorChar(String c) =>
