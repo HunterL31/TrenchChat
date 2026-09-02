@@ -158,6 +158,10 @@ const double _loadOlderThreshold = 120;
 /// view is left put.
 const double _nearBottomThreshold = 80;
 
+/// How near the reported extent counts as already at it, so a re-jump stops
+/// rather than chasing a fractional remainder.
+const double _atBottomEpsilon = 0.5;
+
 class _MessageListState extends State<MessageList> {
   final ScrollController _controller = ScrollController();
 
@@ -170,6 +174,19 @@ class _MessageListState extends State<MessageList> {
   /// A new message arrived while the reader was scrolled up: the affordance
   /// that jumps them back to the newest.
   bool _showNewPill = false;
+
+  /// Whether the view belongs at the newest message. A lazily built list of
+  /// variable-height rows only estimates its extent from the rows laid out so
+  /// far, so one jump lands short of the real bottom; while this holds, every
+  /// extent change jumps again.
+  bool _pinnedToBottom = true;
+
+  /// True while a scroll of our own is running, so it is not read as the
+  /// reader moving away from the bottom.
+  bool _programmaticScroll = false;
+
+  /// A re-jump is already queued for the end of this frame.
+  bool _bottomJumpScheduled = false;
 
   @override
   void initState() {
@@ -267,6 +284,7 @@ class _MessageListState extends State<MessageList> {
 
   void _onScroll() {
     if (!_controller.hasClients) return;
+    if (!_programmaticScroll) _pinnedToBottom = _isNearBottom();
     if (_showNewPill && _isNearBottom()) setState(() => _showNewPill = false);
     if (widget.onLoadOlder == null || !widget.hasMoreOlder || widget.loadingOlder) return;
     if (_controller.position.pixels <= _loadOlderThreshold) {
@@ -282,17 +300,39 @@ class _MessageListState extends State<MessageList> {
 
   void _jumpToBottom() {
     if (!_controller.hasClients) return;
+    _pinnedToBottom = true;
+    _programmaticScroll = true;
     _controller.jumpTo(_controller.position.maxScrollExtent);
+    _programmaticScroll = false;
+  }
+
+  /// Jumps again when the extent grew under a view that belongs at the newest
+  /// message, which is how the estimate an unscrolled list reports converges
+  /// on the real one. Returns false so the notification keeps travelling.
+  bool _keepPinnedToBottom() {
+    if (!_pinnedToBottom || _bottomJumpScheduled || !_controller.hasClients) return false;
+    final pos = _controller.position;
+    if ((pos.maxScrollExtent - pos.pixels) <= _atBottomEpsilon) return false;
+    _bottomJumpScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _bottomJumpScheduled = false;
+      if (mounted && _pinnedToBottom) _jumpToBottom();
+    });
+    return false;
   }
 
   void _animateToBottom() {
     setState(() => _showNewPill = false);
     if (!_controller.hasClients) return;
-    _controller.animateTo(
-      _controller.position.maxScrollExtent,
-      duration: const Duration(milliseconds: 200),
-      curve: Curves.easeOut,
-    );
+    _pinnedToBottom = true;
+    _programmaticScroll = true;
+    _controller
+        .animateTo(
+          _controller.position.maxScrollExtent,
+          duration: const Duration(milliseconds: 200),
+          curve: Curves.easeOut,
+        )
+        .whenComplete(() => _programmaticScroll = false);
   }
 
   @override
@@ -356,7 +396,12 @@ class _MessageListState extends State<MessageList> {
         // Selectable so a code, a hash or a link someone sent can be copied
         // out. The pill stays outside it: a button you can drag-select is a
         // button that fights you.
-        Positioned.fill(child: SelectionArea(child: list)),
+        Positioned.fill(
+          child: NotificationListener<ScrollMetricsNotification>(
+            onNotification: (_) => _keepPinnedToBottom(),
+            child: SelectionArea(child: list),
+          ),
+        ),
         if (_showNewPill)
           Positioned(
             left: 0,
