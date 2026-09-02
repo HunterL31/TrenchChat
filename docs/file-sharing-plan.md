@@ -350,6 +350,45 @@ serves members because it is a member.
   per download, partial TTL, LRU store budget. Outbound: serve rate limit
   per link, inbound link cap, concurrent serve cap, served size cap.
 
+## Existing Reticulum file transfer tools, and why none is used whole
+
+Surveyed against the installed RNS 1.4.2 and LXMF 1.1.1 before designing.
+
+- **`rncp`** (ships with RNS, `RNS/Utilities/rncp.py`). Push a file to a
+  listener, or pull one from a listener started with `--allow-fetch`. Pull
+  is a `fetch_file` request handler on an `rncp.receive` destination,
+  authorised by a static `ALLOW_LIST` of identity hashes, answering with one
+  Resource carrying `{"name": ...}` metadata. It is the closest reference
+  for this plan's file plane and is where its shape comes from. Not reused
+  as code: it is a CLI built on module globals, its allow list is one
+  per-process list rather than per-channel membership that changes, its
+  address is a filesystem path rather than a content hash, and a transfer
+  is one whole-file Resource with no resume (the word does not appear in
+  it). Worth re-reading in step 4.
+- **NomadNet node file serving** (`/file/<name>` over `Link.request`).
+  Already wrapped by `network/node_transport.py`, which the file plane
+  copies. Same limits as `rncp`: whole-file responses, anonymous by default,
+  no membership concept.
+- **LXMF `FIELD_FILE_ATTACHMENTS`**, as Sideband and MeshChat use it. A push
+  inside a message, bounded by the router's per-transfer delivery limit
+  (1000 KB by default). This is exactly the plan's inline tier, and the
+  interop route for the direct-message follow-up. It cannot be the large
+  file path: every member receives every byte whether they wanted it or not.
+- **LXMF propagation nodes.** Hold messages, not files, capped at 256 KB per
+  message by default, and channel messages never enter them.
+- **`RNS.Channel` and `RNS.Buffer`**, the reliable ordered stream over a
+  link that `rnsh` uses. Could carry a seekable byte stream, but it is still
+  bound to one link, so the offset bookkeeping, verification and holder
+  switching would all have to be built on top of it anyway, and Resource
+  already gives chunked reliable transfer with compression and progress for
+  free. Request slices are the smaller design.
+- **`rnsh`, `rnx`.** Remote shell and remote execution; not transfer tools.
+
+Nothing in the ecosystem offers membership-scoped authorisation, multiple
+sources, or resume across links as a library. The primitives all exist and
+the plan uses every one of them; what it adds is the thin layer those tools
+each also had to write for themselves.
+
 ## Rejected alternatives
 
 - **Always push, raise LXMF's `delivery_limit`.** LXMF can move larger
