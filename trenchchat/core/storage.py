@@ -1651,7 +1651,7 @@ class Storage:
     def has_any_tenure(self, channel_hash: str) -> bool:
         """Return True if the membership_tenure table has any rows for this channel.
 
-        Used to decide whether to apply tenure checks — if no tenure data exists
+        Used to decide whether to apply tenure checks, if no tenure data exists
         (e.g. an open-join channel or a channel bootstrapped before this feature),
         tenure checks are skipped rather than incorrectly rejecting all messages.
 
@@ -2354,7 +2354,7 @@ class Storage:
             )
 
     def get_message_requests(self, identity_hash: str | None = None) -> list[dict]:
-        """Held messages, oldest first — the order they should be filed in."""
+        """Held messages, oldest first: the order they should be filed in."""
         if identity_hash is None:
             rows = self._fetchall(
                 "SELECT * FROM message_requests ORDER BY received_at, id")

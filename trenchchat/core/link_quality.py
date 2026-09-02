@@ -7,7 +7,7 @@ link to be open:
   - Hop count      (fewer hops = better)
   - RTT            (from an active RNS link, if one exists to this peer)
   - Path freshness (time remaining before the path entry expires)
-  - Physical layer (RSSI / SNR / Q — only meaningful on radio interfaces)
+  - Physical layer (RSSI / SNR / Q: only meaningful on radio interfaces)
 
 The result is a four-tier enum that maps directly to a display colour in the
 network map and will later be used to rank candidates for voice connections.
@@ -23,11 +23,11 @@ import RNS
 
 class LinkQuality(IntEnum):
     """Four-tier link quality classification, ordered best → worst."""
-    EXCELLENT = 4   # green   — direct, low-latency, fresh path
-    GOOD      = 3   # yellow  — 1–2 hops or slightly stale
-    FAIR      = 2   # orange  — multi-hop or high latency
-    POOR      = 1   # red     — very stale, many hops, or no path data
-    UNKNOWN   = 0   # grey    — not enough information to classify
+    EXCELLENT = 4   # green: direct, low-latency, fresh path
+    GOOD      = 3   # yellow: 1–2 hops or slightly stale
+    FAIR      = 2   # orange: multi-hop or high latency
+    POOR      = 1   # red: very stale, many hops, or no path data
+    UNKNOWN   = 0   # grey: not enough information to classify
 
 
 # Thresholds
@@ -140,7 +140,7 @@ def score_path(
     ttl = _path_ttl(dest_hex)
 
     if hops == 0:
-        # Interface / self — always excellent
+        # Interface / self: always excellent
         return LinkQuality.EXCELLENT
 
     if hops == 1:

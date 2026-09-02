@@ -3,12 +3,12 @@
 New core functionality is prototyped in `devtools/testenv/` against a real
 two-peer network before it's wired into a client UI. This catches protocol
 and manager-level bugs against real RNS Links, real path resolution, and
-real timing — the same class of bug the pytest suite's in-process
+real timing, the same class of bug the pytest suite's in-process
 `TestTransport` shim can mask by delivering messages instantly and
 synchronously.
 
 The client is the Flutter app (`flutter_ui/`), which consumes
-`devtools/testenv/api.py` directly — so "the endpoint" and "the client
+`devtools/testenv/api.py` directly, so "the endpoint" and "the client
 wiring" are the same layer.
 
 ## The required shape
@@ -18,13 +18,13 @@ same code path runs whether it's driven by the disposable test UI or the
 real client:
 
 1. **Business logic goes in `trenchchat/core/actions.py`.** If a feature
-   needs more than one manager call — a permission check before a
+   needs more than one manager call (a permission check before a
    mutation, a computed recipient list, a create-then-follow-up-call
-   sequence — it's a plain function here taking already-constructed
+   sequence), it's a plain function here taking already-constructed
    managers as arguments. See `create_channel`, `join_public_channel`,
    `compute_channel_recipients` for the established shape. Never put this
    sequencing inline in an API endpoint or a client widget.
-2. **`devtools/testenv/api.py`'s endpoints call that function** — not
+2. **`devtools/testenv/api.py`'s endpoints call that function**: not
    a parallel reimplementation. This is what makes a bug caught in the
    test environment a real bug, and a feature proven there ready to port.
 3. **New core managers are instantiated in
@@ -32,7 +32,7 @@ real client:
    its wiring order (identity → storage → router → managers).
 
 Before writing new logic, check `trenchchat/core/` for an existing
-manager/action that already does it — a missing piece in the test
+manager/action that already does it, a missing piece in the test
 environment (a manager never instantiated, an endpoint never written)
 means it hasn't been ported yet, not that a new design is needed.
 
@@ -65,7 +65,7 @@ one (real managers, real network). A feature isn't done until both agree.
 
 ## Known real-app quirks the test environment surfaces
 
-These are genuine behaviors of the production code, not harness bugs —
+These are genuine behaviors of the production code, not harness bugs,
 worth knowing before chasing a phantom bug in new work:
 
 - **Invites/join-requests don't retry.** Unlike chat messages,
@@ -78,7 +78,7 @@ worth knowing before chasing a phantom bug in new work:
   yet marked subscribed/member locally.
 - **Real network round trips are slow compared to the pytest suite.** A
   chain like invite → join request → member-list update → sync request →
-  sync response is four separate hops, not one — give it several seconds
+  sync response is four separate hops, not one; give it several seconds
   before concluding something didn't work.
 
 Full detail in `devtools/testenv/README.md`.

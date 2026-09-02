@@ -30,7 +30,7 @@ class TestJitterBuffer:
         buf.push(2, b"c")
         buf.push(3, b"d")
         assert buf.pop() == b"a"
-        assert buf.pop() is None  # seq 1 lost — caller runs PLC
+        assert buf.pop() is None  # seq 1 lost: caller runs PLC
         assert buf.pop() == b"c"
 
     def test_seq_wraparound(self):
@@ -194,7 +194,7 @@ class TestTonePipeline:
 _FRAME_PCM_BYTES = 1920
 _ENCODE_SECS = 0.01
 # A bundle is 2 x 20 ms frames, so 25 a second. A loop that sleeps the whole
-# interval and then encodes runs at 1/(0.04 + 2 x _ENCODE_SECS) — about 17 —
+# interval and then encodes runs at 1/(0.04 + 2 x _ENCODE_SECS) (about 17)
 # and every frame it fails to send is 20 ms of silence at the listener.
 _NOMINAL_BUNDLE_RATE = 25.0
 _MIN_BUNDLE_RATE = 21.0

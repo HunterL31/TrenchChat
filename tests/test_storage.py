@@ -612,13 +612,13 @@ class TestMembershipTenure:
         db.open_tenure(CHAN, ID_A, t0)
         db.close_tenure(CHAN, ID_A, kick)
         db.open_tenure(CHAN, ID_A, rejoin)
-        # Before kick — valid
+        # Before kick: valid
         assert db.was_member_at(CHAN, ID_A, t0)
         assert db.was_member_at(CHAN, ID_A, kick - 1)
-        # In the gap — invalid
+        # In the gap: invalid
         assert not db.was_member_at(CHAN, ID_A, kick)
         assert not db.was_member_at(CHAN, ID_A, rejoin - 1)
-        # After rejoin — valid
+        # After rejoin: valid
         assert db.was_member_at(CHAN, ID_A, rejoin)
         assert db.was_member_at(CHAN, ID_A, rejoin + 1000)
 
@@ -643,7 +643,7 @@ class TestMembershipTenure:
         t0 = 1_000_000.0
         t1 = t0 + 200.0
         db.open_tenure(CHAN, ID_A, t0)
-        # Same set in and out — nothing changes
+        # Same set in and out, nothing changes
         db.update_tenure(CHAN, {ID_A}, {ID_A}, t1)
         assert db.was_member_at(CHAN, ID_A, t1)
 
@@ -654,7 +654,7 @@ class TestMembershipTenure:
     def test_open_tenure_idempotent(self, db):
         t0 = 1_000_000.0
         db.open_tenure(CHAN, ID_A, t0)
-        db.open_tenure(CHAN, ID_A, t0)  # duplicate — ignored
+        db.open_tenure(CHAN, ID_A, t0)  # duplicate: ignored
         # Should still be a member
         assert db.was_member_at(CHAN, ID_A, t0)
 
@@ -711,7 +711,7 @@ class TestMembershipTenure:
     def test_backfill_from_members_table(self, tmp_path):
         """Existing members are backfilled into tenure on first open."""
         db = Storage(db_path=tmp_path / "bf.db")
-        # Manually insert a member row — bypassing tenure so we can test backfill
+        # Manually insert a member row, bypassing tenure so we can test backfill
         db.upsert_channel(CHAN, "Test", "", "creator", "invite", time.time())
         t0 = time.time() - 10
         db._conn.execute(
@@ -1004,7 +1004,7 @@ class TestServersCRUD:
         assert hashes == [SERVER_H]
 
     def test_get_all_channels_excludes_servers(self, db):
-        """get_all_channels feeds the sidebar and restore_owned_channels —
+        """get_all_channels feeds the sidebar and restore_owned_channels,
         a server must never appear in it."""
         _make_server_with_channel(db)
         hashes = {r["hash"] for r in db.get_all_channels()}
@@ -1094,7 +1094,7 @@ class TestScopeResolution:
 
     def test_writes_do_not_resolve(self, db):
         """A membership write keyed by a channel hash must NOT land at server
-        scope — that would be a privilege-escalation primitive."""
+        scope; that would be a privilege-escalation primitive."""
         _make_server_with_channel(db)
         db.upsert_member(CHAN_IN_SERVER, BOB, "Bob", ROLE_OWNER)
         # It landed on the channel's own row, which no resolving read reaches.
@@ -1167,7 +1167,7 @@ class TestPermissionMirror:
         assert is_discoverable(perms) is False
 
     def test_get_channel_permissions_does_not_resolve(self, db):
-        """Permissions are mirrored down, never resolved up — resolving here
+        """Permissions are mirrored down, never resolved up; resolving here
         would be bypassed by the ~18 direct row['permissions'] readers."""
         db.upsert_server(SERVER_H, "S", "", ALICE, PRESET_SERVER, 1.0)
         db.upsert_channel(CHAN_IN_SERVER, "general", "", ALICE,
@@ -1221,7 +1221,7 @@ class TestServerSchemaMigration:
 class TestServerScopePermissions:
     """has_permission() must work when handed a *server* hash, not just a
     channel one. A server has no channels row, so without a fallback every
-    admin and member is denied everything — and an owner still looks fine
+    admin and member is denied everything, and an owner still looks fine
     because has_permission short-circuits on that role, which is exactly what
     made this hard to notice."""
 

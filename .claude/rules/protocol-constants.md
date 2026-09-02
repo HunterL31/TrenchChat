@@ -79,7 +79,7 @@ to distinguish control messages from chat messages.
 A **direct message is a chat message**, not a control one: it carries no `F_MSG_TYPE`, and its
 `F_CHANNEL_HASH` is a conversation address (`naming.dm_hash_for`) rather than a channel hash. That
 keeps it out of the router's per-sender control throttle, where a limit would drop conversation.
-Nothing on the wire marks it as a direct message — the receiver recomputes the address from the
+Nothing on the wire marks it as a direct message, the receiver recomputes the address from the
 authenticated sender, so the address itself is the proof.
 
 ## msgpack conventions

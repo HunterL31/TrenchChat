@@ -35,7 +35,7 @@ class ChannelManager:
         RNS.Transport.register_announce_handler(self._announce_handler)
 
     def add_channel_discovered_callback(self, callback):
-        """callback(channel_hash_hex, channel_name) — fired when a new public channel is heard."""
+        """callback(channel_hash_hex, channel_name): fired when a new public channel is heard."""
         if callback not in self._discovered_callbacks:
             self._discovered_callbacks.append(callback)
 

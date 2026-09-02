@@ -210,7 +210,7 @@ def list_audio_devices(config) -> dict:
     """PortAudio devices plus the configured selection, for a device picker.
 
     Selections are device names; None means the system default. A selected
-    name that is no longer present stays selected — the pipeline falls back
+    name that is no longer present stays selected, the pipeline falls back
     to the default until the device returns.
     """
     from trenchchat.core.audio.devices import list_devices

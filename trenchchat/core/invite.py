@@ -8,7 +8,7 @@ Member list document v2 (msgpack):
     "published_at":  float,
     "members":       [bytes, ...], # all member identity hashes
     "admins":        [bytes, ...], # subset of members
-    "owners":        [bytes],      # exactly one — the channel creator
+    "owners":        [bytes],      # exactly one: the channel creator
     "permissions":   bytes,        # msgpack-encoded permissions dict
     "signatures":    {bytes: bytes} # admin/owner hash -> Ed25519 signature
 }
@@ -240,7 +240,7 @@ class InviteManager:
             self._invite_callbacks.remove(callback)
 
     def add_channel_joined_callback(self, callback):
-        """callback(channel_hash_hex, channel_name) — fired when auto-joined via invite."""
+        """callback(channel_hash_hex, channel_name): fired when auto-joined via invite."""
         if callback not in self._channel_callbacks:
             self._channel_callbacks.append(callback)
 
@@ -249,7 +249,7 @@ class InviteManager:
             self._channel_callbacks.remove(callback)
 
     def add_server_joined_callback(self, callback):
-        """callback(server_hash_hex, server_name) — fired when a server is first joined.
+        """callback(server_hash_hex, server_name), fired when a server is first joined.
 
         A server carries no subscription, so nothing else marks the moment it
         becomes visible: a client watching only for joined channels missed a
@@ -276,7 +276,7 @@ class InviteManager:
                         RNS.LOG_ERROR)
 
     def add_member_list_callback(self, callback):
-        """callback(channel_hash_hex) — fired whenever a member list update is accepted."""
+        """callback(channel_hash_hex): fired whenever a member list update is accepted."""
         if callback not in self._member_list_callbacks:
             self._member_list_callbacks.append(callback)
 
@@ -864,7 +864,7 @@ class InviteManager:
         new_ts = doc["published_at"]
 
         if existing is None:
-            pass  # no existing — accept
+            pass  # no existing: accept
         else:
             old_v = existing["version"]
             old_ts = existing["published_at"]
@@ -1517,7 +1517,7 @@ class InviteManager:
                                                   if is_server else None))
 
         # Persist the new version so peers cannot replay an older doc, but do
-        # NOT call _accept_document — the local members table is already correct
+        # NOT call _accept_document, the local members table is already correct
         # and replace_members would wipe display names unnecessarily.
         blob = msgpack.packb(doc, use_bin_type=True)
         self._storage.upsert_member_list_version(

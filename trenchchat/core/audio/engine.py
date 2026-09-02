@@ -3,7 +3,7 @@ Audio pipelines: capture → encode → transmit and receive → mix → playbac
 
 AudioPipeline drives real devices via sounddevice/PortAudio. Heavy
 dependencies (sounddevice, the Opus codec, the numpy mixer) are imported
-lazily inside methods so this module itself imports anywhere — headless
+lazily inside methods so this module itself imports anywhere, headless
 testenv workers use TonePipeline, which feeds the same encode/transmit
 path with a generated signal and needs no devices at all.
 
@@ -15,7 +15,7 @@ concealment, and mixes.
 
 Every periodic thread runs on _Cadence: a sender even a few percent slow
 drains the listener's jitter buffer, and the listener then plays 80 ms,
-starves, refills and plays again — audible as the stream cutting in and
+starves, refills and plays again, audible as the stream cutting in and
 out, while loss and jitter both read clean.
 """
 
@@ -183,8 +183,8 @@ class AudioPipeline:
         """Open capture and playback independently and run what opened.
 
         A dead microphone must not cost playback (nor the reverse): each
-        direction that fails start-to-finish — configured device and the
-        default alike — is recorded in device_status() and its worker
+        direction that fails start-to-finish, configured device and the
+        default alike, is recorded in device_status() and its worker
         thread is simply not started. Only both directions failing raises.
         """
         import sounddevice as sd
@@ -281,7 +281,7 @@ class AudioPipeline:
     def healthy(self) -> bool:
         """False once a PortAudio stream that did open has died (device
         unplugged); the owner rebuilds the pipeline, re-resolving devices.
-        A direction that never opened is a recorded failure, not a death —
+        A direction that never opened is a recorded failure, not a death,
         counting it would make the watchdog rebuild forever."""
         if not self._running:
             return True
@@ -318,7 +318,7 @@ class AudioPipeline:
 
     def playout_stats(self) -> dict:
         """Per-peer playout continuity: frames decoded, mid-stream gaps
-        concealed (plc), and starved ticks — ticks with nothing to play
+        concealed (plc), and starved ticks, ticks with nothing to play
         while the peer was still delivering, which is audible dead air.
 
         A sender its own gate has closed delivers nothing on purpose, so
@@ -390,7 +390,7 @@ class AudioPipeline:
     def _gate_open(self, pcm: bytes) -> bool:
         """Mute switch plus voice-activity gate.
 
-        In "ptt" mode an unmuted pipeline always transmits — the frontend
+        In "ptt" mode an unmuted pipeline always transmits, the frontend
         maps the push-to-talk key to set_muted(False) while held.
         """
         if self._muted:
@@ -479,8 +479,8 @@ class TonePipeline:
 
     Transmits a 440 Hz tone through the real codec when one is available
     (falling back to synthetic byte frames), and runs the same receive
-    path a desktop listener does — jitter buffer, stateful decoder, 20 ms
-    playout tick — discarding the decoded PCM. A headless worker therefore
+    path a desktop listener does, jitter buffer, stateful decoder, 20 ms
+    playout tick, discarding the decoded PCM. A headless worker therefore
     measures the continuity a listener would hear, not just a frame count.
     The tone starts disabled; the testenv toggles it per worker.
     """

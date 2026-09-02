@@ -11,7 +11,7 @@ nothing in `tests/` dials a real link.
 uncovered, and what this family is for, is everything that needs three or
 four: a full mesh rather than a single pair, roster convergence across
 peers that learn of each other indirectly, and the states the design
-document is explicit about — "unreachable" being shown rather than hidden,
+document is explicit about, "unreachable" being shown rather than hidden,
 a demoted participant being cut off by the re-authorisation sweep.
 
 Voice needs a fast link. These run on broadband profiles; voice11 is the one

@@ -9,13 +9,13 @@ tests run against a fake with no mesh.
 Hosting serves DATA_DIR/nomad_pages/pages/ as "/page/..." and
 DATA_DIR/nomad_pages/files/ as "/file/...", mirroring nomadnet's node
 directory layout so an existing node dir can be copied straight in. Unlike
-nomadnet, pages starting with "#!" are served as plain bytes — no CGI
+nomadnet, pages starting with "#!" are served as plain bytes, no CGI
 execution.
 
 Our own node is browsed without a link: RNS will not link a destination to
 itself, so a request for it is answered from the pages directory instead
 (_serve_loopback), which is also nomadnet's answer to the same problem. It
-reads bytes, where nomadnet's loopback runs an executable page — the same
+reads bytes, where nomadnet's loopback runs an executable page, the same
 non-goal as above, and the reason a "#!" page previews here as its source.
 """
 
@@ -115,7 +115,7 @@ def page_cache_expiry(payload: bytes, now: float) -> float | None:
 
     "#!c=N" on the first line is the cache lifetime in seconds; "#!c=0"
     means do not cache (kept only for NO_CACHE_GRACE_SECS so the client can
-    read the delivery back). None means no header — the default LRU regime
+    read the delivery back). None means no header, the default LRU regime
     applies. Total: malformed headers read as no header.
     """
     if not payload.startswith(b"#!c="):

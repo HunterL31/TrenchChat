@@ -9,7 +9,7 @@ are never mistaken for each other.
 Every launch compares that version against the one recorded in the profile
 and stores the result in ``version.json`` beside it. Nothing else on disk
 says which build wrote the profile, so without this an installer that rolls
-a user back — or swaps one same-version build for another — looks exactly
+a user back (or swaps one same-version build for another) looks exactly
 like an ordinary restart, and the app opens a database a newer build may
 have migrated with no idea that is what it is doing.
 """
@@ -228,7 +228,7 @@ def record_launch(data_dir: Path | None = None,
 
     The record is only rewritten when the version actually changed, so
     ``changed_at`` stays the time of the change rather than the last launch.
-    A profile that cannot be written is logged and otherwise ignored — a
+    A profile that cannot be written is logged and otherwise ignored, a
     version note must never keep the app from starting.
     """
     data_dir = data_dir or DATA_DIR

@@ -125,8 +125,8 @@ class NodeAnnounceHandler:
     Listens for Nomad Network node announces (nomadnetwork.node).
 
     Fires on_node_discovered(node_hash_hex, display_name, interface).
-    node_hash_hex is the node's *destination* hash — what a page browser
-    dials — not the identity hash. app_data is the unsigned node name:
+    node_hash_hex is the node's *destination* hash, what a page browser
+    dials, not the identity hash. app_data is the unsigned node name:
     presentation only, never authority.
     """
 

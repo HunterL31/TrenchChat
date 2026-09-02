@@ -33,77 +33,77 @@ envelope (pack_dm_envelope below).
 """
 
 # --- Common / messaging fields ---
-F_CHANNEL_HASH      = 0x01   # bytes[16] — which channel
-F_DISPLAY_NAME      = 0x02   # str       — sender display name
-F_TIMESTAMP         = 0x03   # float     — sender wall-clock Unix epoch
-F_MESSAGE_ID        = 0x04   # bytes[32] — SHA-256 of content+sender+timestamp (hex text
+F_CHANNEL_HASH      = 0x01   # bytes[16]: which channel
+F_DISPLAY_NAME      = 0x02   # str: sender display name
+F_TIMESTAMP         = 0x03   # float: sender wall-clock Unix epoch
+F_MESSAGE_ID        = 0x04   # bytes[32]: SHA-256 of content+sender+timestamp (hex text
 #                              from older peers is still read)
-F_REPLY_TO          = 0x05   # bytes[32] — message_id of the message being replied to, or None
-F_LAST_SEEN_ID      = 0x06   # bytes[32] — message_id of the latest msg sender had seen, or None
-F_SYNC_WINDOW_START = 0x07   # float     — unix timestamp: start of sync window (sync_request)
-F_SYNC_MESSAGES     = 0x08   # bytes     — msgpack list[dict] of full message records (sync_response)
-F_MISSED_FOR        = 0x09   # str       — identity hex of peer who missed a message
-F_MISSED_MSG_ID     = 0x0A   # bytes[32] — message_id that was not delivered
-F_AVATAR_DATA       = 0x0B   # bytes     — JPEG avatar payload (max 4 KB)
-F_AVATAR_VERSION    = 0x0C   # int       — monotonic counter; receiver uses to detect stale updates
-F_IMAGE_DATA        = 0x0D   # bytes     — JPEG image attachment payload (max 320 KB)
-F_EMOJI_HASH        = 0x0E   # bytes[32] — SHA-256 of the emoji image data
-F_EMOJI_DATA        = 0x0F   # bytes     — raw emoji image (PNG/GIF, max 64 KB)
+F_REPLY_TO          = 0x05   # bytes[32]: message_id of the message being replied to, or None
+F_LAST_SEEN_ID      = 0x06   # bytes[32]: message_id of the latest msg sender had seen, or None
+F_SYNC_WINDOW_START = 0x07   # float: start of the sync window, unix timestamp (sync_request)
+F_SYNC_MESSAGES     = 0x08   # bytes: msgpack list[dict] of full message records (sync_response)
+F_MISSED_FOR        = 0x09   # str: identity hex of peer who missed a message
+F_MISSED_MSG_ID     = 0x0A   # bytes[32]: message_id that was not delivered
+F_AVATAR_DATA       = 0x0B   # bytes: JPEG avatar payload (max 4 KB)
+F_AVATAR_VERSION    = 0x0C   # int: monotonic counter; receiver uses to detect stale updates
+F_IMAGE_DATA        = 0x0D   # bytes: JPEG image attachment payload (max 320 KB)
+F_EMOJI_HASH        = 0x0E   # bytes[32]: SHA-256 of the emoji image data
+F_EMOJI_DATA        = 0x0F   # bytes: raw emoji image (PNG/GIF, max 64 KB)
 
 # --- Reaction fields ---
-F_REACTION_MSG_ID   = 0x40   # bytes[32] — message_id being reacted to
-F_REACTION_REMOVE   = 0x41   # bool — True if this is a reaction removal
-F_EMOJI_NAME        = 0x42   # str  — human-readable emoji name; sent with request and response
+F_REACTION_MSG_ID   = 0x40   # bytes[32]: message_id being reacted to
+F_REACTION_REMOVE   = 0x41   # bool: True if this is a reaction removal
+F_EMOJI_NAME        = 0x42   # str: human-readable emoji name; sent with request and response
 #                              so the receiver can store the emoji under the correct name
-F_REACTION_UNICODE  = 0x43   # str  — reaction key for a standard unicode emoji. Mutually
+F_REACTION_UNICODE  = 0x43   # str: reaction key for a standard unicode emoji. Mutually
 #                              exclusive with F_EMOJI_HASH, which only ever carries a
 #                              custom emoji's SHA-256.
 
 # --- Control discriminator ---
-F_MSG_TYPE          = 0x10   # str — present on all control messages; absent on chat messages
+F_MSG_TYPE          = 0x10   # str: present on all control messages; absent on chat messages
 
 # --- Invite fields ---
-F_INVITE_TOKEN      = 0x11   # bytes — Ed25519 signature token
-F_INVITEE_HASH      = 0x12   # bytes — identity hash of the invitee
-F_EXPIRY_TS         = 0x13   # float — Unix timestamp when the token expires
-F_ADMIN_HASH        = 0x14   # bytes — identity hash of the issuing admin
-F_INVITE_ISSUED_TS  = 0x15   # float — when the token was issued, bound into its signature
+F_INVITE_TOKEN      = 0x11   # bytes: Ed25519 signature token
+F_INVITEE_HASH      = 0x12   # bytes: identity hash of the invitee
+F_EXPIRY_TS         = 0x13   # float: Unix timestamp when the token expires
+F_ADMIN_HASH        = 0x14   # bytes: identity hash of the issuing admin
+F_INVITE_ISSUED_TS  = 0x15   # float: when the token was issued, bound into its signature
 
 # --- Member-list fields ---
-F_MEMBER_LIST_DOC   = 0x21   # bytes — msgpack-encoded member list document
-F_CHANNEL_NAME      = 0x22   # str   — channel display name
-F_CHANNEL_DESC      = 0x23   # str   — channel description
-F_CHANNEL_CREATOR   = 0x24   # str   — creator identity hash hex
-F_CHANNEL_ACCESS    = 0x25   # str   — (legacy) access mode ("public" | "invite")
-F_CHANNEL_CREATED_AT = 0x26  # float — Unix timestamp of channel creation
-F_CHANNEL_PERMISSIONS = 0x27 # str   — JSON permissions dict (replaces F_CHANNEL_ACCESS)
-F_SCOPE_KIND        = 0x28   # str   — "server" when this control message targets a
+F_MEMBER_LIST_DOC   = 0x21   # bytes: msgpack-encoded member list document
+F_CHANNEL_NAME      = 0x22   # str: channel display name
+F_CHANNEL_DESC      = 0x23   # str: channel description
+F_CHANNEL_CREATOR   = 0x24   # str: creator identity hash hex
+F_CHANNEL_ACCESS    = 0x25   # str: (legacy) access mode ("public" | "invite")
+F_CHANNEL_CREATED_AT = 0x26  # float: Unix timestamp of channel creation
+F_CHANNEL_PERMISSIONS = 0x27 # str: JSON permissions dict (replaces F_CHANNEL_ACCESS)
+F_SCOPE_KIND        = 0x28   # str: "server" when this control message targets a
                              #         server scope; absent/"channel" means a single
                              #         channel. The scope hash rides in F_CHANNEL_HASH.
 
 # --- Subscription fields ---
-F_SUBSCRIBER_LIST   = 0x30   # bytes — msgpack list of hex identity hashes
-F_SUBSCRIBER_VERSION = 0x31  # int   — monotonic counter per channel
-F_SUBSCRIBER_SIG    = 0x32   # bytes — owner Ed25519 signature over the list
+F_SUBSCRIBER_LIST   = 0x30   # bytes: msgpack list of hex identity hashes
+F_SUBSCRIBER_VERSION = 0x31  # int: monotonic counter per channel
+F_SUBSCRIBER_SIG    = 0x32   # bytes: owner Ed25519 signature over the list
 
 # --- Sync status fields ---
-F_SYNC_TRUNCATED    = 0x50   # bool — responder capped this batch; it holds more history
-F_SYNC_SCAN_CURSOR  = 0x51   # float — furthest timestamp the responder's sweep reached,
+F_SYNC_TRUNCATED    = 0x50   # bool: responder capped this batch; it holds more history
+F_SYNC_SCAN_CURSOR  = 0x51   # float: furthest timestamp the responder's sweep reached,
                              #         even if every row there was withheld from the
                              #         requester (sync_response, only set when truncated)
 
 # --- Voice fields ---
-F_VOICE_STATE       = 0x60   # str   — "joined" | "left"
-F_VOICE_MUTED       = 0x61   # bool  — sender's current mute state
-F_VOICE_JOINED_AT   = 0x62   # float — Unix timestamp when the sender joined the voice session
-F_VOICE_CODEC       = 0x63   # str   — codec the sender transmits ("opus")
+F_VOICE_STATE       = 0x60   # str: "joined" | "left"
+F_VOICE_MUTED       = 0x61   # bool: sender's current mute state
+F_VOICE_JOINED_AT   = 0x62   # float: Unix timestamp when the sender joined the voice session
+F_VOICE_CODEC       = 0x63   # str: codec the sender transmits ("opus")
 
 # --- Message integrity fields ---
-F_AUTHOR_SIG        = 0x70   # bytes[64] — author's Ed25519 signature over author_digest()
-F_AUTHOR_KEYS       = 0x71   # dict   — {author identity hex: public key} for a synced batch
+F_AUTHOR_SIG        = 0x70   # bytes[64]: author's Ed25519 signature over author_digest()
+F_AUTHOR_KEYS       = 0x71   # dict: {author identity hex: public key} for a synced batch
 
 # --- Friends / direct message fields ---
-F_FRIEND_NOTE       = 0x80   # str — optional intro line on a friend request
+F_FRIEND_NOTE       = 0x80   # str: optional intro line on a friend request
 
 # Longest intro line accepted on a friend request. Self-asserted text from an
 # identity we have no relationship with yet, so it is capped on the way in.

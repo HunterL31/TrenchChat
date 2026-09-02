@@ -17,7 +17,7 @@ cd /home/hunter/repos/TrenchChat && .venv/bin/python -m pytest tests/ -v
 ## Rules
 
 - Every test must pass. A partial pass is not acceptable.
-- If any tests fail, fix them before finishing — do not leave the codebase in a broken state.
+- If any tests fail, fix them before finishing; do not leave the codebase in a broken state.
 - If you add new behaviour, add a corresponding test for it in the appropriate `tests/test_*.py` file.
 - Do not skip or mark tests as `xfail` to paper over failures.
 

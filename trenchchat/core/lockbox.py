@@ -156,7 +156,7 @@ def create_lock(pin: str) -> bytes:
     the salt and a verification token to disk.  Returns the 32-byte raw key
     so the caller can immediately use it without prompting again.
 
-    Raises ValueError if a lock is already set — call remove_lock first — or
+    Raises ValueError if a lock is already set (call remove_lock first) or
     if the PIN is shorter than MIN_PIN_LENGTH.
     """
     if len(pin) < MIN_PIN_LENGTH:

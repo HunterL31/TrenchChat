@@ -76,7 +76,7 @@ class TestSecureIdentityFile:
         assert _posix_mode(f) == OWNER_RW_MODE
 
     def test_oserror_is_logged_not_raised(self, tmp_path):
-        """A permission failure must not propagate — it is logged as a warning."""
+        """A permission failure must not propagate; it is logged as a warning."""
         f = tmp_path / "identity"
         f.write_bytes(b"\x00" * 64)
 

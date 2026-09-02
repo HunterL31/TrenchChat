@@ -205,7 +205,7 @@ class TestMemberInvitePermission:
 
 
 # ---------------------------------------------------------------------------
-# broadcast_permissions — owner role preserved after permissions update
+# broadcast_permissions: owner role preserved after permissions update
 # ---------------------------------------------------------------------------
 
 class TestBroadcastPermissions:
@@ -262,7 +262,7 @@ class TestBroadcastPermissions:
         ch_hash = alice.channel_mgr.create_channel("promote-regression", "", "invite")
         alice.invite_mgr.publish_member_list(ch_hash, add_members=[bob.identity.hash])
 
-        # Promote Bob to admin — this is the operation that triggered the bug
+        # Promote Bob to admin; this is the operation that triggered the bug
         alice.invite_mgr.publish_member_list(ch_hash, add_admins=[bob.identity.hash])
 
         assert alice.storage.get_role(ch_hash, alice.identity.hash_hex) == ROLE_OWNER, \

@@ -334,7 +334,7 @@ def _mixed_topology_data():
 
 def test_every_node_carries_a_quality_tier():
     """The map colors every node by node["quality"]; a missing key silently
-    draws grey, so every kind — self, peer, transport, unknown, interface —
+    draws grey, so every kind (self, peer, transport, unknown, interface)
     must carry a tier in 0..4."""
     data = _mixed_topology_data()
     kinds_seen = set()

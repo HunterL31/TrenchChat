@@ -1,4 +1,4 @@
-# Live Group Voice Chat
+# Live group voice chat
 
 Discord/TeamSpeak-style live voice, without a server: every channel
 implicitly has one voice room, and each participant streams directly to
@@ -12,7 +12,7 @@ Voice is split across two planes:
 **Signalling plane (LXMF).** `trenchchat/core/voice.py`'s `VoiceManager`
 sends and receives `voice_join` / `voice_leave` / `voice_state` control
 messages, addressed with `compute_channel_recipients` like any other
-channel broadcast. Every message asserts state about **the sender only** —
+channel broadcast. Every message asserts state about **the sender only**,
 nobody relays third-party presence, so a forged message can at worst
 misrepresent its own author. A joiner learns current occupants because
 each participant, on seeing the join, unicasts one `voice_state` back
@@ -29,7 +29,7 @@ falls back to dialing after 10 s, covering one-way reachability). The
 initiator identifies itself on the link (`link.identify`) and sends a
 `VP_HELLO` naming the channel; the responder checks the identified peer
 against membership + the `voice_chat` permission before replying
-`VP_ACCEPT`. Only then do audio frames flow — Opus, 20 ms frames bundled
+`VP_ACCEPT`. Only then do audio frames flow, Opus, 20 ms frames bundled
 two per packet, sent as unreliable link packets (`create_receipt=False`,
 no retransmission; losses are concealed by the codec). Established,
 identified links are the ground truth for who you actually hear. Wire
@@ -100,7 +100,7 @@ Rules for the client, same as every other manager:
   own main thread (the API layer does this via `EventBus`); never touch
   UI state directly from them.
 - **Gate the join control** on `storage.has_permission(channel_hash,
-  self_hex, VOICE_CHAT)` (open-join channels need no permission row) —
+  self_hex, VOICE_CHAT)` (open-join channels need no permission row),
   that is the client layer of the three-layer enforcement
   (`.claude/rules/permission-enforcement.md`). The Flutter client
   implements this gate in `main_window.dart` via
@@ -112,7 +112,7 @@ Rules for the client, same as every other manager:
   failed join. Capture and playback open independently, so
   `audio_status()`'s `input_ok`/`output_ok` (+ per-direction error
   strings) say whether this is listening-only, capture-only, or no audio
-  at all — surface which, not just that.
+  at all, surface which, not just that.
 - "In voice but unreachable" is an honest state: signalling says a peer is
   present while no link can reach them. Show it (grayed entry) rather than
   hiding the peer.
@@ -127,7 +127,7 @@ Config keys (all under `"voice"` in `~/.trenchchat/config.json`):
 (16000/24000), `vad_threshold_db`, `event_sounds`.
 
 `event_sounds` (default on) plays a local rising blip when someone enters
-the session and a falling one when someone leaves — a genuine roster
+the session and a falling one when someone leaves, a genuine roster
 transition only, never a state refresh, and a timeout counts as a leave.
 The cues are synthesized (`core/audio/cues.py`) and mixed into playout, so
 they follow the chosen output device; your own leave is silent because the
@@ -144,36 +144,36 @@ stream that dies mid-call is rebuilt by a cooldown-limited watchdog in
 
 ## Testing
 
-- `tests/test_voice.py` — signalling/roster over the in-process LXMF shim.
-- `tests/test_voice_transport.py` — wire format + streaming semantics via
+- `tests/test_voice.py`: signalling/roster over the in-process LXMF shim.
+- `tests/test_voice_transport.py`: wire format + streaming semantics via
   `tests/fake_voice.py` (an injectable transport double whose `connect`
   runs the target's authorize callback, so core enforcement is exercised).
-- `tests/test_voice_audio.py` — jitter buffer (always runs), mixer/Opus
+- `tests/test_voice_audio.py`: jitter buffer (always runs), mixer/Opus
   (skip cleanly without numpy/libopus).
-- `tests/test_voice_quality.py` — receive-quality metrics (loss, late,
+- `tests/test_voice_quality.py`: receive-quality metrics (loss, late,
   jitter), and a comparison against Discord's standard voice profile:
   same codec settings (Opus 48 kHz mono, 20 ms frames), the Discord
   default 64 kbps bitrate must fit the wire format across VBR peaks,
   spectral fidelity thresholds at 64 kbps and the 16 kbps mesh default,
   an algorithmic latency budget ≤ 150 ms, and per-stream bandwidth at the
   mesh default staying at or below Discord's per-stream default.
-- `tests/test_adversarial.py::TestAdversarialVoice` — unauthorized
+- `tests/test_adversarial.py::TestAdversarialVoice`: unauthorized
   signalling and link attempts, revocation mid-call.
-- `devtools/testenv/smoke_test.py` — the real-network proof: two OS
+- `devtools/testenv/smoke_test.py`: the real-network proof; two OS
   processes over a real TCP Reticulum link do the full invite → sync →
   chat flow, then join voice, stream the tone for a 5 s measurement
   window, and verify both directions streamed with Discord-comparable
   measured quality (loss ≤ 2 %, jitter ≤ 30 ms).
-- `devtools/testenv/scenarios/scen_voice.py::voice13` — the same
+- `devtools/testenv/scenarios/scen_voice.py::voice13`: the same
   listening floor across a three-way mesh over real links.
 
 Loss and jitter are clocked by sequence numbers, so they cannot see a
 sender that emits every frame it should, just slowly: it scores 0 % loss
 and ~0 ms jitter while the listener's buffer drains, starves, refills and
-starves again — audibly choppy. The listener-side truth is `rate_fps` in
+starves again, audibly choppy. The listener-side truth is `rate_fps` in
 `rx_quality` (frames a second of wall clock, 50 nominal) and the
 `playout` counters `starved` (ticks with nothing to play from a peer that
-is still sending — dead air) and `plc` (concealed mid-stream gaps).
+is still sending, dead air) and `plc` (concealed mid-stream gaps).
 Headless testenv workers run the real jitter buffer, decoder and 20 ms
 playout thread and discard the PCM, so what they measure is what a
 desktop listener would have heard.
@@ -188,5 +188,5 @@ collected by its PyInstaller hook, and the `.deb` declares
 `libopus0, libportaudio2` in Depends. On source checkouts, `setup.sh` offers
 to install both libraries via the system package manager; on Windows/macOS
 source checkouts, a library dropped into `packaging/voicelibs/` (gitignored)
-is found by `core/audio/libpath.py` — the source-run twin of the frozen
+is found by `core/audio/libpath.py`, the source-run twin of the frozen
 app's `rthook_voice_libs.py`.

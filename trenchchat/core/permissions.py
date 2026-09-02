@@ -21,7 +21,7 @@ ROLE_MEMBER = "member"
 
 ALL_ROLES = (ROLE_OWNER, ROLE_ADMIN, ROLE_MEMBER)
 
-# Promotion order — higher index = more privileged.
+# Promotion order: higher index = more privileged.
 _ROLE_RANK = {ROLE_MEMBER: 0, ROLE_ADMIN: 1, ROLE_OWNER: 2}
 
 

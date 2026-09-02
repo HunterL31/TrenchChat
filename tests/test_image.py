@@ -260,7 +260,7 @@ class TestCompressGif:
         colours = [(255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 0), (0, 255, 255)]
         pil_frames = [
             Image.new("RGB", (400, 400), c).convert("P", palette=Image.ADAPTIVE)
-            for c in colours * 20  # 100 frames — enough to push past MAX_GIF_BYTES
+            for c in colours * 20  # 100 frames: enough to push past MAX_GIF_BYTES
         ]
         buf = io.BytesIO()
         pil_frames[0].save(buf, format="GIF", save_all=True, append_images=pil_frames[1:],
