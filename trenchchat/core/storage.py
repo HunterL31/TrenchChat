@@ -314,6 +314,7 @@ CREATE TABLE IF NOT EXISTS message_requests (
     identity_hash   TEXT NOT NULL,
     body            TEXT NOT NULL,
     received_at     REAL NOT NULL,
+    sent_at         REAL NOT NULL DEFAULT 0,
     from_trenchchat INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_message_requests_sender
@@ -517,9 +518,24 @@ class Storage:
         self._migrate_nomad_page_expiry()
         self._migrate_nomad_file_name()
         self._migrate_channel_last_read()
+        self._migrate_message_request_sent_at()
         # _scope() reads channels.server_hash, so this must run after
         # _migrate_servers() has ensured that column exists.
         self._repair_tenure_from_message_history()
+
+    def _migrate_message_request_sent_at(self):
+        """Add message_requests.sent_at for existing databases.
+
+        Existing rows only know when they arrived, so that stands in for when
+        they were sent."""
+        if not self._has_column("message_requests", "sent_at"):
+            self._conn.execute(
+                "ALTER TABLE message_requests ADD COLUMN sent_at REAL NOT NULL DEFAULT 0"
+            )
+            self._conn.execute(
+                "UPDATE message_requests SET sent_at = received_at WHERE sent_at = 0"
+            )
+            self._conn.commit()
 
     def _migrate_invite_issued_at(self):
         """Add pending_invites.issued_at for existing databases."""
@@ -2325,20 +2341,24 @@ class Storage:
     # --- message requests (words from someone not yet accepted) ---
 
     def add_message_request(self, identity_hash: str, body: str,
-                            from_trenchchat: bool, *,
+                            from_trenchchat: bool, *, sent_at: float,
                             max_per_sender: int, max_total: int) -> None:
         """Hold one message from an unaccepted sender, oldest-first within bounds.
 
         Both caps are applied here rather than by the caller so no path can add
         a row without them: identities are free to mint, and this arrives on the
-        chat path, which carries no per-sender throttle.
+        chat path, which carries no per-sender throttle. sent_at is the
+        sender's own timestamp and only orders that sender's held messages;
+        the caps and the age prune stay on received_at, the local clock, so a
+        peer cannot steer eviction with a claimed time.
         """
         with self._tx():
             self._conn.execute(
                 "INSERT INTO message_requests "
-                "(identity_hash, body, received_at, from_trenchchat) "
-                "VALUES (?, ?, ?, ?)",
-                (identity_hash, body, time.time(), 1 if from_trenchchat else 0),
+                "(identity_hash, body, received_at, sent_at, from_trenchchat) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (identity_hash, body, time.time(), sent_at,
+                 1 if from_trenchchat else 0),
             )
             self._conn.execute(
                 "DELETE FROM message_requests WHERE identity_hash = ? AND id NOT IN ("
@@ -2354,14 +2374,17 @@ class Storage:
             )
 
     def get_message_requests(self, identity_hash: str | None = None) -> list[dict]:
-        """Held messages, oldest first: the order they should be filed in."""
+        """Held messages, oldest first by sender timestamp: the order they
+        should be filed in. LXMF gives no delivery-ordering guarantee, so two
+        sends can arrive inverted; the sender's own clock is what puts its
+        words back in the order it said them."""
         if identity_hash is None:
             rows = self._fetchall(
-                "SELECT * FROM message_requests ORDER BY received_at, id")
+                "SELECT * FROM message_requests ORDER BY sent_at, id")
         else:
             rows = self._fetchall(
                 "SELECT * FROM message_requests WHERE identity_hash = ? "
-                "ORDER BY received_at, id",
+                "ORDER BY sent_at, id",
                 (identity_hash,),
             )
         return [dict(r) for r in rows]

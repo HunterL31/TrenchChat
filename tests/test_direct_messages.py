@@ -473,6 +473,28 @@ def test_accepting_files_every_held_message_in_order(peer_factory):
     assert b.storage.get_message_requests(a.identity.hash_hex) == []
 
 
+def test_held_messages_file_in_sent_order_even_when_arrival_inverts(peer_factory):
+    """LXMF gives no delivery-ordering guarantee, so the second send can land
+    first; filing must follow the sender's clock, not arrival order."""
+    a = peer_factory("alice")
+    b = peer_factory("bob")
+
+    now = time.time()
+    b.friends_mgr.hold_message_request(
+        a.identity.hash_hex, "second", from_trenchchat=True, sent_at=now)
+    b.friends_mgr.hold_message_request(
+        a.identity.hash_hex, "first", from_trenchchat=True, sent_at=now - 1)
+
+    held = b.storage.get_message_requests(a.identity.hash_hex)
+    assert [h["body"] for h in held] == ["first", "second"]
+
+    assert actions.accept_friend_request(b.friends_mgr, a.identity.hash_hex) is True
+
+    conversation = b.direct_mgr.conversation_hash(a.identity.hash_hex)
+    bodies = [m["content"] for m in b.storage.get_messages(conversation)]
+    assert bodies == ["first", "second"]
+
+
 def test_declining_drops_the_held_messages(peer_factory):
     a = peer_factory("alice")
     b = peer_factory("bob")
