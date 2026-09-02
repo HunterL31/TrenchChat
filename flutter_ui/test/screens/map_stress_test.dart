@@ -89,6 +89,60 @@ Map<String, dynamic> stressTopology({
   };
 }
 
+/// The shape a real mesh takes and the old radial layout handled worst: a
+/// couple of transport hubs that between them own almost every peer on the
+/// map, so one ring carries [hubs] * [peersPerHub] nodes squeezed into two
+/// sectors. Labels mix short handles with 20+ character callsigns.
+Map<String, dynamic> hubTopology({
+  int interfaces = 2,
+  int hubs = 2,
+  int peersPerHub = 28,
+  int directPeers = 5,
+}) {
+  final nodes = <Map<String, dynamic>>[
+    {'id': 'self', 'label': 'This device', 'kind': 'self', 'hops': 0, 'quality': 4},
+  ];
+  final edges = <Map<String, dynamic>>[];
+  final ifaces = <Map<String, dynamic>>[];
+  for (var i = 0; i < interfaces; i++) {
+    nodes.add({'id': '__iface__IF$i', 'label': '● IF$i (TCP)', 'kind': 'interface',
+               'hops': 0, 'quality': 4});
+    edges.add({'src': 'self', 'dst': '__iface__IF$i', 'hops': 0, 'direct': true,
+               'quality': 4});
+    ifaces.add({'name': 'IF$i', 'type': 'TCPClientInterface', 'status': true,
+                'rxb': i, 'txb': i});
+  }
+  for (var d = 0; d < directPeers; d++) {
+    nodes.add({'id': 'direct-$d', 'label': 'nearby-$d', 'kind': 'peer', 'hops': 1,
+               'quality': 4, 'trenchchat': true});
+    edges.add({'src': 'self', 'dst': 'direct-$d', 'hops': 1, 'direct': true,
+               'quality': 4});
+  }
+  for (var h = 0; h < hubs; h++) {
+    nodes.add({'id': 'hub-$h', 'label': 'transport-hub-$h', 'kind': 'transport',
+               'hops': 1, 'quality': 3});
+    edges.add({'src': 'self', 'dst': 'hub-$h', 'hops': 1, 'direct': true, 'quality': 3});
+    for (var p = 0; p < peersPerHub; p++) {
+      final id = 'hub-$h-peer-$p';
+      final label = p % 3 == 0 ? 'operator callsign $h$p long' : 'nd-$h$p';
+      nodes.add({'id': id, 'label': label, 'kind': 'peer', 'hops': 2,
+                 'quality': (h + p) % 5, 'trenchchat': true});
+      edges.add({'src': 'hub-$h', 'dst': id, 'hops': 2, 'direct': false,
+                 'quality': (h + p) % 5});
+    }
+  }
+  return {
+    'nodes': nodes,
+    'edges': edges,
+    'interfaces': ifaces,
+    'stats': {
+      'node_count': nodes.length,
+      'path_count': edges.length,
+      'interface_count': interfaces,
+    },
+  };
+}
+
 /// One direct edge per quality tier, for pixel-sampling the painter. Self
 /// gets an empty label so its text and glow can't bleed onto the edges.
 Map<String, dynamic> tierTopology() => {
@@ -137,16 +191,17 @@ void main() {
     }
   });
 
-  test('rings stay ordered: interfaces, then hop 1, 2, 3', () {
+  test('ring bands stay ordered and separated: interfaces, then hop 1, 2, 3', () {
+    // A crowded ring is a band of lanes rather than one circle, so a group's
+    // radii spread; what must hold is that the bands do not interleave and
+    // that a band stays narrow enough to still read as one ring.
     final layout = layoutMapNodes(data);
     double radius(String id) => (layout.positions[id]! - layout.center).distance;
-    double ringOf(Iterable<MapNode> nodes) {
-      final radii = nodes.map((n) => radius(n.id)).toList();
-      // Every node of the group sits on one exact ring.
-      for (final r in radii) {
-        expect(r, closeTo(radii.first, 1e-6));
-      }
-      return radii.first;
+    (double, double) bandOf(Iterable<MapNode> nodes) {
+      final radii = nodes.map((n) => radius(n.id)).toList()..sort();
+      expect(radii.last - radii.first, lessThan(120),
+          reason: 'ring band spans ${radii.last - radii.first}px');
+      return (radii.first, radii.last);
     }
 
     final byGroup = <int, List<MapNode>>{};
@@ -154,13 +209,11 @@ void main() {
       if (n.kind == MapNodeKind.self) continue;
       byGroup.putIfAbsent(n.kind == MapNodeKind.interface_ ? 0 : n.hops, () => []).add(n);
     }
-    final r0 = ringOf(byGroup[0]!);
-    final r1 = ringOf(byGroup[1]!);
-    final r2 = ringOf(byGroup[2]!);
-    final r3 = ringOf(byGroup[3]!);
-    expect(r0, lessThan(r1));
-    expect(r1, lessThan(r2));
-    expect(r2, lessThan(r3));
+    final bands = [for (var g = 0; g <= 3; g++) bandOf(byGroup[g]!)];
+    for (var g = 1; g <= 3; g++) {
+      expect(bands[g - 1].$2, lessThan(bands[g].$1),
+          reason: 'ring $g overlaps ring ${g - 1}');
+    }
   });
 
   test('node markers never overlap at scale', () {
@@ -201,6 +254,59 @@ void main() {
             reason: '${labels[i].key} overlaps ${labels[j].key}');
       }
     }
+  });
+
+  group('two transport hubs owning almost every peer', () {
+    final hubs = NetworkMapData.fromJson(hubTopology());
+    final layout = layoutMapNodes(hubs);
+
+    test('stays compact instead of inflating one ring across the canvas', () {
+      // The radial layout used to size a ring so every label on it fit end to
+      // end around one circle, which two hubs holding 28 peers each blew out
+      // to 2253x2327 -- 5.2 megapixels of mostly empty canvas. Lanes and the
+      // capped ring step hold it near a megapixel.
+      expect(layout.size.width * layout.size.height, lessThan(1600000),
+          reason: 'layout is ${layout.size}');
+    });
+
+    test('a hub keeps its peers beside it', () {
+      // A hub's peer sits one ring out and inside the hub's own sector, so
+      // the edge between them stays a short spoke rather than a line across
+      // the graph. Four ring gaps is the ceiling a ring step plus a full
+      // sector's worth of angle can reach.
+      const bound = 4 * 84.0;
+      for (final e in hubs.edges) {
+        if (!e.src.startsWith('hub-') || !e.dst.startsWith('hub-')) continue;
+        final d = (layout.positions[e.src]! - layout.positions[e.dst]!).distance;
+        expect(d, lessThan(bound),
+            reason: '${e.src} -> ${e.dst} is ${d.toStringAsFixed(0)}px');
+      }
+    });
+
+    test('labels neither overlap nor drift off their node', () {
+      final entries = layout.labels.entries.toList();
+      for (var i = 0; i < entries.length; i++) {
+        final pos = layout.positions[entries[i].key]!;
+        final rect = entries[i].value.rect;
+        final dx = math.max(0.0, math.max(rect.left - pos.dx, pos.dx - rect.right));
+        final dy = math.max(0.0, math.max(rect.top - pos.dy, pos.dy - rect.bottom));
+        expect(math.sqrt(dx * dx + dy * dy), lessThanOrEqualTo(48),
+            reason: '${entries[i].key} label drifted');
+        for (var j = i + 1; j < entries.length; j++) {
+          expect(rect.overlaps(entries[j].value.rect), isFalse,
+              reason: '${entries[i].key} overlaps ${entries[j].key}');
+        }
+      }
+    });
+
+    test('is deterministic', () {
+      final again = layoutMapNodes(NetworkMapData.fromJson(hubTopology()));
+      expect(again.positions, layout.positions);
+      expect(again.size, layout.size);
+      for (final id in layout.labels.keys) {
+        expect(again.labels[id]!.rect, layout.labels[id]!.rect);
+      }
+    });
   });
 
   test('the trenchchat flag parses, defaulting to the old behavior for peers', () {

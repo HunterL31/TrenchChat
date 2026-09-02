@@ -2,9 +2,10 @@
 // The Qt widget runs a force-directed layout; this uses a deterministic radial
 // one (self centered, interfaces on the inner ring, peers ringed by hop count)
 // so the picture is stable across refreshes and testable. Nodes are placed in
-// angular sectors under the node they route through, ring radii grow to fit
-// their labels, and labels anchor on the side of the node facing away from
-// center so they stay off the edge lines.
+// angular sectors under the node they route through; a ring is a band of a few
+// lanes, and a crowded stretch stacks into the outer lanes rather than pushing
+// the whole ring away from the center. Labels anchor on the side of the node
+// facing away from center so they stay off the edge lines.
 //
 // The layout stays pure: it is computed once per data set in the tab's state,
 // and everything the view adds on top -- the fit transform, the tween between
@@ -105,8 +106,29 @@ const double _labelHeight = 14.0;
 const double _labelGap = 6.0;
 const double _ringGap = 84.0;
 const double _innerRadius = 64.0;
-const double _arcGap = 18.0;
+const double _arcGap = 20.0;
 const double _contentMargin = 40.0;
+
+/// A ring is a band of up to [_maxLanes] lanes [_laneGap] apart rather than a
+/// single circle: n lanes hold the same labels at a fraction of the radius,
+/// which is what keeps a hub's thirty peers beside it instead of pushing the
+/// whole ring across the canvas. [_laneGap] exceeds the marker span so two
+/// lanes never merge visually.
+const double _laneGap = 26.0;
+const int _maxLanes = 4;
+
+/// How far past its floor a ring may grow for crowding. Beyond this the lanes
+/// and the label push loop absorb the rest, so one packed sector cannot drag
+/// every node on the ring away from the center.
+const double _maxRingStep = 4 * _ringGap;
+
+/// Arc a node marker claims for itself whatever its label does.
+const double _markerSpan = 16.0;
+
+/// How many label rows above or below its own a displaced label may take
+/// before it gives up and slides clear instead. Three rows keeps it plainly
+/// beside its node.
+const int _labelLanes = 3;
 
 /// A node label's estimated box (layout coordinates) and how the text is
 /// anchored inside it when the measured width differs from the estimate.
@@ -218,8 +240,9 @@ double _estimateLabelWidth(String label) =>
 /// the innermost ring; everything else ringed by hop count, with the distinct
 /// ring keys compacted to consecutive indices so one distant node can't
 /// squeeze the inner rings. Each node is placed inside the angular sector of
-/// the node it routes through (sector width proportional to subtree size),
-/// and a ring's radius grows until neighboring labels fit along its arc.
+/// the node it routes through (sector width proportional to the room its
+/// subtree's labels need), and a ring grows only until its labels fit across
+/// up to [_maxLanes] radial lanes, capped at [_maxRingStep] past its floor.
 /// Deterministic: all ties break by node id.
 MapLayout layoutMapNodes(NetworkMapData data) {
   final byId = {for (final n in data.nodes) n.id: n};
@@ -302,57 +325,108 @@ MapLayout layoutMapNodes(NetworkMapData data) {
     }
   }
 
+  // The room a node claims along its ring's arc: its marker, or its label box
+  // projected onto the tangent. A label beside an east/west node runs radially
+  // outward and costs almost nothing along the arc, where the same label above
+  // a north/south node costs its full width. Charging every node the full
+  // width is what used to inflate a crowded ring several times past what it
+  // needed.
+  double arcNeed(String id) {
+    final theta = angleOf[id] ?? 0;
+    final tangential = _estimateLabelWidth(byId[id]!.label) * math.sin(theta).abs() +
+        _labelHeight * math.cos(theta).abs();
+    return math.max(_markerSpan, tangential) + _arcGap;
+  }
+
+  List<String> ringIds(int k) => List.of(idsByRing[k] ?? const <String>[])
+    ..sort((a, b) {
+      final byAngle = angleOf[a]!.compareTo(angleOf[b]!);
+      return byAngle != 0 ? byAngle : a.compareTo(b);
+    });
+
+  final lanesOf = List<int>.filled(ringCount + 1, 1);
+
   List<double> computeRadii() {
     final radii = List<double>.filled(ringCount + 1, 0);
     var prev = 0.0;
     for (var k = 1; k <= ringCount; k++) {
-      var r = math.max(prev + _ringGap, _innerRadius);
-      final ids = List.of(idsByRing[k] ?? const <String>[])
-        ..sort((a, b) => angleOf[a]!.compareTo(angleOf[b]!));
+      final floor = math.max(prev + _ringGap, _innerRadius);
+      final ids = ringIds(k);
+      var r = floor;
+      var lanes = 1;
       if (ids.length > 1) {
-        // A crowded ring first grows to the circumference its labels need
-        // end to end, so labels stay beside their nodes instead of being
-        // pushed away to resolve overlaps.
-        var perimeter = 0.0;
+        // What one lane would cost: the circumference the labels need end to
+        // end, then the 90th-percentile adjacent pair rather than the worst
+        // one, so a single tight sector boundary does not set the radius for
+        // everyone -- the tail is left to the lanes and the push loop.
+        var single = 0.0;
         for (final id in ids) {
-          perimeter += _estimateLabelWidth(byId[id]!.label) + _arcGap;
+          single += arcNeed(id);
         }
-        r = math.max(r, perimeter / (2 * math.pi));
-        // Grow for tight neighbor pairs, but follow the 90th-percentile
-        // need rather than the single worst pair -- one tight sector
-        // boundary must not inflate the whole ring; the push loop handles
-        // the tail. Near-zero gaps may not blow the ring out at all.
-        final spikeCap = r + 3 * _ringGap;
+        single /= 2 * math.pi;
         final pairNeeds = <double>[];
         for (var i = 0; i < ids.length; i++) {
-          final a = ids[i];
           final b = ids[(i + 1) % ids.length];
-          final gap = (angleOf[b]! - angleOf[a]!) % (2 * math.pi);
+          final gap = (angleOf[b]! - angleOf[ids[i]]!) % (2 * math.pi);
           if (gap <= 1e-4) continue;
-          final need =
-              (_estimateLabelWidth(byId[a]!.label) + _estimateLabelWidth(byId[b]!.label)) /
-                      2 +
-                  _arcGap;
-          pairNeeds.add(need / gap);
+          pairNeeds.add((arcNeed(ids[i]) + arcNeed(b)) / 2 / gap);
         }
         if (pairNeeds.isNotEmpty) {
           pairNeeds.sort();
-          r = math.max(r, pairNeeds[(0.9 * (pairNeeds.length - 1)).floor()]);
+          single = math.max(single, pairNeeds[(0.9 * (pairNeeds.length - 1)).floor()]);
         }
-        r = math.min(r, spikeCap);
+        // Stacking into lanes rather than growing is what keeps a hub's peers
+        // beside it: n lanes hold the same labels at a fraction of the radius,
+        // and whatever is left over may move the ring only _maxRingStep.
+        lanes = math.min(_maxLanes, math.max(1, (single / floor).ceil()));
+        r = math.min(math.max(floor, single / lanes), floor + _maxRingStep);
       }
       radii[k] = r;
-      prev = r;
+      lanesOf[k] = lanes;
+      prev = r + (lanes - 1) * _laneGap;
     }
     return radii;
   }
 
+  /// Which lane of its ring each node sits in: first fit by angle, so a node
+  /// with room beside its neighbour stays on the inner lane and only a crowded
+  /// stretch stacks outward. When no lane has room the emptiest one wins.
+  Map<String, int> assignLanes(List<double> radii) {
+    final laneOf = <String, int>{};
+    for (var k = 1; k <= ringCount; k++) {
+      final lanes = lanesOf[k];
+      final lastAngle = List<double>.filled(lanes, double.negativeInfinity);
+      final lastNeed = List<double>.filled(lanes, 0);
+      for (final id in ringIds(k)) {
+        final theta = angleOf[id]!;
+        final need = arcNeed(id);
+        var chosen = 0;
+        var bestRoom = double.negativeInfinity;
+        for (var l = 0; l < lanes; l++) {
+          final room = (theta - lastAngle[l]) * radii[k];
+          if (room >= (need + lastNeed[l]) / 2) {
+            chosen = l;
+            break;
+          }
+          if (room > bestRoom) {
+            bestRoom = room;
+            chosen = l;
+          }
+        }
+        laneOf[id] = chosen;
+        lastAngle[chosen] = theta;
+        lastNeed[chosen] = need;
+      }
+    }
+    return laneOf;
+  }
+
   // First pass sizes sectors by subtree node count (needs no radii); two
   // refinement passes re-divide them by the angular room each subtree's
-  // labels need at the current radii (label width over ring radius, summed
-  // per ring, maxed across rings), then re-derive the radii. This keeps a
-  // few nodes on an otherwise empty ring from being crammed into slivers,
-  // and leaves the label push loop only stragglers.
+  // labels need at the current radii and lane counts, summed per ring and
+  // maxed across rings, then re-derive the radii. This keeps a few nodes on
+  // an otherwise empty ring from being crammed into slivers, and leaves the
+  // label push loop only stragglers.
   assignSectors(
       selfId ?? root, -math.pi / 2, 2 * math.pi, (id) => weigh(id).toDouble());
   var radii = computeRadii();
@@ -362,8 +436,8 @@ MapLayout layoutMapNodes(NetworkMapData data) {
       final sums = <int, double>{};
       final ring = ringOf[id];
       if (ring != null && ring > 0) {
-        sums[ring] = (_estimateLabelWidth(byId[id]!.label) + _arcGap) /
-            math.max(radii[ring], _innerRadius);
+        sums[ring] =
+            arcNeed(id) / (math.max(radii[ring], _innerRadius) * lanesOf[ring]);
       }
       for (final kid in childrenOf[id] ?? const <String>[]) {
         accumulate(kid).forEach((k, v) => sums[k] = (sums[k] ?? 0) + v);
@@ -378,14 +452,22 @@ MapLayout layoutMapNodes(NetworkMapData data) {
     radii = computeRadii();
   }
 
+  final laneOf = assignLanes(radii);
   final positions = <String, Offset>{?selfId: Offset.zero};
+  // A lane step is radial, except that a node due east or west would then
+  // stack its lanes along its own label and gain no separation at all, so the
+  // step keeps at least one label row of vertical travel.
   angleOf.forEach((id, theta) {
-    positions[id] =
-        Offset(math.cos(theta), math.sin(theta)) * radii[ringOf[id]!];
+    final sy = math.sin(theta);
+    final dy = (sy >= 0 ? 1 : -1) *
+        math.max(_laneGap * sy.abs(), _labelHeight + 2);
+    final lane = (laneOf[id] ?? 0).toDouble();
+    positions[id] = Offset(math.cos(theta), sy) * radii[ringOf[id]!] +
+        Offset(_laneGap * math.cos(theta) * lane, dy * lane);
   });
 
   // Labels anchor on the side of the node facing away from center, so they
-  // stay off the radial edge lines. Overlapping labels are pushed outward.
+  // stay off the radial edge lines.
   MapLabel place(String id, Offset pos) {
     final w = _estimateLabelWidth(byId[id]!.label);
     const h = _labelHeight;
@@ -423,18 +505,36 @@ MapLayout layoutMapNodes(NetworkMapData data) {
   final placedRects = <Rect>[];
   for (final id in order) {
     final label = place(id, positions[id]!);
-    final theta = angleOf[id] ?? math.pi / 2;
-    // One step clears an overlapping label plus its collision margin; try
-    // alternating outward/inward so stacked labels split around the ring
-    // instead of marching away from their nodes.
-    final step = Offset(math.cos(theta), math.sin(theta)) * (_labelHeight + 4);
+    // A label box is far wider than it is tall, so the cheap way out of an
+    // overlap is straight up or down: a step along the radius would have to
+    // cover a whole label width for a node due east or west, and never does.
+    // The nearest free slot within _labelLanes rows wins, keeping the label
+    // beside its node; only when every row is taken does the label slide
+    // outward past whatever is in the way.
+    final down = math.sin(angleOf[id] ?? math.pi / 2) >= 0;
+    const row = _labelHeight + 2;
+    bool free(Rect r) => !placedRects.any((p) => p.overlaps(r.inflate(2)));
     var chosen = label;
-    for (var attempt = 1;
-        attempt <= 6 && placedRects.any((r) => r.overlaps(chosen.rect.inflate(2)));
-        attempt++) {
-      final shift =
-          step * (((attempt + 1) ~/ 2) * (attempt.isOdd ? 1.0 : -1.0));
-      chosen = MapLabel(rect: label.rect.shift(shift), align: label.align);
+    var settled = free(label.rect);
+    for (var step = 1; !settled && step <= _labelLanes; step++) {
+      for (final sign in const [1.0, -1.0]) {
+        final moved = label.rect.shift(Offset(0, (down ? 1 : -1) * sign * step * row));
+        if (!free(moved)) continue;
+        chosen = MapLabel(rect: moved, align: label.align);
+        settled = true;
+        break;
+      }
+    }
+    for (var attempt = 0; !settled && attempt < 6; attempt++) {
+      var push = 0.0;
+      for (final r in placedRects) {
+        if (!r.overlaps(chosen.rect.inflate(2))) continue;
+        push = math.max(push,
+            down ? r.bottom + 2 - chosen.rect.top : chosen.rect.bottom + 2 - r.top);
+      }
+      if (push <= 0) break;
+      chosen = MapLabel(
+          rect: chosen.rect.shift(Offset(0, down ? push : -push)), align: chosen.align);
     }
     placedRects.add(chosen.rect);
     labels[id] = chosen;
