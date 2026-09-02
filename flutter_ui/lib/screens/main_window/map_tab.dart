@@ -146,6 +146,16 @@ class MapFit {
   Offset toCanvas(Offset content) => content * scale + offset;
 }
 
+/// How far past natural (1:1 content) size the viewer may magnify.
+const double _viewerMaxZoom = 4.0;
+
+/// Zoom ceiling for the map's InteractiveViewer. A graph too large for the
+/// canvas is first shrunk by [mapFitFor], so a fixed ceiling would leave its
+/// nodes tiny at max zoom; dividing by the fit keeps max zoom at the same
+/// multiple of the graph's natural size whatever the graph's extent.
+double mapMaxScale(Size canvas, Size content) =>
+    _viewerMaxZoom / mapFitFor(canvas, content).scale;
+
 MapFit mapFitFor(Size canvas, Size content) {
   final scale = content.width <= 0 || content.height <= 0
       ? 1.0
@@ -724,7 +734,7 @@ class _MapTabState extends State<MapTab> with SingleTickerProviderStateMixin {
               child: InteractiveViewer(
                 constrained: true,
                 minScale: 0.4,
-                maxScale: 4,
+                maxScale: mapMaxScale(outer.biggest, _shownLayout!.size),
                 boundaryMargin: const EdgeInsets.all(600),
                 child: LayoutBuilder(
                   builder: (context, inner) => GestureDetector(

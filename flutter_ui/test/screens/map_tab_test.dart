@@ -218,6 +218,16 @@ void main() {
     expect(tight.toContent(const Offset(50, 50)), const Offset(100, 50));
   });
 
+  test('max zoom compensates for the fit so nodes reach the same size', () {
+    // A graph that fits keeps the plain ceiling.
+    expect(mapMaxScale(const Size(400, 300), const Size(200, 100)), 4.0);
+
+    // A graph shrunk to fit gets a proportionally higher ceiling: viewer
+    // scale times fit scale -- the on-screen magnification -- stays 4.
+    expect(mapMaxScale(const Size(500, 500), const Size(2000, 1000)), 16.0);
+    expect(mapMaxScale(const Size(100, 100), const Size(200, 100)), 8.0);
+  });
+
   test('hit testing picks the nearest node and ignores empty space', () {
     final layout = layoutMapNodes(_data());
     final peer = layout.positions['peer-a']!;
