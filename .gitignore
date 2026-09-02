@@ -65,3 +65,4 @@ flutter_ui/**/ephemeral/
 *.iml
 *.ipr
 *.iws
+.claude/settings.local.json
