@@ -185,6 +185,13 @@ class AppState extends ChangeNotifier {
   /// Saved page bookmarks. Local-only, like [friends].
   List<NomadBookmark> nomadBookmarks = [];
 
+  int _networkMapRevision = 0;
+
+  /// Bumped on every [NetworkMapChangedEvent]. The map is expensive enough
+  /// that nothing is fetched here: the MAP tab watches this counter and
+  /// re-fetches only while it is on screen.
+  int get networkMapRevision => _networkMapRevision;
+
   /// Live state of page/file fetches, keyed by fetch id and updated from
   /// [NomadFetchEvent]s. The browser tab watches its own fetch id here;
   /// terminal entries are removed once a consumer takes them.
@@ -1773,6 +1780,9 @@ class AppState extends ChangeNotifier {
             notifyListeners();
           }
         }
+      case NetworkMapChangedEvent():
+        _networkMapRevision++;
+        notifyListeners();
       case NomadNodeEvent(:final nodeHash, :final displayName):
         final existing = nomadNodes[nodeHash];
         final now = DateTime.now().millisecondsSinceEpoch / 1000.0;
