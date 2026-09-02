@@ -12,7 +12,6 @@ import threading
 
 import RNS
 import LXMF
-import msgpack
 
 from pathlib import Path
 from trenchchat import APP_NAME, APP_ASPECT_USER
@@ -51,10 +50,12 @@ PATH_REQUEST_GLOBAL_BURST = 60
 # How often every entrypoint re-announces (delivery + user + owned channels).
 # Transport nodes cap forwarded announces at 2% of interface bitrate and drop
 # repeats, so a fast heartbeat mostly burns first-hop airtime: at the old 60s
-# it cost ~41 kB/h idle (~8% duty cycle on 1.2 kbps LoRa) against Sideband's
-# 90-300 min and NomadNet's 6 h cadence. Reconnect catch-up does not depend on
-# it -- peer announces, inbound messages, and LinkWatcher all drive that.
-REANNOUNCE_INTERVAL_SECS = 900.0
+# it cost ~41 kB/h idle (~8% duty cycle on 1.2 kbps LoRa). Three hours sits
+# inside Sideband's 90-300 min range, short of NomadNet's 6 h. Meeting a peer
+# does not depend on it (FirstContactAnnouncer answers the first time we hear
+# one), and neither does reconnect catch-up -- peer announces, inbound
+# messages, and LinkWatcher all drive that.
+REANNOUNCE_INTERVAL_SECS = 3 * 3600.0
 
 
 def delivery_hash_for_identity(identity_hash: bytes) -> bytes:
@@ -461,19 +462,16 @@ class Router:
                               attached_interface=attached_interface)
 
     def announce_user(self, attached_interface=None) -> None:
-        """Announce our trenchchat.user destination with the current display name.
+        """Announce our trenchchat.user destination.
 
-        This allows other TrenchChat instances to identify us as a TrenchChat
-        peer and add us to their user directory for discovery and invite lookup.
-        If attached_interface is given the announce is sent only on that
+        Tells other TrenchChat instances this identity runs TrenchChat, so
+        they can add us to their user directory for discovery and invite
+        lookup. It carries no payload: the display name already rides in the
+        lxmf.delivery announce, where every LXMF client reads it. If
+        attached_interface is given the announce is sent only on that
         interface; otherwise it is broadcast on all interfaces.
         """
-        app_data = msgpack.packb(
-            {"name": self._config.display_name or ""},
-            use_bin_type=True,
-        )
-        self._user_dest.announce(app_data=app_data,
-                                 attached_interface=attached_interface)
+        self._user_dest.announce(attached_interface=attached_interface)
 
     @property
     def lxmf_router(self) -> LXMF.LXMRouter:

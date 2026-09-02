@@ -25,8 +25,9 @@ import msgpack
 
 from trenchchat.core.actions import compute_channel_recipients
 from trenchchat.core.protocol import (
-    F_MSG_TYPE, MT_GOODBYE, MT_PRESENCE, pack_fields, unpack_wire,
+    F_MSG_TYPE, MT_GOODBYE, MT_PRESENCE, pack_fields,
 )
+from trenchchat.network.announce import lxmf_display_name
 
 PRESENCE_TIMEOUT_SECS = 300
 
@@ -76,27 +77,12 @@ def resolve_display_name(identity_hex: str, self_hex: str, storage, config=None)
     except Exception:
         pass
 
-    # 2. LXMF announce app_data -- packed as [display_name_bytes, stamp_cost]
+    # 2. The name the peer broadcasts in their lxmf.delivery announce
     try:
-        identity_bytes = bytes.fromhex(identity_hex)
-        # recall() needs a delivery destination hash, not a raw identity hash
-        delivery_hash = RNS.Destination.hash_from_name_and_identity(
-            "lxmf.delivery", identity_bytes
-        )
-        raw = RNS.Identity.recall_app_data(delivery_hash)
-        if raw:
-            parsed = unpack_wire(raw)
-            if isinstance(parsed, list) and len(parsed) >= 1:
-                name = parsed[0]
-            elif isinstance(parsed, dict):
-                name = parsed.get("display_name") or parsed.get("name")
-            else:
-                name = None
-            if isinstance(name, bytes):
-                name = name.decode(errors="replace")
-            if name:
-                return str(name)
-    except Exception:
+        announced = lxmf_display_name(bytes.fromhex(identity_hex))
+        if announced:
+            return announced
+    except ValueError:
         pass
 
     # 3. Hash prefix fallback

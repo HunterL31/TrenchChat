@@ -287,7 +287,7 @@ def f10(env):
 
 
 # A client that has just started is unhearable until its next announce, and a
-# real one announces every 15 minutes. Slow enough that a scenario can observe
+# real one announces every few hours. Slow enough that a scenario can observe
 # the window; short enough that the run does not sit in it.
 QUIET_HEARTBEAT_SECS = 600.0
 
@@ -298,7 +298,7 @@ def f11(env):
     """The case a person actually hit, and the reason it was invisible here.
 
     Every tester announces every 10s, so meeting one is instant and nothing
-    ever exercises first contact. A real client announces every 15 minutes:
+    ever exercises first contact. A real client announces every few hours:
     until a peer has heard it, that peer cannot recall its identity, cannot
     verify its signature, and quarantines its first message until it expires.
     Invites vanished exactly this way, and relaunching the client -- which
