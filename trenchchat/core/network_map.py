@@ -48,11 +48,16 @@ def gather_network_data(rns: RNS.Reticulum, self_hex: str,
       nodes: list[dict] with id, identity_hex, label,
                kind ('self'|'transport'|'peer'|'unknown'|'interface'), hops,
                quality, trenchchat, via, interface, last_heard, expires,
-               rtt_ms, online, nomad, propagation
+               rtt_ms, online, nomad, nomad_node_hash, propagation
       edges: list[dict] with src, dst, hops, direct (bool), quality,
                kind ('interface'|'path')
       interfaces: list[dict] with name, type, status, rxb, txb, bitrate
       stats: dict with node_count, path_count, interface_count, online_peer_count
+
+    A Nomad Network node announces its pages under nomadnetwork.node and its
+    messaging under lxmf.delivery; the two share one identity and collapse into
+    a single graph node, so nomad_node_hash (str | None) carries the page
+    destination, the only one of the two a node browser can dial.
     """
     nodes: dict[str, dict] = {}   # hash_hex -> node dict
     edges: list[dict] = []
@@ -76,6 +81,7 @@ def gather_network_data(rns: RNS.Reticulum, self_hex: str,
         "rtt_ms":       None,
         "online":       _online_for(self_hex, presence),
         "nomad":        self_hex in nomad_hashes,
+        "nomad_node_hash": self_hex if self_hex in nomad_hashes else None,
         "propagation":  self_hex in propagation_hashes,
     }
 
@@ -157,6 +163,8 @@ def gather_network_data(rns: RNS.Reticulum, self_hex: str,
         # duplicate node and redirect edges to the canonical one.
         if identity_hex and identity_hex in identity_to_node:
             canonical_id = identity_to_node[identity_hex]
+            _merge_dest_flags(nodes.get(canonical_id), dest_hex,
+                              nomad_hashes, propagation_hashes)
         else:
             canonical_id = dest_hex
             # Classify
@@ -184,6 +192,7 @@ def gather_network_data(rns: RNS.Reticulum, self_hex: str,
                     "rtt_ms":       rtt_ms_for(dest_hex),
                     "online":       _online_for(identity_hex, presence),
                     "nomad":        dest_hex in nomad_hashes,
+                    "nomad_node_hash": dest_hex if dest_hex in nomad_hashes else None,
                     "propagation":  dest_hex in propagation_hashes,
                 }
             elif identity_hex and nodes[dest_hex].get("identity_hex") is None:
@@ -227,6 +236,8 @@ def gather_network_data(rns: RNS.Reticulum, self_hex: str,
                         "rtt_ms":       rtt_ms_for(relay_id),
                         "online":       _online_for(via_identity_hex, presence),
                         "nomad":        relay_id in nomad_hashes,
+                        "nomad_node_hash": (relay_id if relay_id in nomad_hashes
+                                            else None),
                         "propagation":  relay_id in propagation_hashes,
                     }
 
@@ -262,6 +273,13 @@ def gather_network_data(rns: RNS.Reticulum, self_hex: str,
         if canonical_id in nodes:
             existing_q = nodes[canonical_id].get("quality", 0)
             nodes[canonical_id]["quality"] = max(existing_q, quality_val)
+
+    # A node aspect with no current path entry still belongs to the peer whose
+    # delivery aspect has one; match it back by identity.
+    _reconcile_by_identity(nodes, identity_to_node, nomad_hashes,
+                           "nomad", "nomad_node_hash")
+    _reconcile_by_identity(nodes, identity_to_node, propagation_hashes,
+                           "propagation", None)
 
     # --- interface stats + interface nodes ---
     interfaces: list[dict] = []
@@ -311,6 +329,7 @@ def gather_network_data(rns: RNS.Reticulum, self_hex: str,
                 "rtt_ms":       None,
                 "online":       None,
                 "nomad":        False,
+                "nomad_node_hash": None,
                 "propagation":  False,
             }
             # Edge: self → interface
@@ -340,6 +359,49 @@ def gather_network_data(rns: RNS.Reticulum, self_hex: str,
                                      if n.get("online") is True),
         },
     }
+
+
+def _merge_dest_flags(node: dict | None, dest_hex: str,
+                      nomad_hashes: set[str],
+                      propagation_hashes: set[str]) -> None:
+    """Fold a collapsed destination's nomad/propagation flags into its node."""
+    if node is None:
+        return
+    if dest_hex in nomad_hashes:
+        node["nomad"] = True
+        if not node.get("nomad_node_hash"):
+            node["nomad_node_hash"] = dest_hex
+    if dest_hex in propagation_hashes:
+        node["propagation"] = True
+
+
+def _reconcile_by_identity(nodes: dict[str, dict], identity_to_node: dict[str, str],
+                           dest_hashes: set[str], flag: str,
+                           hash_key: str | None) -> None:
+    """Flag the node of any identity that owns one of these destinations.
+
+    Covers a destination the path table has no entry for: the browser or the
+    propagation table remembers it while its path has expired.
+    """
+    for dest_hex in dest_hashes:
+        if dest_hex in nodes:
+            continue
+        if hash_key and any(n.get(hash_key) == dest_hex for n in nodes.values()):
+            continue
+        try:
+            identity = RNS.Identity.recall(bytes.fromhex(dest_hex))
+            identity_hex = identity.hash.hex() if identity is not None else None
+        except Exception:
+            identity_hex = None
+        if identity_hex is None:
+            continue
+        canonical_id = identity_to_node.get(identity_hex)
+        node = nodes.get(canonical_id) if canonical_id else None
+        if node is None:
+            continue
+        node[flag] = True
+        if hash_key and not node.get(hash_key):
+            node[hash_key] = dest_hex
 
 
 def _coerce_text(value) -> str:

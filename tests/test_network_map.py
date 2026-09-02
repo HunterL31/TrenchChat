@@ -627,10 +627,121 @@ def test_every_edge_carries_a_kind():
 def test_every_node_carries_the_detail_keys():
     data = _mixed_topology_data()
     keys = {"identity_hex", "via", "interface", "last_heard", "expires",
-            "rtt_ms", "online", "nomad", "propagation"}
+            "rtt_ms", "online", "nomad", "nomad_node_hash", "propagation"}
     for node in data["nodes"]:
         missing = keys - set(node)
         assert not missing, f"node {node['id'][:12]} ({node['kind']}): {missing}"
+
+
+# ---------------------------------------------------------------------------
+# One identity, several destinations
+# ---------------------------------------------------------------------------
+
+NODE_HEX = "1a" * 16          # nomadnetwork.node aspect
+DELIVERY_HEX = "2b" * 16      # lxmf.delivery aspect of the same identity
+SHARED_IDENTITY_HEX = "3c" * 16
+
+
+def _shared_identity_recall(mapping: dict[str, str]):
+    """recall() stand-in mapping destination hex → identity hex."""
+
+    def recall(dest_hash, **kwargs):
+        dest_hex = (dest_hash.hex() if isinstance(dest_hash, bytes)
+                    else str(dest_hash))
+        identity_hex = mapping.get(dest_hex)
+        if identity_hex is None:
+            return None
+        identity = MagicMock()
+        identity.hash = bytes.fromhex(identity_hex)
+        return identity
+
+    return recall
+
+
+def _gather_shared(path_table, recall_map, **kwargs) -> dict:
+    rns = _make_rns(path_table=path_table)
+    with patch("trenchchat.core.network_map.RNS.Identity.recall",
+               side_effect=_shared_identity_recall(recall_map)):
+        return gather_network_data(rns, SELF_HEX, **kwargs)
+
+
+def test_nomad_flag_survives_collapse_when_delivery_comes_first():
+    """A Nomad node announces lxmf.delivery and nomadnetwork.node under one
+    identity; the two collapse into one graph node, which must keep the badge
+    and the page hash whichever entry created it."""
+    recall_map = {DELIVERY_HEX: SHARED_IDENTITY_HEX,
+                  NODE_HEX: SHARED_IDENTITY_HEX}
+    data = _gather_shared(
+        [_entry(DELIVERY_HEX, DELIVERY_HEX, 1), _entry(NODE_HEX, NODE_HEX, 1)],
+        recall_map, nomad=_FakeNomad([NODE_HEX]))
+
+    peers = [n for n in data["nodes"] if n["kind"] == "peer"]
+    assert len(peers) == 1
+    assert peers[0]["id"] == DELIVERY_HEX
+    assert peers[0]["nomad"] is True
+    assert peers[0]["nomad_node_hash"] == NODE_HEX
+
+
+def test_nomad_flag_survives_collapse_when_the_node_entry_comes_first():
+    recall_map = {DELIVERY_HEX: SHARED_IDENTITY_HEX,
+                  NODE_HEX: SHARED_IDENTITY_HEX}
+    data = _gather_shared(
+        [_entry(NODE_HEX, NODE_HEX, 1), _entry(DELIVERY_HEX, DELIVERY_HEX, 1)],
+        recall_map, nomad=_FakeNomad([NODE_HEX]))
+
+    peers = [n for n in data["nodes"] if n["kind"] == "peer"]
+    assert len(peers) == 1
+    assert peers[0]["id"] == NODE_HEX
+    assert peers[0]["nomad"] is True
+    assert peers[0]["nomad_node_hash"] == NODE_HEX
+
+
+def test_propagation_flag_survives_collapse():
+    recall_map = {DELIVERY_HEX: SHARED_IDENTITY_HEX,
+                  PROP_HEX: SHARED_IDENTITY_HEX}
+    data = _gather_shared(
+        [_entry(DELIVERY_HEX, DELIVERY_HEX, 1), _entry(PROP_HEX, PROP_HEX, 1)],
+        recall_map, propagation=_FakePropagation([PROP_HEX]))
+
+    peers = [n for n in data["nodes"] if n["kind"] == "peer"]
+    assert len(peers) == 1
+    assert peers[0]["propagation"] is True
+    assert peers[0]["nomad_node_hash"] is None
+
+
+def test_nomad_node_without_a_path_entry_is_matched_by_identity():
+    """The node aspect's path has expired but the browser still knows it; the
+    peer it shares an identity with gets the badge and a dialable hash."""
+    recall_map = {DELIVERY_HEX: SHARED_IDENTITY_HEX,
+                  NODE_HEX: SHARED_IDENTITY_HEX}
+    data = _gather_shared([_entry(DELIVERY_HEX, DELIVERY_HEX, 1)],
+                          recall_map, nomad=_FakeNomad([NODE_HEX]))
+
+    assert NODE_HEX not in {n["id"] for n in data["nodes"]}
+    peer = _node(data, DELIVERY_HEX)
+    assert peer["nomad"] is True
+    assert peer["nomad_node_hash"] == NODE_HEX
+
+
+def test_unmatched_nomad_hash_flags_nothing():
+    """An unrecallable node hash with no path entry stays off the map."""
+    data = _gather_shared([_entry(DELIVERY_HEX, DELIVERY_HEX, 1)],
+                          {DELIVERY_HEX: SHARED_IDENTITY_HEX},
+                          nomad=_FakeNomad([NODE_HEX]))
+
+    assert all(n["nomad"] is False for n in data["nodes"])
+    assert all(n["nomad_node_hash"] is None for n in data["nodes"])
+
+
+def test_plain_peer_has_no_nomad_node_hash():
+    data = _gather([_entry(PEER_HEX, PEER_HEX, 1)])
+    assert _node(data, PEER_HEX)["nomad_node_hash"] is None
+
+
+def test_nomad_node_with_its_own_entry_records_its_own_hash():
+    data = _gather([_entry(NOMAD_HEX, NOMAD_HEX, 1)],
+                   nomad=_FakeNomad([NOMAD_HEX]))
+    assert _node(data, NOMAD_HEX)["nomad_node_hash"] == NOMAD_HEX
 
 
 # ---------------------------------------------------------------------------
