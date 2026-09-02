@@ -24,7 +24,7 @@ from tests.helpers import sign_as, wait_for, wait_for_message
 from trenchchat.core.messaging import _compute_message_id
 from trenchchat.core.protocol import (
     F_CHANNEL_HASH, F_MSG_TYPE, F_SYNC_MESSAGES, F_SYNC_WINDOW_START,
-    MT_SYNC_REQUEST, unpack_wire,
+    MT_SYNC_REQUEST, message_id_from_wire, unpack_wire,
 )
 from trenchchat.core.sync import SYNC_WINDOW_SECS
 from trenchchat.core.sync_status import SyncState
@@ -415,20 +415,23 @@ class TestResponderSideHintClearedOnceServed:
         }
 
         carol.sync_mgr._handle_sync_request(request_fields, ch_hash, bob.identity.hash_hex)
-        first_ids = {m["message_id"] for m in unpack_wire(responses[0][F_SYNC_MESSAGES])}
+        first_ids = {message_id_from_wire(m["message_id"])
+                     for m in unpack_wire(responses[0][F_SYNC_MESSAGES])}
         assert hinted_id in first_ids, "the hint was not served at all"
         assert carol.storage.get_missed_message_ids(ch_hash, bob.identity.hash_hex) == [], \
             "the hint was still held after being served"
 
         carol.sync_mgr._handle_sync_request(request_fields, ch_hash, bob.identity.hash_hex)
-        second_ids = {m["message_id"] for m in unpack_wire(responses[1][F_SYNC_MESSAGES])}
+        second_ids = {message_id_from_wire(m["message_id"])
+                      for m in unpack_wire(responses[1][F_SYNC_MESSAGES])}
         assert hinted_id not in second_ids, "a retired hint was served again"
 
         # Newer history is unaffected by the hint having been retired.
         newer_id = _insert_message(carol.storage, ch_hash, alice.identity.hash_hex,
                                     "newer history, served on its own merits", ts + 2)
         carol.sync_mgr._handle_sync_request(request_fields, ch_hash, bob.identity.hash_hex)
-        last_ids = {m["message_id"] for m in unpack_wire(responses[-1][F_SYNC_MESSAGES])}
+        last_ids = {message_id_from_wire(m["message_id"])
+                    for m in unpack_wire(responses[-1][F_SYNC_MESSAGES])}
         assert newer_id in last_ids, "newer history stopped being served"
 
         # Drive the real path: Bob must still end up with both messages exactly

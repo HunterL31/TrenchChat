@@ -549,3 +549,96 @@ class TestPendingQueueIsBounded:
             alice.messaging._queue_pending(f"{i:032x}", {"msg_id": f"m{i}"})
 
         assert len(alice.messaging._pending) <= MAX_PENDING_PEERS
+
+
+
+class TestMessageIdWireEncoding:
+    """Message ids travel as their 32 digest bytes, and hex text is still read."""
+
+    @staticmethod
+    def _channel(alice, bob) -> str:
+        ch_hash = alice.channel_mgr.create_channel("wire", "", "public")
+        bob.storage.upsert_channel(ch_hash, "wire", "", alice.identity.hash_hex,
+                                   "public", time.time())
+        bob.storage.subscribe(ch_hash)
+        return ch_hash
+
+    @staticmethod
+    def _capture(peer, monkeypatch) -> list[dict]:
+        captured = []
+        original = peer.router.send
+
+        def spy(lxm):
+            captured.append(dict(getattr(lxm, "fields", None) or {}))
+            return original(lxm)
+
+        monkeypatch.setattr(peer.router, "send", spy)
+        return captured
+
+    def test_helpers_round_trip(self):
+        from trenchchat.core.protocol import message_id_from_wire, message_id_to_wire
+
+        hex_id = "ab" * 32
+        assert message_id_to_wire(hex_id) == bytes.fromhex(hex_id)
+        assert message_id_from_wire(bytes.fromhex(hex_id)) == hex_id
+        assert message_id_from_wire(hex_id) == hex_id
+        assert message_id_from_wire(hex_id.encode()) == hex_id
+        assert message_id_to_wire(None) is None
+        assert message_id_to_wire("") is None
+        assert message_id_to_wire("not-a-digest") == "not-a-digest"
+        assert message_id_from_wire(None) == ""
+
+    def test_channel_message_carries_binary_ids(self, peer_factory, monkeypatch):
+        from trenchchat.core.protocol import (
+            F_LAST_SEEN_ID, F_MESSAGE_ID, F_REPLY_TO, unpack_fields,
+        )
+
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+        ch_hash = self._channel(alice, bob)
+        recipients = [bob.identity.hash_hex]
+
+        alice.messaging.send_message(ch_hash, "first", subscriber_hashes=recipients)
+        first = alice.storage.get_latest_message_id(ch_hash)
+        assert wait_for_message(bob.storage, ch_hash, first)
+
+        captured = self._capture(alice, monkeypatch)
+        alice.messaging.send_message(ch_hash, "second", reply_to=first,
+                                     subscriber_hashes=recipients)
+        second = alice.storage.get_latest_message_id(ch_hash)
+
+        fields = unpack_fields(captured[0])
+        assert fields[F_MESSAGE_ID] == bytes.fromhex(second)
+        assert fields[F_REPLY_TO] == bytes.fromhex(first)
+        assert fields[F_LAST_SEEN_ID] == bytes.fromhex(first)
+
+        assert wait_for_message(bob.storage, ch_hash, second)
+        row = bob.storage.get_message(ch_hash, second)
+        assert row["message_id"] == second
+        assert row["reply_to"] == first
+        assert row["last_seen_id"] == first
+
+    def test_hex_ids_from_an_older_peer_are_still_read(self, peer_factory, monkeypatch):
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+        ch_hash = self._channel(alice, bob)
+        recipients = [bob.identity.hash_hex]
+
+        alice.messaging.send_message(ch_hash, "first", subscriber_hashes=recipients)
+        first = alice.storage.get_latest_message_id(ch_hash)
+        assert wait_for_message(bob.storage, ch_hash, first)
+
+        monkeypatch.setattr("trenchchat.core.messaging.message_id_to_wire",
+                            lambda value: value)
+        captured = self._capture(alice, monkeypatch)
+        alice.messaging.send_message(ch_hash, "second", reply_to=first,
+                                     subscriber_hashes=recipients)
+        second = alice.storage.get_latest_message_id(ch_hash)
+
+        from trenchchat.core.protocol import F_REPLY_TO, unpack_fields
+        assert unpack_fields(captured[0])[F_REPLY_TO] == first
+
+        assert wait_for_message(bob.storage, ch_hash, second)
+        row = bob.storage.get_message(ch_hash, second)
+        assert row["reply_to"] == first
+        assert row["last_seen_id"] == first

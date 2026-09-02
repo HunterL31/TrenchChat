@@ -69,7 +69,8 @@ from trenchchat.core.protocol import (
     F_MISSED_FOR, F_MISSED_MSG_ID,
     MT_MISSED_DELIVERY, MT_SYNC_REQUEST, MT_SYNC_RESPONSE,
     SYNC_WINDOW_SECS,
-    pack_fields, unpack_wire, wire_timestamp,
+    message_id_from_wire, message_id_to_wire, pack_fields, unpack_wire,
+    wire_timestamp,
 )
 from trenchchat.core.reaction import is_custom_emoji_hash
 from trenchchat.core.storage import Storage
@@ -457,7 +458,7 @@ class SyncManager:
                 F_MSG_TYPE:      MT_MISSED_DELIVERY,
                 F_CHANNEL_HASH:  bytes.fromhex(channel_hash_hex),
                 F_MISSED_FOR:    missed_peer_hex,
-                F_MISSED_MSG_ID: msg_id,
+                F_MISSED_MSG_ID: message_id_to_wire(msg_id),
             }
             if not self._send_raw(dest_hex, fields):
                 self._queue_hint_for_retry(dest_hex, fields)
@@ -551,7 +552,7 @@ class SyncManager:
         if not self._peer_may_participate(channel_hash_hex, sender_hex):
             return
         missed_for = _coerce_str(fields.get(F_MISSED_FOR, ""))
-        missed_msg_id = _coerce_str(fields.get(F_MISSED_MSG_ID, ""))
+        missed_msg_id = message_id_from_wire(fields.get(F_MISSED_MSG_ID))
         # Both are free-form strings on the wire and each distinct pair is a
         # persistent row, so they are checked for shape rather than taken as
         # given: a message_id is the hex digest messaging computes, and a
@@ -955,6 +956,7 @@ class SyncManager:
         for m in messages:
             try:
                 sender_hash = m.get("sender_hash", "")
+                msg_id = message_id_from_wire(m.get("message_id"))
                 # Dropped rather than clamped, unlike direct delivery: an
                 # accepted row advances our persisted watermark, so taking a
                 # far-future timestamp here would stop us ever asking this
@@ -963,7 +965,7 @@ class SyncManager:
                 if checked_ts is None:
                     RNS.log(
                         f"TrenchChat [sync]: dropping synced message "
-                        f"{str(m.get('message_id', ''))[:12]}… — implausible "
+                        f"{msg_id[:12]}… — implausible "
                         f"timestamp {m.get('timestamp')!r}",
                         RNS.LOG_WARNING,
                     )
@@ -981,7 +983,7 @@ class SyncManager:
                 ):
                     RNS.log(
                         f"TrenchChat [sync]: dropping synced message "
-                        f"{str(m.get('message_id', ''))[:12]}… — sender "
+                        f"{msg_id[:12]}… — sender "
                         f"{sender_hash[:12]}… was not a member at ts={msg_ts:.0f}",
                         RNS.LOG_WARNING,
                     )
@@ -991,7 +993,7 @@ class SyncManager:
                 ):
                     RNS.log(
                         f"TrenchChat [sync]: dropping synced message "
-                        f"{str(m.get('message_id', ''))[:12]}… — we were not "
+                        f"{msg_id[:12]}… — we were not "
                         f"yet a member at ts={msg_ts:.0f}",
                         RNS.LOG_DEBUG,
                     )
@@ -1006,9 +1008,8 @@ class SyncManager:
                 content = m.get("content", "")
                 if isinstance(content, bytes):
                     content = content.decode(errors="replace")
-                msg_id = m.get("message_id", "")
-                if isinstance(msg_id, bytes):
-                    msg_id = msg_id.decode(errors="replace")
+                reply_to = message_id_from_wire(m.get("reply_to")) or None
+                last_seen_id = message_id_from_wire(m.get("last_seen_id")) or None
 
                 # Recomputed exactly as the direct path does: the id *is* the
                 # hash of the row's own content, so a relayed row whose id was
@@ -1036,11 +1037,10 @@ class SyncManager:
                 if not verify_message(
                         self._storage, sender_hash, author_sig,
                         channel_hash_hex, msg_id, msg_ts,
-                        content, m.get("reply_to"),
-                        m.get("last_seen_id"), image_data):
+                        content, reply_to, last_seen_id, image_data):
                     RNS.log(
                         f"TrenchChat [sync]: dropping synced message "
-                        f"{str(m.get('message_id', ''))[:12]}… — author "
+                        f"{msg_id[:12]}… — author "
                         f"signature missing or invalid",
                         RNS.LOG_WARNING,
                     )
@@ -1071,8 +1071,8 @@ class SyncManager:
                     content=content,
                     timestamp=msg_ts,
                     message_id=msg_id,
-                    reply_to=m.get("reply_to"),
-                    last_seen_id=m.get("last_seen_id"),
+                    reply_to=reply_to,
+                    last_seen_id=last_seen_id,
                     received_at=time.time(),
                     image_data=image_data,
                     author_sig=author_sig,
@@ -1206,7 +1206,7 @@ class SyncManager:
         reactions = m.get("reactions")
         if not isinstance(reactions, list):
             return
-        message_id = m.get("message_id", "")
+        message_id = message_id_from_wire(m.get("message_id"))
         if not message_id:
             return
 
@@ -1300,9 +1300,9 @@ class SyncManager:
             "sender_name":  row["sender_name"],
             "content":      row["content"],
             "timestamp":    row["timestamp"],
-            "message_id":   row["message_id"],
-            "reply_to":     row["reply_to"],
-            "last_seen_id": row["last_seen_id"],
+            "message_id":   message_id_to_wire(row["message_id"]),
+            "reply_to":     message_id_to_wire(row["reply_to"]),
+            "last_seen_id": message_id_to_wire(row["last_seen_id"]),
         }
         image_data = row["image_data"] if "image_data" in row.keys() else None
         if image_data:

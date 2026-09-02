@@ -38,7 +38,7 @@ from trenchchat.core.protocol import (
     F_EMOJI_HASH, F_EMOJI_DATA, F_EMOJI_NAME,
     F_REACTION_MSG_ID, F_REACTION_REMOVE, F_REACTION_UNICODE,
     MT_REACTION, MT_EMOJI_REQUEST, MT_EMOJI_RESPONSE,
-    pack_fields,
+    message_id_from_wire, message_id_to_wire, pack_fields,
 )
 from trenchchat.core.storage import Storage
 from trenchchat.network.router import Router
@@ -430,9 +430,7 @@ class ReactionManager:
             )
             return
 
-        msg_id = fields.get(F_REACTION_MSG_ID, "")
-        if isinstance(msg_id, bytes):
-            msg_id = msg_id.decode(errors="replace")
+        msg_id = message_id_from_wire(fields.get(F_REACTION_MSG_ID))
         if not msg_id:
             return
 
@@ -640,7 +638,7 @@ class ReactionManager:
                 lxm.fields = pack_fields({
                     F_MSG_TYPE:          MT_REACTION,
                     F_CHANNEL_HASH:      channel_hash_bytes,
-                    F_REACTION_MSG_ID:   message_id,
+                    F_REACTION_MSG_ID:   message_id_to_wire(message_id),
                     F_REACTION_REMOVE:   remove,
                     **emoji_field,
                 })

@@ -5,13 +5,13 @@ LXMF fields layout:
     0x01  channel_hash      bytes[16]   — which channel
     0x02  display_name      str         — sender display name
     0x03  timestamp         float       — sender wall-clock Unix epoch
-    0x04  message_id        str         — hex SHA-256 of content+sender+timestamp
-    0x05  reply_to          str|None    — hex message_id of the message being replied to
-    0x06  last_seen_id      str|None    — hex message_id of the most recent msg sender had seen
+    0x04  message_id        bytes[32]   — SHA-256 of content+sender+timestamp; hex in storage
+    0x05  reply_to          bytes[32]   — message_id of the message being replied to, or None
+    0x06  last_seen_id      bytes[32]   — message_id of the latest msg sender had seen, or None
     0x07  sync_window_start float       — unix timestamp: start of sync window (sync_request)
     0x08  sync_messages     bytes       — msgpack list[dict] of full message records (sync_response)
     0x09  missed_for        str         — identity hex of peer who missed a message (missed_delivery)
-    0x0A  missed_msg_id     str         — message_id that was not delivered (missed_delivery)
+    0x0A  missed_msg_id     bytes[32]   — message_id that was not delivered (missed_delivery)
     0x0D  image_data        bytes|None  — JPEG image attachment payload (max 320 KB)
     0x15  invite_issued_ts  float       — when an invite token was issued, bound into
                                           its signature so a departure recorded after it
@@ -64,8 +64,8 @@ from trenchchat.core.protocol import (
     F_MISSED_FOR, F_MISSED_MSG_ID, F_MSG_TYPE, F_IMAGE_DATA,
     F_AUTHOR_SIG, DM_ENVELOPE_TYPE, DM_IMAGE_EXTENSION,
     LXMF_FIELD_CUSTOM_DATA, LXMF_FIELD_CUSTOM_TYPE, LXMF_FIELD_IMAGE,
-    inbound_image, pack_dm_envelope, pack_fields, unpack_dm_envelope,
-    wire_timestamp,
+    inbound_image, message_id_from_wire, message_id_to_wire, pack_dm_envelope,
+    pack_fields, unpack_dm_envelope, wire_timestamp,
 )
 from trenchchat.core.authorship import resolve_author, sign_message, verify_message
 from trenchchat.core.image import MAX_IMAGE_BYTES, inbound_image_is_sane
@@ -552,9 +552,9 @@ class Messaging:
             F_CHANNEL_HASH: bytes.fromhex(params["channel_hash_hex"]),
             F_DISPLAY_NAME: params["display_name"],
             F_TIMESTAMP:    params["timestamp"],
-            F_MESSAGE_ID:   params["msg_id"],
-            F_REPLY_TO:     params["reply_to"],
-            F_LAST_SEEN_ID: params["last_seen_id"],
+            F_MESSAGE_ID:   message_id_to_wire(params["msg_id"]),
+            F_REPLY_TO:     message_id_to_wire(params["reply_to"]),
+            F_LAST_SEEN_ID: message_id_to_wire(params["last_seen_id"]),
         }
         if params.get("image_data"):
             fields[F_IMAGE_DATA] = params["image_data"]
@@ -906,17 +906,9 @@ class Messaging:
                 RNS.LOG_WARNING,
             )
             return
-        msg_id = fields.get(F_MESSAGE_ID, "")
-        if isinstance(msg_id, bytes):
-            msg_id = msg_id.decode(errors="replace")
-
-        reply_to = fields.get(F_REPLY_TO)
-        if isinstance(reply_to, bytes):
-            reply_to = reply_to.decode(errors="replace")
-
-        last_seen_id = fields.get(F_LAST_SEEN_ID)
-        if isinstance(last_seen_id, bytes):
-            last_seen_id = last_seen_id.decode(errors="replace")
+        msg_id = message_id_from_wire(fields.get(F_MESSAGE_ID))
+        reply_to = message_id_from_wire(fields.get(F_REPLY_TO)) or None
+        last_seen_id = message_id_from_wire(fields.get(F_LAST_SEEN_ID)) or None
 
         content = message.content or ""
         if isinstance(content, bytes):

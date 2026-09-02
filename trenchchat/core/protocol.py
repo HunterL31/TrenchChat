@@ -36,13 +36,14 @@ envelope (pack_dm_envelope below).
 F_CHANNEL_HASH      = 0x01   # bytes[16] — which channel
 F_DISPLAY_NAME      = 0x02   # str       — sender display name
 F_TIMESTAMP         = 0x03   # float     — sender wall-clock Unix epoch
-F_MESSAGE_ID        = 0x04   # str       — hex SHA-256 of content+sender+timestamp
-F_REPLY_TO          = 0x05   # str|None  — message_id of the message being replied to
-F_LAST_SEEN_ID      = 0x06   # str|None  — message_id of the most recent msg sender had seen
+F_MESSAGE_ID        = 0x04   # bytes[32] — SHA-256 of content+sender+timestamp (hex text
+#                              from older peers is still read)
+F_REPLY_TO          = 0x05   # bytes[32] — message_id of the message being replied to, or None
+F_LAST_SEEN_ID      = 0x06   # bytes[32] — message_id of the latest msg sender had seen, or None
 F_SYNC_WINDOW_START = 0x07   # float     — unix timestamp: start of sync window (sync_request)
 F_SYNC_MESSAGES     = 0x08   # bytes     — msgpack list[dict] of full message records (sync_response)
 F_MISSED_FOR        = 0x09   # str       — identity hex of peer who missed a message
-F_MISSED_MSG_ID     = 0x0A   # str       — message_id that was not delivered
+F_MISSED_MSG_ID     = 0x0A   # bytes[32] — message_id that was not delivered
 F_AVATAR_DATA       = 0x0B   # bytes     — JPEG avatar payload (max 4 KB)
 F_AVATAR_VERSION    = 0x0C   # int       — monotonic counter; receiver uses to detect stale updates
 F_IMAGE_DATA        = 0x0D   # bytes     — JPEG image attachment payload (max 320 KB)
@@ -50,7 +51,7 @@ F_EMOJI_HASH        = 0x0E   # bytes[32] — SHA-256 of the emoji image data
 F_EMOJI_DATA        = 0x0F   # bytes     — raw emoji image (PNG/GIF, max 64 KB)
 
 # --- Reaction fields ---
-F_REACTION_MSG_ID   = 0x40   # str  — message_id being reacted to
+F_REACTION_MSG_ID   = 0x40   # bytes[32] — message_id being reacted to
 F_REACTION_REMOVE   = 0x41   # bool — True if this is a reaction removal
 F_EMOJI_NAME        = 0x42   # str  — human-readable emoji name; sent with request and response
 #                              so the receiver can store the emoji under the correct name
@@ -131,6 +132,32 @@ DM_ENVELOPE_TYPE = "trenchchat/dm/1"
 DM_IMAGE_EXTENSION = "jpg"
 
 
+MESSAGE_ID_BYTES = 32
+
+
+def message_id_to_wire(message_id: str | None):
+    """A message id as sent: its 32 digest bytes, or unchanged if it is not a digest."""
+    if not message_id:
+        return None
+    try:
+        raw = bytes.fromhex(message_id)
+    except (ValueError, TypeError):
+        return message_id
+    return raw if len(raw) == MESSAGE_ID_BYTES else message_id
+
+
+def message_id_from_wire(value) -> str:
+    """A message id as stored: hex, whether it arrived as digest bytes or as text."""
+    if isinstance(value, bytes):
+        if len(value) == MESSAGE_ID_BYTES:
+            return value.hex()
+        return value.decode(errors="replace")
+    return value if isinstance(value, str) else ""
+
+
+_DM_ENVELOPE_ID_KEYS = ("message_id", "reply_to", "last_seen_id")
+
+
 def pack_dm_envelope(*, message_id: str, timestamp: float, display_name: str,
                      reply_to: str | None, last_seen_id: str | None,
                      author_sig: bytes | None) -> bytes:
@@ -141,11 +168,11 @@ def pack_dm_envelope(*, message_id: str, timestamp: float, display_name: str,
     would add a claim to check rather than a fact to use.
     """
     return msgpack.packb({
-        "message_id":   message_id,
+        "message_id":   message_id_to_wire(message_id),
         "timestamp":    timestamp,
         "display_name": display_name,
-        "reply_to":     reply_to,
-        "last_seen_id": last_seen_id,
+        "reply_to":     message_id_to_wire(reply_to),
+        "last_seen_id": message_id_to_wire(last_seen_id),
         "author_sig":   author_sig,
     }, use_bin_type=True)
 
@@ -166,7 +193,12 @@ def unpack_dm_envelope(fields: dict) -> dict | None:
         unpacked = unpack_wire(payload)
     except Exception:
         return None
-    return unpacked if isinstance(unpacked, dict) else None
+    if not isinstance(unpacked, dict):
+        return None
+    for key in _DM_ENVELOPE_ID_KEYS:
+        if unpacked.get(key) is not None:
+            unpacked[key] = message_id_from_wire(unpacked[key])
+    return unpacked
 
 
 # --- protocol envelope ---

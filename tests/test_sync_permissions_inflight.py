@@ -31,7 +31,9 @@ from trenchchat.core.messaging import _compute_message_id
 from trenchchat.core.permissions import (
     FULL_SYNC, PRESET_PRIVATE, ROLE_ADMIN, ROLE_MEMBER, ROLE_OWNER, SEND_MESSAGE,
 )
-from trenchchat.core.protocol import F_SYNC_MESSAGES, F_SYNC_TRUNCATED, F_SYNC_WINDOW_START
+from trenchchat.core.protocol import (
+    F_SYNC_MESSAGES, F_SYNC_TRUNCATED, F_SYNC_WINDOW_START, message_id_from_wire,
+)
 from trenchchat.core.sync import DEEP_SYNC_COOLDOWN_SECS, MAX_RESPONSE_MESSAGES, SYNC_WINDOW_SECS
 
 
@@ -203,7 +205,8 @@ class TestFullSyncRevokedMidBackfill:
         )
         assert len(sent) == 1, "setup assumption violated: Alice should have responded once"
         batch1 = msgpack.unpackb(sent[0][F_SYNC_MESSAGES], raw=False)
-        assert [m["message_id"] for m in batch1] == msg_ids[:MAX_RESPONSE_MESSAGES], (
+        served = [message_id_from_wire(m["message_id"]) for m in batch1]
+        assert served == msg_ids[:MAX_RESPONSE_MESSAGES], (
             "setup assumption violated: first batch should be exactly the "
             "first MAX_RESPONSE_MESSAGES full_sync-eligible rows"
         )
@@ -484,7 +487,8 @@ class TestTenureFailOpenAsymmetry:
         )
         assert sent, "setup assumption violated: Carol should have responded"
         served_ids = {
-            m["message_id"] for m in msgpack.unpackb(sent[0][1][F_SYNC_MESSAGES], raw=False)
+            message_id_from_wire(m["message_id"])
+            for m in msgpack.unpackb(sent[0][1][F_SYNC_MESSAGES], raw=False)
         }
         assert gap_msg_id in served_ids, (
             "setup assumption violated: Carol (no tenure data) should have "
