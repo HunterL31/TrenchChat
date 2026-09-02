@@ -773,10 +773,11 @@ const Duration _mapTransition = Duration(milliseconds: 400);
 /// own, and a backend that never emits the event still stays roughly current.
 const Duration mapFallbackRefresh = Duration(seconds: 15);
 
-/// The Nomad Network URL for a node's index page. A map node's id is the
-/// destination hash the backend matched the nomad flag on, which is the hash
-/// the NET tab dials.
-String mapNomadPageUrl(String nodeId) => '$nodeId:/page/index.mu';
+/// The Nomad Network URL for a node's index page. Dials [MapNode.nomadNodeHash]
+/// when the backend supplies it: a collapsed node's id can be its messaging
+/// destination, which serves no pages. Falls back to the id for old backends.
+String mapNomadPageUrl(MapNode node) =>
+    '${node.nomadNodeHash ?? node.id}:/page/index.mu';
 
 class MapTab extends StatefulWidget {
   const MapTab({super.key, required this.state, this.onOpenNomadPage});
@@ -1818,8 +1819,7 @@ class _NodeDetailsPanel extends StatelessWidget {
     );
   }
 
-  /// A node hosting a Nomad Network node gets a way into the NET tab, dialing
-  /// the id the backend matched the nomad flag on.
+  /// A node hosting a Nomad Network node gets a way into the NET tab.
   Widget _openPageButton(MapNode n) => Padding(
         padding: const EdgeInsets.only(bottom: 8),
         child: Align(
@@ -1827,7 +1827,7 @@ class _NodeDetailsPanel extends StatelessWidget {
           child: TcGhostButton(
             icon: TcIcons.globe,
             label: 'OPEN PAGE',
-            onPressed: () => onOpenNomadPage!(mapNomadPageUrl(n.id)),
+            onPressed: () => onOpenNomadPage!(mapNomadPageUrl(n)),
           ),
         ),
       );

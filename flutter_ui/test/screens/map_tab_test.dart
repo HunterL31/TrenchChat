@@ -34,8 +34,22 @@ NetworkMapData _data() => NetworkMapData.fromJson({
 void main() {
   test('a node page URL is one the NET tab recognises', () {
     const hash = 'ffeeffeeffeeffeeffeeffeeffeeffee';
-    expect(mapNomadPageUrl(hash), '$hash:/page/index.mu');
-    expect(nomadUrlRe.matchAsPrefix(mapNomadPageUrl(hash)), isNotNull);
+    MapNode node({String? nomadNodeHash}) => MapNode.fromJson({
+          'id': hash,
+          'label': 'n',
+          'kind': 'peer',
+          'hops': 1,
+          'nomad': true,
+          'nomad_node_hash': ?nomadNodeHash,
+        });
+
+    expect(mapNomadPageUrl(node()), '$hash:/page/index.mu');
+    expect(nomadUrlRe.matchAsPrefix(mapNomadPageUrl(node())), isNotNull);
+
+    // A collapsed node dials its page destination, not its messaging id.
+    const pageHash = '00dd00dd00dd00dd00dd00dd00dd00dd';
+    expect(mapNomadPageUrl(node(nomadNodeHash: pageHash)),
+        '$pageHash:/page/index.mu');
   });
 
   test('parses nodes, edges, and stats from the gather_network_data shape', () {

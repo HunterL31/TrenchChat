@@ -61,6 +61,7 @@ class MapNode {
     this.nomad = false,
     this.propagation = false,
     this.identityHex,
+    this.nomadNodeHash,
   });
 
   final String id;
@@ -97,6 +98,10 @@ class MapNode {
   /// The node's identity hash, which differs from [id] (a destination hash).
   final String? identityHex;
 
+  /// The nomadnetwork.node destination to dial for pages. [id] can be the
+  /// same node's messaging destination when the two collapsed into one.
+  final String? nomadNodeHash;
+
   factory MapNode.fromJson(Map<String, dynamic> json) {
     final kind = switch (json['kind'] as String?) {
       'self' => MapNodeKind.self,
@@ -125,6 +130,7 @@ class MapNode {
       nomad: json['nomad'] as bool? ?? false,
       propagation: json['propagation'] as bool? ?? false,
       identityHex: json['identity_hex'] as String?,
+      nomadNodeHash: json['nomad_node_hash'] as String?,
     );
   }
 }
