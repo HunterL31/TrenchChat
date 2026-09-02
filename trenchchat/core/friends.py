@@ -284,8 +284,12 @@ class FriendsManager:
         return True
 
     def hold_message_request(self, identity_hash_hex: str, body: str,
-                             from_trenchchat: bool = False) -> bool:
+                             from_trenchchat: bool = False,
+                             sent_at: float | None = None) -> bool:
         """Hold words from someone we have not accepted, for the user to judge.
+
+        sent_at is the sender's own timestamp, defaulting to now; it orders
+        the held messages, since arrival order is not send order over LXMF.
 
         A client that speaks only plain LXMF cannot send MT_FRIEND_REQUEST, so
         without this it has no way to reach a stranger at all -- its message was
@@ -318,6 +322,7 @@ class FriendsManager:
         self._storage.add_message_request(
             identity_hash_hex, (body or "")[:MAX_REQUEST_BODY_CHARS],
             from_trenchchat,
+            sent_at=sent_at if sent_at is not None else time.time(),
             max_per_sender=MAX_HELD_PER_SENDER, max_total=MAX_HELD_MESSAGES,
         )
         RNS.log(

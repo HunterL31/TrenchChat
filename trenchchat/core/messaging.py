@@ -775,8 +775,14 @@ class Messaging:
             # reach anyone who had not already added it. The attachment is
             # deliberately not carried over -- an unknown sender's binary
             # payload is the half worth refusing.
+            sent_at = None
+            if envelope is not None:
+                sent_at = wire_timestamp(envelope.get("timestamp"))
+            if sent_at is None:
+                sent_at = wire_timestamp(getattr(message, "timestamp", None))
             self._direct_mgr.hold_message_request(
-                sender_hex, content, from_trenchchat=envelope is not None)
+                sender_hex, content, from_trenchchat=envelope is not None,
+                sent_at=sent_at)
             return
 
         conversation = self._direct_mgr.open_conversation(sender_hex)

@@ -20,6 +20,7 @@ import 'models/message.dart';
 import 'models/network_map.dart';
 import 'models/nomad.dart';
 import 'models/permissions.dart';
+import 'models/reticulum_config.dart';
 import 'models/server.dart';
 import 'models/settings.dart';
 import 'models/voice.dart';
@@ -644,6 +645,26 @@ class ApiClient {
 
   Future<void> applySuggestedDefaults() async {
     final res = await _http.post(_u('/reticulum/interfaces_suggested'));
+    _decode(res);
+  }
+
+  /// Every node-wide [reticulum]/[logging] option with its current value.
+  Future<List<ReticulumOption>> getReticulumConfig() async {
+    final res = await _http.get(_u('/reticulum/config'));
+    final body = _decode(res) as Map<String, dynamic>;
+    return (body['options'] as List<dynamic>? ?? [])
+        .map((e) => ReticulumOption.fromJson(e as Map<String, dynamic>))
+        .toList();
+  }
+
+  /// Writes only the supplied keys; an empty value clears one back to the
+  /// RNS default.
+  Future<void> setReticulumConfig(Map<String, String> values) async {
+    final res = await _http.put(
+      _u('/reticulum/config'),
+      headers: _jsonHeaders,
+      body: jsonEncode({'values': values}),
+    );
     _decode(res);
   }
 

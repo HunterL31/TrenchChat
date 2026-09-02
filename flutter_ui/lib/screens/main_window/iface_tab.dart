@@ -17,6 +17,7 @@ import '../../widgets/status_dot.dart';
 import '../../widgets/tc_button.dart';
 import '../../widgets/tc_icon.dart';
 import '../dialogs/interface_dialog.dart';
+import '../dialogs/reticulum_config_dialog.dart';
 
 export '../../format.dart' show formatByteCount;
 
@@ -152,6 +153,14 @@ class _IfaceTabState extends State<IfaceTab> {
     }
   }
 
+  Future<void> _editNodeConfig() async {
+    final changed = await showReticulumConfigDialog(context, widget.state);
+    if (changed == true) {
+      setState(() => _restartRequired = true);
+      await _refresh();
+    }
+  }
+
   Future<void> _edit(RetInterface iface) async {
     final changed = await showInterfaceDialog(context, widget.state, existing: iface);
     if (changed == true) {
@@ -201,6 +210,9 @@ class _IfaceTabState extends State<IfaceTab> {
                     icon: TcIcons.plus, label: 'DEFAULTS', onPressed: _applyDefaults),
                 const SizedBox(width: 6),
               ],
+              TcGhostButton(
+                  icon: TcIcons.settings, label: 'CONFIG', onPressed: _editNodeConfig),
+              const SizedBox(width: 6),
               TcGhostButton(icon: TcIcons.plus, label: 'ADD', onPressed: _add),
               const SizedBox(width: 6),
               TcGhostButton(icon: TcIcons.sync, label: 'REFRESH', onPressed: _refresh),

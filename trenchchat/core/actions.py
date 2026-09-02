@@ -437,7 +437,8 @@ def file_message_requests(friends_mgr, direct_mgr, messaging,
         direct_mgr.note_trenchchat_peer(peer_hash_hex)
     for row in held:
         messaging.store_held_message(
-            conversation, peer_hash_hex, row["body"], row["received_at"])
+            conversation, peer_hash_hex, row["body"],
+            row.get("sent_at") or row["received_at"])
     return len(held)
 
 

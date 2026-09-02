@@ -87,14 +87,15 @@ class DirectMessageManager:
         return self._friends.is_friend(peer_hash_hex)
 
     def hold_message_request(self, peer_hash_hex: str, body: str,
-                             from_trenchchat: bool = False) -> bool:
+                             from_trenchchat: bool = False,
+                             sent_at: float | None = None) -> bool:
         """Hold a message from a peer the gate just refused.
 
         The gate itself is unchanged -- this is what happens to what it turns
         away, so a sender that cannot ask any other way is not simply silenced.
         """
         return self._friends.hold_message_request(
-            peer_hash_hex, body, from_trenchchat)
+            peer_hash_hex, body, from_trenchchat, sent_at=sent_at)
 
     # --- conversations ---
 
