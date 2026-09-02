@@ -348,8 +348,7 @@ serves members because it is a member.
 - **Bounds.** Inbound: inline cap, manifest field caps, `max_response_size`
   from the chunk count, stall timeout per request, one request in flight
   per download, partial TTL, LRU store budget. Outbound: serve rate limit
-  per link, inbound link cap,
-  concurrent serve cap, served size cap.
+  per link, inbound link cap, concurrent serve cap, served size cap.
 
 ## Rejected alternatives
 
