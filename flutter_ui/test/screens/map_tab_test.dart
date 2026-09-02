@@ -223,6 +223,23 @@ void main() {
     expect(state.networkMapRevision, before + 2);
   });
 
+  test('a query reorders a hidden group, matches first and stably', () {
+    MapNode peer(String id, String label) => MapNode.fromJson(
+        {'id': id, 'label': label, 'kind': 'peer', 'hops': 2});
+    final group = [
+      peer('a', 'alpha'),
+      peer('b', 'bravo-match'),
+      peer('c', 'charlie'),
+      peer('d', 'delta-match'),
+    ];
+
+    expect(mapOrderGroupForQuery(group, ''), same(group));
+    expect(mapOrderGroupForQuery(group, 'match').map((n) => n.id).toList(),
+        ['b', 'd', 'a', 'c']);
+    expect(mapOrderGroupForQuery(group, 'zzz').map((n) => n.id).toList(),
+        ['a', 'b', 'c', 'd']);
+  });
+
   test('the fit transform centers the layout and inverts back to content', () {
     final exact = mapFitFor(const Size(200, 100), const Size(200, 100));
     expect(exact.scale, 1.0);
@@ -485,6 +502,20 @@ void main() {
       expect(find.text('lbl-kid-11'), findsOneWidget);
       expect(find.text('lbl-kid-00'), findsNothing);
       expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('an active search lifts matching peers to the top of the list',
+        (tester) async {
+      await tester.pumpWidget(harness());
+      await settle(tester);
+      await tester.enterText(find.byType(TextField), 'kid-11');
+      await settle(tester);
+      await tapOverflow(tester);
+
+      expect(find.text('2 MORE VIA hub'), findsOneWidget);
+      final matchY = tester.getTopLeft(find.text('lbl-kid-11')).dy;
+      final otherY = tester.getTopLeft(find.text('lbl-kid-10')).dy;
+      expect(matchY, lessThan(otherY));
     });
 
     testWidgets('tapping a row opens its details, marked as grouped', (tester) async {

@@ -98,6 +98,18 @@ bool mapGroupMatchesQuery(List<MapNode>? hidden, String query) {
   return hidden.any((n) => mapNodeMatchesQuery(n, query));
 }
 
+/// A hidden group's rows for display: with a search query active, matching
+/// peers come first; the priority order holds within each half.
+List<MapNode> mapOrderGroupForQuery(List<MapNode> hidden, String query) {
+  if (query.trim().isEmpty) return hidden;
+  final match = <MapNode>[];
+  final rest = <MapNode>[];
+  for (final n in hidden) {
+    (mapNodeMatchesQuery(n, query) ? match : rest).add(n);
+  }
+  return [...match, ...rest];
+}
+
 /// What everything that does not match the search fades to.
 const double mapDimOpacity = 0.25;
 
@@ -1107,12 +1119,12 @@ class _MapTabState extends State<MapTab> with SingleTickerProviderStateMixin {
 
   /// The panel in the slot beside (or under) the map: the list of what an
   /// overflow node groups when one is selected, otherwise a node's details.
-  Widget _panel(bool side) {
+  Widget _panel(bool side, String query) {
     final id = _selectedId!;
     final group = _hidden[id];
     if (group != null) {
       return _OverflowListPanel(
-        hidden: group,
+        hidden: mapOrderGroupForQuery(group, query),
         viaLabel: _parentLabel(id),
         side: side,
         onSelect: (peer) => setState(() {
@@ -1191,7 +1203,7 @@ class _MapTabState extends State<MapTab> with SingleTickerProviderStateMixin {
                 bottom: 0,
                 top: side ? 0 : null,
                 left: side ? null : 0,
-                child: _panel(side),
+                child: _panel(side, query),
               ),
           ],
         );
