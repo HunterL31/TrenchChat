@@ -52,6 +52,27 @@ Widget _harness(List<Message> messages,
       ),
     );
 
+/// A long history of deliberately varied row heights: three senders so group
+/// headers appear, multi-line bodies among the one-liners, and enough time
+/// between messages that date dividers land in the middle of it. The oldest
+/// stretch is one-liners only, so the extent the first frame estimates from
+/// the top of the list falls well short of the real one. Uniform rows never
+/// expose that drift.
+List<Message> _variedHistory({int count = 180}) {
+  const senders = ['alice', 'bob', 'carol'];
+  final start = DateTime(2026, 1, 1, 9).millisecondsSinceEpoch / 1000;
+  return [
+    for (var i = 0; i < count; i++)
+      _msg(
+        senders[i % senders.length],
+        start + i * 4000,
+        i > 20 && i % 3 == 0
+            ? 'message $i line one\nline two\nline three\nline four\nline five'
+            : 'message $i',
+      ),
+  ];
+}
+
 void main() {
   testWidgets('messages from the same sender under 300s collapse to one avatar', (tester) async {
     const base = 1_700_000_000.0;
@@ -433,6 +454,38 @@ void main() {
         r.text.toPlainText() == 'nice \ud83c\udf89' &&
         _spanFontSize(r.text) == TCType.textBodyMd);
     expect(normal, isNotEmpty, reason: 'the mixed message keeps body size');
+  });
+
+  testWidgets('a long history of varied row heights still opens at the newest message',
+      (tester) async {
+    final messages = _variedHistory();
+
+    await tester.pumpWidget(_harness(messages));
+    await tester.pumpAndSettle();
+
+    final controller = tester.widget<Scrollable>(find.byType(Scrollable)).controller!;
+    expect(controller.position.pixels, closeTo(controller.position.maxScrollExtent, 1));
+  });
+
+  testWidgets('coming back from another tab lands at the newest message',
+      (tester) async {
+    final messages = _variedHistory();
+
+    await tester.pumpWidget(_harness(messages));
+    await tester.pumpAndSettle();
+
+    // Read back through history, then leave the chat tab: the other tab
+    // replaces the list outright, so its scroll state is gone.
+    tester.widget<Scrollable>(find.byType(Scrollable)).controller!.jumpTo(0);
+    await tester.pumpAndSettle();
+    await tester.pumpWidget(const MaterialApp(home: Scaffold(body: SizedBox())));
+    await tester.pumpAndSettle();
+
+    await tester.pumpWidget(_harness(messages));
+    await tester.pumpAndSettle();
+
+    final controller = tester.widget<Scrollable>(find.byType(Scrollable)).controller!;
+    expect(controller.position.pixels, closeTo(controller.position.maxScrollExtent, 1));
   });
 }
 

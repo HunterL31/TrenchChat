@@ -100,6 +100,12 @@ class _MainWindowState extends State<MainWindow> {
     });
   }
 
+  /// Brings the chat pane back, so picking a conversation shows the
+  /// conversation rather than leaving whichever pane was open over it.
+  void _showChat() {
+    if (_tab != ChannelTab.chat) setState(() => _tab = ChannelTab.chat);
+  }
+
   /// A theme staged from the appearance editor lands in the compose box,
   /// which only the chat tab shows -- so the share brings the chat tab back
   /// with it rather than dropping into a pane that cannot show it.
@@ -385,6 +391,7 @@ class _MainWindowState extends State<MainWindow> {
           directChannels: state.standaloneChannels,
           selectedChannelHash: state.selectedChannelHash,
           onSelectChannel: (hash) {
+            _showChat();
             state.selectChannel(hash);
             if (_scaffoldKey.currentState?.isDrawerOpen ?? false) {
               _scaffoldKey.currentState!.closeDrawer();
@@ -397,6 +404,7 @@ class _MainWindowState extends State<MainWindow> {
           onCreateDirectChannel: () => showNewChannelDialog(context, state),
           dms: state.dms,
           onSelectDm: (hash) {
+            _showChat();
             state.selectDm(hash);
             if (_scaffoldKey.currentState?.isDrawerOpen ?? false) {
               _scaffoldKey.currentState!.closeDrawer();
