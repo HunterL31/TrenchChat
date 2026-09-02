@@ -7,6 +7,7 @@ import 'package:flutter_ui/api/events.dart';
 import 'package:flutter_ui/api/models/network_map.dart';
 import 'package:flutter_ui/app_state.dart';
 import 'package:flutter_ui/screens/main_window/map_tab.dart';
+import 'package:flutter_ui/widgets/emoji_text.dart' show nomadUrlRe;
 
 import '../fake_backend.dart';
 
@@ -31,6 +32,12 @@ NetworkMapData _data() => NetworkMapData.fromJson({
     });
 
 void main() {
+  test('a node page URL is one the NET tab recognises', () {
+    const hash = 'ffeeffeeffeeffeeffeeffeeffeeffee';
+    expect(mapNomadPageUrl(hash), '$hash:/page/index.mu');
+    expect(nomadUrlRe.matchAsPrefix(mapNomadPageUrl(hash)), isNotNull);
+  });
+
   test('parses nodes, edges, and stats from the gather_network_data shape', () {
     final data = _data();
     expect(data.nodes, hasLength(6));
@@ -422,15 +429,18 @@ void main() {
 
     tearDown(() => state.dispose());
 
-    Widget harness() => MaterialApp(home: Scaffold(body: MapTab(state: state)));
+    Widget harness({void Function(String)? onOpenNomadPage}) => MaterialApp(
+        home: Scaffold(
+            body: MapTab(state: state, onOpenNomadPage: onOpenNomadPage)));
 
     Finder mapCanvas() => find.byWidgetPredicate((w) =>
         w is CustomPaint && w.painter.runtimeType.toString() == '_NetworkMapPainter');
 
-    Future<void> tapOverflow(WidgetTester tester) async {
+    Future<void> tapOverflow(WidgetTester tester,
+        {List<Map<String, dynamic>>? kids}) async {
       final canvas = mapCanvas();
-      final collapse =
-          collapseMapData(NetworkMapData.fromJson(_hubTopology(_plainKids(12))));
+      final collapse = collapseMapData(
+          NetworkMapData.fromJson(_hubTopology(kids ?? _plainKids(12))));
       final layout = layoutMapNodes(collapse.data);
       final fit = mapFitFor(tester.getSize(canvas), layout.size);
       await tester.tapAt(tester.getTopLeft(canvas) +
@@ -514,6 +524,26 @@ void main() {
       expect(find.textContaining('NO LONGER VISIBLE'), findsOneWidget);
       expect(tester.takeException(), isNull);
     });
+
+    testWidgets('a peer opened out of the group offers its page too',
+        (tester) async {
+      final kids = _plainKids(12);
+      kids[11] = {...kids[11], 'nomad': true};
+      backend.routes['GET /network/map'] = _hubTopology(kids);
+      final opened = <String>[];
+      await tester.pumpWidget(harness(onOpenNomadPage: opened.add));
+      await settle(tester);
+      await tapOverflow(tester, kids: kids);
+
+      await tester.tap(find.text('lbl-kid-11'));
+      await settle(tester);
+      expect(find.text('OPEN PAGE'), findsOneWidget);
+
+      await tester.tap(find.text('OPEN PAGE'));
+      await settle(tester);
+      expect(opened, ['kid-11:/page/index.mu']);
+      expect(tester.takeException(), isNull);
+    });
   });
 
   group('map tab widget', () {
@@ -528,7 +558,9 @@ void main() {
 
     tearDown(() => state.dispose());
 
-    Widget harness() => MaterialApp(home: Scaffold(body: MapTab(state: state)));
+    Widget harness({void Function(String)? onOpenNomadPage}) => MaterialApp(
+        home: Scaffold(
+            body: MapTab(state: state, onOpenNomadPage: onOpenNomadPage)));
 
     int mapFetches() =>
         backend.requests.where((r) => r.path == '/network/map').length;
@@ -643,6 +675,33 @@ void main() {
       expect(find.text('HOPS'), findsNothing);
       expect(find.textContaining('NO LONGER VISIBLE'), findsOneWidget);
       expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('a nomad node opens its index page, a plain one offers nothing',
+        (tester) async {
+      final opened = <String>[];
+      await tester.pumpWidget(harness(onOpenNomadPage: opened.add));
+      await settle(tester);
+
+      await tapNode(tester, kRelayId);
+      expect(find.text('OPEN PAGE'), findsNothing);
+
+      await tapNode(tester, kPeerId);
+      expect(find.text('OPEN PAGE'), findsOneWidget);
+      await tester.tap(find.text('OPEN PAGE'));
+      await settle(tester);
+
+      expect(opened, ['$kPeerId:/page/index.mu']);
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('no callback means no page button', (tester) async {
+      await tester.pumpWidget(harness());
+      await settle(tester);
+      await tapNode(tester, kPeerId);
+
+      expect(find.text('NOMAD'), findsWidgets);
+      expect(find.text('OPEN PAGE'), findsNothing);
     });
 
     testWidgets('typing in the search box leaves the map painting', (tester) async {

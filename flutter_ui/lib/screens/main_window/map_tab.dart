@@ -773,10 +773,19 @@ const Duration _mapTransition = Duration(milliseconds: 400);
 /// own, and a backend that never emits the event still stays roughly current.
 const Duration mapFallbackRefresh = Duration(seconds: 15);
 
+/// The Nomad Network URL for a node's index page. A map node's id is the
+/// destination hash the backend matched the nomad flag on, which is the hash
+/// the NET tab dials.
+String mapNomadPageUrl(String nodeId) => '$nodeId:/page/index.mu';
+
 class MapTab extends StatefulWidget {
-  const MapTab({super.key, required this.state});
+  const MapTab({super.key, required this.state, this.onOpenNomadPage});
 
   final AppState state;
+
+  /// Opens a Nomad Network URL in the NET tab. Null in a harness that has no
+  /// tab to switch to, which hides the control rather than dead-ending it.
+  final void Function(String url)? onOpenNomadPage;
 
   @override
   State<MapTab> createState() => _MapTabState();
@@ -1083,6 +1092,7 @@ class _MapTabState extends State<MapTab> with SingleTickerProviderStateMixin {
       groupedUnder: stillGrouped ? '${_hidden[from]!.length} MORE' : null,
       onBack: stillGrouped ? () => setState(() => _selectedId = from) : null,
       onClose: _clearSelection,
+      onOpenNomadPage: widget.onOpenNomadPage,
     );
   }
 
@@ -1626,6 +1636,7 @@ class _NodeDetailsPanel extends StatelessWidget {
     required this.onClose,
     this.groupedUnder,
     this.onBack,
+    this.onOpenNomadPage,
   });
 
   final MapNode? node;
@@ -1638,6 +1649,9 @@ class _NodeDetailsPanel extends StatelessWidget {
   /// off the canvas: the label of the group it is still inside.
   final String? groupedUnder;
   final VoidCallback? onBack;
+
+  /// Opens a Nomad Network URL in the NET tab; null hides the control.
+  final void Function(String url)? onOpenNomadPage;
 
   @override
   Widget build(BuildContext context) {
@@ -1718,6 +1732,7 @@ class _NodeDetailsPanel extends StatelessWidget {
 
     final rows = <Widget>[
       _badges(tc, n),
+      if (n.nomad && onOpenNomadPage != null) _openPageButton(n),
       _row(tc, 'KIND', _kindLabel(n.kind)),
     ];
     if (n.identityHex != null && n.identityHex!.isNotEmpty) {
@@ -1802,6 +1817,20 @@ class _NodeDetailsPanel extends StatelessWidget {
       ),
     );
   }
+
+  /// A node hosting a Nomad Network node gets a way into the NET tab, dialing
+  /// the id the backend matched the nomad flag on.
+  Widget _openPageButton(MapNode n) => Padding(
+        padding: const EdgeInsets.only(bottom: 8),
+        child: Align(
+          alignment: Alignment.centerLeft,
+          child: TcGhostButton(
+            icon: TcIcons.globe,
+            label: 'OPEN PAGE',
+            onPressed: () => onOpenNomadPage!(mapNomadPageUrl(n.id)),
+          ),
+        ),
+      );
 
   Widget _row(TCSectionColors tc, String label, String value, {Color? valueColor}) =>
       Padding(
