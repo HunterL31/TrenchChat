@@ -302,6 +302,220 @@ void main() {
     expect(mapHeardRecently(heardAt(null)), isFalse);
   });
 
+  group('child collapsing', () {
+    String overflowId() => mapOverflowIdFor('hub');
+
+    MapCollapse collapseOf(List<Map<String, dynamic>> kids, {String? keepVisible}) =>
+        collapseMapData(NetworkMapData.fromJson(_hubTopology(kids)),
+            keepVisible: keepVisible);
+
+    List<String> hiddenIds(MapCollapse c) =>
+        (c.hidden[overflowId()] ?? const []).map((n) => n.id).toList();
+
+    test('a parent past the limit draws ten children and one overflow node', () {
+      final collapse = collapseOf(_plainKids(12));
+      final drawn = collapse.data.nodes.where((n) => n.id.startsWith('kid-'));
+
+      expect(drawn, hasLength(10));
+      expect(hiddenIds(collapse), ['kid-10', 'kid-11']);
+      final overflow = collapse.data.nodes.singleWhere(mapIsOverflowNode);
+      expect(overflow.id, overflowId());
+      expect(overflow.label, '2 more');
+      expect(
+          collapse.data.edges.any((e) =>
+              e.src == 'hub' && e.dst == overflow.id && e.kind == mapOverflowEdgeKind),
+          isTrue);
+      // The header reads the stats, which still count every node there is.
+      expect(collapse.data.nodeCount, 14);
+    });
+
+    test('eleven children all draw: a group of one costs what it hides', () {
+      final collapse = collapseOf(_plainKids(11));
+
+      expect(collapse.hidden, isEmpty);
+      expect(collapse.data.nodes.where(mapIsOverflowNode), isEmpty);
+      expect(collapse.data.nodes.where((n) => n.id.startsWith('kid-')), hasLength(11));
+    });
+
+    test('the drawn ten rank subtrees first, then TrenchChat, presence, quality, id',
+        () {
+      // Thirteen children: the relay is kept ahead of every TrenchChat leaf
+      // because hiding it would take its own peer off the map with it, and
+      // its id sorts last so nothing else can explain the choice.
+      final collapse = collapseOf([
+        {'id': 'z-relay', 'trenchchat': false, 'sub': true},
+        {'id': 'c-online', 'trenchchat': false, 'online': true},
+        {'id': 'd-q4', 'trenchchat': false, 'quality': 4},
+        {'id': 'e-q1', 'trenchchat': false, 'quality': 1},
+        ..._plainKids(9, prefix: 'f'),
+      ]);
+      final drawn = collapse.data.nodes.map((n) => n.id).toSet();
+
+      expect(hiddenIds(collapse), ['c-online', 'd-q4', 'e-q1']);
+      expect(drawn, contains('z-relay'));
+      expect(drawn, contains('z-relay-sub'));
+    });
+
+    test('the same data always collapses the same way', () {
+      expect(hiddenIds(collapseOf(_plainKids(15))), hiddenIds(collapseOf(_plainKids(15))));
+      expect(hiddenIds(collapseOf(_plainKids(15))),
+          ['kid-10', 'kid-11', 'kid-12', 'kid-13', 'kid-14']);
+    });
+
+    test('the selected node keeps its place even when the ranking drops it', () {
+      expect(hiddenIds(collapseOf(_plainKids(13))), ['kid-10', 'kid-11', 'kid-12']);
+
+      final kept = collapseOf(_plainKids(13), keepVisible: 'kid-12');
+      expect(kept.data.nodes.map((n) => n.id), contains('kid-12'));
+      expect(hiddenIds(kept), ['kid-10', 'kid-11']);
+      expect(kept.data.nodes.singleWhere(mapIsOverflowNode).label, '2 more');
+    });
+
+    test('an exemption that leaves one over draws it instead of a "1 more"', () {
+      expect(collapseOf(_plainKids(12), keepVisible: 'kid-11').hidden, isEmpty);
+    });
+
+    test('the overflow node hangs off its parent, hidden nodes off nothing', () {
+      final collapse = collapseOf(_plainKids(12));
+      final layout = layoutMapNodes(collapse.data);
+      double radiusOf(String id) => (layout.positions[id]! - layout.center).distance;
+
+      expect(mapTreeFor(collapse.data).parentOf[overflowId()], 'hub');
+      expect(layout.positions[overflowId()], isNotNull);
+      expect(layout.labels[overflowId()], isNotNull);
+      // The group sits on the ring of the children it stands in for, one out
+      // from the hub, so it reads as one of them rather than a node of its own.
+      final kidRadii = collapse.data.nodes
+          .where((n) => n.id.startsWith('kid-'))
+          .map((n) => radiusOf(n.id))
+          .toList()
+        ..sort();
+      expect(radiusOf(overflowId()),
+          inInclusiveRange(kidRadii.first - 1, kidRadii.last + 1));
+      expect(radiusOf('hub'), lessThan(kidRadii.first));
+      for (final gone in const ['kid-10', 'kid-11']) {
+        expect(layout.positions.containsKey(gone), isFalse);
+        expect(layout.labels.containsKey(gone), isFalse);
+      }
+    });
+
+    test('an overflow node matches a search any child it hides matches', () {
+      final hidden = collapseOf(_plainKids(12)).hidden[overflowId()];
+
+      expect(mapGroupMatchesQuery(hidden, 'KID-11'), isTrue);
+      expect(mapGroupMatchesQuery(hidden, 'lbl-kid-10'), isTrue);
+      expect(mapGroupMatchesQuery(hidden, 'kid-00'), isFalse);
+      expect(mapGroupMatchesQuery(hidden, '  '), isFalse);
+      expect(mapGroupMatchesQuery(null, 'kid'), isFalse);
+    });
+  });
+
+  group('overflow list panel', () {
+    late FakeBackend backend;
+    late AppState state;
+
+    setUp(() {
+      backend = FakeBackend();
+      backend.routes['GET /network/map'] = _hubTopology(_plainKids(12));
+      state = AppState(baseUrl: backend.baseUrl, httpClient: backend.client());
+    });
+
+    tearDown(() => state.dispose());
+
+    Widget harness() => MaterialApp(home: Scaffold(body: MapTab(state: state)));
+
+    Finder mapCanvas() => find.byWidgetPredicate((w) =>
+        w is CustomPaint && w.painter.runtimeType.toString() == '_NetworkMapPainter');
+
+    Future<void> tapOverflow(WidgetTester tester) async {
+      final canvas = mapCanvas();
+      final collapse =
+          collapseMapData(NetworkMapData.fromJson(_hubTopology(_plainKids(12))));
+      final layout = layoutMapNodes(collapse.data);
+      final fit = mapFitFor(tester.getSize(canvas), layout.size);
+      await tester.tapAt(tester.getTopLeft(canvas) +
+          fit.toCanvas(layout.positions[mapOverflowIdFor('hub')]!));
+      await settle(tester);
+    }
+
+    testWidgets('the chips keep true totals while the map draws fewer nodes',
+        (tester) async {
+      await tester.pumpWidget(harness());
+      await settle(tester);
+
+      expect(find.text('14 NODES'), findsOneWidget);
+      expect(find.text('13 PATHS'), findsOneWidget);
+      final painted = (tester.widget<CustomPaint>(mapCanvas()).painter as dynamic).data
+          as NetworkMapData;
+      // self + hub + ten children + the group standing for the other two.
+      expect(painted.nodes, hasLength(13));
+    });
+
+    testWidgets('tapping the overflow node lists the peers it groups', (tester) async {
+      await tester.pumpWidget(harness());
+      await settle(tester);
+      await tapOverflow(tester);
+
+      expect(find.text('2 MORE VIA hub'), findsOneWidget);
+      expect(find.text('lbl-kid-10'), findsOneWidget);
+      expect(find.text('lbl-kid-11'), findsOneWidget);
+      expect(find.text('lbl-kid-00'), findsNothing);
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('tapping a row opens its details, marked as grouped', (tester) async {
+      await tester.pumpWidget(harness());
+      await settle(tester);
+      await tapOverflow(tester);
+
+      await tester.tap(find.text('lbl-kid-11'));
+      await settle(tester);
+      expect(find.textContaining('GROUPED UNDER 2 MORE'), findsOneWidget);
+      expect(find.text('HOPS'), findsOneWidget);
+      expect(find.text('QUALITY'), findsOneWidget);
+
+      await tester.tap(find.text('BACK'));
+      await settle(tester);
+      expect(find.text('2 MORE VIA hub'), findsOneWidget);
+      expect(find.textContaining('GROUPED UNDER'), findsNothing);
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('a refresh that ungroups the peer keeps its details without the note',
+        (tester) async {
+      await tester.pumpWidget(harness());
+      await settle(tester);
+      await tapOverflow(tester);
+      await tester.tap(find.text('lbl-kid-11'));
+      await settle(tester);
+      expect(find.textContaining('GROUPED UNDER'), findsOneWidget);
+
+      backend.routes['GET /network/map'] =
+          _hubTopology(_plainKids(12).where((k) => k['id'] != 'kid-10').toList());
+      await tester.tap(find.text('REFRESH'));
+      await settle(tester);
+
+      expect(find.textContaining('GROUPED UNDER'), findsNothing);
+      expect(find.text('HOPS'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('a refresh that dissolves the group leaves the gone note', (tester) async {
+      await tester.pumpWidget(harness());
+      await settle(tester);
+      await tapOverflow(tester);
+      expect(find.text('2 MORE VIA hub'), findsOneWidget);
+
+      backend.routes['GET /network/map'] = _hubTopology(_plainKids(11));
+      await tester.tap(find.text('REFRESH'));
+      await settle(tester);
+
+      expect(find.text('2 MORE VIA hub'), findsNothing);
+      expect(find.textContaining('NO LONGER VISIBLE'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    });
+  });
+
   group('map tab widget', () {
     late FakeBackend backend;
     late AppState state;
@@ -443,6 +657,49 @@ void main() {
     });
   });
 }
+
+/// A hub owning [kids] children, each map merged over a plain TrenchChat
+/// peer. A kid carrying 'sub': true owns a peer of its own, so the
+/// descendants rule has a subtree to protect.
+Map<String, dynamic> _hubTopology(List<Map<String, dynamic>> kids) {
+  final nodes = <Map<String, dynamic>>[
+    {'id': 'self', 'label': 'This device', 'kind': 'self', 'hops': 0},
+    {'id': 'hub', 'label': 'hub', 'kind': 'transport', 'hops': 1, 'quality': 3},
+  ];
+  final edges = <Map<String, dynamic>>[
+    {'src': 'self', 'dst': 'hub', 'hops': 1, 'direct': true},
+  ];
+  for (final kid in kids) {
+    final id = kid['id'] as String;
+    nodes.add({
+      'label': 'lbl-$id',
+      'kind': 'peer',
+      'hops': 2,
+      'quality': 0,
+      'trenchchat': true,
+      ...kid,
+    });
+    edges.add({'src': 'hub', 'dst': id, 'hops': 2, 'direct': false});
+    if (kid['sub'] == true) {
+      nodes.add({'id': '$id-sub', 'label': 'lbl-$id-sub', 'kind': 'peer', 'hops': 3});
+      edges.add({'src': id, 'dst': '$id-sub', 'hops': 3, 'direct': false});
+    }
+  }
+  return {
+    'nodes': nodes,
+    'edges': edges,
+    'interfaces': <Map<String, dynamic>>[],
+    'stats': {
+      'node_count': nodes.length,
+      'path_count': edges.length,
+      'interface_count': 0,
+    },
+  };
+}
+
+List<Map<String, dynamic>> _plainKids(int count, {String prefix = 'kid'}) => [
+      for (var i = 0; i < count; i++) {'id': '$prefix-${i.toString().padLeft(2, '0')}'},
+    ];
 
 const String kPeerId = 'aa11bb22cc33';
 const String kPeerIdentity = 'ff00cc11dd22';

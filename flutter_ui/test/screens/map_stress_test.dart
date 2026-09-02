@@ -256,34 +256,49 @@ void main() {
     }
   });
 
-  group('two transport hubs owning almost every peer', () {
-    final hubs = NetworkMapData.fromJson(hubTopology());
-    final layout = layoutMapNodes(hubs);
+  /// Every assertion that has to hold of a hub-heavy graph once the collapse
+  /// has had its say: the hub sectors stay compact, a hub's drawn peers stay
+  /// beside it, and no label drifts or overlaps. Run over both the collapsing
+  /// shape and the widest one that draws every child.
+  void expectHubsStayCompact(
+      String what, Map<String, dynamic> topology, int hubs, int drawnPerHub) {
+    final data = NetworkMapData.fromJson(topology);
+    final collapse = collapseMapData(data);
+    final layout = layoutMapNodes(collapse.data);
 
-    test('stays compact instead of inflating one ring across the canvas', () {
+    test('$what draws $drawnPerHub peers per hub', () {
+      for (var h = 0; h < hubs; h++) {
+        final drawn = collapse.data.nodes.where((n) => n.id.startsWith('hub-$h-peer-'));
+        expect(drawn, hasLength(drawnPerHub), reason: 'hub-$h draws ${drawn.length}');
+      }
+    });
+
+    test('$what stays compact instead of inflating one ring across the canvas', () {
       // The radial layout used to size a ring so every label on it fit end to
       // end around one circle, which two hubs holding 28 peers each blew out
-      // to 2253x2327 -- 5.2 megapixels of mostly empty canvas. Lanes and the
-      // capped ring step hold it near a megapixel.
-      expect(layout.size.width * layout.size.height, lessThan(1600000),
+      // to 2253x2327 -- 5.2 megapixels of mostly empty canvas. Lanes, the
+      // capped ring step and the collapse hold it under a megapixel.
+      expect(layout.size.width * layout.size.height, lessThan(800000),
           reason: 'layout is ${layout.size}');
     });
 
-    test('a hub keeps its peers beside it', () {
+    test('$what keeps a hub\'s peers beside it', () {
       // A hub's peer sits one ring out and inside the hub's own sector, so
       // the edge between them stays a short spoke rather than a line across
       // the graph. Four ring gaps is the ceiling a ring step plus a full
       // sector's worth of angle can reach.
       const bound = 4 * 84.0;
-      for (final e in hubs.edges) {
-        if (!e.src.startsWith('hub-') || !e.dst.startsWith('hub-')) continue;
-        final d = (layout.positions[e.src]! - layout.positions[e.dst]!).distance;
+      for (final e in collapse.data.edges) {
+        final a = layout.positions[e.src];
+        final b = layout.positions[e.dst];
+        if (a == null || b == null || !e.src.startsWith('hub-')) continue;
+        final d = (a - b).distance;
         expect(d, lessThan(bound),
             reason: '${e.src} -> ${e.dst} is ${d.toStringAsFixed(0)}px');
       }
     });
 
-    test('labels neither overlap nor drift off their node', () {
+    test('$what keeps labels beside their node and off each other', () {
       final entries = layout.labels.entries.toList();
       for (var i = 0; i < entries.length; i++) {
         final pos = layout.positions[entries[i].key]!;
@@ -299,14 +314,59 @@ void main() {
       }
     });
 
-    test('is deterministic', () {
-      final again = layoutMapNodes(NetworkMapData.fromJson(hubTopology()));
+    test('$what is deterministic', () {
+      final again = layoutMapNodes(collapseMapData(NetworkMapData.fromJson(topology)).data);
       expect(again.positions, layout.positions);
       expect(again.size, layout.size);
       for (final id in layout.labels.keys) {
         expect(again.labels[id]!.rect, layout.labels[id]!.rect);
       }
     });
+  }
+
+  group('two transport hubs owning almost every peer', () {
+    final collapse = collapseMapData(NetworkMapData.fromJson(hubTopology()));
+    final layout = layoutMapNodes(collapse.data);
+
+    expectHubsStayCompact('a collapsed hub graph', hubTopology(), 2, 10);
+
+    test('each hub groups the eighteen peers it has no room for', () {
+      for (var h = 0; h < 2; h++) {
+        final overflow = mapOverflowIdFor('hub-$h');
+        expect(collapse.hidden[overflow], hasLength(18));
+        expect(collapse.data.nodes.singleWhere((n) => n.id == overflow).label, '18 more');
+        // The hidden ones are gone from the picture entirely.
+        for (final node in collapse.hidden[overflow]!) {
+          expect(layout.positions.containsKey(node.id), isFalse);
+          expect(layout.labels.containsKey(node.id), isFalse);
+        }
+      }
+    });
+
+    test('a group lands in the sector of the hub it belongs to', () {
+      double angleOf(String id) {
+        final v = layout.positions[id]! - layout.center;
+        return math.atan2(v.dy, v.dx);
+      }
+
+      for (var h = 0; h < 2; h++) {
+        final spread = (angleOf(mapOverflowIdFor('hub-$h')) - angleOf('hub-$h')).abs();
+        expect(math.min(spread, 2 * math.pi - spread), lessThan(math.pi / 2),
+            reason: 'the hub-$h group drifted out of its sector');
+      }
+    });
+  });
+
+  // Eleven is the most children a parent draws before grouping any of them,
+  // so this is the widest the layout is ever asked to place a hub's peers.
+  group('two transport hubs at the no-collapse maximum', () {
+    test('nothing is grouped', () {
+      expect(collapseMapData(NetworkMapData.fromJson(hubTopology(peersPerHub: 11))).hidden,
+          isEmpty);
+    });
+
+    expectHubsStayCompact(
+        'eleven peers per hub', hubTopology(peersPerHub: 11), 2, 11);
   });
 
   test('the trenchchat flag parses, defaulting to the old behavior for peers', () {
@@ -388,11 +448,20 @@ void main() {
       await tester.tap(find.text('PEERS ONLY'));
       await settle(tester);
 
-      final painted = (mapPaint(tester).painter as dynamic).data as NetworkMapData;
-      expect(painted.nodes.every(isPeerNode), isTrue);
-      // 30 direct minus 4 LXMF-only, plus 72 relay-subtree peers.
-      expect(painted.nodes.where((n) => n.kind == MapNodeKind.peer).length, 98);
-      // relay-1 is a TrenchChat client that happens to relay: it stays.
+      final painter = mapPaint(tester).painter as dynamic;
+      final painted = painter.data as NetworkMapData;
+      final hidden = painter.hidden as Map<String, List<MapNode>>;
+      expect(painted.nodes.every((n) => isPeerNode(n) || mapIsOverflowNode(n)), isTrue);
+      // 30 direct minus 4 LXMF-only, plus 72 relay-subtree peers -- some drawn
+      // and the rest grouped, none of them lost by the filter.
+      final peers = [
+        ...painted.nodes.where((n) => n.kind == MapNodeKind.peer),
+        for (final group in hidden.values)
+          ...group.where((n) => n.kind == MapNodeKind.peer),
+      ];
+      expect(peers.map((n) => n.id).toSet(), hasLength(98));
+      // relay-1 is a TrenchChat client that happens to relay: it stays, and
+      // the collapse keeps it drawn because its subtree hangs off it.
       expect(painted.nodes.any((n) => n.id == 'relay-1'), isTrue);
       expect(painted.nodes.any((n) => n.id == 'relay-0'), isFalse);
       final kept = painted.nodes.map((n) => n.id).toSet();

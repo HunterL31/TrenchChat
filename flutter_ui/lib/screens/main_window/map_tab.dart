@@ -90,6 +90,14 @@ bool mapNodeMatchesQuery(MapNode node, String query) {
       (node.identityHex ?? '').toLowerCase().contains(q);
 }
 
+/// Whether an overflow node counts as a match: the layout stays query
+/// independent, so a hit that landed in a group has to show on the group
+/// itself or the user would read the map as having no match at all.
+bool mapGroupMatchesQuery(List<MapNode>? hidden, String query) {
+  if (hidden == null || query.trim().isEmpty) return false;
+  return hidden.any((n) => mapNodeMatchesQuery(n, query));
+}
+
 /// What everything that does not match the search fades to.
 const double mapDimOpacity = 0.25;
 
@@ -236,15 +244,43 @@ String? hitTestMapNode(MapLayout layout, Offset point,
 double _estimateLabelWidth(String label) =>
     math.min(label.length * 6.2 + 4, _labelMaxWidth);
 
-/// Radial positions for every node. Self sits at the center; interfaces on
-/// the innermost ring; everything else ringed by hop count, with the distinct
-/// ring keys compacted to consecutive indices so one distant node can't
-/// squeeze the inner rings. Each node is placed inside the angular sector of
-/// the node it routes through (sector width proportional to the room its
-/// subtree's labels need), and a ring grows only until its labels fit across
-/// up to [_maxLanes] radial lanes, capped at [_maxRingStep] past its floor.
-/// Deterministic: all ties break by node id.
-MapLayout layoutMapNodes(NetworkMapData data) {
+/// The rooted tree the map is drawn as: which ring each node sits on and
+/// which node it hangs off. The layout places it and the collapse prunes it,
+/// so both derive it here and can never disagree about who a node's parent is.
+class MapTree {
+  MapTree._({
+    required this.selfId,
+    required this.ringOf,
+    required this.parentOf,
+    required this.childrenOf,
+    required this.ringCount,
+  });
+
+  final String? selfId;
+
+  /// Ring index per node, self at 0 and the distinct hop keys compacted to
+  /// consecutive indices so one distant node can't squeeze the inner rings.
+  final Map<String, int> ringOf;
+
+  /// The edge neighbor closest inward, or [root] for a node with no inward
+  /// edge, so every subtree stays inside its parent's angular sector.
+  final Map<String, String> parentOf;
+  final Map<String, List<String>> childrenOf;
+  final int ringCount;
+
+  /// Stands in for self on a map that has no self node.
+  static const String root = '__root__';
+
+  String get rootId => selfId ?? root;
+
+  /// Nodes in the subtree rooted at [id], counting [id] itself.
+  int weigh(String id) => _weights[id] ??=
+      1 + (childrenOf[id] ?? const <String>[]).fold(0, (s, c) => s + weigh(c));
+
+  final Map<String, int> _weights = {};
+}
+
+MapTree mapTreeFor(NetworkMapData data) {
   final byId = {for (final n in data.nodes) n.id: n};
   String? selfId;
   for (final n in data.nodes) {
@@ -266,20 +302,16 @@ MapLayout layoutMapNodes(NetworkMapData data) {
   final ringOf = <String, int>{?selfId: 0};
   ringKeyById.forEach((id, key) => ringOf[id] = ringIndexByKey[key]!);
 
-  // Parent = the edge neighbor closest inward; nodes with no inward edge hang
-  // off self, so every subtree stays inside its parent's angular sector and
-  // relay->peer edges come out as short radial spokes.
   final neighbors = <String, Set<String>>{};
   for (final e in data.edges) {
     if (!byId.containsKey(e.src) || !byId.containsKey(e.dst)) continue;
     neighbors.putIfAbsent(e.src, () => {}).add(e.dst);
     neighbors.putIfAbsent(e.dst, () => {}).add(e.src);
   }
-  const root = '__root__';
   final parentOf = <String, String>{};
   for (final id in ringKeyById.keys) {
     final myRing = ringOf[id]!;
-    var parent = selfId ?? root;
+    var parent = selfId ?? MapTree.root;
     var parentRing = 0;
     final sorted = (neighbors[id] ?? const <String>{}).toList()..sort();
     for (final nb in sorted) {
@@ -295,15 +327,185 @@ MapLayout layoutMapNodes(NetworkMapData data) {
   final childrenOf = <String, List<String>>{};
   parentOf.forEach((id, p) => childrenOf.putIfAbsent(p, () => []).add(id));
 
-  final weights = <String, int>{};
-  int weigh(String id) => weights[id] ??=
-      1 + (childrenOf[id] ?? const []).fold(0, (s, c) => s + weigh(c));
+  return MapTree._(
+    selfId: selfId,
+    ringOf: ringOf,
+    parentOf: parentOf,
+    childrenOf: childrenOf,
+    ringCount: distinctKeys.length,
+  );
+}
+
+/// How many children a parent draws before the rest are grouped behind one
+/// node. The group itself needs a marker and a label, so it is only worth
+/// drawing for two or more: eleven children draw as eleven, never as ten and
+/// a "1 more".
+const int mapMaxChildren = 10;
+
+const String mapOverflowIdPrefix = '__more__';
+
+/// Edge kind for the parent-to-group spoke, so the painter can subdue it.
+const String mapOverflowEdgeKind = 'overflow';
+
+String mapOverflowIdFor(String parentId) => '$mapOverflowIdPrefix$parentId';
+
+bool mapIsOverflowNode(MapNode node) => node.id.startsWith(mapOverflowIdPrefix);
+
+/// Which children a crowded parent keeps. A child takes its whole subtree
+/// with it, so one with descendants outranks even a TrenchChat client:
+/// hiding a relay drops every node behind it, where hiding a leaf drops only
+/// itself. After that it is TrenchChat clients, then presence, then quality,
+/// then id so the choice never depends on map iteration order.
+int compareMapChildPriority(MapNode a, MapNode b, int Function(String) weigh) {
+  int rank(bool wanted) => wanted ? 0 : 1;
+  var c = rank(weigh(a.id) > 1).compareTo(rank(weigh(b.id) > 1));
+  if (c != 0) return c;
+  c = rank(a.isTrenchChat).compareTo(rank(b.isTrenchChat));
+  if (c != 0) return c;
+  c = rank(a.online == true).compareTo(rank(b.online == true));
+  if (c != 0) return c;
+  c = b.quality.compareTo(a.quality);
+  return c != 0 ? c : a.id.compareTo(b.id);
+}
+
+/// A [NetworkMapData] with every crowded parent's extra children replaced by
+/// one synthetic overflow node, plus what each of those groups stands for.
+class MapCollapse {
+  const MapCollapse({
+    required this.data,
+    required this.hidden,
+    required this.parentOf,
+  });
+
+  /// What the layout and the painter see: the kept nodes and edges plus one
+  /// overflow node per crowded parent. The stats are untouched, so the header
+  /// keeps reporting true totals rather than drawn ones.
+  final NetworkMapData data;
+
+  /// Overflow node id -> the children it stands for, in priority order.
+  final Map<String, List<MapNode>> hidden;
+
+  /// Overflow node id -> the parent whose children it groups.
+  final Map<String, String> parentOf;
+}
+
+/// Groups the children a crowded parent has no room for. Pure and stable:
+/// the same data always yields the same choice, so a refresh that changes
+/// nothing animates nothing.
+///
+/// [keepVisible] is the node the user is inspecting; it keeps its place even
+/// when the ranking would drop it, so a refresh never yanks the selection out
+/// from under them. An interface is never grouped -- it is this device's own
+/// link rather than a peer behind the parent, and sits on a different ring.
+MapCollapse collapseMapData(NetworkMapData data, {String? keepVisible}) {
+  final tree = mapTreeFor(data);
+  final byId = {for (final n in data.nodes) n.id: n};
+  final hidden = <String, List<MapNode>>{};
+  final overflowParent = <String, String>{};
+  final dropped = <String>{};
+  final extraNodes = <MapNode>[];
+  final extraEdges = <MapEdge>[];
+
+  void dropSubtree(String id) {
+    for (final kid in tree.childrenOf[id] ?? const <String>[]) {
+      if (dropped.add(kid)) dropSubtree(kid);
+    }
+  }
+
+  for (final parent in tree.childrenOf.keys.toList()..sort()) {
+    final kids = <MapNode>[];
+    for (final id in tree.childrenOf[parent]!) {
+      final node = byId[id];
+      if (node == null || node.kind == MapNodeKind.interface_) continue;
+      kids.add(node);
+    }
+    if (kids.length <= mapMaxChildren) continue;
+    kids.sort((a, b) => compareMapChildPriority(a, b, tree.weigh));
+    final keep = kids.take(mapMaxChildren).map((n) => n.id).toSet();
+    if (keepVisible != null && kids.any((n) => n.id == keepVisible)) {
+      keep.add(keepVisible);
+    }
+    final group = kids.where((n) => !keep.contains(n.id)).toList();
+    if (group.length < 2) continue;
+
+    final overflowId = mapOverflowIdFor(parent);
+    hidden[overflowId] = group;
+    overflowParent[overflowId] = parent;
+    for (final node in group) {
+      dropped.add(node.id);
+      dropSubtree(node.id);
+    }
+    final hops = group.map((n) => n.hops).reduce(math.min);
+    extraNodes.add(MapNode(
+      id: overflowId,
+      label: '${group.length} more',
+      kind: MapNodeKind.unknown,
+      hops: hops,
+      quality: 0,
+      isTrenchChat: false,
+    ));
+    if (byId.containsKey(parent)) {
+      extraEdges.add(MapEdge(
+        src: parent,
+        dst: overflowId,
+        direct: false,
+        quality: 0,
+        hops: hops,
+        kind: mapOverflowEdgeKind,
+      ));
+    }
+  }
+
+  if (hidden.isEmpty) {
+    return MapCollapse(data: data, hidden: const {}, parentOf: const {});
+  }
+  final nodes = [
+    for (final n in data.nodes)
+      if (!dropped.contains(n.id)) n,
+    ...extraNodes,
+  ];
+  final kept = {for (final n in nodes) n.id};
+  return MapCollapse(
+    data: NetworkMapData(
+      nodes: nodes,
+      edges: [
+        for (final e in data.edges)
+          if (kept.contains(e.src) && kept.contains(e.dst)) e,
+        ...extraEdges,
+      ],
+      interfaces: data.interfaces,
+      nodeCount: data.nodeCount,
+      pathCount: data.pathCount,
+      interfaceCount: data.interfaceCount,
+      onlinePeerCount: data.onlinePeerCount,
+    ),
+    hidden: hidden,
+    parentOf: overflowParent,
+  );
+}
+
+/// Radial positions for every node. Self sits at the center; interfaces on
+/// the innermost ring; everything else ringed by hop count, with the distinct
+/// ring keys compacted to consecutive indices so one distant node can't
+/// squeeze the inner rings. Each node is placed inside the angular sector of
+/// the node it routes through (sector width proportional to the room its
+/// subtree's labels need), and a ring grows only until its labels fit across
+/// up to [_maxLanes] radial lanes, capped at [_maxRingStep] past its floor.
+/// Deterministic: all ties break by node id.
+MapLayout layoutMapNodes(NetworkMapData data) {
+  final byId = {for (final n in data.nodes) n.id: n};
+  final tree = mapTreeFor(data);
+  final selfId = tree.selfId;
+  final ringOf = tree.ringOf;
+  final childrenOf = tree.childrenOf;
+  final weigh = tree.weigh;
 
   final idsByRing = <int, List<String>>{};
-  for (final id in ringKeyById.keys) {
-    idsByRing.putIfAbsent(ringOf[id]!, () => []).add(id);
-  }
-  final ringCount = distinctKeys.length;
+  ringOf.forEach((id, ring) {
+    if (id == selfId) return;
+    idsByRing.putIfAbsent(ring, () => []).add(id);
+  });
+  final ringCount = tree.ringCount;
 
   final angleOf = <String, double>{};
   void assignSectors(
@@ -428,7 +630,7 @@ MapLayout layoutMapNodes(NetworkMapData data) {
   // an otherwise empty ring from being crammed into slivers, and leaves the
   // label push loop only stragglers.
   assignSectors(
-      selfId ?? root, -math.pi / 2, 2 * math.pi, (id) => weigh(id).toDouble());
+      tree.rootId, -math.pi / 2, 2 * math.pi, (id) => weigh(id).toDouble());
   var radii = computeRadii();
   for (var pass = 0; pass < 2; pass++) {
     final needOf = <String, double>{};
@@ -446,9 +648,9 @@ MapLayout layoutMapNodes(NetworkMapData data) {
       return sums;
     }
 
-    accumulate(selfId ?? root);
+    accumulate(tree.rootId);
     angleOf.clear();
-    assignSectors(selfId ?? root, -math.pi / 2, 2 * math.pi, (id) => needOf[id]!);
+    assignSectors(tree.rootId, -math.pi / 2, 2 * math.pi, (id) => needOf[id]!);
     radii = computeRadii();
   }
 
@@ -593,6 +795,16 @@ class _MapTabState extends State<MapTab> with SingleTickerProviderStateMixin {
   NetworkMapData? _previous;
   MapLayout? _previousLayout;
 
+  /// The filtered data before collapsing, so a grouped peer still resolves to
+  /// its full details, and what each overflow node on screen stands for.
+  NetworkMapData? _full;
+  Map<String, List<MapNode>> _hidden = const {};
+  Map<String, String> _overflowParent = const {};
+
+  /// The overflow node the current selection was picked out of, or null when
+  /// the user tapped the node on the canvas.
+  String? _pickedFrom;
+
   late final AnimationController _transition;
   final TextEditingController _search = TextEditingController();
   Timer? _poll;
@@ -652,7 +864,14 @@ class _MapTabState extends State<MapTab> with SingleTickerProviderStateMixin {
     final wasLayout = _shownLayout;
     _previous = _shown;
     _previousLayout = wasLayout;
-    _shown = _filtered(data);
+    _full = _filtered(data);
+    // A peer the user picked out of a group stays in it; one they tapped on
+    // the canvas keeps its place even when the ranking would now drop it.
+    final collapse = collapseMapData(_full!,
+        keepVisible: _pickedFrom == null ? _selectedId : null);
+    _hidden = collapse.hidden;
+    _overflowParent = collapse.parentOf;
+    _shown = collapse.data;
     _shownLayout = layoutMapNodes(_shown!);
     if (wasLayout == null) {
       _transition.value = 1;
@@ -685,14 +904,22 @@ class _MapTabState extends State<MapTab> with SingleTickerProviderStateMixin {
     final fit = mapFitFor(canvas, layout.size);
     final radius = (mapHitRadius / fit.scale).clamp(mapHitRadius, 40.0);
     final hit = hitTestMapNode(layout, fit.toContent(local), radius: radius);
-    if (hit == _selectedId) return;
-    setState(() => _selectedId = hit);
+    if (hit == _selectedId && _pickedFrom == null) return;
+    setState(() {
+      _selectedId = hit;
+      _pickedFrom = null;
+    });
   }
 
+  /// The selected node, whether it is drawn or grouped behind an overflow
+  /// node; null once a refresh drops it altogether.
   MapNode? get _selectedNode {
     final id = _selectedId;
     if (id == null) return null;
     for (final n in _shown?.nodes ?? const <MapNode>[]) {
+      if (n.id == id) return n;
+    }
+    for (final n in _full?.nodes ?? const <MapNode>[]) {
       if (n.id == id) return n;
     }
     return null;
@@ -810,6 +1037,7 @@ class _MapTabState extends State<MapTab> with SingleTickerProviderStateMixin {
                       _legendEntry(tc, label, quality),
                     _kindLegendEntry(tc, 'TRENCHCHAT', filled: true),
                     _kindLegendEntry(tc, 'OTHER NODE', filled: false),
+                    _groupedLegendEntry(tc, 'GROUPED'),
                     _markerLegendEntry(tc, 'ONLINE PEER', tc.statusOnline, round: true),
                     _markerLegendEntry(tc, 'NOMAD', tc.accentSecondary, round: true),
                     _markerLegendEntry(tc, 'PROP NODE', tc.statusWarn, round: true),
@@ -823,8 +1051,51 @@ class _MapTabState extends State<MapTab> with SingleTickerProviderStateMixin {
     );
   }
 
+  void _clearSelection() => setState(() {
+        _selectedId = null;
+        _pickedFrom = null;
+      });
+
+  /// The panel in the slot beside (or under) the map: the list of what an
+  /// overflow node groups when one is selected, otherwise a node's details.
+  Widget _panel(bool side) {
+    final id = _selectedId!;
+    final group = _hidden[id];
+    if (group != null) {
+      return _OverflowListPanel(
+        hidden: group,
+        viaLabel: _parentLabel(id),
+        side: side,
+        onSelect: (peer) => setState(() {
+          _pickedFrom = id;
+          _selectedId = peer;
+        }),
+        onClose: _clearSelection,
+      );
+    }
+    final from = _pickedFrom;
+    final stillGrouped = from != null && (_hidden[from]?.any((n) => n.id == id) ?? false);
+    return _NodeDetailsPanel(
+      node: _selectedNode,
+      selectedId: id,
+      data: _full!,
+      side: side,
+      groupedUnder: stillGrouped ? '${_hidden[from]!.length} MORE' : null,
+      onBack: stillGrouped ? () => setState(() => _selectedId = from) : null,
+      onClose: _clearSelection,
+    );
+  }
+
+  String _parentLabel(String overflowId) {
+    final parent = _overflowParent[overflowId];
+    if (parent == null) return '—';
+    for (final n in _full?.nodes ?? const <MapNode>[]) {
+      if (n.id == parent) return n.label.isEmpty ? mapShortHex(n.id) : n.label;
+    }
+    return mapShortHex(parent);
+  }
+
   Widget _mapArea(TCSectionColors tc, String query) {
-    final selected = _selectedNode;
     return LayoutBuilder(
       builder: (context, outer) {
         final side = outer.maxWidth >= mapDetailsSideBreakpoint;
@@ -846,10 +1117,13 @@ class _MapTabState extends State<MapTab> with SingleTickerProviderStateMixin {
                         painter: _NetworkMapPainter(
                           data: _shown!,
                           layout: _shownLayout!,
+                          hidden: _hidden,
                           previous: _previous,
                           previousLayout: _previousLayout,
                           t: _transition.value,
-                          selectedId: _selectedId,
+                          // A peer picked out of a group has no marker of its
+                          // own, so the group keeps the selection ring.
+                          selectedId: _pickedFrom ?? _selectedId,
                           query: query,
                           colors: tc,
                           glow: tcTextGlow(context),
@@ -867,13 +1141,7 @@ class _MapTabState extends State<MapTab> with SingleTickerProviderStateMixin {
                 bottom: 0,
                 top: side ? 0 : null,
                 left: side ? null : 0,
-                child: _NodeDetailsPanel(
-                  node: selected,
-                  selectedId: _selectedId!,
-                  data: _shown!,
-                  side: side,
-                  onClose: () => setState(() => _selectedId = null),
-                ),
+                child: _panel(side),
               ),
           ],
         );
@@ -912,6 +1180,32 @@ class _MapTabState extends State<MapTab> with SingleTickerProviderStateMixin {
             height: 8,
             decoration: BoxDecoration(
               color: filled ? tc.textSecondary : null,
+              border: Border.all(color: tc.textSecondary),
+            ),
+          ),
+          const SizedBox(width: 4),
+          Text(
+            label,
+            style: TextStyle(
+              fontSize: TCType.textMicro,
+              color: tc.textSecondary,
+              letterSpacing: TCType.letterSpacingFor(TCType.textMicro, TCType.trackingWide),
+            ),
+          ),
+          const SizedBox(width: 10),
+        ],
+      );
+
+  /// The outlined circle standing for the children a crowded parent had no
+  /// room to draw -- the only marker on the map that is not one node.
+  Widget _groupedLegendEntry(TCSectionColors tc, String label) => Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            width: 8,
+            height: 8,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
               border: Border.all(color: tc.textSecondary),
             ),
           ),
@@ -977,6 +1271,7 @@ class _NetworkMapPainter extends CustomPainter {
     required this.data,
     required this.layout,
     required this.colors,
+    this.hidden = const {},
     this.previous,
     this.previousLayout,
     this.t = 1.0,
@@ -987,6 +1282,10 @@ class _NetworkMapPainter extends CustomPainter {
 
   final NetworkMapData data;
   final MapLayout layout;
+
+  /// Overflow node id -> the children it stands for, so a search hit inside a
+  /// group still lights the group up.
+  final Map<String, List<MapNode>> hidden;
 
   /// The data/layout being animated away from, or null on the first paint.
   final NetworkMapData? previous;
@@ -1021,7 +1320,8 @@ class _NetworkMapPainter extends CustomPainter {
     }
     final matches = {
       for (final n in data.nodes)
-        if (mapNodeMatchesQuery(n, query)) n.id,
+        if (mapNodeMatchesQuery(n, query) || mapGroupMatchesQuery(hidden[n.id], query))
+          n.id,
     };
 
     for (final edge in data.edges) {
@@ -1097,6 +1397,14 @@ class _NetworkMapPainter extends CustomPainter {
     final dir = delta / len;
     final start = a + dir * (_nodeHalf + 4);
     final end = b - dir * (_nodeHalf + 4);
+    if (edge.kind == mapOverflowEdgeKind) {
+      _drawDashed(canvas, start, end,
+          Paint()
+            ..color = _fade(colors.textTertiary, 0.7 * alpha)
+            ..strokeWidth = 1
+            ..style = PaintingStyle.stroke);
+      return;
+    }
     final color = mapQualityColor(edge.quality, colors: colors);
     final base = edge.direct ? 1.0 : 0.35;
     final paint = Paint()
@@ -1122,6 +1430,17 @@ class _NetworkMapPainter extends CustomPainter {
     );
   }
 
+  void _drawDashed(Canvas canvas, Offset a, Offset b, Paint paint) {
+    const dash = 4.0;
+    const gap = 3.0;
+    final len = (b - a).distance;
+    if (len <= 0) return;
+    final dir = (b - a) / len;
+    for (var at = 0.0; at < len; at += dash + gap) {
+      canvas.drawLine(a + dir * at, a + dir * math.min(at + dash, len), paint);
+    }
+  }
+
   void _drawNode(Canvas canvas, MapNode node, Offset pos,
       {double alpha = 1.0,
       double scale = 1.0,
@@ -1135,6 +1454,23 @@ class _NetworkMapPainter extends CustomPainter {
       ..lineTo(pos.dx, pos.dy + half + 2)
       ..lineTo(pos.dx - half - 2, pos.dy)
       ..close();
+
+    // A group of children the parent had no room for: an outlined circle with
+    // a dot in it, deliberately unlike every marker that stands for one node.
+    if (mapIsOverflowNode(node)) {
+      canvas.drawCircle(
+        pos,
+        half + 2,
+        Paint()
+          ..color = _fade(colors.textSecondary, alpha)
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 1.2,
+      );
+      canvas.drawCircle(
+          pos, _tcMarkerRadius * scale, Paint()..color = _fade(colors.textSecondary, alpha));
+      _drawFocusRing(canvas, pos, half, alpha, selected: selected, highlighted: highlighted);
+      return;
+    }
 
     if (mapHeardRecently(node)) {
       canvas.drawCircle(
@@ -1204,16 +1540,20 @@ class _NetworkMapPainter extends CustomPainter {
           Paint()..color = _fade(colors.statusWarn, alpha));
     }
 
-    if (selected || highlighted) {
-      canvas.drawCircle(
-        pos,
-        half + (selected ? 7 : 5),
-        Paint()
-          ..color = _fade(colors.accentPrimary, selected ? alpha : 0.7 * alpha)
-          ..style = PaintingStyle.stroke
-          ..strokeWidth = selected ? 2 : 1,
-      );
-    }
+    _drawFocusRing(canvas, pos, half, alpha, selected: selected, highlighted: highlighted);
+  }
+
+  void _drawFocusRing(Canvas canvas, Offset pos, double half, double alpha,
+      {required bool selected, required bool highlighted}) {
+    if (!selected && !highlighted) return;
+    canvas.drawCircle(
+      pos,
+      half + (selected ? 7 : 5),
+      Paint()
+        ..color = _fade(colors.accentPrimary, selected ? alpha : 0.7 * alpha)
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = selected ? 2 : 1,
+    );
   }
 
   void _drawLabel(Canvas canvas, MapNode node, MapLabel label, double alpha) {
@@ -1250,6 +1590,7 @@ class _NetworkMapPainter extends CustomPainter {
   @override
   bool shouldRepaint(covariant _NetworkMapPainter oldDelegate) =>
       oldDelegate.data != data ||
+      oldDelegate.hidden != hidden ||
       oldDelegate.layout != layout ||
       oldDelegate.previousLayout != previousLayout ||
       oldDelegate.t != t ||
@@ -1283,6 +1624,8 @@ class _NodeDetailsPanel extends StatelessWidget {
     required this.data,
     required this.side,
     required this.onClose,
+    this.groupedUnder,
+    this.onBack,
   });
 
   final MapNode? node;
@@ -1290,6 +1633,11 @@ class _NodeDetailsPanel extends StatelessWidget {
   final NetworkMapData data;
   final bool side;
   final VoidCallback onClose;
+
+  /// Set when this node was picked out of an overflow node's list rather than
+  /// off the canvas: the label of the group it is still inside.
+  final String? groupedUnder;
+  final VoidCallback? onBack;
 
   @override
   Widget build(BuildContext context) {
@@ -1312,6 +1660,10 @@ class _NodeDetailsPanel extends StatelessWidget {
             padding: const EdgeInsets.fromLTRB(12, 10, 8, 6),
             child: Row(
               children: [
+                if (onBack != null) ...[
+                  TcGhostButton(label: 'BACK', onPressed: onBack),
+                  const SizedBox(width: 8),
+                ],
                 Expanded(
                   child: Text(
                     n == null
@@ -1333,7 +1685,10 @@ class _NodeDetailsPanel extends StatelessWidget {
               padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: n == null ? _goneRows(tc) : _rowsFor(context, tc, n),
+                children: [
+                  if (groupedUnder != null) _groupedNote(tc, groupedUnder!),
+                  ...n == null ? _goneRows(tc) : _rowsFor(context, tc, n),
+                ],
               ),
             ),
           ),
@@ -1341,6 +1696,14 @@ class _NodeDetailsPanel extends StatelessWidget {
       ),
     );
   }
+
+  Widget _groupedNote(TCSectionColors tc, String group) => Padding(
+        padding: const EdgeInsets.only(bottom: 8),
+        child: Text(
+          'GROUPED UNDER $group — not drawn on the map.',
+          style: TextStyle(fontSize: TCType.textCaption, color: tc.textTertiary),
+        ),
+      );
 
   List<Widget> _goneRows(TCSectionColors tc) => [
         Text(
@@ -1508,6 +1871,173 @@ class _NodeDetailsPanel extends StatelessWidget {
           ],
         ),
       );
+}
+
+/// The peers one overflow node stands for, in the slot the details panel
+/// uses. Tapping a row hands the selection to the details panel, which says
+/// the peer is grouped rather than drawn.
+class _OverflowListPanel extends StatelessWidget {
+  const _OverflowListPanel({
+    required this.hidden,
+    required this.viaLabel,
+    required this.side,
+    required this.onSelect,
+    required this.onClose,
+  });
+
+  final List<MapNode> hidden;
+  final String viaLabel;
+  final bool side;
+  final ValueChanged<String> onSelect;
+  final VoidCallback onClose;
+
+  @override
+  Widget build(BuildContext context) {
+    final tc = SectionTheme.of(context);
+    return Container(
+      width: side ? _detailsPanelWidth : null,
+      constraints: side ? null : const BoxConstraints(maxHeight: 260),
+      decoration: BoxDecoration(
+        color: tc.bgSurfaceRaised,
+        border: side
+            ? Border(left: BorderSide(color: tc.borderDefault))
+            : Border(top: BorderSide(color: tc.borderDefault)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 10, 8, 6),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    '${hidden.length} MORE VIA $viaLabel',
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: TCType.textCaption,
+                      color: tc.textSecondary,
+                      letterSpacing: TCType.letterSpacingFor(
+                          TCType.textCaption, TCType.trackingWider),
+                    ),
+                  ),
+                ),
+                _IconTap(icon: TcIcons.close, onTap: onClose),
+              ],
+            ),
+          ),
+          Flexible(
+            child: ListView.builder(
+              padding: const EdgeInsets.only(bottom: 8),
+              shrinkWrap: true,
+              itemCount: hidden.length,
+              itemBuilder: (context, i) =>
+                  _OverflowRow(node: hidden[i], onTap: () => onSelect(hidden[i].id)),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _OverflowRow extends StatefulWidget {
+  const _OverflowRow({required this.node, required this.onTap});
+
+  final MapNode node;
+  final VoidCallback onTap;
+
+  @override
+  State<_OverflowRow> createState() => _OverflowRowState();
+}
+
+class _OverflowRowState extends State<_OverflowRow> {
+  bool _hover = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final tc = SectionTheme.of(context);
+    final n = widget.node;
+    final quality = mapQualityColor(n.quality, colors: tc);
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() => _hover = false),
+      child: GestureDetector(
+        onTap: widget.onTap,
+        behavior: HitTestBehavior.opaque,
+        child: Container(
+          padding: const EdgeInsets.fromLTRB(10, 6, 12, 6),
+          decoration: BoxDecoration(
+            color: _hover ? tc.bgHover : null,
+            border: Border(left: BorderSide(color: quality, width: 2)),
+          ),
+          child: Row(
+            children: [
+              _kindMarker(tc, n, quality),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      n.label.isEmpty ? mapShortHex(n.id) : n.label,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: TCType.textCaption,
+                        color: _hover ? tc.textPrimary : tc.textSecondary,
+                      ),
+                    ),
+                    Text(
+                      mapShortHex(n.id),
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontFamily: TCType.fontMono,
+                        fontSize: TCType.textMicro,
+                        color: tc.textTertiary,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              if (n.online == true) ...[
+                const SizedBox(width: 6),
+                Container(
+                  width: 6,
+                  height: 6,
+                  decoration:
+                      BoxDecoration(color: tc.statusOnline, shape: BoxShape.circle),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// The same marker language the canvas uses: a square for a peer, filled
+  /// for a TrenchChat client, a diamond for a transport.
+  Widget _kindMarker(TCSectionColors tc, MapNode n, Color quality) {
+    if (n.kind == MapNodeKind.transport) {
+      return Transform.rotate(
+        angle: math.pi / 4,
+        child: Container(width: 7, height: 7, color: quality),
+      );
+    }
+    final filled = n.kind == MapNodeKind.peer && n.isTrenchChat;
+    final color = n.kind == MapNodeKind.unknown ? tc.statusOffline : quality;
+    return Container(
+      width: 8,
+      height: 8,
+      decoration: BoxDecoration(
+        color: filled ? color : null,
+        border: Border.all(color: color),
+      ),
+    );
+  }
 }
 
 class _Badge extends StatelessWidget {
