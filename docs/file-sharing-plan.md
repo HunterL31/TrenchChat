@@ -36,7 +36,9 @@ The seven checks from `.claude/rules/reticulum-zen.md`, applied before the desig
    anything above the inline ceiling.
 4. **Store and forward.** A download whose holders are all offline is queued
    and retried when a member announces (`PeerAnnounceHandler`), never failed
-   on a timer. A stalled transfer is what fails, not a slow one.
+   on a timer. A stalled transfer is what fails, not a slow one, and what it
+   loses is one chunk, not the download: progress is persisted and resumes
+   from any holder (see "Interrupted links and resume").
 5. **Identity, not location.** Holders are identity hashes; the file plane
    destination is derived from the holder's identity. Nothing is keyed on an
    interface or a path.
@@ -82,6 +84,7 @@ manifest in the envelope. New fields in a `0x90-0x9F` "File" range of
 | `F_FILE_SIZE` | int | byte length of the file |
 | `F_FILE_HASH` | bytes[32] | SHA-256 of the file bytes; the file's address everywhere |
 | `F_FILE_DATA` | bytes | the bytes themselves, present only when `size <= MAX_INLINE_FILE_BYTES` |
+| `F_FILE_CHUNK_ROOT` | bytes[32] | SHA-256 over the concatenated SHA-256s of each `FILE_CHUNK_BYTES` chunk; present only on the pull path, and what makes resume safe |
 
 - **Inline path** (`size <= MAX_INLINE_FILE_BYTES`): the bytes travel in the
   message, exactly as an image does today. They ride pending retry, missed
@@ -101,11 +104,16 @@ lora_fast` before the feature is called done:
 | `MAX_SHARED_FILE_BYTES` | 5 MB | matches `node_browser.MAX_FILE_BYTES` and `MAX_SERVED_RESPONSE_BYTES`, the limits nomad file serving already runs under |
 | `MAX_FILE_NAME_CHARS` | 128 | matches `node_transport.MAX_FILENAME_LEN` |
 | `FILE_STORE_MAX_BYTES` | 256 MB | LRU budget for received files; own uploads are exempt so the sender never stops being a holder by accident |
+| `FILE_CHUNK_BYTES` | 64 KB | the unit of verification and of lost work on a dropped link; about seven minutes on a 1.2 kbps LoRa link |
+| `FILE_REQUEST_MAX_CHUNKS` | 16 | most chunks one request may ask for (1 MB, one RNS Resource segment) |
+| `FILE_STALL_SECS` | 120 s | no progress on an in-flight request for this long ends the request, not the download |
+| `PARTIAL_FILE_TTL_SECS` | `SYNC_WINDOW_SECS` | a partial download nobody has resumed in this long is dropped |
 
 ### Author signature
 
 `protocol.author_digest` gains the file: when a manifest is present, append
-`file_hash` and the length-prefixed name and size to the digest input. A
+`file_hash`, the chunk root, and the length-prefixed name and size to the
+digest input. A
 message without a file hashes exactly as today, so text and image messages
 stay verifiable by older peers. A file message from a newer peer fails
 verification on an older one and is dropped; that is the same outcome as
@@ -127,6 +135,13 @@ re-checked after a pull.
   (`prune_nomad_files`). Files on disk would sit outside the lockbox.
 - `Storage.file_channels(hash)` answers "which channels was this file shared
   in", which is what the serve handler authorises against.
+- New table `file_parts(hash TEXT, index INTEGER, content BLOB NOT NULL,
+  received_at REAL, PRIMARY KEY (hash, index))`: verified chunks of a
+  download still in progress. Survives a restart; assembled into
+  `channel_files` when the last chunk lands, then deleted. Pruned by
+  `PARTIAL_FILE_TTL_SECS` and, under store pressure, before complete files.
+- Serving a slice reads `substr(content, offset + 1, length)` so a 5 MB blob
+  is never loaded whole to answer a 64 KB request.
 
 ### File plane: `network/file_transport.py`
 
@@ -137,9 +152,12 @@ tests), on a new destination aspect `APP_ASPECT_FILES = "files"` under
 into `core/fileutils.clean_filename`) rather than duplicating them.
 
 - **One request path**, `/tc/file`, registered with `ALLOW_ALL` at the RNS
-  level; the hash rides in the request `data`. RNS's `allowed_list` is a
-  static identity list per handler and membership is per channel and
-  changes, so authorisation is done in the handler, not by RNS.
+  level; the request `data` is `{"h": hash, "i": first chunk index, "n":
+  chunk count}` for bytes, or `{"h": hash, "l": 1}` for the chunk-hash list.
+  RNS's `allowed_list` is a static identity list per handler and membership
+  is per channel and changes, so authorisation is done in the handler, not
+  by RNS. A response is plain `bytes` (the slice, or the concatenated chunk
+  hashes), which RNS sends as one Resource when it exceeds a packet.
 - **Requester identifies** on the link (`Link.identify`) before the first
   request. Unlike nomad browsing this is not optional and needs no policy:
   the holder is a fellow member who already has the requester's identity
@@ -156,11 +174,12 @@ into `core/fileutils.clean_filename`) rather than duplicating them.
      refuse; the requester retries later. Airtime is shared.
   Refusals return `None`, which RNS answers with nothing; every refusal is
   logged at warning with the identities involved, per scenario rule 2.
-- **Fetch**: `fetch(fetch_id, holder_hex, file_hash, max_size=size)` with
-  `max_response_size` from the manifest, so an oversized answer is refused
-  by RNS before it is buffered. Timeout is a **stall** timeout (no progress
-  for `FILE_STALL_SECS`, 120 s), not a total: a 5 MB transfer on LoRa takes
-  hours and is not an error.
+- **Fetch**: `fetch(fetch_id, holder_hex, file_hash, first, count)` with
+  `max_response_size = count * FILE_CHUNK_BYTES`, so an oversized answer is
+  refused by RNS before it is buffered. The timeout is a **stall** timeout
+  (no progress callback for `FILE_STALL_SECS`), never a total: a 5 MB
+  transfer on LoRa takes hours and is not an error. A stall or a closed link
+  fails that one request; the download keeps its verified chunks.
 - The file plane bypasses LXMF, so none of `Router`'s throttles see it; its
   bounds are its own, as nomad's are.
 
@@ -182,14 +201,72 @@ LXMF fields (messaging does that).
   `MAX_HOLDER_ATTEMPTS` (4) per round. No "I hold this" control message is
   sent: a miss costs one link handshake, an announce would cost every
   member a message for every download.
-- **Verify before store**: `sha256(bytes) == hash` or the bytes are dropped,
-  the holder is skipped for this file, and the next one is tried.
+- **Verify before store**: every chunk is checked against the chunk-hash
+  list, itself checked against the signed chunk root, before it is written
+  to `file_parts`; the assembled file is checked against `F_FILE_HASH`
+  before it becomes a `channel_files` row. A bad chunk is dropped, the
+  holder that served it is skipped for this file, and the next holder is
+  tried from the same offset.
 - **Retry on return**: `on_peer_appeared` re-runs any `unavailable` download
   whose channel that peer is in. No timer.
 - **Everyone who downloads becomes a holder**: the stored row makes the
   serve handler answer for it, with no registration step.
 - `prune()` on the existing ticker cadence: LRU over non-own rows to
   `FILE_STORE_MAX_BYTES`.
+
+### Interrupted links and resume
+
+What Reticulum already does, and what it does not:
+
+- **Packet loss inside one transfer** is RNS's job. A Resource retries
+  missing parts up to `MAX_RETRIES` (16) with a per-part timeout scaled to
+  the measured link rate and a window that shrinks on loss. Nothing to
+  build; the LoRa scenario is where this gets exercised.
+- **A dead link** is noticed by the Resource's part timeouts long before the
+  link's own staleness (`RNS.Link.STALE_TIME` is 720 s). When it dies, RNS
+  cancels every Resource on it and deletes the partial response file it was
+  appending to under `RNS.Reticulum.resourcepath`. **A response Resource
+  never resumes across links**: a 5 MB file answered as one request that
+  drops at segment four of five starts again from zero. On the medium this
+  project targets that makes large files undeliverable, so the file plane
+  does not ask for whole files.
+
+What the plan adds, all on the requester side plus one slice lookup on the
+holder:
+
+1. **Chunked requests.** A download is a sequence of requests for chunk
+   ranges. The requester starts at one chunk and doubles the count on each
+   success up to `FILE_REQUEST_MAX_CHUNKS`, halving on any failure: it
+   measures the link rather than detecting it. On a fast link the whole
+   file goes in a handful of requests; on LoRa each request is small enough
+   that a drop costs minutes, not hours.
+2. **Per-chunk verification.** The first request to any holder is the
+   chunk-hash list, checked against the manifest's signed `F_FILE_CHUNK_ROOT`
+   (32 bytes on the message; the list itself is at most 2.5 KB and is fetched
+   once). Every chunk is then verified on arrival. Without this, resuming
+   from a second holder would mean trusting bytes nobody has signed until the
+   very end, and a hostile member could waste an entire transfer with one
+   bad chunk discovered last.
+3. **Persisted progress.** Verified chunks go to `file_parts` as they land.
+   A process restart, a PIN lock, or a phone reboot mid-download loses
+   nothing: on start, `FileManager` rebuilds every unfinished download from
+   `file_parts` as `unavailable` and it resumes on the next announce.
+4. **Resume from any holder.** Chunks are addressed by (hash, index), so the
+   next request can go to a different holder than the last. Holder A drops
+   off at chunk 30; B announces; the download continues from chunk 30 on B.
+   The holder order is re-evaluated at every request boundary, not once per
+   download.
+5. **One request in flight per download, one download in flight per node.**
+   Downloads queue behind each other. Airtime is shared, and two parallel
+   downloads on one LoRa link finish later than the same two in sequence.
+6. **What the user sees.** Progress is chunks verified over chunks total, so
+   it never goes backwards; a dropped link shows as "waiting for a member"
+   with the bar where it was, not as an error.
+
+The **inline path** has no resume and needs none: the message is one LXMF
+Resource at most `MAX_INLINE_FILE_BYTES` long, LXMF retries delivery up to
+`MAX_DELIVERY_ATTEMPTS` (5), and after that the ordinary pending queue, hints
+and sync carry it. Keeping that ceiling small is what keeps this true.
 
 ### Messaging and sync
 
@@ -261,15 +338,17 @@ serves members because it is a member.
   wire, the reply to an unauthorised or unknown request is silence, and the
   manifest never leaves the channel's encrypted messages.
 - **What a holder can do.** Refuse, stall, or serve wrong bytes. The first
-  two move the requester to the next holder; the third is caught by the hash
-  and the holder is skipped. A holder cannot forge a file into a channel:
-  the manifest is signed by the author.
+  two move the requester to the next holder at the same offset; the third is
+  caught by the chunk hash on arrival and that holder is skipped, at the
+  cost of one chunk of airtime. A holder cannot forge a file into a channel:
+  the manifest, chunk root included, is signed by the author.
 - **What a sender can do.** Share a manifest whose bytes nobody has. Members
   see "unavailable" until a holder appears; this is the same as a message
   nobody received, and is not treated as an attack.
 - **Bounds.** Inbound: inline cap, manifest field caps, `max_response_size`
-  from the manifest, stall timeout, one download at a time per file, LRU
-  store budget. Outbound: serve rate limit per link, inbound link cap,
+  from the chunk count, stall timeout per request, one request in flight
+  per download, partial TTL, LRU store budget. Outbound: serve rate limit
+  per link, inbound link cap,
   concurrent serve cap, served size cap.
 
 ## Rejected alternatives
@@ -290,6 +369,14 @@ serves members because it is a member.
 - **Files on disk under `~/.trenchchat/`.** Faster for large files, but
   outside the SQLCipher lockbox and outside the one prune policy. Revisit if
   `MAX_SHARED_FILE_BYTES` ever grows past what a blob column is happy with.
+- **Whole-file requests, resume by restart.** The first draft of this plan.
+  RNS's response Resources do not survive a link change, so every drop
+  restarted a transfer that takes hours on LoRa: fails checks 3 and 4.
+- **Chunking without a chunk root** (whole-file hash only, blame holders on
+  a final mismatch). Saves 32 bytes per file message, but a hostile member
+  can then spoil a whole transfer with one chunk and the requester cannot
+  tell which holder did it until the end. The 32 bytes buy per-chunk
+  verification and safe multi-holder resume.
 - **Per-file request paths** (nomad's `/file/<name>` shape). Needs a
   register/deregister on every store and prune; one path with the hash in
   `data` needs none and is no less private, since paths are hashed anyway.
@@ -305,33 +392,41 @@ serves members because it is a member.
   PR, separate interop test.
 - **Deleting or expiring shared files.** The LRU budget bounds the store;
   an explicit "remove" is a later feature.
-- **Resuming a partial transfer across links.** RNS Resource does not resume;
-  a stalled fetch restarts. Acceptable at 5 MB; revisit with the ceiling.
+- **Fetching chunks from several holders at once.** Faster on a fast mesh,
+  and the chunk scheme allows it, but it doubles the airtime a download can
+  take from a shared link. Sequential first; measure before adding.
 
 ## Steps
 
 Each step is a pytest-green commit; the scenarios in step 8 are what proves
 the feature, per `.claude/rules/scenario-testing.md`.
 
-1. **Protocol and digest.** Fields `0x90-0x93` in `core/protocol.py`,
+1. **Protocol and digest.** Fields `0x90-0x94` in `core/protocol.py`,
+   `chunk_root()` beside `author_digest`,
    registry docstring in `messaging.py`, `author_digest` extension,
    `clean_filename` moved to `core/fileutils.py`. Tests: `test_authorship.py`
    (file covered; text digest unchanged), `test_protocol_envelope.py`.
-2. **Storage.** Migration, `channel_files` table, own-exempt LRU prune,
-   `file_channels`. Tests: `test_storage.py`.
+2. **Storage.** Migration, `channel_files` and `file_parts` tables, slice
+   read, own-exempt LRU prune, partial TTL, `file_channels`. Tests:
+   `test_storage.py`.
 3. **Inline path end to end.** `Messaging` send/receive/strip, sync relay,
    `actions.send_message` guard. Tests: `test_messaging.py`,
    `test_sync.py`, `test_adversarial.py` (bad hash, oversized inline,
    non-member send).
 4. **File plane.** `network/file_transport.py` with base class and
    `tests/fake_file_transport.py` (the `fake_node.py` shape). Tests:
-   `test_file_transport.py` (dial, queue, stall timeout, refusal cases,
-   rate limit, concurrent serve cap).
-5. **FileManager.** Share, download lifecycle, holder order, verify, retry
-   on announce, prune; wired in `backend_core.py` after presence, ticked
-   with the node browser. Tests: `test_files.py`, plus
-   `test_adversarial.py::TestFileServeGate` (non-member, unidentified,
-   wrong bytes from a holder, unknown hash).
+   `test_file_transport.py` (dial, queue, chunk-range requests, stall
+   timeout, refusal cases, rate limit, concurrent serve cap).
+5. **FileManager.** Share, download lifecycle, holder order, chunk-list and
+   per-chunk verify, window growth and halving, resume from `file_parts`
+   after restart, resume on a second holder, retry on announce, prune; wired
+   in `backend_core.py` after presence, ticked with the node browser.
+   Tests: `test_files.py` (including: link dropped mid-download keeps the
+   verified chunks; restart resumes at the same index; a holder that goes
+   away is replaced at the request boundary), plus
+   `test_adversarial.py::TestFileServeGate` (non-member, unidentified, a
+   bad chunk from one holder is dropped and the rest come from another, a
+   wrong chunk list is refused against the root, unknown hash).
 6. **`SHARE_FILES` permission.** All three layers, presets, permissions
    editor; `test_permissions.py`, `test_adversarial.py`.
 7. **API and events.** Endpoints, `MAX_REQUEST_BYTES`, `file_fetch` event;
@@ -347,7 +442,16 @@ the feature, per `.claude/rules/scenario-testing.md`.
    - files4: D, not a member, dials A's file plane with the real hash:
      silence, and a warning naming D in A's log.
    - files5: files1 at `--link-profile lora_fast` with a 200 KB file; the
-     inline and shared ceilings are set from what this measures.
+     inline and shared ceilings and `FILE_CHUNK_BYTES` are set from what
+     this measures.
+   - files6: A shares 2 MB; B starts downloading; A's process is killed
+     mid-transfer; C (who already holds it) is up; B finishes from C without
+     re-fetching a verified chunk (assert on B's request log).
+   - files7: B's process is killed mid-download and restarted; the download
+     resumes from `file_parts` at the same chunk index.
+   - files8: files1 under the `--link-profile` loss setting; RNS part
+     retries, not the chunk scheme, are what carries it, and the run
+     records how many requests the window halving cost.
 9. **Flutter.** Picker, compose chip, file card, download flow, widget
    tests; `flutter analyze && flutter test`.
 10. **Docs.** Fold the trust model into `docs/security-improvements.md`, the
