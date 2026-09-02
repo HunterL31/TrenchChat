@@ -130,6 +130,15 @@ const int _maxLanes = 4;
 /// every node on the ring away from the center.
 const double _maxRingStep = 4 * _ringGap;
 
+/// A ring holding at most [_sparseRingMax] nodes that already fit inside its
+/// floor is paying for room nobody needs, so it takes [_sparseRingGap] from
+/// the ring inside it instead of the full [_ringGap]. Deep singletons are what
+/// this is for: the one peer four hops out behind a relay used to cost a whole
+/// ring gap per hop count and land on empty canvas. The reduced gap still
+/// clears both markers and a label row between them, so depth still reads.
+const double _sparseRingGap = 30.0;
+const int _sparseRingMax = 3;
+
 /// Arc a node marker claims for itself whatever its label does.
 const double _markerSpan = 16.0;
 
@@ -491,6 +500,9 @@ MapCollapse collapseMapData(NetworkMapData data, {String? keepVisible}) {
 /// the node it routes through (sector width proportional to the room its
 /// subtree's labels need), and a ring grows only until its labels fit across
 /// up to [_maxLanes] radial lanes, capped at [_maxRingStep] past its floor.
+/// A ring holding a handful of nodes that already fit takes [_sparseRingGap]
+/// from the ring inside it rather than the full [_ringGap], so a chain of deep
+/// singletons stays near the relay it hangs off.
 /// Deterministic: all ties break by node id.
 MapLayout layoutMapNodes(NetworkMapData data) {
   final byId = {for (final n in data.nodes) n.id: n};
@@ -552,16 +564,13 @@ MapLayout layoutMapNodes(NetworkMapData data) {
     final radii = List<double>.filled(ringCount + 1, 0);
     var prev = 0.0;
     for (var k = 1; k <= ringCount; k++) {
-      final floor = math.max(prev + _ringGap, _innerRadius);
       final ids = ringIds(k);
-      var r = floor;
-      var lanes = 1;
+      // What one lane would cost: the circumference the labels need end to
+      // end, then the 90th-percentile adjacent pair rather than the worst
+      // one, so a single tight sector boundary does not set the radius for
+      // everyone -- the tail is left to the lanes and the push loop.
+      var single = 0.0;
       if (ids.length > 1) {
-        // What one lane would cost: the circumference the labels need end to
-        // end, then the 90th-percentile adjacent pair rather than the worst
-        // one, so a single tight sector boundary does not set the radius for
-        // everyone -- the tail is left to the lanes and the push loop.
-        var single = 0.0;
         for (final id in ids) {
           single += arcNeed(id);
         }
@@ -577,6 +586,16 @@ MapLayout layoutMapNodes(NetworkMapData data) {
           pairNeeds.sort();
           single = math.max(single, pairNeeds[(0.9 * (pairNeeds.length - 1)).floor()]);
         }
+      }
+      // prev is the outer lane edge of the ring inside this one, so a ring
+      // inherits that edge plus its own gap and never more, however far
+      // crowding pushed the rings within it.
+      final sparseFloor = math.max(prev + _sparseRingGap, _innerRadius);
+      final sparse = ids.length <= _sparseRingMax && single <= sparseFloor;
+      final floor = sparse ? sparseFloor : math.max(prev + _ringGap, _innerRadius);
+      var r = floor;
+      var lanes = 1;
+      if (ids.length > 1) {
         // Stacking into lanes rather than growing is what keeps a hub's peers
         // beside it: n lanes hold the same labels at a fraction of the radius,
         // and whatever is left over may move the ring only _maxRingStep.

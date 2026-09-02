@@ -143,6 +143,59 @@ Map<String, dynamic> hubTopology({
   };
 }
 
+/// The shape a real mesh takes once the backend parents multi-hop peers under
+/// their first-hop relay: one interface, one transport behind it, a crowded
+/// band of [bandPeers] peers at hop 2, and a lone peer at each of the deeper
+/// hops in [deepHops]. Every distinct hop count is a ring of its own, so this
+/// is the shape that used to strand the deep singletons on empty canvas.
+Map<String, dynamic> deepChainTopology({
+  int bandPeers = 10,
+  List<int> deepHops = const [3, 4, 5],
+  int deepPerHop = 1,
+  bool longDeepLabels = false,
+}) {
+  final nodes = <Map<String, dynamic>>[
+    {'id': 'self', 'label': 'This device', 'kind': 'self', 'hops': 0, 'quality': 4},
+    {'id': '__iface__IF0', 'label': '● IF0 (TCP)', 'kind': 'interface', 'hops': 0,
+     'quality': 4},
+    {'id': 'relay', 'label': 'transport-relay', 'kind': 'transport', 'hops': 1,
+     'quality': 3},
+  ];
+  final edges = <Map<String, dynamic>>[
+    {'src': 'self', 'dst': '__iface__IF0', 'hops': 0, 'direct': true, 'quality': 4},
+    {'src': '__iface__IF0', 'dst': 'relay', 'hops': 1, 'direct': true, 'quality': 3},
+  ];
+  for (var p = 0; p < bandPeers; p++) {
+    final id = 'near-$p';
+    nodes.add({'id': id, 'label': p % 3 == 0 ? 'operator callsign $p long' : 'nd-$p',
+               'kind': 'peer', 'hops': 2, 'quality': p % 5, 'trenchchat': true});
+    edges.add({'src': 'relay', 'dst': id, 'hops': 2, 'direct': false, 'quality': p % 5});
+  }
+  for (final h in deepHops) {
+    for (var i = 0; i < deepPerHop; i++) {
+      final id = 'far-$h-$i';
+      nodes.add({
+        'id': id,
+        'label': longDeepLabels ? 'distant operator callsign $h$i' : 'far-hop-$h',
+        'kind': 'peer',
+        'hops': h,
+        'quality': 2,
+        'trenchchat': true,
+      });
+      edges.add({'src': 'relay', 'dst': id, 'hops': h, 'direct': false, 'quality': 2});
+    }
+  }
+  return {
+    'nodes': nodes,
+    'edges': edges,
+    'interfaces': [
+      {'name': 'IF0', 'type': 'TCPClientInterface', 'status': true, 'rxb': 0, 'txb': 0},
+    ],
+    'stats': {'node_count': nodes.length, 'path_count': edges.length,
+              'interface_count': 1},
+  };
+}
+
 /// One direct edge per quality tier, for pixel-sampling the painter. Self
 /// gets an empty label so its text and glow can't bleed onto the edges.
 Map<String, dynamic> tierTopology() => {
@@ -380,6 +433,118 @@ void main() {
 
     expectHubsStayCompact(
         'eleven peers per hub', hubTopology(peersPerHub: 11), 2, 11);
+  });
+
+  group('a relay with a crowded band and lone peers deeper behind it', () {
+    // Every distinct hop count is a ring, and a ring used to cost a full
+    // _ringGap (84px) whether or not anything on it needed the room. The user
+    // shape below has three rings holding one node each, so the hop-5 peer
+    // landed at 504px with nothing but empty canvas between it and the band at
+    // 252px. Radii with the old constants, for the ceilings below: interfaces
+    // 84, relay 168, band 252, then 336 / 420 / 504.
+    final data = NetworkMapData.fromJson(deepChainTopology());
+    final layout = layoutMapNodes(data);
+    double radius(String id) => (layout.positions[id]! - layout.center).distance;
+    double bandOuter(MapLayout l, NetworkMapData d, int hops) {
+      var outer = 0.0;
+      for (final n in d.nodes) {
+        if (n.hops != hops || n.kind == MapNodeKind.self) continue;
+        outer = math.max(outer, (l.positions[n.id]! - l.center).distance);
+      }
+      return outer;
+    }
+
+    test('deep singletons tuck in behind the band instead of ringing out', () {
+      for (final (hops, ceiling) in const [(3, 220.0), (4, 250.0), (5, 280.0)]) {
+        expect(radius('far-$hops-0'), lessThan(ceiling),
+            reason: 'the hop-$hops peer sits at '
+                '${radius('far-$hops-0').toStringAsFixed(0)}px');
+      }
+    });
+
+    test('sparse rings stay strictly outside the ring inside them', () {
+      var inner = bandOuter(layout, data, 2);
+      expect(inner, greaterThan(radius('relay')));
+      for (final hops in const [3, 4, 5]) {
+        final r = radius('far-$hops-0');
+        expect(r, greaterThan(inner), reason: 'hop $hops interleaves the ring inside it');
+        inner = r;
+      }
+    });
+
+    test('a compacted ring keeps its markers and labels clear', () {
+      final entries = layout.positions.entries.toList();
+      for (var i = 0; i < entries.length; i++) {
+        for (var j = i + 1; j < entries.length; j++) {
+          expect((entries[i].value - entries[j].value).distance,
+              greaterThanOrEqualTo(14.0),
+              reason: '${entries[i].key} and ${entries[j].key} merged');
+        }
+      }
+      final labels = layout.labels.entries.toList();
+      for (var i = 0; i < labels.length; i++) {
+        final pos = layout.positions[labels[i].key]!;
+        final rect = labels[i].value.rect;
+        final dx = math.max(0.0, math.max(rect.left - pos.dx, pos.dx - rect.right));
+        final dy = math.max(0.0, math.max(rect.top - pos.dy, pos.dy - rect.bottom));
+        expect(math.sqrt(dx * dx + dy * dy), lessThanOrEqualTo(48),
+            reason: '${labels[i].key} label drifted');
+        for (final node in layout.positions.entries) {
+          expect(rect.overlaps(Rect.fromCircle(center: node.value, radius: 7)), isFalse,
+              reason: 'label ${labels[i].key} covers marker ${node.key}');
+        }
+        for (var j = i + 1; j < labels.length; j++) {
+          expect(rect.overlaps(labels[j].value.rect), isFalse,
+              reason: '${labels[i].key} overlaps ${labels[j].key}');
+        }
+      }
+    });
+
+    test('a crowded ring does not leak its growth into the sparse ring outside it', () {
+      // The band here needs several lanes, so its own radius grows well past
+      // its floor. What the ring outside it inherits is that outer edge plus
+      // its own gap and nothing more.
+      final wide = NetworkMapData.fromJson(
+          deepChainTopology(bandPeers: 26, longDeepLabels: true));
+      final l = layoutMapNodes(wide);
+      final outer = bandOuter(l, wide, 2);
+      final deep = (l.positions['far-3-0']! - l.center).distance;
+      expect(deep - outer, lessThan(40),
+          reason: 'the hop-3 peer sits ${(deep - outer).toStringAsFixed(0)}px '
+              'past a band that ends at ${outer.toStringAsFixed(0)}px');
+    });
+
+    test('a packed deep ring still gets full spacing', () {
+      // How far past the band a hop-3 ring of [perHop] peers starts. Only a
+      // ring that needs no room is compacted, so four peers there -- one past
+      // the threshold -- already pays the full 84px gap, and ten labelled ones
+      // pay it too.
+      double step(int perHop, {bool long = false}) {
+        final d = NetworkMapData.fromJson(deepChainTopology(
+            deepHops: const [3], deepPerHop: perHop, longDeepLabels: long));
+        final l = layoutMapNodes(d);
+        var band = double.infinity;
+        var deep = double.infinity;
+        for (final n in d.nodes) {
+          final r = (l.positions[n.id]! - l.center).distance;
+          if (n.hops == 2) band = math.min(band, r);
+          if (n.hops == 3) deep = math.min(deep, r);
+        }
+        return deep - band;
+      }
+
+      expect(step(4), greaterThanOrEqualTo(84.0),
+          reason: 'four peers at hop 3 were compacted like a singleton');
+      expect(step(10, long: true), greaterThanOrEqualTo(84.0),
+          reason: 'ten labelled peers at hop 3 were compacted like a singleton');
+      expect(step(1), lessThan(84.0), reason: 'the lone peer was not compacted');
+    });
+
+    test('the compacted layout is deterministic', () {
+      final again = layoutMapNodes(NetworkMapData.fromJson(deepChainTopology()));
+      expect(again.positions, layout.positions);
+      expect(again.size, layout.size);
+    });
   });
 
   test('the trenchchat flag parses, defaulting to the old behavior for peers', () {
