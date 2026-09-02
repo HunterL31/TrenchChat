@@ -1719,6 +1719,25 @@ class AppState extends ChangeNotifier {
             addedAt: f.addedAt,
             lastSeenAt: f.lastSeenAt,
             isOnline: isOnline,
+            state: f.state,
+            nomadNodeHash: f.nomadNodeHash,
+          );
+        }
+        // The DM sidebar reads its own snapshot of the same presence, so it
+        // must move with the event too or it disagrees with the friends list.
+        final dmIdx = dms.indexWhere((d) => d.peerHash == identityHash);
+        if (dmIdx >= 0) {
+          final d = dms[dmIdx];
+          dms[dmIdx] = DmConversation(
+            hash: d.hash,
+            peerHash: d.peerHash,
+            displayName: d.displayName,
+            createdAt: d.createdAt,
+            lastMessageAt: d.lastMessageAt,
+            unread: d.unread,
+            isOnline: isOnline,
+            isFriend: d.isFriend,
+            peerIsTrenchchat: d.peerIsTrenchchat,
           );
         }
         notifyListeners();
