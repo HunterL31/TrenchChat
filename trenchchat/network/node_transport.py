@@ -133,6 +133,15 @@ def _clean_filename(value) -> str | None:
     return value[:MAX_FILENAME_LEN] or None
 
 
+def _link_is_usable(link) -> bool:
+    """Whether a cached link can still carry a request.
+
+    A link object without a status (a test double) counts as usable.
+    """
+    status = getattr(link, "status", None)
+    return status is None or status == RNS.Link.ACTIVE
+
+
 class NodeTransportBase:
     """Injectable transport interface; see RNSNodeTransport for semantics."""
 
@@ -232,6 +241,7 @@ class _Fetch:
         self.created_at = time.time()
         self.receipt = None
         self.redialed = False
+        self.transferred = False
 
 
 class _NodeConn:
@@ -370,29 +380,35 @@ class RNSNodeTransport(NodeTransportBase):
 
         A link the remote has already dropped still looks established here
         until RNS notices, so the first request on it fails to send. Retry
-        once per fetch; a second failure is a real one.
+        once per fetch; a second failure is a real one. When a batch burns
+        together, the first fetch triggers the redial and the rest only
+        requeue, so they cannot clobber the dial in progress.
         """
         if fetch.redialed:
             return False
         fetch.redialed = True
         link = None
+        redial = False
         with self._lock:
             conn = self._conns.get(fetch.node_hex)
             if conn is None:
                 return False
-            if conn.link is not None:
-                self._by_link.pop(id(conn.link), None)
-                link = conn.link
-                conn.link = None
-            conn.state = _IDLE
-            conn.identified = False
-            conn.dial_attempts = 0
-            conn.next_dial_at = 0.0
+            if conn.state != _DIALING:
+                if conn.link is not None:
+                    self._by_link.pop(id(conn.link), None)
+                    link = conn.link
+                    conn.link = None
+                conn.state = _IDLE
+                conn.identified = False
+                conn.dial_attempts = 0
+                conn.next_dial_at = 0.0
+                redial = True
             conn.queued.append(fetch)
         self._teardown_link(link)
-        RNS.log(f"TrenchChat [nomad]: link to {fetch.node_hex[:12]}… was "
-                f"dead, redialing", RNS.LOG_DEBUG)
-        self._dial(fetch.node_hex)
+        if redial:
+            RNS.log(f"TrenchChat [nomad]: link to {fetch.node_hex[:12]}… was "
+                    f"dead, redialing", RNS.LOG_DEBUG)
+            self._dial(fetch.node_hex)
         return True
 
     def _defer_dial(self, node_hex: str) -> None:
@@ -529,14 +545,29 @@ class RNSNodeTransport(NodeTransportBase):
                         and conn.identified)
 
     def _flush_queued(self, node_hex: str) -> None:
+        dead = None
         with self._lock:
             conn = self._conns.get(node_hex)
             if conn is None or conn.state != _LINKED or conn.link is None:
                 return
-            to_send = conn.queued
-            conn.queued = []
-            link = conn.link
-            conn.last_used = time.time()
+            if not _link_is_usable(conn.link):
+                # RNS noticed the link dying but the closed callback has not
+                # landed yet; dial fresh instead of burning the queue on it.
+                self._by_link.pop(id(conn.link), None)
+                dead = conn.link
+                conn.link = None
+                conn.state = _IDLE
+                conn.identified = False
+                conn.next_dial_at = 0.0
+            else:
+                to_send = conn.queued
+                conn.queued = []
+                link = conn.link
+                conn.last_used = time.time()
+        if dead is not None:
+            self._teardown_link(dead)
+            self._dial(node_hex)
+            return
         for fetch in to_send:
             self._issue_request(link, fetch)
 
@@ -605,6 +636,7 @@ class RNSNodeTransport(NodeTransportBase):
             fetch = self._active.get(id(receipt))
         if fetch is None:
             return
+        fetch.transferred = True
         self._notify_progress(fetch.fetch_id, receipt.progress)
 
     # --- link close ---
@@ -624,6 +656,11 @@ class RNSNodeTransport(NodeTransportBase):
                 self._active.pop(id(fetch.receipt), None)
             self._register_link_failure(conn, arm_backoff=False)
         for fetch in failed:
+            # A request the link died under before any data moved gets the
+            # same one redial a refused send does; a mid-transfer death is
+            # a real failure.
+            if not fetch.transferred and self._redial_for(fetch):
+                continue
             self._notify_result(fetch.fetch_id, False, None, FETCH_LINK_CLOSED)
 
     def _teardown_link(self, link) -> None:
