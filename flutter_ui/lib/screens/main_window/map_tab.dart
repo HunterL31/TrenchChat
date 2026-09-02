@@ -669,31 +669,36 @@ MapLayout layoutMapNodes(NetworkMapData data) {
   });
 
   // Labels anchor on the side of the node facing away from center, so they
-  // stay off the radial edge lines.
-  MapLabel place(String id, Offset pos) {
+  // stay off the radial edge lines. The other three sides are fallbacks for
+  // when that spot is taken.
+  MapLabel anchored(String id, Offset pos, int side) {
     final w = _estimateLabelWidth(byId[id]!.label);
     const h = _labelHeight;
+    return switch (side) {
+      0 => MapLabel(
+          rect: Rect.fromLTWH(pos.dx + _nodeHalf + _labelGap, pos.dy - h / 2, w, h),
+          align: TextAlign.left),
+      1 => MapLabel(
+          rect: Rect.fromLTWH(pos.dx - _nodeHalf - _labelGap - w, pos.dy - h / 2, w, h),
+          align: TextAlign.right),
+      2 => MapLabel(
+          rect: Rect.fromLTWH(pos.dx - w / 2, pos.dy + _nodeHalf + _labelGap, w, h),
+          align: TextAlign.center),
+      _ => MapLabel(
+          rect: Rect.fromLTWH(pos.dx - w / 2, pos.dy - _nodeHalf - _labelGap - h, w, h),
+          align: TextAlign.center),
+    };
+  }
+
+  // Side preference by outward direction: right, left, below, above.
+  List<int> sidesFor(String id) {
     final theta = angleOf[id];
     final dx = theta == null ? 0.0 : math.cos(theta);
     final dy = theta == null ? 1.0 : math.sin(theta);
-    if (dx > 0.5) {
-      return MapLabel(
-          rect: Rect.fromLTWH(pos.dx + _nodeHalf + _labelGap, pos.dy - h / 2, w, h),
-          align: TextAlign.left);
-    }
-    if (dx < -0.5) {
-      return MapLabel(
-          rect: Rect.fromLTWH(pos.dx - _nodeHalf - _labelGap - w, pos.dy - h / 2, w, h),
-          align: TextAlign.right);
-    }
-    if (dy >= 0) {
-      return MapLabel(
-          rect: Rect.fromLTWH(pos.dx - w / 2, pos.dy + _nodeHalf + _labelGap, w, h),
-          align: TextAlign.center);
-    }
-    return MapLabel(
-        rect: Rect.fromLTWH(pos.dx - w / 2, pos.dy - _nodeHalf - _labelGap - h, w, h),
-        align: TextAlign.center);
+    if (dx > 0.5) return const [0, 1, 2, 3];
+    if (dx < -0.5) return const [1, 0, 2, 3];
+    if (dy >= 0) return const [2, 3, 0, 1];
+    return const [3, 2, 0, 1];
   }
 
   final order = positions.keys.toList()
@@ -704,9 +709,27 @@ MapLayout layoutMapNodes(NetworkMapData data) {
       return byAngle != 0 ? byAngle : a.compareTo(b);
     });
   final labels = <String, MapLabel>{};
-  final placedRects = <Rect>[];
+  // Every node marker is an obstacle from the start: a displaced label's
+  // opaque backing box must never sit on another node's square. Markers are
+  // at most _nodeHalf + 2 from center (the diamond's points).
+  final placedRects = <Rect>[
+    for (final p in positions.values)
+      Rect.fromCircle(center: p, radius: _nodeHalf + 2),
+  ];
   for (final id in order) {
-    final label = place(id, positions[id]!);
+    final sides = sidesFor(id);
+    final label = anchored(id, positions[id]!, sides.first);
+    bool free(Rect r) => !placedRects.any((p) => p.overlaps(r.inflate(2)));
+    var chosen = label;
+    var settled = free(label.rect);
+    // A blocked label first tries the node's other sides, so it stays right
+    // beside its node instead of drifting away from it.
+    for (var s = 1; !settled && s < sides.length; s++) {
+      final other = anchored(id, positions[id]!, sides[s]);
+      if (!free(other.rect)) continue;
+      chosen = other;
+      settled = true;
+    }
     // A label box is far wider than it is tall, so the cheap way out of an
     // overlap is straight up or down: a step along the radius would have to
     // cover a whole label width for a node due east or west, and never does.
@@ -715,9 +738,6 @@ MapLayout layoutMapNodes(NetworkMapData data) {
     // outward past whatever is in the way.
     final down = math.sin(angleOf[id] ?? math.pi / 2) >= 0;
     const row = _labelHeight + 2;
-    bool free(Rect r) => !placedRects.any((p) => p.overlaps(r.inflate(2)));
-    var chosen = label;
-    var settled = free(label.rect);
     for (var step = 1; !settled && step <= _labelLanes; step++) {
       for (final sign in const [1.0, -1.0]) {
         final moved = label.rect.shift(Offset(0, (down ? 1 : -1) * sign * step * row));

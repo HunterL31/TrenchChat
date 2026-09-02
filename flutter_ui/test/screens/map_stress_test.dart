@@ -256,6 +256,19 @@ void main() {
     }
   });
 
+  test('labels never cover a node marker at scale', () {
+    // A label's backing box is opaque, so one that lands on a marker hides
+    // the node. Markers extend at most 7px from center (the diamond point).
+    final layout = layoutMapNodes(data);
+    for (final label in layout.labels.entries) {
+      for (final node in layout.positions.entries) {
+        final marker = Rect.fromCircle(center: node.value, radius: 7);
+        expect(label.value.rect.overlaps(marker), isFalse,
+            reason: 'label ${label.key} covers marker ${node.key}');
+      }
+    }
+  });
+
   /// Every assertion that has to hold of a hub-heavy graph once the collapse
   /// has had its say: the hub sectors stay compact, a hub's drawn peers stay
   /// beside it, and no label drifts or overlaps. Run over both the collapsing
