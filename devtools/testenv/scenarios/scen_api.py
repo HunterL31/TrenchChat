@@ -6,12 +6,14 @@ access control on trust. This one tests that control directly, because it is
 the only thing standing between a tester's identity and any process -- or any
 web page -- that can reach the port.
 
-Nothing here sends a message or touches the mesh, so these run in seconds.
+The access-control scenarios send no message and touch no mesh, so they run in
+seconds. api5 is the exception: the map's change event is announce-driven, and
+only a real peer coming up produces one.
 
 See docs/testenv-scenarios.md for the matrix these implement.
 """
 
-from asserts import ScenarioFailure
+from asserts import ScenarioFailure, wait_until
 from scenario import PROBE, scenario
 
 # An origin no backend in this environment has any reason to allow.
@@ -140,4 +142,58 @@ def i4(env):
         "surprise": ("" if shared else
                      "tokens are per-tester after all -- the harness could "
                      "assert isolation between them"),
+    }
+
+
+@scenario("api5", "A peer announcing wakes the map over the event socket", peers="AB")
+def i5(env):
+    """The map is pushed, not polled.
+
+    Nothing about a topology change reaches a client on its own: the path
+    table moves on a background RNS thread, and before this the client could
+    only find out by asking again on a timer. The backend debounces those
+    bursts into one event, so what is under test is that the event arrives at
+    all and that the map behind it has actually caught up -- B present, with
+    its identity resolved rather than a bare destination hash.
+    """
+    a, b = env.peers("A", "B")
+
+    with a.events() as stream:
+        b.set_display_name("Map Mover")
+        elapsed = wait_until(
+            lambda: stream.count("network_map_changed") >= 1,
+            "A to be told the network map changed", timeout=45.0,
+        )
+        events = stream.count("network_map_changed")
+
+    node = None
+
+    def resolved() -> bool:
+        nonlocal node
+        node = a.map_node_for(b.hash)
+        return node is not None
+
+    map_elapsed = wait_until(resolved, "A's map to hold B's identity",
+                             timeout=45.0)
+
+    if node["kind"] not in ("peer", "transport"):
+        raise ScenarioFailure(f"B appears on A's map as {node['kind']!r}")
+
+    # A peer's delivery announce and its trenchchat.user announce are two
+    # packets, so the map can hold B a moment before it knows B is one of ours.
+    flag_elapsed = wait_until(
+        lambda: (a.map_node_for(b.hash) or {}).get("trenchchat"),
+        "B to be flagged as a TrenchChat client on A's map", timeout=45.0,
+    )
+    node = a.map_node_for(b.hash)
+
+    return {
+        "event_after_secs": round(elapsed, 1),
+        "events_seen": events,
+        "map_resolved_after_secs": round(map_elapsed, 1),
+        "trenchchat_flag_after_secs": round(flag_elapsed, 1),
+        "b_label": node["label"],
+        "b_hops": node["hops"],
+        "b_online": node["online"],
+        "b_interface": node["interface"],
     }

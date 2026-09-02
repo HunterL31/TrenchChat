@@ -30,6 +30,7 @@ from trenchchat.core.storage import Storage
 from trenchchat.core.channel import ChannelManager
 from trenchchat.core.server import ServerManager
 from trenchchat.core.messaging import Messaging
+from trenchchat.core.network_map import NetworkMapMonitor
 from trenchchat.core.subscription import SubscriptionManager
 from trenchchat.core.invite import InviteManager
 from trenchchat.core.sync import SyncManager
@@ -234,6 +235,9 @@ class Backend:
         devices); a real profile passes False so VoiceManager builds the
         real AudioPipeline, degrading to receive-only when the machine has
         no audio libraries or devices."""
+        # Every announce, presence change and link change moves the network
+        # map; this collapses those bursts into one change event.
+        self.network_monitor = NetworkMapMonitor()
         self.channel_mgr = ChannelManager(self.identity, self.storage)
         self.server_mgr = ServerManager(self.identity, self.storage)
         self.messaging = Messaging(self.identity, self.storage, self.router)
@@ -266,6 +270,9 @@ class Backend:
                                           router=self.router)
         self.presence_mgr.add_seen_callback(self.friends_mgr.record_seen)
         self.presence_mgr.add_presence_callback(self.friends_mgr.record_presence)
+        self.presence_mgr.add_presence_callback(
+            lambda _peer_hex, _is_online: self.network_monitor.note_change()
+        )
         self.direct_mgr = DirectMessageManager(self.identity, self.storage,
                                                self.friends_mgr, self.presence_mgr)
         self.messaging.set_direct_manager(self.direct_mgr)
@@ -293,8 +300,12 @@ class Backend:
         self.propagation_nodes.add_selection_callback(
             lambda _node: self.propagation_collector.collect_now()
         )
+        def _on_propagation_heard(node_hash_hex: str, hops: int) -> None:
+            self.propagation_nodes.record_node(node_hash_hex, hops)
+            self.network_monitor.note_change()
+
         RNS.Transport.register_announce_handler(
-            PropagationAnnounceHandler(self.propagation_nodes.record_node)
+            PropagationAnnounceHandler(_on_propagation_heard)
         )
         # Headless testers have no sound devices; the tone pipeline feeds the
         # real encode/transmit path with a generated signal instead. A real
@@ -321,6 +332,7 @@ class Backend:
 
         def _on_node_discovered(node_hex: str, display_name: str, iface) -> None:
             self.node_browser.record_node_announce(node_hex, display_name, iface)
+            self.network_monitor.note_change()
 
         RNS.Transport.register_announce_handler(
             NodeAnnounceHandler(_on_node_discovered)
@@ -333,6 +345,7 @@ class Backend:
             self.user_directory.record_user(peer_hex, display_name)
             self.presence_mgr.record_seen(peer_hex)
             self.first_contact.note_peer(peer_hex, iface)
+            self.network_monitor.note_change()
 
         RNS.Transport.register_announce_handler(
             UserAnnounceHandler(_on_user_announced)
@@ -354,6 +367,7 @@ class Backend:
             self.invite_mgr.resync_membership(peer_hex)
             self.friends_mgr.flush_pending(peer_hex)
             self.first_contact.note_peer(peer_hex, iface)
+            self.network_monitor.note_change()
 
         RNS.Transport.register_announce_handler(
             PeerAnnounceHandler(_on_peer_appeared)
@@ -382,6 +396,9 @@ class Backend:
         # is driven by hearing from a remote peer.
         self.link_watcher = LinkWatcher(self._on_link_restored)
         self.link_watcher.start()
+        self.add_link_callback(
+            lambda _is_online: self.network_monitor.note_change()
+        )
 
         self.channel_mgr.restore_owned_channels()
         self.server_mgr.restore_owned_servers()
@@ -395,6 +412,7 @@ class Backend:
         """
         self.sync_mgr.request_sync_all()
         self.collect_propagated()
+        self.network_monitor.note_change()
 
     def collect_propagated(self) -> bool:
         """Ask the selected propagation node for anything held for us."""

@@ -47,7 +47,7 @@ _RSSI_GOOD         = -85
 _RSSI_FAIR         = -100
 
 
-def _rtt_for_dest(dest_hex: str) -> float | None:
+def rtt_ms_for(dest_hex: str) -> float | None:
     """Return the RTT in milliseconds for an active link to dest_hex, or None."""
     try:
         dest_hash = bytes.fromhex(dest_hex)
@@ -126,7 +126,7 @@ def score_path(
         return LinkQuality.POOR
 
     # --- RTT from an active link ---
-    rtt = _rtt_for_dest(dest_hex)
+    rtt = rtt_ms_for(dest_hex)
     if rtt is not None:
         if rtt <= _RTT_EXCELLENT_MS and hops <= 1:
             return LinkQuality.EXCELLENT
