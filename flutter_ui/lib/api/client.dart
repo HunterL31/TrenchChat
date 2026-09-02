@@ -846,12 +846,19 @@ class ApiClient {
         .toList();
   }
 
-  Future<({bool ok, String? fetchId, String? nodeHash, String? path})>
-      browseNomad(String url, {String? currentNode}) async {
+  Future<({bool ok, String? fetchId, String? nodeHash, String? path,
+      bool cached})> browseNomad(String url,
+          {String? currentNode, Map<String, String>? data,
+          bool refresh = false}) async {
     final res = await _http.post(
       _u('/nomad/browse'),
       headers: _jsonHeaders,
-      body: jsonEncode({'url': url, 'current_node': currentNode}),
+      body: jsonEncode({
+        'url': url,
+        'current_node': currentNode,
+        if (data != null && data.isNotEmpty) 'data': data,
+        if (refresh) 'refresh': true,
+      }),
     );
     final body = _decode(res) as Map<String, dynamic>;
     return (
@@ -859,6 +866,22 @@ class ApiClient {
       fetchId: body['fetch_id'] as String?,
       nodeHash: body['node_hash'] as String?,
       path: body['path'] as String?,
+      cached: body['cached'] as bool? ?? false,
+    );
+  }
+
+  /// How a fetch is doing, straight from the backend. Null once the backend
+  /// has forgotten it. The event socket can drop; this cannot.
+  Future<NomadFetchStatus?> getNomadFetch(String fetchId) async {
+    final res = await _http.get(_u('/nomad/fetch/$fetchId'));
+    if (res.statusCode == 404) return null;
+    final body = _decode(res) as Map<String, dynamic>;
+    return NomadFetchStatus(
+      nodeHash: body['node_hash'] as String? ?? '',
+      path: body['path'] as String? ?? '',
+      status: body['status'] as String? ?? '',
+      progress: (body['progress'] as num?)?.toDouble() ?? 0,
+      reason: body['reason'] as String?,
     );
   }
 
@@ -868,6 +891,35 @@ class ApiClient {
         .get(_u('/nomad/page/$nodeHash?path=${Uri.encodeQueryComponent(path)}'));
     if (res.statusCode == 404) return null;
     return NomadPage.fromJson(_decode(res) as Map<String, dynamic>);
+  }
+
+  Future<NomadIdentify> getNomadIdentify(String nodeHash) async {
+    final res = await _http.get(_u('/nomad/identify/$nodeHash'));
+    return NomadIdentify.fromJson(_decode(res) as Map<String, dynamic>);
+  }
+
+  Future<NomadIdentify> setNomadIdentify(String nodeHash, bool enabled) async {
+    final res = await _http.post(
+      _u('/nomad/identify'),
+      headers: _jsonHeaders,
+      body: jsonEncode({'node_hash': nodeHash, 'enabled': enabled}),
+    );
+    return NomadIdentify.fromJson(_decode(res) as Map<String, dynamic>);
+  }
+
+  /// Saves a contact from an LXMF address. Returns the resolution state:
+  /// 'added' once the identity behind it is known, 'resolving' while the
+  /// path request is out.
+  Future<String> addLxmfAddress(String lxmfHash,
+      {String nickname = '', String note = ''}) async {
+    final res = await _http.post(
+      _u('/friends/lxmf'),
+      headers: _jsonHeaders,
+      body: jsonEncode(
+          {'lxmf_hash': lxmfHash, 'nickname': nickname, 'note': note}),
+    );
+    final body = _decode(res) as Map<String, dynamic>;
+    return body['state'] as String? ?? 'resolving';
   }
 
   Future<List<NomadBookmark>> getNomadBookmarks() async {

@@ -490,6 +490,11 @@ class Backend:
                     self.node_browser.tick()
                 except Exception as e:
                     RNS.log(f"TesterBackend: node tick failed: {e}", RNS.LOG_WARNING)
+                try:
+                    self.friends_mgr.tick()
+                except Exception as e:
+                    RNS.log(f"TesterBackend: friends tick failed: {e}",
+                            RNS.LOG_WARNING)
                 now = time.time()
                 if now - last_sync_tick >= SYNC_TICK_SECS:
                     last_sync_tick = now

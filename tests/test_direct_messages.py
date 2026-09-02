@@ -252,8 +252,13 @@ def test_an_offline_peer_goes_through_a_propagation_node(peer_factory, monkeypat
     b = peer_factory("bob")
     befriend(a, b)
 
-    # Presence says the peer is away, and a node is available to hold it.
+    # A peer presence can speak for: one that has identified itself as
+    # TrenchChat, and is not online now. Without that it is only a peer
+    # presence has never heard of, which is not the same thing.
     a.messaging.set_presence_manager(a.presence_mgr)
+    a.direct_mgr.open_conversation(b.identity.hash_hex)
+    a.direct_mgr.note_trenchchat_peer(b.identity.hash_hex)
+    assert a.presence_mgr.is_online(b.identity.hash_hex) is False
     monkeypatch.setattr(type(a.router), "outbound_propagation_node",
                         property(lambda self: b"\x01" * 16))
 
@@ -261,6 +266,31 @@ def test_an_offline_peer_goes_through_a_propagation_node(peer_factory, monkeypat
     assert a.messaging.get_delivery_state(sent) == DELIVERY_PROPAGATED
     conversation = a.direct_mgr.conversation_hash(b.identity.hash_hex)
     assert a.storage.get_message(conversation, sent) is not None
+
+
+def test_a_peer_presence_never_heard_of_is_tried_directly(peer_factory,
+                                                          monkeypatch):
+    """Regression: presence only knows peers that send beacons. A bot or
+    another client's user sends none, so "not online" meant "never heard of"
+    and every first message went to a propagation node to be pulled by
+    someone who may never pull it."""
+    a = peer_factory("alice")
+    b = peer_factory("bob")
+    befriend(a, b)
+    a.messaging.set_presence_manager(a.presence_mgr)
+    # Never seen, and never identified as TrenchChat -- presence has no
+    # opinion, but the path is resolved.
+    assert a.presence_mgr.is_online(b.identity.hash_hex) is False
+    monkeypatch.setattr(type(a.router), "outbound_propagation_node",
+                        property(lambda self: b"\x01" * 16))
+
+    sent = a.messaging.send_direct(b.identity.hash_hex, "!verify me")
+
+    assert a.messaging.get_delivery_state(sent) == DELIVERY_DELIVERED
+    assert wait_for(lambda: any(
+        m["content"] == "!verify me"
+        for m in b.storage.get_messages(
+            b.direct_mgr.conversation_hash(a.identity.hash_hex))))
 
 
 def test_no_missed_delivery_hint_is_broadcast_for_a_conversation(peer_factory):
@@ -348,6 +378,66 @@ def test_a_message_from_a_stranger_is_held_not_dropped(peer_factory):
     assert [h["body"] for h in held] == ["is this thing on"]
     assert b.storage.get_friend_state(a.identity.hash_hex) == FRIEND_PENDING_IN
     assert b.friends_mgr.is_friend(a.identity.hash_hex) is False
+
+
+def test_a_contact_added_by_lxmf_address_can_be_messaged_and_answered(
+        peer_factory):
+    """The whole point of taking an LXMF address: a bot publishes one, and
+    what comes back has to reach us. Resolving it to an identity makes the
+    contact ordinary, so the answer lands in a conversation rather than in
+    the holding pen."""
+    import RNS
+
+    me = peer_factory("alice")
+    bot = peer_factory("bob")
+    bot_address = RNS.Destination.hash(
+        bytes.fromhex(bot.identity.hash_hex), "lxmf", "delivery").hex()
+    assert bot_address != bot.identity.hash_hex
+
+    result = me.friends_mgr.add_lxmf_address(bot_address, "the bot")
+    assert result == {"state": "added",
+                      "identity_hash": bot.identity.hash_hex}
+
+    me.messaging.send_direct(bot.identity.hash_hex, "!verify me")
+    assert wait_for(lambda: bool(
+        bot.storage.get_message_requests(me.identity.hash_hex)))
+
+    # The bot answers, the only way it knows how.
+    bot.friends_mgr.add_friend(me.identity.hash_hex)
+    bot.messaging.send_direct(me.identity.hash_hex, "your code is 12345")
+
+    conversation = me.direct_mgr.open_conversation(bot.identity.hash_hex)
+    assert wait_for(lambda: any(
+        m["content"] == "your code is 12345"
+        for m in me.storage.get_messages(conversation)))
+
+
+def test_a_reply_is_held_even_while_our_own_request_is_outstanding(
+        peer_factory):
+    """Regression: an outstanding friend request used to drop everything the
+    peer said, on the theory that their answer belonged to the request. A bot
+    cannot answer a friend request -- it answers with words, and those were
+    the only reply it could make."""
+    bot = peer_factory("alice")
+    me = peer_factory("bob")
+    # Asked, and never answered: a bot has no MT_FRIEND_ACCEPT to send, so
+    # our request just sits there. Set directly because a TrenchChat test
+    # peer cannot help but answer it.
+    me.storage.upsert_friend(bot.identity.hash_hex, "", "", FRIEND_PENDING_OUT)
+    assert me.storage.get_friend_state(bot.identity.hash_hex) \
+        == FRIEND_PENDING_OUT
+
+    bot.friends_mgr.add_friend(me.identity.hash_hex)
+    bot.messaging.send_direct(me.identity.hash_hex, "your code is 12345")
+
+    assert wait_for(lambda: bool(
+        me.storage.get_message_requests(bot.identity.hash_hex)))
+    held = me.storage.get_message_requests(bot.identity.hash_hex)
+    assert [h["body"] for h in held] == ["your code is 12345"]
+    # Our own request is still ours to track; holding their words is not us
+    # deciding the handshake went the other way.
+    assert me.storage.get_friend_state(bot.identity.hash_hex) \
+        == FRIEND_PENDING_OUT
 
 
 def test_a_held_message_shows_up_as_an_incoming_request(peer_factory):

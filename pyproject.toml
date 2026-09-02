@@ -25,6 +25,9 @@ dependencies = [
     "numpy>=1.26",
     "opuslib>=3.0",
     "pystray>=0.19",
+    "fastapi>=0.141",
+    "uvicorn>=0.52",
+    "websockets>=16.1",
 ]
 
 [project.gui-scripts]

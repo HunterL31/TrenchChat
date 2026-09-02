@@ -11,6 +11,7 @@ import base64
 import sys
 import warnings
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -65,7 +66,8 @@ def backend(tmp_path, registry):
     storage = Storage(db_path=tmp_path / "storage.db")
     transport = FakeNodeTransport("11" * 16, registry)
     backend.node_browser = NodeBrowserManager(
-        None, storage, config, transport=transport)
+        SimpleNamespace(hash_hex="11" * 16), storage, config,
+        transport=transport)
     yield backend
     transport.join_threads()
     storage.close()
@@ -132,6 +134,26 @@ class TestNodesAndBrowse:
                           json={"url": "https://example.com/"})
         assert res.status_code == 400
 
+    def test_fetch_status_answers_a_client_that_missed_the_event(
+            self, client, backend, registry):
+        """The event socket can be down for the whole fetch; the status
+        endpoint is how a client finds out anyway."""
+        _serve(registry, {"/page/index.mu": lambda: b">Hello"})
+        fetch_id = client.post("/nomad/browse", headers=AUTH,
+                               json={"url": f"{NODE}:/page/index.mu"}
+                               ).json()["fetch_id"]
+        assert wait_for(
+            lambda: client.get(f"/nomad/fetch/{fetch_id}", headers=AUTH)
+            .json().get("status") == "done")
+        body = client.get(f"/nomad/fetch/{fetch_id}", headers=AUTH).json()
+        assert body["node_hash"] == NODE
+        assert body["path"] == "/page/index.mu"
+
+    def test_unknown_fetch_is_404_with_reason(self, client):
+        res = client.get(f"/nomad/fetch/{'00' * 8}", headers=AUTH)
+        assert res.status_code == 404
+        assert res.json()["reason"] == "unknown"
+
     def test_uncached_page_is_404_with_reason(self, client):
         res = client.get(f"/nomad/page/{NODE}", headers=AUTH,
                          params={"path": "/page/none.mu"})
@@ -157,10 +179,60 @@ class TestFileEndpoint:
         assert 'filename="data.bin"' in res.headers["content-disposition"]
         assert "attachment" in res.headers["content-disposition"]
 
+    def test_download_uses_the_name_the_node_gave_the_file(
+            self, client, backend, registry, tmp_path):
+        """A node serves /file/<path> under whatever name it chooses; the
+        download must carry that name, not the path's basename."""
+        blob = tmp_path / "Quarterly Report.pdf"
+        blob.write_bytes(b"%PDF")
+        _serve(registry, {"/file/dl": lambda: blob})
+        client.post("/nomad/fetch", headers=AUTH,
+                    json={"node_hash": NODE, "path": "/file/dl"})
+        assert wait_for(lambda: backend.node_browser.get_cached_file(
+            NODE, "/file/dl") is not None)
+
+        res = client.get(f"/nomad/file/{NODE}", headers=AUTH,
+                         params={"path": "/file/dl"})
+
+        assert 'filename="Quarterly Report.pdf"' in \
+            res.headers["content-disposition"]
+
     def test_uncached_file_is_404(self, client):
         res = client.get(f"/nomad/file/{NODE}", headers=AUTH,
                          params={"path": "/file/none"})
         assert res.status_code == 404
+
+
+@needs_backend
+class TestIdentify:
+    def test_a_node_is_anonymous_until_asked(self, client):
+        res = client.get(f"/nomad/identify/{NODE}", headers=AUTH)
+        assert res.status_code == 200
+        assert res.json()["enabled"] is False
+        assert res.json()["identified"] is False
+
+    def test_enabling_identify_round_trips(self, client, backend):
+        res = client.post("/nomad/identify", headers=AUTH,
+                          json={"node_hash": NODE, "enabled": True})
+        assert res.json()["ok"] is True
+        assert res.json()["enabled"] is True
+        assert res.json()["identity_hash"] == backend.node_browser \
+            .identify_status(NODE)["identity_hash"]
+        assert client.get(f"/nomad/identify/{NODE}",
+                          headers=AUTH).json()["enabled"] is True
+
+    def test_disabling_identify_round_trips(self, client):
+        client.post("/nomad/identify", headers=AUTH,
+                    json={"node_hash": NODE, "enabled": True})
+        res = client.post("/nomad/identify", headers=AUTH,
+                          json={"node_hash": NODE, "enabled": False})
+        assert res.json()["enabled"] is False
+
+    def test_the_endpoints_need_the_token(self, client):
+        assert client.get(f"/nomad/identify/{NODE}").status_code == 401
+        assert client.post("/nomad/identify",
+                           json={"node_hash": NODE,
+                                 "enabled": True}).status_code == 401
 
 
 @needs_backend

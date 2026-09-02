@@ -5,12 +5,15 @@ directory scan (the serve-side traversal boundary).
 """
 
 import os
+from types import SimpleNamespace
 
 import pytest
 
 from trenchchat.config import Config
+from trenchchat.core import actions
 from trenchchat.core.node_browser import (
-    DEFAULT_INDEX_MU, NodeBrowserManager, parse_nomad_url,
+    DEFAULT_INDEX_MU, SETTLED_FETCH_MAX, NodeBrowserManager, parse_nomad_url,
+    sanitize_request_data,
 )
 from trenchchat.core.storage import Storage
 
@@ -19,6 +22,7 @@ from tests.helpers import wait_for
 
 NODE_A = "aa" * 16
 NODE_B = "bb" * 16
+SELF_IDENTITY = SimpleNamespace(hash_hex="11" * 16)
 
 
 @pytest.fixture
@@ -31,7 +35,8 @@ def manager(tmp_path, registry):
     config = Config(data_dir=tmp_path)
     storage = Storage(db_path=tmp_path / "storage.db")
     transport = FakeNodeTransport("11" * 16, registry, node_hex=NODE_A)
-    mgr = NodeBrowserManager(None, storage, config, transport=transport)
+    mgr = NodeBrowserManager(SELF_IDENTITY, storage, config,
+                             transport=transport)
     yield mgr
     transport.join_threads()
     storage.close()
@@ -65,6 +70,40 @@ def test_parse_bare_hash_means_index():
 
 def test_parse_uppercase_hash_normalised():
     assert parse_nomad_url(NODE_A.upper()) == (NODE_A, "/page/index.mu")
+
+
+def test_parse_accepts_the_nnn_scheme():
+    assert parse_nomad_url(f"nnn@{NODE_A}:/page/x.mu") == (NODE_A, "/page/x.mu")
+    assert parse_nomad_url(f"NNN@{NODE_A}") == (NODE_A, "/page/index.mu")
+
+
+@pytest.mark.parametrize("url", [
+    f"lxmf@{NODE_A}",
+    "rrc://aabb/room",
+    "p:32",
+    "#anchor",
+    "nnn@",
+])
+def test_parse_rejects_other_schemes(url):
+    with pytest.raises(ValueError):
+        parse_nomad_url(url)
+
+
+# ---------------------------------------------------------------------------
+# Request data
+# ---------------------------------------------------------------------------
+
+def test_sanitize_keeps_only_field_and_var_entries():
+    assert sanitize_request_data({
+        "field_name": "ok", "var_mode": "view", "PATH": "/bin", "other": "x",
+    }) == {"field_name": "ok", "var_mode": "view"}
+
+
+def test_sanitize_drops_non_string_values_and_empty_payloads():
+    assert sanitize_request_data({"field_a": 5}) is None
+    assert sanitize_request_data({}) is None
+    assert sanitize_request_data(None) is None
+    assert sanitize_request_data("field_a=1") is None
 
 
 @pytest.mark.parametrize("url", [
@@ -128,6 +167,62 @@ def test_fetch_page_done_caches_and_notifies(manager, registry):
     assert wait_for(lambda: any(e[3] == "done" for e in events))
     row = manager.get_cached_page(NODE_B, "/page/index.mu")
     assert bytes(row["content"]) == b"# hello"
+
+
+def test_fetch_carries_request_data_to_the_transport(manager, registry):
+    _host(registry, NODE_B, {"/page/f.mu": lambda: b"ok"})
+    fetch_id = manager.fetch_page(NODE_B, "/page/f.mu",
+                                  {"field_user": "nomad", "junk": "x"})
+    assert manager._transport.request_data[fetch_id] == {"field_user": "nomad"}
+
+
+def test_a_different_payload_is_a_different_fetch(manager, registry):
+    _host(registry, NODE_B, {"/page/x.mu": lambda: b"ok"})
+    first = manager.fetch_page(NODE_B, "/page/x.mu", {"field_a": "1"})
+    second = manager.fetch_page(NODE_B, "/page/x.mu", {"field_a": "2"})
+    assert first != second
+
+
+def test_fetch_status_reports_an_outcome_after_the_event_is_gone(
+        manager, registry):
+    """The fetch event is published once over a socket that can be down.
+    Asking afterwards has to still answer, or a client that missed it waits
+    for something that will never come again."""
+    _host(registry, NODE_B, {"/page/x.mu": lambda: b"hello"})
+    fetch_id = manager.fetch_page(NODE_B, "/page/x.mu")
+    assert manager.fetch_status(fetch_id)["status"] in ("queued", "fetching")
+    assert wait_for(
+        lambda: manager.fetch_status(fetch_id)["status"] == "done")
+    status = manager.fetch_status(fetch_id)
+    assert status["node_hash"] == NODE_B and status["path"] == "/page/x.mu"
+    assert status["reason"] is None
+
+
+def test_fetch_status_remembers_why_a_fetch_failed(manager, registry):
+    fetch_id = manager.fetch_page(NODE_B, "/page/x.mu")   # nobody hosts NODE_B
+    assert wait_for(
+        lambda: manager.fetch_status(fetch_id)["status"] == "failed")
+    assert manager.fetch_status(fetch_id)["reason"] is not None
+
+
+def test_fetch_status_is_none_for_an_unknown_id(manager):
+    assert manager.fetch_status("00" * 8) is None
+
+
+def test_settled_fetches_do_not_grow_without_bound(manager, registry):
+    count = SETTLED_FETCH_MAX + 6
+    _host(registry, NODE_B,
+          {f"/page/{i}.mu": lambda: b"x" for i in range(count)})
+    ids = [manager.fetch_page(NODE_B, f"/page/{i}.mu") for i in range(count)]
+
+    def all_settled():
+        live = [manager.fetch_status(i) for i in ids]
+        return not any(s and s["status"] in ("queued", "fetching")
+                       for s in live)
+
+    assert wait_for(all_settled)
+    remembered = sum(1 for i in ids if manager.fetch_status(i) is not None)
+    assert remembered == SETTLED_FETCH_MAX
 
 
 def test_fetch_failure_surfaces_reason(manager, registry):
@@ -242,21 +337,163 @@ def test_hosting_refresh_picks_up_new_pages(manager):
     assert {p["path"] for p in status["pages"]} == \
         {"/page/index.mu", "/page/about.mu"}
     assert {f["path"] for f in status["files"]} == {"/file/data.bin"}
-    assert manager._transport.providers["/file/data.bin"]() == b"\x01"
+    # Files are provided as a Path so the transport can stream them with a
+    # name attached; pages stay plain bytes.
+    assert manager._transport.providers["/file/data.bin"]().read_bytes() == \
+        b"\x01"
+
+
+# ---------------------------------------------------------------------------
+# Identifying to a node
+# ---------------------------------------------------------------------------
+
+def test_browsing_is_anonymous_until_asked(manager):
+    manager.fetch_page(NODE_B, "/page/index.mu")
+    manager._transport.join_threads()
+    status = manager.identify_status(NODE_B)
+    assert status["enabled"] is False
+    assert status["identified"] is False
+
+
+def test_identify_is_per_node_not_global(manager):
+    manager.set_identify(NODE_B, True)
+    assert manager.identify_status(NODE_B)["enabled"] is True
+    assert manager.identify_status(NODE_A)["enabled"] is False
+
+
+def test_enabling_identify_reveals_over_the_open_link(manager, registry):
+    host = FakeNodeTransport("99" * 16, registry, node_hex=NODE_B)
+    host.start_hosting("Host", {"/page/index.mu": lambda: b">Hi"})
+    manager.fetch_page(NODE_B, "/page/index.mu")
+    manager._transport.join_threads()
+    assert manager.identify_status(NODE_B)["identified"] is False
+
+    status = manager.set_identify(NODE_B, True)
+
+    assert status["identified"] is True
+
+
+def test_identify_survives_for_the_next_link(manager):
+    """The stored choice is what identifies a link opened later, which is
+    the whole point of the flag rather than a one-shot action."""
+    manager.set_identify(NODE_B, True)
+    manager.fetch_page(NODE_B, "/page/index.mu")
+    manager._transport.join_threads()
+    assert manager.identify_status(NODE_B)["identified"] is True
+
+
+def test_turning_identify_off_stops_reporting_us_at_once(manager, registry):
+    """Not just the next link: the open one keeps reporting us for as long
+    as it lives, so turning it off has to close it."""
+    host = FakeNodeTransport("99" * 16, registry, node_hex=NODE_B)
+    host.start_hosting("Host", {"/page/index.mu": lambda: b">Hi"})
+    manager.set_identify(NODE_B, True)
+    manager.fetch_page(NODE_B, "/page/index.mu")
+    manager._transport.join_threads()
+    assert manager.identify_status(NODE_B)["identified"] is True
+
+    status = manager.set_identify(NODE_B, False)
+
+    assert status["enabled"] is False
+    assert status["identified"] is False
+    assert manager._transport._may_identify(NODE_B) is False
+
+
+def test_identify_status_names_the_identity_a_node_would_learn(manager):
+    status = manager.identify_status(NODE_B)
+    assert status["identity_hash"] == SELF_IDENTITY.hash_hex
+
+
+def test_identify_survives_the_node_list_being_pruned(manager):
+    """The node list is announce-driven and pruned; a choice the user made
+    must not be dropped with it."""
+    manager.set_identify(NODE_B, True)
+    manager.record_node_announce(NODE_B, "B")
+    manager.record_node_announce(NODE_A, "A")
+
+    manager._storage.prune_nomad_nodes(1)
+
+    assert manager._storage.get_nomad_node(NODE_B) is None
+    assert manager.identify_status(NODE_B)["enabled"] is True
+
+
+def test_identify_rejects_a_hash_that_is_not_one(manager):
+    with pytest.raises(ValueError):
+        manager.set_identify("not-a-hash", True)
+
+
+# ---------------------------------------------------------------------------
+# Loopback -- browsing our own node
+# ---------------------------------------------------------------------------
+
+def test_own_node_is_read_from_disk_not_dialled(manager, registry):
+    manager.set_hosting(enabled=True, node_name="Mine")
+    (manager.pages_root / "pages" / "about.mu").write_text(">About me")
+    manager.refresh_hosted_pages()
+
+    fetch_id = manager.fetch_page(manager.my_node_hash, "/page/about.mu")
+
+    assert manager.fetch_status(fetch_id)["status"] == "done"
+    row = manager.get_cached_page(manager.my_node_hash, "/page/about.mu")
+    assert bytes(row["content"]) == b">About me"
+    assert registry.fetch_log == []
+
+
+def test_own_node_serves_files_with_their_name(manager):
+    manager.set_hosting(enabled=True, node_name="Mine")
+    (manager.pages_root / "files" / "notes.txt").write_bytes(b"local bytes")
+    manager.refresh_hosted_pages()
+
+    manager.fetch_file(manager.my_node_hash, "/file/notes.txt")
+
+    row = manager.get_cached_file(manager.my_node_hash, "/file/notes.txt")
+    assert bytes(row["content"]) == b"local bytes"
+    assert row["filename"] == "notes.txt"
+
+
+def test_own_node_reports_a_page_it_does_not_serve(manager):
+    manager.set_hosting(enabled=True, node_name="Mine")
+    fetch_id = manager.fetch_page(manager.my_node_hash, "/page/nowhere.mu")
+    status = manager.fetch_status(fetch_id)
+    assert (status["status"], status["reason"]) == ("failed", "not_found")
+
+
+def test_own_node_is_reread_after_an_edit(manager):
+    """A cached page inside its #!c= lifetime is served without asking the
+    node -- but our own node is the authority, so an edit must show."""
+    manager.set_hosting(enabled=True, node_name="Mine")
+    page = manager.pages_root / "pages" / "live.mu"
+    page.write_text("#!c=3600\nfirst")
+    manager.refresh_hosted_pages()
+    url = f"{manager.my_node_hash}:/page/live.mu"
+    actions.browse_nomad_url(manager, url)
+
+    page.write_text("#!c=3600\nsecond")
+    result = actions.browse_nomad_url(manager, url)
+
+    assert result["cached"] is False
+    row = manager.get_cached_page(manager.my_node_hash, "/page/live.mu")
+    assert bytes(row["content"]) == b"#!c=3600\nsecond"
+
+
+def test_hosting_status_names_our_own_node(manager):
+    assert manager.hosting_status()["node_hash"] == manager.my_node_hash
 
 
 def test_hosting_restored_from_config(tmp_path, registry):
     config = Config(data_dir=tmp_path)
     storage = Storage(db_path=tmp_path / "storage.db")
     transport = FakeNodeTransport("22" * 16, registry)
-    mgr = NodeBrowserManager(None, storage, config, transport=transport)
+    mgr = NodeBrowserManager(SELF_IDENTITY, storage, config,
+                             transport=transport)
     mgr.set_hosting(enabled=True, node_name="Persistent")
     storage.close()
 
     config2 = Config(data_dir=tmp_path)
     storage2 = Storage(db_path=tmp_path / "storage.db")
     transport2 = FakeNodeTransport("33" * 16, registry)
-    NodeBrowserManager(None, storage2, config2, transport=transport2)
+    NodeBrowserManager(SELF_IDENTITY, storage2, config2,
+                       transport=transport2)
     assert transport2.hosting_name == "Persistent"
     assert "/page/index.mu" in transport2.providers
     storage2.close()

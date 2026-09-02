@@ -398,6 +398,22 @@ void main() {
     );
   });
 
+  testWidgets('the transcript is selectable, so a code can be copied out',
+      (tester) async {
+    // A verification code, a hash or a link someone sent is unreachable if
+    // the text cannot be selected -- there is no other way to get it out.
+    await tester.pumpWidget(_harness([_msg('bot', 1000, 'your code is 12345')]));
+    await tester.pumpAndSettle();
+
+    expect(
+      find.descendant(
+        of: find.byType(SelectionArea),
+        matching: find.textContaining('your code is 12345', findRichText: true),
+      ),
+      findsOneWidget,
+    );
+  });
+
   testWidgets('an emoji-only message renders jumbo; a mixed one stays body-sized',
       (tester) async {
     const base = 1_700_000_000.0;

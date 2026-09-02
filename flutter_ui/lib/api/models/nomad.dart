@@ -86,6 +86,7 @@ class NomadHosting {
   const NomadHosting({
     required this.enabled,
     required this.nodeName,
+    required this.nodeHash,
     required this.pagesDir,
     required this.pages,
     required this.files,
@@ -93,6 +94,10 @@ class NomadHosting {
 
   final bool enabled;
   final String nodeName;
+
+  /// The destination hash our own pages are served under -- what to browse
+  /// to read them back.
+  final String nodeHash;
   final String pagesDir;
   final List<NomadHostedEntry> pages;
   final List<NomadHostedEntry> files;
@@ -100,6 +105,7 @@ class NomadHosting {
   factory NomadHosting.fromJson(Map<String, dynamic> json) => NomadHosting(
         enabled: json['enabled'] as bool? ?? false,
         nodeName: json['node_name'] as String? ?? '',
+        nodeHash: json['node_hash'] as String? ?? '',
         pagesDir: json['pages_dir'] as String? ?? '',
         pages: [
           for (final entry in (json['pages'] as List<dynamic>? ?? []))
@@ -131,4 +137,35 @@ class NomadFetchStatus {
   final String? reason;
 
   bool get isTerminal => status == 'done' || status == 'failed';
+}
+
+/// Whether we reveal our identity to one node, and whether the link open to
+/// it right now already has.
+class NomadIdentify {
+  const NomadIdentify({
+    required this.nodeHash,
+    required this.enabled,
+    required this.identified,
+    required this.identityHash,
+  });
+
+  final String nodeHash;
+
+  /// The stored choice, which identifies every future link to this node.
+  final bool enabled;
+
+  /// Whether the link open now carries the proof. False with [enabled] true
+  /// means no link is up; the next one will identify.
+  final bool identified;
+
+  /// The hash the node would see -- what a forum registers an account
+  /// against, and what it can log about this visit forever.
+  final String identityHash;
+
+  factory NomadIdentify.fromJson(Map<String, dynamic> json) => NomadIdentify(
+        nodeHash: json['node_hash'] as String? ?? '',
+        enabled: json['enabled'] as bool? ?? false,
+        identified: json['identified'] as bool? ?? false,
+        identityHash: json['identity_hash'] as String? ?? '',
+      );
 }

@@ -862,24 +862,175 @@ class AppState extends ChangeNotifier {
     }
   }
 
-  /// Starts a fetch for a nomad URL. Returns the fetch id to watch in
-  /// [nomadFetches], or null when the URL was rejected.
-  Future<String?> browseNomad(String url, {String? currentNode}) async {
+  /// Opens a nomad URL, carrying the request data a page's input fields
+  /// produced. Returns where it resolved to and the fetch id to watch in
+  /// [nomadFetches] -- null when the backend answered from a cache the page
+  /// itself declared, so there is nothing to wait for. Null overall means
+  /// the URL was rejected.
+  Future<({String? fetchId, String nodeHash, String path, bool cached})?>
+      browseNomad(String url,
+          {String? currentNode,
+          Map<String, String>? data,
+          bool refresh = false}) async {
     try {
-      final result = await api.browseNomad(url, currentNode: currentNode);
-      if (!result.ok || result.fetchId == null) return null;
+      final result = await api.browseNomad(url,
+          currentNode: currentNode, data: data, refresh: refresh);
+      if (!result.ok) return null;
+      final location = (
+        fetchId: result.fetchId,
+        nodeHash: result.nodeHash ?? '',
+        path: result.path ?? '/page/index.mu',
+        cached: result.cached,
+      );
+      if (result.fetchId == null) return location;
       // On a warm link the WS done event can beat this continuation; an
       // entry already present is fresher than "queued" and must survive.
       nomadFetches.putIfAbsent(
           result.fetchId!,
           () => NomadFetchStatus(
-                nodeHash: result.nodeHash ?? '',
-                path: result.path ?? '',
+                nodeHash: location.nodeHash,
+                path: location.path,
                 status: 'queued',
                 progress: 0,
               ));
       notifyListeners();
-      return result.fetchId;
+      return location;
+    } catch (e) {
+      _reportActionError(e);
+      return null;
+    }
+  }
+
+  /// Asks the backend how a fetch ended and applies the answer exactly as a
+  /// [NomadFetchEvent] would. Fetch events are published over a socket that
+  /// can drop while a page is in flight, and nothing replays them, so the
+  /// browser polls this rather than waiting forever for an event that is
+  /// already gone.
+  Future<void> pollNomadFetch(String fetchId) async {
+    try {
+      final status = await api.getNomadFetch(fetchId);
+      if (status == null) {
+        // The backend no longer knows this fetch: report it terminally so the
+        // browser stops waiting and can fall back to whatever it has cached.
+        nomadFetches[fetchId] = NomadFetchStatus(
+          nodeHash: nomadFetches[fetchId]?.nodeHash ?? '',
+          path: nomadFetches[fetchId]?.path ?? '',
+          status: 'failed',
+          progress: 0,
+          reason: 'forgotten',
+        );
+      } else {
+        nomadFetches[fetchId] = status;
+      }
+      notifyListeners();
+    } catch (_) {
+      // A failed poll is not an outcome; the next tick tries again.
+    }
+  }
+
+  /// Fetches one micron page and waits for it, returning its source.
+  ///
+  /// The browser's own navigation is event-driven, but a `` `{...} `` partial
+  /// is a fetch nothing on screen is waiting on, so this is the one place
+  /// that blocks until an answer arrives. refresh=true because the interval
+  /// a partial declares is the author's, not the page cache's.
+  Future<String?> loadNomadPartial(String url,
+      {String? currentNode,
+      Map<String, String>? data,
+      Duration interval = const Duration(seconds: 1)}) async {
+    final target = await browseNomad(url,
+        currentNode: currentNode, data: data, refresh: true);
+    if (target == null) return null;
+    final fetchId = target.fetchId;
+    if (fetchId != null) {
+      final status = await awaitNomadFetch(fetchId, interval: interval);
+      if (status?.status != 'done') return null;
+    }
+    final page = await fetchCachedNomadPage(target.nodeHash, target.path);
+    return page?.source;
+  }
+
+  /// Waits for a fetch to end, polling when no event arrives. Null once the
+  /// timeout passes. Either way the fetch's entry is taken, so a partial on
+  /// a refresh timer cannot fill [nomadFetches] with its own history.
+  Future<NomadFetchStatus?> awaitNomadFetch(String fetchId,
+      {Duration timeout = const Duration(seconds: 90),
+      Duration interval = const Duration(seconds: 1)}) async {
+    final deadline = DateTime.now().add(timeout);
+    while (DateTime.now().isBefore(deadline)) {
+      final status = nomadFetches[fetchId];
+      if (status != null && status.isTerminal) return takeNomadFetch(fetchId);
+      await Future<void>.delayed(interval);
+      await pollNomadFetch(fetchId);
+    }
+    takeNomadFetch(fetchId);
+    return null;
+  }
+
+  /// Identify state per node, loaded when a node is opened. Absent means
+  /// "not asked yet", which the UI shows as anonymous.
+  final Map<String, NomadIdentify> nomadIdentify = {};
+
+  /// Where the browser has been, and where in that it currently sits.
+  ///
+  /// Held here rather than in the NET tab's own State because switching to
+  /// another tab unmounts that widget: keeping the trail in the tab meant
+  /// every trip to CHAT and back landed on the node list again.
+  final List<({String nodeHash, String path})> nomadHistory = [];
+  int nomadHistoryIndex = -1;
+
+  ({String nodeHash, String path})? get nomadLocation =>
+      nomadHistoryIndex >= 0 && nomadHistoryIndex < nomadHistory.length
+          ? nomadHistory[nomadHistoryIndex]
+          : null;
+
+  /// Records a visit, dropping any forward history as a browser does.
+  void pushNomadLocation(String nodeHash, String path) {
+    final current = nomadLocation;
+    if (current != null &&
+        current.nodeHash == nodeHash &&
+        current.path == path) {
+      return;
+    }
+    nomadHistory.removeRange(nomadHistoryIndex + 1, nomadHistory.length);
+    nomadHistory.add((nodeHash: nodeHash, path: path));
+    nomadHistoryIndex = nomadHistory.length - 1;
+  }
+
+  /// Moves back or forward, returning where that lands. Null when there is
+  /// nothing that way.
+  ({String nodeHash, String path})? stepNomadHistory(int delta) {
+    final target = nomadHistoryIndex + delta;
+    if (target < 0 || target >= nomadHistory.length) return null;
+    nomadHistoryIndex = target;
+    return nomadHistory[target];
+  }
+
+  void clearNomadHistory() {
+    nomadHistory.clear();
+    nomadHistoryIndex = -1;
+  }
+
+  Future<NomadIdentify?> loadNomadIdentify(String nodeHash) async {
+    try {
+      final status = await api.getNomadIdentify(nodeHash);
+      nomadIdentify[nodeHash] = status;
+      notifyListeners();
+      return status;
+    } catch (e) {
+      _reportActionError(e);
+      return null;
+    }
+  }
+
+  /// Turns identifying to one node on or off. Opt-in per node: this is the
+  /// only path that ever reveals our identity to a node operator.
+  Future<NomadIdentify?> setNomadIdentify(String nodeHash, bool enabled) async {
+    try {
+      final status = await api.setNomadIdentify(nodeHash, enabled);
+      nomadIdentify[nodeHash] = status;
+      notifyListeners();
+      return status;
     } catch (e) {
       _reportActionError(e);
       return null;
@@ -889,6 +1040,23 @@ class AppState extends ChangeNotifier {
   Future<NomadPage?> fetchCachedNomadPage(String nodeHash, String path) async {
     try {
       return await api.getNomadPage(nodeHash, path);
+    } catch (e) {
+      _reportActionError(e);
+      return null;
+    }
+  }
+
+  /// Saves a contact from the LXMF address a bot or foreign client
+  /// advertises. Null means the call failed; otherwise 'added' or
+  /// 'resolving' -- an address only becomes a contact once the announce
+  /// behind it has been heard.
+  Future<String?> addLxmfAddress(String lxmfHash,
+      {String nickname = '', String note = ''}) async {
+    try {
+      final state =
+          await api.addLxmfAddress(lxmfHash, nickname: nickname, note: note);
+      await loadFriends();
+      return state;
     } catch (e) {
       _reportActionError(e);
       return null;
@@ -971,6 +1139,18 @@ class AppState extends ChangeNotifier {
     } catch (e) {
       _reportActionError(e);
       return null;
+    }
+  }
+
+  /// Renames a bookmark. The backend upserts on (node, path), so saving the
+  /// same location with a new label is the rename.
+  Future<void> renameNomadBookmark(
+      String nodeHash, String path, String label) async {
+    try {
+      await api.addNomadBookmark(nodeHash, path, label);
+      await loadNomadBookmarks();
+    } catch (e) {
+      _reportActionError(e);
     }
   }
 

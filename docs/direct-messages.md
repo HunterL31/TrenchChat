@@ -43,6 +43,29 @@ keeps it out of channel sync, presence beacons and avatar broadcast — all thre
 enumerate `get_subscriptions()`, so a conversation is invisible to them without
 a single exclusion check to forget.
 
+### Two hashes that look identical
+
+Everything here is keyed on an **identity hash**. What a client or a bot
+advertises is an **LXMF address** — the delivery destination hash,
+`RNS.Destination.hash(identity_hash, "lxmf", "delivery")`. Both are 16 bytes,
+both print as 32 hex characters, and nothing about one tells you it is not
+the other. The derivation runs one way only.
+
+So an LXMF address pasted where an identity hash is expected is hashed a
+second time and addresses a destination nobody is listening on. There is no
+error: the message queues, no path ever resolves, and it looks exactly like
+the peer being offline. That indistinguishability is the whole problem, and
+it is why `add_lxmf_address` exists as a separate call rather than the field
+guessing.
+
+Resolving is what closes the gap. The announce that made a peer reachable
+carries its identity, so `RNS.Identity.recall(delivery_hash)` gives the
+identity hash back, and from that point the contact is an ordinary one —
+sending, receiving and conversation addressing all unchanged. An address
+whose announce has not been heard cannot be resolved yet, so it waits on a
+path request and `FriendsManager.tick()` finishes it; nothing blocks, and an
+unreachable address simply never becomes a contact.
+
 ## Talking to clients that are not TrenchChat
 
 A conversation is the one thing TrenchChat sends that can legitimately arrive
@@ -109,6 +132,16 @@ creates no conversation, no membership and no way to reply. Only the user
 accepting changes that -- which is the same decision a friend request asks for,
 reached by the only route some clients have.
 
+An outstanding request of **ours** is deliberately not a reason to drop one
+either, though it once was — the reasoning being that their answer belonged
+to the request rather than to a second queue. That holds for a TrenchChat
+peer, which answers with `MT_FRIEND_ACCEPT`. A bot or a plain LXMF client has
+no such message to send: it answers with words, and those were exactly what
+got thrown away. Asking a verification bot to be friends and then losing the
+code it sent back is the shape of that bug. Their words are held; our request
+keeps its own `pending_out` state, because holding what they said is not us
+deciding the handshake went the other way.
+
 What is deliberately *not* held:
 
 - **The attachment.** An unknown sender's binary payload is the surface worth
@@ -151,6 +184,25 @@ that peer collects them.
 
 Consequences worth stating plainly:
 
+- **"Propagated" is not "delivered", and never becomes it.** LXMF marks a
+  propagated message `SENT` when the node accepts it (`__mark_propagated`),
+  and there is no proof from the recipient to advance it — the state machine
+  simply has no path from there to `DELIVERED`. So `DELIVERY_PROPAGATED` means
+  a node took custody, nothing more. Whether the peer ever collects it is not
+  observable from the sending side; the only confirmation is an answer coming
+  back. Anything the UI says beyond that would be a claim it cannot support.
+- **It only arrives if the recipient uses that same node.** Held mail is
+  pulled, so a message left with a node the peer never syncs from sits there
+  until it expires. Nothing tells either end that happened.
+- **Which is why choosing propagation matters.** `_peer_is_reachable` decides,
+  and it used to ask presence alone. Presence only knows peers that send
+  TrenchChat beacons, so for a bot or another client's user it always answered
+  "not online" — meaning "never heard of" — and the first message to them went
+  to a node rather than to the peer sitting right there. Presence now decides
+  only for a peer that has identified itself as TrenchChat; for everyone else
+  a resolved path does. The asymmetry justifies it: a direct attempt that
+  fails falls back to propagation by itself, while a needless propagation is a
+  message nobody may ever collect.
 - **The node learns the pair.** It sees both endpoints' delivery addresses, the
   size, and the timing. It cannot read the content, which is encrypted end to
   end to the recipient — but the fact that these two identities corresponded,

@@ -12,10 +12,11 @@ import RNS
 from trenchchat.config import Config
 from trenchchat.core.identity import Identity
 from trenchchat.network.announce import NodeAnnounceHandler
+from trenchchat.network import node_transport
 from trenchchat.network.node_transport import (
-    FETCH_BAD_PATH, FETCH_UNREACHABLE, MAX_SERVED_RESPONSE_BYTES,
-    NODE_REDIAL_BACKOFF, NODE_SERVE_RATE_LIMIT, NodeTransportBase,
-    RNSNodeTransport, is_valid_request_path,
+    FETCH_BAD_PATH, FETCH_BAD_RESPONSE, FETCH_SEND_FAILED, FETCH_UNREACHABLE,
+    MAX_SERVED_RESPONSE_BYTES, NODE_REDIAL_BACKOFF, NODE_SERVE_RATE_LIMIT,
+    NodeTransportBase, RNSNodeTransport, is_valid_request_path,
 )
 
 
@@ -155,7 +156,8 @@ def test_stop_hosting_clears_providers(transport):
 def _collect_results(transport):
     results = []
     transport.set_fetch_result_callback(
-        lambda fid, ok, payload, reason: results.append((fid, ok, reason)))
+        lambda fid, ok, payload, reason, name=None:
+        results.append((fid, ok, reason)))
     return results
 
 
@@ -223,6 +225,212 @@ def test_fetch_queued_past_deadline_is_unreachable(transport, monkeypatch):
     assert ("f1", False, FETCH_UNREACHABLE) in results
 
 
+class _FakeReceipt:
+    """Stands in for an RNS RequestReceipt with a given response shape."""
+
+    def __init__(self, response, metadata=None):
+        self.response = response
+        self.metadata = metadata
+
+
+def _capture_result(transport, receipt):
+    """Register a fetch against a receipt and run the response callback."""
+    results = _collect_results(transport)
+    fetch = node_transport._Fetch("f1", "ab" * 16, "/file/x.bin",
+                                  max_size=1024, timeout=10)
+    transport._active[id(receipt)] = fetch
+    transport._on_response(receipt)
+    return results
+
+
+def test_page_response_of_plain_bytes_is_delivered(transport):
+    receipt = _FakeReceipt(b"# hello")
+    assert _capture_result(transport, receipt) == [("f1", True, None)]
+
+
+def _collect_payloads(transport):
+    delivered = []
+    transport.set_fetch_result_callback(
+        lambda fid, ok, payload, reason, name=None:
+        delivered.append((ok, payload, name)))
+    return delivered
+
+
+def test_file_response_is_read_out_of_its_handle(transport, tmp_path):
+    """nomadnet answers a /file/ request with an open handle plus metadata,
+    and RNS deletes the temp file the moment this callback returns."""
+    blob = tmp_path / "payload.bin"
+    blob.write_bytes(b"file bytes")
+    delivered = _collect_payloads(transport)
+    fetch = node_transport._Fetch("f1", "ab" * 16, "/file/x.bin",
+                                  max_size=1024, timeout=10)
+    with blob.open("rb") as handle:
+        receipt = _FakeReceipt(handle, metadata={"name": b"payload.bin"})
+        transport._active[id(receipt)] = fetch
+        transport._on_response(receipt)
+    assert delivered == [(True, b"file bytes", "payload.bin")]
+
+
+def test_legacy_name_and_data_file_response_is_delivered(transport):
+    """Older nomadnet nodes answer with [name, data] instead of a handle."""
+    delivered = _collect_payloads(transport)
+    fetch = node_transport._Fetch("f1", "ab" * 16, "/file/x.bin",
+                                  max_size=1024, timeout=10)
+    receipt = _FakeReceipt(["payload.bin", b"file bytes"])
+    transport._active[id(receipt)] = fetch
+    transport._on_response(receipt)
+    assert delivered == [(True, b"file bytes", "payload.bin")]
+
+
+@pytest.mark.parametrize("given,expected", [
+    (b"notes.txt", "notes.txt"),
+    ("../../etc/passwd", "passwd"),
+    (rb"C:\\windows\\system32\\evil.exe", "evil.exe"),
+    ('re"port.txt', "report.txt"),
+    ("", None),
+    ("...", None),
+    (12345, None),
+])
+def test_a_node_supplied_name_is_reduced_to_a_bare_basename(given, expected):
+    """The name comes from the remote and ends up in a download header."""
+    assert node_transport._clean_filename(given) == expected
+
+
+def test_response_of_an_unusable_shape_is_reported(transport):
+    receipt = _FakeReceipt({"not": "a payload"})
+    assert _capture_result(transport, receipt) == [
+        ("f1", False, FETCH_BAD_RESPONSE)]
+
+
+def test_served_file_carries_a_handle_and_its_name(transport, tmp_path):
+    """A nomadnet browser handed raw bytes reads response[0] as a filename
+    and drops the download; it needs the handle-plus-name shape."""
+    blob = tmp_path / "notes.txt"
+    blob.write_bytes(b"served bytes")
+    transport.start_hosting("Node", {"/file/notes.txt": lambda: blob})
+
+    response = transport._serve("/file/notes.txt", None, b"rid", b"lid",
+                                None, time.time())
+
+    assert isinstance(response, list) and len(response) == 2
+    handle, metadata = response
+    assert metadata == {"name": b"notes.txt"}
+    with handle:
+        assert handle.read() == b"served bytes"
+
+
+def test_served_page_stays_plain_bytes(transport, tmp_path):
+    transport.start_hosting("Node", {"/page/index.mu": lambda: b"# page"})
+    response = transport._serve("/page/index.mu", None, b"rid", b"lid",
+                                None, time.time())
+    assert response == b"# page"
+
+
+def test_an_oversized_file_is_refused_without_reading_it(transport, tmp_path):
+    blob = tmp_path / "big.bin"
+    blob.write_bytes(b"x" * 16)
+    transport.start_hosting("Node", {"/file/big.bin": lambda: blob})
+    monkey = MAX_SERVED_RESPONSE_BYTES
+    assert monkey > 16   # sanity: the cap is what refuses, not the size
+    node_transport.MAX_SERVED_RESPONSE_BYTES = 4
+    try:
+        assert transport._serve("/file/big.bin", None, b"rid", b"lid", None,
+                                time.time()) is None
+    finally:
+        node_transport.MAX_SERVED_RESPONSE_BYTES = monkey
+
+
+class _DeadLink:
+    """A link the remote has already dropped: it still looks established
+    here, and every request on it fails to send."""
+
+    def __init__(self):
+        self.torn_down = False
+
+    def request(self, *args, **kwargs):
+        return False
+
+    def teardown(self):
+        self.torn_down = True
+
+
+class _RecordingLink:
+    """An established link that records every identify proof sent on it."""
+
+    def __init__(self):
+        self.identified_as = []
+        self.torn_down = False
+
+    def identify(self, identity):
+        self.identified_as.append(identity)
+
+    def request(self, *args, **kwargs):
+        return object()
+
+    def teardown(self):
+        self.torn_down = True
+
+
+def _linked_conn(transport, node_hex, link):
+    conn = node_transport._NodeConn(node_hex)
+    conn.state = node_transport._LINKED
+    conn.link = link
+    transport._conns[node_hex] = conn
+    transport._by_link[id(link)] = node_hex
+    return conn
+
+
+def test_dead_link_redials_instead_of_failing(transport, monkeypatch):
+    results = _collect_results(transport)
+    requested = []
+    monkeypatch.setattr(RNS.Identity, "recall", staticmethod(lambda h: None))
+    monkeypatch.setattr(RNS.Transport, "request_path",
+                        staticmethod(lambda h, *a, **k: requested.append(h)))
+    node_hex = "ab" * 16
+    link = _DeadLink()
+    _linked_conn(transport, node_hex, link)
+
+    transport.fetch("f1", node_hex, "/page/index.mu", max_size=1024)
+
+    assert results == []
+    assert link.torn_down
+    assert requested == [bytes.fromhex(node_hex)]
+    assert [f.fetch_id for f in transport._conns[node_hex].queued] == ["f1"]
+
+
+def test_a_second_dead_link_fails_the_fetch(transport, monkeypatch):
+    results = _collect_results(transport)
+    monkeypatch.setattr(RNS.Identity, "recall", staticmethod(lambda h: None))
+    monkeypatch.setattr(RNS.Transport, "request_path",
+                        staticmethod(lambda h, *a, **k: None))
+    node_hex = "cd" * 16
+    _linked_conn(transport, node_hex, _DeadLink())
+    transport.fetch("f1", node_hex, "/page/index.mu", max_size=1024)
+
+    conn = transport._conns[node_hex]
+    second = _DeadLink()
+    conn.state = node_transport._LINKED
+    conn.link = second
+    transport._by_link[id(second)] = node_hex
+    transport._flush_queued(node_hex)
+
+    assert results == [("f1", False, FETCH_SEND_FAILED)]
+
+
+def test_an_orderly_close_clears_the_backoff_ladder(transport):
+    node_hex = "ef" * 16
+    link = _DeadLink()
+    conn = _linked_conn(transport, node_hex, link)
+    conn.dial_attempts = 3
+    conn.next_dial_at = time.time() + 999
+
+    transport._on_link_closed(link)
+
+    assert conn.state == node_transport._IDLE
+    assert conn.dial_attempts == 0
+    assert conn.next_dial_at == 0.0
+
+
 # ---------------------------------------------------------------------------
 # NodeAnnounceHandler
 # ---------------------------------------------------------------------------
@@ -269,3 +477,118 @@ def test_node_announce_handler_callback_error_swallowed(transport):
     handler = NodeAnnounceHandler(bad_cb)
     handler.received_announce(
         b"\x03" * 16, transport._identity.rns_identity, b"name", b"ph")
+
+
+# ---------------------------------------------------------------------------
+# Identifying to a node
+# ---------------------------------------------------------------------------
+
+def test_no_identify_policy_means_no_identify(transport):
+    """The default is anonymity: with nothing configured, a link must never
+    carry our identity."""
+    link = _RecordingLink()
+    _linked_conn(transport, "ab" * 16, link)
+
+    transport._on_outbound_established(link)
+
+    assert link.identified_as == []
+    assert transport.is_identified("ab" * 16) is False
+
+
+def test_a_link_identifies_on_establish_when_the_policy_allows_it(transport):
+    node_hex = "ab" * 16
+    transport.set_identify_policy(lambda n: n == node_hex)
+    link = _RecordingLink()
+    _linked_conn(transport, node_hex, link)
+
+    transport._on_outbound_established(link)
+
+    assert link.identified_as == [transport._identity.rns_identity]
+    assert transport.is_identified(node_hex) is True
+
+
+def test_the_policy_is_consulted_per_node(transport):
+    allowed, other = "ab" * 16, "cd" * 16
+    transport.set_identify_policy(lambda n: n == allowed)
+    other_link = _RecordingLink()
+    _linked_conn(transport, other, other_link)
+
+    transport._on_outbound_established(other_link)
+
+    assert other_link.identified_as == []
+
+
+def test_identify_on_demand_uses_the_open_link(transport):
+    node_hex = "ab" * 16
+    transport.set_identify_policy(lambda n: True)
+    link = _RecordingLink()
+    _linked_conn(transport, node_hex, link)
+
+    assert transport.identify(node_hex) is True
+    assert link.identified_as == [transport._identity.rns_identity]
+
+
+def test_identify_with_no_link_is_a_no_op(transport):
+    transport.set_identify_policy(lambda n: True)
+    assert transport.identify("ab" * 16) is False
+
+
+def test_identify_on_demand_still_obeys_the_policy(transport):
+    """One answer to "may this node know us", with no way past it: a caller
+    cannot identify to a node the policy does not name."""
+    node_hex = "ab" * 16
+    transport.set_identify_policy(lambda n: False)
+    link = _RecordingLink()
+    _linked_conn(transport, node_hex, link)
+
+    assert transport.identify(node_hex) is False
+    assert link.identified_as == []
+
+
+def test_a_policy_that_raises_leaves_the_link_anonymous(transport):
+    """A broken policy must fail closed -- the failure mode of the other
+    direction is revealing an identity nobody asked to reveal."""
+    def boom(node_hex):
+        raise RuntimeError("policy exploded")
+
+    transport.set_identify_policy(boom)
+    link = _RecordingLink()
+    _linked_conn(transport, "ab" * 16, link)
+
+    transport._on_outbound_established(link)
+
+    assert link.identified_as == []
+
+
+def test_a_dropped_link_takes_its_identification_with_it(transport):
+    """identify() is per link, so a reconnect starts anonymous unless the
+    policy says otherwise -- is_identified must not outlive the link."""
+    node_hex = "ab" * 16
+    transport.set_identify_policy(lambda n: True)
+    link = _RecordingLink()
+    _linked_conn(transport, node_hex, link)
+    transport._on_outbound_established(link)
+    assert transport.is_identified(node_hex) is True
+
+    transport._on_link_closed(link)
+
+    assert transport.is_identified(node_hex) is False
+
+
+def test_dropping_a_link_ends_the_identification_it_carried(transport):
+    """A link cannot un-identify: the proof is read on every request it
+    carries, so stopping means closing it."""
+    node_hex = "ab" * 16
+    transport.set_identify_policy(lambda n: True)
+    link = _RecordingLink()
+    _linked_conn(transport, node_hex, link)
+    transport._on_outbound_established(link)
+
+    assert transport.drop_link(node_hex) is True
+
+    assert link.torn_down is True
+    assert transport.is_identified(node_hex) is False
+
+
+def test_dropping_a_link_that_is_not_there_is_a_no_op(transport):
+    assert transport.drop_link("ab" * 16) is False

@@ -5,10 +5,11 @@ Speaks Nomad Network's node protocol for full interop: nodes are RNS
 destinations on the "nomadnetwork.node" aspect, pages and files are served
 as request/response over links ("/page/index.mu", "/file/<name>"). Fetching
 dials the node destination directly (announces carry the destination hash,
-so no lxmf-delivery indirection) and never identifies — browsing is
-anonymous. Hosting registers one request handler per served file; RNS
-dispatches requests by exact path hash, so unregistered paths simply have
-no handler.
+so no lxmf-delivery indirection) and is anonymous unless the caller asks
+for a node by name: identify_policy names the nodes our identity may be
+revealed to, and nothing else ever calls Link.identify. Hosting registers
+one request handler per served file; RNS dispatches requests by exact path
+hash, so unregistered paths simply have no handler.
 
 This module never touches Storage or core managers, matching
 voice_transport.py's layering: callbacks up, tick() down.
@@ -16,6 +17,7 @@ voice_transport.py's layering: callbacks up, tick() down.
 
 import threading
 import time
+from pathlib import Path
 
 import RNS
 
@@ -23,11 +25,20 @@ NOMAD_APP_NAME = "nomadnetwork"
 NOMAD_ASPECT_NODE = "node"
 
 NODE_REDIAL_BACKOFF = (2.0, 5.0, 10.0, 30.0)
-NODE_LINK_IDLE_SECS = 60.0
+# A link is kept for the whole time a node is being read, not just between
+# back-to-back requests: nomadnet holds one open until you browse elsewhere,
+# and a node operator sees link churn from a slow reader as a new handshake
+# per page. Idle links are still dropped, just not mid-visit.
+NODE_LINK_IDLE_SECS = 300.0
 NODE_FETCH_TIMEOUT_SECS = 60.0
 NODE_ANNOUNCE_INTERVAL_SECS = 900.0
 MAX_QUEUED_FETCHES_PER_NODE = 8
 MAX_REQUEST_PATH_LEN = 256
+MAX_FILENAME_LEN = 128
+
+# nomadnet's own ceiling for compressing a file response. Above it the cost
+# is not worth paying, and most large files are already compressed.
+NODE_FILE_AUTO_COMPRESS = 32_000_000
 
 NODE_SERVE_RATE_LIMIT = 8
 NODE_SERVE_RATE_WINDOW = 1.0
@@ -43,6 +54,7 @@ FETCH_TOO_LARGE = "too_large"
 FETCH_LINK_CLOSED = "link_closed"
 FETCH_SEND_FAILED = "send_failed"
 FETCH_BAD_RESPONSE = "bad_response"
+FETCH_NOT_FOUND = "not_found"
 FETCH_IDENTITY_MISMATCH = "identity_mismatch"
 FETCH_CANCELLED = "cancelled"
 
@@ -67,23 +79,102 @@ def is_valid_request_path(path) -> bool:
     return True
 
 
+def _response_payload(receipt) -> tuple[bytes | None, str | None]:
+    """A request response as (bytes, name the node gave it).
+
+    A page is plain bytes. A file is not: nomadnet serves it as
+    [open(path), {"name": ...}], which RNS delivers as an open handle on a
+    temp file it deletes as soon as this callback returns -- so it has to be
+    read here, not later -- with the name alongside in the receipt metadata.
+    Older nodes answer with [name, data] instead. (None, None) for anything
+    else.
+    """
+    data = receipt.response
+    name = _response_name(getattr(receipt, "metadata", None))
+    if hasattr(data, "read"):
+        try:
+            data = data.read()
+        except OSError as e:
+            RNS.log(f"TrenchChat [nomad]: could not read file response: {e}",
+                    RNS.LOG_WARNING)
+            return None, None
+    elif isinstance(data, (list, tuple)) and len(data) == 2:
+        if name is None:
+            name = _clean_filename(data[0])
+        data = data[1]
+    if isinstance(data, str):
+        data = data.encode("utf-8")
+    if not isinstance(data, bytes):
+        return None, None
+    return data, name
+
+
+def _response_name(metadata) -> str | None:
+    """The file name in a response's metadata, if it carries a usable one."""
+    if not isinstance(metadata, dict):
+        return None
+    return _clean_filename(metadata.get("name"))
+
+
+def _clean_filename(value) -> str | None:
+    """A node-supplied name reduced to a bare, printable basename.
+
+    The name is chosen by the remote and ends up in a Content-Disposition
+    header, so nothing that could steer a path or a header survives.
+    """
+    if isinstance(value, bytes):
+        value = value.decode("utf-8", errors="replace")
+    if not isinstance(value, str):
+        return None
+    value = value.replace("\\", "/").rsplit("/", 1)[-1]
+    value = "".join(c for c in value
+                    if c.isprintable() and c not in '"\\')
+    value = value.strip().strip(".")
+    return value[:MAX_FILENAME_LEN] or None
+
+
 class NodeTransportBase:
     """Injectable transport interface; see RNSNodeTransport for semantics."""
 
     def __init__(self):
         self._result_cb = None
         self._progress_cb = None
+        self._identify_policy = None
+
+    def _may_identify(self, node_hex: str) -> bool:
+        if self._identify_policy is None:
+            return False
+        try:
+            return bool(self._identify_policy(node_hex))
+        except Exception as e:
+            RNS.log(f"TrenchChat [nomad]: identify policy error: {e}",
+                    RNS.LOG_ERROR)
+            return False
 
     def set_fetch_result_callback(self, cb) -> None:
-        """cb(fetch_id, ok: bool, payload: bytes | None, reason: str | None)"""
+        """cb(fetch_id, ok, payload: bytes | None, reason, filename)"""
         self._result_cb = cb
 
     def set_fetch_progress_callback(self, cb) -> None:
         """cb(fetch_id, progress: float) with progress in 0.0-1.0"""
         self._progress_cb = cb
 
+    def set_identify_policy(self, policy) -> None:
+        """policy(node_hash_hex) -> bool: may we identify to this node?"""
+        self._identify_policy = policy
+
+    def identify(self, node_hash_hex: str) -> bool:
+        raise NotImplementedError
+
+    def is_identified(self, node_hash_hex: str) -> bool:
+        raise NotImplementedError
+
+    def drop_link(self, node_hash_hex: str) -> bool:
+        raise NotImplementedError
+
     def fetch(self, fetch_id: str, node_hash_hex: str, path: str, *,
-              max_size: int, timeout: float = NODE_FETCH_TIMEOUT_SECS) -> None:
+              max_size: int, timeout: float = NODE_FETCH_TIMEOUT_SECS,
+              data: dict | None = None) -> None:
         raise NotImplementedError
 
     def cancel(self, fetch_id: str) -> None:
@@ -107,11 +198,12 @@ class NodeTransportBase:
     # shared helpers for subclasses
 
     def _notify_result(self, fetch_id: str, ok: bool, payload: bytes | None,
-                       reason: str | None) -> None:
+                       reason: str | None,
+                       filename: str | None = None) -> None:
         if self._result_cb is None:
             return
         try:
-            self._result_cb(fetch_id, ok, payload, reason)
+            self._result_cb(fetch_id, ok, payload, reason, filename)
         except Exception as e:
             RNS.log(f"TrenchChat [nomad]: result callback error: {e}",
                     RNS.LOG_ERROR)
@@ -130,14 +222,16 @@ class _Fetch:
     """One in-flight or queued page/file request."""
 
     def __init__(self, fetch_id: str, node_hex: str, path: str,
-                 max_size: int, timeout: float):
+                 max_size: int, timeout: float, data: dict | None = None):
         self.fetch_id = fetch_id
         self.node_hex = node_hex
         self.path = path
         self.max_size = max_size
         self.timeout = timeout
+        self.data = data
         self.created_at = time.time()
         self.receipt = None
+        self.redialed = False
 
 
 class _NodeConn:
@@ -151,6 +245,8 @@ class _NodeConn:
         self.next_dial_at = 0.0
         self.last_used = time.time()
         self.queued: list[_Fetch] = []
+        # Per link, not per node: a new link starts anonymous again.
+        self.identified = False
 
     @property
     def exhausted(self) -> bool:
@@ -178,11 +274,12 @@ class RNSNodeTransport(NodeTransportBase):
     # --- fetching ---
 
     def fetch(self, fetch_id: str, node_hash_hex: str, path: str, *,
-              max_size: int, timeout: float = NODE_FETCH_TIMEOUT_SECS) -> None:
+              max_size: int, timeout: float = NODE_FETCH_TIMEOUT_SECS,
+              data: dict | None = None) -> None:
         if not is_valid_request_path(path):
             self._notify_result(fetch_id, False, None, FETCH_BAD_PATH)
             return
-        fetch = _Fetch(fetch_id, node_hash_hex, path, max_size, timeout)
+        fetch = _Fetch(fetch_id, node_hash_hex, path, max_size, timeout, data)
         dial_now = False
         flush_now = False
         with self._lock:
@@ -268,6 +365,36 @@ class RNSNodeTransport(NodeTransportBase):
                     f"failed: {e}", RNS.LOG_WARNING)
             self._defer_dial(node_hex)
 
+    def _redial_for(self, fetch: _Fetch) -> bool:
+        """Requeue a fetch that burnt on a dead link and dial a fresh one.
+
+        A link the remote has already dropped still looks established here
+        until RNS notices, so the first request on it fails to send. Retry
+        once per fetch; a second failure is a real one.
+        """
+        if fetch.redialed:
+            return False
+        fetch.redialed = True
+        link = None
+        with self._lock:
+            conn = self._conns.get(fetch.node_hex)
+            if conn is None:
+                return False
+            if conn.link is not None:
+                self._by_link.pop(id(conn.link), None)
+                link = conn.link
+                conn.link = None
+            conn.state = _IDLE
+            conn.identified = False
+            conn.dial_attempts = 0
+            conn.next_dial_at = 0.0
+            conn.queued.append(fetch)
+        self._teardown_link(link)
+        RNS.log(f"TrenchChat [nomad]: link to {fetch.node_hex[:12]}… was "
+                f"dead, redialing", RNS.LOG_DEBUG)
+        self._dial(fetch.node_hex)
+        return True
+
     def _defer_dial(self, node_hex: str) -> None:
         # Exhaustion never fails queued fetches here: on a cold path, RNS
         # resolution can outlast the whole backoff ladder while the node is
@@ -279,12 +406,23 @@ class RNSNodeTransport(NodeTransportBase):
                 return
             self._register_link_failure(conn)
 
-    def _register_link_failure(self, conn: _NodeConn) -> None:
-        """Caller holds the lock. Schedules the next dial with backoff."""
+    def _register_link_failure(self, conn: _NodeConn, *,
+                               arm_backoff: bool = True) -> None:
+        """Caller holds the lock. Schedules the next dial.
+
+        The backoff ladder answers dials that never landed. A link that was
+        established and later closed says nothing about reachability, so it
+        clears the ladder instead of climbing it.
+        """
         if conn.link is not None:
             self._by_link.pop(id(conn.link), None)
             conn.link = None
         conn.state = _IDLE
+        conn.identified = False
+        if not arm_backoff:
+            conn.dial_attempts = 0
+            conn.next_dial_at = 0.0
+            return
         backoff = NODE_REDIAL_BACKOFF[
             min(conn.dial_attempts, len(NODE_REDIAL_BACKOFF) - 1)]
         conn.dial_attempts += 1
@@ -320,7 +458,75 @@ class RNSNodeTransport(NodeTransportBase):
                 return
             conn.state = _LINKED
             conn.dial_attempts = 0
+        # Before the queued requests, so the node has our identity by the
+        # time it renders the first page -- the order nomadnet uses too.
+        if self._may_identify(node_hex):
+            self._identify_on(node_hex, link)
         self._flush_queued(node_hex)
+
+    def identify(self, node_hash_hex: str) -> bool:
+        """Reveal our identity to a node over the link already open to it.
+
+        Gated by the same policy as an establishing link, so there is one
+        answer to "may this node know us" and no way past it. Returns
+        whether the proof went out; False when no link is up, in which case
+        the stored choice is what identifies the next one.
+        """
+        if not self._may_identify(node_hash_hex):
+            return False
+        with self._lock:
+            conn = self._conns.get(node_hash_hex)
+            link = conn.link if conn is not None and conn.state == _LINKED \
+                else None
+        if link is None:
+            return False
+        return self._identify_on(node_hash_hex, link)
+
+    def _identify_on(self, node_hex: str, link) -> bool:
+        """Send the link-identify proof and record that this link carries it."""
+        try:
+            link.identify(self._identity.rns_identity)
+        except Exception as e:
+            RNS.log(f"TrenchChat [nomad]: could not identify to "
+                    f"{node_hex[:12]}…: {e}", RNS.LOG_WARNING)
+            return False
+        with self._lock:
+            conn = self._conns.get(node_hex)
+            if conn is not None and conn.link is link:
+                conn.identified = True
+        RNS.log(f"TrenchChat [nomad]: identified to {node_hex[:12]}…",
+                RNS.LOG_NOTICE)
+        return True
+
+    def drop_link(self, node_hash_hex: str) -> bool:
+        """Close the link to a node, so the next request opens a fresh one.
+
+        A link cannot un-identify: the proof is sent once and the node
+        reads it on every request the link carries. Dropping it is the only
+        way to stop identifying without waiting for the idle timeout.
+        Queued and in-flight fetches are left alone -- they fail or finish
+        on the closing link, and the caller is changing a setting, not
+        cancelling a page.
+        """
+        link = None
+        with self._lock:
+            conn = self._conns.get(node_hash_hex)
+            if conn is None or conn.link is None:
+                return False
+            link = conn.link
+            self._by_link.pop(id(link), None)
+            conn.link = None
+            conn.state = _IDLE
+            conn.identified = False
+        self._teardown_link(link)
+        return True
+
+    def is_identified(self, node_hash_hex: str) -> bool:
+        """Whether the link currently open to a node carries our identity."""
+        with self._lock:
+            conn = self._conns.get(node_hash_hex)
+            return bool(conn is not None and conn.state == _LINKED
+                        and conn.identified)
 
     def _flush_queued(self, node_hex: str) -> None:
         with self._lock:
@@ -338,7 +544,7 @@ class RNSNodeTransport(NodeTransportBase):
         try:
             receipt = link.request(
                 fetch.path,
-                data=None,
+                data=fetch.data,
                 response_callback=self._on_response,
                 failed_callback=self._on_request_failed,
                 progress_callback=self._on_request_progress,
@@ -350,6 +556,8 @@ class RNSNodeTransport(NodeTransportBase):
                     RNS.LOG_WARNING)
             receipt = False
         if receipt is False or receipt is None:
+            if self._redial_for(fetch):
+                return
             self._notify_result(fetch.fetch_id, False, None, FETCH_SEND_FAILED)
             return
         fetch.receipt = receipt
@@ -371,14 +579,12 @@ class RNSNodeTransport(NodeTransportBase):
         fetch = self._pop_active(receipt)
         if fetch is None:
             return
-        data = receipt.response
-        if isinstance(data, str):
-            data = data.encode("utf-8")
-        if not isinstance(data, bytes):
+        data, filename = _response_payload(receipt)
+        if data is None:
             self._notify_result(fetch.fetch_id, False, None,
                                 FETCH_BAD_RESPONSE)
             return
-        self._notify_result(fetch.fetch_id, True, data, None)
+        self._notify_result(fetch.fetch_id, True, data, None, filename)
 
     def _on_request_failed(self, receipt) -> None:
         fetch = self._pop_active(receipt)
@@ -416,7 +622,7 @@ class RNSNodeTransport(NodeTransportBase):
                       if f.node_hex == node_hex]
             for fetch in failed:
                 self._active.pop(id(fetch.receipt), None)
-            self._register_link_failure(conn)
+            self._register_link_failure(conn, arm_backoff=False)
         for fetch in failed:
             self._notify_result(fetch.fetch_id, False, None, FETCH_LINK_CLOSED)
 
@@ -524,6 +730,8 @@ class RNSNodeTransport(NodeTransportBase):
                 path,
                 response_generator=self._serve,
                 allow=RNS.Destination.ALLOW_ALL,
+                auto_compress=(NODE_FILE_AUTO_COMPRESS
+                               if path.startswith("/file/") else True),
             )
         self._providers = {p: fn for p, fn in providers.items()
                            if is_valid_request_path(p)}
@@ -592,6 +800,8 @@ class RNSNodeTransport(NodeTransportBase):
             RNS.log(f"TrenchChat [nomad]: serve error for {path}: {e}",
                     RNS.LOG_WARNING)
             return None
+        if isinstance(payload, Path):
+            return self._serve_file(path, payload)
         if not isinstance(payload, bytes):
             return None
         if len(payload) > MAX_SERVED_RESPONSE_BYTES:
@@ -599,3 +809,30 @@ class RNSNodeTransport(NodeTransportBase):
                     f"{path} ({len(payload)} bytes)", RNS.LOG_WARNING)
             return None
         return payload
+
+    def _serve_file(self, path: str, real: Path):
+        """A file response: an open handle plus the name it should be saved
+        under.
+
+        This is the only shape nomadnet's browser can save -- handed raw
+        bytes it reads response[0] as a filename, gets an integer, and drops
+        the download with an exception. RNS streams from the handle and
+        closes it.
+        """
+        try:
+            size = real.stat().st_size
+        except OSError as e:
+            RNS.log(f"TrenchChat [nomad]: cannot stat {path}: {e}",
+                    RNS.LOG_WARNING)
+            return None
+        if size > MAX_SERVED_RESPONSE_BYTES:
+            RNS.log(f"TrenchChat [nomad]: refusing to serve oversized "
+                    f"{path} ({size} bytes)", RNS.LOG_WARNING)
+            return None
+        try:
+            handle = real.open("rb")
+        except OSError as e:
+            RNS.log(f"TrenchChat [nomad]: cannot open {path}: {e}",
+                    RNS.LOG_WARNING)
+            return None
+        return [handle, {"name": real.name.encode("utf-8")}]

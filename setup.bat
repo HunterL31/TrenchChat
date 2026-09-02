@@ -66,6 +66,7 @@ if not exist ".venv\" (
 echo Installing dependencies...
 .venv\Scripts\pip install --upgrade pip --quiet
 .venv\Scripts\pip install -r requirements.txt --quiet
+.venv\Scripts\pip install -r devtools\testenv\requirements.txt --quiet
 
 :: Voice readiness: sounddevice bundles PortAudio on Windows, but libopus
 :: is not installable from a package manager here -- probe and say so.

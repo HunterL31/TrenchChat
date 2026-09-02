@@ -1,8 +1,7 @@
 # Dependencies for the local two-tester test environment (devtools/testenv/).
-# Dev-only -- not part of the shipped app; install into the same .venv as
-# the main requirements.txt before running orchestrator.py or smoke_test.py.
+# Dev-only -- install into the same .venv as the main requirements.txt before
+# running orchestrator.py or smoke_test.py. The server stack the app itself
+# needs (fastapi, uvicorn, websockets) lives in requirements.txt: main_flutter.py
+# serves api.py, so it is not a dev extra.
 
-fastapi>=0.141
-uvicorn[standard]>=0.52
 httpx>=0.28
-websockets>=16.1

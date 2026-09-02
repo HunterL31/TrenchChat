@@ -13,6 +13,7 @@ timeouts, and a per-fetch delivery delay.
 
 import threading
 import time
+from pathlib import Path
 
 from trenchchat.network.node_transport import (
     FETCH_BAD_PATH, FETCH_BAD_RESPONSE, FETCH_BUSY, FETCH_TIMEOUT,
@@ -48,16 +49,22 @@ class FakeNodeTransport(NodeTransportBase):
         self.unreachable: set[str] = set(unreachable or ())
         self.timeout_paths: set[str] = set(timeout_paths or ())
         self.providers: dict = {}
+        self.request_data: dict[str, dict | None] = {}
         self.hosting_name: str | None = None
         self.announce_count = 0
         self._pending: dict[str, int] = {}   # node_hex -> in-flight count
+        # Nodes a link has been opened to, and those it revealed us to.
+        self.linked: set[str] = set()
+        self.identified: set[str] = set()
         self._lock = threading.RLock()
         self._threads: list[threading.Thread] = []
 
     # --- fetching ---
 
     def fetch(self, fetch_id: str, node_hash_hex: str, path: str, *,
-              max_size: int, timeout: float = NODE_FETCH_TIMEOUT_SECS) -> None:
+              max_size: int, timeout: float = NODE_FETCH_TIMEOUT_SECS,
+              data: dict | None = None) -> None:
+        self.request_data[fetch_id] = data
         if not is_valid_request_path(path):
             self._notify_result(fetch_id, False, None, FETCH_BAD_PATH)
             return
@@ -73,6 +80,9 @@ class FakeNodeTransport(NodeTransportBase):
             return
         with self.registry.lock:
             self.registry.fetch_log.append((self.self_hex, node_hash_hex, path))
+        self.linked.add(node_hash_hex)
+        if self._may_identify(node_hash_hex):
+            self.identified.add(node_hash_hex)
 
         def _resolve():
             time.sleep(self._delay)
@@ -105,6 +115,16 @@ class FakeNodeTransport(NodeTransportBase):
             payload = provider()
         except Exception:
             payload = None
+        # A file provider hands back its Path; the real transport streams it
+        # with the name in the response metadata, and the receiving side
+        # reads the bytes out of the response handle.
+        filename = None
+        if isinstance(payload, Path):
+            filename = payload.name
+            try:
+                payload = payload.read_bytes()
+            except OSError:
+                payload = None
         if not isinstance(payload, bytes):
             self._notify_result(fetch_id, False, None, FETCH_BAD_RESPONSE)
             return
@@ -112,10 +132,32 @@ class FakeNodeTransport(NodeTransportBase):
             self._notify_result(fetch_id, False, None, FETCH_TOO_LARGE)
             return
         self._notify_progress(fetch_id, 1.0)
-        self._notify_result(fetch_id, True, payload, None)
+        self._notify_result(fetch_id, True, payload, None, filename)
 
     def cancel(self, fetch_id: str) -> None:
         pass
+
+    # --- identifying ---
+
+    def identify(self, node_hash_hex: str) -> bool:
+        """Records the proof a real link would carry, gated by the same
+        policy the RNS transport consults."""
+        if node_hash_hex not in self.linked:
+            return False
+        if not self._may_identify(node_hash_hex):
+            return False
+        self.identified.add(node_hash_hex)
+        return True
+
+    def is_identified(self, node_hash_hex: str) -> bool:
+        return node_hash_hex in self.identified
+
+    def drop_link(self, node_hash_hex: str) -> bool:
+        """A closed link takes its identification with it, as a real one does."""
+        had_link = node_hash_hex in self.linked
+        self.linked.discard(node_hash_hex)
+        self.identified.discard(node_hash_hex)
+        return had_link
 
     # --- hosting ---
 

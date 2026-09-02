@@ -590,11 +590,75 @@ resolution, link establishment, and the request/response transfer itself.
 The manual interop check — browsing a real pip `nomadnet` node and being
 browsed back by it — is documented in `scen_nomad.py` and not automated.
 
+Run against `nomadnet` 1.2.9 (rns 1.5.2) on 2026-09-01, joined to the testenv
+hub, in both directions. Pages were fine from the start. Files were broken
+both ways, and the shape is the reason: a node answers a `/file/` request
+with `[open(path), {"name": ...}]`, which RNS delivers as an open handle on a
+temp file it deletes the moment the response callback returns. We required
+`bytes`, so every file from a real node failed as `bad_response`; and we
+answered with raw bytes, which sends nomadnet's `file_received` down its
+legacy `[name, data]` branch to do `basename(<int>)` and drop the download
+with a `TypeError`. Both fixed, and re-verified by running nomadnet's own
+`file_received` against our response. Pages remain plain bytes on both
+sides — the handle-and-metadata shape is for files only.
+
+A second parity pass on 2026-09-01 closed the remaining micron and browsing
+gaps: `#!bg=`/`#!fg=` page colours, `` `{...} `` partials with their refresh
+timers and `p:` reload links, the `anchor=` link variable, table block
+arguments (`` `tc70 ``), section right-indent, the file name a node puts in
+its response metadata, and browsing your own node. Each was checked against
+nomadnet's own code rather than its documentation — the demo site's markup
+is fed through upstream's `parse_partial`, its `#!bg=` header scan and its
+table-argument reader, and all three read exactly what ours read. Two things
+are worth knowing. A partial is an ordinary page request on the same link,
+so nothing new reaches the wire and no scenario covers it separately. And
+your own node is never dialled: RNS cannot link a destination to itself, so
+`NodeBrowserManager._serve_loopback` reads the pages directory and answers
+through the ordinary fetch machinery, which is also why a page of your own
+is re-read on every visit rather than served from its `#!c=` cache.
+
+Identify-on-connect was verified the same way, against a real nomadnet
+1.2.9 node serving an executable page that echoes its `remote_identity`
+environment variable — the same variable a forum like rns.recipes keys an
+account to. Browsing anonymously, the page reported `ANONYMOUS`; after
+enabling identify for that node, the very next request on the *same* link
+reported our exact identity hash; tearing the link down and fetching again
+identified the fresh link from the stored choice alone. So both models
+work: nomadnet's directory checkbox (persisted, applies to the next link)
+and MeshChat's fingerprint button (identifies the link already open). We do
+not need nomadnet's disconnect-and-reconnect step, because `Link.identify`
+is legal on an active link and the node reads `remote_identity` per request.
+
+Turning it off is the half worth spelling out, because the obvious
+implementation is wrong: a link cannot un-identify. The proof is sent once
+and the node reads it on every request that link carries, so clearing the
+stored flag alone would keep reporting the identity for as long as the link
+lived — up to `NODE_LINK_IDLE_SECS`, and indefinitely while the user keeps
+reading. `set_identify(..., False)` therefore drops the link, and the same
+probe confirms the next page comes back `ANONYMOUS` rather than at the next
+idle timeout.
+
+It is opt-in per node and defaults to off, which is where the design choice
+sits: identifying tells that operator, provably and permanently, that this
+identity visited, so a bug that identified by accident is not recoverable by
+turning the setting back off. The transport therefore fails closed — no
+policy, a policy that raises, or a node the policy does not name all leave
+the link anonymous, and `tests/test_node_transport.py` asserts each of those
+three against a link that records every proof sent on it.
+
+One deliberate divergence: nomadnet strips Unicode combining and format
+characters from everything it renders, zero-width joiners included, which
+also breaks emoji sequences. We strip only the characters that actually
+mislead a reader — the bidirectional overrides and isolates, which let a
+page reorder what is displayed so a link label reads as a destination it
+does not name — and leave joiners alone.
+
 | ID | Peers | Actions | Expected result |
 |---|---|---|---|
 | nomad1 | A,B | A enables hosting; B browses the node's index | ✅ B discovers the node from the announce and fetches the default `index.mu` in 0.5s. 4/4 runs |
 | nomad2 | A,B | A page and a 16 KB file added to A's directory; A rescans; B fetches both | ✅ Rescan serves the new paths; page and file each fetch in 0.5s and the file round-trips byte-identical. 4/4 runs |
 | nomad3 | A,B | B fetches once; A goes offline; B requests an uncached page; A returns; B fetches a new page | ⚠ **Confirmed.** The offline fetch never arrives and never hangs — the dial ladder gives up within its bounded backoff (browse accepted, nothing after 90s). After A returns, a fresh page fetch succeeds in 20.1s, tracking path re-resolution. Probe |
+| nomad4 | A,B | B fetches A's index; a new page is written into A's directory; A's process is restarted; B fetches the new page | ✅ Hosting comes back from config on boot and the new page fetches in 0.5s over a fresh link. 4/4 runs. Note: it passes with the dead-link redial disabled too — RNS closes the link when the host dies, so this is not that fix's guard (`tests/test_node_transport.py` is) |
 
 ## The LoRa pass
 
@@ -744,7 +808,7 @@ All twelve families built and run: **99 scenarios, 77 strict and 22 probes.**
 | `voice` — live group voice | 13 (10 strict, 3 probes) | All passing; voice13 found a real cadence defect, 5/5 after the fix; voice4, voice5 and voice11 recorded gaps |
 | `api` — the API surface | 4 (3 strict, 1 probe) | All passing; api4 records the shared-token property |
 | `integrity` — message integrity | 4 (4 strict) | All passing; integrity2 found a real gap, now fixed and strict |
-| `nomad` — page browsing and hosting | 3 (2 strict, 1 probe) | All passing, 4/4 runs each; nomad3 confirmed bounded offline failure and recovery |
+| `nomad` — page browsing and hosting | 4 (3 strict, 1 probe) | All passing, 4/4 runs each; nomad3 confirmed bounded offline failure and recovery |
 | `interop` — direct messages with other LXMF clients | 4 (4 strict) | All passing against a real bare RNS+LXMF client; interop4 found a real gap, 5/5 after the fix |
 
 **76 of 77 strict scenarios pass.** The one failure is a real defect, left

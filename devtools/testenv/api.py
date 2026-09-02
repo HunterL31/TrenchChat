@@ -95,6 +95,12 @@ class AddFriendRequest(BaseModel):
     note: str = ""
 
 
+class AddLxmfAddressRequest(BaseModel):
+    lxmf_hash: str
+    nickname: str = ""
+    note: str = ""
+
+
 class UpdateFriendRequest(BaseModel):
     nickname: str | None = None
     note: str | None = None
@@ -115,11 +121,18 @@ class PinPropagationNodeRequest(BaseModel):
 class NomadBrowseRequest(BaseModel):
     url: str
     current_node: str | None = None
+    data: dict[str, str] | None = None
+    refresh: bool = False
 
 
 class NomadFetchRequest(BaseModel):
     node_hash: str
     path: str = "/page/index.mu"
+
+
+class NomadIdentifyRequest(BaseModel):
+    node_hash: str
+    enabled: bool
 
 
 class NomadBookmarkRequest(BaseModel):
@@ -1045,6 +1058,15 @@ def create_app(backend: Backend, *, token: str | None = None,
     def list_friend_requests():
         return backend.friends_mgr.get_pending_requests()
 
+    @app.post("/friends/lxmf")
+    def add_lxmf_address(req: AddLxmfAddressRequest):
+        result = backend.friends_mgr.add_lxmf_address(
+            req.lxmf_hash, req.nickname, req.note)
+        if result["state"] == "invalid":
+            return JSONResponse(
+                {"ok": False, "error": "invalid LXMF address"}, status_code=400)
+        return {"ok": True, **result}
+
     @app.post("/friends/requests")
     def send_friend_request(req: FriendRequestRequest):
         ok = actions.send_friend_request(
@@ -1162,7 +1184,8 @@ def create_app(backend: Backend, *, token: str | None = None,
     @app.post("/nomad/browse")
     def nomad_browse(req: NomadBrowseRequest):
         result = actions.browse_nomad_url(
-            backend.node_browser, req.url, current_node_hex=req.current_node)
+            backend.node_browser, req.url, current_node_hex=req.current_node,
+            request_data=req.data, refresh=req.refresh)
         return {"ok": True, **result}
 
     @app.post("/nomad/fetch")
@@ -1175,6 +1198,16 @@ def create_app(backend: Backend, *, token: str | None = None,
             kind = "page"
         return {"ok": True, "fetch_id": fetch_id, "node_hash": req.node_hash,
                 "path": req.path, "kind": kind}
+
+    @app.get("/nomad/fetch/{fetch_id}")
+    def get_nomad_fetch(fetch_id: str):
+        status = backend.node_browser.fetch_status(fetch_id)
+        if status is None:
+            return JSONResponse(
+                {"ok": False, "error": "unknown fetch", "reason": "unknown"},
+                status_code=404,
+            )
+        return {"ok": True, **status}
 
     @app.get("/nomad/page/{node_hash}")
     def get_nomad_page(node_hash: str, path: str = "/page/index.mu"):
@@ -1198,7 +1231,9 @@ def create_app(backend: Backend, *, token: str | None = None,
                 {"ok": False, "error": "not cached", "reason": "not_cached"},
                 status_code=404,
             )
-        basename = path.rsplit("/", 1)[-1] or "download"
+        # The name the node gave the file, when it gave one; the path's
+        # basename is only the fallback.
+        basename = row["filename"] or path.rsplit("/", 1)[-1] or "download"
         safe_name = "".join(
             c for c in basename if c.isprintable() and c not in '"\\')[:128]
         return Response(
@@ -1211,6 +1246,16 @@ def create_app(backend: Backend, *, token: str | None = None,
                     f'attachment; filename="{safe_name or "download"}"',
             },
         )
+
+    @app.get("/nomad/identify/{node_hash}")
+    def get_nomad_identify(node_hash: str):
+        return backend.node_browser.identify_status(node_hash)
+
+    @app.post("/nomad/identify")
+    def set_nomad_identify(req: NomadIdentifyRequest):
+        status = actions.set_node_identify(
+            backend.node_browser, req.node_hash, req.enabled)
+        return {"ok": True, **status}
 
     @app.get("/nomad/bookmarks")
     def list_nomad_bookmarks():

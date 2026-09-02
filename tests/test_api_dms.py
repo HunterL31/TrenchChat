@@ -125,6 +125,34 @@ class TestFriendRequestEndpoints:
                           headers=AUTH)
         assert res.status_code == 400
 
+    def test_an_lxmf_address_is_passed_through_for_resolution(
+            self, client, backend):
+        backend.friends_mgr.add_lxmf_address.return_value = {
+            "state": "added", "identity_hash": PEER}
+        res = client.post("/friends/lxmf",
+                          json={"lxmf_hash": "dd" * 16, "nickname": "bot"},
+                          headers=AUTH)
+        assert res.status_code == 200
+        assert res.json()["state"] == "added"
+        assert res.json()["identity_hash"] == PEER
+        backend.friends_mgr.add_lxmf_address.assert_called_once_with(
+            "dd" * 16, "bot", "")
+
+    def test_an_address_still_resolving_is_reported_as_such(
+            self, client, backend):
+        backend.friends_mgr.add_lxmf_address.return_value = {
+            "state": "resolving", "identity_hash": None}
+        res = client.post("/friends/lxmf", json={"lxmf_hash": "dd" * 16},
+                          headers=AUTH)
+        assert res.json()["state"] == "resolving"
+
+    def test_a_malformed_lxmf_address_is_rejected(self, client, backend):
+        backend.friends_mgr.add_lxmf_address.return_value = {
+            "state": "invalid", "identity_hash": None}
+        res = client.post("/friends/lxmf", json={"lxmf_hash": "nope"},
+                          headers=AUTH)
+        assert res.status_code == 400
+
     def test_accept_and_decline_report_whether_a_request_existed(
             self, client, backend):
         backend.friends_mgr.accept_friend_request.return_value = True

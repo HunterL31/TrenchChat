@@ -93,6 +93,9 @@ class FriendsManager:
         self._callbacks: list = []
         self._request_callbacks: list = []
         self._retry = ControlRetryQueue("friends")
+        # LXMF addresses waiting to resolve to an identity: address -> the
+        # contact details to save once it does.
+        self._resolving: dict[str, dict] = {}
         # Set by the frontend wiring; see set_message_filer.
         self._message_filer = None
 
@@ -155,6 +158,72 @@ class FriendsManager:
             self._last_seen.pop(identity_hash_hex, None)
         self._fire_callbacks(identity_hash_hex)
         return True
+
+    def add_lxmf_address(self, lxmf_hash_hex: str, nickname: str = "",
+                         note: str = "") -> dict:
+        """Save a contact from the LXMF address a client or bot advertises.
+
+        An LXMF address is a delivery destination hash, not the identity hash
+        everything else here is keyed on, and one cannot be computed from the
+        other -- but the announce that made the peer reachable carries the
+        identity, so recalling it turns the address into an ordinary contact
+        and every path from there is unchanged.
+
+        Returns {"state", "identity_hash"}: "added" once resolved, or
+        "resolving" while the path request is out, which tick() retries.
+        Nothing blocks; an unreachable address simply never resolves.
+        """
+        lxmf_hex = (lxmf_hash_hex or "").strip().lower()
+        if not self._is_valid_hash(lxmf_hex):
+            return {"state": "invalid", "identity_hash": None}
+
+        identity_hex = self._identity_for_address(lxmf_hex)
+        if identity_hex == self._self_hex:
+            return {"state": "invalid", "identity_hash": None}
+        if identity_hex is None:
+            with self._lock:
+                self._resolving[lxmf_hex] = {"nickname": nickname, "note": note}
+            RNS.Transport.request_path(bytes.fromhex(lxmf_hex))
+            RNS.log(f"TrenchChat [friends]: resolving LXMF address "
+                    f"{lxmf_hex[:12]}…", RNS.LOG_NOTICE)
+            return {"state": "resolving", "identity_hash": None}
+
+        self.add_friend(identity_hex, nickname, note)
+        return {"state": "added", "identity_hash": identity_hex}
+
+    def _identity_for_address(self, lxmf_hex: str) -> str | None:
+        """The identity hash behind an LXMF address, once its announce has
+        been heard. None while it has not."""
+        try:
+            identity = RNS.Identity.recall(bytes.fromhex(lxmf_hex))
+        except Exception as e:
+            RNS.log(f"TrenchChat [friends]: could not recall {lxmf_hex[:12]}…: "
+                    f"{e}", RNS.LOG_WARNING)
+            return None
+        return identity.hash.hex() if identity is not None else None
+
+    def resolving_addresses(self) -> list[str]:
+        """LXMF addresses still waiting on a path."""
+        with self._lock:
+            return sorted(self._resolving)
+
+    def tick(self) -> None:
+        """Finish any LXMF address whose identity has since been recalled."""
+        with self._lock:
+            pending = dict(self._resolving)
+        for lxmf_hex, details in pending.items():
+            identity_hex = self._identity_for_address(lxmf_hex)
+            if identity_hex is None:
+                continue
+            with self._lock:
+                self._resolving.pop(lxmf_hex, None)
+            # Our own address resolves like any other; it is just not a
+            # contact, and leaving it queued would retry it forever.
+            if identity_hex == self._self_hex:
+                continue
+            RNS.log(f"TrenchChat [friends]: {lxmf_hex[:12]}… is "
+                    f"{identity_hex[:12]}…", RNS.LOG_NOTICE)
+            self.add_friend(identity_hex, details["nickname"], details["note"])
 
     def is_friend(self, identity_hash_hex: str) -> bool:
         """True only for an accepted friend. The direct-message gate."""
@@ -223,20 +292,26 @@ class FriendsManager:
         dropped and nobody was ever told. Holding it grants nothing: the sender
         stays unaccepted, and only the user accepting changes that.
 
-        False when there is nothing to hold: our own hash, a malformed one, a
-        sender already accepted (their message is a real one), or one we have an
-        outstanding request to -- their answer belongs to that request, not to a
-        second queue.
+        False when there is nothing to hold: our own hash, a malformed one, or
+        a sender already accepted (their message is a real one).
+
+        An outstanding request of ours is deliberately not a reason to drop
+        one. A TrenchChat peer answers a request with MT_FRIEND_ACCEPT, but a
+        bot or a plain LXMF client cannot -- it answers with words, and
+        treating those as belonging to the request meant the only reply it
+        could make was silently thrown away.
         """
         if not self._is_valid_hash(identity_hash_hex) \
                 or identity_hash_hex == self._self_hex:
             return False
         state = self._storage.get_friend_state(identity_hash_hex)
-        if state in (FRIEND_ACCEPTED, FRIEND_PENDING_OUT):
+        if state == FRIEND_ACCEPTED:
             return False
 
         self._storage.prune_message_requests(time.time() - MESSAGE_REQUEST_TTL_SECS)
-        if state != FRIEND_PENDING_IN:
+        # A peer we have asked keeps its pending_out state: their words are
+        # held for the user to read, but our request is still ours to track.
+        if state not in (FRIEND_PENDING_IN, FRIEND_PENDING_OUT):
             self._evict_oldest_pending()
             self._storage.upsert_friend(identity_hash_hex, "", "", FRIEND_PENDING_IN)
 

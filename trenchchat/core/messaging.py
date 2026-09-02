@@ -341,14 +341,35 @@ class Messaging:
     def _peer_is_reachable(self, peer_hex: str) -> bool:
         """Whether a direct attempt is worth making right now.
 
-        Presence is the signal when it is wired up; without it, a resolved
-        path is the best evidence available.
+        Presence answers for a peer that sends beacons. It cannot answer for
+        one that does not -- a bot, or anyone on another LXMF client -- and
+        for them "not online" only ever meant "never heard of", which sent
+        every first message to a propagation node to be pulled by a peer that
+        may never pull. So presence decides for a peer it knows to be
+        TrenchChat, and a resolved path decides for everyone else.
+
+        Guessing wrong this way is cheap: a failed direct attempt falls back
+        to propagation on its own (_on_direct_failed). Guessing wrong the
+        other way is a message nobody collects.
         """
         if self._presence_mgr is not None:
-            return self._presence_mgr.is_online(peer_hex)
+            if self._presence_mgr.is_online(peer_hex):
+                return True
+            if self._peer_speaks_trenchchat(peer_hex):
+                return False
         delivery_dest_hash = RNS.Destination.hash(
             bytes.fromhex(peer_hex), "lxmf", "delivery")
         return RNS.Identity.recall(delivery_dest_hash) is not None
+
+    def _peer_speaks_trenchchat(self, peer_hex: str) -> bool:
+        """Whether this peer has ever identified itself as TrenchChat, and so
+        is one presence can speak for."""
+        if self._direct_mgr is None:
+            return False
+        conversation = self._direct_mgr.conversation_hash(peer_hex)
+        if conversation is None:
+            return False
+        return self._direct_mgr.peer_is_trenchchat(conversation)
 
     def _send_direct_lxm(self, dest_identity: RNS.Identity, peer_hex: str,
                          params: dict) -> bool:

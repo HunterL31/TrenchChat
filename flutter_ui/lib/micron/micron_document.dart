@@ -38,21 +38,49 @@ class MicronStyle {
       );
 }
 
-/// One styled run of text, optionally acting as a link or an inert
-/// input-field placeholder.
+enum MicronFieldKind { text, checkbox, radio }
+
+/// One `` `<...> `` input field. Text fields carry [initial] and [width];
+/// checkboxes and radios carry the [value] they submit when selected.
+class MicronField {
+  const MicronField({
+    required this.name,
+    required this.kind,
+    this.value = '',
+    this.initial = '',
+    this.width = 24,
+    this.masked = false,
+    this.preChecked = false,
+  });
+
+  final String name;
+  final MicronFieldKind kind;
+  final String value;
+  final String initial;
+  final int width;
+  final bool masked;
+  final bool preChecked;
+}
+
+/// One styled run of text, optionally acting as a link or an input field.
 class MicronSegment {
-  const MicronSegment(this.text, this.style, {this.linkUrl, this.isField = false});
+  const MicronSegment(this.text, this.style, {this.linkUrl, this.linkFields,
+      this.field});
 
   final String text;
   final MicronStyle style;
 
   /// Non-null for `[label`url]` links. The URL is raw micron form
-  /// (hash:/page/x.mu, :/page/x.mu, /page/x.mu ...); resolution against the
-  /// current node happens at tap time.
+  /// (hash:/page/x.mu, :/page/x.mu, /page/x.mu, #anchor ...); resolution
+  /// against the current node happens at tap time.
   final String? linkUrl;
 
-  /// True for `<...>` input fields, rendered inert in this client.
-  final bool isField;
+  /// The link's third piece: field names to submit, `*` for all of them, and
+  /// `name=value` request variables. Null when the link carries none.
+  final List<String>? linkFields;
+
+  /// Non-null for `` `<...> `` input fields.
+  final MicronField? field;
 }
 
 sealed class MicronLine {
@@ -83,12 +111,73 @@ class MicronDividerLine extends MicronLine {
   final int depth;
 }
 
+/// A `` `t `` block: rows of cells, each cell a run of styled segments.
+class MicronTableLine extends MicronLine {
+  const MicronTableLine(this.rows, this.aligns, this.depth,
+      {this.align = MicronAlign.defaultAlign, this.maxWidth});
+  final List<List<List<MicronSegment>>> rows;
+
+  /// Per-column alignment from the rule row, when the table has one.
+  final List<MicronAlign> aligns;
+  final int depth;
+
+  /// Where the whole table sits, from the block tag's own argument
+  /// (`` `tc ``, `` `tr ``).
+  final MicronAlign align;
+
+  /// Widest the table may draw, in characters, from `` `tc60 `` and friends.
+  final int? maxWidth;
+}
+
+/// A `` `{url`refresh`fields} `` include: content the node serves separately,
+/// fetched after the page it sits in and optionally re-fetched on a timer.
+class MicronPartialLine extends MicronLine {
+  const MicronPartialLine({
+    required this.url,
+    required this.depth,
+    this.id,
+    this.refreshSecs,
+    this.fields = const [],
+  });
+
+  final String url;
+  final int depth;
+
+  /// The `pid=` name a `p:` link uses to refresh this one by hand.
+  final String? id;
+
+  /// Refresh interval in seconds. Null for load-once; micron ignores any
+  /// interval under a second.
+  final double? refreshSecs;
+
+  /// Field names and `name=value` variables to submit, as a link carries.
+  /// Includes the `pid=` entry, which upstream submits too.
+  final List<String> fields;
+}
+
 class MicronLiteralLine extends MicronLine {
   const MicronLiteralLine(this.text);
   final String text;
 }
 
 class MicronDocument {
-  const MicronDocument(this.lines);
+  const MicronDocument(this.lines,
+      {this.anchors = const {},
+      this.headingLines = const [],
+      this.foreground,
+      this.background});
+
   final List<MicronLine> lines;
+
+  /// Page-wide colours from the `#!fg=` / `#!bg=` headers. Null means the
+  /// enclosing theme decides.
+  final Color? foreground;
+  final Color? background;
+
+  /// Anchor name to the index in [lines] it marks. Explicit `` `: `` anchors
+  /// and heading slugs share one namespace; the first declared wins.
+  final Map<String, int> anchors;
+
+  /// Indices of heading lines, ascending -- what a bare `#` link jumps to.
+  final List<int> headingLines;
 }

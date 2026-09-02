@@ -3,19 +3,24 @@
 // backend (POST /nomad/browse) and complete via nomad_fetch WS events; the
 // page content itself is pulled from the cache endpoint afterwards, so a
 // previously seen page renders instantly and refreshes in place.
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../../api/models/nomad.dart';
 import '../../app_state.dart';
 import '../../format.dart';
+import '../../micron/micron_parser.dart';
 import '../../micron/micron_view.dart';
 import '../../theme/section_theme.dart';
 import '../../theme/theme_spec.dart';
 import '../../theme/tokens.dart';
 import '../../widgets/tc_button.dart';
 import '../../widgets/tc_icon.dart';
+import '../dialogs/confirm_dialog.dart';
 import '../dialogs/nomad_hosting_dialog.dart';
+import '../dialogs/rename_bookmark_dialog.dart';
 
 class BrowserTab extends StatefulWidget {
   const BrowserTab({super.key, required this.state});
@@ -28,21 +33,40 @@ class BrowserTab extends StatefulWidget {
 
 class _BrowserTabState extends State<BrowserTab> {
   final TextEditingController _address = TextEditingController();
-  final List<({String nodeHash, String path})> _history = [];
-  int _historyIndex = -1;
 
   String? _activeFetchId;
   String? _fileFetchId;
   NomadPage? _page;
+
+  /// Where [_page] came from. The page pane only shows content that belongs
+  /// to the location being browsed -- a fetch in flight must never leave the
+  /// previous page on screen looking like the answer.
+  ({String nodeHash, String path})? _pageLocation;
+
+  /// [_page]'s own `#!bg=` colour, parsed once when the page lands so the
+  /// whole pane can carry it rather than only the text column.
+  Color? _pageBackground;
+
+  /// The anchor a link's `anchor=` variable asked the next page to open at,
+  /// held until that page renders.
+  String? _pendingAnchor;
   String? _error;
   String? _info;
   double _progress = 0;
   bool _loading = false;
 
+  /// Fetch results arrive as WebSocket events, which are gone for good if the
+  /// socket is down when one fires. This asks the backend directly while
+  /// anything is in flight, so a dropped socket costs latency, not the page.
+  Timer? _pollTimer;
+  static const Duration _pollInterval = Duration(seconds: 2);
+
+  /// Our own hosting, so the node list can offer the pages we serve. They
+  /// are read straight off disk -- a node cannot dial itself.
+  NomadHosting? _hosting;
+
   ({String nodeHash, String path})? get _current =>
-      _historyIndex >= 0 && _historyIndex < _history.length
-          ? _history[_historyIndex]
-          : null;
+      widget.state.nomadLocation;
 
   @override
   void initState() {
@@ -52,17 +76,64 @@ class _BrowserTabState extends State<BrowserTab> {
       widget.state.loadNomadNodes();
     }
     widget.state.loadNomadBookmarks();
+    _loadHosting();
     final pending = widget.state.takePendingNomadUrl();
     if (pending != null) {
       Future.microtask(() => _go(pending));
+      return;
+    }
+    // Remounted on the page we left: the trail survived in AppState, the
+    // rendered page did not, so read it back rather than showing an empty
+    // pane over a location we still claim to be on.
+    final resumed = _current;
+    if (resumed != null) {
+      _address.text = '${resumed.nodeHash}:${resumed.path}';
+      Future.microtask(() => _resume(resumed));
+    }
+  }
+
+  /// Restores the page for a location we are already on. Falls back to
+  /// fetching when it has been pruned from the cache since.
+  Future<void> _resume(({String nodeHash, String path}) location) async {
+    final shown = await _showCached(location.nodeHash, location.path);
+    if (!shown && mounted) {
+      _go('${location.nodeHash}:${location.path}');
+    }
+  }
+
+  Future<void> _loadHosting() async {
+    try {
+      final hosting = await widget.state.api.getNomadHosting();
+      if (mounted) setState(() => _hosting = hosting);
+    } catch (_) {
+      // Hosting is only an extra row here; the node list stands without it.
     }
   }
 
   @override
   void dispose() {
     widget.state.removeListener(_onStateChanged);
+    _pollTimer?.cancel();
     _address.dispose();
     super.dispose();
+  }
+
+  /// Runs only while a fetch is outstanding.
+  void _syncPolling() {
+    final waiting = _activeFetchId != null || _fileFetchId != null;
+    if (waiting && _pollTimer == null) {
+      _pollTimer = Timer.periodic(_pollInterval, (_) => _pollFetches());
+    } else if (!waiting) {
+      _pollTimer?.cancel();
+      _pollTimer = null;
+    }
+  }
+
+  void _pollFetches() {
+    if (!mounted) return;
+    for (final fetchId in {_activeFetchId, _fileFetchId}) {
+      if (fetchId != null) widget.state.pollNomadFetch(fetchId);
+    }
   }
 
   /// Rebuilds on every AppState notification (node list, bookmarks),
@@ -78,103 +149,141 @@ class _BrowserTabState extends State<BrowserTab> {
     final fetchId = _activeFetchId;
     final status = fetchId == null ? null : widget.state.nomadFetches[fetchId];
     if (status == null) {
+      _syncPolling();
       setState(() {});
       return;
     }
     if (!status.isTerminal) {
+      _syncPolling();
       setState(() => _progress = status.progress);
       return;
     }
     widget.state.takeNomadFetch(fetchId!);
     _activeFetchId = null;
+    _syncPolling();
     if (status.status == 'done') {
       setState(() {});
       _showCached(status.nodeHash, status.path, doneLoading: true);
     } else {
-      setState(() {
-        _loading = false;
-        _error = _friendlyReason(status.reason);
-      });
+      // A fetch the backend has forgotten may still have landed in the cache
+      // before this client lost track of it; show that rather than an error.
+      _recoverOrFail(status);
     }
   }
 
-  Future<void> _showCached(String nodeHash, String path,
-      {bool doneLoading = false}) async {
-    final page = await widget.state.fetchCachedNomadPage(nodeHash, path);
+  Future<void> _recoverOrFail(NomadFetchStatus status) async {
+    if (status.reason == 'forgotten' && status.nodeHash.isNotEmpty) {
+      final shown = await _showCached(status.nodeHash, status.path);
+      if (!mounted) return;
+      if (shown) {
+        setState(() {
+          _loading = false;
+          _error = null;
+        });
+        return;
+      }
+    }
     if (!mounted) return;
     setState(() {
-      if (page != null) _page = page;
+      _loading = false;
+      _error = _friendlyReason(status.reason);
+    });
+  }
+
+  /// Shows the cached copy of a location, if there is one. Returns whether
+  /// there was.
+  Future<bool> _showCached(String nodeHash, String path,
+      {bool doneLoading = false}) async {
+    final page = await widget.state.fetchCachedNomadPage(nodeHash, path);
+    if (!mounted) return page != null;
+    setState(() {
+      if (page != null) {
+        _page = page;
+        _pageLocation = (nodeHash: nodeHash, path: path);
+        _pageBackground = micronPageBackground(page.source);
+      }
       if (doneLoading) {
         _loading = false;
         _error = page == null ? 'Fetched page could not be read back.' : null;
       }
     });
+    return page != null;
   }
 
-  Future<void> _go(String url) async {
+  Future<void> _go(String url,
+      {Map<String, String>? data, bool refresh = false}) async {
     if (url.trim().isEmpty) return;
-    final fetchId = await widget.state
-        .browseNomad(url.trim(), currentNode: _current?.nodeHash);
+    // Micron's own convention: a link carrying anchor= names where in the
+    // page it lands should open. The node never sees it as a scroll
+    // instruction -- it is an ordinary request variable -- so it is read
+    // here as well as sent.
+    _pendingAnchor = data?['var_anchor'];
+    final target = await widget.state.browseNomad(url.trim(),
+        currentNode: _current?.nodeHash, data: data, refresh: refresh);
     if (!mounted) return;
-    if (fetchId == null) {
+    if (target == null) {
       setState(() =>
           _error = widget.state.takeActionError() ?? 'Could not open that URL.');
       return;
     }
-    final status = widget.state.nomadFetches[fetchId];
-    final nodeHash = status?.nodeHash ?? '';
-    final path = status?.path ?? '/page/index.mu';
+    final nodeHash = target.nodeHash;
+    final path = target.path;
     // A repeat visit while the same fetch is still in flight reuses its id;
     // only push history when the location actually changes.
-    if (_current == null ||
-        _current!.nodeHash != nodeHash ||
-        _current!.path != path) {
-      _history.removeRange(_historyIndex + 1, _history.length);
-      _history.add((nodeHash: nodeHash, path: path));
-      _historyIndex = _history.length - 1;
+    widget.state.pushNomadLocation(nodeHash, path);
+    if (widget.state.nomadIdentify[nodeHash] == null) {
+      widget.state.loadNomadIdentify(nodeHash);
     }
     setState(() {
-      _activeFetchId = fetchId;
-      _loading = true;
+      _activeFetchId = target.fetchId;
+      _loading = target.fetchId != null;
       _error = null;
       _info = null;
       _progress = 0;
       _address.text = '$nodeHash:$path';
     });
     // Stale-while-revalidate: show whatever we already have immediately.
+    // For a page the node told us to cache there is nothing else coming.
     _showCached(nodeHash, path);
+    if (target.fetchId == null) {
+      _syncPolling();
+      return;
+    }
     // The fetch may have finished before _activeFetchId was assigned, in
     // which case its terminal event already fired and nothing else will;
     // claim it now rather than waiting for an unrelated notification.
     _onStateChanged();
   }
 
-  void _navigateHistory(int delta) {
-    final target = _historyIndex + delta;
-    if (target < 0 || target >= _history.length) return;
-    final entry = _history[target];
+  Future<void> _navigateHistory(int delta) async {
+    final entry = widget.state.stepNomadHistory(delta);
+    if (entry == null) return;
     setState(() {
-      _historyIndex = target;
-      _page = null;
       _error = null;
       _activeFetchId = null;
       _loading = false;
       _address.text = '${entry.nodeHash}:${entry.path}';
     });
-    _showCached(entry.nodeHash, entry.path);
+    // A page pruned from the cache since it was visited has to be fetched
+    // again; _go will not re-push history for the location we just moved to.
+    final cached = await _showCached(entry.nodeHash, entry.path);
+    if (!cached && mounted) _go('${entry.nodeHash}:${entry.path}');
   }
 
-  void _reload() {
+  /// RELOAD always goes back to the node, even for a page still inside the
+  /// lifetime it declared -- that is what the button is for.
+  Future<void> _reload() async {
     final current = _current;
     if (current == null) return;
-    _go('${current.nodeHash}:${current.path}');
+    await _go('${current.nodeHash}:${current.path}', refresh: true);
   }
 
   void _home() {
+    widget.state.clearNomadHistory();
     setState(() {
-      _history.clear();
-      _historyIndex = -1;
       _page = null;
+      _pageLocation = null;
+      _pageBackground = null;
       _error = null;
       _info = null;
       _activeFetchId = null;
@@ -183,17 +292,91 @@ class _BrowserTabState extends State<BrowserTab> {
     });
     widget.state.loadNomadNodes();
     widget.state.loadNomadBookmarks();
+    _loadHosting();
+  }
+
+  /// Turns identifying to the node being browsed on or off.
+  ///
+  /// Identifying is irreversible in the only sense that matters: the node
+  /// operator learns this identity visited and can keep that forever, so
+  /// turning it on asks first and turning it off says what it does not undo.
+  Future<void> _toggleIdentify() async {
+    final current = _current;
+    if (current == null) return;
+    final status = widget.state.nomadIdentify[current.nodeHash] ??
+        await widget.state.loadNomadIdentify(current.nodeHash);
+    if (!mounted || status == null) return;
+    final turningOn = !status.enabled;
+
+    final confirmed = await showTcConfirmDialog(
+      context,
+      widget.state,
+      title: turningOn ? 'Identify to this node?' : 'Stop identifying?',
+      message: turningOn
+          ? 'This node will see your identity hash '
+              '${status.identityHash} on every page you open here, and can '
+              'keep a record of it. Pages that need an account — a forum, '
+              'anything with a login — use it as your account. Nothing '
+              'about your Reticulum instance or your other nodes is '
+              'revealed, and no other node is affected.'
+          : 'This node stops seeing your identity from the next page you '
+              'open — the connection carrying it is dropped. What it '
+              'already recorded about this identity stays recorded.',
+      confirmLabel: turningOn ? 'IDENTIFY' : 'STOP',
+    );
+    if (!confirmed || !mounted) return;
+
+    final updated =
+        await widget.state.setNomadIdentify(current.nodeHash, turningOn);
+    if (!mounted) return;
+    if (updated == null) {
+      setState(() => _error =
+          widget.state.takeActionError() ?? 'Could not change identifying.');
+      return;
+    }
+    // The page the node served was rendered for whoever it thought we were,
+    // and navigating clears the banner -- so reload first, then say so.
+    if (turningOn) await _reload();
+    if (!mounted) return;
+    setState(() => _info = turningOn
+        ? (updated.identified
+            ? 'Identified to this node. This page is how it sees you now.'
+            : 'Identifying from the next connection to this node.')
+        : 'No longer identifying to this node.');
   }
 
   Future<void> _toggleBookmark() async {
     final current = _current;
     if (current == null) return;
-    final node = widget.state.nomadNodes[current.nodeHash];
-    final label = node?.displayName.isNotEmpty == true
-        ? node!.displayName
-        : current.path;
+    await widget.state.toggleNomadBookmark(
+        current.nodeHash, current.path, _defaultBookmarkLabel(current));
+  }
+
+  /// What to call a bookmark when the user has not said.
+  ///
+  /// The node's name alone was the same string for every page on it, which
+  /// made a shelf of bookmarks to one node unreadable. A page's own heading
+  /// names the page; failing that the node and the file it came from do.
+  String _defaultBookmarkLabel(({String nodeHash, String path}) location) {
+    final page = _page;
+    if (page != null &&
+        _pageLocation?.nodeHash == location.nodeHash &&
+        _pageLocation?.path == location.path) {
+      final title = micronPageTitle(page.source);
+      if (title.isNotEmpty) return title;
+    }
+    final node = widget.state.nomadNodes[location.nodeHash]?.displayName ?? '';
+    final basename = location.path.split('/').last;
+    if (node.isNotEmpty && basename.isNotEmpty) return '$node — $basename';
+    return location.path;
+  }
+
+  Future<void> _renameBookmark(NomadBookmark mark) async {
+    final label = await showRenameBookmarkDialog(
+        context, widget.state, current: mark.label);
+    if (label == null || !mounted) return;
     await widget.state
-        .toggleNomadBookmark(current.nodeHash, current.path, label);
+        .renameNomadBookmark(mark.nodeHash, mark.path, label.trim());
   }
 
   String _friendlyReason(String? reason) => switch (reason) {
@@ -205,6 +388,10 @@ class _BrowserTabState extends State<BrowserTab> {
         'busy' => 'Too many requests to this node are already in flight.',
         'bad_path' => 'That page path is not valid.',
         'bad_response' => 'The node sent something that is not a page.',
+        'not_found' => 'Your node does not serve that path. Add the file '
+            'under its pages directory and press RELOAD.',
+        'send_failed' => 'The link to the node could not carry the request.',
+        'forgotten' => 'Lost track of that fetch. Reload to try again.',
         _ => 'The page could not be fetched.',
       };
 
@@ -241,6 +428,8 @@ class _BrowserTabState extends State<BrowserTab> {
     final current = _current;
     final bookmarked = current != null &&
         widget.state.isNomadBookmarked(current.nodeHash, current.path);
+    final identified = current != null &&
+        (widget.state.nomadIdentify[current.nodeHash]?.enabled ?? false);
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
       decoration: BoxDecoration(
@@ -250,11 +439,14 @@ class _BrowserTabState extends State<BrowserTab> {
         children: [
           TcGhostButton(
               label: '<',
-              onPressed: _historyIndex > 0 ? () => _navigateHistory(-1) : null),
+              onPressed: widget.state.nomadHistoryIndex > 0
+                  ? () => _navigateHistory(-1)
+                  : null),
           const SizedBox(width: 4),
           TcGhostButton(
               label: '>',
-              onPressed: _historyIndex < _history.length - 1
+              onPressed: widget.state.nomadHistoryIndex <
+                      widget.state.nomadHistory.length - 1
                   ? () => _navigateHistory(1)
                   : null),
           const SizedBox(width: 4),
@@ -299,8 +491,17 @@ class _BrowserTabState extends State<BrowserTab> {
           ),
           const SizedBox(width: 4),
           TcGhostButton(
+            icon: TcIcons.lock,
+            label: identified ? 'ID ✓' : 'ID',
+            onPressed: current == null ? null : _toggleIdentify,
+          ),
+          const SizedBox(width: 4),
+          TcGhostButton(
             label: 'HOST',
-            onPressed: () => showNomadHostingDialog(context, widget.state),
+            onPressed: () async {
+              await showNomadHostingDialog(context, widget.state);
+              await _loadHosting();
+            },
           ),
         ],
       ),
@@ -358,9 +559,17 @@ class _BrowserTabState extends State<BrowserTab> {
     final bookmarks = widget.state.nomadBookmarks;
     final nodes = widget.state.nomadNodes.values.toList()
       ..sort((a, b) => b.lastSeen.compareTo(a.lastSeen));
+    final hosting = _hosting;
     return ListView(
       padding: const EdgeInsets.all(14),
       children: [
+        if (hosting != null &&
+            hosting.enabled &&
+            hosting.nodeHash.isNotEmpty) ...[
+          _sectionLabel(tc, 'YOUR NODE'),
+          _ownNodeRow(tc, hosting),
+          const SizedBox(height: 16),
+        ],
         if (bookmarks.isNotEmpty) ...[
           _sectionLabel(tc, 'BOOKMARKS'),
           for (final mark in bookmarks) _bookmarkRow(tc, mark),
@@ -379,6 +588,43 @@ class _BrowserTabState extends State<BrowserTab> {
           ),
         for (final node in nodes) _nodeRow(tc, node),
       ],
+    );
+  }
+
+  Widget _ownNodeRow(TCSectionColors tc, NomadHosting hosting) {
+    return InkWell(
+      onTap: () => _go(hosting.nodeHash),
+      child: Container(
+        padding: const EdgeInsets.symmetric(vertical: 8),
+        decoration: BoxDecoration(
+          border: Border(bottom: BorderSide(color: tc.borderSubtle)),
+        ),
+        child: Row(
+          children: [
+            TcIcon(TcIcons.globe, size: 14, color: tc.borderAccent),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                hosting.nodeName.isNotEmpty ? hosting.nodeName : 'your node',
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                    fontSize: TCType.textBodySm, color: tc.textEmphasis),
+              ),
+            ),
+            Text(
+              _shortHash(hosting.nodeHash),
+              style: TextStyle(
+                  fontSize: TCType.textCaption, color: tc.textTertiary),
+            ),
+            const SizedBox(width: 10),
+            Text(
+              'served from disk',
+              style: TextStyle(
+                  fontSize: TCType.textCaption, color: tc.textTertiary),
+            ),
+          ],
+        ),
+      ),
     );
   }
 
@@ -424,6 +670,9 @@ class _BrowserTabState extends State<BrowserTab> {
               style: TextStyle(
                   fontSize: TCType.textCaption, color: tc.textTertiary),
             ),
+            const SizedBox(width: 8),
+            TcGhostButton(
+                label: 'RENAME', onPressed: () => _renameBookmark(mark)),
           ],
         ),
       ),
@@ -478,46 +727,132 @@ class _BrowserTabState extends State<BrowserTab> {
 
   Widget _pageView(TCSectionColors tc) {
     final page = _page;
-    if (page == null) {
-      return Center(
-        child: Text(
-          _loading ? 'LOCATING NODE…' : 'No page loaded.',
-          style: TextStyle(fontSize: TCType.textCaption, color: tc.textTertiary),
+    final current = _current;
+    final showing = page != null &&
+        current != null &&
+        _pageLocation?.nodeHash == current.nodeHash &&
+        _pageLocation?.path == current.path;
+    if (!showing) return _pendingPane(tc, current);
+    return Container(
+      color: _pageBackground,
+      child: SelectionArea(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.all(16),
+          child: MicronView(
+            source: page.source,
+            onLinkTap: _onMicronLink,
+            onPartialLoad: _loadPartial,
+            initialAnchor: _pendingAnchor,
+          ),
         ),
-      );
-    }
-    return SelectionArea(
-      child: SingleChildScrollView(
-        padding: const EdgeInsets.all(16),
-        child: MicronView(source: page.source, onLinkTap: _onMicronLink),
       ),
     );
   }
 
-  void _onMicronLink(String url) {
-    if (url.contains(':/file/') || url.startsWith('/file/')) {
-      _fetchFile(url);
+  /// What the page pane shows while a location has no content of its own:
+  /// which location is being fetched, or that nothing came back for it.
+  Widget _pendingPane(
+      TCSectionColors tc, ({String nodeHash, String path})? current) {
+    if (current == null) {
+      return Center(
+        child: Text('No page loaded.',
+            style:
+                TextStyle(fontSize: TCType.textCaption, color: tc.textTertiary)),
+      );
+    }
+    return Center(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            _loading ? 'FETCHING' : 'NOTHING CACHED FOR',
+            style: TextStyle(
+              fontSize: TCType.textCaption,
+              color: tc.textSecondary,
+              letterSpacing: TCType.letterSpacingFor(
+                  TCType.textCaption, TCType.trackingWider),
+            ),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            '${_shortHash(current.nodeHash)}:${current.path}',
+            style:
+                TextStyle(fontSize: TCType.textBodySm, color: tc.textEmphasis),
+          ),
+          const SizedBox(height: 10),
+          if (_loading)
+            ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 460),
+              child: Text(
+                'Pages come back over the mesh — a distant node can take a '
+                'while, and one that does not serve this path never answers.',
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                    fontSize: TCType.textCaption, color: tc.textTertiary),
+              ),
+            )
+          // The error banner carries its own RETRY; a second one here would
+          // be two buttons for one action.
+          else if (_error == null)
+            TcGhostButton(label: 'RETRY', onPressed: _reload),
+        ],
+      ),
+    );
+  }
+
+  void _onMicronLink(String url, Map<String, String> data) {
+    final target = url.trim();
+    final unsupported = _unsupportedScheme(target);
+    if (unsupported != null) {
+      setState(() => _info = unsupported);
       return;
     }
-    _go(url);
+    if (target.contains(':/file/') || target.startsWith('/file/')) {
+      _fetchFile(target);
+      return;
+    }
+    _go(target, data: data);
   }
+
+  /// Micron links can name destinations other than a node's pages. Saying
+  /// which is better than the URL parser's complaint about hex digits.
+  String? _unsupportedScheme(String url) {
+    final lower = url.toLowerCase();
+    if (lower.startsWith('lxmf@')) {
+      return 'That link opens an LXMF conversation. TrenchChat messages '
+          'mutual friends — add the peer from the FRIENDS tab first.';
+    }
+    if (lower.startsWith('rrc://')) {
+      return 'That is a link to an RRC voice hub, which this browser does '
+          'not open.';
+    }
+    return null;
+  }
+
+  /// Fetches one partial's page. Resolved against the node being browsed,
+  /// so a partial can name a path the way a link does.
+  Future<String?> _loadPartial(String url, Map<String, String> data) =>
+      widget.state.loadNomadPartial(url,
+          currentNode: _current?.nodeHash, data: data);
 
   /// Fetches a /file/ link into the backend cache without leaving the page.
   /// When it lands, the authenticated download URL goes to the clipboard --
   /// the same interim answer main_window's _openLink gives for web links.
   Future<void> _fetchFile(String url) async {
-    final fetchId = await widget.state
+    final target = await widget.state
         .browseNomad(url, currentNode: _current?.nodeHash);
     if (!mounted) return;
-    if (fetchId == null) {
+    // Files are never answered from cache, so a fetch id is always expected.
+    if (target?.fetchId == null) {
       setState(() =>
           _error = widget.state.takeActionError() ?? 'Could not fetch file.');
       return;
     }
     setState(() {
-      _fileFetchId = fetchId;
+      _fileFetchId = target!.fetchId;
       _info = 'Fetching file…';
     });
+    _syncPolling();
   }
 
   void _advanceFileFetch() {
@@ -526,17 +861,32 @@ class _BrowserTabState extends State<BrowserTab> {
     if (status == null || !status.isTerminal) return;
     widget.state.takeNomadFetch(fetchId!);
     _fileFetchId = null;
+    _syncPolling();
     if (status.status == 'done') {
       final uri = widget.state.api.nomadFileUri(status.nodeHash, status.path);
-      Clipboard.setData(ClipboardData(text: uri.toString()));
-      setState(() => _info =
-          'File cached — download URL copied to clipboard.');
+      _copyFileUrl(uri.toString());
     } else {
       setState(() {
         _info = null;
         _error = _friendlyReason(status.reason);
       });
     }
+  }
+
+  /// Clipboard access is a permission the browser can refuse, so the banner
+  /// reports what actually happened rather than assuming.
+  Future<void> _copyFileUrl(String url) async {
+    var copied = true;
+    try {
+      await Clipboard.setData(ClipboardData(text: url));
+    } catch (_) {
+      copied = false;
+    }
+    if (!mounted) return;
+    setState(() => _info = copied
+        ? 'File cached — download URL copied to clipboard.'
+        : 'File cached, but this browser refused clipboard access, so the '
+            'download URL could not be copied.');
   }
 
   String _shortHash(String hash) =>
