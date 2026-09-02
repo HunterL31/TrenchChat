@@ -7,6 +7,7 @@ answering a peer we have just met so they can hear us back.
 import threading
 import time
 
+import LXMF
 import RNS
 import msgpack
 
@@ -156,6 +157,23 @@ class NodeAnnounceHandler:
             RNS.log(f"TrenchChat: node announce callback error: {e}", RNS.LOG_ERROR)
 
 
+def lxmf_display_name(identity_hash: bytes) -> str:
+    """Name a peer last announced on lxmf.delivery, or "" if none is known.
+
+    Parsed with LXMF's own reader, so the name is read exactly as Sideband and
+    MeshChat read it. RNS remembers announce app_data before dispatching
+    handlers, so this is current from inside an announce callback.
+    """
+    delivery_hash = RNS.Destination.hash(identity_hash, "lxmf", "delivery")
+    try:
+        name = LXMF.display_name_from_app_data(RNS.Identity.recall_app_data(delivery_hash))
+    except Exception as e:
+        RNS.log(f"TrenchChat: unreadable lxmf.delivery app_data from "
+                f"{identity_hash.hex()[:12]}…: {e}", RNS.LOG_DEBUG)
+        return ""
+    return name or ""
+
+
 class UserAnnounceHandler:
     """
     Listens for trenchchat.user announces from TrenchChat peers.
@@ -164,6 +182,12 @@ class UserAnnounceHandler:
     directory can be populated with confirmed TrenchChat peers.  Only
     TrenchChat instances broadcast on this aspect, so the directory will
     not contain generic LXMF clients.
+
+    The announce carries no payload: it is the aspect that says "this identity
+    runs TrenchChat". The display name comes from the peer's lxmf.delivery
+    announce, the same place every other LXMF client publishes it. Peers that
+    predate this still send a name in the app_data, honoured only when no
+    delivery announce has been heard yet.
     """
 
     aspect_filter = f"{APP_NAME}.{APP_ASPECT_USER}"
@@ -177,22 +201,27 @@ class UserAnnounceHandler:
                           announce_packet_hash: bytes):
         if announced_identity is None:
             return
-        display_name = ""
-        if app_data:
-            try:
-                parsed = unpack_wire(app_data)
-                if isinstance(parsed, dict):
-                    name = parsed.get("name", "")
-                    if isinstance(name, bytes):
-                        name = name.decode(errors="replace")
-                    display_name = str(name)
-            except Exception:
-                pass
+        display_name = lxmf_display_name(announced_identity.hash)
+        if not display_name and app_data:
+            display_name = _legacy_user_announce_name(app_data)
         try:
             iface = _receiving_interface_for(destination_hash)
             self._callback(announced_identity.hash.hex(), display_name, iface)
         except Exception as e:
             RNS.log(f"TrenchChat: user announce callback error: {e}", RNS.LOG_ERROR)
+
+
+def _legacy_user_announce_name(app_data: bytes) -> str:
+    try:
+        parsed = unpack_wire(app_data)
+    except Exception:
+        return ""
+    if not isinstance(parsed, dict):
+        return ""
+    name = parsed.get("name", "")
+    if isinstance(name, bytes):
+        name = name.decode(errors="replace")
+    return str(name)
 
 
 class PropagationAnnounceHandler:
@@ -278,8 +307,8 @@ class FirstContactAnnouncer:
 
     A peer that has never heard our announce cannot recall our identity, so
     LXMF cannot verify anything we send them: our first message is quarantined
-    at their end and dropped when it expires. Re-announcing every 15 minutes is
-    frugal with airtime and useless for meeting somebody -- and answering
+    at their end and dropped when it expires. The periodic re-announce is hours
+    apart, frugal with airtime and useless for meeting somebody -- and answering
     *every* announce instead would leave two idle clients replying to each
     other's replies for ever.
 

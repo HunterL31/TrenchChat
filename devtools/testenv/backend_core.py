@@ -276,7 +276,7 @@ class Backend:
         self.messaging.set_presence_manager(self.presence_mgr)
         self.reaction_mgr.set_direct_manager(self.direct_mgr)
         # Answers a peer the first time we hear them: our own re-announce is
-        # 15 minutes apart, and until they have heard us they cannot verify
+        # hours apart, and until they have heard us they cannot verify
         # anything we send -- it is quarantined at their end and dropped.
         self.first_contact = FirstContactAnnouncer(
             self.router, self.channel_mgr, self.identity.hash_hex,
