@@ -658,8 +658,8 @@ def _shared_identity_recall(mapping: dict[str, str]):
     return recall
 
 
-def _gather_shared(path_table, recall_map, **kwargs) -> dict:
-    rns = _make_rns(path_table=path_table)
+def _gather_shared(path_table, recall_map, interface_stats=None, **kwargs) -> dict:
+    rns = _make_rns(path_table=path_table, interface_stats=interface_stats)
     with patch("trenchchat.core.network_map.RNS.Identity.recall",
                side_effect=_shared_identity_recall(recall_map)):
         return gather_network_data(rns, SELF_HEX, **kwargs)
@@ -742,6 +742,151 @@ def test_nomad_node_with_its_own_entry_records_its_own_hash():
     data = _gather([_entry(NOMAD_HEX, NOMAD_HEX, 1)],
                    nomad=_FakeNomad([NOMAD_HEX]))
     assert _node(data, NOMAD_HEX)["nomad_node_hash"] == NOMAD_HEX
+
+
+# ---------------------------------------------------------------------------
+# Multi-hop paths are drawn through their relay
+# ---------------------------------------------------------------------------
+
+HUB_ID = "__iface__Hub"
+RELAY_VIA_HEX = "4d" * 16         # the destination a path table names as via
+RELAY_DELIVERY_HEX = "5e" * 16    # the same relay's lxmf.delivery aspect
+RELAY_IDENTITY_HEX = "6f" * 16
+OTHER_PEER_HEX = "7a" * 16
+OTHER_RELAY_HEX = "8b" * 16
+
+
+def _hub_stats() -> dict:
+    """Interface stats for one hub, whose diamond is HUB_ID."""
+    return {"interfaces": [
+        {"name": "TCPInterface[Hub/1.2.3.4:4242]", "short_name": "Hub",
+         "type": "TCPClientInterface", "status": True, "rxb": 0, "txb": 0},
+    ]}
+
+
+def _pairs(data: dict) -> set[tuple[str, str]]:
+    return {(e["src"], e["dst"]) for e in data["edges"]}
+
+
+def test_multi_hop_peer_hangs_off_its_relay_not_the_interface():
+    """The path goes self → interface → relay → peer, one link per real hop,
+    so the peer is never drawn as a child of the interface it came through."""
+    data = _gather([_entry(PEER_HEX, TRANSPORT_HEX, 2, interface="Hub")],
+                   _hub_stats())
+
+    assert _pairs(data) == {(SELF_HEX, HUB_ID), (HUB_ID, TRANSPORT_HEX),
+                            (TRANSPORT_HEX, PEER_HEX)}
+    relay = _node(data, TRANSPORT_HEX)
+    assert relay["kind"] == "transport"
+    assert relay["hops"] == 1
+
+
+def test_the_relay_edge_is_direct_and_the_peer_edge_is_not():
+    data = _gather([_entry(PEER_HEX, TRANSPORT_HEX, 3, interface="Hub")],
+                   _hub_stats())
+    by_pair = {(e["src"], e["dst"]): e for e in data["edges"]}
+
+    relay_edge = by_pair[(HUB_ID, TRANSPORT_HEX)]
+    assert relay_edge["hops"] == 1
+    assert relay_edge["direct"] is True
+    assert relay_edge["kind"] == "path"
+
+    peer_edge = by_pair[(TRANSPORT_HEX, PEER_HEX)]
+    assert peer_edge["hops"] == 3
+    assert peer_edge["direct"] is False
+    assert peer_edge["kind"] == "path"
+
+
+def test_peers_sharing_a_relay_share_one_relay_node():
+    data = _gather([_entry(PEER_HEX, TRANSPORT_HEX, 2, interface="Hub"),
+                    _entry(OTHER_PEER_HEX, TRANSPORT_HEX, 3, interface="Hub")],
+                   _hub_stats())
+
+    relays = [n for n in data["nodes"] if n["kind"] == "transport"]
+    assert [n["id"] for n in relays] == [TRANSPORT_HEX]
+    assert _pairs(data) == {(SELF_HEX, HUB_ID), (HUB_ID, TRANSPORT_HEX),
+                            (TRANSPORT_HEX, PEER_HEX),
+                            (TRANSPORT_HEX, OTHER_PEER_HEX)}
+
+
+def test_two_relays_behind_one_interface_each_hold_their_own_peers():
+    data = _gather([_entry(PEER_HEX, TRANSPORT_HEX, 2, interface="Hub"),
+                    _entry(OTHER_PEER_HEX, OTHER_RELAY_HEX, 2, interface="Hub")],
+                   _hub_stats())
+
+    assert _pairs(data) == {(SELF_HEX, HUB_ID),
+                            (HUB_ID, TRANSPORT_HEX), (TRANSPORT_HEX, PEER_HEX),
+                            (HUB_ID, OTHER_RELAY_HEX),
+                            (OTHER_RELAY_HEX, OTHER_PEER_HEX)}
+
+
+def test_a_relay_that_is_also_a_peer_stays_one_node():
+    """The relay's own delivery path arrives first, so its node already exists
+    when the path through it does: it is reused, drawn as the transport it is,
+    and parents the peer behind it."""
+    recall_map = {RELAY_DELIVERY_HEX: RELAY_IDENTITY_HEX,
+                  RELAY_VIA_HEX: RELAY_IDENTITY_HEX}
+    data = _gather_shared(
+        [_entry(RELAY_DELIVERY_HEX, RELAY_DELIVERY_HEX, 1, interface="Hub"),
+         _entry(PEER_HEX, RELAY_VIA_HEX, 2, interface="Hub")],
+        recall_map, _hub_stats())
+
+    assert RELAY_VIA_HEX not in {n["id"] for n in data["nodes"]}
+    relay = _node(data, RELAY_DELIVERY_HEX)
+    assert relay["kind"] == "transport"
+    assert _pairs(data) == {(SELF_HEX, HUB_ID), (SELF_HEX, RELAY_DELIVERY_HEX),
+                            (HUB_ID, RELAY_DELIVERY_HEX),
+                            (RELAY_DELIVERY_HEX, PEER_HEX)}
+
+
+def test_a_relay_that_is_also_a_peer_stays_one_node_in_either_order():
+    """Same topology, the path through the relay listed first: the node the
+    relay entry created is the one its delivery path collapses into."""
+    recall_map = {RELAY_DELIVERY_HEX: RELAY_IDENTITY_HEX,
+                  RELAY_VIA_HEX: RELAY_IDENTITY_HEX}
+    data = _gather_shared(
+        [_entry(PEER_HEX, RELAY_VIA_HEX, 2, interface="Hub"),
+         _entry(RELAY_DELIVERY_HEX, RELAY_DELIVERY_HEX, 1, interface="Hub")],
+        recall_map, _hub_stats())
+
+    assert RELAY_DELIVERY_HEX not in {n["id"] for n in data["nodes"]}
+    relay = _node(data, RELAY_VIA_HEX)
+    assert relay["kind"] == "transport"
+    assert _pairs(data) == {(SELF_HEX, HUB_ID), (SELF_HEX, RELAY_VIA_HEX),
+                            (HUB_ID, RELAY_VIA_HEX), (RELAY_VIA_HEX, PEER_HEX)}
+
+
+def test_a_relay_on_an_unknown_interface_hangs_off_self():
+    """No interface node to hang the relay from, so self holds it and the
+    chain keeps its shape."""
+    data = _gather([_entry(PEER_HEX, TRANSPORT_HEX, 2, interface="Elsewhere")],
+                   _hub_stats())
+
+    assert _pairs(data) == {(SELF_HEX, HUB_ID), (SELF_HEX, TRANSPORT_HEX),
+                            (TRANSPORT_HEX, PEER_HEX)}
+    assert _node(data, TRANSPORT_HEX)["kind"] == "transport"
+
+
+def test_one_hop_peer_keeps_its_direct_edge_to_self():
+    """A 1-hop peer has no relay to route through, whatever interface it came
+    through, so it hangs off self and adds no transport node."""
+    data = _gather([_entry(PEER_HEX, PEER_HEX, 1, interface="Hub")],
+                   _hub_stats())
+
+    assert _pairs(data) == {(SELF_HEX, HUB_ID), (SELF_HEX, PEER_HEX)}
+    assert next(e for e in data["edges"]
+                if e["dst"] == PEER_HEX)["direct"] is True
+    assert not [n for n in data["nodes"] if n["kind"] == "transport"]
+
+
+def test_the_relay_carries_the_same_detail_keys_as_a_peer():
+    data = _gather([_entry(PEER_HEX, TRANSPORT_HEX, 2, interface="Hub")],
+                   _hub_stats())
+    keys = {"identity_hex", "via", "interface", "last_heard", "expires",
+            "rtt_ms", "online", "nomad", "nomad_node_hash", "propagation",
+            "quality", "trenchchat"}
+
+    assert not keys - set(_node(data, TRANSPORT_HEX))
 
 
 # ---------------------------------------------------------------------------
