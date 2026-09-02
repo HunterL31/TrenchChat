@@ -45,7 +45,14 @@ jobs:
             libportaudio2
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: |
+          pip install -r requirements.txt
+          pip install -r devtools/testenv/requirements.txt
+
+      # The API tests skip themselves when the test client is missing, so a
+      # failed install would leave them silently unrun and the job green.
+      - name: Check the API tests can run
+        run: python -c "import fastapi.testclient"
 
       - name: Run test suite
         env:

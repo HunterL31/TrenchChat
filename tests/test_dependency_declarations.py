@@ -55,6 +55,13 @@ def test_windows_setup_installs_the_same_files_as_the_unix_one():
         assert req in sh, f"setup.sh does not install {req}"
 
 
+def test_ci_installs_the_test_dependencies():
+    """CI installed requirements.txt only, so the API tests -- which skip
+    themselves when the test client is missing -- never ran there."""
+    workflow = (_ROOT / ".github" / "workflows" / "release.yml").read_text()
+    assert "pip install -r devtools/testenv/requirements.txt" in workflow
+
+
 def test_launcher_refuses_to_start_without_a_websocket_library(monkeypatch):
     import importlib.util
 
