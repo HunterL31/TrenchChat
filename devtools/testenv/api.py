@@ -52,6 +52,9 @@ from trenchchat.core.presence import resolve_display_name
 from trenchchat.core.link_quality import (
     LinkQuality, quality_label, score_path,
 )
+from trenchchat.core.reticulum_config import (
+    load_reticulum_config, write_reticulum_config,
+)
 
 from backend_core import Backend
 
@@ -222,6 +225,10 @@ class DiscoverySettingsRequest(BaseModel):
 
 class PinDiscoveredRequest(BaseModel):
     discovery_hash: str
+
+
+class ReticulumConfigRequest(BaseModel):
+    values: dict[str, str]
 
 
 class VoiceMuteRequest(BaseModel):
@@ -923,6 +930,21 @@ def create_app(backend: Backend, *, token: str | None = None,
         except InterfaceConfigError as e:
             return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
         return {"ok": True, "name": name, "restart_required": True}
+
+    @app.get("/reticulum/config")
+    def get_reticulum_config():
+        # The node-wide [reticulum]/[logging] options, each carrying its
+        # schema entry so a client can render an editor without hardcoding
+        # the option set -- see trenchchat/core/reticulum_config.py.
+        return {"ok": True, "options": load_reticulum_config(backend.rns_config_path)}
+
+    @app.put("/reticulum/config")
+    def put_reticulum_config(req: ReticulumConfigRequest):
+        try:
+            write_reticulum_config(backend.rns_config_path, req.values)
+        except InterfaceConfigError as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+        return {"ok": True, "restart_required": True}
 
     @app.get("/reticulum/interfaces_suggested")
     def get_suggested_defaults():
