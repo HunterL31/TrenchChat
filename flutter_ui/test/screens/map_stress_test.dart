@@ -89,6 +89,113 @@ Map<String, dynamic> stressTopology({
   };
 }
 
+/// The shape a real mesh takes and the old radial layout handled worst: a
+/// couple of transport hubs that between them own almost every peer on the
+/// map, so one ring carries [hubs] * [peersPerHub] nodes squeezed into two
+/// sectors. Labels mix short handles with 20+ character callsigns.
+Map<String, dynamic> hubTopology({
+  int interfaces = 2,
+  int hubs = 2,
+  int peersPerHub = 28,
+  int directPeers = 5,
+}) {
+  final nodes = <Map<String, dynamic>>[
+    {'id': 'self', 'label': 'This device', 'kind': 'self', 'hops': 0, 'quality': 4},
+  ];
+  final edges = <Map<String, dynamic>>[];
+  final ifaces = <Map<String, dynamic>>[];
+  for (var i = 0; i < interfaces; i++) {
+    nodes.add({'id': '__iface__IF$i', 'label': '● IF$i (TCP)', 'kind': 'interface',
+               'hops': 0, 'quality': 4});
+    edges.add({'src': 'self', 'dst': '__iface__IF$i', 'hops': 0, 'direct': true,
+               'quality': 4});
+    ifaces.add({'name': 'IF$i', 'type': 'TCPClientInterface', 'status': true,
+                'rxb': i, 'txb': i});
+  }
+  for (var d = 0; d < directPeers; d++) {
+    nodes.add({'id': 'direct-$d', 'label': 'nearby-$d', 'kind': 'peer', 'hops': 1,
+               'quality': 4, 'trenchchat': true});
+    edges.add({'src': 'self', 'dst': 'direct-$d', 'hops': 1, 'direct': true,
+               'quality': 4});
+  }
+  for (var h = 0; h < hubs; h++) {
+    nodes.add({'id': 'hub-$h', 'label': 'transport-hub-$h', 'kind': 'transport',
+               'hops': 1, 'quality': 3});
+    edges.add({'src': 'self', 'dst': 'hub-$h', 'hops': 1, 'direct': true, 'quality': 3});
+    for (var p = 0; p < peersPerHub; p++) {
+      final id = 'hub-$h-peer-$p';
+      final label = p % 3 == 0 ? 'operator callsign $h$p long' : 'nd-$h$p';
+      nodes.add({'id': id, 'label': label, 'kind': 'peer', 'hops': 2,
+                 'quality': (h + p) % 5, 'trenchchat': true});
+      edges.add({'src': 'hub-$h', 'dst': id, 'hops': 2, 'direct': false,
+                 'quality': (h + p) % 5});
+    }
+  }
+  return {
+    'nodes': nodes,
+    'edges': edges,
+    'interfaces': ifaces,
+    'stats': {
+      'node_count': nodes.length,
+      'path_count': edges.length,
+      'interface_count': interfaces,
+    },
+  };
+}
+
+/// The shape a real mesh takes once the backend parents multi-hop peers under
+/// their first-hop relay: one interface, one transport behind it, a crowded
+/// band of [bandPeers] peers at hop 2, and a lone peer at each of the deeper
+/// hops in [deepHops]. Every distinct hop count is a ring of its own, so this
+/// is the shape that used to strand the deep singletons on empty canvas.
+Map<String, dynamic> deepChainTopology({
+  int bandPeers = 10,
+  List<int> deepHops = const [3, 4, 5],
+  int deepPerHop = 1,
+  bool longDeepLabels = false,
+}) {
+  final nodes = <Map<String, dynamic>>[
+    {'id': 'self', 'label': 'This device', 'kind': 'self', 'hops': 0, 'quality': 4},
+    {'id': '__iface__IF0', 'label': '● IF0 (TCP)', 'kind': 'interface', 'hops': 0,
+     'quality': 4},
+    {'id': 'relay', 'label': 'transport-relay', 'kind': 'transport', 'hops': 1,
+     'quality': 3},
+  ];
+  final edges = <Map<String, dynamic>>[
+    {'src': 'self', 'dst': '__iface__IF0', 'hops': 0, 'direct': true, 'quality': 4},
+    {'src': '__iface__IF0', 'dst': 'relay', 'hops': 1, 'direct': true, 'quality': 3},
+  ];
+  for (var p = 0; p < bandPeers; p++) {
+    final id = 'near-$p';
+    nodes.add({'id': id, 'label': p % 3 == 0 ? 'operator callsign $p long' : 'nd-$p',
+               'kind': 'peer', 'hops': 2, 'quality': p % 5, 'trenchchat': true});
+    edges.add({'src': 'relay', 'dst': id, 'hops': 2, 'direct': false, 'quality': p % 5});
+  }
+  for (final h in deepHops) {
+    for (var i = 0; i < deepPerHop; i++) {
+      final id = 'far-$h-$i';
+      nodes.add({
+        'id': id,
+        'label': longDeepLabels ? 'distant operator callsign $h$i' : 'far-hop-$h',
+        'kind': 'peer',
+        'hops': h,
+        'quality': 2,
+        'trenchchat': true,
+      });
+      edges.add({'src': 'relay', 'dst': id, 'hops': h, 'direct': false, 'quality': 2});
+    }
+  }
+  return {
+    'nodes': nodes,
+    'edges': edges,
+    'interfaces': [
+      {'name': 'IF0', 'type': 'TCPClientInterface', 'status': true, 'rxb': 0, 'txb': 0},
+    ],
+    'stats': {'node_count': nodes.length, 'path_count': edges.length,
+              'interface_count': 1},
+  };
+}
+
 /// One direct edge per quality tier, for pixel-sampling the painter. Self
 /// gets an empty label so its text and glow can't bleed onto the edges.
 Map<String, dynamic> tierTopology() => {
@@ -137,16 +244,17 @@ void main() {
     }
   });
 
-  test('rings stay ordered: interfaces, then hop 1, 2, 3', () {
+  test('ring bands stay ordered and separated: interfaces, then hop 1, 2, 3', () {
+    // A crowded ring is a band of lanes rather than one circle, so a group's
+    // radii spread; what must hold is that the bands do not interleave and
+    // that a band stays narrow enough to still read as one ring.
     final layout = layoutMapNodes(data);
     double radius(String id) => (layout.positions[id]! - layout.center).distance;
-    double ringOf(Iterable<MapNode> nodes) {
-      final radii = nodes.map((n) => radius(n.id)).toList();
-      // Every node of the group sits on one exact ring.
-      for (final r in radii) {
-        expect(r, closeTo(radii.first, 1e-6));
-      }
-      return radii.first;
+    (double, double) bandOf(Iterable<MapNode> nodes) {
+      final radii = nodes.map((n) => radius(n.id)).toList()..sort();
+      expect(radii.last - radii.first, lessThan(120),
+          reason: 'ring band spans ${radii.last - radii.first}px');
+      return (radii.first, radii.last);
     }
 
     final byGroup = <int, List<MapNode>>{};
@@ -154,13 +262,11 @@ void main() {
       if (n.kind == MapNodeKind.self) continue;
       byGroup.putIfAbsent(n.kind == MapNodeKind.interface_ ? 0 : n.hops, () => []).add(n);
     }
-    final r0 = ringOf(byGroup[0]!);
-    final r1 = ringOf(byGroup[1]!);
-    final r2 = ringOf(byGroup[2]!);
-    final r3 = ringOf(byGroup[3]!);
-    expect(r0, lessThan(r1));
-    expect(r1, lessThan(r2));
-    expect(r2, lessThan(r3));
+    final bands = [for (var g = 0; g <= 3; g++) bandOf(byGroup[g]!)];
+    for (var g = 1; g <= 3; g++) {
+      expect(bands[g - 1].$2, lessThan(bands[g].$1),
+          reason: 'ring $g overlaps ring ${g - 1}');
+    }
   });
 
   test('node markers never overlap at scale', () {
@@ -201,6 +307,244 @@ void main() {
             reason: '${labels[i].key} overlaps ${labels[j].key}');
       }
     }
+  });
+
+  test('labels never cover a node marker at scale', () {
+    // A label's backing box is opaque, so one that lands on a marker hides
+    // the node. Markers extend at most 7px from center (the diamond point).
+    final layout = layoutMapNodes(data);
+    for (final label in layout.labels.entries) {
+      for (final node in layout.positions.entries) {
+        final marker = Rect.fromCircle(center: node.value, radius: 7);
+        expect(label.value.rect.overlaps(marker), isFalse,
+            reason: 'label ${label.key} covers marker ${node.key}');
+      }
+    }
+  });
+
+  /// Every assertion that has to hold of a hub-heavy graph once the collapse
+  /// has had its say: the hub sectors stay compact, a hub's drawn peers stay
+  /// beside it, and no label drifts or overlaps. Run over both the collapsing
+  /// shape and the widest one that draws every child.
+  void expectHubsStayCompact(
+      String what, Map<String, dynamic> topology, int hubs, int drawnPerHub) {
+    final data = NetworkMapData.fromJson(topology);
+    final collapse = collapseMapData(data);
+    final layout = layoutMapNodes(collapse.data);
+
+    test('$what draws $drawnPerHub peers per hub', () {
+      for (var h = 0; h < hubs; h++) {
+        final drawn = collapse.data.nodes.where((n) => n.id.startsWith('hub-$h-peer-'));
+        expect(drawn, hasLength(drawnPerHub), reason: 'hub-$h draws ${drawn.length}');
+      }
+    });
+
+    test('$what stays compact instead of inflating one ring across the canvas', () {
+      // The radial layout used to size a ring so every label on it fit end to
+      // end around one circle, which two hubs holding 28 peers each blew out
+      // to 2253x2327 -- 5.2 megapixels of mostly empty canvas. Lanes, the
+      // capped ring step and the collapse hold it under a megapixel.
+      expect(layout.size.width * layout.size.height, lessThan(800000),
+          reason: 'layout is ${layout.size}');
+    });
+
+    test('$what keeps a hub\'s peers beside it', () {
+      // A hub's peer sits one ring out and inside the hub's own sector, so
+      // the edge between them stays a short spoke rather than a line across
+      // the graph. Four ring gaps is the ceiling a ring step plus a full
+      // sector's worth of angle can reach.
+      const bound = 4 * 84.0;
+      for (final e in collapse.data.edges) {
+        final a = layout.positions[e.src];
+        final b = layout.positions[e.dst];
+        if (a == null || b == null || !e.src.startsWith('hub-')) continue;
+        final d = (a - b).distance;
+        expect(d, lessThan(bound),
+            reason: '${e.src} -> ${e.dst} is ${d.toStringAsFixed(0)}px');
+      }
+    });
+
+    test('$what keeps labels beside their node and off each other', () {
+      final entries = layout.labels.entries.toList();
+      for (var i = 0; i < entries.length; i++) {
+        final pos = layout.positions[entries[i].key]!;
+        final rect = entries[i].value.rect;
+        final dx = math.max(0.0, math.max(rect.left - pos.dx, pos.dx - rect.right));
+        final dy = math.max(0.0, math.max(rect.top - pos.dy, pos.dy - rect.bottom));
+        expect(math.sqrt(dx * dx + dy * dy), lessThanOrEqualTo(48),
+            reason: '${entries[i].key} label drifted');
+        for (var j = i + 1; j < entries.length; j++) {
+          expect(rect.overlaps(entries[j].value.rect), isFalse,
+              reason: '${entries[i].key} overlaps ${entries[j].key}');
+        }
+      }
+    });
+
+    test('$what is deterministic', () {
+      final again = layoutMapNodes(collapseMapData(NetworkMapData.fromJson(topology)).data);
+      expect(again.positions, layout.positions);
+      expect(again.size, layout.size);
+      for (final id in layout.labels.keys) {
+        expect(again.labels[id]!.rect, layout.labels[id]!.rect);
+      }
+    });
+  }
+
+  group('two transport hubs owning almost every peer', () {
+    final collapse = collapseMapData(NetworkMapData.fromJson(hubTopology()));
+    final layout = layoutMapNodes(collapse.data);
+
+    expectHubsStayCompact('a collapsed hub graph', hubTopology(), 2, 10);
+
+    test('each hub groups the eighteen peers it has no room for', () {
+      for (var h = 0; h < 2; h++) {
+        final overflow = mapOverflowIdFor('hub-$h');
+        expect(collapse.hidden[overflow], hasLength(18));
+        expect(collapse.data.nodes.singleWhere((n) => n.id == overflow).label, '18 more');
+        // The hidden ones are gone from the picture entirely.
+        for (final node in collapse.hidden[overflow]!) {
+          expect(layout.positions.containsKey(node.id), isFalse);
+          expect(layout.labels.containsKey(node.id), isFalse);
+        }
+      }
+    });
+
+    test('a group lands in the sector of the hub it belongs to', () {
+      double angleOf(String id) {
+        final v = layout.positions[id]! - layout.center;
+        return math.atan2(v.dy, v.dx);
+      }
+
+      for (var h = 0; h < 2; h++) {
+        final spread = (angleOf(mapOverflowIdFor('hub-$h')) - angleOf('hub-$h')).abs();
+        expect(math.min(spread, 2 * math.pi - spread), lessThan(math.pi / 2),
+            reason: 'the hub-$h group drifted out of its sector');
+      }
+    });
+  });
+
+  // Eleven is the most children a parent draws before grouping any of them,
+  // so this is the widest the layout is ever asked to place a hub's peers.
+  group('two transport hubs at the no-collapse maximum', () {
+    test('nothing is grouped', () {
+      expect(collapseMapData(NetworkMapData.fromJson(hubTopology(peersPerHub: 11))).hidden,
+          isEmpty);
+    });
+
+    expectHubsStayCompact(
+        'eleven peers per hub', hubTopology(peersPerHub: 11), 2, 11);
+  });
+
+  group('a relay with a crowded band and lone peers deeper behind it', () {
+    // Every distinct hop count is a ring, and a ring used to cost a full
+    // _ringGap (84px) whether or not anything on it needed the room. The user
+    // shape below has three rings holding one node each, so the hop-5 peer
+    // landed at 504px with nothing but empty canvas between it and the band at
+    // 252px. Radii with the old constants, for the ceilings below: interfaces
+    // 84, relay 168, band 252, then 336 / 420 / 504.
+    final data = NetworkMapData.fromJson(deepChainTopology());
+    final layout = layoutMapNodes(data);
+    double radius(String id) => (layout.positions[id]! - layout.center).distance;
+    double bandOuter(MapLayout l, NetworkMapData d, int hops) {
+      var outer = 0.0;
+      for (final n in d.nodes) {
+        if (n.hops != hops || n.kind == MapNodeKind.self) continue;
+        outer = math.max(outer, (l.positions[n.id]! - l.center).distance);
+      }
+      return outer;
+    }
+
+    test('deep singletons tuck in behind the band instead of ringing out', () {
+      for (final (hops, ceiling) in const [(3, 220.0), (4, 250.0), (5, 280.0)]) {
+        expect(radius('far-$hops-0'), lessThan(ceiling),
+            reason: 'the hop-$hops peer sits at '
+                '${radius('far-$hops-0').toStringAsFixed(0)}px');
+      }
+    });
+
+    test('sparse rings stay strictly outside the ring inside them', () {
+      var inner = bandOuter(layout, data, 2);
+      expect(inner, greaterThan(radius('relay')));
+      for (final hops in const [3, 4, 5]) {
+        final r = radius('far-$hops-0');
+        expect(r, greaterThan(inner), reason: 'hop $hops interleaves the ring inside it');
+        inner = r;
+      }
+    });
+
+    test('a compacted ring keeps its markers and labels clear', () {
+      final entries = layout.positions.entries.toList();
+      for (var i = 0; i < entries.length; i++) {
+        for (var j = i + 1; j < entries.length; j++) {
+          expect((entries[i].value - entries[j].value).distance,
+              greaterThanOrEqualTo(14.0),
+              reason: '${entries[i].key} and ${entries[j].key} merged');
+        }
+      }
+      final labels = layout.labels.entries.toList();
+      for (var i = 0; i < labels.length; i++) {
+        final pos = layout.positions[labels[i].key]!;
+        final rect = labels[i].value.rect;
+        final dx = math.max(0.0, math.max(rect.left - pos.dx, pos.dx - rect.right));
+        final dy = math.max(0.0, math.max(rect.top - pos.dy, pos.dy - rect.bottom));
+        expect(math.sqrt(dx * dx + dy * dy), lessThanOrEqualTo(48),
+            reason: '${labels[i].key} label drifted');
+        for (final node in layout.positions.entries) {
+          expect(rect.overlaps(Rect.fromCircle(center: node.value, radius: 7)), isFalse,
+              reason: 'label ${labels[i].key} covers marker ${node.key}');
+        }
+        for (var j = i + 1; j < labels.length; j++) {
+          expect(rect.overlaps(labels[j].value.rect), isFalse,
+              reason: '${labels[i].key} overlaps ${labels[j].key}');
+        }
+      }
+    });
+
+    test('a crowded ring does not leak its growth into the sparse ring outside it', () {
+      // The band here needs several lanes, so its own radius grows well past
+      // its floor. What the ring outside it inherits is that outer edge plus
+      // its own gap and nothing more.
+      final wide = NetworkMapData.fromJson(
+          deepChainTopology(bandPeers: 26, longDeepLabels: true));
+      final l = layoutMapNodes(wide);
+      final outer = bandOuter(l, wide, 2);
+      final deep = (l.positions['far-3-0']! - l.center).distance;
+      expect(deep - outer, lessThan(40),
+          reason: 'the hop-3 peer sits ${(deep - outer).toStringAsFixed(0)}px '
+              'past a band that ends at ${outer.toStringAsFixed(0)}px');
+    });
+
+    test('a packed deep ring still gets full spacing', () {
+      // How far past the band a hop-3 ring of [perHop] peers starts. Only a
+      // ring that needs no room is compacted, so four peers there -- one past
+      // the threshold -- already pays the full 84px gap, and ten labelled ones
+      // pay it too.
+      double step(int perHop, {bool long = false}) {
+        final d = NetworkMapData.fromJson(deepChainTopology(
+            deepHops: const [3], deepPerHop: perHop, longDeepLabels: long));
+        final l = layoutMapNodes(d);
+        var band = double.infinity;
+        var deep = double.infinity;
+        for (final n in d.nodes) {
+          final r = (l.positions[n.id]! - l.center).distance;
+          if (n.hops == 2) band = math.min(band, r);
+          if (n.hops == 3) deep = math.min(deep, r);
+        }
+        return deep - band;
+      }
+
+      expect(step(4), greaterThanOrEqualTo(84.0),
+          reason: 'four peers at hop 3 were compacted like a singleton');
+      expect(step(10, long: true), greaterThanOrEqualTo(84.0),
+          reason: 'ten labelled peers at hop 3 were compacted like a singleton');
+      expect(step(1), lessThan(84.0), reason: 'the lone peer was not compacted');
+    });
+
+    test('the compacted layout is deterministic', () {
+      final again = layoutMapNodes(NetworkMapData.fromJson(deepChainTopology()));
+      expect(again.positions, layout.positions);
+      expect(again.size, layout.size);
+    });
   });
 
   test('the trenchchat flag parses, defaulting to the old behavior for peers', () {
@@ -282,11 +626,20 @@ void main() {
       await tester.tap(find.text('PEERS ONLY'));
       await settle(tester);
 
-      final painted = (mapPaint(tester).painter as dynamic).data as NetworkMapData;
-      expect(painted.nodes.every(isPeerNode), isTrue);
-      // 30 direct minus 4 LXMF-only, plus 72 relay-subtree peers.
-      expect(painted.nodes.where((n) => n.kind == MapNodeKind.peer).length, 98);
-      // relay-1 is a TrenchChat client that happens to relay: it stays.
+      final painter = mapPaint(tester).painter as dynamic;
+      final painted = painter.data as NetworkMapData;
+      final hidden = painter.hidden as Map<String, List<MapNode>>;
+      expect(painted.nodes.every((n) => isPeerNode(n) || mapIsOverflowNode(n)), isTrue);
+      // 30 direct minus 4 LXMF-only, plus 72 relay-subtree peers -- some drawn
+      // and the rest grouped, none of them lost by the filter.
+      final peers = [
+        ...painted.nodes.where((n) => n.kind == MapNodeKind.peer),
+        for (final group in hidden.values)
+          ...group.where((n) => n.kind == MapNodeKind.peer),
+      ];
+      expect(peers.map((n) => n.id).toSet(), hasLength(98));
+      // relay-1 is a TrenchChat client that happens to relay: it stays, and
+      // the collapse keeps it drawn because its subtree hangs off it.
       expect(painted.nodes.any((n) => n.id == 'relay-1'), isTrue);
       expect(painted.nodes.any((n) => n.id == 'relay-0'), isFalse);
       final kept = painted.nodes.map((n) => n.id).toSet();

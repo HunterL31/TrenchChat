@@ -464,7 +464,8 @@ class _MainWindowState extends State<MainWindow> {
                   ),
                   Expanded(
                     child: switch (_tab) {
-                      ChannelTab.map => MapTab(state: state),
+                      ChannelTab.map =>
+                        MapTab(state: state, onOpenNomadPage: _openLink),
                       ChannelTab.iface => IfaceTab(state: state),
                       ChannelTab.friends =>
                         FriendsTab(state: state, onOpenNomadPage: _openLink),

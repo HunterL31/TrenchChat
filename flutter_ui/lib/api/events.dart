@@ -108,6 +108,8 @@ sealed class TcEvent {
             if (entry.value is Map<String, dynamic>)
               entry.key: ThemeSpec.fromJson(entry.value as Map<String, dynamic>),
         });
+      case 'network_map_changed':
+        return const NetworkMapChangedEvent();
       case 'nomad_node':
         return NomadNodeEvent(
           json['node_hash'] as String,
@@ -288,6 +290,13 @@ class SyncStatusEvent extends TcEvent {
 
   final String channelHash;
   final String state;
+}
+
+/// The network topology changed -- an announce, a presence flip, a link going
+/// up or down. Debounced backend-side and carries no detail: handlers re-fetch
+/// GET /network/map, which is the only thing that knows the whole picture.
+class NetworkMapChangedEvent extends TcEvent {
+  const NetworkMapChangedEvent();
 }
 
 /// A Nomad Network node announced itself (or refreshed its name).

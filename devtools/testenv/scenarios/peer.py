@@ -7,6 +7,8 @@ api.py -> actions.py path the Flutter client uses.
 """
 
 import base64
+import json
+import threading
 
 import httpx
 
@@ -18,6 +20,69 @@ TOKEN_QUERY_PARAM = "token"
 
 def _auth_headers(token: str) -> dict[str, str]:
     return {_TOKEN_HEADER: token} if token else {}
+
+
+class EventListener:
+    """A live subscription to one tester's event socket.
+
+    Events land in a list on a background thread, so a scenario can open the
+    socket before the action it expects to be told about and then poll for the
+    event rather than sleeping for it.
+    """
+
+    def __init__(self, url: str, headers: dict[str, str]):
+        self._url = url
+        self._headers = headers
+        self._events: list[dict] = []
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._ws = None
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> "EventListener":
+        from websockets.sync.client import connect
+
+        self._ws = connect(self._url, additional_headers=self._headers,
+                           open_timeout=10)
+        self._thread = threading.Thread(target=self._read, daemon=True,
+                                        name="event-listener")
+        self._thread.start()
+        return self
+
+    def _read(self) -> None:
+        while not self._stop.is_set():
+            try:
+                raw = self._ws.recv(timeout=1.0)
+            except TimeoutError:
+                continue
+            except Exception:
+                return
+            try:
+                event = json.loads(raw)
+            except ValueError:
+                continue
+            with self._lock:
+                self._events.append(event)
+
+    def types(self) -> list[str]:
+        with self._lock:
+            return [e.get("type", "") for e in self._events]
+
+    def count(self, event_type: str) -> int:
+        return self.types().count(event_type)
+
+    def close(self) -> None:
+        self._stop.set()
+        try:
+            self._ws.close()
+        except Exception:
+            pass
+
+    def __enter__(self) -> "EventListener":
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.close()
 
 
 class Peer:
@@ -147,6 +212,11 @@ class Peer:
                 return f"closed:{e.rcvd.code if e.rcvd else 'unknown'}"
 
         return asyncio.run(attempt())
+
+    def events(self) -> EventListener:
+        """Open the event socket and collect everything that arrives on it."""
+        url = self._base.replace("http://", "ws://") + "/ws"
+        return EventListener(url, _auth_headers(self.token)).start()
 
     def alive(self) -> bool:
         """True if this tester's API is answering. False across a kill."""
@@ -497,6 +567,18 @@ class Peer:
             return None
         r.raise_for_status()
         return r.content
+
+    # --- network map ---
+
+    def network_map(self) -> dict:
+        return self._get("/network/map")
+
+    def map_node_for(self, identity_hash: str) -> dict | None:
+        """The map node an identity resolved to, or None when unresolved."""
+        for node in self.network_map()["nodes"]:
+            if node.get("identity_hex") == identity_hash:
+                return node
+        return None
 
     # --- link control ---
 

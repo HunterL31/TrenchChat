@@ -9,6 +9,7 @@ import '../../api/models/bandwidth.dart';
 import '../../api/models/discovery.dart';
 import '../../api/models/interface.dart';
 import '../../app_state.dart';
+import '../../format.dart';
 import '../../theme/section_theme.dart';
 import '../../theme/theme_spec.dart';
 import '../../theme/tokens.dart';
@@ -17,11 +18,7 @@ import '../../widgets/tc_button.dart';
 import '../../widgets/tc_icon.dart';
 import '../dialogs/interface_dialog.dart';
 
-String formatByteCount(int n) {
-  if (n < 1024) return '$n B';
-  if (n < 1024 * 1024) return '${(n / 1024).toStringAsFixed(1)} KB';
-  return '${(n / (1024 * 1024)).toStringAsFixed(1)} MB';
-}
+export '../../format.dart' show formatByteCount;
 
 String formatRate(double? bytesPerSec) {
   if (bytesPerSec == null) return '—';

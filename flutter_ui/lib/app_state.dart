@@ -185,6 +185,13 @@ class AppState extends ChangeNotifier {
   /// Saved page bookmarks. Local-only, like [friends].
   List<NomadBookmark> nomadBookmarks = [];
 
+  int _networkMapRevision = 0;
+
+  /// Bumped on every [NetworkMapChangedEvent]. The map is expensive enough
+  /// that nothing is fetched here: the MAP tab watches this counter and
+  /// re-fetches only while it is on screen.
+  int get networkMapRevision => _networkMapRevision;
+
   /// Live state of page/file fetches, keyed by fetch id and updated from
   /// [NomadFetchEvent]s. The browser tab watches its own fetch id here;
   /// terminal entries are removed once a consumer takes them.
@@ -1712,6 +1719,25 @@ class AppState extends ChangeNotifier {
             addedAt: f.addedAt,
             lastSeenAt: f.lastSeenAt,
             isOnline: isOnline,
+            state: f.state,
+            nomadNodeHash: f.nomadNodeHash,
+          );
+        }
+        // The DM sidebar reads its own snapshot of the same presence, so it
+        // must move with the event too or it disagrees with the friends list.
+        final dmIdx = dms.indexWhere((d) => d.peerHash == identityHash);
+        if (dmIdx >= 0) {
+          final d = dms[dmIdx];
+          dms[dmIdx] = DmConversation(
+            hash: d.hash,
+            peerHash: d.peerHash,
+            displayName: d.displayName,
+            createdAt: d.createdAt,
+            lastMessageAt: d.lastMessageAt,
+            unread: d.unread,
+            isOnline: isOnline,
+            isFriend: d.isFriend,
+            peerIsTrenchchat: d.peerIsTrenchchat,
           );
         }
         notifyListeners();
@@ -1773,6 +1799,9 @@ class AppState extends ChangeNotifier {
             notifyListeners();
           }
         }
+      case NetworkMapChangedEvent():
+        _networkMapRevision++;
+        notifyListeners();
       case NomadNodeEvent(:final nodeHash, :final displayName):
         final existing = nomadNodes[nodeHash];
         final now = DateTime.now().millisecondsSinceEpoch / 1000.0;

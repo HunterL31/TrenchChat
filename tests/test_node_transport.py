@@ -14,7 +14,8 @@ from trenchchat.core.identity import Identity
 from trenchchat.network.announce import NodeAnnounceHandler
 from trenchchat.network import node_transport
 from trenchchat.network.node_transport import (
-    FETCH_BAD_PATH, FETCH_BAD_RESPONSE, FETCH_SEND_FAILED, FETCH_UNREACHABLE,
+    FETCH_BAD_PATH, FETCH_BAD_RESPONSE, FETCH_LINK_CLOSED, FETCH_SEND_FAILED,
+    FETCH_UNREACHABLE,
     MAX_SERVED_RESPONSE_BYTES, NODE_REDIAL_BACKOFF, NODE_SERVE_RATE_LIMIT,
     NodeTransportBase, RNSNodeTransport, is_valid_request_path,
 )
@@ -429,6 +430,75 @@ def test_an_orderly_close_clears_the_backoff_ladder(transport):
     assert conn.state == node_transport._IDLE
     assert conn.dial_attempts == 0
     assert conn.next_dial_at == 0.0
+
+
+class _StaleLink(_DeadLink):
+    """A link RNS already marked dead, before the closed callback lands."""
+
+    status = RNS.Link.CLOSED
+
+
+def test_a_stale_link_is_replaced_before_burning_the_queue(transport, monkeypatch):
+    results = _collect_results(transport)
+    monkeypatch.setattr(RNS.Identity, "recall", staticmethod(lambda h: None))
+    monkeypatch.setattr(RNS.Transport, "request_path",
+                        staticmethod(lambda h, *a, **k: None))
+    node_hex = "aa" * 16
+    link = _StaleLink()
+    conn = _linked_conn(transport, node_hex, link)
+    conn.queued.append(node_transport._Fetch(
+        "f1", node_hex, "/page/index.mu", 1024, 60.0))
+
+    transport._flush_queued(node_hex)
+
+    assert results == []
+    assert link.torn_down
+    assert conn.link is not link
+    assert [f.fetch_id for f in conn.queued] == ["f1"]
+
+
+def _active_fetch(transport, monkeypatch, node_hex, *, link=None):
+    monkeypatch.setattr(RNS.Identity, "recall", staticmethod(lambda h: None))
+    monkeypatch.setattr(RNS.Transport, "request_path",
+                        staticmethod(lambda h, *a, **k: None))
+    link = link or _RecordingLink()
+    _linked_conn(transport, node_hex, link)
+    transport.fetch("f1", node_hex, "/page/index.mu", max_size=1024)
+    return link, next(iter(transport._active.values()))
+
+
+def test_link_death_before_transfer_retries_once(transport, monkeypatch):
+    results = _collect_results(transport)
+    node_hex = "bb" * 16
+    link, fetch = _active_fetch(transport, monkeypatch, node_hex)
+
+    transport._on_link_closed(link)
+
+    assert results == []
+    assert fetch.redialed
+    assert [f.fetch_id for f in transport._conns[node_hex].queued] == ["f1"]
+
+
+def test_link_death_mid_transfer_is_a_real_failure(transport, monkeypatch):
+    results = _collect_results(transport)
+    node_hex = "cc" * 16
+    link, fetch = _active_fetch(transport, monkeypatch, node_hex)
+    fetch.transferred = True
+
+    transport._on_link_closed(link)
+
+    assert results == [("f1", False, FETCH_LINK_CLOSED)]
+
+
+def test_a_fetch_is_redialed_only_once_across_mechanisms(transport, monkeypatch):
+    results = _collect_results(transport)
+    node_hex = "dd" * 16
+    link, fetch = _active_fetch(transport, monkeypatch, node_hex)
+    fetch.redialed = True
+
+    transport._on_link_closed(link)
+
+    assert results == [("f1", False, FETCH_LINK_CLOSED)]
 
 
 # ---------------------------------------------------------------------------

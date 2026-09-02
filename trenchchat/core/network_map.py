@@ -2,16 +2,27 @@
 Reticulum topology gathering for the network map.
 
 Pure data functions consumed by the testenv API that backs the Flutter
-client.
+client, plus a debounced notifier the API turns into a change event.
 """
+
+import threading
+import time
+from typing import Callable
 
 import RNS
 
 from trenchchat.core.protocol import unpack_wire
 
-from trenchchat.core.link_quality import LinkQuality, score_path
+from trenchchat.core.link_quality import LinkQuality, rtt_ms_for, score_path
 
-_MAX_NODES = 120   # cap to keep the graph readable
+# Cap on the peer nodes drawn from the path table, not on the entries read: one
+# identity answers to several destinations and collapses into a single node, so
+# the budget is spent per node. Relays and interfaces are drawn on top of it.
+_MAX_NODES = 120
+
+# Announces, presence transitions and link changes all touch the map and all
+# arrive in bursts; this is the shortest gap between two change notifications.
+CHANGE_MIN_INTERVAL_SECS = 2.0
 
 
 # ---------------------------------------------------------------------------
@@ -19,7 +30,8 @@ _MAX_NODES = 120   # cap to keep the graph readable
 # ---------------------------------------------------------------------------
 
 def gather_network_data(rns: RNS.Reticulum, self_hex: str,
-                        storage=None, directory=None) -> dict:
+                        storage=None, directory=None, presence=None,
+                        propagation=None, nomad=None, friends=None) -> dict:
     """
     Query the RNS instance for the current network topology.
 
@@ -28,25 +40,73 @@ def gather_network_data(rns: RNS.Reticulum, self_hex: str,
                 seen in channel member lists) in preference to the announce app_data.
     directory: optional UserDirectory; identities it contains (fed by
                 trenchchat.user announces) are marked as TrenchChat clients.
+    presence: optional PresenceManager; drives each node's online flag, which
+                is None for every node without one.
+    propagation: optional PropagationNodes (or a set of destination hexes);
+                its nodes are flagged as LXMF propagation nodes.
+    nomad: optional NodeBrowserManager (or a set of destination hexes);
+                its nodes are flagged as Nomad Network nodes.
+    friends: optional Storage, FriendsManager (or a set of identity hexes);
+                accepted friends rank alongside channel members when the path
+                table holds more peers than the map draws.
 
     Returns a dict with keys:
-      nodes: list[dict] with id, label, kind ('self'|'transport'|'peer'|'unknown'),
-               hops, quality, trenchchat (bool: known TrenchChat client)
-      edges: list[dict] with src, dst, hops, direct (bool)
-      interfaces: list[dict] with name, type, status, rxb, txb
-      stats: dict with node_count, path_count, interface_count
+      nodes: list[dict] with id, identity_hex, label,
+               kind ('self'|'transport'|'peer'|'unknown'|'interface'), hops,
+               quality, trenchchat, via, interface, last_heard, expires,
+               rtt_ms, online, nomad, nomad_node_hash, propagation
+      edges: list[dict] with src, dst, hops, direct (bool), quality,
+               kind ('interface'|'path')
+      interfaces: list[dict] with name, type, status, rxb, txb, bitrate
+      stats: dict with node_count, path_count, interface_count, online_peer_count
+
+    A multi-hop path is drawn through the relay it really travels through: the
+    interface it was learned on holds the first-hop relay, and the relay holds
+    the destination. A path whose interface has no node falls back to hanging
+    the relay off self. A 1-hop destination hangs off self directly, unless it
+    is itself a relay an interface already holds: one route per node.
+
+    A Nomad Network node announces its pages under nomadnetwork.node and its
+    messaging under lxmf.delivery; the two share one identity and collapse into
+    a single graph node, so nomad_node_hash (str | None) carries the page
+    destination, the only one of the two a node browser can dial. A relay
+    collapses the same way, and is drawn as a transport whichever of its
+    destinations the path table listed first.
+
+    A path table longer than _MAX_NODES is selected from by relevance, never by
+    the order RNS happens to hold it in: a relearned path is re-inserted at the
+    end of the table, so taking the head drops exactly the peers most recently
+    heard from. Entries are grouped by the identity behind them, each group
+    ranked by its best entry, and whole groups admitted best-first until the
+    node budget is spent. The rank, best first, is: channel member or accepted
+    friend, then any known TrenchChat client, then online, then most recently
+    heard, then fewest hops, then destination hex. Admitted entries are drawn
+    in path-table order, so nothing below the cap changes.
     """
     nodes: dict[str, dict] = {}   # hash_hex -> node dict
     edges: list[dict] = []
 
+    propagation_hashes = _propagation_hashes(propagation)
+    nomad_hashes = _nomad_hashes(nomad)
+
     # --- self node ---
     nodes[self_hex] = {
-        "id":         self_hex,
-        "label":      "This device",
-        "kind":       "self",
-        "hops":       0,
-        "quality":    int(LinkQuality.EXCELLENT),
-        "trenchchat": True,
+        "id":           self_hex,
+        "identity_hex": self_hex,
+        "label":        "This device",
+        "kind":         "self",
+        "hops":         0,
+        "quality":      int(LinkQuality.EXCELLENT),
+        "trenchchat":   True,
+        "via":          None,
+        "interface":    None,
+        "last_heard":   None,
+        "expires":      None,
+        "rtt_ms":       None,
+        "online":       _online_for(self_hex, presence),
+        "nomad":        self_hex in nomad_hashes,
+        "nomad_node_hash": self_hex if self_hex in nomad_hashes else None,
+        "propagation":  self_hex in propagation_hashes,
     }
 
     # --- path table ---
@@ -98,38 +158,57 @@ def gather_network_data(rns: RNS.Reticulum, self_hex: str,
             if via_hex != self_hex and via_hex != dest_h_hex:
                 transport_hashes.add(via_hex)
 
+    # A relay is reachable under several destinations that share one identity,
+    # and only one of them is ever named as a via. Classifying by identity too
+    # keeps it a transport whichever of them the path table listed first.
+    transport_identities: set[str] = set()
+    for relay_hex in transport_hashes:
+        relay_identity = _recall(relay_hex)
+        if relay_identity is not None:
+            transport_identities.add(relay_identity.hash.hex())
+
     seen_pairs: set[tuple] = set()
     # Maps identity_hex → the canonical node ID already added for that identity.
     # Multiple RNS destinations (lxmf.delivery, trenchchat.channel, …) can share
     # the same underlying identity; we collapse them into one graph node.
     identity_to_node: dict[str, str] = {self_hex: self_hex}
+    # Relays drawn as a child of the interface they were learned on.
+    relayed_under_interface: set[str] = set()
 
-    for entry in path_table[:_MAX_NODES]:
+    selected, identity_by_dest = _select_entries(
+        path_table, member_identities, _friend_hashes(friends),
+        directory, presence)
+
+    for entry in selected:
         dest_hash = entry.get("hash")
-        if dest_hash is None:
-            continue
         dest_hex = dest_hash.hex() if isinstance(dest_hash, bytes) else str(dest_hash)
         hops = entry.get("hops", 0)
         via = entry.get("via")
         via_hex = via.hex() if isinstance(via, bytes) else (str(via) if via else None)
         # The interface name this path was learned through (may be None/empty)
-        path_iface: str = entry.get("interface") or ""
+        path_iface: str = _coerce_text(entry.get("interface"))
+        # A via that is the destination itself is a direct path, not a relay.
+        next_hop = via_hex if (via_hex and via_hex != dest_hex
+                               and via_hex != self_hex) else None
 
-        # Resolve the identity behind this destination.
-        identity = RNS.Identity.recall(dest_hash if isinstance(dest_hash, bytes)
-                                       else bytes.fromhex(dest_hex))
+        # The identity behind this destination, recalled once during selection.
+        identity = identity_by_dest.get(dest_hex)
         identity_hex: str | None = identity.hash.hex() if identity is not None else None
 
         # If we already have a node for this identity, reuse it, skip adding a
         # duplicate node and redirect edges to the canonical one.
         if identity_hex and identity_hex in identity_to_node:
             canonical_id = identity_to_node[identity_hex]
+            _merge_dest_flags(nodes.get(canonical_id), dest_hex,
+                              nomad_hashes, propagation_hashes)
         else:
             canonical_id = dest_hex
             # Classify
             if dest_hex == self_hex:
                 kind = "self"
-            elif dest_hex in transport_hashes:
+            elif (dest_hex in transport_hashes
+                  or (identity_hex is not None
+                      and identity_hex in transport_identities)):
                 kind = "transport"
             elif identity is not None:
                 kind = "peer"
@@ -144,6 +223,15 @@ def gather_network_data(rns: RNS.Reticulum, self_hex: str,
                     "kind":         kind,
                     "hops":         hops,
                     "trenchchat":   _is_trenchchat(identity_hex, member_identities, directory),
+                    "via":          next_hop,
+                    "interface":    path_iface,
+                    "last_heard":   _as_float(entry.get("timestamp")),
+                    "expires":      _as_float(entry.get("expires")),
+                    "rtt_ms":       rtt_ms_for(dest_hex),
+                    "online":       _online_for(identity_hex, presence),
+                    "nomad":        dest_hex in nomad_hashes,
+                    "nomad_node_hash": dest_hex if dest_hex in nomad_hashes else None,
+                    "propagation":  dest_hex in propagation_hashes,
                 }
             elif identity_hex and nodes[dest_hex].get("identity_hex") is None:
                 # A later path-table entry resolved the identity, backfill it.
@@ -151,65 +239,60 @@ def gather_network_data(rns: RNS.Reticulum, self_hex: str,
                 nodes[dest_hex]["label"] = _make_label(dest_hex, identity, kind, storage)
                 nodes[dest_hex]["trenchchat"] = _is_trenchchat(
                     identity_hex, member_identities, directory)
+                nodes[dest_hex]["online"] = _online_for(identity_hex, presence)
             if identity_hex:
                 identity_to_node[identity_hex] = dest_hex
 
-        # Determine the relay node to route through for multi-hop paths.
-        # Prefer the interface diamond node (if the path came through a known
-        # interface) over creating a separate floating transport hash node.
+        # A multi-hop path travels through its via: give that relay a node and
+        # hang the destination off it, so the graph reads as the tree the
+        # traffic actually takes.
         relay_id: str | None = None
-        if via_hex and via_hex != self_hex and hops > 1:
-            iface_node_id = iface_name_to_id.get(path_iface)
-            if iface_node_id:
-                relay_id = iface_node_id          # anchor to interface diamond
-            else:
-                relay_id = via_hex                # fall back to transport hash node
-                if relay_id not in nodes:
-                    via_identity = RNS.Identity.recall(bytes.fromhex(relay_id))
-                    via_identity_hex = (via_identity.hash.hex()
-                                        if via_identity is not None else None)
-                    nodes[relay_id] = {
-                        "id":         relay_id,
-                        "label":      _make_label(relay_id, via_identity, "transport", storage),
-                        "kind":       "transport",
-                        "hops":       1,
-                        "quality":    int(score_path(relay_id, 1, None)),
-                        "trenchchat": _is_trenchchat(via_identity_hex,
-                                                     member_identities, directory),
-                    }
+        if next_hop and hops > 1:
+            relay_id = _ensure_relay_node(
+                nodes, identity_to_node, next_hop, path_iface,
+                storage, member_identities, directory, presence,
+                nomad_hashes, propagation_hashes)
+            if relay_id == canonical_id:
+                relay_id = None
 
         # Score the quality of the path to this destination
         quality = score_path(dest_hex, hops, via_hex)
         quality_val = int(quality)
 
         if relay_id:
-            # self → relay
-            pair = (self_hex, relay_id)
-            if pair not in seen_pairs:
-                seen_pairs.add(pair)
-                relay_quality = int(score_path(relay_id, 1, None))
-                edges.append({"src": self_hex, "dst": relay_id, "hops": 1, "direct": True,
-                               "kind": "interface" if relay_id.startswith("__iface__") else "path",
-                               "quality": relay_quality})
-            # relay → canonical peer node
-            pair2 = (relay_id, canonical_id)
-            if pair2 not in seen_pairs:
-                seen_pairs.add(pair2)
-                edges.append({"src": relay_id, "dst": canonical_id,
-                               "hops": hops, "direct": False,
-                               "quality": quality_val})
+            # The relay is a 1-hop neighbour, so it hangs off the interface it
+            # was learned on; self holds it only when that interface has no node.
+            relay_parent = iface_name_to_id.get(path_iface) or self_hex
+            if relay_parent != self_hex:
+                relayed_under_interface.add(relay_id)
+            _add_edge(edges, seen_pairs, relay_parent, relay_id, 1, True,
+                      "path", int(score_path(relay_id, 1, None)))
+            _add_edge(edges, seen_pairs, relay_id, canonical_id, hops, False,
+                      "path", quality_val)
         else:
-            pair = (self_hex, canonical_id)
-            if pair not in seen_pairs:
-                seen_pairs.add(pair)
-                edges.append({"src": self_hex, "dst": canonical_id,
-                               "hops": hops, "direct": hops <= 1,
-                               "quality": quality_val})
+            _add_edge(edges, seen_pairs, self_hex, canonical_id, hops,
+                      hops <= 1, "path", quality_val)
 
         # Propagate the best quality score seen for this node
         if canonical_id in nodes:
             existing_q = nodes[canonical_id].get("quality", 0)
             nodes[canonical_id]["quality"] = max(existing_q, quality_val)
+
+    # A relay that is a peer in its own right also has a 1-hop entry, whose
+    # direct edge would draw a second route to a node the interface chain
+    # already holds. Dropped here rather than in the loop, so the result does
+    # not depend on which of the two entries the path table listed first.
+    if relayed_under_interface:
+        edges = [edge for edge in edges
+                 if not (edge["src"] == self_hex and edge["kind"] == "path"
+                         and edge["dst"] in relayed_under_interface)]
+
+    # A node aspect with no current path entry still belongs to the peer whose
+    # delivery aspect has one; match it back by identity.
+    _reconcile_by_identity(nodes, identity_to_node, nomad_hashes,
+                           "nomad", "nomad_node_hash")
+    _reconcile_by_identity(nodes, identity_to_node, propagation_hashes,
+                           "propagation", None)
 
     # --- interface stats + interface nodes ---
     interfaces: list[dict] = []
@@ -222,11 +305,12 @@ def gather_network_data(rns: RNS.Reticulum, self_hex: str,
             rxb = iface.get("rxb", 0)
             txb = iface.get("txb", 0)
             interfaces.append({
-                "name":   iface_name,
-                "type":   iface_type,
-                "status": iface_status,
-                "rxb":    rxb,
-                "txb":    txb,
+                "name":    iface_name,
+                "type":    iface_type,
+                "status":  iface_status,
+                "rxb":     rxb,
+                "txb":     txb,
+                "bitrate": _as_int(iface.get("bitrate")),
             })
 
             # Add the interface as a graph node so it appears on the map.
@@ -244,25 +328,25 @@ def gather_network_data(rns: RNS.Reticulum, self_hex: str,
                 LinkQuality.EXCELLENT if iface_status else LinkQuality.POOR
             )
             nodes[iface_id] = {
-                "id":         iface_id,
-                "label":      label,
-                "kind":       "interface",
-                "hops":       0,
-                "quality":    iface_quality,
-                "trenchchat": False,
+                "id":           iface_id,
+                "identity_hex": None,
+                "label":        label,
+                "kind":         "interface",
+                "hops":         0,
+                "quality":      iface_quality,
+                "trenchchat":   False,
+                "via":          None,
+                "interface":    iface_name,
+                "last_heard":   None,
+                "expires":      None,
+                "rtt_ms":       None,
+                "online":       None,
+                "nomad":        False,
+                "nomad_node_hash": None,
+                "propagation":  False,
             }
-            # Edge: self → interface
-            pair = (self_hex, iface_id)
-            if pair not in seen_pairs:
-                seen_pairs.add(pair)
-                edges.append({
-                    "src":     self_hex,
-                    "dst":     iface_id,
-                    "hops":    0,
-                    "direct":  True,
-                    "kind":    "interface",
-                    "quality": iface_quality,
-                })
+            _add_edge(edges, seen_pairs, self_hex, iface_id, 0, True,
+                      "interface", iface_quality)
     except Exception:
         pass
 
@@ -271,11 +355,265 @@ def gather_network_data(rns: RNS.Reticulum, self_hex: str,
         "edges":      edges,
         "interfaces": interfaces,
         "stats": {
-            "node_count":      len(nodes),
-            "path_count":      len(path_table),
-            "interface_count": len(interfaces),
+            "node_count":        len(nodes),
+            "path_count":        len(path_table),
+            "interface_count":   len(interfaces),
+            "online_peer_count": sum(1 for n in nodes.values()
+                                     if n.get("online") is True),
         },
     }
+
+
+def _select_entries(path_table, member_identities: set[str],
+                    friend_hashes: set[str], directory, presence
+                    ) -> tuple[list[dict], dict[str, object]]:
+    """The path-table entries the map draws, and the identity behind each.
+
+    Entries sharing one identity form a group, because they collapse into one
+    graph node; each group is ranked by its best entry and whole groups are
+    admitted best-first until _MAX_NODES of them are in. An entry whose identity
+    cannot be recalled is its own group. The entries come back in path-table
+    order, so the graph a table under the cap draws is unchanged.
+    """
+    identity_by_dest: dict[str, object] = {}
+    entry_groups: list[tuple[dict, str]] = []
+    group_rank: dict[str, tuple] = {}
+
+    for entry in path_table:
+        dest_hash = entry.get("hash")
+        if dest_hash is None:
+            continue
+        dest_hex = dest_hash.hex() if isinstance(dest_hash, bytes) else str(dest_hash)
+        if dest_hex not in identity_by_dest:
+            identity_by_dest[dest_hex] = RNS.Identity.recall(
+                dest_hash if isinstance(dest_hash, bytes) else bytes.fromhex(dest_hex))
+        identity = identity_by_dest[dest_hex]
+        identity_hex = identity.hash.hex() if identity is not None else None
+
+        group = identity_hex or dest_hex
+        rank = _rank_key(dest_hex, identity_hex, entry, member_identities,
+                         friend_hashes, directory, presence)
+        best = group_rank.get(group)
+        if best is None or rank < best:
+            group_rank[group] = rank
+        entry_groups.append((entry, group))
+
+    if len(group_rank) <= _MAX_NODES:
+        return [entry for entry, _ in entry_groups], identity_by_dest
+
+    admitted = {group for group, _ in
+                sorted(group_rank.items(), key=lambda item: item[1])[:_MAX_NODES]}
+    return ([entry for entry, group in entry_groups if group in admitted],
+            identity_by_dest)
+
+
+def _rank_key(dest_hex: str, identity_hex: str | None, entry: dict,
+              member_identities: set[str], friend_hashes: set[str],
+              directory, presence) -> tuple:
+    """How relevant a path-table entry is, lowest first."""
+    known_peer = identity_hex is not None and (identity_hex in member_identities
+                                               or identity_hex in friend_hashes)
+    last_heard = _as_float(entry.get("timestamp")) or 0.0
+    hops = _as_int(entry.get("hops")) or 0
+    return (
+        0 if known_peer else 1,
+        0 if _is_trenchchat(identity_hex, member_identities, directory) else 1,
+        0 if _online_for(identity_hex, presence) is True else 1,
+        -last_heard,
+        hops,
+        dest_hex,
+    )
+
+
+def _add_edge(edges: list[dict], seen_pairs: set[tuple], src: str, dst: str,
+              hops: int, direct: bool, kind: str, quality: int) -> None:
+    """Append an edge unless this pair already has one."""
+    pair = (src, dst)
+    if pair in seen_pairs:
+        return
+    seen_pairs.add(pair)
+    edges.append({"src": src, "dst": dst, "hops": hops, "direct": direct,
+                  "kind": kind, "quality": quality})
+
+
+def _ensure_relay_node(nodes: dict[str, dict], identity_to_node: dict[str, str],
+                       via_hex: str, path_iface: str, storage,
+                       member_identities: set[str], directory, presence,
+                       nomad_hashes: set[str],
+                       propagation_hashes: set[str]) -> str:
+    """The graph node for a first-hop relay, adding it when it is new.
+
+    Returns the canonical node ID: a relay whose identity already has a node
+    reuses it rather than drawing the same peer twice.
+    """
+    via_identity = _recall(via_hex)
+    via_identity_hex = via_identity.hash.hex() if via_identity is not None else None
+    canonical_id = (identity_to_node.get(via_identity_hex)
+                    if via_identity_hex else None)
+    if canonical_id is not None:
+        _merge_dest_flags(nodes.get(canonical_id), via_hex,
+                          nomad_hashes, propagation_hashes)
+        return canonical_id
+    if via_hex not in nodes:
+        nodes[via_hex] = {
+            "id":           via_hex,
+            "identity_hex": via_identity_hex,
+            "label":        _make_label(via_hex, via_identity, "transport", storage),
+            "kind":         "transport",
+            "hops":         1,
+            "quality":      int(score_path(via_hex, 1, None)),
+            "trenchchat":   _is_trenchchat(via_identity_hex,
+                                           member_identities, directory),
+            "via":          None,
+            "interface":    path_iface,
+            "last_heard":   None,
+            "expires":      None,
+            "rtt_ms":       rtt_ms_for(via_hex),
+            "online":       _online_for(via_identity_hex, presence),
+            "nomad":        via_hex in nomad_hashes,
+            "nomad_node_hash": via_hex if via_hex in nomad_hashes else None,
+            "propagation":  via_hex in propagation_hashes,
+        }
+    if via_identity_hex:
+        identity_to_node[via_identity_hex] = via_hex
+    return via_hex
+
+
+def _recall(dest_hex: str):
+    """The identity behind a destination hex, or None when it cannot be recalled."""
+    try:
+        return RNS.Identity.recall(bytes.fromhex(dest_hex))
+    except Exception:
+        return None
+
+
+def _merge_dest_flags(node: dict | None, dest_hex: str,
+                      nomad_hashes: set[str],
+                      propagation_hashes: set[str]) -> None:
+    """Fold a collapsed destination's nomad/propagation flags into its node."""
+    if node is None:
+        return
+    if dest_hex in nomad_hashes:
+        node["nomad"] = True
+        if not node.get("nomad_node_hash"):
+            node["nomad_node_hash"] = dest_hex
+    if dest_hex in propagation_hashes:
+        node["propagation"] = True
+
+
+def _reconcile_by_identity(nodes: dict[str, dict], identity_to_node: dict[str, str],
+                           dest_hashes: set[str], flag: str,
+                           hash_key: str | None) -> None:
+    """Flag the node of any identity that owns one of these destinations.
+
+    Covers a destination the path table has no entry for: the browser or the
+    propagation table remembers it while its path has expired.
+    """
+    for dest_hex in dest_hashes:
+        if dest_hex in nodes:
+            continue
+        if hash_key and any(n.get(hash_key) == dest_hex for n in nodes.values()):
+            continue
+        try:
+            identity = RNS.Identity.recall(bytes.fromhex(dest_hex))
+            identity_hex = identity.hash.hex() if identity is not None else None
+        except Exception:
+            identity_hex = None
+        if identity_hex is None:
+            continue
+        canonical_id = identity_to_node.get(identity_hex)
+        node = nodes.get(canonical_id) if canonical_id else None
+        if node is None:
+            continue
+        node[flag] = True
+        if hash_key and not node.get(hash_key):
+            node[hash_key] = dest_hex
+
+
+def _coerce_text(value) -> str:
+    """An interface name off the path table, as text ("" when absent)."""
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode(errors="replace")
+    return str(value)
+
+
+def _as_float(value) -> float | None:
+    """A path-table timestamp as a float, or None when absent or malformed."""
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _as_int(value) -> int | None:
+    """An interface bitrate as an int, or None when absent or malformed."""
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _online_for(identity_hex: str | None, presence) -> bool | None:
+    """Presence for an identity; None when unknown or no presence source."""
+    if presence is None or identity_hex is None:
+        return None
+    try:
+        return bool(presence.is_online(identity_hex))
+    except Exception:
+        return None
+
+
+def _propagation_hashes(source) -> set[str]:
+    """Destination hexes of every known LXMF propagation node.
+
+    Takes a PropagationNodes, or any iterable of hexes.
+    """
+    if source is None:
+        return set()
+    try:
+        if hasattr(source, "known_nodes"):
+            return {str(entry["hash"]) for entry in source.known_nodes()}
+        return {str(node_hex) for node_hex in source}
+    except Exception:
+        return set()
+
+
+def _nomad_hashes(source) -> set[str]:
+    """Destination hexes of every known Nomad Network node.
+
+    Takes a NodeBrowserManager, or any iterable of hexes.
+    """
+    if source is None:
+        return set()
+    try:
+        if hasattr(source, "known_nodes"):
+            return {str(row["node_hash"]) for row in source.known_nodes()}
+        return {str(node_hex) for node_hex in source}
+    except Exception:
+        return set()
+
+
+def _friend_hashes(source) -> set[str]:
+    """Identity hexes of every accepted friend.
+
+    Takes a Storage, a FriendsManager, or any iterable of hexes.
+    """
+    if source is None:
+        return set()
+    try:
+        if hasattr(source, "get_friend_hashes"):
+            return {str(peer_hex) for peer_hex in source.get_friend_hashes()}
+        if hasattr(source, "get_friends"):
+            return {str(row["identity_hash"]) for row in source.get_friends()}
+        return {str(peer_hex) for peer_hex in source}
+    except Exception:
+        return set()
 
 
 def _is_trenchchat(identity_hex: str | None, member_identities: set[str],
@@ -344,6 +682,69 @@ def _make_label(hex_id: str, identity, kind: str, storage=None) -> str:
         except Exception:
             pass
 
-    # 3 & 4. Hash prefix fallback
+    # 3 & 4. Hash prefix fallback. Short: the details panel carries the full
+    # hash, and 8 chars matches the [98df4b4a] style the chat UI shows.
     fallback = identity_hex if identity_hex else hex_id
-    return fallback[:12] + "…"
+    return fallback[:8] + "…"
+
+
+def _start_timer(delay: float, fn: Callable[[], None]):
+    timer = threading.Timer(delay, fn)
+    timer.daemon = True
+    timer.start()
+    return timer
+
+
+class NetworkMapMonitor:
+    """Tells a client the map has changed, without telling it constantly.
+
+    Every announce, presence transition, link change and discovered node moves
+    the topology, and they arrive in bursts: a single peer coming up fires
+    several within a second. note_change() is safe to call from any RNS thread
+    and fires at most once per interval: immediately when quiet, and once more
+    after the interval for anything that arrived during it, however much did.
+    """
+
+    def __init__(self, min_interval_secs: float = CHANGE_MIN_INTERVAL_SECS,
+                 clock: Callable[[], float] | None = None,
+                 timer_factory: Callable[[float, Callable[[], None]], object] | None = None
+                 ) -> None:
+        self._min_interval = min_interval_secs
+        self._clock = clock or time.monotonic
+        self._timer_factory = timer_factory or _start_timer
+        self._callbacks: list[Callable[[], None]] = []
+        self._lock = threading.Lock()
+        self._last_fire: float | None = None
+        self._timer = None
+
+    def add_change_callback(self, cb: Callable[[], None]) -> None:
+        """Register a callback invoked (with no arguments) on a change."""
+        self._callbacks.append(cb)
+
+    def note_change(self) -> None:
+        """Note that the topology moved. Safe to call from any thread."""
+        now = self._clock()
+        with self._lock:
+            if self._timer is not None:
+                return
+            if (self._last_fire is not None
+                    and now - self._last_fire < self._min_interval):
+                delay = self._min_interval - (now - self._last_fire)
+                self._timer = self._timer_factory(delay, self._on_timer)
+                return
+            self._last_fire = now
+        self._fire()
+
+    def _on_timer(self) -> None:
+        with self._lock:
+            self._timer = None
+            self._last_fire = self._clock()
+        self._fire()
+
+    def _fire(self) -> None:
+        for cb in list(self._callbacks):
+            try:
+                cb()
+            except Exception as e:
+                RNS.log(f"TrenchChat [netmap]: change callback error: {e}",
+                        RNS.LOG_ERROR)

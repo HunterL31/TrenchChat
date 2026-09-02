@@ -604,6 +604,10 @@ def create_app(backend: Backend, *, token: str | None = None,
     def _on_link_status(is_online: bool):
         bus.emit("net_status", online=is_online)
 
+    def _on_network_map_changed():
+        # No payload: the map is large and the client re-reads /network/map.
+        bus.emit("network_map_changed")
+
     def _on_voice_roster(channel_hash_hex: str):
         bus.emit("voice_roster", channel_hash=channel_hash_hex)
 
@@ -631,6 +635,7 @@ def create_app(backend: Backend, *, token: str | None = None,
     backend.reaction_mgr.add_emoji_callback(_on_emoji_received)
     backend.sync_mgr.status.add_status_callback(_on_sync_status)
     backend.add_link_callback(_on_link_status)
+    backend.network_monitor.add_change_callback(_on_network_map_changed)
     def _on_nomad_node(node_hash_hex: str, display_name: str):
         bus.emit("nomad_node", node_hash=node_hash_hex,
                  display_name=display_name)
@@ -749,7 +754,11 @@ def create_app(backend: Backend, *, token: str | None = None,
     def get_network_map():
         from trenchchat.core.network_map import gather_network_data
         return gather_network_data(backend.rns, backend.identity.hash_hex,
-                                   backend.storage, backend.user_directory)
+                                   backend.storage, backend.user_directory,
+                                   presence=backend.presence_mgr,
+                                   propagation=backend.propagation_nodes,
+                                   nomad=backend.node_browser,
+                                   friends=backend.friends_mgr)
 
     @app.get("/bandwidth")
     def get_bandwidth():

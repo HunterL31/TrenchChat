@@ -60,6 +60,8 @@ instant delivery.
 | Friend requests | `GET /friends/requests` → `incoming` / `outgoing` |
 | Propagation node | `GET /propagation` → selected node, nodes heard, transfer state |
 | Link | `GET /net/status`, orchestrator `GET /status` |
+| Network map | `GET /network/map` → nodes (identity, kind, hops, quality, path detail), edges, interfaces |
+| Events | the `/ws` event socket, collected live → event types and their counts |
 
 **Convergence** is the workhorse assertion: named peers hold identical message
 ID sets, identical rosters with identical roles, and identical reaction counts
@@ -414,8 +416,9 @@ takes its access control on trust. This family tests that control directly,
 because it is the only thing between a tester's identity and any process (or
 any web page) that can reach the port. Added after the August security audit
 (PR 52) gave the API a token; before it, this surface was unauthenticated with
-wildcard CORS. Nothing here touches the mesh, so the whole family runs in
-about four seconds.
+wildcard CORS. The access-control scenarios touch no mesh and run in about four
+seconds; api5 does, because the map's change event only exists when a real peer
+announces.
 
 | ID | Peers | Actions | Expected result |
 |---|---|---|---|
@@ -423,6 +426,7 @@ about four seconds.
 | api2 | A | A wrong token, then the right one as a header, a bearer and `?token=` | ✅ Wrong token 401; all three routes 200; the socket opens on both the header and the query parameter |
 | api3 | A | Open the event socket with `Origin: http://evil.example`, then with its own | ✅ Foreign origin refused 403, own origin accepted. The socket checks this itself, a browser applies neither CORS nor same-origin policy to a WebSocket handshake |
 | api4 | A,B,C,D | Present each tester's token to a different tester's API | ⚠️ **One token for the whole environment**, as designed: B accepts A's, C's and D's (all 200), and the orchestrator's unauthenticated `/config` serves it. Recorded so the harness never claims per-identity isolation it does not have |
+| api5 | A,B | A opens the event socket, B re-announces; wait for `network_map_changed`, then read `/network/map` | ✅ 5/5. The event reaches A in 0.5–2 s of B's announce, or on the next heartbeat (16 s) when A already held everything B just said; one event per burst, never a stream. B is on the map by the time it arrives (0.0 s), at 2 hops through the hub, online, with its interface named. The TrenchChat flag lags 0–15 s behind, because the delivery announce and the `trenchchat.user` announce are two packets |
 
 ### `dm`: Direct messages between mutual friends
 
@@ -794,7 +798,7 @@ How to run it, when a scenario is the right tool, and how to add one live in
 
 ## Status
 
-All twelve families built and run: **99 scenarios, 77 strict and 22 probes.**
+All twelve families built and run: **100 scenarios, 78 strict and 22 probes.**
 
 | Family | Scenarios | Result |
 |---|---|---|
@@ -806,12 +810,12 @@ All twelve families built and run: **99 scenarios, 77 strict and 22 probes.**
 | `social`: reactions, presence, identity | 10 (9 strict, 1 probe) | All passing; social3's prediction refuted |
 | `restart`: restart and ordering | 5 (3 strict, 2 probes) | All passing; restart1 confirmed, then fixed; restart3 confirmed |
 | `voice`: live group voice | 13 (10 strict, 3 probes) | All passing; voice13 found a real cadence defect, 5/5 after the fix; voice4, voice5 and voice11 recorded gaps |
-| `api`: the API surface | 4 (3 strict, 1 probe) | All passing; api4 records the shared-token property |
+| `api`: the API surface | 5 (4 strict, 1 probe) | All passing; api4 records the shared-token property; api5 covers the pushed network map, 5/5 |
 | `integrity`: message integrity | 4 (4 strict) | All passing; integrity2 found a real gap, now fixed and strict |
 | `nomad`: page browsing and hosting | 4 (3 strict, 1 probe) | All passing, 4/4 runs each; nomad3 confirmed bounded offline failure and recovery |
 | `interop`: direct messages with other LXMF clients | 4 (4 strict) | All passing against a real bare RNS+LXMF client; interop4 found a real gap, 5/5 after the fix |
 
-**76 of 77 strict scenarios pass.** The one failure is a real defect, left
+**78 of 79 strict scenarios pass.** The one failure is a real defect, left
 strict and failing on purpose, so `--family sync` exits non-zero until it is
 resolved: sync11, intermittently (2 passes in 7). invite11 is now passing on
 the narrowed `kick` rule described above.
