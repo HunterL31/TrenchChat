@@ -539,9 +539,10 @@ def _make_label(hex_id: str, identity, kind: str, storage=None) -> str:
         except Exception:
             pass
 
-    # 3 & 4. Hash prefix fallback
+    # 3 & 4. Hash prefix fallback. Short: the details panel carries the full
+    # hash, and 8 chars matches the [98df4b4a] style the chat UI shows.
     fallback = identity_hex if identity_hex else hex_id
-    return fallback[:12] + "…"
+    return fallback[:8] + "…"
 
 
 def _start_timer(delay: float, fn: Callable[[], None]):
