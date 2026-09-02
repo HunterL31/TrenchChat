@@ -757,7 +757,8 @@ def create_app(backend: Backend, *, token: str | None = None,
                                    backend.storage, backend.user_directory,
                                    presence=backend.presence_mgr,
                                    propagation=backend.propagation_nodes,
-                                   nomad=backend.node_browser)
+                                   nomad=backend.node_browser,
+                                   friends=backend.friends_mgr)
 
     @app.get("/bandwidth")
     def get_bandwidth():

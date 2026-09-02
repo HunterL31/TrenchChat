@@ -7,6 +7,7 @@ real Reticulum stack is needed.
 
 from unittest.mock import MagicMock, patch
 
+from trenchchat.core import network_map
 from trenchchat.core.network_map import NetworkMapMonitor, gather_network_data
 
 
@@ -834,7 +835,7 @@ def test_a_relay_that_is_also_a_peer_stays_one_node():
     assert RELAY_VIA_HEX not in {n["id"] for n in data["nodes"]}
     relay = _node(data, RELAY_DELIVERY_HEX)
     assert relay["kind"] == "transport"
-    assert _pairs(data) == {(SELF_HEX, HUB_ID), (SELF_HEX, RELAY_DELIVERY_HEX),
+    assert _pairs(data) == {(SELF_HEX, HUB_ID),
                             (HUB_ID, RELAY_DELIVERY_HEX),
                             (RELAY_DELIVERY_HEX, PEER_HEX)}
 
@@ -852,8 +853,31 @@ def test_a_relay_that_is_also_a_peer_stays_one_node_in_either_order():
     assert RELAY_DELIVERY_HEX not in {n["id"] for n in data["nodes"]}
     relay = _node(data, RELAY_VIA_HEX)
     assert relay["kind"] == "transport"
-    assert _pairs(data) == {(SELF_HEX, HUB_ID), (SELF_HEX, RELAY_VIA_HEX),
+    assert _pairs(data) == {(SELF_HEX, HUB_ID),
                             (HUB_ID, RELAY_VIA_HEX), (RELAY_VIA_HEX, PEER_HEX)}
+
+
+def test_a_relay_with_its_own_path_entry_is_not_also_drawn_off_self():
+    """Its 1-hop entry would hang it off self as well, drawing two routes to
+    one neighbour; the interface chain owns it in either table order."""
+    recall_map = {RELAY_DELIVERY_HEX: RELAY_IDENTITY_HEX,
+                  RELAY_VIA_HEX: RELAY_IDENTITY_HEX}
+    delivery_first = [
+        _entry(RELAY_DELIVERY_HEX, RELAY_DELIVERY_HEX, 1, interface="Hub"),
+        _entry(PEER_HEX, RELAY_VIA_HEX, 2, interface="Hub"),
+        _entry(OTHER_PEER_HEX, OTHER_PEER_HEX, 1, interface="Hub"),
+    ]
+    for table in (delivery_first, list(reversed(delivery_first))):
+        data = _gather_shared(table, recall_map, _hub_stats())
+
+        relay_id = next(n["id"] for n in data["nodes"]
+                        if n["kind"] == "transport")
+        pairs = _pairs(data)
+        assert (HUB_ID, relay_id) in pairs
+        assert (SELF_HEX, relay_id) not in pairs
+        assert (relay_id, PEER_HEX) in pairs
+        # A 1-hop peer that is nobody's relay keeps its own direct edge.
+        assert (SELF_HEX, OTHER_PEER_HEX) in pairs
 
 
 def test_a_relay_on_an_unknown_interface_hangs_off_self():
@@ -887,6 +911,155 @@ def test_the_relay_carries_the_same_detail_keys_as_a_peer():
             "quality", "trenchchat"}
 
     assert not keys - set(_node(data, TRANSPORT_HEX))
+
+
+# ---------------------------------------------------------------------------
+# Relevance-ranked selection under the node cap
+# ---------------------------------------------------------------------------
+
+ANON_HEXES = [f"{i:02x}" * 16 for i in (0x11, 0x12, 0x13)]
+MEMBER_DEST_HEX = "91" * 16
+MEMBER_ALT_DEST_HEX = "92" * 16     # second destination of the same identity
+MEMBER_IDENTITY_HEX = "93" * 16
+ONLINE_DEST_HEX = "94" * 16
+ONLINE_IDENTITY_HEX = "95" * 16
+FRIEND_DEST_HEX = "96" * 16
+FRIEND_IDENTITY_HEX = "97" * 16
+
+
+def _fake_storage(members=(), friends=()) -> MagicMock:
+    storage = MagicMock()
+    storage.get_trenchchat_peer_identities.return_value = set(members)
+    storage.get_display_name_for_identity.return_value = None
+    storage.get_friend_hashes.return_value = set(friends)
+    return storage
+
+
+def _ids(data: dict) -> set[str]:
+    return {n["id"] for n in data["nodes"]}
+
+
+def test_a_channel_member_last_in_the_table_survives_the_cap(monkeypatch):
+    """A relearned path is re-inserted at the end of the RNS path table, so
+    taking the head drops the peers most recently heard from. The member is
+    drawn and the anonymous destinations ahead of it give up their slots."""
+    monkeypatch.setattr(network_map, "_MAX_NODES", 2)
+    path_table = [_entry(h, h, 1) for h in ANON_HEXES]
+    path_table.append(_entry(MEMBER_DEST_HEX, MEMBER_DEST_HEX, 1))
+
+    data = _gather_shared(path_table, {MEMBER_DEST_HEX: MEMBER_IDENTITY_HEX},
+                          storage=_fake_storage(members={MEMBER_IDENTITY_HEX}))
+
+    ids = _ids(data)
+    assert MEMBER_DEST_HEX in ids
+    assert len(ids & set(ANON_HEXES)) == 1
+
+
+def test_an_online_peer_outranks_an_offline_anonymous_one(monkeypatch):
+    monkeypatch.setattr(network_map, "_MAX_NODES", 1)
+    path_table = [_entry(ANON_HEXES[0], ANON_HEXES[0], 1),
+                  _entry(ONLINE_DEST_HEX, ONLINE_DEST_HEX, 1)]
+
+    data = _gather_shared(path_table, {ONLINE_DEST_HEX: ONLINE_IDENTITY_HEX},
+                          presence=_FakePresence({ONLINE_IDENTITY_HEX}))
+
+    assert _ids(data) == {SELF_HEX, ONLINE_DEST_HEX}
+
+
+def test_an_accepted_friend_outranks_an_anonymous_destination(monkeypatch):
+    """Friends rank with channel members, whatever source supplies them."""
+    monkeypatch.setattr(network_map, "_MAX_NODES", 1)
+    path_table = [_entry(ANON_HEXES[0], ANON_HEXES[0], 1),
+                  _entry(FRIEND_DEST_HEX, FRIEND_DEST_HEX, 1)]
+
+    for friends in ({FRIEND_IDENTITY_HEX},
+                    _fake_storage(friends={FRIEND_IDENTITY_HEX})):
+        data = _gather_shared(path_table,
+                              {FRIEND_DEST_HEX: FRIEND_IDENTITY_HEX},
+                              friends=friends)
+        assert _ids(data) == {SELF_HEX, FRIEND_DEST_HEX}
+
+
+def test_two_destinations_of_one_identity_cost_one_node_slot(monkeypatch):
+    """The cap counts drawn nodes, not path-table entries: a peer answering to
+    two destinations collapses into one node and leaves room for another."""
+    monkeypatch.setattr(network_map, "_MAX_NODES", 2)
+    recall_map = {MEMBER_DEST_HEX: MEMBER_IDENTITY_HEX,
+                  MEMBER_ALT_DEST_HEX: MEMBER_IDENTITY_HEX}
+    path_table = [_entry(MEMBER_DEST_HEX, MEMBER_DEST_HEX, 1),
+                  _entry(MEMBER_ALT_DEST_HEX, MEMBER_ALT_DEST_HEX, 1),
+                  _entry(ANON_HEXES[0], ANON_HEXES[0], 1)]
+
+    data = _gather_shared(path_table, recall_map,
+                          storage=_fake_storage(members={MEMBER_IDENTITY_HEX}))
+
+    assert _ids(data) == {SELF_HEX, MEMBER_DEST_HEX, ANON_HEXES[0]}
+
+
+def test_an_admitted_peer_keeps_the_relay_it_travels_through(monkeypatch):
+    """The relay is drawn on demand for the peer behind it, so a cap tight
+    enough to admit only that peer never leaves it parentless."""
+    monkeypatch.setattr(network_map, "_MAX_NODES", 1)
+    path_table = [_entry(ANON_HEXES[0], ANON_HEXES[0], 1),
+                  _entry(MEMBER_DEST_HEX, TRANSPORT_HEX, 2)]
+
+    data = _gather_shared(path_table, {MEMBER_DEST_HEX: MEMBER_IDENTITY_HEX},
+                          storage=_fake_storage(members={MEMBER_IDENTITY_HEX}))
+
+    assert ANON_HEXES[0] not in _ids(data)
+    assert _node(data, TRANSPORT_HEX)["kind"] == "transport"
+    assert _pairs(data) == {(SELF_HEX, TRANSPORT_HEX),
+                            (TRANSPORT_HEX, MEMBER_DEST_HEX)}
+
+
+def _below_cap_table() -> list[dict]:
+    return [_entry(ANON_HEXES[0], ANON_HEXES[0], 1),
+            _entry(ANON_HEXES[1], TRANSPORT_HEX, 2),
+            _entry(MEMBER_ALT_DEST_HEX, MEMBER_ALT_DEST_HEX, 1),
+            _entry(MEMBER_DEST_HEX, MEMBER_DEST_HEX, 1)]
+
+
+def test_ranking_does_not_reshape_a_table_that_fits():
+    """Everything fits, so the graph is the one the table order draws, whatever
+    the ranking sources say about the entries in it."""
+    recall_map = {MEMBER_DEST_HEX: MEMBER_IDENTITY_HEX,
+                  MEMBER_ALT_DEST_HEX: MEMBER_IDENTITY_HEX}
+    plain = _gather_shared(_below_cap_table(), recall_map)
+    ranked = _gather_shared(
+        _below_cap_table(), recall_map,
+        storage=_fake_storage(members={MEMBER_IDENTITY_HEX}),
+        presence=_FakePresence({MEMBER_IDENTITY_HEX}))
+
+    assert ([n["id"] for n in ranked["nodes"]]
+            == [n["id"] for n in plain["nodes"]])
+    assert _pairs(ranked) == _pairs(plain)
+
+
+def test_selection_is_deterministic(monkeypatch):
+    monkeypatch.setattr(network_map, "_MAX_NODES", 3)
+    path_table = [_entry(f"{i:02x}" * 16, f"{i:02x}" * 16, 1,
+                         timestamp=float(i))
+                  for i in range(0x20, 0x2a)]
+    recall_map = {MEMBER_DEST_HEX: MEMBER_IDENTITY_HEX}
+    path_table.append(_entry(MEMBER_DEST_HEX, MEMBER_DEST_HEX, 1))
+
+    runs = [_gather_shared(path_table, recall_map,
+                           storage=_fake_storage(members={MEMBER_IDENTITY_HEX}))
+            for _ in range(3)]
+
+    assert runs[0] == runs[1] == runs[2]
+    assert MEMBER_DEST_HEX in _ids(runs[0])
+
+
+def test_path_count_reports_the_whole_table_under_the_cap(monkeypatch):
+    monkeypatch.setattr(network_map, "_MAX_NODES", 2)
+    path_table = [_entry(f"{i:02x}" * 16, f"{i:02x}" * 16, 1)
+                  for i in range(0x30, 0x38)]
+
+    data = _gather_shared(path_table, {})
+
+    assert data["stats"]["path_count"] == 8
+    assert data["stats"]["node_count"] == 3     # self + the two admitted
 
 
 # ---------------------------------------------------------------------------
