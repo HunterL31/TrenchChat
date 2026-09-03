@@ -159,12 +159,25 @@ class TestMyPermissionsSendMessage:
 class TestChannelUnread:
     def test_unread_counts_come_from_storage(self, client, backend):
         backend.storage.get_unread_counts.return_value = {"aa" * 16: 3}
+        backend.storage.get_mention_counts.return_value = {"aa" * 16: 0}
 
         res = client.get("/channels/unread", headers=AUTH)
 
         assert res.status_code == 200
-        assert res.json() == {"counts": {"aa" * 16: 3}}
+        assert res.json() == {
+            "counts": {"aa" * 16: 3},
+            "mentions": {"aa" * 16: 0},
+        }
         backend.storage.get_unread_counts.assert_called_once_with("a" * 32)
+
+    def test_mention_counts_are_reported_beside_the_unread_ones(self, client, backend):
+        backend.storage.get_unread_counts.return_value = {"aa" * 16: 5}
+        backend.storage.get_mention_counts.return_value = {"aa" * 16: 2}
+
+        res = client.get("/channels/unread", headers=AUTH)
+
+        assert res.json()["mentions"] == {"aa" * 16: 2}
+        backend.storage.get_mention_counts.assert_called_once_with("a" * 32)
 
     def test_mark_read_answers_ok(self, client, backend):
         backend.storage.mark_channel_read.return_value = True

@@ -8,11 +8,12 @@ import '../../api/models/emoji.dart';
 import '../../api/models/message.dart';
 import '../../format.dart';
 import '../../grouping.dart';
-import '../../name_color.dart';
 import '../../theme/section_theme.dart';
 import '../../theme/shape.dart';
 import '../../theme/theme_spec.dart';
 import '../../theme/tokens.dart';
+import '../../mentions.dart';
+import '../../name_color.dart';
 import '../../widgets/avatar.dart';
 import '../../widgets/badge.dart';
 import '../../widgets/emoji_text.dart';
@@ -83,11 +84,17 @@ class MessageList extends StatefulWidget {
     this.loadingOlder = false,
     this.onReply,
     this.onOpenLink,
+    this.resolveMentionName,
   });
 
   final List<Message> messages;
   final String meHashHex;
   final String Function(String identityHashHex, String fallback) displayNameFor;
+
+  /// The name this client knows an identity by, for an `@<hash>` mention in
+  /// message text. Null, or a null return, renders the mention as a short
+  /// hash: a name nothing here can vouch for is not one to invent.
+  final String? Function(String identityHashHex)? resolveMentionName;
 
   /// Starts a reply to a message, from its row menu. Null hides the action.
   final void Function(Message message)? onReply;
@@ -362,6 +369,8 @@ class _MessageListState extends State<MessageList> {
               message: row.message,
               isContinuation: row.isContinuation,
               isOwn: row.message.senderHash == widget.meHashHex,
+              meHashHex: widget.meHashHex,
+              resolveMentionName: widget.resolveMentionName,
               displayName: widget.displayNameFor(row.message.senderHash, row.message.senderName),
               parent: row.message.replyTo == null ? null : byId[row.message.replyTo!],
               parentDisplayName: () {
@@ -499,12 +508,20 @@ class _DateDivider extends StatelessWidget {
   }
 }
 
+/// How much accent a row that pings the reader picks up, and how much sits
+/// behind the mention itself. Low enough that a busy channel does not turn
+/// into a wall of highlight.
+const double _mentionRowTint = 0.06;
+const double _mentionSelfTint = 0.16;
+
 class _MessageRowWidget extends StatefulWidget {
   const _MessageRowWidget({
     required this.message,
     required this.isContinuation,
     required this.isOwn,
+    required this.meHashHex,
     required this.displayName,
+    this.resolveMentionName,
     this.parent,
     this.parentDisplayName = '',
     this.parentIsOwn = false,
@@ -527,7 +544,11 @@ class _MessageRowWidget extends StatefulWidget {
   final Message message;
   final bool isContinuation;
   final bool isOwn;
+  final String meHashHex;
   final String displayName;
+
+  /// See [MessageList.resolveMentionName].
+  final String? Function(String identityHashHex)? resolveMentionName;
 
   /// The message this one replies to, if it is loaded; null when this is not a
   /// reply, or the parent is not on screen.
@@ -666,7 +687,13 @@ class _MessageRowWidgetState extends State<_MessageRowWidget> {
       widget.ensureAttachmentLoaded?.call(message.messageId);
     }
     final tc = SectionTheme.of(context);
-    final bg = isOwn ? const Color.fromRGBO(255, 255, 255, 0.02) : Colors.transparent;
+    // A ping the reader wrote themselves is not one to shout back at them.
+    final pingsMe = !isOwn && contentMentions(message.content, widget.meHashHex);
+    final bg = pingsMe
+        ? tc.accentPrimary.withValues(alpha: _mentionRowTint)
+        : isOwn
+            ? const Color.fromRGBO(255, 255, 255, 0.02)
+            : Colors.transparent;
     final baseStyle = TextStyle(
       fontSize: TCType.textBodyMd,
       height: TCType.leadingBody,
@@ -692,6 +719,18 @@ class _MessageRowWidgetState extends State<_MessageRowWidget> {
       hoveredUrl: _hoveredLink,
       onHover: (url) => setState(() => _hoveredLink = url),
     );
+    // Deltas, not whole styles: an all-emoji message renders jumbo, and a
+    // mention inside one keeps that run's size.
+    final mentions = MentionConfig(
+      style: TextStyle(color: tc.accentSecondary, fontWeight: FontWeight.w600),
+      selfStyle: TextStyle(
+        color: tc.accentPrimary,
+        fontWeight: FontWeight.w600,
+        backgroundColor: tc.accentPrimary.withValues(alpha: _mentionSelfTint),
+      ),
+      resolveName: widget.resolveMentionName ?? (_) => null,
+      selfHash: widget.meHashHex,
+    );
     final bodyText = Text.rich(
       TextSpan(
         children: messageContentSpans(
@@ -699,6 +738,7 @@ class _MessageRowWidgetState extends State<_MessageRowWidget> {
           widget.emojiLibrary,
           bodyStyle,
           links: links,
+          mentions: mentions,
           emojiSize: jumboEmoji ? jumboEmojiSize : inlineEmojiSize,
         ),
       ),

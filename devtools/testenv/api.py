@@ -1460,7 +1460,12 @@ def create_app(backend: Backend, *, token: str | None = None,
         # Per-channel unread, the channel counterpart of /dms' unread field.
         # Conversations are excluded by construction: they have no
         # subscriptions row (see docs/direct-messages.md).
-        return {"counts": backend.storage.get_unread_counts(backend.identity.hash_hex)}
+        # mentions is the subset of those that name this identity, counted
+        # separately so a ping is not lost in a busy channel's badge.
+        return {
+            "counts": backend.storage.get_unread_counts(backend.identity.hash_hex),
+            "mentions": backend.storage.get_mention_counts(backend.identity.hash_hex),
+        }
 
     @app.post("/channels/{channel_hash}/read")
     def mark_channel_read(channel_hash: str):
