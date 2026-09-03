@@ -32,6 +32,7 @@ from pydantic import BaseModel
 from starlette.routing import Match, Mount
 
 from trenchchat.core import actions
+from trenchchat.core.files import DL_DONE
 from trenchchat.core.image import is_gif, prepare_image
 from trenchchat.core.avatar import compress_avatar
 from trenchchat.core.discovery import list_discovered_interfaces, pin_discovered_interface
@@ -50,6 +51,10 @@ from trenchchat.core.permissions import (
     permissions_from_json,
 )
 from trenchchat.core.presence import resolve_display_name
+from trenchchat.core.protocol import MAX_SHARED_FILE_BYTES
+from trenchchat.core.storage import (
+    FILE_STORE_MAX_BYTES, OWN_FILE_STORE_MAX_BYTES, PARTIAL_STORE_MAX_BYTES,
+)
 from trenchchat.core.link_quality import (
     LinkQuality, quality_label, score_path,
 )
@@ -160,6 +165,14 @@ class SendMessageRequest(BaseModel):
     content: str
     reply_to: str | None = None
     image_data_b64: str | None = None
+    # A file attachment: both fields together, and never alongside an image.
+    # The bytes are stored here and shared as a manifest; see core/files.py.
+    file_name: str | None = None
+    file_data_b64: str | None = None
+
+
+class FetchFileRequest(BaseModel):
+    message_id: str
 
 
 class UpdatePermissionsRequest(BaseModel):
@@ -281,8 +294,48 @@ def _reactions_summary(storage, message_id: str, self_hex: str) -> list[dict[str
     return list(by_emoji.values())
 
 
+# The two file states a message row can be in that no download record covers:
+# the bytes are here (our own share, or a finished download), or nobody has
+# asked for them yet. Every other value comes from FileManager's DL_* states.
+FILE_DONE = DL_DONE
+FILE_AVAILABLE = "available"
+
+
+def _file_to_dict(file_mgr, storage, row) -> dict[str, Any] | None:
+    """The file card for a message row, or None when it names no file.
+
+    state is a download's own state while one exists, and otherwise says
+    whether this node already holds the bytes: the sender's share and a
+    finished download both read "done", a manifest nobody has asked for reads
+    "available".
+    """
+    if "file_hash" not in row.keys() or not row["file_hash"]:
+        return None
+    hash_hex = row["file_hash"]
+    status = file_mgr.download_status(hash_hex)
+    if status is not None:
+        state = status["state"]
+        progress = status["progress"]
+        reason = status["reason"]
+    else:
+        held = storage.get_file(hash_hex)
+        complete = held is not None and held["complete"]
+        state = FILE_DONE if complete else FILE_AVAILABLE
+        progress = 1.0 if complete else 0.0
+        reason = None
+    return {
+        "name": row["file_name"],
+        "size": row["file_size"],
+        "hash": hash_hex,
+        "state": state,
+        "progress": progress,
+        "reason": reason,
+    }
+
+
 def _message_to_dict(row, reactions: list[dict[str, Any]] | None = None,
-                     delivery_state: str | None = None) -> dict[str, Any]:
+                     delivery_state: str | None = None,
+                     file: dict[str, Any] | None = None) -> dict[str, Any]:
     return {
         "message_id": row["message_id"],
         "sender_hash": row["sender_hash"],
@@ -292,6 +345,8 @@ def _message_to_dict(row, reactions: list[dict[str, Any]] | None = None,
         "reply_to": row["reply_to"],
         "has_image": bool(row["image_data"]) if "image_data" in row.keys() else False,
         "image_stripped": bool(row["image_stripped"]) if "image_stripped" in row.keys() else False,
+        "file": file,
+        "file_stripped": bool(row["file_stripped"]) if "file_stripped" in row.keys() else False,
         "reactions": reactions or [],
         # Only our own outbound messages carry a delivery state; None for
         # everyone else's (and for our own once it ages out of the tracker).
@@ -335,9 +390,19 @@ TOKEN_HEADER = "x-tc-token"
 TOKEN_QUERY_PARAM = "token"
 
 # Largest request body accepted. Every upload endpoint takes base64 in JSON and
-# the limits below it are per-image, so without this a token holder can hand
-# the process an arbitrarily large string to decode.
-MAX_REQUEST_BYTES = 4 * 1024 * 1024
+# the limits below it are per-attachment, so without this a token holder can
+# hand the process an arbitrarily large string to decode. It sits above
+# MAX_SHARED_FILE_BYTES with room for base64's third and the rest of the body.
+MAX_REQUEST_BYTES = 8 * 1024 * 1024
+
+# Why an attachment was refused before anything was stored or sent.
+REASON_FILE_AND_IMAGE = "file_and_image"
+REASON_INCOMPLETE_FILE = "incomplete_file"
+REASON_BAD_FILE_BASE64 = "bad_file_base64"
+REASON_EMPTY_FILE = "empty_file"
+REASON_FILE_TOO_LARGE = "file_too_large"
+REASON_NO_FILE_IN_DM = "no_file_in_dm"
+REASON_NO_RECIPIENTS = "no_recipients"
 
 # Host values a browser may reach this backend on. A page cannot set Host, but
 # DNS rebinding gives it one of its own choosing, which the socket's
@@ -500,12 +565,21 @@ def create_app(backend: Backend, *, token: str | None = None,
             return None
         return backend.messaging.get_delivery_state(row["message_id"])
 
+    def _message_payload(row) -> dict[str, Any]:
+        """One message row as a client reads it: reactions, delivery, file."""
+        return _message_to_dict(
+            row,
+            _reactions_summary(backend.storage, row["message_id"],
+                               backend.identity.hash_hex),
+            _delivery_state_for(row),
+            _file_to_dict(backend.file_mgr, backend.storage, row),
+        )
+
     def _on_message(channel_hash_hex: str, message_id: str):
         msgs = backend.storage.get_messages(channel_hash_hex)
         row = next((m for m in msgs if m["message_id"] == message_id), None)
-        reactions = _reactions_summary(backend.storage, message_id, backend.identity.hash_hex) if row else None
         bus.emit("message", channel_hash=channel_hash_hex,
-                message=_message_to_dict(row, reactions, _delivery_state_for(row)) if row else None)
+                 message=_message_payload(row) if row else None)
 
     def _on_delivery_status(channel_hash_hex: str, message_id: str,
                             delivery_state: str):
@@ -655,6 +729,17 @@ def create_app(backend: Backend, *, token: str | None = None,
         bus.emit("nomad_fetch", fetch_id=fetch_id, node_hash=node_hash_hex,
                  path=path, status=status, progress=progress, reason=reason)
 
+    def _on_file_fetch(file_hash: str, state: str, progress: float, reason,
+                       message_ids: list[str]):
+        # The bytes deliberately travel over REST once the state is done, not
+        # in the WS frame: a shared file runs to MAX_SHARED_FILE_BYTES.
+        status = backend.file_mgr.download_status(file_hash) or {}
+        bus.emit("file_fetch", file_hash=file_hash,
+                 message_ids=list(message_ids),
+                 channels=status.get("channels", []), state=state,
+                 progress=progress, reason=reason)
+
+    backend.file_mgr.add_download_callback(_on_file_fetch)
     backend.voice_mgr.add_roster_callback(_on_voice_roster)
     backend.voice_mgr.add_speaking_callback(_on_voice_speaking)
     backend.voice_mgr.add_session_callback(_on_voice_session)
@@ -1147,6 +1232,15 @@ def create_app(backend: Backend, *, token: str | None = None,
 
     @app.post("/dms/{peer_hash}/messages")
     def send_dm(peer_hash: str, req: SendMessageRequest):
+        if req.file_name or req.file_data_b64:
+            # A conversation has no member list to authorise a serve against,
+            # so Messaging refuses a manifest on one; say so rather than
+            # sending the words and dropping the attachment silently.
+            return JSONResponse(
+                {"ok": False, "reason": REASON_NO_FILE_IN_DM,
+                 "error": "files are not shared in direct messages"},
+                status_code=400,
+            )
         image_data, error = _decode_attachment(req.image_data_b64)
         if error is not None:
             return error
@@ -1708,11 +1802,7 @@ def create_app(backend: Backend, *, token: str | None = None,
     def list_messages(channel_hash: str, limit: int = 200,
                       before_ts: float | None = None):
         return [
-            _message_to_dict(
-                m,
-                _reactions_summary(backend.storage, m["message_id"], backend.identity.hash_hex),
-                _delivery_state_for(m),
-            )
+            _message_payload(m)
             for m in backend.storage.get_messages(
                 channel_hash, limit=limit, before_ts=before_ts)
         ]
@@ -1756,8 +1846,74 @@ def create_app(backend: Backend, *, token: str | None = None,
             RNS.log(f"TrenchChat testenv: image preparation failed: {exc}", RNS.LOG_WARNING)
             return None, None
 
+    def _refused(reason: str, error: str) -> JSONResponse:
+        """A request turned down before anything was stored or sent."""
+        return JSONResponse({"ok": False, "reason": reason, "error": error},
+                            status_code=400)
+
+    def _decode_file(name: str | None, file_data_b64: str | None):
+        """(file bytes or None, error response or None).
+
+        Every refusal happens here, before the file is stored and before the
+        manifest that names it is signed: a share the sender cannot undo is
+        the wrong place to discover an unusable size.
+        """
+        if not name and not file_data_b64:
+            return None, None
+        if not name:
+            return None, _refused(
+                REASON_INCOMPLETE_FILE,
+                "file_name and file_data_b64 must be sent together")
+        try:
+            raw = base64.b64decode(file_data_b64 or "", validate=True)
+        except Exception:
+            return None, _refused(REASON_BAD_FILE_BASE64,
+                                  "file_data_b64 is not valid base64")
+        if not raw:
+            return None, _refused(REASON_EMPTY_FILE, "the file is empty")
+        if len(raw) > MAX_SHARED_FILE_BYTES:
+            return None, _refused(
+                REASON_FILE_TOO_LARGE,
+                f"a shared file may be at most {MAX_SHARED_FILE_BYTES} bytes")
+        return raw, None
+
+    def _send_file_message(channel_hash: str, req: SendMessageRequest,
+                           file_data: bytes):
+        """Share a file and send the message naming it, as one action.
+
+        actions.share_file runs the outbound share guard before anything is
+        stored, so a sender who may not share here never becomes the holder of
+        something nobody may ask them for.
+        """
+        before = backend.storage.get_latest_message_id(channel_hash)
+        result = actions.share_file(
+            backend.file_mgr, backend.storage, backend.subscription_mgr,
+            backend.messaging, channel_hash, backend.identity.hash_hex,
+            req.file_name, file_data, req.content,
+        )
+        if not result["sent"]:
+            return {"ok": False, "reason": result["reason"]}
+        after = backend.storage.get_latest_message_id(channel_hash)
+        if after is None or after == before:
+            return {"ok": False, "reason": REASON_NO_RECIPIENTS}
+        _on_message(channel_hash, after)
+        return {"ok": True, "message_id": after,
+                "file_hash": result["manifest"]["hash"].hex()}
+
     @app.post("/channels/{channel_hash}/messages")
     def send_message(channel_hash: str, req: SendMessageRequest):
+        if req.image_data_b64 and (req.file_name or req.file_data_b64):
+            # An image is rendered in the transcript and travels inside the
+            # message; a file is a manifest fetched on request. One message
+            # carries one or the other.
+            return _refused(REASON_FILE_AND_IMAGE,
+                            "a message carries an image or a file, not both")
+        file_data, error = _decode_file(req.file_name, req.file_data_b64)
+        if error is not None:
+            return error
+        if file_data is not None:
+            return _send_file_message(channel_hash, req, file_data)
+
         image_data, error = _decode_attachment(req.image_data_b64)
         if error is not None:
             return error
@@ -1780,7 +1936,97 @@ def create_app(backend: Backend, *, token: str | None = None,
             _on_message(channel_hash, after)
             return {"ok": True}
         return {"ok": False,
-                "reason": "no_send_permission" if not sent else "no_recipients"}
+                "reason": actions.REASON_NO_SEND_PERMISSION if not sent
+                else REASON_NO_RECIPIENTS}
+
+    # --- shared files ---
+    #
+    # A message carries a manifest and never the bytes, so downloading is its
+    # own request: the client asks for the file a message names, watches the
+    # file_fetch events, and reads the bytes back over REST once it is done.
+
+    def _no_such_file() -> JSONResponse:
+        """A file this node cannot answer for, whichever way it is unknown.
+
+        One answer for a file nobody here has heard of, a manifest that was
+        stripped, and a channel the caller is not a member of: the caller has
+        no right to tell those apart.
+        """
+        return JSONResponse(
+            {"ok": False, "error": "no such file", "reason": "unknown"},
+            status_code=404,
+        )
+
+    @app.post("/channels/{channel_hash}/files/{file_hash}/fetch")
+    def fetch_file(channel_hash: str, file_hash: str, req: FetchFileRequest):
+        """Start the download of the file a message names, or join it.
+
+        A download already running or already finished is returned as it
+        stands rather than started again; the snapshot is the same shape the
+        GET below and the file_fetch event carry.
+        """
+        row = backend.storage.get_message(channel_hash, req.message_id)
+        if row is None or (row["file_hash"] or "") != file_hash:
+            return _no_such_file()
+        status = actions.request_file_download(backend.file_mgr, channel_hash,
+                                               req.message_id)
+        if status is None:
+            return _no_such_file()
+        return {"ok": True, **status}
+
+    @app.get("/channels/{channel_hash}/files/{file_hash}/fetch")
+    def get_file_fetch(channel_hash: str, file_hash: str):
+        """How a download is doing, for a client that missed the events."""
+        status = backend.file_mgr.download_status(file_hash)
+        if status is None:
+            return _no_such_file()
+        return {"ok": True, **status}
+
+    @app.get("/channels/{channel_hash}/files/{file_hash}")
+    def get_file(channel_hash: str, file_hash: str):
+        """The file itself, once this node holds all of it.
+
+        The channel in the path is checked against the channels the file was
+        actually shared in, so a hash learned elsewhere cannot be fetched
+        under a channel it never belonged to. The token rides the query
+        parameter here as it does for images: a browser navigation carries no
+        headers.
+        """
+        if channel_hash not in backend.storage.file_channels(file_hash):
+            return _no_such_file()
+        data = backend.file_mgr.file_bytes(file_hash)
+        if data is None:
+            return _no_such_file()
+        name = ""
+        for row in backend.storage.messages_for_file(file_hash):
+            if row["channel_hash"] == channel_hash and row["file_name"]:
+                name = row["file_name"]
+                break
+        safe_name = "".join(
+            c for c in name if c.isprintable() and c not in '"\\')[:128]
+        return Response(
+            content=data,
+            media_type="application/octet-stream",
+            # Peer bytes served verbatim: force download, forbid sniffing.
+            headers={
+                "X-Content-Type-Options": "nosniff",
+                "Content-Disposition":
+                    f'attachment; filename="{safe_name or "download"}"',
+            },
+        )
+
+    @app.get("/files/usage")
+    def get_file_usage():
+        """What the file store is holding against each of its three budgets."""
+        return {
+            "usage": backend.storage.file_store_usage(),
+            "limits": {
+                "own": OWN_FILE_STORE_MAX_BYTES,
+                "received": FILE_STORE_MAX_BYTES,
+                "partial": PARTIAL_STORE_MAX_BYTES,
+            },
+            "max_file_bytes": MAX_SHARED_FILE_BYTES,
+        }
 
     # --- reactions and custom emoji ---
 
