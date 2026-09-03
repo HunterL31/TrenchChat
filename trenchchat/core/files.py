@@ -11,8 +11,10 @@ all, because that announce is what a path to its file plane is made of.
 
 Requests go out one at a time, one download at a time, because airtime is
 shared and two transfers over one slow link finish later than the same two in
-sequence. The request window starts at one chunk and doubles on each success,
-halving on any failure, which measures the link rather than detecting it.
+sequence. The request window starts at one chunk and doubles after two
+successes in a row, halving at once on any failure, which measures the link
+rather than detecting it: growth is what has to be paid for, because a window
+that overreaches costs a stall timeout and a retreat costs nothing.
 Progress is chunks verified over chunks total and is persisted as they land,
 so a dropped link, a restart or a PIN lock costs nothing already held and the
 bar never goes backwards.
@@ -49,6 +51,11 @@ from trenchchat.network.file_transport import (
 
 # Holders tried per round before a download parks and waits instead.
 MAX_HOLDER_ATTEMPTS = 4
+# Successful ranges in a row before the window doubles. One success is not
+# evidence of a link that can carry twice as much, and on a radio the failed
+# attempt to find that out costs a whole stall timeout, so the climb is paid
+# for twice and the retreat stays immediate.
+WINDOW_GROWTH_STREAK = 2
 # How long a parked download waits before asking again on its own, doubling
 # up to the ceiling and reset by any sign of a member. Hearing a peer is the
 # cheap trigger and stays the first one, but it cannot be the only one: a
@@ -124,6 +131,7 @@ class _Download:
         self.held: set[int] = set()
         self.chunk_list: list[bytes] | None = None
         self.window: int = 1
+        self.wins: int = 0
         self.attempts: int = 0
         # Holders passed over for the rest of this round, and for the life of
         # the download: a stall is worth retrying later, bad bytes are not.
@@ -136,6 +144,23 @@ class _Download:
         self.wants_list: bool = False
         self.next_retry_at: float = 0.0
         self.retry_backoff: float = DOWNLOAD_RETRY_SECS
+
+    def grow_window(self) -> None:
+        """A range landed. The window doubles on the second success in a row."""
+        self.wins += 1
+        if self.wins >= WINDOW_GROWTH_STREAK:
+            self.wins = 0
+            self.window = min(self.window * 2, FILE_REQUEST_MAX_CHUNKS)
+
+    def shrink_window(self) -> None:
+        """A request failed. Halve at once and start the count again."""
+        self.wins = 0
+        self.window = max(1, self.window // 2)
+
+    def reset_window(self) -> None:
+        """Bad bytes, or a download starting over: back to one chunk."""
+        self.wins = 0
+        self.window = 1
 
     def note_progress(self) -> None:
         if self.chunk_count:
@@ -787,7 +812,7 @@ class FileManager:
     def _on_failed_request(self, dl: _Download, holder: str,
                            reason: str | None, events: list[dict]) -> None:
         """Caller holds the lock. One request failed, the download did not."""
-        dl.window = max(1, dl.window // 2)
+        dl.shrink_window()
         if holder:
             dl.skipped.add(holder)
             if reason == FETCH_REFUSED:
@@ -808,7 +833,7 @@ class FileManager:
                     f"that does not match the root of "
                     f"{dl.file_hash_hex[:12]}…", RNS.LOG_WARNING)
             dl.suspect.add(holder)
-            dl.window = 1
+            dl.reset_window()
             return
         dl.chunk_list = hashes
         self._round_reset(dl, holder)
@@ -833,7 +858,7 @@ class FileManager:
                         f"chunk {idx} of {dl.file_hash_hex[:12]}…",
                         RNS.LOG_WARNING)
                 dl.suspect.add(holder)
-                dl.window = 1
+                dl.reset_window()
                 break
             if not self._storage.put_file_chunk(dl.file_hash_hex, idx, chunk):
                 self._finish(dl, DL_FAILED, REASON_STORAGE, events)
@@ -845,13 +870,13 @@ class FileManager:
         if stored == 0:
             if holder not in dl.suspect:
                 dl.skipped.add(holder)
-                dl.window = max(1, dl.window // 2)
+                dl.shrink_window()
             return
         dl.contributors.add(holder)
         dl.note_progress()
         events.append(dl.snapshot())
         if holder not in dl.suspect:
-            dl.window = min(dl.window * 2, FILE_REQUEST_MAX_CHUNKS)
+            dl.grow_window()
             self._round_reset(dl, holder)
         if len(dl.held) >= dl.chunk_count:
             self._complete(dl, events)
@@ -888,7 +913,7 @@ class FileManager:
         dl.held.clear()
         dl.chunk_list = None
         dl.progress = 0.0
-        dl.window = 1
+        dl.reset_window()
         dl.admitted = False
         if not [p for p in self._candidates(dl) if p not in dl.suspect]:
             self._finish(dl, DL_FAILED, REASON_CORRUPT, events)

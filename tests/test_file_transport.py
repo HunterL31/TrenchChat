@@ -12,14 +12,14 @@ import RNS
 from trenchchat import APP_NAME, APP_ASPECT_FILES
 from trenchchat.config import Config
 from trenchchat.core.identity import Identity
-from trenchchat.core.protocol import FILE_CHUNK_BYTES
+from trenchchat.core.protocol import FILE_CHUNK_BYTES, MAX_SHARED_FILE_BYTES
 from trenchchat.network import file_transport
 from trenchchat.network.file_transport import (
     FETCH_REFUSED, FETCH_STALLED, FILE_REQUEST_MAX_CHUNKS, FILE_REQUEST_PATH,
     FILE_SERVE_SETTLE_SECS, FILE_STALL_SECS, MAX_CHUNK_INDEX,
-    MAX_CHUNK_LIST_BYTES, MAX_CONCURRENT_SERVES, R_COUNT, R_FILE_HASH,
-    R_FIRST, R_WANT_LIST, FileTransportBase, RNSFileTransport,
-    max_response_for, parse_file_request,
+    MAX_CHUNK_LIST_BYTES, MAX_CONCURRENT_SERVES, RESPONSE_ENVELOPE_BYTES,
+    R_COUNT, R_FILE_HASH, R_FIRST, R_WANT_LIST, FileTransportBase,
+    RNSFileTransport, max_response_for, parse_file_request,
 )
 from trenchchat.network.link_client import (
     FETCH_BAD_PATH, FETCH_BAD_RESPONSE, FETCH_LINK_CLOSED, FETCH_TOO_LARGE,
@@ -83,7 +83,10 @@ def test_max_response_leaves_room_for_the_msgpack_envelope():
 
 
 def test_the_chunk_list_ceiling_covers_the_largest_file():
-    assert MAX_CHUNK_LIST_BYTES == (MAX_CHUNK_INDEX + 1) * 32
+    chunks = -(-MAX_SHARED_FILE_BYTES // FILE_CHUNK_BYTES)
+    assert MAX_CHUNK_LIST_BYTES >= chunks * 32 + RESPONSE_ENVELOPE_BYTES
+    assert MAX_CHUNK_LIST_BYTES == (MAX_CHUNK_INDEX + 1) * 32 \
+        + RESPONSE_ENVELOPE_BYTES
 
 
 # ---------------------------------------------------------------------------

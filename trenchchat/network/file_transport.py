@@ -56,22 +56,30 @@ R_WANT_LIST = "l"
 CHUNK_HASH_BYTES = 32
 FILE_HASH_BYTES = 32
 
-# Most chunks one request may ask for: 1 MB, one RNS Resource segment.
+# Most chunks one request may ask for: 512 KB, inside the size RNS carries as
+# one Resource segment. A ceiling for a fast link, never a target on a slow
+# one, where the window never climbs near it.
 FILE_REQUEST_MAX_CHUNKS = 16
 MAX_CHUNK_INDEX = MAX_SHARED_FILE_BYTES // FILE_CHUNK_BYTES
-MAX_CHUNK_LIST_BYTES = (MAX_CHUNK_INDEX + 1) * CHUNK_HASH_BYTES
 
 # RNS measures a response against max_response_size as the msgpack envelope
 # it puts on the wire ([request_id, payload]), not as the payload alone, so a
 # full-size range needs headroom or the requester rejects its own answer.
 RESPONSE_ENVELOPE_BYTES = 64
 
+# The chunk list is one hash per chunk of the largest file, and it rides the
+# same envelope, so its ceiling carries the same headroom.
+MAX_CHUNK_LIST_BYTES = ((MAX_CHUNK_INDEX + 1) * CHUNK_HASH_BYTES
+                        + RESPONSE_ENVELOPE_BYTES)
+
 # How long a request may sit with no answer at all. RNS stops applying it once
 # a response starts arriving, which is what leaves room for the stall timeout.
 FILE_FETCH_TIMEOUT_SECS = 120.0
 # No progress on an in-flight request for this long ends the request, not the
 # download. There is deliberately no total deadline: a 5 MB transfer over LoRa
-# takes hours and is not an error.
+# takes hours and is not an error. Measured against one chunk of airtime on the
+# slowest profile, which is why it moves only alongside FILE_CHUNK_BYTES:
+# 32 KB is about 47 s at SF7, comfortably inside this sweep.
 FILE_STALL_SECS = 120.0
 # A download issues its requests back to back, so a link nobody has used for
 # this long belongs to a download that has finished or moved to another holder.
