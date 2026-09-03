@@ -9,6 +9,7 @@ import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 
 import '../api/models/emoji.dart';
+import '../mentions.dart';
 import 'peer_image.dart';
 import 'tc_tooltip.dart';
 
@@ -74,6 +75,39 @@ int? emojiOnlyCount(String content, Map<String, CustomEmoji> library) {
   return count;
 }
 
+/// Styling and name resolution for inline mentions.
+///
+/// The text carries the mentioned identity's hash, never their name, so the
+/// name shown is whatever this client knows that identity as right now.
+class MentionConfig {
+  const MentionConfig({
+    required this.style,
+    required this.selfStyle,
+    required this.resolveName,
+    this.selfHash,
+  });
+
+  /// A mention of somebody else.
+  final TextStyle style;
+
+  /// A mention of the reader, which is the whole point of a ping.
+  final TextStyle selfStyle;
+
+  /// The identity's current display name, or null when none is known.
+  final String? Function(String identityHashHex) resolveName;
+
+  /// The reader's own identity hash, so their own mentions stand out.
+  final String? selfHash;
+
+  TextStyle styleFor(String identityHashHex) =>
+      identityHashHex == selfHash?.toLowerCase() ? selfStyle : style;
+
+  String labelFor(String identityHashHex) {
+    final name = resolveName(identityHashHex);
+    return '@${name == null || name.isEmpty ? shortMentionLabel(identityHashHex) : name}';
+  }
+}
+
 /// Styling and behavior for inline links. The caller owns [recognizers] and
 /// must dispose them; every tappable link span appends its recognizer here.
 class InlineLinkConfig {
@@ -104,6 +138,34 @@ class InlineLinkConfig {
   /// Reports the URL under the pointer (null on exit), so the caller can
   /// repaint the hovered link.
   final void Function(String? url)? onHover;
+}
+
+/// Splits a plain-text run into mention spans and link-resolved runs between
+/// them. Mentions come first: a hash is never part of a URL, and resolving it
+/// here keeps the link pass working on the words the reader actually sees.
+List<InlineSpan> _plainRun(String text, TextStyle style, InlineLinkConfig? links,
+    MentionConfig? mentions) {
+  if (mentions == null || !text.contains('@')) {
+    return _linkifyRun(text, style, links);
+  }
+  final spans = <InlineSpan>[];
+  int last = 0;
+  for (final m in mentionTokenRe.allMatches(text)) {
+    final hex = m.group(1)!.toLowerCase();
+    if (m.start > last) {
+      spans.addAll(_linkifyRun(text.substring(last, m.start), style, links));
+    }
+    spans.add(TextSpan(
+      text: mentions.labelFor(hex),
+      style: style.merge(mentions.styleFor(hex)),
+    ));
+    last = m.end;
+  }
+  if (spans.isEmpty) return _linkifyRun(text, style, links);
+  if (last < text.length) {
+    spans.addAll(_linkifyRun(text.substring(last), style, links));
+  }
+  return spans;
 }
 
 /// Splits a plain-text run into text and styled link spans. Returns a single
@@ -152,13 +214,16 @@ List<InlineSpan> _linkifyRun(String text, TextStyle style, InlineLinkConfig? lin
 }
 
 /// Splits [content] into text and inline-image spans using [library]
-/// (emoji hash -> CustomEmoji), linkifying plain text when [links] is given.
+/// (emoji hash -> CustomEmoji), linkifying plain text when [links] is given
+/// and resolving `@<hash>` mentions when [mentions] is.
 /// Returns a single text span when no token resolves.
 List<InlineSpan> emojiSpans(
     String content, Map<String, CustomEmoji> library, TextStyle style,
-    {InlineLinkConfig? links, double emojiSize = inlineEmojiSize}) {
+    {InlineLinkConfig? links,
+    MentionConfig? mentions,
+    double emojiSize = inlineEmojiSize}) {
   if (!content.contains(':') || library.isEmpty) {
-    return _linkifyRun(content, style, links);
+    return _plainRun(content, style, links, mentions);
   }
 
   final spans = <InlineSpan>[];
@@ -171,7 +236,7 @@ List<InlineSpan> emojiSpans(
         : library.values.where((e) => e.name == name).firstOrNull;
     if (emoji == null) continue;
     if (m.start > last) {
-      spans.addAll(_linkifyRun(content.substring(last, m.start), style, links));
+      spans.addAll(_plainRun(content.substring(last, m.start), style, links, mentions));
     }
     spans.add(WidgetSpan(
       alignment: PlaceholderAlignment.middle,
@@ -188,9 +253,9 @@ List<InlineSpan> emojiSpans(
     ));
     last = m.end;
   }
-  if (spans.isEmpty) return _linkifyRun(content, style, links);
+  if (spans.isEmpty) return _plainRun(content, style, links, mentions);
   if (last < content.length) {
-    spans.addAll(_linkifyRun(content.substring(last), style, links));
+    spans.addAll(_plainRun(content.substring(last), style, links, mentions));
   }
   return spans;
 }

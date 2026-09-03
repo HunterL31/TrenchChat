@@ -328,6 +328,53 @@ class TestChannelUnread:
         assert db.mark_channel_read("nope") is False
 
 
+class TestChannelMentions:
+    ME = "cc" * 16
+    OTHER = "aa" * 16
+
+    def _seed(self, db):
+        db.upsert_channel("ch01", "Pings", "", "creator", "public", time.time())
+        db.subscribe("ch01")
+
+    def _insert(self, db, sender, msg_id, content, ts):
+        db.insert_message("ch01", sender, sender, content, ts, msg_id, None, None, ts)
+
+    def test_only_messages_naming_this_identity_count(self, db):
+        self._seed(db)
+        now = time.time()
+        self._insert(db, "peer", "m1", f"hi @{self.ME}", now - 5)
+        self._insert(db, "peer", "m2", "just talking", now - 4)
+        self._insert(db, "peer", "m3", f"hi @{self.OTHER}", now - 3)
+        assert db.get_mention_counts(self.ME) == {"ch01": 1}
+
+    def test_our_own_mention_of_ourselves_does_not_count(self, db):
+        self._seed(db)
+        self._insert(db, self.ME, "m1", f"note to self @{self.ME}", time.time() - 5)
+        assert db.get_mention_counts(self.ME) == {"ch01": 0}
+
+    def test_marking_the_channel_read_clears_them(self, db):
+        self._seed(db)
+        self._insert(db, "peer", "m1", f"hi @{self.ME}", time.time() - 5)
+        assert db.mark_channel_read("ch01") is True
+        assert db.get_mention_counts(self.ME) == {"ch01": 0}
+
+    def test_a_hash_inside_a_longer_hex_run_is_not_counted(self, db):
+        # The SQL narrows on the token and Python confirms the match; without
+        # that second pass this row would read as a ping.
+        self._seed(db)
+        self._insert(db, "peer", "m1", f"@{self.ME}deadbeef", time.time() - 5)
+        assert db.get_mention_counts(self.ME) == {"ch01": 0}
+
+    def test_a_channel_with_no_pings_reads_zero(self, db):
+        self._seed(db)
+        self._insert(db, "peer", "m1", "just talking", time.time() - 5)
+        assert db.get_mention_counts(self.ME) == {"ch01": 0}
+
+    def test_unsubscribed_channels_are_absent(self, db):
+        db.upsert_channel("ch02", "Other", "", "creator", "public", time.time())
+        assert db.get_mention_counts(self.ME) == {}
+
+
 # ---------------------------------------------------------------------------
 # Members
 # ---------------------------------------------------------------------------

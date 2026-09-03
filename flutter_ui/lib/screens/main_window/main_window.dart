@@ -15,6 +15,7 @@ import '../../app_state.dart';
 import '../../attachments.dart';
 import '../../clipboard_image.dart';
 import '../../clipboard_paste.dart';
+import '../../mentions.dart';
 import '../../theme/section_theme.dart';
 import '../../theme/theme_spec.dart';
 import '../../theme/tokens.dart';
@@ -255,6 +256,50 @@ class _MainWindowState extends State<MainWindow> {
     return identityHashHex.substring(0, identityHashHex.length >= 8 ? 8 : identityHashHex.length);
   }
 
+  /// The name this client knows an identity by, for rendering an `@<hash>`
+  /// mention. Null when nothing here knows one, which renders a short hash
+  /// rather than a name this client cannot vouch for.
+  String? _mentionNameFor(String identityHashHex) {
+    final state = widget.state;
+    if (identityHashHex == state.meHashHex) {
+      return state.meDisplayName.isEmpty ? null : state.meDisplayName;
+    }
+    final channelHash = state.selectedChannelHash;
+    for (final m in state.membersByChannel[channelHash] ?? const []) {
+      if (m.identityHash == identityHashHex && m.displayName.isNotEmpty) {
+        return m.displayName;
+      }
+    }
+    return state.resolvePeerName(identityHashHex);
+  }
+
+  /// Who the `@` picker offers in this channel: its roster, the reader aside.
+  /// Presence is the roster either way -- subscribers for an open-join
+  /// channel, members for an invite-only one -- so nobody outside the channel
+  /// is offered a ping into it.
+  List<MentionCandidate> _mentionCandidates(String? channelHash) {
+    final state = widget.state;
+    if (channelHash == null) return const [];
+    final seen = <String>{state.meHashHex};
+    final out = <MentionCandidate>[];
+    for (final p in state.presenceByChannel[channelHash] ?? const []) {
+      if (!seen.add(p.identityHash)) continue;
+      out.add(MentionCandidate(
+        identityHash: p.identityHash,
+        displayName: p.displayName ?? '',
+      ));
+    }
+    for (final m in state.membersByChannel[channelHash] ?? const []) {
+      if (!seen.add(m.identityHash)) continue;
+      out.add(MentionCandidate(
+        identityHash: m.identityHash,
+        displayName: m.displayName,
+      ));
+    }
+    out.sort((a, b) => a.displayName.toLowerCase().compareTo(b.displayName.toLowerCase()));
+    return out;
+  }
+
   @override
   Widget build(BuildContext context) {
     final state = widget.state;
@@ -418,6 +463,7 @@ class _MainWindowState extends State<MainWindow> {
           voiceSessionPanel: voicePanel,
           syncStates: state.syncStateByChannel,
           unreadCounts: state.unreadByChannel,
+          mentionCounts: state.mentionsByChannel,
           channelPermissions: state.permissionsByChannel,
           onViewMembers: (c) => showMembersDialog(context, state,
               channelHashHex: c.hash, channelName: c.name),
@@ -474,6 +520,7 @@ class _MainWindowState extends State<MainWindow> {
                             messages: messages,
                             meHashHex: state.meHashHex,
                             displayNameFor: _displayNameFor,
+                            resolveMentionName: _mentionNameFor,
                             avatarBytesFor: (hash) => state.avatarCache[hash],
                             ensureAvatarLoaded: (hash) => state.avatarFor(hash),
                             attachmentBytesFor: channelHash == null
@@ -549,6 +596,12 @@ class _MainWindowState extends State<MainWindow> {
                               snippet: _replyTarget!.content.replaceAll('\n', ' '),
                             ),
                       onCancelReply: () => setState(() => _replyTarget = null),
+                      // A conversation offers nobody: a ping needs somebody to
+                      // pick out of a group, and the other end may be running
+                      // a client that would only show the raw hash.
+                      mentionCandidates: state.selectedDmHash != null
+                          ? const []
+                          : _mentionCandidates(channelHash),
                       onSend: (content, attachment) async {
                         final replyTo = _replyTarget?.messageId;
                         // A conversation is addressed by peer, not by

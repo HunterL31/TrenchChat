@@ -131,4 +131,51 @@ void main() {
     await state.refreshUnreadCounts();
     expect(state.unreadByChannel, isEmpty);
   });
+
+  group('pings', () {
+    const me = 'ccccccccccccccccccccccccccccccc0';
+    const alice = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0';
+
+    setUp(() => state.meHashHex = me);
+
+    test('a live message naming us bumps the ping count too', () {
+      state.applyEvent(MessageEvent('hash-beta', _msg('alice', 'oi @$me')));
+      expect(state.unreadByChannel['hash-beta'], 1);
+      expect(state.mentionsByChannel['hash-beta'], 1);
+    });
+
+    test('a live message naming somebody else bumps only the unread count', () {
+      state.applyEvent(MessageEvent('hash-beta', _msg('alice', 'oi @$alice')));
+      expect(state.unreadByChannel['hash-beta'], 1);
+      expect(state.mentionsByChannel['hash-beta'], isNull);
+    });
+
+    test('opening the channel clears its pings', () async {
+      _seedChannelReads(backend, 'hash-beta');
+      state.applyEvent(MessageEvent('hash-beta', _msg('alice', 'oi @$me')));
+      await state.selectChannel('hash-beta');
+      await Future<void>.delayed(Duration.zero);
+      expect(state.mentionsByChannel['hash-beta'], 0);
+    });
+
+    test('refreshUnreadCounts loads pings and keeps the open channel at zero',
+        () async {
+      backend.routes['GET /channels/unread'] = {
+        'counts': {'hash-alpha': 5, 'hash-beta': 2},
+        'mentions': {'hash-alpha': 1, 'hash-beta': 1},
+      };
+      await state.refreshUnreadCounts();
+      expect(state.mentionsByChannel['hash-beta'], 1);
+      expect(state.mentionsByChannel['hash-alpha'], 0);
+    });
+
+    test('a backend that reports no pings draws none', () async {
+      backend.routes['GET /channels/unread'] = {
+        'counts': {'hash-beta': 2},
+      };
+      await state.refreshUnreadCounts();
+      expect(state.unreadByChannel['hash-beta'], 2);
+      expect(state.mentionsByChannel['hash-beta'], isNull);
+    });
+  });
 }

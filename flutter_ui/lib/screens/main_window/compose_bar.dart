@@ -1,17 +1,23 @@
 // 1a: no-chrome compose row. Enter sends, Shift+Enter inserts a newline.
 // There is deliberately no Send button.
 //
-// Two things the draft shows short and sends long: a picked custom emoji
-// (`:name:` -> `:name@hash:`) and a theme shared from the appearance editor
-// (`[theme:Name]` -> its `tct1:` code). Both expand at send time, so neither
-// a 64-char hash nor a whole packed theme ever sits in the user's words, and
+// Three things the draft shows short and sends long: a picked custom emoji
+// (`:name:` -> `:name@hash:`), a theme shared from the appearance editor
+// (`[theme:Name]` -> its `tct1:` code), and a mention picked from the `@`
+// list (`@Name` -> `@<identity hash>`). All expand at send time, so neither a
+// 64-char hash nor a whole packed theme ever sits in the user's words, and
 // deleting the token is all it takes to not send it. A theme token is
 // all-or-nothing: editing any part of one takes the whole token out, so a
 // half-deleted one is never sent as literal text.
+//
+// A mention only ever expands for somebody picked off the list. Typing a name
+// out by hand sends the words, not a ping: a ping names an identity, and this
+// bar is the only place that knows which identity a name meant.
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../../attachments.dart';
+import '../../mentions.dart';
 import '../../theme/section_theme.dart';
 import '../../theme/shape.dart';
 import '../../theme/theme_spec.dart';
@@ -86,17 +92,30 @@ int _themeTokenPrefixLength(String text, int start, String token) {
   return null;
 }
 
+/// Longest `@` query the picker stays open across. Past this the '@' the
+/// reader is typing after is prose, not the start of a name.
+const int _mentionQueryMaxChars = 48;
+
+/// Rows the mention picker shows at once.
+const int _mentionPickerRows = 6;
+
 /// One channel's unsent draft: the text plus the token maps that expand it.
 class _ComposeDraft {
-  const _ComposeDraft(this.text, this.emoji, this.themes, this.attachment);
+  const _ComposeDraft(
+      this.text, this.emoji, this.themes, this.mentions, this.attachment);
 
   final String text;
   final Map<String, String> emoji;
   final Map<String, String> themes;
+  final Map<String, String> mentions;
   final PickedAttachment? attachment;
 
   bool get isEmpty =>
-      text.isEmpty && emoji.isEmpty && themes.isEmpty && attachment == null;
+      text.isEmpty &&
+      emoji.isEmpty &&
+      themes.isEmpty &&
+      mentions.isEmpty &&
+      attachment == null;
 }
 
 class ComposeBar extends StatefulWidget {
@@ -113,6 +132,7 @@ class ComposeBar extends StatefulWidget {
     this.onThemeShareConsumed,
     this.replyPreview,
     this.onCancelReply,
+    this.mentionCandidates = const [],
     this.compact = false,
   });
 
@@ -162,6 +182,12 @@ class ComposeBar extends StatefulWidget {
   /// Clears the pending reply from the banner's cancel affordance.
   final VoidCallback? onCancelReply;
 
+  /// Who `@` may offer to mention here: the channel's roster. Empty turns the
+  /// picker off, which is what a conversation passes -- a ping needs somebody
+  /// to pick out of a group, and the other end of a conversation may not be
+  /// running TrenchChat to read one.
+  final List<MentionCandidate> mentionCandidates;
+
   @override
   State<ComposeBar> createState() => _ComposeBarState();
 }
@@ -177,6 +203,17 @@ class _ComposeBarState extends State<ComposeBar> {
   /// Theme name -> code for shares staged into the current draft, so the
   /// short `[theme:name]` the user sees goes out as the full code.
   final Map<String, String> _draftThemes = {};
+
+  /// The literal `@Name` written into the draft -> the identity it was picked
+  /// for, so the words the reader sees go out as `@<hash>`. Keyed by the
+  /// literal rather than the name: two peers may answer to one name, and a
+  /// ping sent to the wrong one is worse than an awkward label.
+  final Map<String, String> _draftMentions = {};
+
+  /// Candidates for the `@` currently being typed, and which of them Enter
+  /// takes. Empty means no picker is open.
+  List<MentionCandidate> _mentionMatches = const [];
+  int _mentionSelected = 0;
 
   /// Drafts left behind in other channels, keyed by channel hash.
   final Map<String, _ComposeDraft> _stashedDrafts = {};
@@ -211,11 +248,17 @@ class _ComposeBarState extends State<ComposeBar> {
     setState(() => _attachment = image);
   }
 
+  void _onDraftChanged() {
+    if (_rewritingDraft) return;
+    _pruneThemeTokens();
+    _refreshMentionPicker();
+  }
+
   /// Keeps a staged theme token all-or-nothing: editing any part of one takes
   /// the whole token out of the draft, the way deleting an attachment chip
   /// does, rather than leaving a half-token to be sent as literal text.
-  void _onDraftChanged() {
-    if (_rewritingDraft || _draftThemes.isEmpty) return;
+  void _pruneThemeTokens() {
+    if (_draftThemes.isEmpty) return;
     var text = _controller.text;
     var cursor = _controller.selection.baseOffset;
     var changed = false;
@@ -230,6 +273,75 @@ class _ComposeBarState extends State<ComposeBar> {
       changed = true;
     }
     if (changed) _setDraftText(text, cursor: cursor);
+  }
+
+  /// Recomputes what the `@` picker offers for the query at the caret.
+  void _refreshMentionPicker() {
+    final active = _activeMentionQuery();
+    final matches = active == null
+        ? const <MentionCandidate>[]
+        : matchMentionCandidates(widget.mentionCandidates, active.query,
+            limit: _mentionPickerRows);
+    if (matches.isEmpty && _mentionMatches.isEmpty) return;
+    setState(() {
+      _mentionMatches = matches;
+      _mentionSelected = 0;
+    });
+  }
+
+  /// The `@query` being typed at the caret, or null when the caret is not in
+  /// one. Spaces are allowed inside it because display names have them; a
+  /// query that matches nobody simply closes the picker.
+  ({int start, String query})? _activeMentionQuery() {
+    if (widget.mentionCandidates.isEmpty) return null;
+    final selection = _controller.selection;
+    if (!selection.isValid || !selection.isCollapsed) return null;
+    final text = _controller.text;
+    final cursor = selection.baseOffset;
+    if (cursor < 0 || cursor > text.length) return null;
+    for (var i = cursor - 1; i >= 0 && cursor - i <= _mentionQueryMaxChars; i--) {
+      final ch = text[i];
+      if (ch == '\n') return null;
+      if (ch != '@') continue;
+      if (i > 0 && !_opensMention(text[i - 1])) return null;
+      return (start: i, query: text.substring(i + 1, cursor));
+    }
+    return null;
+  }
+
+  /// Whether an '@' following this character starts a mention rather than
+  /// sitting inside a word, which is what an email address looks like.
+  static bool _opensMention(String ch) => ch.trim().isEmpty;
+
+  /// Replaces the `@query` at the caret with the picked peer's label, and
+  /// remembers which identity that label stands for.
+  void _insertMention(MentionCandidate candidate) {
+    final active = _activeMentionQuery();
+    if (active == null) return;
+    final label = _mentionLabelFor(candidate);
+    _draftMentions[label] = candidate.identityHash;
+    final replacement = '$label ';
+    _setDraftText(
+      _controller.text
+          .replaceRange(active.start, _controller.selection.baseOffset, replacement),
+      cursor: active.start + replacement.length,
+    );
+    setState(() => _mentionMatches = const []);
+    _focusNode.requestFocus();
+  }
+
+  /// `@Name`, or `@Name#a1b2c3d4` when that name is already staged for
+  /// somebody else in this draft. A display name is self-asserted, so two
+  /// peers in one channel may legitimately answer to the same one, and a ping
+  /// delivered to the wrong one is worse than an awkward label.
+  String _mentionLabelFor(MentionCandidate candidate) {
+    final name = candidate.displayName.isEmpty
+        ? shortMentionLabel(candidate.identityHash)
+        : candidate.displayName;
+    final label = '@$name';
+    final staged = _draftMentions[label];
+    if (staged == null || staged == candidate.identityHash) return label;
+    return '$label#${candidate.identityHash.substring(0, 8)}';
   }
 
   /// Writes the draft without [_onDraftChanged] acting on it -- every caller
@@ -259,8 +371,8 @@ class _ComposeBarState extends State<ComposeBar> {
   /// in the channel being entered.
   void _switchDraft(String? leaving) {
     if (leaving != null) {
-      final draft = _ComposeDraft(
-          _controller.text, Map.of(_draftEmoji), Map.of(_draftThemes), _attachment);
+      final draft = _ComposeDraft(_controller.text, Map.of(_draftEmoji),
+          Map.of(_draftThemes), Map.of(_draftMentions), _attachment);
       if (draft.isEmpty) {
         _stashedDrafts.remove(leaving);
       } else {
@@ -275,6 +387,10 @@ class _ComposeBarState extends State<ComposeBar> {
     _draftThemes
       ..clear()
       ..addAll(restored?.themes ?? const {});
+    _draftMentions
+      ..clear()
+      ..addAll(restored?.mentions ?? const {});
+    _mentionMatches = const [];
     _attachment = restored?.attachment;
     _setDraftText(restored?.text ?? '');
   }
@@ -317,8 +433,9 @@ class _ComposeBarState extends State<ComposeBar> {
   }
 
   bool _onKeyEvent(KeyEvent event) {
-    if (!_focusNode.hasFocus) return false;
-    if (event is KeyDownEvent && event.logicalKey == LogicalKeyboardKey.enter) {
+    if (!_focusNode.hasFocus || event is! KeyDownEvent) return false;
+    if (_mentionMatches.isNotEmpty && _onPickerKey(event.logicalKey)) return true;
+    if (event.logicalKey == LogicalKeyboardKey.enter) {
       if (HardwareKeyboard.instance.isShiftPressed) {
         return false; // let the TextField insert the newline
       }
@@ -328,18 +445,44 @@ class _ComposeBarState extends State<ComposeBar> {
     return false;
   }
 
+  /// Keys the open mention picker takes for itself. Enter picks rather than
+  /// sends while it is up, so choosing somebody never fires the message.
+  bool _onPickerKey(LogicalKeyboardKey key) {
+    final count = _mentionMatches.length;
+    if (key == LogicalKeyboardKey.arrowDown) {
+      setState(() => _mentionSelected = (_mentionSelected + 1) % count);
+      return true;
+    }
+    if (key == LogicalKeyboardKey.arrowUp) {
+      setState(() => _mentionSelected = (_mentionSelected - 1 + count) % count);
+      return true;
+    }
+    if (key == LogicalKeyboardKey.escape) {
+      setState(() => _mentionMatches = const []);
+      return true;
+    }
+    if (key == LogicalKeyboardKey.enter || key == LogicalKeyboardKey.tab) {
+      _insertMention(_mentionMatches[_mentionSelected]);
+      return true;
+    }
+    return false;
+  }
+
   Future<void> _submit() async {
     final text = _controller.text;
     final attachment = _attachment;
     if (!widget.enabled) return;
     if (text.trim().isEmpty && attachment == null) return;
-    final expanded = _expandDraftThemes(_expandDraftEmoji(text));
+    final expanded =
+        _expandDraftMentions(_expandDraftThemes(_expandDraftEmoji(text)));
     _setDraftText('');
+    if (_mentionMatches.isNotEmpty) setState(() => _mentionMatches = const []);
     if (attachment != null) setState(() => _attachment = null);
     final ok = await widget.onSend(expanded, attachment);
     if (ok) {
       _draftEmoji.clear();
       _draftThemes.clear();
+      _draftMentions.clear();
     } else if (mounted) {
       // Restore the short form, and keep the mapping so a retry still expands.
       if (_controller.text.isEmpty) _setDraftText(text);
@@ -378,6 +521,23 @@ class _ComposeBarState extends State<ComposeBar> {
       composeThemeTokenRe,
       (m) => _draftThemes[m.group(1)!] ?? m[0]!,
     );
+  }
+
+  /// Rewrites each `@Name` picked this draft to the identity it stands for.
+  /// Longest label first, so `@Alice#a1b2c3d4` is not eaten by `@Alice`, and
+  /// never mid-word, so a label the user typed more of is left alone.
+  String _expandDraftMentions(String text) {
+    if (_draftMentions.isEmpty) return text;
+    final labels = _draftMentions.keys.toList()
+      ..sort((a, b) => b.length.compareTo(a.length));
+    var out = text;
+    for (final label in labels) {
+      out = out.replaceAll(
+        RegExp('${RegExp.escape(label)}(?![A-Za-z0-9_])'),
+        mentionToken(_draftMentions[label]!),
+      );
+    }
+    return out;
   }
 
   Future<void> _insertEmoji() async {
@@ -477,6 +637,7 @@ class _ComposeBarState extends State<ComposeBar> {
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
+          if (_mentionMatches.isNotEmpty) _mentionPicker(tc),
           if (widget.replyPreview != null) _replyBanner(tc),
           if (_attachment != null) _attachmentChip(tc, _attachment!),
           if (rounded)
@@ -488,6 +649,61 @@ class _ComposeBarState extends State<ComposeBar> {
           else
             row,
         ],
+      ),
+    );
+  }
+
+  /// The `@` list, sitting above the input the way the reply banner does.
+  /// Each row carries the identity's short hash as well as its name, since a
+  /// name alone is self-asserted and two peers may share one.
+  Widget _mentionPicker(TCSectionColors tc) {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 8),
+      decoration: BoxDecoration(
+        color: tc.bgSurfaceRaised,
+        border: Border.all(color: tc.borderSubtle),
+        borderRadius: tcCorners(context),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          for (var i = 0; i < _mentionMatches.length; i++)
+            _mentionRow(tc, _mentionMatches[i], i == _mentionSelected),
+        ],
+      ),
+    );
+  }
+
+  Widget _mentionRow(TCSectionColors tc, MentionCandidate candidate, bool selected) {
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      child: GestureDetector(
+        onTap: () => _insertMention(candidate),
+        child: Container(
+          color: selected ? tc.bgSelected : Colors.transparent,
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+          child: Row(
+            children: [
+              Expanded(
+                child: Text(
+                  candidate.displayName.isEmpty ? 'unnamed' : candidate.displayName,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: TCType.textBodySm,
+                    color: selected ? tc.textPrimary : tc.textSecondary,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Text(
+                shortMentionLabel(candidate.identityHash),
+                style: TextStyle(fontSize: TCType.textMicro, color: tc.textTertiary),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }

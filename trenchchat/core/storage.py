@@ -18,6 +18,7 @@ from trenchchat.core.permissions import (
     has_permission as _check_permission, is_open_join,
     permissions_from_json, permissions_to_json,
 )
+from trenchchat.core.protocol import mention_token, mentions_identity
 
 DB_PATH = DATA_DIR / "storage.db"
 
@@ -1230,6 +1231,30 @@ class Storage:
             GROUP BY s.channel_hash
         """, (self_hash,))
         return {row["channel_hash"]: row["unread"] for row in rows}
+
+    def get_mention_counts(self, self_hash: str) -> dict[str, int]:
+        """Unread messages naming this identity, per subscribed channel.
+
+        A mention is text rather than a field (see protocol.mentions_in), so
+        the token narrows the rows in SQL and the match is confirmed in Python:
+        LIKE would also match a hash that is merely the start of a longer hex
+        run, which names somebody else.
+        """
+        counts = {row["channel_hash"]: 0 for row in self.get_subscriptions()}
+        if not self_hash:
+            return counts
+        rows = self._fetchall("""
+            SELECT s.channel_hash AS channel_hash, m.content AS content
+            FROM subscriptions s
+            JOIN messages m ON m.channel_hash = s.channel_hash
+                AND m.timestamp > s.last_read_at
+                AND m.sender_hash != ?
+                AND m.content LIKE ?
+        """, (self_hash, f"%{mention_token(self_hash)}%"))
+        for row in rows:
+            if mentions_identity(row["content"], self_hash):
+                counts[row["channel_hash"]] = counts.get(row["channel_hash"], 0) + 1
+        return counts
 
     # --- channel subscribers (durable copy of SubscriptionManager state) ---
 
