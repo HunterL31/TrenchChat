@@ -43,7 +43,7 @@ LXMF fields layout:
     0x92  file_hash         bytes[32], SHA-256 of the file bytes; the address
                                           a member downloads it by
     0x93  file_chunk_root   bytes[32], SHA-256 over the concatenated SHA-256s
-                                          of each 64 KB chunk, so the author's
+                                          of each 32 KB chunk, so the author's
                                           signature covers every chunk
 
 A direct message uses none of the fields above. It is a plain LXMF message --

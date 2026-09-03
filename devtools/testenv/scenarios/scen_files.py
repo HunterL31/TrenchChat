@@ -7,8 +7,8 @@ when a member asks for them, over the file plane's own RNS Links on the
 signed chunk root before it is stored. That is three things pytest's
 FakeFileTransport cannot reach: path resolution to a destination nothing
 ever announces, a holder that dies with a transfer in flight, and what a
-window that doubles on success and halves on failure actually costs on a
-radio.
+window that climbs on two successes and halves on one failure actually costs
+on a radio.
 
 The property the whole design rests on is check 1: nobody's absence breaks a
 download once one other member holds the file. files2, files3 and files6
@@ -29,6 +29,7 @@ from flows import (
     NEGATIVE_HOLD_SECS,
 )
 from scenario import PROBE, scenario
+from trenchchat.core.protocol import FILE_CHUNK_BYTES
 
 SIZE_2MB = 2 * 1024 * 1024
 SIZE_512KB = 512 * 1024
@@ -51,7 +52,7 @@ LOSSY_FETCH_TIMEOUT = 600.0
 PROBE_REQUEST_TIMEOUT = 45.0
 PROBE_WAIT = 240.0
 
-CHUNK_BYTES = 64 * 1024
+CHUNK_BYTES = FILE_CHUNK_BYTES
 CHUNK_HASH_BYTES = 32
 
 # Slow enough to interrupt a transfer on purpose rather than by luck, and

@@ -388,7 +388,7 @@ def test_a_restarted_manager_resumes_at_the_same_index(peer_factory):
         resumed_transport.join_threads()
 
 
-def test_the_request_window_doubles_on_success(peer_factory):
+def test_the_request_window_doubles_after_two_successes(peer_factory):
     (alice, bob), ch_hash = file_channel(peer_factory, "alice", "bob")
     data = blob(15)
     manifest = share(alice, ch_hash, "survey.bin", data)
@@ -399,7 +399,9 @@ def test_the_request_window_doubles_on_success(peer_factory):
     counts = [count for _h, _f, count
               in chunk_fetches(bob.file_transport.registry,
                                bob.identity.hash_hex, file_hash)]
-    assert counts == [1, 2, 4, 8], counts
+    # Every size is asked for twice before the next one, and the last request
+    # asks for the one chunk that is left rather than the window.
+    assert counts == [1, 1, 2, 2, 4, 4, 1], counts
 
 
 def test_the_window_halves_after_a_failed_request(peer_factory):
@@ -409,7 +411,8 @@ def test_the_window_halves_after_a_failed_request(peer_factory):
     manifest = share(alice, ch_hash, "survey.bin", data)
     file_hash = manifest["hash"].hex()
     download(carol, ch_hash, file_hash, timeout=40.0)
-    # (0,1) and (1,2) land, then (3,4) fails: the next request asks for two.
+    # (0,1) and (1,1) land and the window reaches two, then (2,2) fails: the
+    # next request asks for one, from the other holder.
     bob.file_transport.stall_chunks.add((alice.identity.hash_hex, 3))
 
     download(bob, ch_hash, file_hash, timeout=40.0)
@@ -417,8 +420,36 @@ def test_the_window_halves_after_a_failed_request(peer_factory):
     fetches = chunk_fetches(bob.file_transport.registry,
                             bob.identity.hash_hex, file_hash)
     counts = [count for _h, _f, count in fetches]
-    assert counts[:3] == [1, 2, 4], counts
-    assert counts[3] == 2, counts
+    assert counts[:3] == [1, 1, 2], counts
+    assert counts[3] == 1, counts
+    assert bob.file_mgr.file_bytes(file_hash) == data
+
+
+def test_a_failure_between_two_successes_does_not_double_the_window(
+        peer_factory):
+    """The pair the window climbs on has to be consecutive.
+
+    One success either side of a failed request is not evidence that the link
+    can carry twice as much, and finding out that it cannot costs a stall
+    timeout on a radio. The count starts again, so three ranges of one chunk
+    run before the window reaches two.
+    """
+    (alice, bob, carol), ch_hash = file_channel(peer_factory, "alice", "bob",
+                                                "carol")
+    data = blob(6)
+    manifest = share(alice, ch_hash, "survey.bin", data)
+    file_hash = manifest["hash"].hex()
+    download(carol, ch_hash, file_hash, timeout=40.0)
+    bob.file_transport.stall_chunks.add((alice.identity.hash_hex, 1))
+
+    download(bob, ch_hash, file_hash, timeout=40.0)
+
+    fetches = chunk_fetches(bob.file_transport.registry,
+                            bob.identity.hash_hex, file_hash)
+    counts = [count for _h, _f, count in fetches]
+    assert counts[:5] == [1, 1, 1, 1, 2], counts
+    assert fetches[1][0] == alice.identity.hash_hex, fetches
+    assert fetches[2][0] == carol.identity.hash_hex, fetches
     assert bob.file_mgr.file_bytes(file_hash) == data
 
 

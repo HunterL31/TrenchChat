@@ -26,7 +26,8 @@ from pathlib import Path
 
 _SCENARIOS_DIR = Path(__file__).resolve().parent
 _TESTENV_DIR = _SCENARIOS_DIR.parent
-for _p in (str(_SCENARIOS_DIR), str(_TESTENV_DIR)):
+_REPO_ROOT = _TESTENV_DIR.parent.parent
+for _p in (str(_SCENARIOS_DIR), str(_TESTENV_DIR), str(_REPO_ROOT)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 

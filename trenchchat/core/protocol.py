@@ -121,7 +121,12 @@ F_FILE_CHUNK_ROOT   = 0x93   # bytes[32]: SHA-256 over the concatenated SHA-256s
                              #            FILE_CHUNK_BYTES chunk
 
 # The unit of verification, and of the work lost when a link drops mid-transfer.
-FILE_CHUNK_BYTES = 64 * 1024
+# Read together with file_transport.FILE_STALL_SECS: a chunk is what one
+# request carries at the smallest window, so its airtime on the slowest link
+# has to sit well inside that sweep. At SF7 (5.5 kbps) 32 KB is about 47 s
+# against a 120 s sweep; 64 KB measured 95 s and failed whenever the link gave
+# a fifth of its capacity to anything else.
+FILE_CHUNK_BYTES = 32 * 1024
 
 # Largest file a share may carry. Chosen against the slowest link the project
 # targets, and matched to what node file serving already runs under.

@@ -678,7 +678,7 @@ only when a member asks for them, over the file plane's own RNS Links on the
 signed chunk root before it is stored. `tests/test_files.py` covers that
 engine against a transport double. This family covers the three things the
 double cannot produce: a real path to a destination, a holder that dies with a
-transfer in flight, and what a request window that doubles and halves actually
+transfer in flight, and what a request window that climbs and halves actually
 costs on a radio.
 
 It earned its keep immediately. **files1, the plainest row here, failed twice
@@ -710,8 +710,8 @@ block buffered and a count can be short when a run ends.
 200 KB over SF7 took **609.9 s** and **686.7 s** on the two runs of five that
 finished, at **335.8** and **298.3 B/s** against a nominal 687 B/s: about half
 the link. Four requests carried it, the chunk list plus ranges of 1, 2 and 1
-chunk, which is the window doing exactly what it is designed to do (double on
-success, stop at what is left).
+chunk, which is the window of the day doing exactly what it was designed to do
+(double on each success, stop at what is left).
 
 The other three runs did not finish, two of them inside 900 s and one inside
 1200 s, each stopping at **one chunk of four**. That is the more interesting
@@ -721,29 +721,30 @@ request to the holder ended on the plane's 120 s stall sweep, and two more
 were dials at the third member, which holds nothing, never announces on the
 `files` aspect, and therefore has no path to fail fast against.
 
-Read against the constants, one is worth revisiting and the rest are not:
+Read against the constants, two moved and the rest did not. **Every number in
+this section was measured at the old 64 KB chunk**, so a re-run counts twice
+the chunks for the same file; the airtime is what carries over, not the counts.
 
-- `FILE_CHUNK_BYTES` (64 KB) is **95 s of airtime per chunk** here, against a
+- `FILE_CHUNK_BYTES` was 64 KB, **95 s of airtime per chunk** here, against a
   120 s stall sweep. That is too little headroom: a chunk that takes four
   fifths of the window it is measured against fails whenever the link gives up
   a fifth of its capacity to anything else, and at SF7 the announces of four
-  peers are exactly that. **This is the constant worth revisiting**, and 32 KB
-  is the value the measurement points at: 47 s a chunk, well inside the sweep,
-  at the cost of one more round trip per 64 KB. Not changed here, because the
-  same evidence supports raising `FILE_STALL_SECS` instead and one radio
-  profile is thin ground for choosing between them; both now have a scenario
-  that would show the difference.
+  peers are exactly that. **Changed to 32 KB**: 47 s a chunk, well inside the
+  sweep, at the cost of one more round trip per 64 KB. The sweep was left where
+  it is rather than raised, because a longer sweep buys the same headroom by
+  making every real failure cost longer, and the chunk is also the unit of work
+  a dropped link throws away.
 - `FILE_REQUEST_MAX_CHUNKS` (16) is never reached by a file this size and
   would be 25 minutes of transfer inside one request at this rate. It is a
   ceiling on a fast link, not a target on a slow one, which is what it should
-  be. **The one change worth considering** is not to the number but to the
-  window that climbs toward it: doubling costs nothing when it works and 120 s
+  be. **The change made** is not to the number but to the window that climbs
+  toward it: doubling costs nothing when it works and 120 s
   when it does not, and a 200 KB file at SF7 only ever reaches a window of 2.
-  Requiring two consecutive successes before doubling, or bounding the window
-  by the throughput the last range actually measured, would make the climb
-  cheap on a radio without touching a constant. Left alone deliberately: one
-  radio profile and five runs is not enough evidence to redesign the window,
-  and the scenario that would prove it now exists.
+  **The window now doubles only after two consecutive successes** and still
+  halves on the first failure, so the climb is paid for twice and the retreat
+  stays free. Bounding the window by the throughput the last range measured was
+  the other candidate and is not built: it is a second estimator to get wrong,
+  and the streak rule needs no measurement at all.
 - `MAX_SHARED_FILE_BYTES` (5 MB) is **4.3 hours** at this measured rate. That
   is not an argument for lowering it: the transfer is resumable across links,
   holders and restarts, and a person who wants a 5 MB file over LoRa can leave
@@ -751,9 +752,10 @@ Read against the constants, one is worth revisiting and the rest are not:
   decision the estimate now exists for.
 - `FILE_STALL_SECS` (120 s) is a *no progress* timer rather than a total, so
   in principle it is measured against the gap between resource parts and not
-  against the chunk. In practice a 64 KB range at SF7 ends on it often enough
-  to be the other half of the chunk-size question above: whichever of the two
-  moves, they have to be read together.
+  against the chunk. In practice a 64 KB range at SF7 ended on it often enough
+  to be the other half of the chunk-size question above, and the chunk is the
+  half that moved. The two are read together and the constant's comment says
+  so: 32 KB is about 47 s at SF7, comfortably inside the sweep.
 
 The half-rate result is the honest cost of a request-and-response transfer:
 each range is a resource with its own handshake and proof, and the link is
