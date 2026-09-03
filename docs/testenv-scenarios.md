@@ -948,7 +948,7 @@ How to run it, when a scenario is the right tool, and how to add one live in
 
 ## Status
 
-All thirteen families built and run: **108 scenarios, 85 strict and 23 probes.**
+All fourteen families built and run: **121 scenarios, 96 strict and 25 probes**, counted from the registry rather than by hand, which the total here had drifted behind.
 
 | Family | Scenarios | Result |
 |---|---|---|
@@ -966,10 +966,10 @@ All thirteen families built and run: **108 scenarios, 85 strict and 23 probes.**
 | `interop`: direct messages with other LXMF clients | 4 (4 strict) | All passing against a real bare RNS+LXMF client; interop4 found a real gap, 5/5 after the fix |
 | `files`: shared files in invite-only channels | 8 (7 strict, 1 probe) | All strict rows passing; files1 alone found three defects and files8 a fourth, all fixed. files8 records what a 15% loss link costs |
 
-**85 of 86 strict scenarios pass.** The one failure is a real defect, left
-strict and failing on purpose, so `--family sync` exits non-zero until it is
-resolved: sync11, intermittently (2 passes in 7). invite11 is now passing on
-the narrowed `kick` rule described above.
+**One strict scenario fails, on purpose.** sync11 is a real defect, left
+strict and failing so `--family sync` exits non-zero until it is resolved:
+intermittently, 2 passes in 7. invite11 is now passing on the narrowed `kick`
+rule described above.
 
 Re-run against `main` after the August security audit merged (PR 52): the suite
 is unchanged at 53/55, so the audit regressed nothing here. Its one effect on
