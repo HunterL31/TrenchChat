@@ -9,8 +9,10 @@ trust model and the rejected alternatives into docstrings and
 A member of an invite-only channel attaches any file to a message. Every other
 member sees a file card (name, size, state) in the transcript and can download
 it. The file reaches them whether or not the sender is still online, provided
-some member who holds it is. Nothing new is stored for anyone by anyone who is
-not a member, and no peer outside the member list can fetch a byte of it.
+some member who holds it is. A share is only ever the manifest: no member
+receives or stores file bytes until they ask for that file, whatever its
+size. Nothing new is stored for anyone by anyone who is not a member, and no
+peer outside the member list can fetch a byte of it.
 
 Scope for the first release: invite-only channels only. Open-join channels and
 direct messages are follow-ups (see "Deliberately out of scope").
@@ -29,11 +31,10 @@ The seven checks from `.claude/rules/reticulum-zen.md`, applied before the desig
    but cannot substitute. Serving is gated on the requester identifying on
    the link and being in the channel's stored member list. Every inbound
    size is capped and every serve is rate limited.
-3. **Every byte costs.** Large files are never pushed. A message carries a
-   manifest (name, size, hash: under 200 bytes); the bytes move only when a
-   member asks, once per member, from one holder. Small files ride inline so
-   they cost no extra link handshake. Sync relays manifests, not bytes, for
-   anything above the inline ceiling.
+3. **Every byte costs.** Files are never pushed. A message carries a
+   manifest (name, size, hash, chunk root: under 200 bytes); the bytes move
+   only when a member asks, once per member, from one holder. Sync relays
+   manifests, never bytes.
 4. **Store and forward.** A download whose holders are all offline is queued
    and retried when a member announces (`PeerAnnounceHandler`), never failed
    on a timer. A stalled transfer is what fails, not a slow one, and what it
@@ -42,7 +43,7 @@ The seven checks from `.claude/rules/reticulum-zen.md`, applied before the desig
 5. **Identity, not location.** Holders are identity hashes; the file plane
    destination is derived from the holder's identity. Nothing is keyed on an
    interface or a path.
-6. **Intent, not medium.** The inline ceiling is a size, not a link type.
+6. **Intent, not medium.** Every ceiling is a size, not a link type.
    Nothing branches on bandwidth; the LoRa scenario run is what sets the
    constants.
 7. **Not neutral.** A holder learns which member downloaded which file. That
@@ -53,8 +54,8 @@ The seven checks from `.claude/rules/reticulum-zen.md`, applied before the desig
 
 | Need | Existing piece | Where it already lives here |
 |---|---|---|
-| Carry a small file with the message | LXMF fields, auto-promoted to an RNS Resource above one packet; the router's 1000 KB per-transfer limit | `F_IMAGE_DATA` in `core/messaging.py`, capped by `image.MAX_IMAGE_BYTES` |
-| Pull a large file from a peer | `RNS.Link` + `Destination.register_request_handler` + `Link.request(max_response_size, progress_callback)`; file responses stream as `RNS.Resource` (segmented, compressed, progress) | `network/node_transport.py` (nomad `/file/` serving and fetching) |
+| Carry the manifest with the message | LXMF fields inside the TrenchChat envelope | `_channel_fields` in `core/messaging.py` |
+| Pull a file from a peer | `RNS.Link` + `Destination.register_request_handler` + `Link.request(max_response_size, progress_callback)`; file responses stream as `RNS.Resource` (segmented, compressed, progress) | `network/node_transport.py` (nomad `/file/` serving and fetching) |
 | Authenticate the requester | `Link.identify()`; the handler receives `remote_identity` | `node_transport.identify` and the six-argument `_serve` signature |
 | Authenticate the holder | The link handshake proves the destination identity | every outbound Link here |
 | Bound inbound work | per-link serve rate limit, inbound link cap, served-size cap | `NODE_SERVE_RATE_LIMIT`, `MAX_INBOUND_NODE_LINKS`, `MAX_SERVED_RESPONSE_BYTES` |
@@ -72,10 +73,12 @@ four envelope fields and one request path.
 
 ## Design
 
-### One message shape, two transfer paths
+### One message shape: the manifest
 
 A file message is an ordinary channel message (no `F_MSG_TYPE`) with a file
-manifest in the envelope. New fields in a `0x90-0x9F` "File" range of
+manifest in the envelope, and never the file. The file is explicitly
+requested and fetched separately, whatever its size, so no member ever holds
+bytes they did not ask for. New fields in a `0x90-0x9F` "File" range of
 `core/protocol.py`:
 
 | Field | Type | Meaning |
@@ -83,24 +86,18 @@ manifest in the envelope. New fields in a `0x90-0x9F` "File" range of
 | `F_FILE_NAME` | str | display name, cleaned to a bare printable basename, max 128 chars |
 | `F_FILE_SIZE` | int | byte length of the file |
 | `F_FILE_HASH` | bytes[32] | SHA-256 of the file bytes; the file's address everywhere |
-| `F_FILE_DATA` | bytes | the bytes themselves, present only when `size <= MAX_INLINE_FILE_BYTES` |
-| `F_FILE_CHUNK_ROOT` | bytes[32] | SHA-256 over the concatenated SHA-256s of each `FILE_CHUNK_BYTES` chunk; present only on the pull path, and what makes resume safe |
+| `F_FILE_CHUNK_ROOT` | bytes[32] | SHA-256 over the concatenated SHA-256s of each `FILE_CHUNK_BYTES` chunk; what makes resume safe |
 
-- **Inline path** (`size <= MAX_INLINE_FILE_BYTES`): the bytes travel in the
-  message, exactly as an image does today. They ride pending retry, missed
-  delivery hints and sync unchanged. Receiver checks `sha256(data) == hash`
-  and `len(data) == size` and strips the file (clearing the signature, as
-  `image_stripped` does) on mismatch or when over the cap.
-- **Pull path** (larger, up to `MAX_SHARED_FILE_BYTES`): the message carries
-  the manifest only. A member downloads by asking a holder over the file
-  plane below. Sync relays the manifest, never the bytes.
+The manifest rides pending retry, missed-delivery hints and sync exactly as
+text does, since it is text-sized. A member downloads by asking a holder over
+the file plane below. Images are unchanged by this: an image is a rendered
+part of the message and keeps its existing inline path and caps.
 
 Constants, all in one place and all to be re-checked at `--link-profile
 lora_fast` before the feature is called done:
 
 | Constant | Proposed | Why |
 |---|---|---|
-| `MAX_INLINE_FILE_BYTES` | 256 KB | below the image ceiling; a file cannot be downscaled, so the push cost is the whole file times the member count |
 | `MAX_SHARED_FILE_BYTES` | 5 MB | matches `node_browser.MAX_FILE_BYTES` and `MAX_SERVED_RESPONSE_BYTES`, the limits nomad file serving already runs under |
 | `MAX_FILE_NAME_CHARS` | 128 | matches `node_transport.MAX_FILENAME_LEN` |
 | `FILE_STORE_MAX_BYTES` | 256 MB | LRU budget for received files; own uploads are exempt so the sender never stops being a holder by accident |
@@ -263,21 +260,16 @@ holder:
    it never goes backwards; a dropped link shows as "waiting for a member"
    with the bar where it was, not as an error.
 
-The **inline path** has no resume and needs none: the message is one LXMF
-Resource at most `MAX_INLINE_FILE_BYTES` long, LXMF retries delivery up to
-`MAX_DELIVERY_ATTEMPTS` (5), and after that the ordinary pending queue, hints
-and sync carry it. Keeping that ceiling small is what keeps this true.
-
 ### Messaging and sync
 
-- `Messaging.send_message` takes an optional manifest (+ inline bytes) and
-  writes the four fields; `_store_chat_message` reads them with the usual
-  bytes/str coercion, checks name, size, hash shape, and the inline cap, and
-  strips on any failure the way images are stripped.
+- `Messaging.send_message` takes an optional manifest and writes the four
+  fields; `_store_chat_message` reads them with the usual bytes/str
+  coercion, checks name, size and hash shape, and strips the manifest
+  (clearing the signature, as `image_stripped` does) on any failure.
 - Inbound gate is unchanged: a file message from a non-member or a member
   without `SEND_MESSAGE` is dropped where text is (`_on_lxmf_message`).
-- `sync._row_to_dict` adds the manifest; inline bytes ride only when the row
-  holds them, and `row_wire_size` counts them so `MAX_RESPONSE_BYTES` holds.
+- `sync._row_to_dict` adds the manifest and nothing else; file bytes never
+  ride a sync response.
 - Direct-delivery and sync inbound paths share the same strip logic, as
   they do for images (`_insert_chat_message`).
 
@@ -321,7 +313,7 @@ serves members because it is a member.
 - `compose_bar.dart`: a second picker action; the staged chip shows the
   file name and size.
 - `message_list.dart`: a file card widget showing name, size, and one
-  state: a Download button (inline or available), a progress bar
+  state: a Download button (not yet requested), a progress bar
   (downloading), a Save button (done), "No member online has this yet"
   (unavailable), or "attachment refused" (stripped). Save opens the
   `GET .../files/{hash}` URL, the mechanism the nomad file download uses.
@@ -345,7 +337,7 @@ serves members because it is a member.
 - **What a sender can do.** Share a manifest whose bytes nobody has. Members
   see "unavailable" until a holder appears; this is the same as a message
   nobody received, and is not treated as an attack.
-- **Bounds.** Inbound: inline cap, manifest field caps, `max_response_size`
+- **Bounds.** Inbound: manifest field caps, `max_response_size`
   from the chunk count, stall timeout per request, one request in flight
   per download, partial TTL, LRU store budget. Outbound: serve rate limit
   per link, inbound link cap, concurrent serve cap, served size cap.
@@ -371,9 +363,9 @@ Surveyed against the installed RNS 1.4.2 and LXMF 1.1.1 before designing.
   no membership concept.
 - **LXMF `FIELD_FILE_ATTACHMENTS`**, as Sideband and MeshChat use it. A push
   inside a message, bounded by the router's per-transfer delivery limit
-  (1000 KB by default). This is exactly the plan's inline tier, and the
-  interop route for the direct-message follow-up. It cannot be the large
-  file path: every member receives every byte whether they wanted it or not.
+  (1000 KB by default). Rejected for the same reason as any push: every
+  member receives every byte whether they wanted it or not. It remains the
+  interop route if direct messages to Sideband ever carry files.
 - **LXMF propagation nodes.** Hold messages, not files, capped at 256 KB per
   message by default, and channel messages never enter them.
 - **`RNS.Channel` and `RNS.Buffer`**, the reliable ordered stream over a
@@ -395,9 +387,14 @@ each also had to write for themselves.
   resources, but a push sends the whole file to every member whether they
   want it or not, and the receiver cannot decline an inbound resource the
   router has agreed to. Fails checks 2 and 3.
-- **Always pull, no inline tier.** Cleaner (one path), but a 20 KB file would
-  cost every member a link handshake and lose the offline path text already
-  has (hints, sync). The inline tier is the image path that already exists.
+- **An inline tier for small files.** An earlier draft pushed files under
+  256 KB inside the message, as images are, so they would ride hints and
+  sync for free and cost no link handshake. Rejected: it makes every member
+  store bytes they never asked for, and the size at which that stops being
+  acceptable is not the sender's to decide. The cost of dropping it is one
+  link handshake per member per download for small files, paid only by the
+  members who want the file. A manifest still rides hints and sync, so the
+  offline path is kept; only the bytes wait for a request.
 - **Propagation nodes for files.** Channel messages are never propagated,
   nodes cap messages at 256 KB, and a node holding channel files for members
   is exactly the storing-for-others role check 1 says must stay weak.
@@ -421,13 +418,13 @@ each also had to write for themselves.
 
 ## Deliberately out of scope for the first release
 
-- **Open-join channels.** No member table to authorise a serve against.
-  Inline-only sharing there is a small follow-up (the outbound guard refuses
-  a manifest on an open-join channel until then).
-- **Direct messages.** A DM is plain LXMF so Sideband can read it; the inline
-  tier maps onto LXMF's `FIELD_FILE_ATTACHMENTS` (`[name, bytes]`) for
-  interop, and the pull tier works only TrenchChat to TrenchChat. Separate
-  PR, separate interop test.
+- **Open-join channels.** No member table to authorise a serve against, so
+  there is no honest answer yet to "who may fetch". The outbound guard
+  refuses a manifest on an open-join channel until one is designed.
+- **Direct messages.** Between two TrenchChat peers the manifest and pull
+  path work unchanged. A client that is not TrenchChat cannot fetch, and
+  sending it LXMF's `FIELD_FILE_ATTACHMENTS` would be a push. Separate PR,
+  separate decision.
 - **Deleting or expiring shared files.** The LRU budget bounds the store;
   an explicit "remove" is a later feature.
 - **`rncp` fetch compatibility.** `rncp` identifies on the link and sends
@@ -457,10 +454,10 @@ the feature, per `.claude/rules/scenario-testing.md`.
 2. **Storage.** Migration, `channel_files` and `file_parts` tables, slice
    read, own-exempt LRU prune, partial TTL, `file_channels`. Tests:
    `test_storage.py`.
-3. **Inline path end to end.** `Messaging` send/receive/strip, sync relay,
+3. **Manifest end to end.** `Messaging` send/receive/strip, sync relay,
    `actions.send_message` guard. Tests: `test_messaging.py`,
-   `test_sync.py`, `test_adversarial.py` (bad hash, oversized inline,
-   non-member send).
+   `test_sync.py`, `test_adversarial.py` (malformed manifest, non-member
+   send, a message that carries bytes is stripped rather than stored).
 4. **File plane.** `network/file_transport.py` with base class and
    `tests/fake_file_transport.py` (the `fake_node.py` shape). Tests:
    `test_file_transport.py` (dial, queue, chunk-range requests, stall
@@ -485,13 +482,13 @@ the feature, per `.claude/rules/scenario-testing.md`.
    - files1: A shares 2 MB; B and C download from A.
    - files2: A shares; C offline; A killed; C returns and downloads from B
      (holder fallback, the check-1 proof).
-   - files3: A shares 200 KB inline; C offline through it; C backfills it via
-     sync from B.
+   - files3: A shares 20 KB; C offline through it; C returns, gets the
+     manifest by sync from B, and downloads the bytes from B; assert C held
+     no file bytes before it asked.
    - files4: D, not a member, dials A's file plane with the real hash:
      silence, and a warning naming D in A's log.
    - files5: files1 at `--link-profile lora_fast` with a 200 KB file; the
-     inline and shared ceilings and `FILE_CHUNK_BYTES` are set from what
-     this measures.
+     shared ceiling and `FILE_CHUNK_BYTES` are set from what this measures.
    - files6: A shares 2 MB; B starts downloading; A's process is killed
      mid-transfer; C (who already holds it) is up; B finishes from C without
      re-fetching a verified chunk (assert on B's request log).
