@@ -664,25 +664,33 @@ class FileManager:
     def _next_holder(self, dl: _Download) -> str | None:
         """Caller holds the lock. The holder to ask next, or None this round.
 
-        Presence orders the candidates rather than gating them. A member we
-        have not heard from lately is not a member we know to be gone: a
-        transport node damps repeat announces, and the liveness beacon is
-        evidence for whoever receives it and not for whoever sends it, so a
-        peer one link away can read as offline here for minutes at a time.
-        Asking a quiet member costs one dial that fails and parks the
-        download; not asking costs the download.
+        Reachability and presence order the candidates rather than gating
+        them. A member we have not heard from lately is not a member we know
+        to be gone: a transport node damps repeat announces, and the liveness
+        beacon is evidence for whoever receives it and not for whoever sends
+        it, so a peer one link away can read as offline here for minutes at a
+        time. A member whose file plane we have no path to is the weaker
+        candidate of the two, because a node announces on that aspect only
+        while it holds something: asking it costs the whole dial ladder and
+        ends as unreachable. Both are still asked, last.
         """
         if dl.attempts >= MAX_HOLDER_ATTEMPTS:
             return None
-        quiet: str | None = None
+        # Reachable and heard from, reachable, heard from, neither.
+        tiers: list[str | None] = [None, None, None, None]
         for peer in self._candidates(dl):
             if peer in dl.suspect or peer in dl.skipped:
                 continue
-            if self._presence.is_online(peer):
+            tier = (0 if self._transport.can_reach(peer) else 2) + (
+                0 if self._presence.is_online(peer) else 1)
+            if tiers[tier] is None:
+                tiers[tier] = peer
+                if tier == 0:
+                    break
+        for peer in tiers:
+            if peer is not None:
                 return peer
-            if quiet is None:
-                quiet = peer
-        return quiet
+        return None
 
     def _all_refused(self, dl: _Download) -> bool:
         """Caller holds the lock. Whether every known holder has said no."""
@@ -885,10 +893,16 @@ class FileManager:
             self._complete(dl, events)
 
     def _round_reset(self, dl: _Download, holder: str) -> None:
-        """Caller holds the lock. A holder answered, so the round starts over."""
+        """Caller holds the lock. A holder answered, so the round starts over.
+
+        That includes the wait a later silence will park behind: a served
+        range is the strongest sign of a member there is, and the backoff
+        exists to stop a download asking a holder that is not there.
+        """
         dl.attempts = 0
         dl.skipped.clear()
         dl.refused.discard(holder)
+        dl.retry_backoff = DOWNLOAD_RETRY_SECS
         self._last_holder[dl.file_hash_hex] = holder
 
     def _complete(self, dl: _Download, events: list[dict]) -> None:
