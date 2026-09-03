@@ -46,8 +46,10 @@ from trenchchat.core.propagation import PropagationCollector, PropagationNodes
 from trenchchat.core.reaction import ReactionManager
 from trenchchat.core.voice import VoiceManager
 from trenchchat.core.audio.engine import make_tone_pipeline
+from trenchchat.core.files import FileManager
 from trenchchat.core.node_browser import NodeBrowserManager
 from trenchchat.network.router import Router
+from trenchchat.network.file_transport import RNSFileTransport
 from trenchchat.network.node_transport import RNSNodeTransport
 from trenchchat.network.voice_transport import RNSVoiceTransport
 from trenchchat.network.announce import (
@@ -260,6 +262,10 @@ class Backend:
             self.presence_mgr, **beacon_kwargs,
         )
         self.router.add_outbound_callback(self.presence_beacon.record_sent)
+        self.file_transport = RNSFileTransport(self.identity)
+        self.file_mgr = FileManager(self.identity, self.storage,
+                                    self.presence_mgr,
+                                    transport=self.file_transport)
         self.user_directory = UserDirectory(self.identity.hash_hex)
         self.avatar_mgr = AvatarManager(
             self.identity, self.config, self.storage, self.router,
@@ -358,6 +364,7 @@ class Backend:
         # .on_peer_appeared() is never called at all in this harness.
         def _on_peer_appeared(peer_hex: str, iface) -> None:
             self.sync_mgr.on_peer_appeared(peer_hex)
+            self.file_mgr.on_peer_appeared(peer_hex)
             self.presence_mgr.record_seen(peer_hex)
             self._seed_user_directory(peer_hex)
             self.avatar_mgr.flush_avatar(peer_hex)
@@ -509,6 +516,10 @@ class Backend:
                 except Exception as e:
                     RNS.log(f"TesterBackend: node tick failed: {e}", RNS.LOG_WARNING)
                 try:
+                    self.file_mgr.tick()
+                except Exception as e:
+                    RNS.log(f"TesterBackend: file tick failed: {e}", RNS.LOG_WARNING)
+                try:
                     self.friends_mgr.tick()
                 except Exception as e:
                     RNS.log(f"TesterBackend: friends tick failed: {e}",
@@ -584,6 +595,7 @@ class Backend:
         return self.presence_beacon.announce_offline()
 
     def close(self):
+        self.file_mgr.stop()
         self.link_watcher.stop()
         self.router.stop()
         self.storage.close()

@@ -87,7 +87,14 @@ from trenchchat.core.protocol import (
 )
 from trenchchat.core.presence import PresenceManager
 from trenchchat.core.image import MAX_IMAGE_BYTES
+from tests.test_files import (
+    blob, chunk_fetches, file_channel, hostile_serve, list_fetches,
+    wait_for_file_message, wait_for_state,
+)
+from tests.test_files import download as file_download
+from tests.test_files import share as file_share
 from trenchchat.core.actions import build_file_manifest
+from trenchchat.core.files import DL_UNAVAILABLE, chunk_count_for
 from trenchchat.core.protocol import (
     F_FILE_CHUNK_ROOT, F_FILE_HASH, F_FILE_NAME, F_FILE_SIZE,
     MAX_SHARED_FILE_BYTES,
@@ -1848,6 +1855,112 @@ class TestAdversarialFileManifest:
         assert all(m["content"] != "have this file"
                    for m in alice.storage.get_messages(conversation))
 
+
+# ---------------------------------------------------------------------------
+# FILE SERVE GATE: who may pull a byte of a shared file
+# ---------------------------------------------------------------------------
+
+class TestFileServeGate:
+    """The holder answers a request, so the holder is where the check lives.
+
+    A file is served only to a peer that identified on the link and sits in
+    the stored member list of an invite-only channel the file was shared in.
+    Everything else is answered with silence, and a file this node does not
+    hold complete is answered the same way, so a stranger cannot use the
+    refusals to learn what exists here.
+    """
+
+    def _shared(self, peer_factory, *names, chunks: int = 2):
+        peers, ch_hash = file_channel(peer_factory, *names)
+        data = blob(chunks, seed=11)
+        manifest = file_share(peers[0], ch_hash, "survey.bin", data)
+        return peers, ch_hash, data, manifest["hash"].hex()
+
+    def test_an_unidentified_requester_is_refused(self, peer_factory):
+        (alice, _bob), _ch, _data, file_hash = self._shared(
+            peer_factory, "alice", "bob")
+
+        assert alice.file_transport.serve(None, file_hash, 0, 1, False) is None
+        assert alice.file_transport.serve(None, file_hash, 0, 0, True) is None
+
+    def test_a_non_member_is_refused(self, peer_factory):
+        (alice, _bob), _ch, _data, file_hash = self._shared(
+            peer_factory, "alice", "bob")
+        mallory = peer_factory("mallory")
+
+        assert alice.file_transport.serve(
+            mallory.identity.hash_hex, file_hash, 0, 1, False) is None
+
+    def test_a_member_of_another_channel_is_refused(self, peer_factory):
+        (alice, _bob), _ch, _data, file_hash = self._shared(
+            peer_factory, "alice", "bob")
+        dave = peer_factory("dave")
+        other = alice.channel_mgr.create_channel("other-ch", "",
+                                                 permissions=dict(PRESET_PRIVATE))
+        alice.invite_mgr.publish_member_list(other, add_members=[dave.identity.hash])
+        assert wait_for_member(alice.storage, other, dave.identity.hash_hex)
+
+        assert alice.file_transport.serve(
+            dave.identity.hash_hex, file_hash, 0, 1, False) is None
+
+    def test_an_unknown_hash_is_refused(self, peer_factory):
+        (alice, bob), _ch, _data, _file_hash = self._shared(
+            peer_factory, "alice", "bob")
+
+        assert alice.file_transport.serve(
+            bob.identity.hash_hex, "ab" * 32, 0, 1, False) is None
+
+    def test_an_index_past_the_end_is_refused(self, peer_factory):
+        (alice, bob), _ch, data, file_hash = self._shared(
+            peer_factory, "alice", "bob")
+        past_the_end = chunk_count_for(len(data))
+
+        assert alice.file_transport.serve(
+            bob.identity.hash_hex, file_hash, past_the_end, 1, False) is None
+        assert alice.file_transport.serve(
+            bob.identity.hash_hex, file_hash, 0, 1, False) is not None
+
+    def test_a_file_held_only_in_part_is_refused(self, peer_factory):
+        (alice, bob, carol), ch_hash, _data, file_hash = self._shared(
+            peer_factory, "alice", "bob", "carol", chunks=3)
+        msg_id = wait_for_file_message(bob, ch_hash, file_hash)
+        bob.file_transport.stall_chunks.add((alice.identity.hash_hex, 1))
+        bob.file_mgr.request_download(ch_hash, msg_id)
+        wait_for_state(bob, file_hash, DL_UNAVAILABLE)
+        assert bob.storage.get_file(file_hash)["complete"] == 0
+
+        assert bob.file_transport.serve(
+            carol.identity.hash_hex, file_hash, 0, 1, False) is None
+
+    def test_a_holder_that_serves_a_bad_chunk_is_skipped(self, peer_factory):
+        (alice, bob, carol), ch_hash, data, file_hash = self._shared(
+            peer_factory, "alice", "bob", "carol", chunks=3)
+        file_download(carol, ch_hash, file_hash)
+        alice.file_transport.set_serve_callback(hostile_serve(data))
+
+        file_download(bob, ch_hash, file_hash)
+
+        assert bob.file_mgr.file_bytes(file_hash) == data
+        holders = {holder for holder, _first, _count
+                   in chunk_fetches(bob.file_transport.registry,
+                                    bob.identity.hash_hex, file_hash)}
+        assert carol.identity.hash_hex in holders
+
+    def test_a_chunk_list_that_does_not_match_the_root_is_refused(
+            self, peer_factory):
+        (alice, bob, carol), ch_hash, data, file_hash = self._shared(
+            peer_factory, "alice", "bob", "carol", chunks=3)
+        file_download(carol, ch_hash, file_hash)
+        alice.file_transport.set_serve_callback(
+            hostile_serve(data, bad_list=True))
+
+        file_download(bob, ch_hash, file_hash)
+
+        assert bob.file_mgr.file_bytes(file_hash) == data
+        asked = list_fetches(bob.file_transport.registry,
+                             bob.identity.hash_hex, file_hash)
+        assert asked[0] == alice.identity.hash_hex
+        assert carol.identity.hash_hex in asked
 
 # ---------------------------------------------------------------------------
 # ADMIN ADVERSARY: a trusted signer exceeding their own permissions

@@ -30,6 +30,7 @@ from trenchchat.core.identity import Identity
 from trenchchat.core.storage import Storage
 from trenchchat.core.channel import ChannelManager
 from trenchchat.core.direct import DirectMessageManager
+from trenchchat.core.files import FileManager
 from trenchchat.core.friends import FriendsManager
 from trenchchat.core.messaging import Messaging
 from trenchchat.core.subscription import SubscriptionManager
@@ -41,6 +42,7 @@ from trenchchat.core.sync import SyncManager
 from trenchchat.core.voice import VoiceManager
 from trenchchat.network.router import Router
 
+from tests.fake_file_transport import FakeFileRegistry, FakeFileTransport
 from tests.fake_voice import FakeVoiceRegistry, FakeVoiceTransport
 
 
@@ -167,6 +169,8 @@ class TestPeer:
     direct_mgr: DirectMessageManager
     voice_mgr: VoiceManager
     voice_transport: FakeVoiceTransport
+    file_mgr: FileManager
+    file_transport: FakeFileTransport
     _teardown_callbacks: list = field(default_factory=list, repr=False)
 
     def announce(self):
@@ -248,6 +252,7 @@ def peer_factory(rns_instance, tmp_path):
     created_peers: list[TestPeer] = []
     transport = TestTransport()
     voice_registry = FakeVoiceRegistry()
+    file_registry = FakeFileRegistry()
 
     def make_peer(name: str, display_name: str | None = None) -> TestPeer:
         peer_dir = tmp_path / name
@@ -291,6 +296,10 @@ def peer_factory(rns_instance, tmp_path):
                                  config, transport=voice_transport,
                                  state_refresh_secs=0.5, roster_ttl_secs=2.0)
 
+        file_transport = FakeFileTransport(identity.hash_hex, file_registry)
+        file_mgr = FileManager(identity, storage, presence_mgr,
+                               transport=file_transport)
+
         channel_mgr.restore_owned_channels()
         server_mgr.restore_owned_servers()
 
@@ -313,6 +322,8 @@ def peer_factory(rns_instance, tmp_path):
             direct_mgr=direct_mgr,
             voice_mgr=voice_mgr,
             voice_transport=voice_transport,
+            file_mgr=file_mgr,
+            file_transport=file_transport,
         )
 
         # Drive VoiceManager.tick the way the testenv ticker thread would,
@@ -335,6 +346,10 @@ def peer_factory(rns_instance, tmp_path):
             ticker_thread.join(timeout=2.0)
             voice_mgr.leave_voice()
             voice_transport.stop()
+
+        def _stop_files():
+            file_mgr.stop()
+            file_transport.join_threads()
         # Every peer stands up an LXMRouter with its own destinations, links
         # and callbacks.  Left running, these accumulate across the whole
         # session -- several hundred by the end of a full run -- and the
@@ -377,6 +392,7 @@ def peer_factory(rns_instance, tmp_path):
         # Order matters: stop the voice ticker and inbound delivery before
         # anything they touch goes away, and close storage last.
         peer._teardown_callbacks.append(_stop_voice)
+        peer._teardown_callbacks.append(_stop_files)
         peer._teardown_callbacks.append(lambda p=peer: transport.unregister(p))
         peer._teardown_callbacks.append(_stop_router)
         peer._teardown_callbacks.append(storage.close)

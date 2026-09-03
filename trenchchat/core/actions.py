@@ -12,16 +12,15 @@ These functions take already-constructed manager/storage objects and are
 free of any GUI framework dependency.
 """
 
-import hashlib
 from collections.abc import Callable
 
-from trenchchat.core.fileutils import clean_filename
+from trenchchat.core.files import build_manifest
 from trenchchat.core.node_browser import parse_nomad_url
 from trenchchat.core.permissions import (
     CREATE_CHANNEL, KICK, MANAGE_CHANNEL, MANAGE_ROLES, SEND_MESSAGE,
     VOICE_CHAT, is_open_join, permissions_from_json,
 )
-from trenchchat.core.protocol import chunk_hashes, chunk_root, file_manifest
+from trenchchat.core.protocol import file_manifest
 
 MAX_THEME_NAME_LEN = 64
 
@@ -110,11 +109,7 @@ def build_file_manifest(name: str, data: bytes) -> dict | None:
     bind the message to bytes nobody has sent yet: the file hash addresses it
     everywhere, the chunk root covers each chunk of it.
     """
-    cleaned = clean_filename(name)
-    if cleaned is None or not data:
-        return None
-    return file_manifest(cleaned, len(data), hashlib.sha256(data).digest(),
-                         chunk_root(chunk_hashes(data)))
+    return build_manifest(name, data)
 
 
 def send_message(storage, subscription_mgr, messaging, channel_hash_hex: str,
@@ -155,6 +150,37 @@ def send_message(storage, subscription_mgr, messaging, channel_hash_hex: str,
         manifest=manifest,
     )
     return True
+
+
+def share_file(file_mgr, storage, subscription_mgr, messaging,
+               channel_hash_hex: str, self_hash_hex: str, name: str,
+               data: bytes, content: str = "") -> dict:
+    """Store a file, then send the message that names it.
+
+    Two steps that only make sense together: the bytes are stored first so a
+    member who acts on the message immediately finds a holder, and the message
+    goes through the same send guard as any other, so a sender who may not
+    post here has not been made a holder of something nobody can ask for.
+
+    Returns {"shared", "sent", "reason", "manifest"}; reason is "storage" when
+    the file could not be stored (an unusable name or size, or a full own
+    store) and "refused" when the send guard turned the message down.
+    """
+    manifest = file_mgr.share(channel_hash_hex, name, data)
+    if manifest is None:
+        return {"shared": False, "sent": False, "reason": "storage",
+                "manifest": None}
+    sent = send_message(storage, subscription_mgr, messaging,
+                        channel_hash_hex, self_hash_hex, content,
+                        manifest=manifest)
+    return {"shared": True, "sent": sent,
+            "reason": None if sent else "refused", "manifest": manifest}
+
+
+def request_file_download(file_mgr, channel_hash_hex: str,
+                          message_id: str) -> dict | None:
+    """Start or join the download of the file a message names."""
+    return file_mgr.request_download(channel_hash_hex, message_id)
 
 
 def update_membership(storage, invite_mgr, channel_hash_hex: str, actor_hash_hex: str, *,

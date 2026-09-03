@@ -2873,6 +2873,16 @@ class Storage:
             "SELECT DISTINCT channel_hash FROM messages WHERE file_hash = ?", (hash_hex,))
         return [r["channel_hash"] for r in rows]
 
+    def messages_for_file(self, hash_hex: str) -> list[sqlite3.Row]:
+        """Every stored message naming this file, oldest first.
+
+        A download is addressed by the file hash alone, so this is where it
+        recovers the manifest and the peers who sent it after a restart.
+        """
+        return self._fetchall(
+            "SELECT * FROM messages WHERE file_hash = ? ORDER BY timestamp ASC",
+            (hash_hex,))
+
     def list_files(self, complete: bool | None = None,
                    own: bool | None = None) -> list[sqlite3.Row]:
         """Stored files, most recently used first, optionally filtered."""
