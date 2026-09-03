@@ -199,6 +199,19 @@ class _MainWindowState extends State<MainWindow> {
     return picked.attachment;
   }
 
+  /// Opens the file picker behind the compose bar's FILE action. The ceiling
+  /// is the backend's own, so an oversized pick is refused before it is read.
+  Future<PickedAttachment?> _pickFile() async {
+    final picked =
+        await pickFileAttachment(maxBytes: widget.state.maxFileBytes);
+    if (!mounted) return null;
+    if (picked.error != null) {
+      widget.state.reportError(picked.error!);
+      return null;
+    }
+    return picked.attachment;
+  }
+
   /// Puts a pasted image through the same size gate the file picker applies,
   /// so the compose bar only ever sees one the backend will accept.
   VoidCallback _watchPastedImages(void Function(PickedAttachment) onImage) {
@@ -484,6 +497,14 @@ class _MainWindowState extends State<MainWindow> {
                                 ? null
                                 : (messageId) =>
                                     state.attachmentFor(channelHash, messageId),
+                            onFetchFile: channelHash == null
+                                ? null
+                                : (messageId, fileHash) => state.fetchFile(
+                                    channelHash, fileHash, messageId),
+                            onSaveFile: channelHash == null
+                                ? null
+                                : (fileHash, fileName) =>
+                                    state.saveFile(channelHash, fileHash, fileName),
                             emojiLibrary: state.customEmojis,
                             onToggleReaction: channelHash == null
                                 ? null
@@ -553,25 +574,37 @@ class _MainWindowState extends State<MainWindow> {
                         final replyTo = _replyTarget?.messageId;
                         // A conversation is addressed by peer, not by
                         // channel, and carries no permissions to check.
+                        final isFile = attachment?.isFile ?? false;
                         final ok = state.selectedDmHash != null
                             ? await state.sendDirectMessage(
                                 content,
                                 replyTo: replyTo,
                                 imageData: attachment?.bytes,
                               )
-                            : await state.sendMessage(
-                                content,
-                                replyTo: replyTo,
-                                imageDataB64: attachment == null
-                                    ? null
-                                    : base64Encode(attachment.bytes),
-                              );
+                            : isFile
+                                ? await state.shareFile(
+                                    attachment!.name,
+                                    attachment.bytes,
+                                    content: content,
+                                    replyTo: replyTo,
+                                  )
+                                : await state.sendMessage(
+                                    content,
+                                    replyTo: replyTo,
+                                    imageDataB64: attachment == null
+                                        ? null
+                                        : base64Encode(attachment.bytes),
+                                  );
                         if (ok && _replyTarget != null) {
                           setState(() => _replyTarget = null);
                         }
                         return ok;
                       },
                       pickAttachment: _pickAttachment,
+                      // Hidden rather than disabled: a channel this reader
+                      // may not share files in offers no file action at all,
+                      // and a conversation never does (files are channel-only).
+                      pickFile: state.canShareFiles ? _pickFile : null,
                       watchPastedImages: _watchPastedImages,
                       pickEmoji: () async =>
                           (await showEmojiPickerDialog(context, state, title: 'Add emoji'))

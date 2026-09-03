@@ -124,4 +124,17 @@ void main() {
 
     expect(find.text('Create channels in this server'), findsWidgets);
   });
+
+  testWidgets('share_files is offered under a readable label', (tester) async {
+    backend.routes['GET /channels/$_channelHash/permissions'] = {
+      'all_permissions': ['send_message', 'share_files'],
+      'admin': ['send_message', 'share_files'],
+      'member': ['send_message', 'share_files'],
+    };
+    await open(tester);
+
+    // Owner, admin and member sections each carry the row.
+    expect(find.text('Share files'), findsNWidgets(3));
+    expect(find.text('share_files'), findsNothing);
+  });
 }

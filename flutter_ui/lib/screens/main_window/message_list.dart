@@ -29,6 +29,9 @@ const double _attachmentMaxWidth = 400;
 const double _attachmentMaxHeight = 300;
 const int _attachmentDecodeCap = 1200;
 
+/// How wide a file card gets before its name ellipsizes.
+const double _fileCardMaxWidth = 360;
+
 sealed class _Row {}
 
 class _DateDividerRow extends _Row {
@@ -70,6 +73,8 @@ class MessageList extends StatefulWidget {
     this.ensureAvatarLoaded,
     this.attachmentBytesFor,
     this.ensureAttachmentLoaded,
+    this.onFetchFile,
+    this.onSaveFile,
     this.onToggleReaction,
     this.onReact,
     this.emojiLibrary = const {},
@@ -116,6 +121,14 @@ class MessageList extends StatefulWidget {
   /// synchronous cache read and the fetch that fills it.
   final Uint8List? Function(String messageId)? attachmentBytesFor;
   final void Function(String messageId)? ensureAttachmentLoaded;
+
+  /// Asks the backend to fetch a message's file from whichever member holds
+  /// it. Null leaves the card's Download button out: nothing is ever fetched
+  /// without the reader asking for it.
+  final void Function(String messageId, String fileHash)? onFetchFile;
+
+  /// Hands a held file to the save dialog. Null leaves the Save button out.
+  final void Function(String fileHash, String fileName)? onSaveFile;
 
   final void Function(String messageId, String emojiHash)? onToggleReaction;
 
@@ -377,6 +390,8 @@ class _MessageListState extends State<MessageList> {
               attachmentBytes:
                   widget.attachmentBytesFor?.call(row.message.messageId),
               ensureAttachmentLoaded: widget.ensureAttachmentLoaded,
+              onFetchFile: widget.onFetchFile,
+              onSaveFile: widget.onSaveFile,
               onToggleReaction: widget.onToggleReaction,
               onReact: widget.onReact,
               onReply: widget.onReply,
@@ -512,6 +527,8 @@ class _MessageRowWidget extends StatefulWidget {
     this.ensureAvatarLoaded,
     this.attachmentBytes,
     this.ensureAttachmentLoaded,
+    this.onFetchFile,
+    this.onSaveFile,
     this.onToggleReaction,
     this.onReact,
     this.onReply,
@@ -539,6 +556,8 @@ class _MessageRowWidget extends StatefulWidget {
   final void Function(String identityHashHex)? ensureAvatarLoaded;
   final Uint8List? attachmentBytes;
   final void Function(String messageId)? ensureAttachmentLoaded;
+  final void Function(String messageId, String fileHash)? onFetchFile;
+  final void Function(String fileHash, String fileName)? onSaveFile;
   final void Function(String messageId, String emojiHash)? onToggleReaction;
   final void Function(String messageId)? onReact;
   final void Function(Message message)? onReply;
@@ -706,9 +725,15 @@ class _MessageRowWidgetState extends State<_MessageRowWidget> {
 
     final sharedThemes = themeCodesIn(message.content);
 
+    final file = message.file;
+
     // An attachment we refused leaves the text intact, so without this the
     // message reads as though it never had one.
-    final body = message.hasImage || message.imageStripped || sharedThemes.isNotEmpty
+    final body = message.hasImage ||
+            message.imageStripped ||
+            file != null ||
+            message.fileStripped ||
+            sharedThemes.isNotEmpty
         ? Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
@@ -716,6 +741,28 @@ class _MessageRowWidgetState extends State<_MessageRowWidget> {
               if (message.hasImage) ...[
                 if (message.content.isNotEmpty) const SizedBox(height: 6),
                 _attachment(tc),
+              ],
+              if (file != null) ...[
+                const SizedBox(height: 6),
+                _FileCard(
+                  file: file,
+                  onDownload: widget.onFetchFile == null
+                      ? null
+                      : () => widget.onFetchFile!(message.messageId, file.hash),
+                  onSave: widget.onSaveFile == null
+                      ? null
+                      : () => widget.onSaveFile!(file.hash, file.name),
+                ),
+              ],
+              if (message.fileStripped) ...[
+                const SizedBox(height: 4),
+                Text(
+                  'Attachment refused',
+                  style: TextStyle(
+                    fontSize: TCType.textMicro,
+                    color: tc.accentSecondary,
+                  ),
+                ),
               ],
               if (message.imageStripped) ...[
                 const SizedBox(height: 4),
@@ -878,6 +925,113 @@ class _MessageRowWidgetState extends State<_MessageRowWidget> {
       ],
       child: content,
     ));
+  }
+}
+
+/// The file a message names, and the one thing the reader can do about it
+/// right now. Nothing is fetched until the Download button is pressed: a
+/// message carries a manifest, and the bytes wait on a member who holds them.
+class _FileCard extends StatelessWidget {
+  const _FileCard({required this.file, this.onDownload, this.onSave});
+
+  final FileAttachment file;
+  final VoidCallback? onDownload;
+  final VoidCallback? onSave;
+
+  /// Why a download ended, in the reader's words. Every cause is one a member
+  /// can act on, so none of them is phrased as a fault of theirs.
+  String get _reasonText => switch (file.reason) {
+        'refused' => 'the member holding it would not serve it',
+        'corrupt' => 'the bytes did not verify',
+        'storage' => 'there is not enough storage on this node',
+        _ => 'the transfer did not finish',
+      };
+
+  @override
+  Widget build(BuildContext context) {
+    final tc = SectionTheme.of(context);
+    final Widget state;
+    switch (file.state) {
+      case fileStateQueued:
+      case fileStateFetching:
+        state = Row(
+          children: [
+            SizedBox(
+              width: 160,
+              child: LinearProgressIndicator(
+                value: file.progress,
+                minHeight: 3,
+                backgroundColor: tc.bgInset,
+                color: tc.borderAccent,
+              ),
+            ),
+            const SizedBox(width: 8),
+            Text(
+              '${(file.progress * 100).round()}%',
+              style: TextStyle(fontSize: TCType.textMicro, color: tc.textTertiary),
+            ),
+          ],
+        );
+      case fileStateDone:
+        state = TcGhostButton(label: 'SAVE', onPressed: onSave);
+      case fileStateUnavailable:
+        // Not an error: on a mesh, nobody being reachable yet is the normal
+        // case, and the download resumes when a member announces.
+        state = Text(
+          'Waiting for a member who has this file',
+          style: TextStyle(fontSize: TCType.textMicro, color: tc.textTertiary),
+        );
+      case fileStateFailed:
+        state = Row(
+          children: [
+            Flexible(
+              child: Text(
+                'Download failed: $_reasonText',
+                style: TextStyle(fontSize: TCType.textMicro, color: tc.accentSecondary),
+              ),
+            ),
+            const SizedBox(width: 8),
+            TcGhostButton(label: 'RETRY', onPressed: onDownload),
+          ],
+        );
+      default:
+        state = TcGhostButton(label: 'DOWNLOAD', onPressed: onDownload);
+    }
+    return Container(
+      constraints: const BoxConstraints(maxWidth: _fileCardMaxWidth),
+      margin: const EdgeInsets.only(top: 2),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: tc.bgInset,
+        border: Border.all(color: tc.borderSubtle),
+        borderRadius: tcCorners(context),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Row(
+            children: [
+              Flexible(
+                child: Text(
+                  file.name,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(fontSize: TCType.textBodySm, color: tc.textPrimary),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Text(
+                formatByteCount(file.size),
+                style: TextStyle(fontSize: TCType.textMicro, color: tc.textTertiary),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          state,
+        ],
+      ),
+    );
   }
 }
 

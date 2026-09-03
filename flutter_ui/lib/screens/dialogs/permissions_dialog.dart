@@ -19,6 +19,7 @@ const _createChannelPerm = 'create_channel';
 
 const Map<String, String> _permissionLabels = {
   'send_message': 'Send messages',
+  'share_files': 'Share files',
   'invite': 'Invite members',
   'kick': 'Remove members',
   'manage_roles': 'Manage roles',

@@ -3,6 +3,7 @@
 // ChangeNotifier rather than a state-management package -- the surface
 // area here is small enough that a package would add ceremony, not clarity.
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
@@ -23,6 +24,7 @@ import 'api/models/server.dart';
 import 'api/models/settings.dart';
 import 'api/models/voice.dart';
 import 'api/ws.dart';
+import 'attachments.dart';
 import 'theme/theme_spec.dart';
 
 /// How long reaction events for one channel are coalesced before the
@@ -33,14 +35,43 @@ const Duration _reactionRefreshWindow = Duration(milliseconds: 250);
 /// there may be more; a short page is the end of history.
 const int messagePageSize = 50;
 
+/// What a send or share refusal reads as. The reasons are api.py's and
+/// actions.py's own machine-readable set; anything unrecognised says the
+/// message did not go rather than inventing a cause.
+String sendRefusalMessage(String? reason) => switch (reason) {
+      'no_send_permission' => "You don't have permission to send in this channel.",
+      'no_share_permission' =>
+        'You do not have permission to share files in this channel.',
+      'open_join_channel' => 'Files are shared in invite-only channels only.',
+      'no_channel' => 'That channel is not known here.',
+      'no_recipients' =>
+        'Not sent: no known subscribers to deliver to yet. Try again once peers are online.',
+      'storage' => 'Not enough file storage on this node.',
+      'file_too_large' => 'That file is over the size this node shares.',
+      'file_and_image' => 'A message carries an image or a file, not both.',
+      'incomplete_file' => 'That file could not be read.',
+      'empty_file' => 'That file is empty.',
+      'bad_file_base64' => 'That file could not be read.',
+      'bad_manifest' => 'That file could not be shared.',
+      'no_file_in_dm' => 'Files are not shared in direct messages.',
+      _ => 'Message was not sent.',
+    };
+
 class AppState extends ChangeNotifier {
   /// [httpClient] lets tests inject a mock transport; the real app leaves it
-  /// null and gets a standard IO client.
-  AppState({required String baseUrl, http.Client? httpClient, String token = ''})
+  /// null and gets a standard IO client. [saveFileBytes] is the same seam for
+  /// the save dialog, which is a plugin call widget tests must not make.
+  AppState(
+      {required String baseUrl,
+      http.Client? httpClient,
+      String token = '',
+      FileSaver? saveFileBytes})
       : api = ApiClient(baseUrl: baseUrl, client: httpClient, token: token),
+        _saveFileBytes = saveFileBytes ?? saveBytesToFile,
         _socket = TcSocket(baseUrl: baseUrl, token: token);
 
   final ApiClient api;
+  final FileSaver _saveFileBytes;
   final TcSocket _socket;
   StreamSubscription<TcEvent>? _sub;
 
@@ -279,6 +310,7 @@ class AppState extends ChangeNotifier {
       await loadVersion();
       await loadTheme();
       await loadThemeLibrary();
+      await loadFileUsage();
 
       loading = false;
       notifyListeners();
@@ -466,31 +498,130 @@ class AppState extends ChangeNotifier {
   }
 
   Future<bool> sendMessage(String content,
-      {String? replyTo, String? imageDataB64}) async {
+      {String? replyTo,
+      String? imageDataB64,
+      String? fileName,
+      String? fileDataB64}) async {
     final channelHashHex = selectedChannelHash;
     if (channelHashHex == null) return false;
-    if (content.trim().isEmpty && imageDataB64 == null) return false;
+    if (content.trim().isEmpty && imageDataB64 == null && fileDataB64 == null) {
+      return false;
+    }
     try {
       final result = await api.sendMessage(channelHashHex, content.trim(),
-          replyTo: replyTo, imageDataB64: imageDataB64);
+          replyTo: replyTo,
+          imageDataB64: imageDataB64,
+          fileName: fileName,
+          fileDataB64: fileDataB64);
       if (result.ok) {
         // The WS event echoes it too; this covers a dropped socket so the
         // sender always sees their own message land.
         unawaited(refreshMessages(channelHashHex));
         return true;
       }
-      actionError = switch (result.reason) {
-        'no_send_permission' => "You don't have permission to send in this channel.",
-        'no_recipients' =>
-          'Not sent: no known subscribers to deliver to yet. Try again once peers are online.',
-        _ => 'Message was not sent.',
-      };
+      actionError = sendRefusalMessage(result.reason);
       notifyListeners();
       return false;
     } catch (e) {
       _reportActionError(e);
       return false;
     }
+  }
+
+  /// Shares a picked file: the bytes are stored here and the message carries
+  /// only the manifest, so nothing is pushed to anyone.
+  Future<bool> shareFile(String name, Uint8List bytes,
+          {String content = '', String? replyTo}) =>
+      sendMessage(content,
+          replyTo: replyTo, fileName: name, fileDataB64: base64Encode(bytes));
+
+  /// Starts (or joins) the download of the file a message names. The card
+  /// moves on the file_fetch events that follow; the snapshot this returns is
+  /// applied straight away so a dropped socket still shows the state change.
+  Future<bool> fetchFile(
+      String channelHashHex, String fileHash, String messageId) async {
+    try {
+      final fetch = await api.fetchFile(channelHashHex, fileHash, messageId);
+      if (fetch == null) {
+        actionError = 'That file is no longer available here.';
+        notifyListeners();
+        return false;
+      }
+      _applyFileFetch(fetch.fileHash, fetch.messageIds, fetch.channels,
+          fetch.state, fetch.progress, fetch.reason);
+      return true;
+    } catch (e) {
+      _reportActionError(e);
+      return false;
+    }
+  }
+
+  /// Reads a held file back over the API and hands it to the save dialog. The
+  /// bytes live in the backend's database, which may be on another machine,
+  /// so they make the round trip rather than being read off local disk.
+  Future<bool> saveFile(
+      String channelHashHex, String fileHash, String fileName) async {
+    final bytes = await api.getFileBytes(channelHashHex, fileHash);
+    if (bytes == null) {
+      actionError = 'That file is not here yet.';
+      notifyListeners();
+      return false;
+    }
+    try {
+      await _saveFileBytes(fileName, bytes, guessMimeType(fileName));
+      return true;
+    } catch (e) {
+      _reportActionError(e);
+      return false;
+    }
+  }
+
+  /// The largest file this backend will share, from GET /files/usage. The
+  /// client's own default holds until it answers.
+  int maxFileBytes = maxFileAttachmentBytes;
+
+  /// Whether this reader may attach a file in the channel on screen. The
+  /// client gate only: actions.share_file re-checks it, and the inbound
+  /// handler drops a manifest from a peer without it.
+  bool get canShareFiles {
+    final hash = selectedChannelHash;
+    if (hash == null || selectedDmHash != null) return false;
+    return permissionsByChannel[hash]?.shareFiles ?? false;
+  }
+
+  Future<void> loadFileUsage() async {
+    try {
+      maxFileBytes = (await api.fileUsage()).maxFileBytes;
+      notifyListeners();
+    } catch (_) {
+      // An older backend without the endpoint keeps the client's own ceiling.
+    }
+  }
+
+  /// Moves every card showing this file to the state the download reached.
+  /// Progress is chunks verified, so it never goes backwards; a state that
+  /// arrives out of order cannot pull a bar back either.
+  void _applyFileFetch(String fileHash, List<String> messageIds,
+      List<String> channels, String state, double progress, String? reason) {
+    var changed = false;
+    final scope = channels.isEmpty ? messagesByChannel.keys : channels;
+    for (final channelHash in scope) {
+      final list = messagesByChannel[channelHash];
+      if (list == null) continue;
+      for (var i = 0; i < list.length; i++) {
+        final file = list[i].file;
+        if (file == null || file.hash != fileHash) continue;
+        if (messageIds.isNotEmpty && !messageIds.contains(list[i].messageId)) {
+          continue;
+        }
+        final next = progress < file.progress && state != fileStateDone
+            ? file.progress
+            : progress;
+        list[i] = list[i].withFile(file.withFetch(state, next, reason));
+        changed = true;
+      }
+    }
+    if (changed) notifyListeners();
   }
 
   Future<void> refreshMessages(String channelHashHex) async {
@@ -1817,6 +1948,15 @@ class AppState extends ChangeNotifier {
           unawaited(loadFriends());
         }
         notifyListeners();
+      case FileFetchEvent(
+          :final fileHash,
+          :final messageIds,
+          :final channels,
+          :final state,
+          :final progress,
+          :final reason
+        ):
+        _applyFileFetch(fileHash, messageIds, channels, state, progress, reason);
       case NomadFetchEvent(
           :final fetchId,
           :final nodeHash,

@@ -15,4 +15,10 @@ void main() {
     final perms = ChannelPermissions.fromJson(const {});
     expect(perms.sendMessage, isTrue);
   });
+
+  test('fromJson reads share_files, and fails closed without it', () {
+    expect(
+        ChannelPermissions.fromJson(const {'share_files': true}).shareFiles, isTrue);
+    expect(ChannelPermissions.fromJson(const {}).shareFiles, isFalse);
+  });
 }
