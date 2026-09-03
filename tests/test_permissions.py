@@ -18,10 +18,10 @@ from trenchchat.core.storage import Storage
 from trenchchat.core.permissions import (
     ALL_PERMISSIONS,
     FULL_SYNC, INVITE, KICK, MANAGE_CHANNEL, MANAGE_ROLES,
-    PRESET_OPEN, PRESET_PRIVATE, PRESET_SERVER, ROLE_ADMIN, ROLE_MEMBER,
-    ROLE_OWNER, SEND_MESSAGE, has_permission, is_discoverable,
-    is_open_join, offered_permissions, permissions_from_json,
-    permissions_to_json, role_rank,
+    PRESET_OPEN, PRESET_PRIVATE, PRESET_SERVER, PRESETS, ROLE_ADMIN,
+    ROLE_MEMBER, ROLE_OWNER, SEND_MESSAGE, SHARE_FILES, has_permission,
+    is_discoverable, is_open_join, mentions_permission, offered_permissions,
+    permissions_from_json, permissions_to_json, role_rank,
 )
 
 
@@ -354,3 +354,96 @@ class TestAdminOnlyPermissions:
             assert KICK not in offered
             assert MANAGE_ROLES not in offered
             assert SEND_MESSAGE in offered
+
+
+# ---------------------------------------------------------------------------
+# SHARE_FILES: a file is a message, so send_message is the floor
+# ---------------------------------------------------------------------------
+
+class TestShareFilesPermission:
+    """share_files lets an admin keep a channel text-only for a role.
+
+    It is not admin-only, and it is the one permission with a compatibility
+    rule: a blob written before it existed names it nowhere, and that reads as
+    "granted wherever send_message is". The rule lives in permissions.py and
+    is asserted here, at the storage layer, and adversarially.
+    """
+
+    def test_share_files_in_all_permissions(self):
+        assert SHARE_FILES in ALL_PERMISSIONS
+
+    def test_presets_grant_it_to_member_and_admin(self):
+        for perms in (PRESET_PRIVATE, PRESET_OPEN, PRESET_SERVER):
+            assert has_permission(perms, ROLE_MEMBER, SHARE_FILES)
+            assert has_permission(perms, ROLE_ADMIN, SHARE_FILES)
+            assert has_permission(perms, ROLE_OWNER, SHARE_FILES)
+
+    def test_every_preset_role_that_may_send_may_share(self):
+        for perms in PRESETS.values():
+            for role in (ROLE_ADMIN, ROLE_MEMBER):
+                if has_permission(perms, role, SEND_MESSAGE):
+                    assert has_permission(perms, role, SHARE_FILES), \
+                        f"{role} may send but not share under {perms}"
+
+    def test_a_blob_predating_it_shares_wherever_it_sends(self):
+        """A channel bootstrapped before the permission existed keeps working.
+
+        Its role lists name share_files nowhere, which cannot be told apart
+        from a blob that dropped it on purpose, so the reading is the one that
+        does not silently take file sharing away from existing channels.
+        """
+        legacy = {ROLE_ADMIN: [SEND_MESSAGE, INVITE], ROLE_MEMBER: [SEND_MESSAGE]}
+        assert has_permission(legacy, ROLE_ADMIN, SHARE_FILES)
+        assert has_permission(legacy, ROLE_MEMBER, SHARE_FILES)
+
+    def test_a_legacy_role_that_cannot_send_cannot_share(self):
+        legacy = {ROLE_ADMIN: [SEND_MESSAGE], ROLE_MEMBER: []}
+        assert not has_permission(legacy, ROLE_MEMBER, SHARE_FILES)
+
+    def test_one_mention_makes_every_role_list_explicit(self):
+        """The scenario the permission exists for: admins share, members do not."""
+        perms = {ROLE_ADMIN: [SEND_MESSAGE, SHARE_FILES],
+                 ROLE_MEMBER: [SEND_MESSAGE]}
+        assert has_permission(perms, ROLE_ADMIN, SHARE_FILES)
+        assert not has_permission(perms, ROLE_MEMBER, SHARE_FILES)
+
+    def test_the_owner_always_shares(self):
+        assert has_permission({ROLE_MEMBER: []}, ROLE_OWNER, SHARE_FILES)
+
+    def test_send_message_implies_nothing_else(self):
+        legacy = {ROLE_MEMBER: [SEND_MESSAGE]}
+        for perm in ALL_PERMISSIONS:
+            if perm in (SEND_MESSAGE, SHARE_FILES):
+                continue
+            assert not has_permission(legacy, ROLE_MEMBER, perm), \
+                f"{perm} was implied by send_message"
+
+    def test_mentions_permission_reads_role_lists_only(self):
+        assert mentions_permission(PRESET_PRIVATE, SHARE_FILES)
+        assert not mentions_permission({ROLE_MEMBER: [SEND_MESSAGE]}, SHARE_FILES)
+        assert not mentions_permission({"open_join": False}, SHARE_FILES)
+
+    def test_it_is_offered_to_both_roles(self):
+        assert SHARE_FILES in offered_permissions(PRESET_PRIVATE, ROLE_MEMBER)
+        assert SHARE_FILES in offered_permissions(PRESET_PRIVATE, ROLE_ADMIN)
+
+    def test_storage_applies_the_rule_to_a_stored_legacy_blob(self, db):
+        legacy = {"open_join": False, ROLE_ADMIN: [SEND_MESSAGE],
+                  ROLE_MEMBER: [SEND_MESSAGE]}
+        db.upsert_channel("ch_legacy", "Legacy", "", "creator", legacy, time.time())
+        db.upsert_member("ch_legacy", "member_id", "Member", role=ROLE_MEMBER)
+        assert db.has_permission("ch_legacy", "member_id", SHARE_FILES)
+
+    def test_storage_denies_a_member_an_admin_kept_to_text(self, db):
+        perms = dict(PRESET_PRIVATE)
+        perms[ROLE_MEMBER] = [SEND_MESSAGE]
+        db.upsert_channel("ch_text", "Text only", "", "creator", perms, time.time())
+        db.upsert_member("ch_text", "member_id", "Member", role=ROLE_MEMBER)
+        db.upsert_member("ch_text", "admin_id", "Admin", role=ROLE_ADMIN)
+        assert db.has_permission("ch_text", "member_id", SEND_MESSAGE)
+        assert not db.has_permission("ch_text", "member_id", SHARE_FILES)
+        assert db.has_permission("ch_text", "admin_id", SHARE_FILES)
+
+    def test_a_json_round_trip_keeps_the_grant(self, db):
+        restored = permissions_from_json(permissions_to_json(PRESET_PRIVATE))
+        assert has_permission(restored, ROLE_MEMBER, SHARE_FILES)

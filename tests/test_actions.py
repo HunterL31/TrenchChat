@@ -16,7 +16,8 @@ from tests.helpers import wait_for_member
 from trenchchat.config import Config
 from trenchchat.core import actions
 from trenchchat.core.permissions import (
-    FLAG_DISCOVERABLE, FLAG_OPEN_JOIN, PRESET_OPEN, PRESET_PRIVATE, ROLE_MEMBER, ROLE_OWNER,
+    FLAG_DISCOVERABLE, FLAG_OPEN_JOIN, PRESET_OPEN, PRESET_PRIVATE, ROLE_MEMBER,
+    ROLE_OWNER, SEND_MESSAGE, SHARE_FILES, VOICE_CHAT,
 )
 from trenchchat.core.protocol import (
     F_CHANNEL_HASH, MAX_SHARED_FILE_BYTES, chunk_hashes, chunk_root, file_manifest,
@@ -123,6 +124,109 @@ class TestFileManifestSend:
             alice.storage, alice.subscription_mgr, alice.messaging, "ab" * 16,
             alice.identity.hash_hex, "the survey", manifest=manifest,
         )
+
+
+class TestSendRefusalReasons:
+    """The guard says which permission was missing, not just that it refused.
+
+    A file is a message: send_message is the floor, share_files is what an
+    admin narrows it with, and a caller with no other feedback loop (an HTTP
+    response) has to be able to tell the two apart.
+    """
+
+    def test_a_member_without_share_files_is_told_which_one(self, peer_factory):
+        alice, bob, ch_hash = _setup_channel_with_member(
+            peer_factory, member_perms=[SEND_MESSAGE, VOICE_CHAT])
+        manifest = actions.build_file_manifest("survey.csv", _FILE_BYTES)
+
+        result = actions.send_message_result(
+            bob.storage, bob.subscription_mgr, bob.messaging, ch_hash,
+            bob.identity.hash_hex, "the survey", manifest=manifest)
+
+        assert result == {"sent": False,
+                          "reason": actions.REASON_NO_SHARE_PERMISSION}
+
+    def test_the_same_member_still_sends_text(self, peer_factory):
+        alice, bob, ch_hash = _setup_channel_with_member(
+            peer_factory, member_perms=[SEND_MESSAGE, VOICE_CHAT])
+
+        assert actions.send_message_result(
+            bob.storage, bob.subscription_mgr, bob.messaging, ch_hash,
+            bob.identity.hash_hex, "just text") == {"sent": True, "reason": None}
+
+    def test_a_member_without_send_message_keeps_its_own_reason(self, peer_factory):
+        alice, bob, ch_hash = _setup_channel_with_member(
+            peer_factory, member_perms=[])
+        manifest = actions.build_file_manifest("survey.csv", _FILE_BYTES)
+
+        assert actions.send_message_result(
+            bob.storage, bob.subscription_mgr, bob.messaging, ch_hash,
+            bob.identity.hash_hex, "the survey", manifest=manifest,
+        )["reason"] == actions.REASON_NO_SEND_PERMISSION
+        assert actions.send_message_result(
+            bob.storage, bob.subscription_mgr, bob.messaging, ch_hash,
+            bob.identity.hash_hex, "just text",
+        )["reason"] == actions.REASON_NO_SEND_PERMISSION
+
+    def test_the_other_manifest_refusals_each_name_themselves(self, peer_factory):
+        alice, bob, ch_hash = _setup_channel_with_member(peer_factory)
+        manifest = actions.build_file_manifest("survey.csv", _FILE_BYTES)
+        open_hash = alice.channel_mgr.create_channel(
+            "open-ch3", "", permissions=dict(PRESET_OPEN))
+
+        assert actions.send_message_result(
+            alice.storage, alice.subscription_mgr, alice.messaging, open_hash,
+            alice.identity.hash_hex, "the survey", manifest=manifest,
+        )["reason"] == actions.REASON_OPEN_JOIN
+        assert actions.send_message_result(
+            alice.storage, alice.subscription_mgr, alice.messaging, "ab" * 16,
+            alice.identity.hash_hex, "the survey", manifest=manifest,
+        )["reason"] == actions.REASON_NO_CHANNEL
+        assert actions.send_message_result(
+            alice.storage, alice.subscription_mgr, alice.messaging, ch_hash,
+            alice.identity.hash_hex, "the survey",
+            manifest={"name": "survey.csv", "size": MAX_SHARED_FILE_BYTES + 1,
+                      "hash": b"\x11" * 32, "chunk_root": b"\x22" * 32},
+        )["reason"] == actions.REASON_BAD_MANIFEST
+
+    def test_file_share_refusal_answers_none_when_it_holds(self, peer_factory):
+        alice, bob, ch_hash = _setup_channel_with_member(peer_factory)
+
+        assert actions.file_share_refusal(
+            alice.storage, ch_hash, alice.identity.hash_hex) is None
+        assert bob.storage.has_permission(
+            ch_hash, bob.identity.hash_hex, SHARE_FILES)
+        assert actions.file_share_refusal(
+            bob.storage, ch_hash, bob.identity.hash_hex) is None
+
+
+class TestShareFileAction:
+    def test_a_share_that_goes_reports_no_reason(self, peer_factory):
+        alice, bob, ch_hash = _setup_channel_with_member(peer_factory)
+
+        result = actions.share_file(
+            alice.file_mgr, alice.storage, alice.subscription_mgr,
+            alice.messaging, ch_hash, alice.identity.hash_hex, "survey.csv",
+            _FILE_BYTES, "the survey")
+
+        assert result["shared"] and result["sent"]
+        assert result["reason"] is None
+        assert alice.storage.get_file(result["manifest"]["hash"].hex()) is not None
+
+    def test_a_refused_share_stores_nothing(self, peer_factory):
+        alice, bob, ch_hash = _setup_channel_with_member(
+            peer_factory, member_perms=[SEND_MESSAGE, VOICE_CHAT])
+
+        result = actions.share_file(
+            bob.file_mgr, bob.storage, bob.subscription_mgr, bob.messaging,
+            ch_hash, bob.identity.hash_hex, "survey.csv", _FILE_BYTES,
+            "the survey")
+
+        assert result == {"shared": False, "sent": False, "manifest": None,
+                          "reason": actions.REASON_NO_SHARE_PERMISSION}
+        assert bob.storage.get_file(
+            hashlib.sha256(_FILE_BYTES).hexdigest()) is None
+        assert bob.storage.get_messages(ch_hash) == []
 
 
 class TestUpdateMembership:
