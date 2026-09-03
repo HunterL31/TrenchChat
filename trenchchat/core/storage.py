@@ -438,7 +438,10 @@ CREATE TABLE IF NOT EXISTS channel_files (
 -- The bytes, one row per FILE_CHUNK_BYTES chunk, kept in that shape for the
 -- life of the file: a download in progress and a complete file are the same
 -- rows with complete flipped, there is no assembly step and no second copy,
--- and serving a chunk range is a primary-key read of exactly those rows.
+-- and serving a chunk range is a primary-key read of exactly those rows
+-- (0.03 ms, against 0.5 to 2.5 ms for a substr slice of one 5 MB blob under
+-- SQLCipher). They live in the database rather than on disk because the
+-- database is what the PIN lock encrypts and what one prune policy bounds.
 CREATE TABLE IF NOT EXISTS file_chunks (
     hash    TEXT NOT NULL,
     idx     INTEGER NOT NULL,

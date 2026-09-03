@@ -5,7 +5,10 @@ A file is never pushed. A member that wants one asks a holder for a range of
 chunks over a link, on TrenchChat's own "files" aspect, and the holder answers
 with the bytes or with silence. One request path carries everything: the hash
 of the file, the first chunk index and how many chunks, or a flag asking for
-the chunk-hash list instead. Chunk ranges are what makes a dropped link cost
+the chunk-hash list instead. A path per file, nomad's /file/<name> shape,
+would need a register and a deregister on every store and every prune; the
+hash in the request data needs neither, and is no less private, because RNS
+hashes paths anyway. Chunk ranges are what makes a dropped link cost
 one request rather than a whole transfer, since RNS response resources never
 resume across links.
 

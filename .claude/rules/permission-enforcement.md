@@ -26,6 +26,13 @@ layer allows a bad client (or a bug) to bypass the restriction.
 | `KICK` | kick button hidden in members view | `actions.update_membership` re-applies the gate | `publish_member_list` nulls `remove_members` |
 | `MANAGE_ROLES` | promote/demote hidden in members view | `actions.update_membership` re-applies the gate | `publish_member_list` nulls `add/remove_admins` |
 | `MANAGE_CHANNEL` | permissions editor hidden | `actions.edit_channel_permissions` re-checks it | n/a (member list doc is signature-validated) |
+| `SHARE_FILES` | attach-file action hidden in the compose bar (`AppState.canShareFiles`) | `actions.file_share_refusal`, called by `send_message_result` and `share_file` | `_on_lxmf_message` drops an inbound message carrying a manifest |
+
+`SHARE_FILES` carries one compatibility rule, and `permissions.has_permission` is
+the only place it lives: a permissions blob that mentions `share_files` in no role
+list at all predates the permission, so it grants it wherever `send_message` is
+granted; one that mentions it anywhere is read exactly as written. Never re-derive
+that rule elsewhere.
 
 Direct messages are gated by mutual friendship rather than a channel permission, but the same
 three-layer shape applies: the client offers a conversation only for an accepted friend, the

@@ -2,12 +2,15 @@
 Shared files: the download engine, holder choice, and serving members.
 
 A file is content addressed. The message carries a manifest and never the
-bytes, so a download is this node asking a member who holds the file for
-ranges of it and verifying every chunk before it is stored. Nothing is
-pushed, and nothing says which files it holds: a holder is found from the
-member list and asked, so a miss costs one link handshake instead of every
-member a control message. What a holder does announce is that it is one at
-all, because that announce is what a path to its file plane is made of.
+bytes, whatever the file's size: a push would make every member store bytes
+they never asked for, and the size at which that stops being acceptable is not
+the sender's to decide. A download is this node asking a member who holds the
+file for ranges of it and verifying every chunk before it is stored. Nothing
+says which files it holds: a holder is found from the member list and asked,
+so a miss costs one link handshake instead of every member a control message.
+What a holder does announce is that it is one at all, and only while it holds
+something: that announce is what a path to its file plane is made of, and a
+node with nothing to serve gives nobody a reason to dial it.
 
 Requests go out one at a time, one download at a time, because airtime is
 shared and two transfers over one slow link finish later than the same two in
