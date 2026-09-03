@@ -5,6 +5,7 @@ devtools/testenv/api.py calls, so a caller with no other feedback loop
 silently-filtered request.
 """
 
+import hashlib
 import time
 
 import LXMF
@@ -17,7 +18,9 @@ from trenchchat.core import actions
 from trenchchat.core.permissions import (
     FLAG_DISCOVERABLE, FLAG_OPEN_JOIN, PRESET_OPEN, PRESET_PRIVATE, ROLE_MEMBER, ROLE_OWNER,
 )
-from trenchchat.core.protocol import F_CHANNEL_HASH
+from trenchchat.core.protocol import (
+    F_CHANNEL_HASH, MAX_SHARED_FILE_BYTES, chunk_hashes, chunk_root, file_manifest,
+)
 
 
 def _setup_channel_with_member(peer_factory, *, member_perms=None):
@@ -41,6 +44,85 @@ def _setup_channel_with_member(peer_factory, *, member_perms=None):
     bob.storage.set_channel_permissions(ch_hash, perms)
 
     return alice, bob, ch_hash
+
+
+_FILE_BYTES = b"survey data\n" * 500
+
+
+class TestFileManifestSend:
+    """Sharing a file is offered only where a member list can authorise a serve."""
+
+    def test_build_file_manifest_validates(self):
+        manifest = actions.build_file_manifest("  ../reports/survey.csv ",
+                                               _FILE_BYTES)
+        assert manifest is not None
+        assert manifest["name"] == "survey.csv"
+        assert manifest["size"] == len(_FILE_BYTES)
+        assert manifest == file_manifest(manifest["name"], manifest["size"],
+                                         manifest["hash"], manifest["chunk_root"])
+        assert manifest["hash"] == hashlib.sha256(_FILE_BYTES).digest()
+        assert manifest["chunk_root"] == chunk_root(chunk_hashes(_FILE_BYTES))
+
+    def test_build_file_manifest_refuses_an_empty_file_or_a_bare_name(self):
+        assert actions.build_file_manifest("survey.csv", b"") is None
+        assert actions.build_file_manifest("../", _FILE_BYTES) is None
+
+    def test_invite_only_channel_accepts_a_manifest(self, peer_factory):
+        alice, bob, ch_hash = _setup_channel_with_member(peer_factory)
+        manifest = actions.build_file_manifest("survey.csv", _FILE_BYTES)
+
+        assert actions.send_message(
+            alice.storage, alice.subscription_mgr, alice.messaging, ch_hash,
+            alice.identity.hash_hex, "the survey", manifest=manifest,
+        )
+
+        row = alice.storage.get_messages(ch_hash)[-1]
+        assert row["file_name"] == "survey.csv"
+        assert row["file_hash"] == manifest["hash"].hex()
+
+    def test_open_join_channel_refuses_a_manifest(self, peer_factory):
+        alice = peer_factory("alice")
+        ch_hash = alice.channel_mgr.create_channel("open-ch", "",
+                                                   permissions=dict(PRESET_OPEN))
+        manifest = actions.build_file_manifest("survey.csv", _FILE_BYTES)
+
+        assert not actions.send_message(
+            alice.storage, alice.subscription_mgr, alice.messaging, ch_hash,
+            alice.identity.hash_hex, "the survey", manifest=manifest,
+        )
+        assert alice.storage.get_messages(ch_hash) == []
+
+    def test_open_join_channel_still_takes_plain_text(self, peer_factory):
+        """Control: only the manifest is refused there, not the message."""
+        alice = peer_factory("alice")
+        ch_hash = alice.channel_mgr.create_channel("open-ch2", "",
+                                                   permissions=dict(PRESET_OPEN))
+
+        assert actions.send_message(
+            alice.storage, alice.subscription_mgr, alice.messaging, ch_hash,
+            alice.identity.hash_hex, "just text",
+        )
+        assert len(alice.storage.get_messages(ch_hash)) == 1
+
+    def test_a_manifest_that_is_not_one_is_refused(self, peer_factory):
+        alice, bob, ch_hash = _setup_channel_with_member(peer_factory)
+
+        assert not actions.send_message(
+            alice.storage, alice.subscription_mgr, alice.messaging, ch_hash,
+            alice.identity.hash_hex, "the survey",
+            manifest={"name": "survey.csv", "size": MAX_SHARED_FILE_BYTES + 1,
+                      "hash": b"\x11" * 32, "chunk_root": b"\x22" * 32},
+        )
+        assert alice.storage.get_messages(ch_hash) == []
+
+    def test_an_unknown_channel_refuses_a_manifest(self, peer_factory):
+        alice = peer_factory("alice")
+        manifest = actions.build_file_manifest("survey.csv", _FILE_BYTES)
+
+        assert not actions.send_message(
+            alice.storage, alice.subscription_mgr, alice.messaging, "ab" * 16,
+            alice.identity.hash_hex, "the survey", manifest=manifest,
+        )
 
 
 class TestUpdateMembership:

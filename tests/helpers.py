@@ -173,7 +173,8 @@ def wait_for_path(peer_hex: str, timeout: float = 10.0) -> bool:
 def sign_as(sender_hex: str, channel_hash_hex: str, message_id: str,
             timestamp: float, content: str, reply_to: str | None = None,
             last_seen_id: str | None = None,
-            image_data: bytes | None = None) -> bytes | None:
+            image_data: bytes | None = None,
+            manifest: dict | None = None) -> bytes | None:
     """Sign fabricated history as the peer who supposedly authored it.
 
     Tests seed transcripts by writing straight to storage or by hand-building
@@ -187,4 +188,4 @@ def sign_as(sender_hex: str, channel_hash_hex: str, message_id: str,
     if identity is None:
         return None
     return sign_message(identity, channel_hash_hex, message_id, timestamp,
-                        content, reply_to, last_seen_id, image_data)
+                        content, reply_to, last_seen_id, image_data, manifest)

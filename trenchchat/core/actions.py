@@ -12,13 +12,16 @@ These functions take already-constructed manager/storage objects and are
 free of any GUI framework dependency.
 """
 
+import hashlib
 from collections.abc import Callable
 
+from trenchchat.core.fileutils import clean_filename
 from trenchchat.core.node_browser import parse_nomad_url
 from trenchchat.core.permissions import (
     CREATE_CHANNEL, KICK, MANAGE_CHANNEL, MANAGE_ROLES, SEND_MESSAGE,
     VOICE_CHAT, is_open_join, permissions_from_json,
 )
+from trenchchat.core.protocol import chunk_hashes, chunk_root, file_manifest
 
 MAX_THEME_NAME_LEN = 64
 
@@ -99,12 +102,45 @@ def compute_send_recipients(storage, subscription_mgr, channel_hash_hex: str,
     return compute_channel_recipients(storage, subscription_mgr, channel_hash_hex, sender_hash_hex)
 
 
+def build_file_manifest(name: str, data: bytes) -> dict | None:
+    """The manifest for a file about to be shared, or None if it cannot be one.
+
+    The name is cleaned to the shape a receiver accepts, so what the author
+    signs here is what holds up at the other end, and the two digests are what
+    bind the message to bytes nobody has sent yet: the file hash addresses it
+    everywhere, the chunk root covers each chunk of it.
+    """
+    cleaned = clean_filename(name)
+    if cleaned is None or not data:
+        return None
+    return file_manifest(cleaned, len(data), hashlib.sha256(data).digest(),
+                         chunk_root(chunk_hashes(data)))
+
+
 def send_message(storage, subscription_mgr, messaging, channel_hash_hex: str,
                  sender_hash_hex: str, content: str, *,
                  image_data: bytes | None = None,
-                 reply_to: str | None = None) -> bool:
+                 reply_to: str | None = None,
+                 manifest: dict | None = None) -> bool:
     """Compute recipients and send. Returns False (no-op) if the sender
-    lacks permission to send on this channel."""
+    lacks permission to send on this channel.
+
+    A file manifest is refused on an open-join channel, and on a channel this
+    node holds no record of: there is no member list there to authorise a
+    serve against, so a share nobody could be allowed to fetch is not offered
+    in the first place. One that is not a valid manifest is refused too,
+    rather than signed and sent for every receiver to strip.
+    """
+    if manifest is not None:
+        channel = storage.get_channel(channel_hash_hex)
+        if channel is None:
+            return False
+        if is_open_join(permissions_from_json(channel["permissions"])):
+            return False
+        manifest = file_manifest(manifest.get("name"), manifest.get("size"),
+                                 manifest.get("hash"), manifest.get("chunk_root"))
+        if manifest is None:
+            return False
     recipients = compute_send_recipients(
         storage, subscription_mgr, channel_hash_hex, sender_hash_hex
     )
@@ -116,6 +152,7 @@ def send_message(storage, subscription_mgr, messaging, channel_hash_hex: str,
         subscriber_hashes=recipients,
         image_data=image_data,
         reply_to=reply_to,
+        manifest=manifest,
     )
     return True
 
