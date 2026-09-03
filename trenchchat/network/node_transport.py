@@ -21,6 +21,8 @@ from pathlib import Path
 
 import RNS
 
+from trenchchat.core.fileutils import clean_filename as _clean_filename
+
 NOMAD_APP_NAME = "nomadnetwork"
 NOMAD_ASPECT_NODE = "node"
 
@@ -34,7 +36,6 @@ NODE_FETCH_TIMEOUT_SECS = 60.0
 NODE_ANNOUNCE_INTERVAL_SECS = 900.0
 MAX_QUEUED_FETCHES_PER_NODE = 8
 MAX_REQUEST_PATH_LEN = 256
-MAX_FILENAME_LEN = 128
 
 # nomadnet's own ceiling for compressing a file response. Above it the cost
 # is not worth paying, and most large files are already compressed.
@@ -114,23 +115,6 @@ def _response_name(metadata) -> str | None:
     if not isinstance(metadata, dict):
         return None
     return _clean_filename(metadata.get("name"))
-
-
-def _clean_filename(value) -> str | None:
-    """A node-supplied name reduced to a bare, printable basename.
-
-    The name is chosen by the remote and ends up in a Content-Disposition
-    header, so nothing that could steer a path or a header survives.
-    """
-    if isinstance(value, bytes):
-        value = value.decode("utf-8", errors="replace")
-    if not isinstance(value, str):
-        return None
-    value = value.replace("\\", "/").rsplit("/", 1)[-1]
-    value = "".join(c for c in value
-                    if c.isprintable() and c not in '"\\')
-    value = value.strip().strip(".")
-    return value[:MAX_FILENAME_LEN] or None
 
 
 def _link_is_usable(link) -> bool:
