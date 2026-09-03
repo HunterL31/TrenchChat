@@ -98,7 +98,7 @@ lora_fast` before the feature is called done:
 
 | Constant | Proposed | Why |
 |---|---|---|
-| `MAX_SHARED_FILE_BYTES` | 5 MB | matches `node_browser.MAX_FILE_BYTES` and `MAX_SERVED_RESPONSE_BYTES`, the limits nomad file serving already runs under |
+| `MAX_SHARED_FILE_BYTES` | 5 MB | decided for the first release; matches `node_browser.MAX_FILE_BYTES` and `MAX_SERVED_RESPONSE_BYTES`, the limits nomad file serving already runs under. Raising it later needs a raw-body upload endpoint (base64 JSON tops out near 6 MB under `MAX_REQUEST_BYTES`), a streamed save instead of the in-memory one, and a second look at the store budgets; the chunk scheme itself scales linearly |
 | `MAX_FILE_NAME_CHARS` | 128 | matches `node_transport.MAX_FILENAME_LEN` |
 | `FILE_STORE_MAX_BYTES` | 256 MB | LRU budget for complete received files |
 | `OWN_FILE_STORE_MAX_BYTES` | 256 MB | ceiling on the user's own uploads; never auto-pruned (the sender must stay a holder), so a share past it is refused with a clear error rather than evicting anything |
