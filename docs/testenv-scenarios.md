@@ -412,6 +412,7 @@ to itself.
 | interop2 | A + bare client | The same message with the friendship removed | ✅ **19s.** Refused. Sending without the envelope is exactly what an attacker would do, since that is the half carrying a signature, it buys nothing, because the gate reads the identity LXMF authenticated |
 | interop3 | A + bare client | A tester sends a direct message; the bare client reports what it received | ✅ **48s.** The text arrives in the ordinary content, and the only fields present are `0xFB`/`0xFC`, LXMF's own custom-payload fields. No TrenchChat field numbers reach a foreign client |
 | interop4 | A + bare client | The bare LXMF client messages A, which has **not** added it; A accepts | ✅ **Was a real gap.** The message used to be dropped where the gate refused it (with LXMF having already proved the packet, so the sender was told it was delivered) and a client that cannot send `MT_FRIEND_REQUEST` had no other way to ask. It is now held as a request carrying its text, grants nothing until accepted, and is filed into the conversation on accept. Fails without the fix (64s). 5/5 runs, 3–5s |
+| interop5 | A + bare client | A tester sends a direct message carrying a custom emoji token and a theme code; the bare client reports what it received | ✅ **48s.** Arrives as `hi :salute: try out`: the emoji keeps its name and loses the 64-character hash, and the theme code is gone. 5/5 in a family run, 3/5 standalone. The standalone failures share interop3's live-delivery race (interop3 measured 2/5 standalone in the same container): they fail with nothing received at all, never with the wrong words |
 
 ### `restart`: Restart, persistence, ordering
 
@@ -1352,7 +1353,7 @@ How to run it, when a scenario is the right tool, and how to add one live in
 
 ## Status
 
-All fifteen families built and run: **127 scenarios, 99 strict and 28 probes**, counted from the registry rather than by hand.
+All fifteen families built and run: **128 scenarios, 100 strict and 28 probes**, counted from the registry rather than by hand.
 
 | Family | Scenarios | Result |
 |---|---|---|
@@ -1368,7 +1369,7 @@ All fifteen families built and run: **127 scenarios, 99 strict and 28 probes**, 
 | `integrity`: message integrity | 4 (4 strict) | All passing; integrity2 found a real gap, now fixed and strict |
 | `nomad`: page browsing and hosting | 4 (3 strict, 1 probe) | All passing, 4/4 runs each; nomad3 confirmed bounded offline failure and recovery |
 | `bw`: bytes on the wire | 1 (probe) | Measured before and after reconciliation; see the family's section |
-| `interop`: direct messages with other LXMF clients | 4 (4 strict) | All passing against a real bare RNS+LXMF client; interop4 found a real gap, 5/5 after the fix |
+| `interop`: direct messages with other LXMF clients | 5 (5 strict) | All passing against a real bare RNS+LXMF client; interop4 found a real gap, 5/5 after the fix; interop3 and interop5 race on live delivery when run alone |
 | `files`: shared files in invite-only channels | 11 (7 strict, 4 probes) | All strict rows passing; files1 alone found three defects, files8 a fourth, the two radio probes two more and files9 a seventh, all fixed. files5, files8 and files10 record what a slow link, a lossy one and a shared one each cost, and files11 moves the 5 MB ceiling itself over SF7 in 5h 14m |
 
 **All strict scenarios pass**, sync11 included: 6/6 on broadband and 3/3 on

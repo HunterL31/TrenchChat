@@ -18,12 +18,17 @@ import RNS
 import pytest
 
 from tests.helpers import wait_for
+from trenchchat.core.interop import carries_only_trenchchat_markup, plain_lxmf_content
 from trenchchat.core.messaging import _compute_message_id
 from trenchchat.core.naming import dm_hash_for
 from trenchchat.core.protocol import (
-    DM_ENVELOPE_TYPE, F_CHANNEL_HASH, LXMF_FIELD_CUSTOM_DATA,
-    LXMF_FIELD_CUSTOM_TYPE, LXMF_FIELD_IMAGE, unpack_dm_envelope,
+    DM_ENVELOPE_TYPE, F_CHANNEL_HASH, F_MSG_TYPE, LXMF_FIELD_CUSTOM_DATA,
+    LXMF_FIELD_CUSTOM_TYPE, LXMF_FIELD_IMAGE, MT_EMOJI_REQUEST,
+    unpack_dm_envelope, unpack_fields,
 )
+
+# Stands in for a custom emoji nobody holds the image for.
+EMOJI_HASH = "a" * 64
 
 
 def befriend(a, b):
@@ -50,6 +55,27 @@ def sent_fields(peer, monkeypatch) -> list[dict]:
 
     def spy(lxm):
         captured.append(dict(getattr(lxm, "fields", None) or {}))
+        return original(lxm)
+
+    monkeypatch.setattr(peer.router, "send", spy)
+    return captured
+
+
+def control_messages(sent: list[dict]) -> list[dict]:
+    """The TrenchChat control messages among captured outbound fields."""
+    return [f for f in (unpack_fields(raw) for raw in sent) if f]
+
+
+def sent_content(peer, monkeypatch) -> list[str]:
+    """Capture the words that actually go on the wire from this peer."""
+    captured = []
+    original = peer.router.send
+
+    def spy(lxm):
+        content = lxm.content or b""
+        if isinstance(content, bytes):
+            content = content.decode(errors="replace")
+        captured.append(content)
         return original(lxm)
 
     monkeypatch.setattr(peer.router, "send", spy)
@@ -296,3 +322,142 @@ def test_reactions_are_not_sent_to_another_lxmf_client(peer_factory):
     b.reaction_mgr.add_reaction(conversation, msg_id, "👍", [])
     assert any(r["reactor_hash"] == b.identity.hash_hex
                for r in b.storage.get_reactions(msg_id))
+
+
+def test_an_emoji_request_is_not_sent_to_another_lxmf_client(peer_factory, monkeypatch):
+    """An inbound message may reference an emoji we lack whatever wrote it.
+    Asking the client that wrote it only works if it is TrenchChat."""
+    a = peer_factory("alice")
+    b = peer_factory("bob")
+    befriend(a, b)
+
+    asked = sent_fields(b, monkeypatch)
+    a.router.send(plain_lxm(a, b, f"look :wave@{EMOJI_HASH}:"))
+    conversation = dm_hash_for(a.identity.hash_hex, b.identity.hash_hex)
+    assert wait_for(lambda: b.storage.get_messages(conversation))
+
+    time.sleep(0.3)
+    assert not [f for f in control_messages(asked)
+                if f.get(F_MSG_TYPE) == MT_EMOJI_REQUEST]
+
+
+def test_an_emoji_request_still_reaches_a_trenchchat_peer(peer_factory, monkeypatch):
+    a = peer_factory("alice")
+    b = peer_factory("bob")
+    befriend(a, b)
+
+    a.messaging.send_direct(b.identity.hash_hex, "hello")
+    assert wait_for(lambda: b.direct_mgr.conversations()
+                    and b.direct_mgr.conversations()[0]["peer_is_trenchchat"])
+    b.messaging.send_direct(a.identity.hash_hex, "hello yourself")
+    assert wait_for(lambda: a.direct_mgr.conversations()
+                    and a.direct_mgr.conversations()[0]["peer_is_trenchchat"])
+
+    asked = sent_fields(b, monkeypatch)
+    a.messaging.send_direct(b.identity.hash_hex, f"look :wave@{EMOJI_HASH}:")
+    assert wait_for(
+        lambda: [f for f in control_messages(asked)
+                 if f.get(F_MSG_TYPE) == MT_EMOJI_REQUEST]
+    )
+
+
+# ---------------------------------------------------------------------------
+# what a message is rewritten to for a client that is not TrenchChat
+# ---------------------------------------------------------------------------
+
+def test_a_custom_emoji_keeps_its_name_and_loses_its_hash(peer_factory, monkeypatch):
+    """The hash is the half addressed to us: the other client cannot ask for
+    the image, so all it would carry is 64 characters of noise."""
+    a = peer_factory("alice")
+    b = peer_factory("bob")
+    befriend(a, b)
+
+    words = sent_content(a, monkeypatch)
+    msg_id = a.messaging.send_direct(b.identity.hash_hex, f"hi :wave@{EMOJI_HASH}:")
+
+    assert words == ["hi :wave:"]
+    conversation = dm_hash_for(a.identity.hash_hex, b.identity.hash_hex)
+    stored = [m for m in a.storage.get_messages(conversation)
+              if m["message_id"] == msg_id]
+    assert stored[0]["content"] == "hi :wave:"
+
+
+def test_a_theme_code_is_not_sent_to_another_lxmf_client(peer_factory, monkeypatch):
+    a = peer_factory("alice")
+    b = peer_factory("bob")
+    befriend(a, b)
+
+    words = sent_content(a, monkeypatch)
+    a.messaging.send_direct(b.identity.hash_hex, "try this tct1:AbC-_09 nice one")
+
+    assert words == ["try this nice one"]
+
+
+def test_a_message_of_only_markup_is_refused_rather_than_sent_empty(
+        peer_factory, monkeypatch):
+    """An empty message is what the other client would show, and it says
+    nothing. Refusing hands the words back to the sender instead."""
+    a = peer_factory("alice")
+    b = peer_factory("bob")
+    befriend(a, b)
+
+    words = sent_content(a, monkeypatch)
+    assert a.messaging.send_direct(b.identity.hash_hex, "tct1:AbC-_09") is None
+    assert words == []
+
+    conversation = dm_hash_for(a.identity.hash_hex, b.identity.hash_hex)
+    assert a.storage.get_messages(conversation) == []
+
+
+def test_a_trenchchat_peer_gets_the_whole_token(peer_factory, monkeypatch):
+    a = peer_factory("alice")
+    b = peer_factory("bob")
+    befriend(a, b)
+
+    b.messaging.send_direct(a.identity.hash_hex, "hello")
+    conversation = dm_hash_for(a.identity.hash_hex, b.identity.hash_hex)
+    assert wait_for(lambda: a.direct_mgr.conversations()
+                    and a.direct_mgr.conversations()[0]["peer_is_trenchchat"])
+
+    words = sent_content(a, monkeypatch)
+    a.messaging.send_direct(b.identity.hash_hex, f"hi :wave@{EMOJI_HASH}:")
+
+    assert words == [f"hi :wave@{EMOJI_HASH}:"]
+
+
+def test_a_channel_message_is_never_rewritten(peer_factory, monkeypatch):
+    """Everyone in a channel runs TrenchChat; there is nothing to degrade for."""
+    a = peer_factory("alice")
+    b = peer_factory("bob")
+
+    channel_hash = a.channel_mgr.create_channel("markup", "")
+    words = sent_content(a, monkeypatch)
+    a.messaging.send_message(channel_hash, f"hi :wave@{EMOJI_HASH}: tct1:AbC-_09",
+                             subscriber_hashes=[b.identity.hash_hex])
+
+    assert words == [f"hi :wave@{EMOJI_HASH}: tct1:AbC-_09"]
+
+
+# ---------------------------------------------------------------------------
+# the rewrite itself
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("written,read", [
+    (f"hi :wave@{EMOJI_HASH}:", "hi :wave:"),
+    (f":a@{EMOJI_HASH}::b@{EMOJI_HASH}:", ":a::b:"),
+    (f"hi :wave@{EMOJI_HASH.upper()}:", "hi :wave:"),
+    (":wave:", ":wave:"),
+    ("meet at 12:30, no:emoji:here", "meet at 12:30, no:emoji:here"),
+    ("try tct1:AbC-_09 out", "try out"),
+    ("tct1:AbC-_09", ""),
+    ("", ""),
+])
+def test_what_a_foreign_client_is_given_to_read(written, read):
+    assert plain_lxmf_content(written) == read
+
+
+def test_only_markup_is_told_apart_from_a_message_that_has_words():
+    assert carries_only_trenchchat_markup("tct1:AbC-_09")
+    assert not carries_only_trenchchat_markup("look tct1:AbC-_09")
+    assert not carries_only_trenchchat_markup(f":wave@{EMOJI_HASH}:")
+    assert not carries_only_trenchchat_markup("")
