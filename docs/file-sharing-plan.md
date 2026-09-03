@@ -430,6 +430,16 @@ each also had to write for themselves.
   PR, separate interop test.
 - **Deleting or expiring shared files.** The LRU budget bounds the store;
   an explicit "remove" is a later feature.
+- **`rncp` fetch compatibility.** `rncp` identifies on the link and sends
+  `link.request("fetch_file", data=<path>)` to an `rncp.receive`
+  destination; the handler starts a Resource with `{"name": ...}` metadata,
+  or answers `False` (not found), `None` (error) or `0xF0` (not allowed).
+  Registering that destination with the path read as a file hash, and the
+  same membership check as the file plane, would let a member pull a channel
+  file from a headless node with the stock CLI. Whole-file only, fetch only
+  (a push carries no channel), and needs the user's identity in a form
+  `rncp -i` can load. A follow-up, verified with the real binary the way the
+  nomadnet interop check is.
 - **Fetching chunks from several holders at once.** Faster on a fast mesh,
   and the chunk scheme allows it, but it doubles the airtime a download can
   take from a shared link. Sequential first; measure before adding.
