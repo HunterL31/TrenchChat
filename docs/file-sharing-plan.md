@@ -100,7 +100,9 @@ lora_fast` before the feature is called done:
 |---|---|---|
 | `MAX_SHARED_FILE_BYTES` | 5 MB | matches `node_browser.MAX_FILE_BYTES` and `MAX_SERVED_RESPONSE_BYTES`, the limits nomad file serving already runs under |
 | `MAX_FILE_NAME_CHARS` | 128 | matches `node_transport.MAX_FILENAME_LEN` |
-| `FILE_STORE_MAX_BYTES` | 256 MB | LRU budget for received files; own uploads are exempt so the sender never stops being a holder by accident |
+| `FILE_STORE_MAX_BYTES` | 256 MB | LRU budget for complete received files |
+| `OWN_FILE_STORE_MAX_BYTES` | 256 MB | ceiling on the user's own uploads; never auto-pruned (the sender must stay a holder), so a share past it is refused with a clear error rather than evicting anything |
+| `PARTIAL_STORE_MAX_BYTES` | 20 MB | ceiling on chunks of unfinished downloads; the oldest partial is dropped to admit a new download |
 | `FILE_CHUNK_BYTES` | 64 KB | the unit of verification and of lost work on a dropped link; about seven minutes on a 1.2 kbps LoRa link |
 | `FILE_REQUEST_MAX_CHUNKS` | 16 | most chunks one request may ask for (1 MB, one RNS Resource segment) |
 | `FILE_STALL_SECS` | 120 s | no progress on an in-flight request for this long ends the request, not the download |
@@ -123,22 +125,28 @@ re-checked after a pull.
 
 - `messages` gains `file_name TEXT`, `file_size INTEGER`, `file_hash TEXT`,
   `file_stripped INTEGER` (migration in `_migrate_*` style).
-- New table `channel_files(hash TEXT PRIMARY KEY, content BLOB NOT NULL,
-  size INTEGER, stored_at REAL, last_used REAL, own INTEGER)`.
-  Content-addressed, so the same file shared twice or in two channels is
-  stored once, and a pull from any holder is verified against the key.
+- New table `channel_files(hash TEXT PRIMARY KEY, size INTEGER,
+  chunk_count INTEGER, held_bytes INTEGER, complete INTEGER, own INTEGER,
+  stored_at REAL, last_used REAL)`: one row per file this node holds or is
+  downloading. Content-addressed, so the same file shared twice or in two
+  channels is stored once, and a pull from any holder is verified against
+  the key.
+- New table `file_chunks(hash TEXT, idx INTEGER, content BLOB NOT NULL,
+  PRIMARY KEY (hash, idx))`: the bytes, one row per `FILE_CHUNK_BYTES`
+  chunk, kept in that shape for the life of the file. A download in
+  progress and a complete file are the same rows with `complete` flipped;
+  there is no assembly step, no second copy of the bytes, and serving a
+  chunk range is a primary-key read of exactly those rows (measured at
+  0.03 ms under SQLCipher against 0.5 to 2.5 ms for a `substr` slice of a
+  single 5 MB blob). Saving to disk assembles in memory, which the 5 MB
+  ceiling makes cheap.
 - Bytes live in SQLite, not on disk: the database is already the thing the
   PIN lock encrypts, and it already has a byte-budget LRU prune to copy
   (`prune_nomad_files`). Files on disk would sit outside the lockbox.
 - `Storage.file_channels(hash)` answers "which channels was this file shared
   in", which is what the serve handler authorises against.
-- New table `file_parts(hash TEXT, index INTEGER, content BLOB NOT NULL,
-  received_at REAL, PRIMARY KEY (hash, index))`: verified chunks of a
-  download still in progress. Survives a restart; assembled into
-  `channel_files` when the last chunk lands, then deleted. Pruned by
-  `PARTIAL_FILE_TTL_SECS` and, under store pressure, before complete files.
-- Serving a slice reads `substr(content, offset + 1, length)` so a 5 MB blob
-  is never loaded whole to answer a 64 KB request.
+- Every chunk write is its own small transaction. Under WAL that is a 64 KB
+  append and a checkpoint, never a multi-megabyte transaction.
 
 ### File plane: `network/file_transport.py`
 
@@ -198,18 +206,28 @@ LXMF fields (messaging does that).
   `MAX_HOLDER_ATTEMPTS` (4) per round. No "I hold this" control message is
   sent: a miss costs one link handshake, an announce would cost every
   member a message for every download.
+- **Admit before fetching**: a download starts only once the store can
+  hold the whole file. Eviction (LRU over complete received files, oldest
+  partial first if the partial budget is what is short) happens at
+  admission, never after bytes have landed, and never touches own uploads
+  or the file being downloaded. A file that cannot be admitted stays
+  `queued` with reason `storage` and the card says so.
 - **Verify before store**: every chunk is checked against the chunk-hash
   list, itself checked against the signed chunk root, before it is written
-  to `file_parts`; the assembled file is checked against `F_FILE_HASH`
-  before it becomes a `channel_files` row. A bad chunk is dropped, the
-  holder that served it is skipped for this file, and the next holder is
-  tried from the same offset.
+  to `file_chunks`; when the last chunk lands the whole is checked against
+  `F_FILE_HASH` before `complete` is set. A bad chunk is dropped, the holder
+  that served it is skipped for this file, and the next holder is tried
+  from the same offset.
 - **Retry on return**: `on_peer_appeared` re-runs any `unavailable` download
   whose channel that peer is in. No timer.
 - **Everyone who downloads becomes a holder**: the stored row makes the
   serve handler answer for it, with no registration step.
-- `prune()` on the existing ticker cadence: LRU over non-own rows to
-  `FILE_STORE_MAX_BYTES`.
+- `prune()` on the existing ticker cadence: LRU over complete received
+  files to `FILE_STORE_MAX_BYTES`, partials past `PARTIAL_FILE_TTL_SECS`.
+- **Disk full** (`sqlite3.OperationalError: database or disk is full`) on a
+  chunk write marks the download `failed` with reason `storage`, keeps the
+  chunks already held, logs once, and does not retry on its own; the ticker
+  survives it. Sharing checks free space the same way before storing.
 
 ### Interrupted links and resume
 
@@ -244,10 +262,11 @@ holder:
    from a second holder would mean trusting bytes nobody has signed until the
    very end, and a hostile member could waste an entire transfer with one
    bad chunk discovered last.
-3. **Persisted progress.** Verified chunks go to `file_parts` as they land.
-   A process restart, a PIN lock, or a phone reboot mid-download loses
+3. **Persisted progress.** Verified chunks go to `file_chunks` as they
+   land. A process restart, a PIN lock, or a phone reboot mid-download loses
    nothing: on start, `FileManager` rebuilds every unfinished download from
-   `file_parts` as `unavailable` and it resumes on the next announce.
+   the incomplete `channel_files` rows as `unavailable` and it resumes on
+   the next announce.
 4. **Resume from any holder.** Chunks are addressed by (hash, index), so the
    next request can go to a different holder than the last. Holder A drops
    off at chunk 30; B announces; the download continues from chunk 30 on B.
@@ -334,6 +353,44 @@ serves members because it is a member.
   file state from `file_fetch` events; widget tests with `fake_backend.dart`,
   injecting the save function the way `pickImageAttachment` injects the
   picker so tests never reach the plugin.
+
+## Database growth
+
+Measured on this container with SQLCipher 3.51 and SQLite 3.45, 5 MB random
+blobs, WAL mode as `Storage` sets it.
+
+- **What is bounded.** Complete received files by `FILE_STORE_MAX_BYTES`,
+  unfinished downloads by `PARTIAL_STORE_MAX_BYTES`, own uploads by
+  `OWN_FILE_STORE_MAX_BYTES`. Worst case the file tables hold about 530 MB
+  plus row overhead (SQLCipher adds about 2% for page authentication).
+  Nothing a peer sends can grow them: a manifest is text-sized and rides the
+  ordinary message path, downloads start only on the user's click, a
+  hostile holder's bytes are refused per chunk before any write, and
+  admission evicts before fetching rather than pruning after.
+- **The high-water mark.** Deleting rows does not shrink the database file.
+  It moves pages to the freelist, which later writes reuse, so the file
+  stays at the largest size the budgets ever reached (deleting 45 MB of 50
+  left a 52 MB file with 11,764 free pages; inserting 5 MB more did not grow
+  it). Only `VACUUM` shrinks it (to 10 MB in the same test), and `VACUUM`
+  rewrites the whole database, needs free disk equal to its size, and under
+  SQLCipher re-encrypts every page. It is not run automatically. The
+  budgets are what bound the mark; they are the number the user is told.
+  `auto_vacuum=INCREMENTAL` would let freed pages be returned piecemeal, but
+  it can only be set before a database has tables, so it would apply to new
+  profiles only and is left for a later "compact database" action.
+- **PIN set and remove copy everything.** `Storage.encrypt_to` and
+  `export_to_plaintext` build a second copy through `sqlcipher_export`, so
+  they need free disk equal to the database, files included; `rekey` is in
+  place and does not. Those two paths should check `shutil.disk_usage`
+  before starting. This gap exists today; files make it larger.
+- **The baseline is worse than this.** Message images (up to 900 KB each)
+  are stored in `messages` with no prune at all, and only a deleted
+  conversation ever removes them. File sharing arrives bounded where images
+  are not; putting images under the same LRU is a separate, worthwhile
+  follow-up.
+- **Serve cost stays flat.** Chunk rows make a served range a primary-key
+  read regardless of file size, so a node serving many downloads does not
+  decrypt whole blobs per request.
 
 ## Trust model (to fold into `docs/security-improvements.md`)
 
@@ -466,9 +523,11 @@ the feature, per `.claude/rules/scenario-testing.md`.
    registry docstring in `messaging.py`, `author_digest` extension,
    `clean_filename` moved to `core/fileutils.py`. Tests: `test_authorship.py`
    (file covered; text digest unchanged), `test_protocol_envelope.py`.
-2. **Storage.** Migration, `channel_files` and `file_parts` tables, slice
-   read, own-exempt LRU prune, partial TTL, `file_channels`. Tests:
-   `test_storage.py`.
+2. **Storage.** Migration, `channel_files` and `file_chunks` tables, chunk
+   range read, the three budgets with admission-time eviction, partial TTL,
+   disk-full handling, `file_channels`. Tests: `test_storage.py`, including
+   a budget test that fills the store and shows own uploads survive, the
+   oldest partial goes first, and a full disk fails one download cleanly.
 3. **Manifest end to end.** `Messaging` send/receive/strip, sync relay,
    `actions.send_message` guard. Tests: `test_messaging.py`,
    `test_sync.py`, `test_adversarial.py` (malformed manifest, non-member
@@ -478,7 +537,7 @@ the feature, per `.claude/rules/scenario-testing.md`.
    `test_file_transport.py` (dial, queue, chunk-range requests, stall
    timeout, refusal cases, rate limit, concurrent serve cap).
 5. **FileManager.** Share, download lifecycle, holder order, chunk-list and
-   per-chunk verify, window growth and halving, resume from `file_parts`
+   per-chunk verify, window growth and halving, resume from incomplete rows
    after restart, resume on a second holder, retry on announce, prune; wired
    in `backend_core.py` after presence, ticked with the node browser.
    Tests: `test_files.py` (including: link dropped mid-download keeps the
@@ -508,7 +567,7 @@ the feature, per `.claude/rules/scenario-testing.md`.
      mid-transfer; C (who already holds it) is up; B finishes from C without
      re-fetching a verified chunk (assert on B's request log).
    - files7: B's process is killed mid-download and restarted; the download
-     resumes from `file_parts` at the same chunk index.
+     resumes from its stored chunks at the same chunk index.
    - files8: files1 under the `--link-profile` loss setting; RNS part
      retries, not the chunk scheme, are what carries it, and the run
      records how many requests the window halving cost.
