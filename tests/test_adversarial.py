@@ -87,6 +87,11 @@ from trenchchat.core.protocol import (
 )
 from trenchchat.core.presence import PresenceManager
 from trenchchat.core.image import MAX_IMAGE_BYTES
+from trenchchat.core.actions import build_file_manifest
+from trenchchat.core.protocol import (
+    F_FILE_CHUNK_ROOT, F_FILE_HASH, F_FILE_NAME, F_FILE_SIZE,
+    MAX_SHARED_FILE_BYTES,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -1688,6 +1693,160 @@ class TestAdversarialPayloadLimits:
         assert rows, "The message itself should still be delivered"
         assert not rows[0]["image_data"], \
             "An over-cap image attachment was stored"
+
+
+class TestAdversarialFileManifest:
+    """A file message names a file; the manifest is the whole of what travels.
+
+    Every part of it is asserted by the sender, so a receiver checks the
+    author signature against what arrived and only then judges the manifest:
+    a forged one is dropped, an unusable one costs the message its attachment
+    and its signature but not its row.
+    """
+
+    _FILE_BYTES = b"survey data\n" * 500
+
+    def _file_lxm(self, sender, recipient, ch_hash, content, ts, manifest,
+                  sign_over_manifest: bool = True):
+        dest = RNS.Destination(
+            recipient.identity.rns_identity, RNS.Destination.OUT,
+            RNS.Destination.SINGLE, "lxmf", "delivery",
+        )
+        lxm = LXMF.LXMessage(dest, sender.router.delivery_destination, content,
+                             desired_method=LXMF.LXMessage.DIRECT)
+        msg_id = _compute_message_id(content, sender.identity.hash_hex, ts)
+        signed = manifest if sign_over_manifest else None
+        lxm.fields = pack_fields({
+            F_CHANNEL_HASH:    bytes.fromhex(ch_hash),
+            F_DISPLAY_NAME:    "Alice",
+            F_TIMESTAMP:       ts,
+            F_MESSAGE_ID:      msg_id,
+            F_FILE_NAME:       manifest["name"],
+            F_FILE_SIZE:       manifest["size"],
+            F_FILE_HASH:       manifest["hash"],
+            F_FILE_CHUNK_ROOT: manifest["chunk_root"],
+            F_AUTHOR_SIG:      sign_as(sender.identity.hash_hex, ch_hash, msg_id,
+                                       ts, content, manifest=signed),
+        })
+        lxm.signature_validated = True
+        return lxm, msg_id
+
+    def test_a_manifest_naming_a_path_is_stripped(self, peer_factory):
+        """A name that needed cleaning is refused, not repaired."""
+        alice, bob, ch_hash = _setup_channel_with_member(
+            peer_factory, member_perms=[SEND_MESSAGE]
+        )
+        manifest = {"name": "../../etc/passwd", "size": 12,
+                    "hash": b"\x11" * 32, "chunk_root": b"\x22" * 32}
+        lxm, msg_id = self._file_lxm(alice, bob, ch_hash, "here", time.time(),
+                                     manifest)
+
+        bob.router._on_message_received(lxm)
+        time.sleep(0.3)
+
+        rows = [m for m in bob.storage.get_messages(ch_hash)
+                if m["message_id"] == msg_id]
+        assert rows, "the message itself should still be delivered"
+        assert rows[0]["file_name"] is None
+        assert rows[0]["file_hash"] is None
+        assert rows[0]["file_stripped"], "the refusal must be recorded on the row"
+        assert not rows[0]["author_sig"], \
+            "a signature that covers a manifest we refused must not be kept"
+
+    def test_an_oversized_size_is_stripped(self, peer_factory):
+        alice, bob, ch_hash = _setup_channel_with_member(
+            peer_factory, member_perms=[SEND_MESSAGE]
+        )
+        manifest = {"name": "huge.bin", "size": MAX_SHARED_FILE_BYTES + 1,
+                    "hash": b"\x11" * 32, "chunk_root": b"\x22" * 32}
+        lxm, msg_id = self._file_lxm(alice, bob, ch_hash, "huge", time.time(),
+                                     manifest)
+
+        bob.router._on_message_received(lxm)
+        time.sleep(0.3)
+
+        rows = [m for m in bob.storage.get_messages(ch_hash)
+                if m["message_id"] == msg_id]
+        assert rows, "the message itself should still be delivered"
+        assert rows[0]["file_size"] is None
+        assert rows[0]["file_stripped"]
+
+    def test_a_manifest_the_signature_does_not_cover_is_dropped(self, peer_factory):
+        """The forgery case: a manifest bolted onto a message signed without it."""
+        alice, bob, ch_hash = _setup_channel_with_member(
+            peer_factory, member_perms=[SEND_MESSAGE]
+        )
+        manifest = build_file_manifest("survey.csv", self._FILE_BYTES)
+        lxm, msg_id = self._file_lxm(alice, bob, ch_hash, "here", time.time(),
+                                     manifest, sign_over_manifest=False)
+
+        bob.router._on_message_received(lxm)
+        time.sleep(0.3)
+
+        ids = [m["message_id"] for m in bob.storage.get_messages(ch_hash)]
+        assert msg_id not in ids, \
+            "a manifest outside the author signature was stored anyway"
+
+    def test_a_genuine_manifest_is_delivered(self, peer_factory):
+        """Positive control: the same message, signed over its manifest."""
+        alice, bob, ch_hash = _setup_channel_with_member(
+            peer_factory, member_perms=[SEND_MESSAGE]
+        )
+        manifest = build_file_manifest("survey.csv", self._FILE_BYTES)
+        lxm, msg_id = self._file_lxm(alice, bob, ch_hash, "here", time.time(),
+                                     manifest)
+
+        bob.router._on_message_received(lxm)
+        time.sleep(0.3)
+
+        rows = [m for m in bob.storage.get_messages(ch_hash)
+                if m["message_id"] == msg_id]
+        assert rows, "a correctly signed file message was not delivered"
+        assert rows[0]["file_name"] == "survey.csv"
+        assert not rows[0]["file_stripped"]
+
+    def test_a_manifest_from_a_non_member_is_dropped(self, peer_factory):
+        """The inbound gate is unchanged: a file message is a message."""
+        alice, bob, ch_hash = _setup_channel_with_member(
+            peer_factory, member_perms=[SEND_MESSAGE]
+        )
+        carol = peer_factory("carol")
+        carol.storage.upsert_channel(ch_hash, "test-ch", "",
+                                     alice.identity.hash_hex, PRESET_PRIVATE,
+                                     time.time())
+        carol.storage.subscribe(ch_hash)
+
+        carol.messaging.send_message(
+            channel_hash_hex=ch_hash,
+            content="a file nobody asked for",
+            subscriber_hashes=[bob.identity.hash_hex],
+            manifest=build_file_manifest("survey.csv", self._FILE_BYTES),
+        )
+        time.sleep(0.3)
+
+        assert all(m["sender_hash"] != carol.identity.hash_hex
+                   for m in bob.storage.get_messages(ch_hash)), \
+            "Bob stored a file message from someone who is not a member"
+
+    def test_a_direct_message_refuses_a_manifest(self, peer_factory):
+        """A conversation reaches clients that are not TrenchChat; it stays readable."""
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+        alice.friends_mgr.add_friend(bob.identity.hash_hex)
+        bob.friends_mgr.add_friend(alice.identity.hash_hex)
+
+        # Without a manifest the same send works, so the refusal below is
+        # about the manifest and not about the friendship.
+        assert alice.messaging.send_direct(bob.identity.hash_hex, "hello") \
+            is not None
+        assert alice.messaging.send_direct(
+            bob.identity.hash_hex, "have this file",
+            manifest=build_file_manifest("survey.csv", self._FILE_BYTES),
+        ) is None
+
+        conversation = alice.direct_mgr.conversation_hash(bob.identity.hash_hex)
+        assert all(m["content"] != "have this file"
+                   for m in alice.storage.get_messages(conversation))
 
 
 # ---------------------------------------------------------------------------

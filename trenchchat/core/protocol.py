@@ -445,6 +445,66 @@ def file_manifest(name, size, file_hash, root) -> dict | None:
     return {"name": name, "size": size, "hash": file_hash, "chunk_root": root}
 
 
+def _digest_from_wire(value) -> bytes | None:
+    """A manifest digest as sent: 32 raw bytes, or the hex text of them."""
+    if isinstance(value, bytes) and len(value) == FILE_DIGEST_BYTES:
+        return value
+    if isinstance(value, bytes):
+        value = value.decode("utf-8", errors="replace")
+    if isinstance(value, str):
+        try:
+            raw = bytes.fromhex(value.strip())
+        except ValueError:
+            return None
+        return raw if len(raw) == FILE_DIGEST_BYTES else None
+    return None
+
+
+def manifest_from_wire(name, size, file_hash, root) -> dict | None:
+    """What a peer said about a file, coerced but not judged.
+
+    None only when nothing about a file was sent at all, which is what
+    separates a message with no attachment from one whose manifest does not
+    hold up. Judging is left to file_manifest, because the author's signature
+    covers what arrived rather than what survives checking: refusing the shape
+    first would make an unusable manifest indistinguishable from a forgery.
+    """
+    if name is None and size is None and file_hash is None and root is None:
+        return None
+    if isinstance(name, bytes):
+        name = name.decode("utf-8", errors="replace")
+    return {
+        "name": name,
+        "size": size,
+        "hash": _digest_from_wire(file_hash),
+        "chunk_root": _digest_from_wire(root),
+    }
+
+
+def inbound_manifest(fields: dict) -> dict | None:
+    """The file manifest an inbound channel message carries, coerced.
+
+    There is no field for file bytes and none is read here: a message names a
+    file, and a member who wants it asks for it.
+    """
+    if not fields:
+        return None
+    return manifest_from_wire(
+        fields.get(F_FILE_NAME), fields.get(F_FILE_SIZE),
+        fields.get(F_FILE_HASH), fields.get(F_FILE_CHUNK_ROOT),
+    )
+
+
+def manifest_fields(manifest: dict) -> dict:
+    """The four wire fields that carry a manifest."""
+    return {
+        F_FILE_NAME:       manifest["name"],
+        F_FILE_SIZE:       manifest["size"],
+        F_FILE_HASH:       manifest["hash"],
+        F_FILE_CHUNK_ROOT: manifest["chunk_root"],
+    }
+
+
 def author_digest(channel_hash_hex: str, message_id: str, timestamp: float,
                   content: str, reply_to: str | None,
                   last_seen_id: str | None,

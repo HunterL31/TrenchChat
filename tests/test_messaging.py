@@ -13,6 +13,7 @@ from tests.helpers import (
     wait_for,
     wait_for_message,
 )
+from trenchchat.core.actions import build_file_manifest
 from trenchchat.core.messaging import (
     _compute_message_id,
     DELIVERY_PENDING, DELIVERY_DELIVERED, DELIVERY_FAILED,
@@ -389,6 +390,93 @@ class TestImageMessages:
         bob_msgs = bob.storage.get_messages(ch_hash)
         assert bob_msgs[0]["content"] == "Just text"
         assert bob_msgs[0]["image_data"] is None
+
+
+# ---------------------------------------------------------------------------
+# File manifest in messages
+# ---------------------------------------------------------------------------
+
+_FILE_BYTES = b"survey data\n" * 500
+
+
+class TestFileManifestMessages:
+    """A share is the manifest and nothing else: the bytes wait to be asked for."""
+
+    def test_manifest_stored_locally_on_send(self, peer_factory):
+        alice = peer_factory("alice")
+        ch_hash = alice.channel_mgr.create_channel("file-local", "", "public")
+        manifest = build_file_manifest("survey.csv", _FILE_BYTES)
+
+        alice.messaging.send_message(
+            channel_hash_hex=ch_hash,
+            content="the survey",
+            subscriber_hashes=[alice.identity.hash_hex],
+            manifest=manifest,
+        )
+
+        row = alice.storage.get_messages(ch_hash)[0]
+        assert row["file_name"] == "survey.csv"
+        assert row["file_size"] == len(_FILE_BYTES)
+        assert row["file_hash"] == manifest["hash"].hex()
+        assert row["file_chunk_root"] == manifest["chunk_root"].hex()
+        assert not row["file_stripped"]
+
+    def test_manifest_received_by_peer(self, peer_factory):
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+
+        ch_hash = alice.channel_mgr.create_channel("file-peer", "", "public")
+        bob.storage.upsert_channel(ch_hash, "file-peer", "", alice.identity.hash_hex,
+                                   "public", time.time())
+        bob.storage.subscribe(ch_hash)
+
+        manifest = build_file_manifest("survey.csv", _FILE_BYTES)
+        alice.messaging.send_message(
+            channel_hash_hex=ch_hash,
+            content="the survey",
+            subscriber_hashes=[bob.identity.hash_hex],
+            manifest=manifest,
+        )
+
+        msg_id = alice.storage.get_messages(ch_hash)[0]["message_id"]
+        assert wait_for_message(bob.storage, ch_hash, msg_id, timeout=5), \
+            "Bob did not receive Alice's file message"
+
+        row = bob.storage.get_messages(ch_hash)[0]
+        assert row["content"] == "the survey"
+        assert row["file_name"] == "survey.csv"
+        assert row["file_size"] == len(_FILE_BYTES)
+        assert row["file_hash"] == manifest["hash"].hex()
+        assert row["file_chunk_root"] == manifest["chunk_root"].hex()
+        assert not row["file_stripped"]
+        assert row["author_sig"], "the signature covers the manifest and must survive"
+        # Nothing of the file itself arrived with it.
+        assert bob.storage.get_file(manifest["hash"].hex()) is None
+
+    def test_message_without_a_manifest_is_unchanged(self, peer_factory):
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+
+        ch_hash = alice.channel_mgr.create_channel("no-file", "", "public")
+        bob.storage.upsert_channel(ch_hash, "no-file", "", alice.identity.hash_hex,
+                                   "public", time.time())
+        bob.storage.subscribe(ch_hash)
+
+        alice.messaging.send_message(
+            channel_hash_hex=ch_hash,
+            content="just text",
+            subscriber_hashes=[bob.identity.hash_hex],
+        )
+
+        msg_id = alice.storage.get_messages(ch_hash)[0]["message_id"]
+        assert wait_for_message(bob.storage, ch_hash, msg_id, timeout=5), \
+            "Bob did not receive Alice's plain message"
+
+        row = bob.storage.get_messages(ch_hash)[0]
+        assert row["file_name"] is None
+        assert row["file_size"] is None
+        assert row["file_hash"] is None
+        assert not row["file_stripped"]
 
 
 class TestDeliveryState:

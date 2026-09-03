@@ -59,7 +59,7 @@ from trenchchat.core.authorship import (
     public_key_for, remember_relayed_key, verify_message,
 )
 from trenchchat.core.image import MAX_IMAGE_BYTES, inbound_image_is_sane
-from trenchchat.core.messaging import Messaging, _compute_message_id
+from trenchchat.core.messaging import Messaging, _compute_message_id, resolve_manifest
 from trenchchat.core.permissions import (
     FULL_SYNC, has_permission, is_open_join, permissions_from_json,
 )
@@ -69,8 +69,8 @@ from trenchchat.core.protocol import (
     F_MISSED_FOR, F_MISSED_MSG_ID,
     MT_MISSED_DELIVERY, MT_SYNC_REQUEST, MT_SYNC_RESPONSE,
     SYNC_WINDOW_SECS,
-    message_id_from_wire, message_id_to_wire, pack_fields, unpack_wire,
-    wire_timestamp,
+    manifest_from_wire, message_id_from_wire, message_id_to_wire, pack_fields,
+    unpack_wire, wire_timestamp,
 )
 from trenchchat.core.reaction import is_custom_emoji_hash
 from trenchchat.core.storage import Storage
@@ -1005,6 +1005,13 @@ class SyncManager:
                 if not image_data:
                     image_data = None
 
+                # The manifest as the responder relayed it, judged only after
+                # the author's signature has been checked against it. A synced
+                # row names a file; it never carries one.
+                manifest = manifest_from_wire(
+                    m.get("file_name"), m.get("file_size"),
+                    m.get("file_hash"), m.get("file_chunk_root"))
+
                 content = m.get("content", "")
                 if isinstance(content, bytes):
                     content = content.decode(errors="replace")
@@ -1037,7 +1044,7 @@ class SyncManager:
                 if not verify_message(
                         self._storage, sender_hash, author_sig,
                         channel_hash_hex, msg_id, msg_ts,
-                        content, reply_to, last_seen_id, image_data):
+                        content, reply_to, last_seen_id, image_data, manifest):
                     RNS.log(
                         f"TrenchChat [sync]: dropping synced message "
                         f"{msg_id[:12]}… — author "
@@ -1064,6 +1071,10 @@ class SyncManager:
                     author_sig = None
                     image_stripped = True
 
+                manifest, file_stripped = resolve_manifest(manifest, msg_id)
+                if file_stripped:
+                    author_sig = None
+
                 inserted = self._storage.insert_message(
                     channel_hash=channel_hash_hex,
                     sender_hash=sender_hash,
@@ -1077,6 +1088,8 @@ class SyncManager:
                     image_data=image_data,
                     author_sig=author_sig,
                     image_stripped=image_stripped,
+                    manifest=manifest,
+                    file_stripped=file_stripped,
                 )
                 # A duplicate we already hold is still "accepted" -- the
                 # watermark should move past it. A failed insert for an id
@@ -1307,6 +1320,15 @@ class SyncManager:
         image_data = row["image_data"] if "image_data" in row.keys() else None
         if image_data:
             d["image_data"] = bytes(image_data)
+        # The manifest, and never the bytes: history relays what a file is
+        # called and what it hashes to, and a member who wants it asks a
+        # holder for it.
+        file_hash = row["file_hash"] if "file_hash" in row.keys() else None
+        if file_hash:
+            d["file_name"] = row["file_name"]
+            d["file_size"] = row["file_size"]
+            d["file_hash"] = bytes.fromhex(file_hash)
+            d["file_chunk_root"] = bytes.fromhex(row["file_chunk_root"] or "")
         author_sig = row["author_sig"] if "author_sig" in row.keys() else None
         if author_sig:
             d["author_sig"] = bytes(author_sig)

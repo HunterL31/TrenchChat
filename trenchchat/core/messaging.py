@@ -72,7 +72,8 @@ from trenchchat.core.protocol import (
     F_MISSED_FOR, F_MISSED_MSG_ID, F_MSG_TYPE, F_IMAGE_DATA,
     F_AUTHOR_SIG, DM_ENVELOPE_TYPE, DM_IMAGE_EXTENSION,
     LXMF_FIELD_CUSTOM_DATA, LXMF_FIELD_CUSTOM_TYPE, LXMF_FIELD_IMAGE,
-    inbound_image, message_id_from_wire, message_id_to_wire, pack_dm_envelope,
+    file_manifest, inbound_image, inbound_manifest, manifest_fields,
+    message_id_from_wire, message_id_to_wire, pack_dm_envelope,
     pack_fields, unpack_dm_envelope, wire_timestamp,
 )
 from trenchchat.core.authorship import resolve_author, sign_message, verify_message
@@ -105,6 +106,26 @@ DELIVERY_PROPAGATED = "propagated"  # handed to a propagation node to hold until
 
 # Outbound messages whose delivery state is tracked before the oldest is dropped.
 MAX_TRACKED_DELIVERIES = 200
+
+
+def resolve_manifest(manifest: dict | None, msg_id: str) -> tuple[dict | None, bool]:
+    """The file manifest to store, and whether an unusable one was refused.
+
+    Shared by direct delivery and sync, which both check the author signature
+    against the manifest exactly as it arrived and only judge it afterwards. A
+    manifest that does not hold up costs the message its attachment, not its
+    row: the words are still the author's, and the card says the file was
+    refused.
+    """
+    if manifest is None:
+        return None, False
+    checked = file_manifest(manifest.get("name"), manifest.get("size"),
+                            manifest.get("hash"), manifest.get("chunk_root"))
+    if checked is None:
+        RNS.log(f"TrenchChat: stripping an unusable file manifest from "
+                f"{msg_id[:12]}…", RNS.LOG_WARNING)
+        return None, True
+    return checked, False
 
 
 def _compute_message_id(content: str, sender_hex: str, timestamp: float) -> str:
@@ -170,7 +191,8 @@ class Messaging:
     def send_message(self, channel_hash_hex: str, content: str,
                      reply_to: str | None = None,
                      subscriber_hashes: list[str] | None = None,
-                     image_data: bytes | None = None):
+                     image_data: bytes | None = None,
+                     manifest: dict | None = None):
         """
         Send a channel message to all known subscribers.
 
@@ -178,6 +200,9 @@ class Messaging:
         If None, the caller is responsible for providing the list
         (retrieved from subscription.py).
         image_data: optional JPEG bytes to attach to the message.
+        manifest: optional file manifest (protocol.file_manifest) naming a
+        shared file. The message carries the name, size and digests; the bytes
+        stay here until a member asks for them.
         """
         if not subscriber_hashes:
             return
@@ -187,7 +212,7 @@ class Messaging:
         msg_id = _compute_message_id(content, self._identity.hash_hex, ts)
         author_sig = sign_message(
             self._identity.rns_identity, channel_hash_hex, msg_id, ts,
-            content, reply_to, last_seen, image_data,
+            content, reply_to, last_seen, image_data, manifest,
         )
 
         # Params stored for pending retry and failure callbacks.
@@ -203,6 +228,7 @@ class Messaging:
             "last_seen_id":      last_seen,
             "subscriber_hashes": list(subscriber_hashes),
             "image_data":        image_data,
+            "manifest":          manifest,
             "author_sig":        author_sig,
         }
 
@@ -254,19 +280,30 @@ class Messaging:
             received_at=ts,
             image_data=image_data,
             author_sig=author_sig,
+            manifest=manifest,
         )
 
     # --- direct messages ---
 
     def send_direct(self, peer_hex: str, content: str,
                     reply_to: str | None = None,
-                    image_data: bytes | None = None) -> str | None:
+                    image_data: bytes | None = None,
+                    manifest: dict | None = None) -> str | None:
         """Send a direct message to an accepted friend. Returns its message id.
 
         Returns None when direct messaging is not wired up, or the peer is not
         an accepted friend -- a silent no-op, matching the channel send path.
+
+        A file manifest is refused here too. A conversation is the one message
+        type that reaches clients that are not TrenchChat, and its envelope
+        stays what any of them can read; sharing a file over one is a separate
+        decision, not a field quietly added to an interoperable format.
         """
         if self._direct_mgr is None:
+            return None
+        if manifest is not None:
+            RNS.log("TrenchChat: refusing a file manifest on a direct message",
+                    RNS.LOG_WARNING)
             return None
         conversation = self._direct_mgr.open_conversation(peer_hex)
         if conversation is None:
@@ -566,6 +603,8 @@ class Messaging:
         }
         if params.get("image_data"):
             fields[F_IMAGE_DATA] = params["image_data"]
+        if params.get("manifest"):
+            fields.update(manifest_fields(params["manifest"]))
         if params.get("author_sig"):
             fields[F_AUTHOR_SIG] = params["author_sig"]
         return fields
@@ -934,6 +973,10 @@ class Messaging:
         if not image_data:
             image_data = None
 
+        # Coerced, not judged: the signature below covers the manifest as the
+        # author sent it. There is no field for the file itself.
+        manifest = inbound_manifest(fields)
+
         # The id *is* this hash, and a globally-UNIQUE column means the first
         # writer of one keeps it: a member who signs their own message under
         # an id they saw elsewhere makes the genuine copy a silent duplicate
@@ -960,6 +1003,7 @@ class Messaging:
             last_seen_id=last_seen_id,
             image_data=image_data,
             author_sig=fields.get(F_AUTHOR_SIG),
+            manifest=manifest,
         )
 
     def _insert_chat_message(self, *, channel_hash_hex: str, sender_hex: str,
@@ -967,6 +1011,7 @@ class Messaging:
                              content: str, reply_to: str | None,
                              last_seen_id: str | None, image_data: bytes | None,
                              author_sig: bytes | None,
+                             manifest: dict | None = None,
                              require_author_signature: bool = True) -> None:
         """Check what a message claims, then store it.
 
@@ -976,12 +1021,12 @@ class Messaging:
         means anything where a message can arrive by relay -- see the caller.
         """
         # Checked against the payload exactly as it arrived, before any of it
-        # is stripped below -- the signature covers the image, so re-checking
-        # after would never match.
+        # is stripped below -- the signature covers the image and the file
+        # manifest, so re-checking after would never match.
         image_stripped = False
         if require_author_signature and not verify_message(
                 self._storage, sender_hex, author_sig, channel_hash_hex, msg_id,
-                timestamp, content, reply_to, last_seen_id, image_data):
+                timestamp, content, reply_to, last_seen_id, image_data, manifest):
             RNS.log(
                 f"TrenchChat: dropping message {msg_id[:12]}… from "
                 f"{sender_hex[:12]}… — author signature missing or invalid",
@@ -1004,6 +1049,12 @@ class Messaging:
             author_sig = None
             image_stripped = True
 
+        manifest, file_stripped = resolve_manifest(manifest, msg_id)
+        if file_stripped:
+            # Same reasoning as the image above: the signature covers the
+            # manifest we are refusing, so it no longer describes the row.
+            author_sig = None
+
         inserted = self._storage.insert_message(
             channel_hash=channel_hash_hex,
             sender_hash=sender_hex,
@@ -1017,6 +1068,8 @@ class Messaging:
             image_data=image_data,
             author_sig=author_sig,
             image_stripped=image_stripped,
+            manifest=manifest,
+            file_stripped=file_stripped,
         )
 
         if inserted:
