@@ -118,6 +118,13 @@ def channel(peer_factory):
 
     member.storage.upsert_channel(ch_hash, "files-ch", "",
                                   owner.identity.hash_hex, perms, time.time())
+    # The document the owner published lands on the member's own thread and
+    # rewrites the channel's permissions when it does. Everything below has to
+    # come after it, or a test that narrows the member's permissions has them
+    # restored a fraction of a second later and passes on the timing.
+    assert wait_for(
+        lambda: member.storage.get_member_list_version(ch_hash) is not None,
+    ), "the member never applied the owner's member list"
     member.storage.subscribe(ch_hash)
     member.storage.set_channel_permissions(ch_hash, perms)
     for peer, role in ((owner, ROLE_OWNER), (member, ROLE_MEMBER)):

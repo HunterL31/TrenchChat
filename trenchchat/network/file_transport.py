@@ -17,10 +17,15 @@ is asking before it can check membership), and a request that stops making
 progress fails on a stall timeout rather than a total deadline, because a slow
 transfer is not an error.
 
-Nothing announces on this aspect. A holder registers its inbound destination
-when it starts serving, which is enough for RNS to answer a path request for
-it; a timer announcing "I hold files" would cost every peer airtime for
-something only a requester needs to know.
+A holder announces on this aspect, and only while it actually holds
+something. Registering the destination is not enough on its own: a path
+request for a destination that has never announced is answered by the node
+that owns it, but a transport node in between neither knows the path nor
+searches for one (`Interface.DISCOVER_PATHS_FOR` leaves out the ordinary
+full mode), so on any mesh with a hop in it the request dies there and every
+fetch fails as unreachable. Who announces and when is the core layer's
+decision (files.py), because whether there is anything to serve is its
+question; this module only sends the packet.
 
 Authorisation is not done here. The serve callback is the core layer's
 membership check (files.py), and this module hands it the requester's identity
@@ -73,12 +78,16 @@ FILE_STALL_SECS = 120.0
 FILE_LINK_IDLE_SECS = 120.0
 
 MAX_INBOUND_FILE_LINKS = MAX_INBOUND_LINKS
-# Airtime is shared: two transfers out at once, and the third requester is
-# told nothing and comes back later.
+# Airtime is shared: two downloads out at once, and the third requester is
+# told nothing and comes back later. The slot is held per link rather than
+# per request, because a download issues one request at a time: the next
+# range on a link already serving is the same transfer continuing, and
+# counting it as a third would refuse every download that got past its first
+# chunk.
 MAX_CONCURRENT_SERVES = 2
 # RNS builds the response Resource itself, after the handler returns, and
-# exposes no concluded callback for it, so a serve is counted as finished when
-# the link it was issued on has no outgoing resource left (RNS drops one from
+# exposes no concluded callback for it, so a link's serve slot is counted as
+# free when it has no outgoing resource left (RNS drops one from
 # link.outgoing_resources when it concludes or is cancelled). The settle floor
 # covers the gap between the handler returning and the Resource existing; the
 # window is the backstop for a slot that never clears.
@@ -179,6 +188,9 @@ class FileTransportBase(LinkClientBase):
     def stop_serving(self) -> None:
         raise NotImplementedError
 
+    def announce(self) -> None:
+        raise NotImplementedError
+
     def drop_link(self, holder_hex: str) -> bool:
         raise NotImplementedError
 
@@ -240,9 +252,8 @@ class RNSFileTransport(LinkClient, FileTransportBase):
     def __init__(self, identity):
         super().__init__(identity=identity)
         self._in_dest = None
-        # serve id -> (started_at, link_id) for every response in flight.
-        self._serves: dict[int, tuple[float, bytes]] = {}
-        self._next_serve = 0
+        # link id -> when its latest response was handed to RNS.
+        self._serves: dict[bytes, float] = {}
 
     # --- fetching ---
 
@@ -349,6 +360,23 @@ class RNSFileTransport(LinkClient, FileTransportBase):
                 auto_compress=True,
             )
 
+    def announce(self) -> None:
+        """Say this destination exists, so a member can resolve a path to it.
+
+        Carries no app data: the hash is the whole message, and what a peer
+        does with it (ask for a file) needs nothing else. Silent before
+        start_serving, since there is nothing to reach yet.
+        """
+        with self._lock:
+            dest = self._in_dest
+        if dest is None:
+            return
+        try:
+            dest.announce()
+        except Exception as e:
+            RNS.log(f"TrenchChat [files]: could not announce: {e}",
+                    RNS.LOG_WARNING)
+
     def stop_serving(self) -> None:
         with self._lock:
             if self._in_dest is None:
@@ -362,7 +390,7 @@ class RNSFileTransport(LinkClient, FileTransportBase):
 
     def _release_finished_serves(self, now: float) -> None:
         """Caller holds the lock. Drop the slots whose responses are done."""
-        for serve_id, (started_at, link_id) in list(self._serves.items()):
+        for link_id, started_at in list(self._serves.items()):
             if now - started_at < FILE_SERVE_SETTLE_SECS:
                 continue
             link = self._inbound_link(link_id)
@@ -370,20 +398,21 @@ class RNSFileTransport(LinkClient, FileTransportBase):
                 if link is not None else None
             if (link is None or not outgoing
                     or now - started_at >= FILE_SERVE_WINDOW_SECS):
-                del self._serves[serve_id]
+                del self._serves[link_id]
 
-    def _begin_serve(self, link_id: bytes, now: float) -> int | None:
-        """Caller holds the lock. A serve slot, or None when all are busy."""
+    def _begin_serve(self, link_id: bytes, now: float) -> bool:
+        """Caller holds the lock. Whether this link may be answered now."""
         self._release_finished_serves(now)
-        if len(self._serves) >= MAX_CONCURRENT_SERVES:
-            return None
-        self._next_serve += 1
-        self._serves[self._next_serve] = (now, link_id)
-        return self._next_serve
+        if link_id not in self._serves \
+                and len(self._serves) >= MAX_CONCURRENT_SERVES:
+            return False
+        self._serves[link_id] = now
+        return True
 
-    def _end_serve(self, serve_id: int) -> None:
+    def _end_serve(self, link_id: bytes) -> None:
+        """A request that was refused holds nothing, so its slot goes back."""
         with self._lock:
-            self._serves.pop(serve_id, None)
+            self._serves.pop(link_id, None)
 
     def _serve(self, path, data, request_id, link_id, remote_identity,
                requested_at):
@@ -407,22 +436,22 @@ class RNSFileTransport(LinkClient, FileTransportBase):
         file_hash_hex, first, count, want_list = parsed
 
         with self._lock:
-            serve_id = self._begin_serve(key, now)
-        if serve_id is None:
+            admitted = self._begin_serve(key, now)
+        if not admitted:
             RNS.log(f"TrenchChat [files]: already serving "
-                    f"{MAX_CONCURRENT_SERVES} files, refusing "
+                    f"{MAX_CONCURRENT_SERVES} downloads, refusing "
                     f"{file_hash_hex[:12]}… to {who}", RNS.LOG_WARNING)
             return None
 
         payload = self._call_serve(requester, file_hash_hex, first, count,
                                    want_list)
         if payload is None:
-            self._end_serve(serve_id)
+            self._end_serve(key)
             RNS.log(f"TrenchChat [files]: refusing {file_hash_hex[:12]}… "
                     f"to {who}", RNS.LOG_WARNING)
             return None
         if len(payload) > MAX_SERVED_RESPONSE_BYTES:
-            self._end_serve(serve_id)
+            self._end_serve(key)
             RNS.log(f"TrenchChat [files]: refusing to serve oversized "
                     f"{file_hash_hex[:12]}… ({len(payload)} bytes) to {who}",
                     RNS.LOG_WARNING)

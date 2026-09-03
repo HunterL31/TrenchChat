@@ -52,6 +52,7 @@ class FakeFileTransport(FileTransportBase):
         self.stall_chunks: set[tuple[str, int]] = set(stall_chunks or ())
         self.holder_delays: dict[str, float] = dict(holder_delays or {})
         self.serving = False
+        self.announces = 0
         # Holders a link has been opened to, and the fetches riding each one.
         self.linked: set[str] = set()
         self._in_flight: dict[str, str] = {}     # fetch_id -> holder_hex
@@ -166,6 +167,10 @@ class FakeFileTransport(FileTransportBase):
         self.serving = True
         with self.registry.lock:
             self.registry.holders[self.self_hex] = self
+
+    def announce(self) -> None:
+        """Record it. A fetch here needs no path, so only the count matters."""
+        self.announces += 1
 
     def stop_serving(self) -> None:
         self.serving = False
