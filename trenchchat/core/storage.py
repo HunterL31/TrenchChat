@@ -18,6 +18,7 @@ from trenchchat.core.permissions import (
     has_permission as _check_permission, is_open_join,
     permissions_from_json, permissions_to_json,
 )
+from trenchchat.core.protocol import FILE_CHUNK_BYTES, SYNC_WINDOW_SECS
 
 DB_PATH = DATA_DIR / "storage.db"
 
@@ -28,6 +29,32 @@ _KNOWN_TABLE_RE = re.compile(r"^[a-z_][a-z0-9_]*$")
 FRIEND_ACCEPTED    = "accepted"
 FRIEND_PENDING_OUT = "pending_out"
 FRIEND_PENDING_IN  = "pending_in"
+
+
+# --- shared file store budgets ---
+#
+# Three ceilings, because the three kinds of stored file answer to different
+# rules. Received files are evicted least-recently-used. Unfinished downloads
+# get the smallest budget and are the first thing dropped, since a partial is
+# worth nothing on its own. The user's own uploads are never evicted, because
+# the sender has to stay a holder, so a share past their ceiling is refused
+# instead of costing someone else their file.
+FILE_STORE_MAX_BYTES = 256 * 1024 * 1024
+OWN_FILE_STORE_MAX_BYTES = 256 * 1024 * 1024
+PARTIAL_STORE_MAX_BYTES = 20 * 1024 * 1024
+
+# A download nobody has resumed within the sync window is dropped: past it the
+# channel history the file was shared in has stopped being backfilled too.
+PARTIAL_FILE_TTL_SECS = SYNC_WINDOW_SECS
+
+# What SQLite says when it has no room left. SQLCipher raises its own exception
+# classes rather than sqlite3's, so the message is what the two have in common.
+DISK_FULL_MESSAGE = "database or disk is full"
+
+
+def _is_disk_full(error: Exception) -> bool:
+    """Whether a database error is the out-of-space one."""
+    return DISK_FULL_MESSAGE in str(error).lower()
 
 
 def _connect_plain(path: str) -> sqlite3.Connection:
@@ -108,6 +135,11 @@ CREATE TABLE IF NOT EXISTS messages (
     image_data   BLOB,
     author_sig   BLOB,
     image_stripped INTEGER NOT NULL DEFAULT 0,
+    file_name    TEXT,
+    file_size    INTEGER,
+    file_hash    TEXT,
+    file_chunk_root TEXT,
+    file_stripped INTEGER NOT NULL DEFAULT 0,
     FOREIGN KEY (channel_hash) REFERENCES channels(hash)
 );
 
@@ -385,6 +417,34 @@ CREATE TABLE IF NOT EXISTS nomad_bookmarks (
     added_at  REAL NOT NULL,
     PRIMARY KEY (node_hash, path)
 );
+
+-- One row per file this node holds or is downloading, addressed by the
+-- SHA-256 of its bytes: the same file shared twice, or shared in two
+-- channels, is stored once, and a pull from any holder is verified against
+-- the key. held_bytes is what file_chunks holds so far; complete says the
+-- whole file is here. own marks a file this node shared, which is never
+-- auto-pruned because the sender has to stay a holder.
+CREATE TABLE IF NOT EXISTS channel_files (
+    hash        TEXT PRIMARY KEY,
+    size        INTEGER NOT NULL,
+    chunk_count INTEGER NOT NULL,
+    held_bytes  INTEGER NOT NULL DEFAULT 0,
+    complete    INTEGER NOT NULL DEFAULT 0,
+    own         INTEGER NOT NULL DEFAULT 0,
+    stored_at   REAL NOT NULL,
+    last_used   REAL NOT NULL
+);
+
+-- The bytes, one row per FILE_CHUNK_BYTES chunk, kept in that shape for the
+-- life of the file: a download in progress and a complete file are the same
+-- rows with complete flipped, there is no assembly step and no second copy,
+-- and serving a chunk range is a primary-key read of exactly those rows.
+CREATE TABLE IF NOT EXISTS file_chunks (
+    hash    TEXT NOT NULL,
+    idx     INTEGER NOT NULL,
+    content BLOB NOT NULL,
+    PRIMARY KEY (hash, idx)
+);
 """
 
 
@@ -424,6 +484,9 @@ class Storage:
         # ON CONFLICT clause); invalidated per-key by upsert_channel.  Must
         # also exist before _migrate_permissions() for the same reason.
         self._scope_cache: dict[str, str] = {}
+        # A full disk is reported once per run: a stalled download retries, and
+        # a line per chunk would bury everything else in the log.
+        self._disk_full_logged = False
         self._migrate_permissions()
         self._secure_db_files()
 
@@ -519,6 +582,7 @@ class Storage:
         self._migrate_nomad_file_name()
         self._migrate_channel_last_read()
         self._migrate_message_request_sent_at()
+        self._migrate_file_manifest()
         # _scope() reads channels.server_hash, so this must run after
         # _migrate_servers() has ensured that column exists.
         self._repair_tenure_from_message_history()
@@ -693,6 +757,29 @@ class Storage:
                 "ALTER TABLE messages ADD COLUMN image_data BLOB"
             )
             self._conn.commit()
+
+    def _migrate_file_manifest(self):
+        """Add the file manifest columns to messages for existing databases.
+
+        Hashes are stored as hex text, so a manifest column reads back like
+        any other message column. The index is created here rather than in
+        SCHEMA because on a legacy database the messages table already exists,
+        so its CREATE TABLE IF NOT EXISTS is a no-op and an index over
+        file_hash would run before the ALTER TABLE below.
+        """
+        for column, ddl in (
+            ("file_name", "file_name TEXT"),
+            ("file_size", "file_size INTEGER"),
+            ("file_hash", "file_hash TEXT"),
+            ("file_chunk_root", "file_chunk_root TEXT"),
+            ("file_stripped", "file_stripped INTEGER NOT NULL DEFAULT 0"),
+        ):
+            if not self._has_column("messages", column):
+                self._conn.execute(f"ALTER TABLE messages ADD COLUMN {ddl}")
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_messages_file_hash ON messages(file_hash)"
+        )
+        self._conn.commit()
 
     def _migrate_image_stripped(self):
         """Add image_stripped to messages for existing databases."""
@@ -1092,19 +1179,33 @@ class Storage:
                        received_at: float,
                        image_data: bytes | None = None,
                        author_sig: bytes | None = None,
-                       image_stripped: bool = False) -> bool:
-        """Returns True if inserted, False if duplicate."""
+                       image_stripped: bool = False,
+                       manifest: dict | None = None,
+                       file_stripped: bool = False) -> bool:
+        """Returns True if inserted, False if duplicate.
+
+        *manifest* is a file manifest in protocol.file_manifest shape (name,
+        size, hash, chunk_root); its two digests are stored as hex text. The
+        message carries only the manifest, never the file: the bytes live in
+        channel_files and file_chunks, and only once someone asks for them.
+        """
+        file_name = manifest["name"] if manifest else None
+        file_size = manifest["size"] if manifest else None
+        file_hash = manifest["hash"].hex() if manifest else None
+        chunk_root = manifest["chunk_root"].hex() if manifest else None
         try:
             with self._tx():
                 self._conn.execute("""
                     INSERT INTO messages
                         (channel_hash, sender_hash, sender_name, content, timestamp,
                          message_id, reply_to, last_seen_id, received_at, image_data,
-                         author_sig, image_stripped)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         author_sig, image_stripped, file_name, file_size, file_hash,
+                         file_chunk_root, file_stripped)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (channel_hash, sender_hash, sender_name, content, timestamp,
                       message_id, reply_to, last_seen_id, received_at, image_data,
-                      author_sig, 1 if image_stripped else 0))
+                      author_sig, 1 if image_stripped else 0, file_name, file_size,
+                      file_hash, chunk_root, 1 if file_stripped else 0))
             return True
         except sqlite3.IntegrityError:
             return False
@@ -2653,3 +2754,232 @@ class Storage:
                 "DELETE FROM nomad_bookmarks WHERE node_hash = ? AND path = ?",
                 (node_hash, path))
             return cursor.rowcount > 0
+
+    # ------------------------------------------------------------------
+    # Shared file store
+    # ------------------------------------------------------------------
+
+    def begin_file(self, hash_hex: str, size: int, own: bool = False) -> None:
+        """Open a store row for a file this node holds or is downloading.
+
+        Idempotent: a second call for the same hash keeps the chunks already
+        held and only refreshes last_used, so a resumed download and a second
+        share both land on the row that is already there. A received file this
+        node later shares becomes own, never the reverse.
+        """
+        now = time.time()
+        chunk_count = (size + FILE_CHUNK_BYTES - 1) // FILE_CHUNK_BYTES
+        with self._tx():
+            self._conn.execute("""
+                INSERT INTO channel_files
+                    (hash, size, chunk_count, held_bytes, complete, own,
+                     stored_at, last_used)
+                VALUES (?, ?, ?, 0, 0, ?, ?, ?)
+                ON CONFLICT(hash) DO UPDATE SET
+                    own = MAX(own, excluded.own),
+                    last_used = excluded.last_used
+            """, (hash_hex, size, chunk_count, 1 if own else 0, now, now))
+
+    def put_file_chunk(self, hash_hex: str, idx: int, content: bytes) -> bool:
+        """Store one verified chunk. False when the database has no room left.
+
+        Its own small transaction, so a download is a sequence of chunk-sized
+        appends rather than one multi-megabyte write and every chunk that
+        lands is kept whatever happens to the rest. A full disk is the one
+        failure answered rather than raised: the caller stops the download and
+        keeps what it already holds.
+        """
+        try:
+            with self._tx():
+                cursor = self._conn.execute(
+                    "INSERT OR IGNORE INTO file_chunks (hash, idx, content) "
+                    "VALUES (?, ?, ?)", (hash_hex, idx, content))
+                if cursor.rowcount:
+                    self._conn.execute(
+                        "UPDATE channel_files SET held_bytes = held_bytes + ?, "
+                        "last_used = ? WHERE hash = ?",
+                        (len(content), time.time(), hash_hex))
+        except Exception as e:
+            if not _is_disk_full(e):
+                raise
+            if not self._disk_full_logged:
+                self._disk_full_logged = True
+                RNS.log(f"TrenchChat [storage]: {DISK_FULL_MESSAGE}; "
+                        f"chunk {idx} of {hash_hex} not stored", RNS.LOG_ERROR)
+            return False
+        return True
+
+    def file_chunk_indices(self, hash_hex: str) -> list[int]:
+        """Which chunks of a file are held, in order."""
+        rows = self._fetchall(
+            "SELECT idx FROM file_chunks WHERE hash = ? ORDER BY idx ASC", (hash_hex,))
+        return [r["idx"] for r in rows]
+
+    def get_file_chunks(self, hash_hex: str, first_idx: int, count: int) -> list[bytes]:
+        """The chunks from first_idx, in order, at most *count* of them.
+
+        A primary-key read of exactly those rows, so what a serve costs does
+        not grow with the size of the file it comes from.
+        """
+        rows = self._fetchall(
+            "SELECT content FROM file_chunks WHERE hash = ? AND idx >= ? AND idx < ? "
+            "ORDER BY idx ASC", (hash_hex, first_idx, first_idx + count))
+        return [bytes(r["content"]) for r in rows]
+
+    def get_file_bytes(self, hash_hex: str) -> bytes | None:
+        """A complete file assembled in memory, None while it is not all here.
+
+        The share ceiling is what makes assembling cheap; the stored shape
+        stays one row per chunk either way.
+        """
+        row = self.get_file(hash_hex)
+        if row is None or not row["complete"]:
+            return None
+        rows = self._fetchall(
+            "SELECT content FROM file_chunks WHERE hash = ? ORDER BY idx ASC", (hash_hex,))
+        return b"".join(bytes(r["content"]) for r in rows)
+
+    def mark_file_complete(self, hash_hex: str) -> None:
+        """Flip a file from downloading to held. The chunk rows do not move."""
+        with self._tx():
+            self._conn.execute(
+                "UPDATE channel_files SET complete = 1, last_used = ? WHERE hash = ?",
+                (time.time(), hash_hex))
+
+    def touch_file(self, hash_hex: str, used_at: float | None = None) -> None:
+        """Record use of a file, which is what the LRU eviction order reads."""
+        with self._tx():
+            self._conn.execute(
+                "UPDATE channel_files SET last_used = ? WHERE hash = ?",
+                (time.time() if used_at is None else used_at, hash_hex))
+
+    def get_file(self, hash_hex: str) -> sqlite3.Row | None:
+        """The store row for a file, or None if this node holds nothing of it."""
+        return self._fetchone("SELECT * FROM channel_files WHERE hash = ?", (hash_hex,))
+
+    def delete_file(self, hash_hex: str) -> None:
+        """Remove a file and every chunk of it."""
+        with self._tx():
+            self._conn.execute("DELETE FROM file_chunks WHERE hash = ?", (hash_hex,))
+            self._conn.execute("DELETE FROM channel_files WHERE hash = ?", (hash_hex,))
+
+    def file_channels(self, hash_hex: str) -> list[str]:
+        """The channels a message carrying this file was stored in.
+
+        What a serve request is authorised against: a requester in the stored
+        member list of one of these channels may have the bytes.
+        """
+        rows = self._fetchall(
+            "SELECT DISTINCT channel_hash FROM messages WHERE file_hash = ?", (hash_hex,))
+        return [r["channel_hash"] for r in rows]
+
+    def list_files(self, complete: bool | None = None,
+                   own: bool | None = None) -> list[sqlite3.Row]:
+        """Stored files, most recently used first, optionally filtered."""
+        clauses: list[str] = []
+        params: list[int] = []
+        if complete is not None:
+            clauses.append("complete = ?")
+            params.append(1 if complete else 0)
+        if own is not None:
+            clauses.append("own = ?")
+            params.append(1 if own else 0)
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        return self._fetchall(
+            f"SELECT * FROM channel_files{where} ORDER BY last_used DESC", tuple(params))
+
+    def file_store_usage(self) -> dict[str, int]:
+        """Bytes held against each of the three budgets.
+
+        Measured as held_bytes, what the database is actually carrying, so an
+        unfinished download counts for what has landed and nothing more.
+        """
+        return self._file_usage()
+
+    def _file_usage(self, exclude_hex: str | None = None) -> dict[str, int]:
+        """file_store_usage(), optionally ignoring one file.
+
+        Admission ignores the file being admitted, whose own held bytes are
+        already counted and must not be charged to it twice.
+        """
+        row = self._fetchone("""
+            SELECT
+                COALESCE(SUM(CASE WHEN own = 1
+                    THEN held_bytes ELSE 0 END), 0) AS own_bytes,
+                COALESCE(SUM(CASE WHEN own = 0 AND complete = 1
+                    THEN held_bytes ELSE 0 END), 0) AS received_bytes,
+                COALESCE(SUM(CASE WHEN own = 0 AND complete = 0
+                    THEN held_bytes ELSE 0 END), 0) AS partial_bytes
+            FROM channel_files WHERE hash IS NOT ?
+        """, (exclude_hex,))
+        return {"own": row["own_bytes"], "received": row["received_bytes"],
+                "partial": row["partial_bytes"]}
+
+    def admit_file(self, hash_hex: str, size: int, own: bool = False) -> bool:
+        """Whether the store has room for this file, having made the room.
+
+        Eviction happens here, before a byte of the new file has landed, never
+        after: least recently used complete received files first, then the
+        oldest unfinished downloads when the partial budget is what is short.
+        Own uploads are never evicted and neither is the file being admitted,
+        so a share past the own ceiling is refused rather than costing someone
+        else their file. False means the room could not be made.
+        """
+        if own:
+            if size > OWN_FILE_STORE_MAX_BYTES:
+                return False
+            return self._file_usage(hash_hex)["own"] + size <= OWN_FILE_STORE_MAX_BYTES
+        if size > FILE_STORE_MAX_BYTES or size > PARTIAL_STORE_MAX_BYTES:
+            return False
+        usage = self._file_usage(hash_hex)
+        if usage["received"] + size > FILE_STORE_MAX_BYTES:
+            self._evict_files(
+                "SELECT hash, held_bytes FROM channel_files "
+                "WHERE own = 0 AND complete = 1 AND hash IS NOT ? ORDER BY last_used ASC",
+                hash_hex, usage["received"] + size - FILE_STORE_MAX_BYTES)
+        usage = self._file_usage(hash_hex)
+        if usage["partial"] + size > PARTIAL_STORE_MAX_BYTES:
+            self._evict_files(
+                "SELECT hash, held_bytes FROM channel_files "
+                "WHERE own = 0 AND complete = 0 AND hash IS NOT ? ORDER BY stored_at ASC",
+                hash_hex, usage["partial"] + size - PARTIAL_STORE_MAX_BYTES)
+        usage = self._file_usage(hash_hex)
+        return (usage["received"] + size <= FILE_STORE_MAX_BYTES
+                and usage["partial"] + size <= PARTIAL_STORE_MAX_BYTES)
+
+    def _evict_files(self, sql: str, exclude_hex: str, needed: int) -> None:
+        """Delete stored files in the order the query gives until *needed* bytes are free."""
+        freed = 0
+        for row in self._fetchall(sql, (exclude_hex,)):
+            if freed >= needed:
+                return
+            self.delete_file(row["hash"])
+            freed += row["held_bytes"]
+
+    def prune_files(self, now: float | None = None) -> int:
+        """Drop what the budgets no longer cover. Returns the files deleted.
+
+        Unfinished downloads past PARTIAL_FILE_TTL_SECS go by age, then
+        complete received files over FILE_STORE_MAX_BYTES go least recently
+        used first. Own uploads are never pruned: the sender staying a holder
+        is what keeps a share downloadable.
+        """
+        now = time.time() if now is None else now
+        deleted = 0
+        stale = self._fetchall(
+            "SELECT hash FROM channel_files "
+            "WHERE own = 0 AND complete = 0 AND stored_at < ?",
+            (now - PARTIAL_FILE_TTL_SECS,))
+        for row in stale:
+            self.delete_file(row["hash"])
+            deleted += 1
+        rows = self._fetchall(
+            "SELECT hash, held_bytes FROM channel_files "
+            "WHERE own = 0 AND complete = 1 ORDER BY last_used DESC")
+        total = 0
+        for row in rows:
+            total += row["held_bytes"]
+            if total > FILE_STORE_MAX_BYTES:
+                self.delete_file(row["hash"])
+                deleted += 1
+        return deleted
