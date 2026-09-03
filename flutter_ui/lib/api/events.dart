@@ -124,6 +124,19 @@ sealed class TcEvent {
           (json['progress'] as num?)?.toDouble() ?? 0.0,
           json['reason'] as String?,
         );
+      case 'file_fetch':
+        return FileFetchEvent(
+          json['file_hash'] as String,
+          (json['message_ids'] as List<dynamic>? ?? const [])
+              .map((e) => e.toString())
+              .toList(),
+          (json['channels'] as List<dynamic>? ?? const [])
+              .map((e) => e.toString())
+              .toList(),
+          json['state'] as String? ?? 'failed',
+          (json['progress'] as num?)?.toDouble() ?? 0.0,
+          json['reason'] as String?,
+        );
       default:
         return null;
     }
@@ -304,6 +317,20 @@ class NomadNodeEvent extends TcEvent {
   const NomadNodeEvent(this.nodeHash, this.displayName);
   final String nodeHash;
   final String displayName;
+}
+
+/// A shared file's download changed state. [messageIds] names the messages
+/// whose cards move with it; the bytes never ride the event, they are read
+/// over REST once the state is 'done'.
+class FileFetchEvent extends TcEvent {
+  const FileFetchEvent(this.fileHash, this.messageIds, this.channels, this.state,
+      this.progress, this.reason);
+  final String fileHash;
+  final List<String> messageIds;
+  final List<String> channels;
+  final String state;
+  final double progress;
+  final String? reason;
 }
 
 /// A page/file fetch changed state. 'done' means the content is cached and

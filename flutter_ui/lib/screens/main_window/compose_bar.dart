@@ -12,6 +12,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../../attachments.dart';
+import '../../format.dart';
 import '../../theme/section_theme.dart';
 import '../../theme/shape.dart';
 import '../../theme/theme_spec.dart';
@@ -108,6 +109,7 @@ class ComposeBar extends StatefulWidget {
     this.channelHash,
     this.pickEmoji,
     this.pickAttachment,
+    this.pickFile,
     this.watchPastedImages,
     this.pendingThemeShare,
     this.onThemeShareConsumed,
@@ -142,6 +144,11 @@ class ComposeBar extends StatefulWidget {
   /// Opens the file picker behind the + button. Null leaves the button inert,
   /// which is what isolated widget tests want.
   final Future<PickedAttachment?> Function()? pickAttachment;
+
+  /// Opens the picker behind the FILE action, for a file shared as a
+  /// manifest. Null hides the action outright, which is what a channel this
+  /// reader may not share files in passes.
+  final Future<PickedAttachment?> Function()? pickFile;
 
   /// Subscribes a handler to the platform's paste events for as long as this
   /// compose bar lives, returning the disposer. Null disables paste-to-attach.
@@ -358,6 +365,15 @@ class _ComposeBarState extends State<ComposeBar> {
     _focusNode.requestFocus();
   }
 
+  /// One message carries one attachment, so a picked file replaces a staged
+  /// image and the other way round.
+  Future<void> _pickFile() async {
+    final picked = await widget.pickFile?.call();
+    if (picked == null || !mounted) return;
+    setState(() => _attachment = picked);
+    _focusNode.requestFocus();
+  }
+
   /// Rewrites each `:name:` picked this draft back to `:name@hash:`. Tokens
   /// that already carry a hash, and names the user typed themselves, are left
   /// exactly as they are.
@@ -422,6 +438,27 @@ class _ComposeBarState extends State<ComposeBar> {
             ),
           ),
         ),
+        if (widget.pickFile != null) ...[
+          const SizedBox(width: 10),
+          MouseRegion(
+            cursor: SystemMouseCursors.click,
+            child: GestureDetector(
+              onTap: _pickFile,
+              child: TcTooltip(
+                message: 'Attach a file',
+                child: Text(
+                  'FILE',
+                  style: TextStyle(
+                    fontSize: TCType.textMicro,
+                    color: tc.textTertiary,
+                    letterSpacing:
+                        TCType.letterSpacingFor(TCType.textMicro, TCType.trackingWide),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ],
         const SizedBox(width: 10),
         Expanded(
           child: TextField(
@@ -492,26 +529,39 @@ class _ComposeBarState extends State<ComposeBar> {
     );
   }
 
-  /// The staged image, shown the way the reply banner is: above the input,
-  /// with its own way out. Removing it is the only thing that unstages it.
+  /// The staged attachment, shown the way the reply banner is: above the
+  /// input, with its own way out. Removing it is the only thing that unstages
+  /// it. An image previews itself; a file is named and sized, since nothing
+  /// about its bytes is for this client to render.
   Widget _attachmentChip(TCSectionColors tc, PickedAttachment attachment) {
     return Padding(
       padding: const EdgeInsets.only(bottom: 8),
       child: Row(
         children: [
-          ClipRRect(
-            borderRadius: tcCorners(context) ?? BorderRadius.zero,
-            child: Image.memory(
-              attachment.bytes,
+          if (attachment.isFile)
+            Container(
               width: 40,
               height: 40,
-              fit: BoxFit.cover,
-              cacheWidth: 120,
-              cacheHeight: 120,
-              errorBuilder: (context, error, stack) =>
-                  Container(width: 40, height: 40, color: tc.bgInset),
+              decoration: BoxDecoration(
+                color: tc.bgInset,
+                borderRadius: tcCorners(context),
+                border: Border.all(color: tc.borderSubtle),
+              ),
+            )
+          else
+            ClipRRect(
+              borderRadius: tcCorners(context) ?? BorderRadius.zero,
+              child: Image.memory(
+                attachment.bytes,
+                width: 40,
+                height: 40,
+                fit: BoxFit.cover,
+                cacheWidth: 120,
+                cacheHeight: 120,
+                errorBuilder: (context, error, stack) =>
+                    Container(width: 40, height: 40, color: tc.bgInset),
+              ),
             ),
-          ),
           const SizedBox(width: 8),
           Expanded(
             child: Text(
@@ -521,6 +571,13 @@ class _ComposeBarState extends State<ComposeBar> {
               style: TextStyle(fontSize: TCType.textMicro, color: tc.textSecondary),
             ),
           ),
+          if (attachment.isFile) ...[
+            const SizedBox(width: 8),
+            Text(
+              formatByteCount(attachment.bytes.length),
+              style: TextStyle(fontSize: TCType.textMicro, color: tc.textTertiary),
+            ),
+          ],
           const SizedBox(width: 8),
           MouseRegion(
             cursor: SystemMouseCursors.click,
