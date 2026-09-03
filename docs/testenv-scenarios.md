@@ -327,6 +327,7 @@ to itself.
 | interop2 | A + bare client | The same message with the friendship removed | ✅ **19s.** Refused. Sending without the envelope is exactly what an attacker would do, since that is the half carrying a signature, it buys nothing, because the gate reads the identity LXMF authenticated |
 | interop3 | A + bare client | A tester sends a direct message; the bare client reports what it received | ✅ **48s.** The text arrives in the ordinary content, and the only fields present are `0xFB`/`0xFC`, LXMF's own custom-payload fields. No TrenchChat field numbers reach a foreign client |
 | interop4 | A + bare client | The bare LXMF client messages A, which has **not** added it; A accepts | ✅ **Was a real gap.** The message used to be dropped where the gate refused it (with LXMF having already proved the packet, so the sender was told it was delivered) and a client that cannot send `MT_FRIEND_REQUEST` had no other way to ask. It is now held as a request carrying its text, grants nothing until accepted, and is filed into the conversation on accept. Fails without the fix (64s). 5/5 runs, 3–5s |
+| interop5 | A + bare client | A tester sends a direct message carrying a custom emoji token and a theme code; the bare client reports what it received | ✅ **48s.** Arrives as `hi :salute: try out`: the emoji keeps its name and loses the 64-character hash, and the theme code is gone. 5/5 in a family run, 3/5 standalone. The standalone failures share interop3's live-delivery race (interop3 measured 2/5 standalone in the same container): they fail with nothing received at all, never with the wrong words |
 
 ### `restart`: Restart, persistence, ordering
 
@@ -798,7 +799,7 @@ How to run it, when a scenario is the right tool, and how to add one live in
 
 ## Status
 
-All twelve families built and run: **100 scenarios, 78 strict and 22 probes.**
+All twelve families built and run: **101 scenarios, 79 strict and 22 probes.**
 
 | Family | Scenarios | Result |
 |---|---|---|
@@ -813,9 +814,9 @@ All twelve families built and run: **100 scenarios, 78 strict and 22 probes.**
 | `api`: the API surface | 5 (4 strict, 1 probe) | All passing; api4 records the shared-token property; api5 covers the pushed network map, 5/5 |
 | `integrity`: message integrity | 4 (4 strict) | All passing; integrity2 found a real gap, now fixed and strict |
 | `nomad`: page browsing and hosting | 4 (3 strict, 1 probe) | All passing, 4/4 runs each; nomad3 confirmed bounded offline failure and recovery |
-| `interop`: direct messages with other LXMF clients | 4 (4 strict) | All passing against a real bare RNS+LXMF client; interop4 found a real gap, 5/5 after the fix |
+| `interop`: direct messages with other LXMF clients | 5 (5 strict) | All passing against a real bare RNS+LXMF client; interop4 found a real gap, 5/5 after the fix; interop3 and interop5 race on live delivery when run alone |
 
-**78 of 79 strict scenarios pass.** The one failure is a real defect, left
+**79 of 80 strict scenarios pass.** The one failure is a real defect, left
 strict and failing on purpose, so `--family sync` exits non-zero until it is
 resolved: sync11, intermittently (2 passes in 7). invite11 is now passing on
 the narrowed `kick` rule described above.

@@ -30,6 +30,7 @@ import LXMF
 
 from trenchchat.core.identity import Identity
 from trenchchat.core.image import inbound_image_is_sane
+from trenchchat.core.interop import EMOJI_TOKEN_RE, peer_reads_trenchchat
 from trenchchat.core.permissions import (
     SEND_MESSAGE, is_open_join, permissions_from_json,
 )
@@ -86,10 +87,6 @@ MAX_TRACKED_FLUSH_PEERS = 256
 # Longest stored emoji name. Peer-supplied, and both clients resolve a legacy
 # :name: token by exact match over the whole library.
 MAX_EMOJI_NAME_LEN = 32
-
-# Matches :name@hexhash: (unambiguous) or :name: (legacy, name lookup only).
-# Group 1 = name, group 2 = 64-char SHA-256 hex, absent on legacy tokens.
-EMOJI_TOKEN_RE = re.compile(r":([a-zA-Z0-9_-]+)(?:@([0-9a-fA-F]{64}))?:")
 
 
 def _sanitise_emoji_name(name: str) -> str:
@@ -152,11 +149,25 @@ class ReactionManager:
         # a place reactions can happen.
         self._direct_mgr = None
 
+        # Set by the frontend wiring; without it every peer is treated as one
+        # that speaks TrenchChat, which is what a channels-only build gets.
+        self._is_trenchchat = None
+
         router.add_delivery_callback(self._on_lxmf_message)
 
     def set_direct_manager(self, direct_mgr) -> None:
         """Attach the DirectMessageManager, so conversations count as shared."""
         self._direct_mgr = direct_mgr
+
+    def set_trenchchat_gate(self, is_trenchchat) -> None:
+        """Attach the predicate deciding whether a peer runs TrenchChat.
+
+        An emoji request is a TrenchChat control message: it reaches any other
+        client as an empty one, and buys an answer from none of them. A friend
+        on such a client can still write a token we cannot resolve, so the
+        check belongs on the request rather than on what prompted it.
+        """
+        self._is_trenchchat = is_trenchchat
 
     # ------------------------------------------------------------------
     # Public API: reactions
@@ -665,7 +676,19 @@ class ReactionManager:
 
         *name* is included so the sender echoes it back in the response, letting
         the receiver store the emoji under the correct human-readable name.
+
+        Refused for a peer not known to run TrenchChat, before the in-flight
+        marker is taken, so the same emoji can still be asked of someone who
+        can answer.
         """
+        if not peer_reads_trenchchat(self._is_trenchchat, peer_hex):
+            RNS.log(
+                f"TrenchChat [reaction]: not asking {peer_hex[:12]}… for an "
+                f"emoji — not a known TrenchChat peer",
+                RNS.LOG_DEBUG,
+            )
+            return
+
         now = time.time()
         with self._lock:
             last = self._pending_emoji_requests.get(emoji_hash)

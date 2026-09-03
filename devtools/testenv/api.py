@@ -1154,8 +1154,15 @@ def create_app(backend: Backend, *, token: str | None = None,
             reply_to=req.reply_to, image_data=image_data,
         )
         if msg_id is None:
+            if not backend.direct_mgr.may_dm(peer_hash):
+                return JSONResponse(
+                    {"ok": False, "error": "not an accepted friend"}, status_code=403,
+                )
             return JSONResponse(
-                {"ok": False, "error": "not an accepted friend"}, status_code=403,
+                {"ok": False,
+                 "error": "nothing left to send: the message carried only "
+                          "markup this peer's client cannot read"},
+                status_code=400,
             )
         conversation = backend.direct_mgr.conversation_hash(peer_hash)
         _on_message(conversation, msg_id)

@@ -285,6 +285,9 @@ def peer_factory(rns_instance, tmp_path):
                 actions.file_message_requests(_f, _d, _m, peer_hex)
         )
         reaction_mgr.set_direct_manager(direct_mgr)
+        trenchchat_gate = actions.trenchchat_peer_gate(storage)
+        messaging.set_trenchchat_gate(trenchchat_gate)
+        reaction_mgr.set_trenchchat_gate(trenchchat_gate)
 
         voice_transport = FakeVoiceTransport(identity.hash_hex, voice_registry)
         voice_mgr = VoiceManager(identity, storage, router, subscription_mgr,

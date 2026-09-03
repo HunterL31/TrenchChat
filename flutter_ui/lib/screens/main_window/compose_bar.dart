@@ -114,6 +114,7 @@ class ComposeBar extends StatefulWidget {
     this.replyPreview,
     this.onCancelReply,
     this.compact = false,
+    this.peerReadsTrenchchat = true,
   });
 
   final String channelName;
@@ -161,6 +162,13 @@ class ComposeBar extends StatefulWidget {
 
   /// Clears the pending reply from the banner's cancel affordance.
   final VoidCallback? onCancelReply;
+
+  /// Whether the other end can read TrenchChat's own markup. False for a
+  /// conversation with a plain LXMF client, where a custom emoji stays the
+  /// `:name:` the draft shows and a staged theme stays its `[theme:name]`
+  /// label: the hash and the code mean nothing there, and the backend rewrites
+  /// them away regardless. Always true for a channel.
+  final bool peerReadsTrenchchat;
 
   @override
   State<ComposeBar> createState() => _ComposeBarState();
@@ -362,7 +370,7 @@ class _ComposeBarState extends State<ComposeBar> {
   /// that already carry a hash, and names the user typed themselves, are left
   /// exactly as they are.
   String _expandDraftEmoji(String text) {
-    if (_draftEmoji.isEmpty) return text;
+    if (_draftEmoji.isEmpty || !widget.peerReadsTrenchchat) return text;
     return text.replaceAllMapped(emojiTokenRe, (m) {
       if (m.group(2) != null) return m[0]!;
       final hash = _draftEmoji[m.group(1)!];
@@ -373,7 +381,7 @@ class _ComposeBarState extends State<ComposeBar> {
   /// Rewrites each `[theme:name]` staged this draft to its code. A token the
   /// user deleted simply is not there to expand.
   String _expandDraftThemes(String text) {
-    if (_draftThemes.isEmpty) return text;
+    if (_draftThemes.isEmpty || !widget.peerReadsTrenchchat) return text;
     return text.replaceAllMapped(
       composeThemeTokenRe,
       (m) => _draftThemes[m.group(1)!] ?? m[0]!,

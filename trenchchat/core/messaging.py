@@ -69,6 +69,9 @@ from trenchchat.core.protocol import (
 )
 from trenchchat.core.authorship import resolve_author, sign_message, verify_message
 from trenchchat.core.image import MAX_IMAGE_BYTES, inbound_image_is_sane
+from trenchchat.core.interop import (
+    carries_only_trenchchat_markup, peer_reads_trenchchat, plain_lxmf_content,
+)
 from trenchchat.core.naming import dm_hash_for
 from trenchchat.core.storage import Storage
 from trenchchat.network.router import Router
@@ -124,6 +127,9 @@ class Messaging:
         # inert without them, which is what a channels-only build gets.
         self._direct_mgr = None
         self._presence_mgr = None
+        # Set by the frontend wiring; without it every peer is treated as one
+        # that speaks TrenchChat, and nothing is rewritten.
+        self._is_trenchchat = None
 
         # dest_hex → list of message param dicts queued for offline peers
         self._pending: dict[str, list[dict]] = {}
@@ -148,6 +154,16 @@ class Messaging:
     def set_presence_manager(self, presence_mgr) -> None:
         """Attach presence, used to choose direct delivery over propagation."""
         self._presence_mgr = presence_mgr
+
+    def set_trenchchat_gate(self, is_trenchchat) -> None:
+        """Attach the predicate deciding whether a peer runs TrenchChat.
+
+        Broader than a conversation's own peer_is_trenchchat flag, which only
+        knows peers that have written to us: a channel member or a
+        trenchchat.user announce proves the same thing, and proving it earlier
+        is one message fewer written for a client that could have read it.
+        """
+        self._is_trenchchat = is_trenchchat
 
     def set_missed_delivery_callback(self, callback):
         """
@@ -255,14 +271,25 @@ class Messaging:
                     image_data: bytes | None = None) -> str | None:
         """Send a direct message to an accepted friend. Returns its message id.
 
-        Returns None when direct messaging is not wired up, or the peer is not
-        an accepted friend -- a silent no-op, matching the channel send path.
+        Returns None when direct messaging is not wired up, the peer is not an
+        accepted friend, or the words were only markup their client could not
+        have read -- a silent no-op, matching the channel send path.
         """
         if self._direct_mgr is None:
             return None
         conversation = self._direct_mgr.open_conversation(peer_hex)
         if conversation is None:
             return None
+
+        if not peer_reads_trenchchat(self._is_trenchchat, peer_hex):
+            if image_data is None and carries_only_trenchchat_markup(content):
+                RNS.log(
+                    f"TrenchChat [dm]: nothing left to send {peer_hex[:12]}… — the "
+                    f"message was only markup their client cannot read",
+                    RNS.LOG_WARNING,
+                )
+                return None
+            content = plain_lxmf_content(content)
 
         ts = time.time()
         last_seen = self._storage.get_latest_message_id(conversation)

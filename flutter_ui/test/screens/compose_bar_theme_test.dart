@@ -15,6 +15,7 @@ Widget _harness({
   required Future<bool> Function(String, PickedAttachment?) onSend,
   ({String name, String code})? staged,
   VoidCallback? onConsumed,
+  bool peerReadsTrenchchat = true,
 }) =>
     MaterialApp(
       home: Scaffold(
@@ -24,6 +25,7 @@ Widget _harness({
           onSend: onSend,
           pendingThemeShare: staged,
           onThemeShareConsumed: onConsumed,
+          peerReadsTrenchchat: peerReadsTrenchchat,
           compact: true, // gives a tappable send button
         ),
       ),
@@ -189,5 +191,22 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('look at [theme:Deep]'), findsOneWidget);
+  });
+
+  testWidgets('a plain LXMF peer gets the label, never the code',
+      (tester) async {
+    String? sent;
+    await tester.pumpWidget(_harness(
+      onSend: (c, _) async {
+        sent = c;
+        return true;
+      },
+      staged: (name: 'Deep', code: _code),
+      peerReadsTrenchchat: false,
+    ));
+    await tester.pumpAndSettle();
+    await _send(tester);
+
+    expect(sent, '[theme:Deep]');
   });
 }

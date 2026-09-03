@@ -578,6 +578,7 @@ class _MainWindowState extends State<MainWindow> {
                               ?.composeToken,
                       pendingThemeShare: state.pendingThemeShare,
                       onThemeShareConsumed: state.consumePendingThemeShare,
+                      peerReadsTrenchchat: dm == null || dm.peerIsTrenchchat,
                       compact: compact,
                     ),
                 ],

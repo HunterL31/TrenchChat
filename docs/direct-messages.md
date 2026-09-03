@@ -106,7 +106,36 @@ What another client cannot do is TrenchChat's own extras. Reactions are control
 messages that would arrive as empty ones, so they are not sent to a peer that
 has never identified itself as TrenchChat (`dm_conversations.peer_is_trenchchat`,
 set when an envelope arrives). Both clients show such a conversation as `LXMF`
-so the difference is visible rather than mysterious.
+so the difference is visible rather than mysterious. An emoji request is refused
+the same way and for the same reason, at `_request_emoji` rather than at what
+prompted it: a friend on another client can perfectly well write a token we
+cannot resolve, and asking them for the image reaches them as an empty message
+and buys an answer from nobody.
+
+### Words that are markup
+
+The extras are not only control messages. A message's own text carries
+TrenchChat's markup too: a custom emoji is `:name@<sha256>:`, which the far end
+is expected to resolve by asking us for the image, and a shared theme is an
+entire palette packed into a `tct1:` code. To a client that has never heard of
+either, one is 64 characters of noise and the other several hundred, and both
+are bytes somebody's radio spent for nothing.
+
+So a message bound for such a client is rewritten to what it can read
+(`interop.plain_lxmf_content`): a custom emoji keeps its name and loses the
+hash, which was only ever addressed to us, and a theme code is dropped, since
+no part of it survives the translation. The rewrite is what the sender stores
+as well as sends, so a transcript is never a claim about what the other end
+received. Where it would leave nothing at all, the send is refused rather than
+delivered as the empty message the other client would otherwise show.
+
+Two details are deliberate. The rewrite asks `actions.trenchchat_peer_gate`
+rather than the conversation's own flag, so a peer proven by a member list, a
+subscriber record or a `trenchchat.user` announce keeps the whole token without
+having to write to us first. And it happens in `Messaging.send_direct`, the one
+door outbound conversation text goes through, rather than in the client: a
+compose bar that knows the peer is a plain LXMF client already sends the short
+forms (`peerReadsTrenchchat`), and that is convenience, not the guarantee.
 
 ## Being refused is not the same as never happening
 

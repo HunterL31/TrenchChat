@@ -261,9 +261,10 @@ class Backend:
         )
         self.router.add_outbound_callback(self.presence_beacon.record_sent)
         self.user_directory = UserDirectory(self.identity.hash_hex)
+        trenchchat_gate = actions.trenchchat_peer_gate(self.storage, self.user_directory)
         self.avatar_mgr = AvatarManager(
             self.identity, self.config, self.storage, self.router,
-            is_trenchchat=actions.trenchchat_peer_gate(self.storage, self.user_directory),
+            is_trenchchat=trenchchat_gate,
         )
         self.friends_mgr = FriendsManager(self.storage, self.identity.hash_hex,
                                           self.presence_mgr, identity=self.identity,
@@ -282,6 +283,8 @@ class Backend:
         )
         self.messaging.set_presence_manager(self.presence_mgr)
         self.reaction_mgr.set_direct_manager(self.direct_mgr)
+        self.messaging.set_trenchchat_gate(trenchchat_gate)
+        self.reaction_mgr.set_trenchchat_gate(trenchchat_gate)
         # Answers a peer the first time we hear them: our own re-announce is
         # hours apart, and until they have heard us they cannot verify
         # anything we send -- it is quarantined at their end and dropped.
