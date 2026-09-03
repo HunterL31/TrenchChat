@@ -31,7 +31,13 @@ type: it is the one message type that legitimately arrives at a client that
 is not TrenchChat, so its text rides in the ordinary content, its attachment
 in LXMF's standard image field, and only the TrenchChat extras in the
 envelope (pack_dm_envelope below).
+
+A mention is the one piece of TrenchChat's own structure that claims no key
+here at all: it is written into the message text, so the wire carries no ping
+to tamper with. See the mentions section below.
 """
+
+import re
 
 # --- Common / messaging fields ---
 F_CHANNEL_HASH      = 0x01   # bytes[16]: which channel
@@ -165,6 +171,77 @@ MAX_FILE_NAME_CHARS = 128
 
 # Both manifest digests are SHA-256.
 FILE_DIGEST_BYTES = 32
+
+
+# --- Mentions ---
+#
+# A mention is not a field. It is the mentioned identity's hash written into
+# the message text as "@<hex>", which is why it needs no protocol of its own:
+# the author signature already covers the content, sync already relays it, and
+# storage already holds it. Nothing on the wire describes a ping, so a relay
+# cannot add one, drop one, or aim it at somebody else, and a client that has
+# never heard of mentions still shows the message it was written into.
+#
+# The name is deliberately not carried alongside the hash. A display name is
+# self-asserted and mutable (see author_digest below), so the reader renders a
+# mention from the name it holds for that identity now; a rename never leaves a
+# ping addressed to who the sender thought they were talking to.
+#
+# The obvious alternative, a field holding the list of mentioned hashes, costs
+# fewer bytes and was rejected anyway: it sits outside the author signature, so
+# a relay could add a ping to somebody else's words or take one out.
+# author_digest could be widened to cover it, appended only when present the
+# way a file manifest is. What that still would not answer is where in the text
+# the mention sits, which the reader needs to draw it: the words have to carry
+# the address either way, and once they do, a field repeats what they say.
+MENTION_PREFIX = "@"
+
+# Identity hashes are RNS truncated hashes: 16 bytes, 32 hex characters.
+MENTION_HEX_CHARS = 32
+
+# Distinct identities read out of one message. A ping is one notification per
+# message however many names it holds, so this bounds only the work a peer can
+# ask a reader to do per message, not what the message may say.
+MAX_MENTIONS_PER_MESSAGE = 32
+
+# The trailing exclusion keeps a longer hex run from reading as a mention of
+# whoever its first 32 characters happen to name.
+_MENTION_RE = re.compile(
+    r"@([0-9a-fA-F]{%d})(?![0-9a-fA-F])" % MENTION_HEX_CHARS
+)
+
+
+def mention_token(identity_hash_hex: str) -> str:
+    """The text a mention of this identity is written as."""
+    return MENTION_PREFIX + identity_hash_hex
+
+
+def mentions_in(content: str) -> list[str]:
+    """Every identity a message names, in the order written, without repeats."""
+    if not content or MENTION_PREFIX not in content:
+        return []
+    found: list[str] = []
+    seen: set[str] = set()
+    for match in _MENTION_RE.finditer(content):
+        hex_hash = match.group(1).lower()
+        if hex_hash in seen:
+            continue
+        seen.add(hex_hash)
+        found.append(hex_hash)
+        if len(found) >= MAX_MENTIONS_PER_MESSAGE:
+            break
+    return found
+
+
+def mentions_identity(content: str, identity_hash_hex: str) -> bool:
+    """Whether a message pings that identity.
+
+    Deliberately not a substring test: a hash that is only the start of a
+    longer hex run is not the identity that run names.
+    """
+    if not identity_hash_hex:
+        return False
+    return identity_hash_hex.lower() in mentions_in(content)
 
 
 # --- Direct message envelope ---

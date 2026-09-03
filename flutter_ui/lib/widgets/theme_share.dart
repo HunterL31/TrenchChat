@@ -175,10 +175,12 @@ List<SharedTheme> themeCodesIn(String content) {
 /// every other run going through [emojiSpans].
 List<InlineSpan> messageContentSpans(
     String content, Map<String, CustomEmoji> emojiLibrary, TextStyle style,
-    {InlineLinkConfig? links, double emojiSize = inlineEmojiSize}) {
+    {InlineLinkConfig? links,
+    MentionConfig? mentions,
+    double emojiSize = inlineEmojiSize}) {
   if (!content.contains(themeCodePrefix)) {
     return emojiSpans(content, emojiLibrary, style,
-        links: links, emojiSize: emojiSize);
+        links: links, mentions: mentions, emojiSize: emojiSize);
   }
 
   final spans = <InlineSpan>[];
@@ -188,7 +190,7 @@ List<InlineSpan> messageContentSpans(
     if (decoded == null) continue;
     if (match.start > last) {
       spans.addAll(emojiSpans(content.substring(last, match.start), emojiLibrary,
-          style, links: links, emojiSize: emojiSize));
+          style, links: links, mentions: mentions, emojiSize: emojiSize));
     }
     spans.add(WidgetSpan(
       alignment: PlaceholderAlignment.middle,
@@ -197,11 +199,12 @@ List<InlineSpan> messageContentSpans(
     last = match.end;
   }
   if (spans.isEmpty) {
-    return emojiSpans(content, emojiLibrary, style, links: links, emojiSize: emojiSize);
+    return emojiSpans(content, emojiLibrary, style,
+        links: links, mentions: mentions, emojiSize: emojiSize);
   }
   if (last < content.length) {
     spans.addAll(emojiSpans(content.substring(last), emojiLibrary, style,
-        links: links, emojiSize: emojiSize));
+        links: links, mentions: mentions, emojiSize: emojiSize));
   }
   return spans;
 }

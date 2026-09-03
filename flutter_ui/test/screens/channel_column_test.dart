@@ -134,6 +134,47 @@ void main() {
     expect(find.text('4'), findsOneWidget);
   });
 
+  testWidgets('a channel holding a ping carries the ping pill instead',
+      (tester) async {
+    await tester.pumpWidget(MaterialApp(
+      home: Scaffold(
+        body: ChannelColumn(
+          serverName: 'mesh-crew',
+          serverMemberCount: 2,
+          channels: [_channel('general'), _channel('ops')],
+          directChannels: const [],
+          selectedChannelHash: 'hash-general',
+          onSelectChannel: (_) {},
+          unreadCounts: const {'hash-ops': 4},
+          mentionCounts: const {'hash-ops': 2},
+        ),
+      ),
+    ));
+
+    expect(find.text('@2'), findsOneWidget);
+    expect(find.text('4'), findsNothing);
+  });
+
+  testWidgets('the selected channel never shows a ping pill either',
+      (tester) async {
+    await tester.pumpWidget(MaterialApp(
+      home: Scaffold(
+        body: ChannelColumn(
+          serverName: 'mesh-crew',
+          serverMemberCount: 2,
+          channels: [_channel('general')],
+          directChannels: const [],
+          selectedChannelHash: 'hash-general',
+          onSelectChannel: (_) {},
+          unreadCounts: const {'hash-general': 3},
+          mentionCounts: const {'hash-general': 1},
+        ),
+      ),
+    ));
+
+    expect(find.text('@1'), findsNothing);
+  });
+
   testWidgets('the selected channel never shows an unread pill', (tester) async {
     await tester.pumpWidget(MaterialApp(
       home: Scaffold(
