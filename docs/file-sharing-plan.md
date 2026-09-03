@@ -299,7 +299,7 @@ serves members because it is a member.
   progress}` or null.
 - `POST /channels/{hash}/files/{file_hash}/fetch` starts or joins a
   download; `GET .../fetch` reads its state.
-- `GET /channels/{hash}/files/{file_hash}` streams the bytes with
+- `GET /channels/{hash}/files/{file_hash}` returns the bytes with
   `Content-Disposition: attachment` and `X-Content-Type-Options: nosniff`,
   copied from `get_nomad_file`; 404 until held.
 - WS event `file_fetch {channel, file_hash, message_id, state, progress,
@@ -315,10 +315,25 @@ serves members because it is a member.
 - `message_list.dart`: a file card widget showing name, size, and one
   state: a Download button (not yet requested), a progress bar
   (downloading), a Save button (done), "No member online has this yet"
-  (unavailable), or "attachment refused" (stripped). Save opens the
-  `GET .../files/{hash}` URL, the mechanism the nomad file download uses.
-- `app_state.dart` + `client.dart`: `shareFile`, `fetchFile`, file state
-  from `file_fetch` events; widget tests with `fake_backend.dart`.
+  (unavailable), or "attachment refused" (stripped).
+- **Save, to the user's own filesystem.** The bytes sit in the backend's
+  database, which may be on another machine when the client is served over
+  a tunnel, so the client fetches them over the API and hands them to
+  `FilePicker.saveFile(fileName, bytes, mimeType)`, one call for both
+  targets. On web (`file_picker_web`) that wraps the bytes in a Blob and
+  clicks an anchor with the `download` attribute, so the browser saves the
+  file under its own download rules. On desktop it opens the native save
+  dialog (the XDG portal on Linux, the platform dialog on Windows and macOS)
+  and the plugin writes the bytes to the chosen path. The manifest's cleaned
+  name is the default file name; the MIME type is guessed from the extension
+  and falls back to `application/octet-stream`. The 5 MB ceiling makes the
+  in-memory round trip fine; revisit alongside the ceiling. The nomad tab's
+  copy-a-URL-to-the-clipboard step is the interim it names, not a pattern to
+  copy. Verify the Windows and macOS packages write the bytes in step 9.
+- `app_state.dart` + `client.dart`: `shareFile`, `fetchFile`, `saveFile`,
+  file state from `file_fetch` events; widget tests with `fake_backend.dart`,
+  injecting the save function the way `pickImageAttachment` injects the
+  picker so tests never reach the plugin.
 
 ## Trust model (to fold into `docs/security-improvements.md`)
 
