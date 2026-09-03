@@ -16,8 +16,8 @@ from tests.helpers import wait_for, wait_for_member
 from trenchchat.core import actions
 from trenchchat.core import storage as storage_module
 from trenchchat.core.files import (
-    DL_DONE, DL_QUEUED, DL_UNAVAILABLE, FileManager, REASON_NO_HOLDER,
-    REASON_STORAGE, chunk_count_for, chunk_size_at,
+    DL_DONE, DL_QUEUED, DL_UNAVAILABLE, DOWNLOAD_RETRY_SECS, FileManager,
+    REASON_NO_HOLDER, REASON_STORAGE, chunk_count_for, chunk_size_at,
 )
 from trenchchat.core.permissions import PRESET_PRIVATE, ROLE_MEMBER, ROLE_OWNER
 from trenchchat.core.protocol import FILE_CHUNK_BYTES, chunk_hashes
@@ -262,7 +262,43 @@ def test_a_stalled_holder_is_replaced_at_the_request_boundary(peer_factory):
     assert carol.identity.hash_hex in holders, holders
 
 
-def test_a_download_with_no_online_holder_waits_for_an_announce(peer_factory):
+def test_a_download_nobody_can_answer_waits_for_an_announce(peer_factory):
+    """A download with nothing to ask parks and waits rather than failing.
+
+    Being unreachable is what settles that, not presence: this used to test
+    the same concern with a peer merely recorded offline, which the files
+    scenarios showed is a different thing entirely (see
+    test_a_quiet_member_is_asked_anyway).
+    """
+    (alice, bob), ch_hash = file_channel(peer_factory, "alice", "bob")
+    data = blob(2)
+    manifest = share(alice, ch_hash, "survey.bin", data)
+    file_hash = manifest["hash"].hex()
+    msg_id = wait_for_file_message(bob, ch_hash, file_hash)
+    bob.file_transport.unreachable.add(alice.identity.hash_hex)
+    bob.presence_mgr.record_offline(alice.identity.hash_hex)
+
+    bob.file_mgr.request_download(ch_hash, msg_id)
+    status = wait_for_state(bob, file_hash, DL_UNAVAILABLE)
+    assert status["reason"] == REASON_NO_HOLDER
+
+    bob.file_transport.unreachable.discard(alice.identity.hash_hex)
+    bob.presence_mgr.record_seen(alice.identity.hash_hex)
+    bob.file_mgr.on_peer_appeared(alice.identity.hash_hex)
+
+    wait_for_state(bob, file_hash, DL_DONE)
+    assert bob.file_mgr.file_bytes(file_hash) == data
+
+
+def test_a_quiet_member_is_asked_anyway(peer_factory):
+    """Regression guard for the defect the files scenarios found.
+
+    Presence is evidence of having heard from a peer, not of the peer being
+    gone: announces are damped behind a transport node, and the liveness
+    beacon only tells whoever receives it. A returning member that beacons a
+    holder and is never answered had the holder read as offline for minutes,
+    and its download waited for an announce with the bytes one link away.
+    """
     (alice, bob), ch_hash = file_channel(peer_factory, "alice", "bob")
     data = blob(2)
     manifest = share(alice, ch_hash, "survey.bin", data)
@@ -271,11 +307,6 @@ def test_a_download_with_no_online_holder_waits_for_an_announce(peer_factory):
     bob.presence_mgr.record_offline(alice.identity.hash_hex)
 
     bob.file_mgr.request_download(ch_hash, msg_id)
-    status = wait_for_state(bob, file_hash, DL_UNAVAILABLE)
-    assert status["reason"] == REASON_NO_HOLDER
-
-    bob.presence_mgr.record_seen(alice.identity.hash_hex)
-    bob.file_mgr.on_peer_appeared(alice.identity.hash_hex)
 
     wait_for_state(bob, file_hash, DL_DONE)
     assert bob.file_mgr.file_bytes(file_hash) == data
@@ -482,3 +513,91 @@ def test_a_file_already_held_downloads_without_a_request(peer_factory):
     assert status["state"] == DL_DONE
     assert not chunk_fetches(alice.file_transport.registry,
                              alice.identity.hash_hex, file_hash)
+
+
+# ---------------------------------------------------------------------------
+# Announcing that this node holds files
+# ---------------------------------------------------------------------------
+
+def test_a_node_holding_nothing_says_nothing(peer_factory):
+    (alice, _bob), _ch_hash = file_channel(peer_factory, "alice", "bob")
+
+    alice.file_mgr.tick()
+
+    assert alice.file_transport.announces == 0
+
+
+def test_becoming_a_holder_announces_the_file_plane(peer_factory):
+    """Regression guard for the defect the files scenarios found.
+
+    Registering the destination is not enough to be reachable: a path request
+    for a destination that has never announced is answered only by a node
+    that already knows it, and a transport node in between does not search
+    for one, so every fetch failed as unreachable on a mesh with a hop in it.
+    A node says it is a holder the moment it becomes one, by sharing or by
+    finishing a download.
+    """
+    (alice, bob), ch_hash = file_channel(peer_factory, "alice", "bob")
+    data = blob(2)
+
+    manifest = share(alice, ch_hash, "survey.bin", data)
+    assert alice.file_transport.announces == 1
+
+    download(bob, ch_hash, manifest["hash"].hex())
+    assert bob.file_transport.announces == 1
+
+
+def test_a_holder_announces_once_however_many_files_it_takes_on(peer_factory):
+    """The floor between announces: airtime is per node, not per file."""
+    (alice, _bob), ch_hash = file_channel(peer_factory, "alice", "bob")
+
+    for index in range(3):
+        share(alice, ch_hash, f"survey-{index}.bin", blob(2, seed=index))
+    alice.file_mgr.tick()
+
+    assert alice.file_transport.announces == 1
+
+
+def test_a_parked_download_asks_again_without_hearing_anyone(peer_factory):
+    """Regression guard for the defect the files scenarios found.
+
+    Hearing a peer used to be the only trigger to try again, and a transport
+    node damps repeat announces while the liveness beacon informs only its
+    receiver, so a download whose one attempt failed sat parked for the whole
+    run with the holder up the entire time. It now asks again on its own,
+    after a wait that doubles.
+    """
+    (alice, bob), ch_hash = file_channel(peer_factory, "alice", "bob")
+    data = blob(2)
+    manifest = share(alice, ch_hash, "survey.bin", data)
+    file_hash = manifest["hash"].hex()
+    msg_id = wait_for_file_message(bob, ch_hash, file_hash)
+    bob.file_transport.unreachable.add(alice.identity.hash_hex)
+
+    bob.file_mgr.request_download(ch_hash, msg_id)
+    wait_for_state(bob, file_hash, DL_UNAVAILABLE)
+    bob.file_transport.unreachable.discard(alice.identity.hash_hex)
+
+    bob.file_mgr.tick(now=time.time() + DOWNLOAD_RETRY_SECS + 1.0)
+
+    wait_for_state(bob, file_hash, DL_DONE)
+    assert bob.file_mgr.file_bytes(file_hash) == data
+
+
+def test_a_parked_download_waits_out_its_backoff(peer_factory):
+    """The other half: the retry is a slow drip, not a poll."""
+    (alice, bob), ch_hash = file_channel(peer_factory, "alice", "bob")
+    manifest = share(alice, ch_hash, "survey.bin", blob(2))
+    file_hash = manifest["hash"].hex()
+    msg_id = wait_for_file_message(bob, ch_hash, file_hash)
+    bob.file_transport.unreachable.add(alice.identity.hash_hex)
+
+    bob.file_mgr.request_download(ch_hash, msg_id)
+    wait_for_state(bob, file_hash, DL_UNAVAILABLE)
+    bob.file_transport.unreachable.discard(alice.identity.hash_hex)
+
+    bob.file_mgr.tick()
+
+    assert wait_for(
+        lambda: bob.file_mgr.download_status(file_hash)["state"] == DL_DONE,
+        timeout=2.0) is False

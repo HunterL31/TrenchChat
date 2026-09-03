@@ -4,9 +4,10 @@ Shared files: the download engine, holder choice, and serving members.
 A file is content addressed. The message carries a manifest and never the
 bytes, so a download is this node asking a member who holds the file for
 ranges of it and verifying every chunk before it is stored. Nothing is
-pushed, and nothing announces what it holds: a holder is found from presence
-and the member list, so a miss costs one link handshake instead of every
-member a control message.
+pushed, and nothing says which files it holds: a holder is found from the
+member list and asked, so a miss costs one link handshake instead of every
+member a control message. What a holder does announce is that it is one at
+all, because that announce is what a path to its file plane is made of.
 
 Requests go out one at a time, one download at a time, because airtime is
 shared and two transfers over one slow link finish later than the same two in
@@ -46,9 +47,24 @@ from trenchchat.network.file_transport import (
     FileTransportBase,
 )
 
-# Holders tried per round before a download waits for an announce instead.
+# Holders tried per round before a download parks and waits instead.
 MAX_HOLDER_ATTEMPTS = 4
+# How long a parked download waits before asking again on its own, doubling
+# up to the ceiling and reset by any sign of a member. Hearing a peer is the
+# cheap trigger and stays the first one, but it cannot be the only one: a
+# transport node damps repeat announces and the liveness beacon informs only
+# its receiver, so a download whose one attempt failed could sit parked for
+# ever with the holder up the whole time.
+DOWNLOAD_RETRY_SECS = 120.0
+MAX_DOWNLOAD_RETRY_SECS = 3600.0
 CACHE_PRUNE_INTERVAL_SECS = 300.0
+# How often a node that holds files says so. It is also the floor between
+# announces, so becoming a holder several times over costs one packet, not one
+# per file. Shorter than a hosted node's 900s because this announce is what a
+# path to the file plane is made of: on a lossy link the one sent when the
+# file arrived is the one that goes missing, and until the next one every
+# download from this holder fails as unreachable.
+FILE_ANNOUNCE_INTERVAL_SECS = 300.0
 
 DL_QUEUED = "queued"
 DL_FETCHING = "fetching"
@@ -118,6 +134,8 @@ class _Download:
         self.admitted: bool = False
         self.fetch_id: str | None = None
         self.wants_list: bool = False
+        self.next_retry_at: float = 0.0
+        self.retry_backoff: float = DOWNLOAD_RETRY_SECS
 
     def note_progress(self) -> None:
         if self.chunk_count:
@@ -168,6 +186,7 @@ class FileManager:
         self._chunk_lists: dict[str, bytes] = {}
         self._callbacks: list = []
         self._last_prune = time.time()
+        self._last_announce = 0.0
 
         self._transport.set_serve_callback(self._serve)
         self._transport.set_result_callback(self._on_result)
@@ -234,6 +253,7 @@ class FileManager:
         self._storage.touch_file(hash_hex)
         with self._lock:
             self._chunk_lists.pop(hash_hex, None)
+        self.announce()
         return manifest
 
     # --- downloads ---
@@ -330,6 +350,8 @@ class FileManager:
                 dl.skipped.discard(peer_hex)
                 dl.refused.discard(peer_hex)
                 dl.attempts = 0
+                dl.next_retry_at = 0.0
+                dl.retry_backoff = DOWNLOAD_RETRY_SECS
                 if dl.state == DL_UNAVAILABLE:
                     dl.state = DL_QUEUED
                     dl.reason = None
@@ -419,15 +441,41 @@ class FileManager:
 
     # --- housekeeping ---
 
-    def tick(self) -> None:
+    def announce(self) -> None:
+        """Tell the mesh this node holds files, if it holds any.
+
+        A member cannot ask for a file without a path to the file plane, and
+        nothing else on the mesh can supply one: a path request for a
+        destination that has never announced dies at the first transport node
+        (see network/file_transport.py). So a node says it is a holder the
+        moment it becomes one and repeats it on a slow cadence, and a node
+        holding nothing stays quiet, because nobody has any reason to dial it.
+        """
+        if not self._has_transport:
+            return
+        now = time.time()
+        with self._lock:
+            if now - self._last_announce < FILE_ANNOUNCE_INTERVAL_SECS:
+                return
+        usage = self._storage.file_store_usage()
+        if not usage["own"] and not usage["received"]:
+            return
+        with self._lock:
+            self._last_announce = now
+        self._transport.announce()
+
+    def tick(self, now: float | None = None) -> None:
         if self._has_transport:
             self._transport.tick()
-        now = time.time()
+        self.announce()
+        now = time.time() if now is None else now
         events: list[dict] = []
         if now - self._last_prune >= CACHE_PRUNE_INTERVAL_SECS:
             self._last_prune = now
             with self._lock:
                 self._prune_locked(now, events)
+        with self._lock:
+            self._retry_parked(now)
         self._notify_all(events)
         self._pump()
 
@@ -458,6 +506,22 @@ class FileManager:
             self._drop_locked(hash_hex)
             self._chunk_lists.pop(hash_hex, None)
         return deleted
+
+    def _retry_parked(self, now: float) -> None:
+        """Caller holds the lock. Re-queue the downloads whose wait is up."""
+        for hash_hex in list(self._order):
+            dl = self._downloads.get(hash_hex)
+            if dl is None or dl.state != DL_UNAVAILABLE:
+                continue
+            if now < dl.next_retry_at:
+                continue
+            dl.retry_backoff = min(dl.retry_backoff * 2,
+                                   MAX_DOWNLOAD_RETRY_SECS)
+            dl.next_retry_at = now + dl.retry_backoff
+            dl.skipped.clear()
+            dl.attempts = 0
+            dl.state = DL_QUEUED
+            dl.reason = None
 
     def _drop_locked(self, hash_hex: str) -> None:
         self._downloads.pop(hash_hex, None)
@@ -570,16 +634,27 @@ class FileManager:
         return ordered
 
     def _next_holder(self, dl: _Download) -> str | None:
-        """Caller holds the lock. The holder to ask next, or None this round."""
+        """Caller holds the lock. The holder to ask next, or None this round.
+
+        Presence orders the candidates rather than gating them. A member we
+        have not heard from lately is not a member we know to be gone: a
+        transport node damps repeat announces, and the liveness beacon is
+        evidence for whoever receives it and not for whoever sends it, so a
+        peer one link away can read as offline here for minutes at a time.
+        Asking a quiet member costs one dial that fails and parks the
+        download; not asking costs the download.
+        """
         if dl.attempts >= MAX_HOLDER_ATTEMPTS:
             return None
+        quiet: str | None = None
         for peer in self._candidates(dl):
             if peer in dl.suspect or peer in dl.skipped:
                 continue
-            if not self._presence.is_online(peer):
-                continue
-            return peer
-        return None
+            if self._presence.is_online(peer):
+                return peer
+            if quiet is None:
+                quiet = peer
+        return quiet
 
     def _all_refused(self, dl: _Download) -> bool:
         """Caller holds the lock. Whether every known holder has said no."""
@@ -661,6 +736,9 @@ class FileManager:
         else:
             dl.state = DL_UNAVAILABLE
             dl.reason = REASON_NO_HOLDER
+            # The wait runs from the attempt that just failed, and grows only
+            # when one of these waits is actually spent (_retry_parked).
+            dl.next_retry_at = time.time() + dl.retry_backoff
         events.append(dl.snapshot())
         self._active = None
 
@@ -701,6 +779,9 @@ class FileManager:
             else:
                 self._on_chunks(dl, holder, payload, events)
         self._notify_all(events)
+        # A finished download makes this node a holder, and a holder nobody
+        # can find a path to is no holder at all.
+        self.announce()
         self._pump()
 
     def _on_failed_request(self, dl: _Download, holder: str,

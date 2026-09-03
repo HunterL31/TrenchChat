@@ -249,6 +249,29 @@ def test_only_two_files_are_served_at_once(transport):
     assert served[-1] is None
 
 
+def test_the_next_range_of_a_download_already_being_served_is_not_a_third(
+        transport):
+    """Regression guard for the defect the files scenarios found.
+
+    The cap counts concurrent downloads, and a download issues one request at
+    a time, so the next range on a link already serving is the same transfer
+    continuing. Counted per request instead, every download stalled after its
+    first chunk: two requesters filled the cap and every later range was
+    refused with silence until the requester's stall timeout expired.
+    """
+    _serving(transport)
+    now = time.time()
+    for n in range(MAX_CONCURRENT_SERVES):
+        assert transport._serve(FILE_REQUEST_PATH, _request(), b"r",
+                                bytes([n]), _Requester(HOLDER), now) is not None
+
+    for _ in range(4):
+        assert transport._serve(FILE_REQUEST_PATH, _request(), b"r", b"\x00",
+                                _Requester(HOLDER), now) == b"chunk bytes"
+    assert transport._serve(FILE_REQUEST_PATH, _request(), b"r", b"l9",
+                            _Requester(HOLDER), now) is None
+
+
 def test_a_finished_serve_frees_its_slot(transport):
     """RNS exposes no concluded callback for a response resource, so a slot
     is freed once its link has no outgoing resource left and the settle floor
@@ -262,8 +285,8 @@ def test_a_finished_serve_frees_its_slot(transport):
                             _Requester(HOLDER), now) is None
 
     transport._serves = {
-        key: (started - FILE_SERVE_SETTLE_SECS - 1.0, link_id)
-        for key, (started, link_id) in transport._serves.items()
+        link_id: started - FILE_SERVE_SETTLE_SECS - 1.0
+        for link_id, started in transport._serves.items()
     }
     assert transport._serve(FILE_REQUEST_PATH, _request(), b"r", b"l9",
                             _Requester(HOLDER), time.time()) == b"chunk bytes"
