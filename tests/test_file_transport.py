@@ -11,19 +11,21 @@ import RNS
 
 from trenchchat import APP_NAME, APP_ASPECT_FILES
 from trenchchat.config import Config
+from trenchchat.core.files import WINDOW_GROWTH_STREAK
 from trenchchat.core.identity import Identity
 from trenchchat.core.protocol import FILE_CHUNK_BYTES, MAX_SHARED_FILE_BYTES
 from trenchchat.network import file_transport
 from trenchchat.network.file_transport import (
     FETCH_REFUSED, FETCH_STALLED, FILE_REQUEST_MAX_CHUNKS, FILE_REQUEST_PATH,
-    FILE_SERVE_SETTLE_SECS, FILE_STALL_SECS, MAX_CHUNK_INDEX,
-    MAX_CHUNK_LIST_BYTES, MAX_CONCURRENT_SERVES, RESPONSE_ENVELOPE_BYTES,
+    FILE_SERVE_RATE_LIMIT, FILE_SERVE_SETTLE_SECS, FILE_STALL_SECS,
+    MAX_CHUNK_INDEX, MAX_CHUNK_LIST_BYTES, MAX_CONCURRENT_SERVES,
+    RESPONSE_ENVELOPE_BYTES,
     R_COUNT, R_FILE_HASH, R_FIRST, R_WANT_LIST, FileTransportBase,
     RNSFileTransport, max_response_for, parse_file_request,
 )
 from trenchchat.network.link_client import (
     FETCH_BAD_PATH, FETCH_BAD_RESPONSE, FETCH_LINK_CLOSED, FETCH_TOO_LARGE,
-    FETCH_UNREACHABLE, SERVE_RATE_LIMIT, LinkConn, LinkFetch, _LINKED,
+    FETCH_UNREACHABLE, LinkConn, LinkFetch, _LINKED,
 )
 from tests.fake_file_transport import FakeFileRegistry, FakeFileTransport
 
@@ -231,14 +233,49 @@ def test_serve_rate_limit_per_link(transport, monkeypatch):
     _serving(transport)
     now = time.time()
     served = sum(
-        1 for _ in range(SERVE_RATE_LIMIT * 2)
+        1 for _ in range(FILE_SERVE_RATE_LIMIT * 2)
         if transport._serve(FILE_REQUEST_PATH, _request(), b"r", b"l1", None,
                             now) is not None
     )
-    assert served == SERVE_RATE_LIMIT
+    assert served == FILE_SERVE_RATE_LIMIT
     # A different link is unaffected.
     assert transport._serve(FILE_REQUEST_PATH, _request(), b"r", b"l2", None,
                             now) is not None
+
+
+def _ranges_for_a_whole_file(chunks: int) -> int:
+    """Requests the window rule takes to cover a file, plus its chunk list."""
+    window, wins, held, requests = 1, 0, 0, 1
+    while held < chunks:
+        held += min(window, chunks - held)
+        requests += 1
+        wins += 1
+        if wins >= WINDOW_GROWTH_STREAK:
+            wins = 0
+            window = min(window * 2, FILE_REQUEST_MAX_CHUNKS)
+    return requests
+
+
+def test_a_whole_download_is_never_rate_limited(transport):
+    """Regression guard for the defect files9 found.
+
+    A download issues one range at a time and waits for it, so its request
+    rate is the link's speed. At the shared 8-per-second ceiling every one of
+    three members pulling the same 2 MB file over loopback was refused
+    mid-download, and a refusal is silence, so each paid a 120s stall sweep
+    and none of them finished in 924s. The largest file allowed has to fit
+    inside one second of this limit, because on a fast enough link it will.
+    """
+    _serving(transport)
+    now = time.time()
+    requests = _ranges_for_a_whole_file(MAX_CHUNK_INDEX)
+    assert requests <= FILE_SERVE_RATE_LIMIT
+    served = sum(
+        1 for _ in range(requests)
+        if transport._serve(FILE_REQUEST_PATH, _request(), b"r", b"l1",
+                            _Requester(HOLDER), now) is not None
+    )
+    assert served == requests
 
 
 def test_only_two_files_are_served_at_once(transport):

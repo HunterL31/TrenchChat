@@ -89,6 +89,16 @@ FILE_STALL_SECS = 120.0
 FILE_LINK_IDLE_SECS = 120.0
 
 MAX_INBOUND_FILE_LINKS = MAX_INBOUND_LINKS
+# A download issues one range at a time and waits for it, so how many requests
+# it makes in a second is the link's speed and not anything either end chose:
+# over loopback a 2 MB file asks eight times in well under one. The shared
+# 8-per-second ceiling refused that mid-download, and a refusal is silence, so
+# it cost the asker a whole stall sweep. This plane sets its own above what a
+# download can cost: the largest file allowed is 160 chunks, which the window
+# rule covers in 18 ranges. What bounds the work is the concurrent-serve cap
+# and the response ceiling; this only bounds a peer that is not waiting for
+# answers at all.
+FILE_SERVE_RATE_LIMIT = 64
 # Airtime is shared: two downloads out at once, and the third requester is
 # told nothing and comes back later. The slot is held per link rather than
 # per request, because a download issues one request at a time: the next
@@ -268,6 +278,7 @@ class RNSFileTransport(LinkClient, FileTransportBase):
 
     link_idle_secs = FILE_LINK_IDLE_SECS
     max_inbound_links = MAX_INBOUND_FILE_LINKS
+    serve_rate_limit = FILE_SERVE_RATE_LIMIT
 
     def __init__(self, identity):
         super().__init__(identity=identity)
