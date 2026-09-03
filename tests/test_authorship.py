@@ -9,11 +9,12 @@ committed vector here rather than only exercised end to end.
 import RNS
 
 from trenchchat.core import authorship
-from trenchchat.core.protocol import author_digest
+from trenchchat.core.protocol import author_digest, file_manifest
 from trenchchat.core.storage import Storage
 
 CH = "ab" * 16
 ARGS = (CH, "mid-1", 1000.0, "hello", None, None, None)
+MANIFEST = file_manifest("notes.txt", 1024, b"\x11" * 32, b"\x22" * 32)
 
 
 class TestAuthorDigest:
@@ -43,6 +44,64 @@ class TestAuthorDigest:
         a = author_digest(CH, "mid", 1000.0, "ab", "c", None, None)
         b = author_digest(CH, "mid", 1000.0, "a", "bc", None, None)
         assert a != b
+
+
+class TestFileManifestInTheDigest:
+    """A shared file is signed through its manifest, never its bytes."""
+
+    def test_a_message_without_a_manifest_hashes_as_it_always_did(self):
+        """Older peers keep verifying every text and image message."""
+        assert author_digest(*ARGS, None) == author_digest(*ARGS)
+
+    def test_a_manifest_changes_the_digest(self):
+        assert author_digest(*ARGS, MANIFEST) != author_digest(*ARGS)
+
+    def test_every_manifest_field_changes_it(self):
+        base = author_digest(*ARGS, MANIFEST)
+        variants = [
+            file_manifest("other.txt", 1024, b"\x11" * 32, b"\x22" * 32),
+            file_manifest("notes.txt", 1025, b"\x11" * 32, b"\x22" * 32),
+            file_manifest("notes.txt", 1024, b"\x33" * 32, b"\x22" * 32),
+            file_manifest("notes.txt", 1024, b"\x11" * 32, b"\x44" * 32),
+        ]
+        for variant in variants:
+            assert author_digest(*ARGS, variant) != base
+
+    def test_manifest_boundaries_cannot_be_shifted(self):
+        """The name and the size are length-prefixed, not run together."""
+        a = author_digest(*ARGS, dict(MANIFEST, name="ab", size=1))
+        b = author_digest(*ARGS, dict(MANIFEST, name="a", size=11))
+        assert a != b
+
+    def test_a_tampered_manifest_fails_verification(self, tmp_path):
+        st = Storage(db_path=tmp_path / "keys.db")
+        alice = RNS.Identity()
+        authorship.remember_identity(st, alice)
+        sig = authorship.sign_message(alice, *ARGS, MANIFEST)
+
+        assert authorship.verify_message(st, alice.hash.hex(), sig, *ARGS, MANIFEST)
+        for field, value in [("name", "invoice.pdf"), ("size", 2048),
+                             ("hash", b"\x99" * 32), ("chunk_root", b"\x99" * 32)]:
+            tampered = dict(MANIFEST, **{field: value})
+            assert not authorship.verify_message(
+                st, alice.hash.hex(), sig, *ARGS, tampered), field
+        st.close()
+
+    def test_a_manifest_cannot_be_stripped_from_a_signed_message(self, tmp_path):
+        st = Storage(db_path=tmp_path / "keys.db")
+        alice = RNS.Identity()
+        authorship.remember_identity(st, alice)
+        sig = authorship.sign_message(alice, *ARGS, MANIFEST)
+        assert not authorship.verify_message(st, alice.hash.hex(), sig, *ARGS)
+        st.close()
+
+    def test_a_manifest_cannot_be_added_to_a_signed_message(self, tmp_path):
+        st = Storage(db_path=tmp_path / "keys.db")
+        alice = RNS.Identity()
+        authorship.remember_identity(st, alice)
+        sig = authorship.sign_message(alice, *ARGS)
+        assert not authorship.verify_message(st, alice.hash.hex(), sig, *ARGS, MANIFEST)
+        st.close()
 
 
 class TestKeyCache:

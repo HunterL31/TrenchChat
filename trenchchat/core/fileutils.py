@@ -13,6 +13,28 @@ import RNS
 # Owner read+write only: no group or other access.
 OWNER_RW_MODE = 0o600
 
+# Longest file name kept after cleaning. A name is a label chosen by whoever
+# sent it, so it is bounded like any other inbound string.
+MAX_FILENAME_CHARS = 128
+
+
+def clean_filename(value, max_len: int = MAX_FILENAME_CHARS) -> str | None:
+    """A remote-supplied name reduced to a bare, printable basename.
+
+    The name is chosen by a peer and ends up in a Content-Disposition header
+    and a save dialog, so nothing that could steer a path or a header
+    survives. None when nothing usable is left.
+    """
+    if isinstance(value, bytes):
+        value = value.decode("utf-8", errors="replace")
+    if not isinstance(value, str):
+        return None
+    value = value.replace("\\", "/").rsplit("/", 1)[-1]
+    value = "".join(c for c in value
+                    if c.isprintable() and c not in '"\\')
+    value = value.strip().strip(".")
+    return value[:max_len] or None
+
 
 def _secure_file_windows(path: Path) -> None:
     """Restrict a file's ACL to the current user.

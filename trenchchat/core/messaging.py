@@ -37,6 +37,14 @@ LXMF fields layout:
                                           after its author leaves
     0x80  friend_note       str, optional intro line on a friend request
                                           (friends.py); never on a chat message
+    0x90  file_name         str, display name of a shared file, a bare
+                                          printable basename (max 128 chars)
+    0x91  file_size         int, byte length of the shared file
+    0x92  file_hash         bytes[32], SHA-256 of the file bytes; the address
+                                          a member downloads it by
+    0x93  file_chunk_root   bytes[32], SHA-256 over the concatenated SHA-256s
+                                          of each 64 KB chunk, so the author's
+                                          signature covers every chunk
 
 A direct message uses none of the fields above. It is a plain LXMF message --
 its text in the ordinary content, its attachment in LXMF's own FIELD_IMAGE --

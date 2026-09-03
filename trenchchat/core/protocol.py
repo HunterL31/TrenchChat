@@ -16,6 +16,7 @@ Field key registry
 0x60–0x6F  Voice fields
 0x70–0x7F  Message integrity fields
 0x80–0x8F  Friends / direct message fields
+0x90–0x9F  File manifest fields
 
 These numbers are TrenchChat's own and never appear as LXMF field keys on the
 wire: LXMF reserves 0x00-0x80 for its standard registry (0x01 is
@@ -108,6 +109,30 @@ F_FRIEND_NOTE       = 0x80   # str: optional intro line on a friend request
 # Longest intro line accepted on a friend request. Self-asserted text from an
 # identity we have no relationship with yet, so it is capped on the way in.
 MAX_FRIEND_NOTE_CHARS = 140
+
+# --- File manifest fields ---
+#
+# A shared file travels as a manifest on an ordinary channel message; the bytes
+# are pulled separately, only by a member who asks for them.
+F_FILE_NAME         = 0x90   # str: display name, a bare printable basename
+F_FILE_SIZE         = 0x91   # int: byte length of the file
+F_FILE_HASH         = 0x92   # bytes[32]: SHA-256 of the file bytes; its address everywhere
+F_FILE_CHUNK_ROOT   = 0x93   # bytes[32]: SHA-256 over the concatenated SHA-256s of each
+                             #            FILE_CHUNK_BYTES chunk
+
+# The unit of verification, and of the work lost when a link drops mid-transfer.
+FILE_CHUNK_BYTES = 64 * 1024
+
+# Largest file a share may carry. Chosen against the slowest link the project
+# targets, and matched to what node file serving already runs under.
+MAX_SHARED_FILE_BYTES = 5 * 1024 * 1024
+
+# Matches fileutils.MAX_FILENAME_CHARS: a manifest name is what clean_filename
+# produces, so the two ceilings are the same number.
+MAX_FILE_NAME_CHARS = 128
+
+# Both manifest digests are SHA-256.
+FILE_DIGEST_BYTES = 32
 
 
 # --- Direct message envelope ---
@@ -360,10 +385,71 @@ def _length_prefixed(*parts: bytes) -> bytes:
     return b"".join(struct.pack(">I", len(p)) + p for p in parts)
 
 
+def chunk_hashes(data: bytes) -> list[bytes]:
+    """The SHA-256 of every FILE_CHUNK_BYTES chunk of a file, in order.
+
+    Empty data has no chunks. The list is what a downloader checks each
+    arriving chunk against, so a hostile holder is caught on the chunk it
+    spoils rather than at the end of the transfer.
+    """
+    return [
+        hashlib.sha256(data[i:i + FILE_CHUNK_BYTES]).digest()
+        for i in range(0, len(data), FILE_CHUNK_BYTES)
+    ]
+
+
+def chunk_root(hash_list) -> bytes:
+    """SHA-256 over the concatenated chunk hashes.
+
+    One 32-byte value on the message covers every chunk of the file, so the
+    author's signature reaches the chunk list without carrying it.
+    """
+    return hashlib.sha256(b"".join(hash_list)).digest()
+
+
+def _name_is_clean(name: str) -> bool:
+    """Whether a manifest name is already a bare printable basename.
+
+    The same shape fileutils.clean_filename produces, checked rather than
+    applied: a sender cleans its own name, and a name that arrives needing
+    cleaning is a manifest to refuse, not one to repair.
+    """
+    if not name or len(name) > MAX_FILE_NAME_CHARS:
+        return False
+    if name != name.strip().strip("."):
+        return False
+    if any(c in name for c in '/\\"'):
+        return False
+    return all(c.isprintable() for c in name)
+
+
+def file_manifest(name, size, file_hash, root) -> dict | None:
+    """A file manifest normalised for use, or None if it is not a valid one.
+
+    Every part of a manifest is asserted by the sender, so the shape is
+    checked before it is stored or signed: a bare printable basename, a
+    positive size inside MAX_SHARED_FILE_BYTES, and two 32-byte digests.
+    Strings are taken as strings; callers coerce a bytes field from the wire
+    before calling.
+    """
+    if not isinstance(name, str) or not _name_is_clean(name):
+        return None
+    if not isinstance(size, int) or isinstance(size, bool):
+        return None
+    if size < 1 or size > MAX_SHARED_FILE_BYTES:
+        return None
+    if not isinstance(file_hash, bytes) or len(file_hash) != FILE_DIGEST_BYTES:
+        return None
+    if not isinstance(root, bytes) or len(root) != FILE_DIGEST_BYTES:
+        return None
+    return {"name": name, "size": size, "hash": file_hash, "chunk_root": root}
+
+
 def author_digest(channel_hash_hex: str, message_id: str, timestamp: float,
                   content: str, reply_to: str | None,
                   last_seen_id: str | None,
-                  image_data: bytes | None) -> bytes:
+                  image_data: bytes | None,
+                  manifest: dict | None = None) -> bytes:
     """The bytes an author signs to bind a message to their identity.
 
     Covers everything a relay could otherwise alter while passing every other
@@ -372,12 +458,18 @@ def author_digest(channel_hash_hex: str, message_id: str, timestamp: float,
     message_id is covered too, which is what stops a tampered copy being
     stored under a genuine message's id.
 
+    A file manifest is appended only when there is one, so a message without a
+    file hashes exactly as it did before files existed and every signature
+    already in circulation still verifies. The manifest's digests are what the
+    signature reaches the bytes through: a downloaded copy is checked against
+    the hash and the chunk root, never against the relay that served it.
+
     sender_name is deliberately absent: a display name is self-asserted and
     mutable, so signing it would freeze it at send time and fail on rename.
     The timestamp is formatted, not packed, so peers agree on it without
     depending on float encoding.
     """
-    return hashlib.sha256(_length_prefixed(
+    parts = [
         AUTHOR_SIG_DOMAIN,
         bytes.fromhex(channel_hash_hex),
         message_id.encode(),
@@ -386,7 +478,15 @@ def author_digest(channel_hash_hex: str, message_id: str, timestamp: float,
         (last_seen_id or "").encode(),
         hashlib.sha256(image_data or b"").digest(),
         content.encode("utf-8"),
-    )).digest()
+    ]
+    if manifest:
+        parts += [
+            manifest.get("hash") or b"",
+            manifest.get("chunk_root") or b"",
+            str(manifest.get("name") or "").encode("utf-8"),
+            str(manifest.get("size") or 0).encode(),
+        ]
+    return hashlib.sha256(_length_prefixed(*parts)).digest()
 
 
 def unpack_wire(payload: bytes, *, raw: bool = False, int_keys: bool = False):
