@@ -495,6 +495,19 @@ def inbound_manifest(fields: dict) -> dict | None:
     )
 
 
+def carries_manifest(fields: dict) -> bool:
+    """Whether an inbound message tried to name a file, well formed or not.
+
+    The permission gate asks this rather than asking for the manifest: a
+    sender who may not share files does not get a different outcome for
+    naming one badly.
+    """
+    if not fields:
+        return False
+    return any(key in fields for key in
+               (F_FILE_NAME, F_FILE_SIZE, F_FILE_HASH, F_FILE_CHUNK_ROOT))
+
+
 def manifest_fields(manifest: dict) -> dict:
     """The four wire fields that carry a manifest."""
     return {

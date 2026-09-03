@@ -14,15 +14,22 @@ free of any GUI framework dependency.
 
 from collections.abc import Callable
 
-from trenchchat.core.files import build_manifest
+from trenchchat.core.files import REASON_STORAGE, build_manifest
 from trenchchat.core.node_browser import parse_nomad_url
 from trenchchat.core.permissions import (
     CREATE_CHANNEL, KICK, MANAGE_CHANNEL, MANAGE_ROLES, SEND_MESSAGE,
-    VOICE_CHAT, is_open_join, permissions_from_json,
+    SHARE_FILES, VOICE_CHAT, is_open_join, permissions_from_json,
 )
 from trenchchat.core.protocol import file_manifest
 
 MAX_THEME_NAME_LEN = 64
+
+# Why a send was turned down, for a caller with no other feedback loop.
+REASON_NO_SEND_PERMISSION = "no_send_permission"
+REASON_NO_SHARE_PERMISSION = "no_share_permission"
+REASON_NO_CHANNEL = "no_channel"
+REASON_OPEN_JOIN = "open_join_channel"
+REASON_BAD_MANIFEST = "bad_manifest"
 
 DIRECTORY_SCOPE_ALL = "all"
 DIRECTORY_SCOPE_FRIENDS = "friends"
@@ -112,35 +119,56 @@ def build_file_manifest(name: str, data: bytes) -> dict | None:
     return build_manifest(name, data)
 
 
-def send_message(storage, subscription_mgr, messaging, channel_hash_hex: str,
-                 sender_hash_hex: str, content: str, *,
-                 image_data: bytes | None = None,
-                 reply_to: str | None = None,
-                 manifest: dict | None = None) -> bool:
-    """Compute recipients and send. Returns False (no-op) if the sender
-    lacks permission to send on this channel.
+def file_share_refusal(storage, channel_hash_hex: str,
+                       sender_hash_hex: str) -> str | None:
+    """Why a file share here would be refused, or None if it is allowed.
 
-    A file manifest is refused on an open-join channel, and on a channel this
-    node holds no record of: there is no member list there to authorise a
-    serve against, so a share nobody could be allowed to fetch is not offered
-    in the first place. One that is not a valid manifest is refused too,
-    rather than signed and sent for every receiver to strip.
+    A manifest is only offered where a member list can authorise a serve, so
+    an open-join channel and a channel this node holds no record of are
+    refused whatever the roles say. Beyond that a file is a message:
+    SEND_MESSAGE is the floor, and SHARE_FILES is what an admin narrows it
+    with. The outbound half of the SHARE_FILES gate; the core enforcement is
+    in Messaging._on_lxmf_message, which holds against a peer calling in
+    directly.
+    """
+    channel = storage.get_channel(channel_hash_hex)
+    if channel is None:
+        return REASON_NO_CHANNEL
+    if is_open_join(permissions_from_json(channel["permissions"])):
+        return REASON_OPEN_JOIN
+    if not storage.has_permission(channel_hash_hex, sender_hash_hex, SEND_MESSAGE):
+        return REASON_NO_SEND_PERMISSION
+    if not storage.has_permission(channel_hash_hex, sender_hash_hex, SHARE_FILES):
+        return REASON_NO_SHARE_PERMISSION
+    return None
+
+
+def send_message_result(storage, subscription_mgr, messaging,
+                        channel_hash_hex: str, sender_hash_hex: str,
+                        content: str, *,
+                        image_data: bytes | None = None,
+                        reply_to: str | None = None,
+                        manifest: dict | None = None) -> dict:
+    """Compute recipients and send. Returns {"sent", "reason"}.
+
+    reason names which guard turned the send down, so a caller with no other
+    feedback loop can tell a missing send_message apart from a missing
+    share_files. A manifest that is not a valid one is refused here rather
+    than signed and sent for every receiver to strip.
     """
     if manifest is not None:
-        channel = storage.get_channel(channel_hash_hex)
-        if channel is None:
-            return False
-        if is_open_join(permissions_from_json(channel["permissions"])):
-            return False
+        refusal = file_share_refusal(storage, channel_hash_hex, sender_hash_hex)
+        if refusal is not None:
+            return {"sent": False, "reason": refusal}
         manifest = file_manifest(manifest.get("name"), manifest.get("size"),
                                  manifest.get("hash"), manifest.get("chunk_root"))
         if manifest is None:
-            return False
+            return {"sent": False, "reason": REASON_BAD_MANIFEST}
     recipients = compute_send_recipients(
         storage, subscription_mgr, channel_hash_hex, sender_hash_hex
     )
     if recipients is None:
-        return False
+        return {"sent": False, "reason": REASON_NO_SEND_PERMISSION}
     messaging.send_message(
         channel_hash_hex=channel_hash_hex,
         content=content,
@@ -149,7 +177,19 @@ def send_message(storage, subscription_mgr, messaging, channel_hash_hex: str,
         reply_to=reply_to,
         manifest=manifest,
     )
-    return True
+    return {"sent": True, "reason": None}
+
+
+def send_message(storage, subscription_mgr, messaging, channel_hash_hex: str,
+                 sender_hash_hex: str, content: str, *,
+                 image_data: bytes | None = None,
+                 reply_to: str | None = None,
+                 manifest: dict | None = None) -> bool:
+    """send_message_result() for callers that only need whether it went."""
+    return send_message_result(
+        storage, subscription_mgr, messaging, channel_hash_hex, sender_hash_hex,
+        content, image_data=image_data, reply_to=reply_to, manifest=manifest,
+    )["sent"]
 
 
 def share_file(file_mgr, storage, subscription_mgr, messaging,
@@ -157,24 +197,29 @@ def share_file(file_mgr, storage, subscription_mgr, messaging,
                data: bytes, content: str = "") -> dict:
     """Store a file, then send the message that names it.
 
-    Two steps that only make sense together: the bytes are stored first so a
-    member who acts on the message immediately finds a holder, and the message
-    goes through the same send guard as any other, so a sender who may not
-    post here has not been made a holder of something nobody can ask for.
+    Two steps that only make sense together: the guard runs before anything is
+    stored, so a sender who may not share here is never made the holder of
+    something nobody can ask for, and the bytes are then stored before the
+    message goes out, so a member who acts on it immediately finds a holder.
 
-    Returns {"shared", "sent", "reason", "manifest"}; reason is "storage" when
-    the file could not be stored (an unusable name or size, or a full own
-    store) and "refused" when the send guard turned the message down.
+    Returns {"shared", "sent", "reason", "manifest"}; reason is the send
+    guard's own when it turned the share down (no_share_permission for a
+    member an admin has kept to text), and "storage" when the file could not
+    be stored (an unusable name or size, or a full own store).
     """
+    refusal = file_share_refusal(storage, channel_hash_hex, self_hash_hex)
+    if refusal is not None:
+        return {"shared": False, "sent": False, "reason": refusal,
+                "manifest": None}
     manifest = file_mgr.share(channel_hash_hex, name, data)
     if manifest is None:
-        return {"shared": False, "sent": False, "reason": "storage",
+        return {"shared": False, "sent": False, "reason": REASON_STORAGE,
                 "manifest": None}
-    sent = send_message(storage, subscription_mgr, messaging,
-                        channel_hash_hex, self_hash_hex, content,
-                        manifest=manifest)
-    return {"shared": True, "sent": sent,
-            "reason": None if sent else "refused", "manifest": manifest}
+    result = send_message_result(storage, subscription_mgr, messaging,
+                                 channel_hash_hex, self_hash_hex, content,
+                                 manifest=manifest)
+    return {"shared": True, "sent": result["sent"],
+            "reason": result["reason"], "manifest": manifest}
 
 
 def request_file_download(file_mgr, channel_hash_hex: str,

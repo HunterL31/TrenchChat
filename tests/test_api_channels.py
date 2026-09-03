@@ -154,6 +154,31 @@ class TestMyPermissionsSendMessage:
 
         assert res.json()["send_message"] is False
 
+    def test_open_join_channel_reports_share_files_false(self, client, backend):
+        """Files need a member list to authorise a serve, so an open-join
+        channel refuses a manifest whatever the roles say."""
+        backend.storage.get_channel.return_value = {
+            "permissions": json.dumps(dict(PRESET_OPEN))
+        }
+        backend.storage.has_permission.return_value = True
+
+        res = client.get("/channels/deadbeef/my_permissions", headers=AUTH)
+
+        assert res.json()["share_files"] is False
+
+    def test_private_channel_reports_the_role_check(self, client, backend):
+        backend.storage.get_channel.return_value = {
+            "permissions": json.dumps(dict(PRESET_PRIVATE))
+        }
+        backend.storage.has_permission.return_value = True
+
+        assert client.get("/channels/deadbeef/my_permissions",
+                          headers=AUTH).json()["share_files"] is True
+
+        backend.storage.has_permission.return_value = False
+        assert client.get("/channels/deadbeef/my_permissions",
+                          headers=AUTH).json()["share_files"] is False
+
 
 @needs_backend
 class TestChannelUnread:

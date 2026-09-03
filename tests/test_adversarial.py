@@ -71,7 +71,7 @@ from trenchchat.core.storage import FRIEND_PENDING_IN, FRIEND_PENDING_OUT
 from trenchchat.core.permissions import (
     ALL_PERMISSIONS, FULL_SYNC, INVITE, KICK, MANAGE_CHANNEL, MANAGE_ROLES,
     PRESET_OPEN, PRESET_PRIVATE, ROLE_ADMIN, ROLE_MEMBER, ROLE_OWNER, SEND_MESSAGE,
-    is_open_join, permissions_from_json,
+    SHARE_FILES, VOICE_CHAT, is_open_join, permissions_from_json,
 )
 from trenchchat.core.subscription import SubscriptionManager, _subscriber_payload
 from trenchchat.core.protocol import (
@@ -94,7 +94,7 @@ from tests.test_files import (
 from tests.test_files import download as file_download
 from tests.test_files import share as file_share
 from trenchchat.core.actions import build_file_manifest
-from trenchchat.core.files import DL_UNAVAILABLE, chunk_count_for
+from trenchchat.core.files import DL_DONE, DL_UNAVAILABLE, chunk_count_for
 from trenchchat.core.protocol import (
     F_FILE_CHUNK_ROOT, F_FILE_HASH, F_FILE_NAME, F_FILE_SIZE,
     MAX_SHARED_FILE_BYTES,
@@ -1961,6 +1961,157 @@ class TestFileServeGate:
                              bob.identity.hash_hex, file_hash)
         assert asked[0] == alice.identity.hash_hex
         assert carol.identity.hash_hex in asked
+
+# ---------------------------------------------------------------------------
+# SHARE_FILES: a member an admin has kept to text
+# ---------------------------------------------------------------------------
+
+class TestShareFilesGate:
+    """A file is a message, so send_message is the floor and share_files
+    narrows it. The client gate hides the attach control, the outbound guard
+    refuses the manifest before it is signed, and the receiver drops a file
+    message from a member without the permission: the last is the only layer
+    that holds when the sender is the bad client.
+
+    Downloading is not gated on it. A member who may not attach a file may
+    still fetch one another member shared, and holding it makes them a holder
+    like anyone else.
+    """
+
+    _FILE_BYTES = b"survey data\n" * 500
+
+    def _text_only_member(self, peer_factory):
+        """Alice (owner) and Bob, a member who may send but not share."""
+        return _setup_channel_with_member(
+            peer_factory, member_perms=[SEND_MESSAGE, VOICE_CHAT]
+        )
+
+    def test_a_file_message_from_a_member_without_it_is_dropped(self, peer_factory):
+        """The core layer: Bob's client ignores its own guard and sends anyway."""
+        alice, bob, ch_hash = self._text_only_member(peer_factory)
+        assert not bob.storage.has_permission(
+            ch_hash, bob.identity.hash_hex, SHARE_FILES)
+        manifest = build_file_manifest("survey.csv", self._FILE_BYTES)
+
+        bob.messaging.send_message(
+            channel_hash_hex=ch_hash,
+            content="have this",
+            subscriber_hashes=[alice.identity.hash_hex],
+            manifest=manifest,
+        )
+        time.sleep(0.3)
+
+        assert all(m["sender_hash"] != bob.identity.hash_hex
+                   for m in alice.storage.get_messages(ch_hash)), \
+            "Alice stored a file message from a member without share_files"
+
+    def test_the_same_member_is_still_heard_in_text(self, peer_factory):
+        """Control: the drop is about the manifest, not about Bob."""
+        alice, bob, ch_hash = self._text_only_member(peer_factory)
+
+        bob.messaging.send_message(
+            channel_hash_hex=ch_hash,
+            content="just words",
+            subscriber_hashes=[alice.identity.hash_hex],
+        )
+
+        assert wait_for(
+            lambda: any(m["content"] == "just words"
+                        for m in alice.storage.get_messages(ch_hash)),
+            timeout=5,
+        ), "a plain message from the same member was dropped too"
+
+    def test_the_outbound_guard_refuses_it_before_it_is_signed(self, peer_factory):
+        alice, bob, ch_hash = self._text_only_member(peer_factory)
+        manifest = build_file_manifest("survey.csv", self._FILE_BYTES)
+
+        result = actions.send_message_result(
+            bob.storage, bob.subscription_mgr, bob.messaging, ch_hash,
+            bob.identity.hash_hex, "have this", manifest=manifest,
+        )
+
+        assert result == {"sent": False,
+                          "reason": actions.REASON_NO_SHARE_PERMISSION}
+        assert bob.storage.get_messages(ch_hash) == [], \
+            "the refused message was stored locally anyway"
+
+    def test_share_file_stores_nothing_when_the_guard_refuses(self, peer_factory):
+        alice, bob, ch_hash = self._text_only_member(peer_factory)
+        manifest = build_file_manifest("survey.csv", self._FILE_BYTES)
+
+        result = actions.share_file(
+            bob.file_mgr, bob.storage, bob.subscription_mgr, bob.messaging,
+            ch_hash, bob.identity.hash_hex, "survey.csv", self._FILE_BYTES,
+        )
+
+        assert result["shared"] is False
+        assert result["reason"] == actions.REASON_NO_SHARE_PERMISSION
+        assert bob.storage.get_file(manifest["hash"].hex()) is None, \
+            "Bob was made the holder of a file nobody may ask him for"
+
+    def test_a_member_without_it_may_still_download(self, peer_factory):
+        """Downloading needs membership only; the serve gate asks nothing else."""
+        peers, ch_hash = file_channel(peer_factory, "alice", "bob")
+        alice, bob = peers
+        text_only = dict(PRESET_PRIVATE)
+        text_only[ROLE_MEMBER] = [SEND_MESSAGE, VOICE_CHAT]
+        for peer in peers:
+            peer.storage.set_channel_permissions(ch_hash, text_only)
+        assert not bob.storage.has_permission(
+            ch_hash, bob.identity.hash_hex, SHARE_FILES)
+
+        data = blob(2, seed=23)
+        manifest = file_share(alice, ch_hash, "survey.bin", data)
+        status = file_download(bob, ch_hash, manifest["hash"].hex())
+
+        assert status["state"] == DL_DONE
+        assert bob.file_mgr.file_bytes(manifest["hash"].hex()) == data
+
+    def test_taking_it_away_stops_the_next_share(self, peer_factory):
+        """An admin narrows a channel that already allowed files.
+
+        The change travels as a signed permissions document, so the receiver
+        is applying its own copy of it when it drops the next file message.
+        """
+        alice, bob, ch_hash = _setup_channel_with_member(peer_factory)
+        first = build_file_manifest("first.csv", self._FILE_BYTES)
+        bob.messaging.send_message(
+            channel_hash_hex=ch_hash, content="first",
+            subscriber_hashes=[alice.identity.hash_hex], manifest=first,
+        )
+        assert wait_for(
+            lambda: any(m["file_hash"] == first["hash"].hex()
+                        for m in alice.storage.get_messages(ch_hash)),
+            timeout=5,
+        ), "the control share never arrived"
+
+        text_only = dict(PRESET_PRIVATE)
+        text_only[ROLE_MEMBER] = [SEND_MESSAGE, VOICE_CHAT]
+        assert actions.edit_channel_permissions(
+            alice.storage, alice.invite_mgr, ch_hash,
+            alice.identity.hash_hex, text_only,
+        )
+        assert wait_for(
+            lambda: not bob.storage.has_permission(
+                ch_hash, bob.identity.hash_hex, SHARE_FILES),
+            timeout=5,
+        ), "Bob never received the permissions change"
+
+        second = build_file_manifest("second.csv", self._FILE_BYTES + b"!")
+        bob.messaging.send_message(
+            channel_hash_hex=ch_hash, content="second",
+            subscriber_hashes=[alice.identity.hash_hex], manifest=second,
+        )
+        time.sleep(0.3)
+
+        assert all(m["file_hash"] != second["hash"].hex()
+                   for m in alice.storage.get_messages(ch_hash)), \
+            "Alice took a file message after removing share_files from members"
+        assert not actions.send_message(
+            bob.storage, bob.subscription_mgr, bob.messaging, ch_hash,
+            bob.identity.hash_hex, "second", manifest=second,
+        ), "Bob's own guard still offered the share"
+
 
 # ---------------------------------------------------------------------------
 # ADMIN ADVERSARY: a trusted signer exceeding their own permissions

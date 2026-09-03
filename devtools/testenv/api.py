@@ -45,8 +45,9 @@ from trenchchat.core.interfaces_config import (
 from trenchchat.core.naming import NameInUseError
 from trenchchat.core.permissions import (
     ALL_PERMISSIONS, CREATE_CHANNEL, INVITE, KICK, MANAGE_CHANNEL, MANAGE_ROLES,
-    ROLE_ADMIN, ROLE_MEMBER, PRESET_OPEN, PRESET_PRIVATE, SEND_MESSAGE, VOICE_CHAT,
-    is_open_join, offered_permissions, permissions_from_json,
+    ROLE_ADMIN, ROLE_MEMBER, PRESET_OPEN, PRESET_PRIVATE, SEND_MESSAGE,
+    SHARE_FILES, VOICE_CHAT, is_open_join, offered_permissions,
+    permissions_from_json,
 )
 from trenchchat.core.presence import resolve_display_name
 from trenchchat.core.link_quality import (
@@ -1583,10 +1584,17 @@ def create_app(backend: Backend, *, token: str | None = None,
         channel = backend.storage.get_channel(channel_hash)
         perms = permissions_from_json(channel["permissions"]) if channel else {}
         send_message = True
+        # share_files is the other way round: a file is offered only where a
+        # member list can authorise a serve, so an open-join channel refuses
+        # a manifest whatever the roles say (actions.file_share_refusal).
+        share_files = False
         if channel and not is_open_join(perms):
             send_message = backend.storage.has_permission(channel_hash, my_hex, SEND_MESSAGE)
+            share_files = send_message and backend.storage.has_permission(
+                channel_hash, my_hex, SHARE_FILES)
         return {
             "send_message": send_message,
+            "share_files": share_files,
             "invite": backend.storage.has_permission(channel_hash, my_hex, INVITE),
             "kick": backend.storage.has_permission(channel_hash, my_hex, KICK),
             "manage_roles": backend.storage.has_permission(channel_hash, my_hex, MANAGE_ROLES),
