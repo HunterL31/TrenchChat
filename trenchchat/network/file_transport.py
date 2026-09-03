@@ -205,6 +205,15 @@ class FileTransportBase(LinkClientBase):
     def drop_link(self, holder_hex: str) -> bool:
         raise NotImplementedError
 
+    def can_reach(self, holder_hex: str) -> bool:
+        """Whether this holder's file plane can be dialled without waiting.
+
+        Every holder looks reachable to a transport that cannot tell, which
+        keeps holder choice on presence alone; RNSFileTransport answers it
+        from the path table.
+        """
+        return True
+
     def tick(self) -> None:
         raise NotImplementedError
 
@@ -292,13 +301,13 @@ class RNSFileTransport(LinkClient, FileTransportBase):
 
     # --- link client hooks ---
 
-    def _dial_destination(self, holder_hex: str):
+    def _file_destination(self, holder_hex: str):
+        """(destination, delivery hash) for a holder, destination None if cold."""
         delivery_hash = RNS.Destination.hash(
             bytes.fromhex(holder_hex), "lxmf", "delivery")
         peer_identity = RNS.Identity.recall(delivery_hash)
         if peer_identity is None:
-            RNS.Transport.request_path(delivery_hash)
-            return None, None
+            return None, delivery_hash
         dest = RNS.Destination(
             peer_identity,
             RNS.Destination.OUT,
@@ -306,10 +315,21 @@ class RNSFileTransport(LinkClient, FileTransportBase):
             APP_NAME,
             APP_ASPECT_FILES,
         )
+        return dest, delivery_hash
+
+    def _dial_destination(self, holder_hex: str):
+        dest, delivery_hash = self._file_destination(holder_hex)
+        if dest is None:
+            RNS.Transport.request_path(delivery_hash)
+            return None, None
         if not RNS.Transport.has_path(dest.hash):
             RNS.Transport.request_path(dest.hash)
             return None, None
         return dest, None
+
+    def can_reach(self, holder_hex: str) -> bool:
+        dest, _delivery_hash = self._file_destination(holder_hex)
+        return dest is not None and RNS.Transport.has_path(dest.hash)
 
     def _should_identify(self, holder_hex: str) -> bool:
         # Never optional here: the holder cannot check membership without

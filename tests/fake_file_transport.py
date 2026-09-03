@@ -145,6 +145,10 @@ class FakeFileTransport(FileTransportBase):
 
     # --- links ---
 
+    def can_reach(self, holder_hex: str) -> bool:
+        """A holder marked unreachable is one no path leads to."""
+        return holder_hex not in self.unreachable
+
     def drop_link(self, holder_hex: str) -> bool:
         """Drop the link to a holder, failing whatever it carries right now."""
         had_link = holder_hex in self.linked

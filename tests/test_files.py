@@ -312,6 +312,39 @@ def test_a_quiet_member_is_asked_anyway(peer_factory):
     assert bob.file_mgr.file_bytes(file_hash) == data
 
 
+def test_a_member_with_no_path_is_asked_after_a_holder_with_one(peer_factory):
+    """Regression guard for what the files5 radio runs spent their time on.
+
+    A node announces on the files aspect only while it holds something, so a
+    member holding nothing has no path to dial, and the dial ladder cannot
+    tell that from a holder that is merely slow: asking it spends the whole
+    ladder and ends as unreachable. Presence cannot see the difference, and
+    here it says the member holding nothing is the livelier of the two.
+    """
+    (alice, bob, carol), ch_hash = file_channel(peer_factory, "alice", "bob",
+                                                "carol")
+    data = blob(2)
+    manifest = share(alice, ch_hash, "survey.bin", data)
+    file_hash = manifest["hash"].hex()
+    msg_id = wait_for_file_message(bob, ch_hash, file_hash)
+
+    bob.file_transport.unreachable.add(carol.identity.hash_hex)
+    bob.presence_mgr.record_offline(alice.identity.hash_hex)
+
+    registry = bob.file_transport.registry
+    with registry.lock:
+        since = len(registry.fetch_log)
+    bob.file_mgr.request_download(ch_hash, msg_id)
+    wait_for_state(bob, file_hash, DL_DONE)
+
+    bob_hex = bob.identity.hash_hex
+    assert list_fetches(registry, bob_hex, file_hash, since) == [
+        alice.identity.hash_hex]
+    asked = {holder for holder, _first, _count
+             in chunk_fetches(registry, bob_hex, file_hash, since)}
+    assert asked == {alice.identity.hash_hex}, asked
+
+
 # ---------------------------------------------------------------------------
 # Interrupted links, resume and the request window
 # ---------------------------------------------------------------------------
@@ -609,6 +642,44 @@ def test_a_parked_download_asks_again_without_hearing_anyone(peer_factory):
     wait_for_state(bob, file_hash, DL_UNAVAILABLE)
     bob.file_transport.unreachable.discard(alice.identity.hash_hex)
 
+    bob.file_mgr.tick(now=time.time() + DOWNLOAD_RETRY_SECS + 1.0)
+
+    wait_for_state(bob, file_hash, DL_DONE)
+    assert bob.file_mgr.file_bytes(file_hash) == data
+
+
+def test_a_served_range_puts_the_retry_wait_back_to_the_floor(peer_factory):
+    """Regression guard for what the files8 loss runs spent their time on.
+
+    The wait doubles every time one is spent, and hearing a peer is what puts
+    it back. A served range says the same thing and used to say it to nobody,
+    so a download that lost one request early asked twice in ten minutes on a
+    link that was answering in between.
+    """
+    (alice, bob), ch_hash = file_channel(peer_factory, "alice", "bob")
+    data = blob(3)
+    manifest = share(alice, ch_hash, "survey.bin", data)
+    file_hash = manifest["hash"].hex()
+    msg_id = wait_for_file_message(bob, ch_hash, file_hash)
+    alice_hex = alice.identity.hash_hex
+
+    bob.file_transport.unreachable.add(alice_hex)
+    bob.file_mgr.request_download(ch_hash, msg_id)
+    wait_for_state(bob, file_hash, DL_UNAVAILABLE)
+
+    # One wait spent with nothing served doubles it; the range that lands
+    # after it is what puts it back to the floor.
+    bob.file_transport.unreachable.discard(alice_hex)
+    bob.file_transport.stall_chunks.add((alice_hex, 1))
+    bob.file_mgr.tick(now=time.time() + DOWNLOAD_RETRY_SECS + 1.0)
+    assert wait_for(
+        lambda: (bob.file_mgr.download_status(file_hash)["state"]
+                 == DL_UNAVAILABLE
+                 and bob.file_mgr.download_status(file_hash)["chunks_held"]
+                 == 1),
+        timeout=10.0), bob.file_mgr.download_status(file_hash)
+
+    bob.file_transport.stall_chunks.clear()
     bob.file_mgr.tick(now=time.time() + DOWNLOAD_RETRY_SECS + 1.0)
 
     wait_for_state(bob, file_hash, DL_DONE)
