@@ -47,6 +47,7 @@ import scen_authorship  # noqa: F401,E402  (registers family integrity)
 import scen_nomad   # noqa: F401,E402  (registers family nomad)
 import scen_interop # noqa: F401,E402  (registers family interop)
 import scen_dm     # noqa: F401,E402  (registers family dm)
+import scen_files  # noqa: F401,E402  (registers family files)
 
 _ORCHESTRATOR = _TESTENV_DIR / "orchestrator.py"
 _BOOT_TIMEOUT = 180.0
@@ -101,6 +102,9 @@ def _boot(testers: int, log_path: str | None = None) -> subprocess.Popen:
     if log_path:
         env["TC_TESTENV_LOGLEVEL"] = "7"
         sink = open(log_path, "w")
+        # Named for the scenarios too: a refusal is silent on the wire, so
+        # proving one happened means reading the holder's log for it.
+        os.environ["TC_TESTER_LOG"] = str(Path(log_path).resolve())
         print(f"  capturing tester logs to {log_path}")
     return subprocess.Popen(
         [sys.executable, str(_ORCHESTRATOR), "--testers", str(testers)],

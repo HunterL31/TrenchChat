@@ -38,6 +38,7 @@ tester's API (8801+) or one orchestrator call (8800).
 | **Membership** | send invite, accept invite, decline invite, kick, promote to admin, demote |
 | **Permissions** | edit channel perms (`send_message`, `invite`, `kick`, `manage_roles`, `manage_channel`, `create_channel`, `full_sync`), edit server perms |
 | **Messaging** | send message, reply to message, send image, add reaction, remove reaction, import custom emoji |
+| **Files** | share a file with a message, start a download, read a download's state, read the bytes back, read the store's usage, dial a holder's file plane directly (a harness hook, so a non-member's request can reach the wire at all) |
 | **Lifecycle** | go offline (link drop), go online, kill process, start process, restart, reset tester, kill/start hub |
 | **Link** | set profile, the names `link_profiles.py` actually defines: `broadband`, `satellite`, `serial` (9600), `lora_fast` (SF7), `lora_long` (SF10), `packet_radio`, `lossy` (15% loss), `custom` (explicit bitrate/latency/jitter/loss) |
 
@@ -61,6 +62,10 @@ instant delivery.
 | Propagation node | `GET /propagation` → selected node, nodes heard, transfer state |
 | Link | `GET /net/status`, orchestrator `GET /status` |
 | Network map | `GET /network/map` → nodes (identity, kind, hops, quality, path detail), edges, interfaces |
+| File card | message rows → `file: {name, size, hash, state, progress, reason}`, or null |
+| Download | `GET /channels/{h}/files/{hash}/fetch` → state, progress, chunks held, current holder |
+| File bytes | `GET /channels/{h}/files/{hash}` → the file, 404 until this node holds all of it |
+| File store | `GET /files/usage` → bytes held against the own, received and partial budgets |
 | Events | the `/ws` event socket, collected live → event types and their counts |
 
 **Convergence** is the workhorse assertion: named peers hold identical message
@@ -664,6 +669,135 @@ does not name), and leave joiners alone.
 | nomad3 | A,B | B fetches once; A goes offline; B requests an uncached page; A returns; B fetches a new page | ⚠ **Confirmed.** The offline fetch never arrives and never hangs; the dial ladder gives up within its bounded backoff (browse accepted, nothing after 90s). After A returns, a fresh page fetch succeeds in 20.1s, tracking path re-resolution. Probe |
 | nomad4 | A,B | B fetches A's index; a new page is written into A's directory; A's process is restarted; B fetches the new page | ✅ Hosting comes back from config on boot and the new page fetches in 0.5s over a fresh link. 4/4 runs. Note: it passes with the dead-link redial disabled too; RNS closes the link when the host dies, so this is not that fix's guard (`tests/test_node_transport.py` is) |
 
+### `files`: Shared files in invite-only channels
+
+A file message carries a manifest and never the bytes: name, size, SHA-256 and
+chunk root, under 200 bytes, riding the ordinary message path. The bytes move
+only when a member asks for them, over the file plane's own RNS Links on the
+`files` aspect, one chunk range per request, every chunk verified against the
+signed chunk root before it is stored. `tests/test_files.py` covers that
+engine against a transport double. This family covers the three things the
+double cannot produce: a real path to a destination, a holder that dies with a
+transfer in flight, and what a request window that doubles and halves actually
+costs on a radio.
+
+It earned its keep immediately. **files1, the plainest row here, failed twice
+for two different reasons before it passed once**, and neither was visible to
+the 167 file tests under `tests/`: nothing on the mesh could resolve a path to
+the file plane, and the concurrent-serve cap refused every range after the
+first. files3 then found a third (holder choice treated a member it had not
+heard from lately as one that was gone) and files8 a fourth (a parked download
+with no way to try again). All four were fatal in production, all four are
+fixed, and each has a regression test; see the findings below.
+
+The request counts in the notes are read from the captured tester log
+(`--tester-log`), so they are indicative rather than exact: worker stdout is
+block buffered and a count can be short when a run ends.
+
+| ID | Peers | Actions | Expected result |
+|---|---|---|---|
+| files1 | A,B,C | A shares a 2 MB file in an invite-only channel; B and C both ask for it | ✅ **6/6 runs, 8-19s**, of which 3.5s is the transfer. Both hold it byte for byte and neither holds a byte before asking. Fails at 0 chunks without either of the first two fixes below, which is how both were found |
+| files2 | A,B,C | C offline through the share; B downloads; A's **process is killed**; C returns | ✅ **6/6 runs, 151-162s.** The check-1 proof on the file plane: C backfills the manifest by sync from B in 1.5-17.2s and pulls 2 MB from a member that never wrote the message. Its own fetch takes 123s, of which 120 are one stall timeout spent on the dead sender before the fallback |
+| files3 | A,B,C | Same shape with a 20 KB file, asserting C holds nothing before it asks | ✅ **6/6 runs, 156-174s.** Manifest in 1.5-10.1s, `GET` 404 and an empty file store held for 15s, then the download completes. 20 KB is small enough that pushing it would have been cheap, and it is still not pushed |
+| files4 | A,B,D | D, in no channel this file was shared in, drives its own file plane at A's with the real hash; B, who is a member, makes the identical request | ✅ **5/5 runs, 249-258s.** B is served the chunk list in 2.5s; D gets nothing twice over, and A's log names it. Almost all the time is D waiting: a refusal is silence, and silence costs the asker the 120s stall timeout |
+| files5 | A,B,C | files1 at `lora_fast` (SF7, 5.5 kbps), 200 KB, B downloading, testers slowed to a 60s announce cadence | ⚠ Probe, and the answer is two numbers. **Finished twice in five runs, in 610s and 687s** (335.8 and 298.3 B/s, about half the link's nominal rate, 4 requests). The other three stopped at **1 of 4 chunks**, having served 4 requests and lost 4. See below for what that says about the constants |
+| files6 | A,B,C | C downloads first; B starts; A's process is killed mid-transfer | ✅ **7/7 runs on the assertion it makes now, 82-206s.** B keeps its 7 verified chunks and takes the other 25 with the sender dead, in 21.7s when it notices the dead link at once and 142s when it spends a stall timeout first. Which holder served it is recorded, not asserted: a 0.5s poll saw C in only one run of three |
+| files7 | A,B | B's **process is killed mid-download** and restarted | ✅ **6/6 runs, 50-54s.** Comes back holding exactly the 7 chunks it had verified, resumes 4.0s later with nobody asking it to, and finishes in 27-35s |
+| files8 | A,B | files1 under `lossy` (62.5 kbps, 250±150 ms, **15% loss**), 512 KB | ⚠ Probe. **Arrived once in four runs, in 214.2s with 5 requests and no failures.** The three that did not are the three that found the announce and retry defects: 0 chunks in 600s before those fixes, 1 of 8 with the first of them. See the entry below |
+
+#### files5: what the LoRa run says about the constants
+
+200 KB over SF7 took **609.9 s** and **686.7 s** on the two runs of five that
+finished, at **335.8** and **298.3 B/s** against a nominal 687 B/s: about half
+the link. Four requests carried it, the chunk list plus ranges of 1, 2 and 1
+chunk, which is the window doing exactly what it is designed to do (double on
+success, stop at what is left).
+
+The other three runs did not finish, two of them inside 900 s and one inside
+1200 s, each stopping at **one chunk of four**. That is the more interesting
+half of the measurement and what makes this row a probe. The last of them
+served 4 requests and lost 4, and the log says what the losses were: one
+request to the holder ended on the plane's 120 s stall sweep, and two more
+were dials at the third member, which holds nothing, never announces on the
+`files` aspect, and therefore has no path to fail fast against.
+
+Read against the constants, one is worth revisiting and the rest are not:
+
+- `FILE_CHUNK_BYTES` (64 KB) is **95 s of airtime per chunk** here, against a
+  120 s stall sweep. That is too little headroom: a chunk that takes four
+  fifths of the window it is measured against fails whenever the link gives up
+  a fifth of its capacity to anything else, and at SF7 the announces of four
+  peers are exactly that. **This is the constant worth revisiting**, and 32 KB
+  is the value the measurement points at: 47 s a chunk, well inside the sweep,
+  at the cost of one more round trip per 64 KB. Not changed here, because the
+  same evidence supports raising `FILE_STALL_SECS` instead and one radio
+  profile is thin ground for choosing between them; both now have a scenario
+  that would show the difference.
+- `FILE_REQUEST_MAX_CHUNKS` (16) is never reached by a file this size and
+  would be 25 minutes of transfer inside one request at this rate. It is a
+  ceiling on a fast link, not a target on a slow one, which is what it should
+  be. **The one change worth considering** is not to the number but to the
+  window that climbs toward it: doubling costs nothing when it works and 120 s
+  when it does not, and a 200 KB file at SF7 only ever reaches a window of 2.
+  Requiring two consecutive successes before doubling, or bounding the window
+  by the throughput the last range actually measured, would make the climb
+  cheap on a radio without touching a constant. Left alone deliberately: one
+  radio profile and five runs is not enough evidence to redesign the window,
+  and the scenario that would prove it now exists.
+- `MAX_SHARED_FILE_BYTES` (5 MB) is **4.3 hours** at this measured rate. That
+  is not an argument for lowering it: the transfer is resumable across links,
+  holders and restarts, and a person who wants a 5 MB file over LoRa can leave
+  it running. It is an argument for the client saying so, which is a UI
+  decision the estimate now exists for.
+- `FILE_STALL_SECS` (120 s) is a *no progress* timer rather than a total, so
+  in principle it is measured against the gap between resource parts and not
+  against the chunk. In practice a 64 KB range at SF7 ends on it often enough
+  to be the other half of the chunk-size question above: whichever of the two
+  moves, they have to be read together.
+
+The half-rate result is the honest cost of a request-and-response transfer:
+each range is a resource with its own handshake and proof, and the link is
+idle between them. Fetching from several holders at once would fill that gap
+and is deliberately out of scope (it doubles what one download can take from a
+shared link).
+
+#### files8: what a 15% loss link costs
+
+A 512 KB file arrived once in four runs, in **214.2 s with five requests and
+no failures**, which is roughly the 62.5 kbps link running at a third of
+nominal. The three runs that did not arrive are the three that found the two
+defects below, and they are worth keeping in that order.
+
+The first two held **zero chunks** after 600 s: the download was not slow, it
+never began.
+
+What the log shows, in order: the link to the holder's file plane comes up
+(RTT 3.2 s), the requester identifies, the first request (the chunk-hash list,
+256 bytes) is sent, and nothing comes back. It ends 120 s later on the plane's
+own stall sweep, because a request packet that is proven and then never
+answered has no failure of its own in RNS. One packet lost in either direction
+costs the whole 120 s, and at 15% loss over two hops that is roughly every
+other attempt.
+
+The second half is what made it terminal rather than slow, and it is the
+[sync2 lesson](#sync2-fixed-after-three-causes) again: the only thing that
+made a parked download try again was hearing the holder announce, and a
+transport node damps repeat announces while the liveness beacon informs only
+the peer it is sent to. The requester heard nothing from the holder for eight
+minutes and never asked again. That is now fixed (a parked download asks again
+on its own, after a wait that doubles from 120 s), and the third run shows the
+difference: three requests served, two failed, **one chunk of eight verified**
+in the same 600 s. Progress rather than a stall, and still nowhere near a
+finished file.
+
+The probe is kept as the measurement of what a bad radio costs: a download
+under 15% loss is either a clean run of a few minutes or a sequence of 120 s
+silences with a coin flip at the end of each, and which one it is is decided
+by whether the first requests survive. Loss is not what makes it hard, once
+the plane can be dialled and a parked download asks again: files8 moved 512 KB
+at 15% loss in less time than files5 needed to move 200 KB at SF7 with 1%.
+Bandwidth is the binding constraint, not loss.
+
 ## The LoRa pass
 
 Every family re-run with `--link-profile lora_fast` (SF7, 5.5 kbps, 60±20ms, 1%
@@ -701,6 +835,15 @@ failure.
   may be latency rather than loss; re-run at a higher timeout scale before
   treating them as defects.
 
+The `files` family carries its own radio row rather than a whole-family pass:
+files5 is files1 at SF7, and the rest of the family is broadband because what
+it tests (a dead holder, a killed downloader, a non-member's request) is not
+about the link. One thing that pass makes plain: at SF7 the harness's own
+announces are a large fraction of the link, four testers announcing three
+destinations each every 10s against 687 bytes a second, so files5 slows every
+tester to a 60s cadence first and puts it back afterwards. Without that, the
+transfer queues behind the harness and the measurement is of the harness.
+
 At SF10 (1 kbps) the suite stops being informative: a five-message fan-out to
 two subscribers exceeded 600s before reaching the scenario's actual subject.
 That is a bandwidth floor, not a defect, shape to SF7 for behaviour, and treat
@@ -730,6 +873,10 @@ Everything the matrix turned up, across all ten families.
 | **A membership document was delivered exactly once**, and the queue holding one for an unreachable peer is in memory, so a peer that missed the only copy stayed a member on every other node and a stranger on its own, recoverable only by a fresh invite | Fixed: hearing a peer re-sends the current document for any scope they are a member of, behind a per-(scope, peer) cooldown matched to the announce interval. Documents are version-ordered, so a peer already current ignores it. invite20 fails without it |
 | **The equal-version tiebreak compared against a sentinel**, it re-derives the *stored* document's signer rather than trusting its signature map, but rebuilt that document without `joined_at`, `departed` or `channels`. The payload no longer matched the signature, nothing validated, and the `0xff…` fallback lost every tie, so any equal-version document from a trusted signer was re-applied over the one already held | Fixed: every signed field is carried across, present-or-absent as stored. Latent while equal-version documents were rare; the membership resync made them routine and servers4 went 0/5. 5/5 after the fix. Regression tests in `tests/test_invites.py` |
 | **A message from an unaccepted sender vanished**, dropped where the gate refused it, while LXMF had already proved the packet, so the sender's client showed it delivered. A client speaking only plain LXMF cannot send `MT_FRIEND_REQUEST`, so messaging was its only way to ask and it had no way at all | Fixed: the message is held as a request carrying its text, shown wherever a friend request is, and filed into the conversation on accept. The gate is untouched, holding grants nothing. Bounded where the row is written, because this path is deliberately exempt from the router's control throttle. interop4 fails without it; `tests/test_adversarial.py::TestAdversarialMessageRequests` pins the bounds |
+| **A file plane nobody could dial**: the holder registered its destination on the `files` aspect and never announced it, and a path request for a destination that has never announced is answered only by a node that already knows the path. A transport node in between does not go looking (`Interface.DISCOVER_PATHS_FOR` leaves out the ordinary full mode), so on any mesh with a hop in it every fetch failed as `unreachable` after its 120s timeout | Fixed: a node announces on the `files` aspect while it holds something to serve, when it becomes a holder and every `FILE_ANNOUNCE_INTERVAL_SECS` (300s) after. A node holding nothing stays quiet, since nobody has a reason to dial it. files1 fails at 0 chunks without it; regression tests in `tests/test_files.py` |
+| **The concurrent-serve cap counted requests, not downloads**: a slot was held per request for a two-second settle floor, so with two members downloading, every range after the first was refused. A refusal is silence, which the requester can only tell from a lost packet by waiting out its 120s stall | Fixed: the slot is held per link. A download issues one request at a time, so the next range on a link already serving is the same transfer continuing, not a third one. Regression test in `tests/test_file_transport.py` |
+| **A quiet member was treated as an absent one**: holder choice filtered candidates through `PresenceManager.is_online`, and presence is evidence of having *heard* a peer. A returning member found the only other holder unheard-from and waited for an announce with the bytes one link away | Fixed: presence orders the candidates and no longer gates them. Asking a quiet member costs one dial that fails and parks the download; not asking cost the download. Regression tests in `tests/test_files.py`, including the replacement for the test that encoded the old rule |
+| **A parked download had one trigger and it was the wrong one**: only hearing the holder announce made it try again, and a transport node damps repeat announces while the liveness beacon informs only its receiver. Under 15% loss the requester heard nothing from a holder that was up the whole time and never asked again in eight minutes | Fixed: a parked download asks again on its own after 120s, doubling to an hour, reset by any sign of a member. The same shape `SyncManager.tick` needed for sync2, and for the same reason. Regression tests in `tests/test_files.py` |
 | **Rejections were silent**: `_validate_document` returned `None` with no log for a failed signature or an unrecallable signer, and the auto-join block aborted without one for a name mismatch or a missing channel name. From outside, a rejected document is indistinguishable from one never sent | Fixed: each of those paths logs a warning naming the scope and the reason |
 
 ### Open
@@ -743,6 +890,9 @@ Everything the matrix turned up, across all ten families.
 | **voice11**: `loss_pct`, the metric `docs/voice.md` designates for the UI's per-peer quality indicator, cannot see a starved link. It counts gaps between frames that arrived, so a link delivering 8% of the audio reports ~6% loss, and `link_state` still reads `streaming` | **Confirmed** across three runs. The signal that shows it now exists (`rx_quality`'s `rate_fps`, added for voice13, plus the listener's starved playout ticks) and the UI still reads `loss_pct` |
 | **voice5 / voice4**, a voice participant whose link drops shows `connecting` indefinitely rather than `unreachable`, and one whose process dies lingers for the roster TTL, 180s in production | **Confirmed.** Neither is wrong, but a UI showing "connecting…" for three minutes after someone crashed is not the honest state `docs/voice.md` asks for |
 | **public5**: a public-channel join fires no sync request; backfill waits on the next peer announce | **Confirmed, and deliberately left.** 0 messages at join, backfill at 1.0s / 9.1s tracking the 10s heartbeat; up to 60s in the real client, and at SF7 it never arrived at all (see the LoRa pass). Deferred by decision, public-channel behaviour is being left alone for now |
+| **A member that holds nothing is still asked, and asking costs a full timeout**: a node announces on the `files` aspect only while it holds something, so a member with nothing has no path to dial, and the dial ladder cannot tell a cold path from an absent destination. Two of the four lost requests in files5's last run were exactly that | **Confirmed.** The fix is ordering rather than filtering, the same shape presence took: prefer candidates whose file plane already has a known path (`Transport.has_path`), and keep the rest as the fallback. Not made here, on one radio profile's evidence, and it costs a slow download rather than a failed one |
+| **A presence beacon is evidence for its receiver only**, so a peer that beacons is never answered and its own view stays stale. In files3 the returning member beaconed the holder every 35s for three minutes and the holder, having fresh evidence of it, had no reason to beacon back: the holder read as offline the whole time | **Confirmed**, and the reason the presence gate above had to go. The fix belongs to `presence.py` (answer a beacon from a peer we have gone quiet toward, once, the way `FirstContactAnnouncer` answers a first announce), and is not made here: nothing in `files/` depends on it any more, and every other consumer of presence deserves its own look first |
+| **A refusal on the file plane costs the asker 120s of silence**: `None` from the serve handler means RNS sends nothing, and a request packet that is proven and then never answered has no failure callback in RNS, so only the plane's own stall sweep ends it | **Confirmed** in files4, at 120.1s and 127.5s. Deliberate for a non-member (silence teaches them nothing) and the price of it is paid by a member refused for a reason that will pass, such as the concurrent-serve cap. Worth revisiting only with an answer that cannot become a probe oracle |
 | **public6**, `full_sync` has no effect on public channels; any subscriber can pull full history | **Confirmed, and deliberately left.** Identical backfill with and without the grant, and the UI offers the toggle regardless, so it reads as a privacy control that is not one. Deferred by decision, same as public5 |
 
 ### Predictions the runs refuted
@@ -798,7 +948,7 @@ How to run it, when a scenario is the right tool, and how to add one live in
 
 ## Status
 
-All twelve families built and run: **100 scenarios, 78 strict and 22 probes.**
+All thirteen families built and run: **108 scenarios, 85 strict and 23 probes.**
 
 | Family | Scenarios | Result |
 |---|---|---|
@@ -814,8 +964,9 @@ All twelve families built and run: **100 scenarios, 78 strict and 22 probes.**
 | `integrity`: message integrity | 4 (4 strict) | All passing; integrity2 found a real gap, now fixed and strict |
 | `nomad`: page browsing and hosting | 4 (3 strict, 1 probe) | All passing, 4/4 runs each; nomad3 confirmed bounded offline failure and recovery |
 | `interop`: direct messages with other LXMF clients | 4 (4 strict) | All passing against a real bare RNS+LXMF client; interop4 found a real gap, 5/5 after the fix |
+| `files`: shared files in invite-only channels | 8 (7 strict, 1 probe) | All strict rows passing; files1 alone found three defects and files8 a fourth, all fixed. files8 records what a 15% loss link costs |
 
-**78 of 79 strict scenarios pass.** The one failure is a real defect, left
+**85 of 86 strict scenarios pass.** The one failure is a real defect, left
 strict and failing on purpose, so `--family sync` exits non-zero until it is
 resolved: sync11, intermittently (2 passes in 7). invite11 is now passing on
 the narrowed `kick` rule described above.

@@ -14,7 +14,9 @@ The "--- link control ---" group below is the one exception: it has no
 actions.py counterpart because it isn't application logic at all -- it's
 dev-harness process control (dropping/restoring this tester's own network
 link so the UI can simulate going offline), so it calls Backend.go_offline
-/go_online directly.
+/go_online directly. The file probe under "--- shared files ---" is the
+second: it drives the file plane at a holder with no message behind the
+request, which is the only way to put a non-member's request on the wire.
 """
 
 import asyncio
@@ -60,6 +62,9 @@ from trenchchat.core.link_quality import (
 )
 from trenchchat.core.reticulum_config import (
     load_reticulum_config, write_reticulum_config,
+)
+from trenchchat.network.file_transport import (
+    FILE_FETCH_TIMEOUT_SECS, RNSFileTransport,
 )
 
 from backend_core import Backend
@@ -173,6 +178,15 @@ class SendMessageRequest(BaseModel):
 
 class FetchFileRequest(BaseModel):
     message_id: str
+
+
+class ProbeFileRequest(BaseModel):
+    holder_hash: str
+    file_hash: str
+    first: int = 0
+    count: int = 1
+    want_list: bool = False
+    timeout: float = FILE_FETCH_TIMEOUT_SECS
 
 
 class UpdatePermissionsRequest(BaseModel):
@@ -2027,6 +2041,60 @@ def create_app(backend: Backend, *, token: str | None = None,
             },
             "max_file_bytes": MAX_SHARED_FILE_BYTES,
         }
+
+    # Dev-harness only, like the link controls: a probe asks a holder for a
+    # file this node was never offered. No client does that, and it is the
+    # only way to put a non-member's request on the file plane, which is what
+    # the serve gate has to hold against. It runs on a transport of its own,
+    # so FileManager's downloads are untouched and nothing here serves.
+    probe_transport: dict[str, Any] = {"transport": None}
+    probe_results: dict[str, dict[str, Any]] = {}
+
+    def _on_probe_result(probe_id: str, ok: bool, payload, reason):
+        probe_results[probe_id] = {
+            "done": True, "ok": bool(ok), "reason": reason,
+            "bytes": len(payload) if payload else 0,
+        }
+
+    def _probe_transport() -> RNSFileTransport:
+        transport = probe_transport["transport"]
+        if transport is None:
+            transport = RNSFileTransport(backend.identity)
+            transport.set_result_callback(_on_probe_result)
+            probe_transport["transport"] = transport
+        return transport
+
+    @app.post("/files/probe")
+    def probe_file(req: ProbeFileRequest):
+        """Ask a holder for a range of a file, or for its chunk-hash list."""
+        probe_id = secrets.token_hex(8)
+        probe_results[probe_id] = {"done": False, "ok": False, "reason": None,
+                                   "bytes": 0}
+        transport = _probe_transport()
+        if req.want_list:
+            transport.fetch_chunk_list(probe_id, req.holder_hash,
+                                       req.file_hash, timeout=req.timeout)
+        else:
+            transport.fetch_chunks(probe_id, req.holder_hash, req.file_hash,
+                                   req.first, req.count, timeout=req.timeout)
+        return {"ok": True, "probe_id": probe_id}
+
+    @app.get("/files/probe/{probe_id}")
+    def get_probe_file(probe_id: str):
+        """What a probe got back. Reading it is also what ticks its transport.
+
+        The probe transport is deliberately outside the backend's ticker, so
+        the dial ladder and the stall sweep advance on each read rather than
+        on a thread nothing else needs.
+        """
+        transport = probe_transport["transport"]
+        if transport is not None:
+            transport.tick()
+        result = probe_results.get(probe_id)
+        if result is None:
+            return JSONResponse({"ok": False, "error": "no such probe"},
+                                status_code=404)
+        return result
 
     # --- reactions and custom emoji ---
 

@@ -71,6 +71,16 @@ class EventListener:
     def count(self, event_type: str) -> int:
         return self.types().count(event_type)
 
+    def of_type(self, event_type: str) -> list[dict]:
+        """Every event of one type, whole, in the order they arrived.
+
+        count() answers how many; a scenario watching a download needs what
+        each one said.
+        """
+        with self._lock:
+            return [dict(e) for e in self._events
+                    if e.get("type", "") == event_type]
+
     def close(self) -> None:
         self._stop.set()
         try:
@@ -498,6 +508,79 @@ class Peer:
         return self._delete(
             f"/channels/{channel_hash}/messages/{message_id}/reactions/{emoji_hash}"
         )
+
+    # --- shared files ---
+
+    def share_file(self, channel_hash: str, name: str, data: bytes,
+                   content: str = "") -> dict:
+        """Attach a file to a message. The bytes stay here until a member asks."""
+        return self._post(f"/channels/{channel_hash}/messages", {
+            "content": content, "file_name": name,
+            "file_data_b64": base64.b64encode(data).decode(),
+        })
+
+    def file_card(self, channel_hash: str, message_id: str) -> dict | None:
+        """The file block on one message row, or None when it names no file."""
+        for m in self.messages(channel_hash):
+            if m["message_id"] == message_id:
+                return m.get("file")
+        return None
+
+    def file_state(self, channel_hash: str, message_id: str) -> str | None:
+        card = self.file_card(channel_hash, message_id)
+        return card["state"] if card else None
+
+    def start_file_fetch(self, channel_hash: str, file_hash: str,
+                         message_id: str) -> dict:
+        """Start the download of the file a message names, or join it."""
+        return self._post(f"/channels/{channel_hash}/files/{file_hash}/fetch",
+                          {"message_id": message_id})
+
+    def file_fetch_status(self, channel_hash: str,
+                          file_hash: str) -> dict | None:
+        """How a download is doing, or None while this node tracks none."""
+        r = self._client.get(
+            f"{self._base}/channels/{channel_hash}/files/{file_hash}/fetch")
+        if r.status_code == 404:
+            return None
+        r.raise_for_status()
+        return r.json()
+
+    def file_bytes(self, channel_hash: str, file_hash: str) -> bytes | None:
+        """The file itself, or None while this node does not hold all of it."""
+        r = self._client.get(
+            f"{self._base}/channels/{channel_hash}/files/{file_hash}")
+        if r.status_code == 404:
+            return None
+        r.raise_for_status()
+        return r.content
+
+    def file_bytes_status(self, channel_hash: str, file_hash: str) -> int:
+        """Status of asking for the bytes; 404 until this node holds them."""
+        return self._client.get(
+            f"{self._base}/channels/{channel_hash}/files/{file_hash}").status_code
+
+    def file_usage(self) -> dict:
+        return self._get("/files/usage")
+
+    def probe_file(self, holder_hash: str, file_hash: str, *, first: int = 0,
+                   count: int = 1, want_list: bool = False,
+                   timeout: float | None = None) -> str:
+        """Dial a holder's file plane directly. Returns the probe id.
+
+        The harness hook, not something a client does: it asks for a file
+        this node was never offered, which is how a non-member's request is
+        put on the wire at all.
+        """
+        body = {"holder_hash": holder_hash, "file_hash": file_hash,
+                "first": first, "count": count, "want_list": want_list}
+        if timeout is not None:
+            body["timeout"] = timeout
+        return self._post("/files/probe", body)["probe_id"]
+
+    def probe_result(self, probe_id: str) -> dict:
+        """What a probe got back: {"done", "ok", "reason", "bytes"}."""
+        return self._get(f"/files/probe/{probe_id}")
 
     # --- voice ---
 
