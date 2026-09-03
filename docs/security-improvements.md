@@ -568,6 +568,28 @@ Left open pending that product/protocol call. The earlier
 
 ---
 
+### 3-bis. A relayed message is not checked against its author's permissions
+
+The direct path drops a message from a member whose role lacks `SEND_MESSAGE`,
+and drops a file manifest from one whose role lacks `SHARE_FILES`
+(`Messaging._on_lxmf_message`). The sync path does not: a relayed row is checked
+for an author signature, a message id that hashes its own content, and tenure at
+its timestamp, and then stored. So a message its author was not permitted to send
+can still arrive as history, from any member who kept a copy.
+
+This predates file sharing (`SEND_MESSAGE` has always had the gap) and
+`SHARE_FILES` now shares it. It is narrower than it sounds: the author is
+cryptographically bound to the row, so the relay cannot forge one, and a role
+change is not retroactive, a message sent while permitted is legitimate history
+that a later demotion should not erase. What is missing is the case where the
+author never had the permission at all.
+
+The fix is a permission check beside the tenure check in `_handle_sync_response`,
+resolved against the author's role rather than the relayer's. It is not made here
+because the two questions ("was this permitted when sent" and "is it permitted
+now") need the same tenure record that the tenure check uses, and answering the
+wrong one silently drops real history.
+
 ### 4. Minor residue
 
 None of these are exploitable on their own; recorded so they are not
@@ -643,3 +665,145 @@ above: the trust tier that fell back to a document's own signers is gone, and
 the durable `accepted_invites` anchor replaced an in-memory map that did not
 survive a restart.
 
+---
+
+## Shared files in invite-only channels: the trust model
+
+A shared file never travels with the message. The message carries a manifest
+(name, size, SHA-256, chunk root) under 200 bytes, and the bytes move only when
+a member asks a holder for a range of chunks over the file plane
+(`network/file_transport.py`, aspect `files`). Invite-only channels only: an
+open-join channel has no member list to authorise a serve against, so
+`actions.file_share_refusal` refuses a manifest there.
+
+**What a member learns.** Every manifest, because it rides the message. A holder
+also learns which member asked it for which file, and when. Members already hold
+each other's identities through the member list, so this adds "who fetched what"
+inside a set that already knows who everyone is, and nothing outside it.
+
+**What a non-member learns.** Nothing. The request path is hashed on the wire,
+the manifest never leaves the channel's encrypted messages, and the answer to an
+unauthorised request is silence rather than a refusal code, so a probe cannot
+tell "not a member" from "no such file".
+
+**What a holder can do.** Refuse, stall, or serve wrong bytes. The first two move
+the requester to the next holder at the same chunk index; the third is caught by
+the chunk hash on arrival, and that holder is skipped for the rest of the
+download, at the cost of one chunk of airtime. A holder cannot forge a file into
+a channel: the author's signature covers the manifest, chunk root included, so
+every chunk is verified against a list the signature anchors, and the assembled
+file against the signed hash.
+
+**What a sender can do.** Share a manifest whose bytes nobody can serve. Members
+see the download park as `unavailable` until a holder appears. That is the same
+outcome as a message nobody received and is not treated as an attack.
+
+**The serve gate**, in `FileManager`, in this order: the requester must have
+identified on the link; the file must be held locally; some channel it was
+shared in must be invite-only with that identity in the **stored** member list
+(never a claim from the request); and the concurrent-serve cap must have a slot.
+Every failure returns `None`, which RNS answers with nothing at all, and logs a
+warning naming the identity. This is the core layer of the three, the one that
+holds when a peer calls in directly rather than through a client.
+
+**Presence orders holders and never gates them.** Presence is evidence of having
+*heard* a peer, so a quiet member is not a known-absent one: a transport node
+damps repeat announces and the liveness beacon informs only its receiver. Asking
+a quiet member costs one dial that fails; not asking cost the whole download, and
+did, until the scenario suite found it.
+
+**Bounds.** Inbound: manifest field caps, `max_response_size` derived from the
+chunk count so an oversized answer is refused before it is buffered, a stall
+timeout per request, one request in flight per download and one download per
+node, a partial TTL, and an LRU store budget. Outbound: per-link serve rate
+limit, inbound link cap, concurrent serve cap, served-size cap. Nothing a peer
+sends grows the store: downloads start on the user's click, and admission
+evicts before a fetch rather than pruning after it.
+
+### Costs left in deliberately
+
+- **A refusal costs the asker a full stall timeout.** RNS sends nothing for a
+  `None` response, and a request packet that is proven and then never answered
+  has no failure callback, so only the plane's own sweep ends it (measured at
+  120.1s and 127.5s in scenario files4). Silence is the point for a non-member;
+  the price is paid by a member refused for a reason that would have passed,
+  such as the concurrent-serve cap. Worth revisiting only with an answer that
+  cannot become an oracle for a prober.
+- **A member holding nothing costs the same timeout.** A node announces on the
+  `files` aspect only while it holds something to serve, so a member with
+  nothing has no path to dial and the dial ladder cannot tell a cold path from
+  an absent destination. Ordering candidates by `Transport.has_path` would fix
+  it; not done on one radio profile's evidence, and it costs a slow download
+  rather than a failed one.
+- **A relayed file message is not checked against its author's permissions**
+  (see "3-bis" above). `SEND_MESSAGE` already had this gap and `SHARE_FILES`
+  now shares it.
+
+### Database growth, which the code cannot state
+
+Three budgets bound the file tables: complete received files
+(`FILE_STORE_MAX_BYTES`), unfinished downloads (`PARTIAL_STORE_MAX_BYTES`) and
+this node's own uploads (`OWN_FILE_STORE_MAX_BYTES`, never auto-pruned because
+the sender has to stay a holder). Worst case is about 530 MB of file rows plus
+overhead. What the budgets do not bound is the file on disk:
+
+- **Deleting rows never shrinks the database.** Freed pages go on the freelist
+  and later writes reuse them, so the file stays at the largest size the budgets
+  ever reached. Only `VACUUM` returns the space, and it rewrites the whole
+  database, needs free disk equal to its size, and re-encrypts every page under
+  SQLCipher. It is not run automatically. `auto_vacuum=INCREMENTAL` can only be
+  set before a database has tables, so it would apply to new profiles only; a
+  "compact database" action is the honest fix and is not built.
+- **Setting or removing the PIN copies the whole database.** `encrypt_to` and
+  `export_to_plaintext` build a second copy through `sqlcipher_export`, so both
+  need free disk equal to the database, files included; `rekey` is in place and
+  does not. This gap predates file sharing, which makes it larger.
+- **Message images are still unbounded.** Up to 900 KB each, stored in
+  `messages`, with no prune at all: only deleting a conversation removes them.
+  File sharing arrives bounded where images are not. Putting images under the
+  same LRU is the follow-up.
+
+### Alternatives rejected, and why
+
+- **Push the file, raising LXMF's delivery limit.** A push sends every byte to
+  every member whether they want it or not, and the receiver cannot decline a
+  resource the router already agreed to.
+- **An inline tier for small files.** Files under a few hundred KB carried in
+  the message, as images are, so they would ride hints and sync for free.
+  Rejected: the size at which storing bytes you did not ask for stops being
+  acceptable is not the sender's to decide. The manifest rides hints and sync
+  anyway, so only the bytes wait for a request.
+- **Propagation nodes for files.** Channel messages are never propagated, nodes
+  cap a message at 256 KB, and a node holding channel files for members is
+  exactly the storing-for-others role that has to stay weak.
+- **"I hold this" announcements.** One control message to every member per
+  download, to save the requester one failed handshake. Presence order plus
+  remembering the last holder gets most of it for nothing.
+- **Files on disk under `~/.trenchchat/`.** Faster for large files and outside
+  both the SQLCipher lockbox and the one prune policy. Revisit only if the 5 MB
+  ceiling grows past what a blob column is happy with.
+- **Whole-file requests, resume by restarting.** An RNS response resource does
+  not survive a link change, so every drop restarts a transfer that takes hours
+  on LoRa.
+- **Chunking with the file hash only, no chunk root.** Saves 32 bytes per
+  message and lets one hostile member spoil a whole transfer with a single bad
+  chunk discovered at the end, with no way to say which holder did it.
+- **Per-file request paths**, nomad's `/file/<name>` shape. Needs a register and
+  deregister on every store and prune; one path with the hash in the request
+  data needs neither and is no less private, since paths are hashed anyway.
+- **Existing tools.** `rncp` (in RNS) is the closest reference and the shape the
+  file plane copies, but its allow list is one static per-process identity list,
+  its address is a filesystem path, and a transfer is one whole-file resource
+  with no resume. Nomad node file serving has the same three limits. LXMF's
+  `FIELD_FILE_ATTACHMENTS` is a push. `RNS.Channel`/`Buffer` is a stream bound to
+  one link, so offsets, verification and holder switching would all still have to
+  be built on top. None offers membership-scoped authorisation, several sources,
+  or resume across links.
+- **Fetching from several holders at once.** The chunk scheme allows it and it
+  is faster on a good mesh, but it doubles what one download can take from a
+  shared link. Sequential first, measure before adding.
+- **`rncp` fetch compatibility** is a live follow-up rather than a rejection:
+  registering an `rncp.receive` destination that reads the path as a file hash
+  and applies the same membership check would let a member pull a channel file
+  with the stock CLI. Whole-file only, fetch only, and it needs the user's
+  identity in a form `rncp -i` can load.

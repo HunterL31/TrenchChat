@@ -45,6 +45,7 @@ so overlapping LXMF's own registry is harmless.
 | `0x60–0x6F` | Voice | `F_VOICE_STATE=0x60`, `F_VOICE_MUTED=0x61`, `F_VOICE_JOINED_AT=0x62`, `F_VOICE_CODEC=0x63` |
 | `0x70–0x7F` | Message integrity | `F_AUTHOR_SIG=0x70`, `F_AUTHOR_KEYS=0x71` |
 | `0x80–0x8F` | Friends / direct messages | `F_FRIEND_NOTE=0x80` |
+| `0x90–0x9F` | File manifest | `F_FILE_NAME=0x90`, `F_FILE_SIZE=0x91`, `F_FILE_HASH=0x92`, `F_FILE_CHUNK_ROOT=0x93` |
 
 When adding a new field:
 1. Pick the next unused key in the appropriate range.
@@ -75,6 +76,14 @@ Control messages are identified by `fields[F_MSG_TYPE]`. Defined values:
 
 Chat messages have **no** `F_MSG_TYPE` field. Handlers should check `F_MSG_TYPE in fields`
 to distinguish control messages from chat messages.
+
+A **shared file is a chat message too**: the four `0x90` fields are a manifest
+(name, size, hash, chunk root), never bytes. The bytes are pulled from a holder
+over the file plane's own request path, which is not LXMF at all and carries no
+field keys. LXMF's own `FIELD_FILE_ATTACHMENTS`, which Sideband and MeshChat use,
+is deliberately never set on a channel message: it is a push, so every member
+would receive every byte whether they asked or not. It stays available as the
+interop route if direct messages to other clients ever carry files.
 
 A **direct message is a chat message**, not a control one: it carries no `F_MSG_TYPE`, and its
 `F_CHANNEL_HASH` is a conversation address (`naming.dm_hash_for`) rather than a channel hash. That
