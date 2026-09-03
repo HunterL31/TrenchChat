@@ -80,9 +80,9 @@ MAX_CHUNK_LIST_BYTES = ((MAX_CHUNK_INDEX + 1) * CHUNK_HASH_BYTES
 FILE_FETCH_TIMEOUT_SECS = 120.0
 # No progress on an in-flight request for this long ends the request, not the
 # download. There is deliberately no total deadline: a 5 MB transfer over LoRa
-# takes hours and is not an error. Measured against one chunk of airtime on the
-# slowest profile, which is why it moves only alongside FILE_CHUNK_BYTES:
-# 32 KB is about 47 s at SF7, comfortably inside this sweep.
+# takes hours and is not an error. Every resource part resets it, so what it
+# bounds is a response that never starts: at SF7 a 65 KB range that does start
+# takes 127-201 s and finishes well outside this sweep.
 FILE_STALL_SECS = 120.0
 # A download issues its requests back to back, so a link nobody has used for
 # this long belongs to a download that has finished or moved to another holder.
