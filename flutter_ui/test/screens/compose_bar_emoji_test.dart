@@ -12,6 +12,7 @@ const _hash =
 Widget _harness({
   required Future<bool> Function(String, PickedAttachment?) onSend,
   required Future<String?> Function() pickEmoji,
+  bool peerReadsTrenchchat = true,
 }) =>
     MaterialApp(
       home: Scaffold(
@@ -20,6 +21,7 @@ Widget _harness({
           enabled: true,
           onSend: onSend,
           pickEmoji: pickEmoji,
+          peerReadsTrenchchat: peerReadsTrenchchat,
           compact: true, // gives a tappable send button
         ),
       ),
@@ -125,5 +127,24 @@ void main() {
     await _send(tester);
 
     expect(sends, [':salute@$_hash:', ':salute@$_hash:']);
+  });
+
+  testWidgets('a plain LXMF peer is sent the name, never the hash',
+      (tester) async {
+    String? sent;
+    await tester.pumpWidget(_harness(
+      onSend: (c, _) async {
+        sent = c;
+        return true;
+      },
+      pickEmoji: () async => ':salute@$_hash:',
+      peerReadsTrenchchat: false,
+    ));
+
+    await _pickEmoji(tester);
+    await tester.enterText(find.byType(TextField), 'hi :salute: there');
+    await _send(tester);
+
+    expect(sent, 'hi :salute: there');
   });
 }

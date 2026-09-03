@@ -201,3 +201,43 @@ def f4(env):
     if stranger in a.incoming_request_hashes():
         raise ScenarioFailure("the request survived being accepted")
     return {"peer": stranger[:12]}
+
+
+@scenario("interop5", "A direct message is rewritten to what a plain client can read",
+          peers="A")
+def f5(env):
+    """The words, not just the fields.
+
+    interop3 keeps TrenchChat's field numbers off the wire. This keeps its
+    markup out of the words: a custom emoji's 64-character hash and a whole
+    theme packed into a `tct1:` code mean nothing to a client that has never
+    heard of either, and cost the same airtime as anything else.
+    """
+    a, = env.peers("A")
+    stranger = peer_hash()
+    a.add_friend(stranger)
+
+    listener = subprocess.Popen(
+        [sys.executable, str(_PEER), "--data-dir", str(_PEER_DIR),
+         "listen", "--seconds", "45"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    try:
+        wait_until(lambda: any(e["identity_hash"] == stranger
+                               for e in a.directory()),
+                   f"{a.tag} to hear the bare LXMF client", DISCOVERY_TIMEOUT)
+        a.open_dm(stranger)
+        a.send_dm(stranger, f"hi :salute@{'ab' * 32}: try tct1:AbC-_09 out")
+        stdout, stderr = listener.communicate(timeout=PEER_TIMEOUT_SECS)
+    finally:
+        if listener.poll() is None:
+            listener.kill()
+
+    line = stdout.strip().splitlines()[-1] if stdout.strip() else ""
+    if not line:
+        raise ScenarioFailure(f"the bare client reported nothing: {stderr[-400:]}")
+    received = [m["content"] for m in json.loads(line)["received"]]
+    if "hi :salute: try out" not in received:
+        raise ScenarioFailure(
+            f"the words were not rewritten for a plain LXMF client: {received}")
+    return {"content": "hi :salute: try out"}
