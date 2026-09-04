@@ -14,12 +14,18 @@ The property the whole design rests on is check 1: nobody's absence breaks a
 download once one other member holds the file. files2, files3 and files6
 each take the sender away and watch the download finish anyway.
 
+files9 and files10 come at it from the other side: not one member left, but
+every member at once. The concurrent-serve cap and the per-link rate limit
+exist for that moment, and what they cost the members they turn away is only
+visible with more askers than slots.
+
 See docs/testenv-scenarios.md for the matrix these implement.
 """
 
 import hashlib
 import os
 import random
+import time
 from pathlib import Path
 
 from asserts import hold_for, settle, wait_until, ScenarioFailure
@@ -29,6 +35,7 @@ from flows import (
     NEGATIVE_HOLD_SECS,
 )
 from scenario import PROBE, scenario
+from trenchchat.core.files import DL_DONE, DL_UNAVAILABLE
 from trenchchat.core.protocol import FILE_CHUNK_BYTES
 
 SIZE_2MB = 2 * 1024 * 1024
@@ -66,6 +73,17 @@ SLOW_HOLDER = {"bitrate_bps": 512_000, "latency_ms": 10.0, "jitter_ms": 2.0,
 # the first window, so what survives the interruption is several requests'
 # work rather than one.
 PARTIAL_FLOOR = 4
+
+# A fan-in is bounded by refusals rather than by bytes. A member turned away
+# by the serve cap learns nothing on the wire, so its request ends at the
+# plane's 120s stall sweep, and with more askers than slots that happens in
+# waves: the ceiling has to cover several of those in a row and the transfer
+# that follows the last one.
+FAN_IN_TIMEOUT = 900.0
+LORA_FAN_IN_TIMEOUT = 3000.0
+# Slow enough not to be load of its own against every downloader at once,
+# fast enough to catch a holder switch between two ranges.
+SAMPLE_INTERVAL = 1.0
 
 # The harness announces every 10s, which is 1000x a real client and, at SF7,
 # a large fraction of the link: four testers announcing three destinations
@@ -186,6 +204,140 @@ def _log_tail() -> _LogTail | None:
     if not path or not Path(path).exists():
         return None
     return _LogTail(Path(path))
+
+
+def _trail_summary(trail: list[tuple], names: dict[str, str]) -> dict:
+    """One downloader's run, read off its status samples.
+
+    A download names the holder it is asking at that instant, so the trail is
+    who was *asked*. Who actually served is attributed one step back: the
+    holder named before a sample where the chunk count grew.
+    """
+    def tag_of(holder) -> str | None:
+        return names.get(holder, holder[:8]) if holder else None
+
+    done_secs = next((t for t, state, _c, _h, _r in trail if state == DL_DONE),
+                     None)
+    asked: list[str] = []
+    served_by: list[str] = []
+    parked = 0.0
+    for i, (secs, state, chunks, holder, _reason) in enumerate(trail):
+        tag = tag_of(holder)
+        if tag and (not asked or asked[-1] != tag):
+            asked.append(tag)
+        if i + 1 >= len(trail):
+            continue
+        if state == DL_UNAVAILABLE:
+            parked += trail[i + 1][0] - secs
+        if tag and trail[i + 1][2] > chunks and tag not in served_by:
+            served_by.append(tag)
+    last = trail[-1] if trail else None
+    return {
+        "done_secs": round(done_secs, 1) if done_secs is not None else None,
+        "asked": asked,
+        "served_by": served_by,
+        "parked_secs": round(parked, 1),
+        "states": sorted({state for _t, state, _c, _h, _r in trail if state}),
+        "final": None if last is None else {
+            "state": last[1], "chunks": last[2], "reason": last[4]},
+    }
+
+
+def _serve_counts(tail, everyone) -> dict:
+    """What the holders' logs say they turned away, keyed by who was refused.
+
+    A refusal is silence on the wire, so this is the only place the count
+    exists. Indicative rather than exact: worker stdout is block buffered.
+    """
+    if tail is None:
+        return {"log": "no tester log captured"}
+    cap = {p.tag: len(tail.lines_with("already serving", p.hash[:12]))
+           for p in everyone}
+    not_held = {p.tag: len(tail.lines_with("refusing", "not held here",
+                                           p.hash[:12])) for p in everyone}
+    return {
+        "refused_by_the_serve_cap": {k: v for k, v in cap.items() if v},
+        "refused_as_not_held": {k: v for k, v in not_held.items() if v},
+        "rate_limited": tail.count("rate limit reached"),
+        "requests_served": tail.count("for: /tc/file"),
+        "requests_failed": len(tail.lines_with("[files]", "failed:")),
+        "tracebacks": tail.count("Traceback (most recent call last)"),
+    }
+
+
+def _fan_in(channel_hash: str, sharer, downloaders, data: bytes, name: str,
+            content: str, manifest_timeout: float, timeout: float,
+            tail) -> dict:
+    """Share a file, have every other member ask at once, and watch them all.
+
+    Every fetch is posted before any of them is waited on, so the requests
+    reach the holder inside the same second rather than in a queue of the
+    harness's own making. Whoever reaches done is checked byte for byte;
+    whoever does not is described rather than asserted, so the caller decides
+    whether that is a failure or a measurement.
+    """
+    message_id, file_hash = _share(sharer, channel_hash, name, data, content)
+    if sharer.file_state(channel_hash, message_id) != "done":
+        raise ScenarioFailure(
+            f"the sender does not hold its own share: "
+            f"{sharer.file_card(channel_hash, message_id)}")
+    for peer in downloaders:
+        _await_manifest(peer, channel_hash, content, message_id,
+                        manifest_timeout)
+
+    posted_at = time.time()
+    for peer in downloaders:
+        started = peer.start_file_fetch(channel_hash, file_hash, message_id)
+        if not started.get("ok"):
+            raise ScenarioFailure(
+                f"{peer.tag} was refused the download: {started}")
+    posted_within = round(time.time() - posted_at, 2)
+
+    trails: dict[str, list[tuple]] = {p.tag: [] for p in downloaders}
+    origin = time.time()
+
+    def _everyone_done() -> bool:
+        done = True
+        for peer in downloaders:
+            status = _status(peer, channel_hash, file_hash)
+            trails[peer.tag].append((
+                round(time.time() - origin, 1), status.get("state"),
+                status.get("chunks_held", 0), status.get("holder"),
+                status.get("reason")))
+            if status.get("state") != DL_DONE:
+                done = False
+        return done
+
+    arrived, _secs = settle(
+        _everyone_done,
+        f"all {len(downloaders)} members to finish the file they asked for "
+        f"at once", timeout, interval=SAMPLE_INTERVAL)
+
+    names = {p.hash: p.tag for p in (sharer, *downloaders)}
+    per_peer = {tag: _trail_summary(trail, names)
+                for tag, trail in trails.items()}
+    for peer in downloaders:
+        if per_peer[peer.tag]["done_secs"] is not None:
+            _verify(peer, channel_hash, file_hash, data)
+    finished = [s["done_secs"] for s in per_peer.values()
+                if s["done_secs"] is not None]
+
+    notes = {
+        "arrived": arrived,
+        "file_bytes": len(data),
+        "chunks": _chunks(len(data)),
+        "askers": len(downloaders),
+        "fetches_posted_within_secs": posted_within,
+        "finished": f"{len(finished)}/{len(downloaders)}",
+        "spread_secs": (round(max(finished) - min(finished), 1)
+                        if finished else None),
+        "served_by_another_downloader": sorted(
+            tag for tag, summary in per_peer.items()
+            if any(holder != sharer.tag for holder in summary["served_by"])),
+        "per_downloader": per_peer,
+    }
+    notes.update(_serve_counts(tail, (sharer, *downloaders)))
+    return notes
 
 
 @scenario("files1", "A 2 MB file reaches both members byte for byte", peers="ABC")
@@ -610,4 +762,87 @@ def h8(env):
             f"{LOSSY_FETCH_TIMEOUT:.0f}s: {_status(b, ch, file_hash)}")
         return notes
     _verify(b, ch, file_hash, data)
+    return notes
+
+
+@scenario("files9", "Every other member asks for the same 2 MB file at once",
+          peers="ABCD")
+def h9(env):
+    """The fan-in the concurrent-serve cap exists for, with the cap overrun.
+
+    Every tester but the sharer posts its fetch before any of them is waited
+    on, so the requests land inside the same second and the holder has to
+    turn some of them away. What is settled is that all of them finish with
+    the same bytes: a refusal is a "come back later", and a member that is
+    told it for ever is the defect this row is for. What each downloader pays
+    for the refusal, and which holder ends up serving it, are recorded.
+
+    The body runs against every tester the environment has, so `--testers 8`
+    turns the same row into a seven-way fan-in against a cap of two.
+    """
+    peers = env.all()
+    if len(peers) < 3:
+        raise ScenarioFailure(f"files9 needs a sharer and two askers, not "
+                              f"{len(peers)} testers")
+    sharer, downloaders = peers[0], peers[1:]
+    ch = invite_only_channel(sharer, downloaders, "h9-private")
+
+    tail = _log_tail()
+    notes = _fan_in(ch, sharer, downloaders, _payload(SIZE_2MB, 9),
+                    "h9-2mb.bin", "h9-file", FETCH_TIMEOUT, FAN_IN_TIMEOUT,
+                    tail)
+    if not notes.pop("arrived"):
+        raise ScenarioFailure(
+            f"not every member finished the file they all asked for at "
+            f"once: {notes}")
+    return notes
+
+
+@scenario("files10", "The same fan-in at LoRa SF7, 200 KB", peers="ABCD",
+          kind=PROBE)
+def h10(env):
+    """files9 on a radio, at the size files5 measures a single download at.
+
+    A probe for the same reason files5 is one: it measures what a shared
+    uplink costs when several members want the same file at once, and the
+    answer is a spread of numbers rather than a behaviour. 200 KB keeps it
+    comparable with files5, whose one downloader is the baseline this row's
+    per-downloader times are read against.
+
+    Same preparation as files5: the channel is built before the link is
+    shaped, and every tester is slowed to a real announce cadence first,
+    because at SF7 the harness's own announces are otherwise most of what the
+    link carries.
+    """
+    peers = env.all()
+    if len(peers) < 3:
+        raise ScenarioFailure(f"files10 needs a sharer and two askers, not "
+                              f"{len(peers)} testers")
+    for peer in peers:
+        env.orch.set_heartbeat(peer.tag, QUIET_HEARTBEAT_SECS)
+        env.wait_alive(peer)
+    try:
+        return _lora_fan_in(env, peers)
+    finally:
+        for peer in peers:
+            env.orch.set_heartbeat(peer.tag, DEFAULT_HEARTBEAT_SECS)
+            env.wait_alive(peer)
+
+
+def _lora_fan_in(env, peers) -> dict:
+    sharer, downloaders = peers[0], peers[1:]
+    ch = invite_only_channel(sharer, downloaders, "h10-private")
+
+    shaping = {p.tag: set_link_profile(env, p, LORA_FAST) for p in peers}
+    tail = _log_tail()
+    notes = _fan_in(ch, sharer, downloaders, _payload(SIZE_200KB, 10),
+                    "h10-200kb.bin", "h10-file", LORA_FETCH_TIMEOUT,
+                    LORA_FAN_IN_TIMEOUT, tail)
+    notes["shaping"] = shaping
+    notes["heartbeat_secs"] = QUIET_HEARTBEAT_SECS
+    if not notes.pop("arrived"):
+        notes["surprise"] = (
+            f"{len(downloaders)} members asking at once did not all finish "
+            f"200 KB over SF7 in {LORA_FAN_IN_TIMEOUT:.0f}s: "
+            f"{notes['per_downloader']}")
     return notes
