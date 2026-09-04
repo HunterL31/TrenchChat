@@ -1,0 +1,313 @@
+"""
+Set reconciliation over message ids, expressed as timestamp ranges.
+
+A watermark cannot describe a set. Two peers that both kept writing through a
+partition each hold rows the other lacks on either side of it, and "everything
+since T" cannot name which: whichever side's T is later hides the gap behind
+it. What both sides can afford to exchange instead is a description of the set
+they hold, coarse at first and refined only where it differs.
+
+A side describes what it holds in [lo, hi) as ranges. The other side compares
+that description against its own rows, sends what the first side is missing,
+and asks for what it is missing itself. Where a range is too big to spell out,
+it is split and only the halves that actually differ are looked at again, so
+the traffic is proportional to the difference rather than to the history.
+
+A range is [lo, hi, mode, payload], covering rows with lo <= timestamp < hi:
+
+  RANGE_FINGERPRINT  payload [count, fp]: fp is SYNC_FINGERPRINT_BYTES of
+                     SHA-256 over the range's ids, sorted and concatenated.
+                     Equal count and fingerprint means equal sets.
+  RANGE_IDLIST       payload [prefix, ...]: every id in the range by its
+                     leading SYNC_ID_PREFIX_BYTES, ascending. Small enough to
+                     diff outright, so a leaf range ends the exchange.
+
+This module is the set arithmetic and nothing else: no storage, no RNS, no
+network, so it can be reasoned about (and tested) on plain lists. A row is
+anything indexable by "message_id" and "timestamp", which is what
+Storage.get_message_index returns.
+"""
+
+import hashlib
+import math
+
+import msgpack
+
+from trenchchat.core.protocol import (
+    RANGE_FINGERPRINT, RANGE_IDLIST, SYNC_FINGERPRINT_BYTES,
+    SYNC_ID_PREFIX_BYTES, unpack_wire,
+)
+
+# Sub-ranges a mismatched range is split into. Wide rather than binary: each
+# round trip on a mesh costs seconds to minutes, so the thing worth minimising
+# is round trips, not bytes per message.
+SYNC_RANGE_FANOUT = 16
+
+# A range holding at most this many local rows is spelled out as an id list
+# instead of fingerprinted. Sized so that spelling one out (32 * 8 bytes) is
+# cheaper than the round trip that comparing a fingerprint would cost.
+SYNC_LEAF_IDS = 32
+
+# Inbound caps. A well-formed description of one window is at most
+# SYNC_RANGE_FANOUT ranges, and a full split of id lists is exactly
+# SYNC_RANGE_FANOUT * SYNC_LEAF_IDS prefixes, so anything past these is not a
+# peer describing a window, and the whole field is refused.
+MAX_SYNC_RANGES = 32
+MAX_SYNC_LIST_IDS = SYNC_RANGE_FANOUT * SYNC_LEAF_IDS
+
+# Rows one message may ask for by prefix. Matches sync.MAX_RESPONSE_MESSAGES:
+# more than that cannot be answered in one response anyway.
+MAX_SYNC_NEEDS = 50
+
+
+def _id_bytes(message_id: str) -> bytes:
+    """An id as bytes, tolerating a stored id that is not a hex digest."""
+    try:
+        return bytes.fromhex(message_id)
+    except (ValueError, AttributeError, TypeError):
+        return str(message_id).encode(errors="replace")
+
+
+def id_prefix(message_id: str) -> bytes:
+    """The leading bytes of an id, as an id list or a need names it."""
+    return _id_bytes(message_id)[:SYNC_ID_PREFIX_BYTES]
+
+
+def fingerprint(message_ids) -> bytes:
+    """A digest over a set of ids, independent of the order they arrive in."""
+    digest = hashlib.sha256()
+    for message_id in sorted(message_ids):
+        digest.update(_id_bytes(message_id))
+    return digest.digest()[:SYNC_FINGERPRINT_BYTES]
+
+
+def prefixes_of(rows) -> set[bytes]:
+    """The id prefixes of a set of rows."""
+    return {id_prefix(row["message_id"]) for row in rows}
+
+
+def sort_rows(rows) -> list:
+    """Rows in the order every range operation here assumes: oldest first."""
+    return sorted(rows, key=lambda r: (r["timestamp"], r["message_id"]))
+
+
+def id_list_range(lo: float, hi: float, rows) -> list:
+    """A range naming every row in it by id prefix."""
+    return [float(lo), float(hi), RANGE_IDLIST, sorted(prefixes_of(rows))]
+
+
+def fingerprint_range(lo: float, hi: float, rows) -> list:
+    """A range summarising the rows in it as a count and a digest."""
+    ids = [row["message_id"] for row in rows]
+    return [float(lo), float(hi), RANGE_FINGERPRINT, [len(ids), fingerprint(ids)]]
+
+
+def rows_in(rows, lo: float, hi: float) -> list:
+    """The rows a range covers: lo inclusive, hi exclusive."""
+    return [row for row in rows if lo <= row["timestamp"] < hi]
+
+
+def _split_bounds(rows: list, lo: float, hi: float,
+                  fanout: int = SYNC_RANGE_FANOUT) -> list[tuple[float, float]]:
+    """Contiguous [lo, hi) sub-ranges holding roughly equal counts of rows.
+
+    Every boundary sits on a row's timestamp and never inside a group of rows
+    sharing one: a boundary travels as a bare float with no tie-breaker, so a
+    group split down the middle would land its halves in two ranges neither
+    side could ever compare consistently. Rows must be sorted oldest first.
+    """
+    total = len(rows)
+    target = max(1, math.ceil(total / fanout))
+    bounds: list[tuple[float, float]] = []
+    start = float(lo)
+    count = 0
+    for i, row in enumerate(rows):
+        count += 1
+        if count < target or i + 1 >= total or len(bounds) >= fanout - 1:
+            continue
+        boundary = float(rows[i + 1]["timestamp"])
+        if boundary <= float(row["timestamp"]):
+            continue
+        bounds.append((start, boundary))
+        start = boundary
+        count = 0
+    bounds.append((start, float(hi)))
+    return bounds
+
+
+def describe(rows, lo: float, hi: float) -> list[list]:
+    """How a side names what it holds in [lo, hi) to a peer.
+
+    One id list when the range is small enough to spell out, otherwise up to
+    SYNC_RANGE_FANOUT sub-ranges split by equal row count, each an id list or a
+    fingerprint by the same rule. Holding nothing yields one empty id list,
+    which is what makes a fresh join ask for the whole window in one field.
+
+    A range whose rows all share a single timestamp cannot be split at all. It
+    is spelled out however long that makes it, and only falls back to a
+    fingerprint when that would be longer than the receiver will accept: a
+    fingerprint that can never be narrowed settles as a permanent mismatch on
+    one range, where an id list past the cap would have the receiver refuse the
+    whole window.
+    """
+    rows = sort_rows(rows_in(rows, lo, hi))
+    if len(rows) <= SYNC_LEAF_IDS:
+        return [id_list_range(lo, hi, rows)]
+
+    bounds = _split_bounds(rows, lo, hi)
+    if len(bounds) < 2:
+        if len(rows) > MAX_SYNC_LIST_IDS:
+            return [fingerprint_range(lo, hi, rows)]
+        return [id_list_range(lo, hi, rows)]
+
+    described: list[list] = []
+    for sub_lo, sub_hi in bounds:
+        sub = rows_in(rows, sub_lo, sub_hi)
+        described.append(id_list_range(sub_lo, sub_hi, sub)
+                         if len(sub) <= SYNC_LEAF_IDS
+                         else fingerprint_range(sub_lo, sub_hi, sub))
+    return described
+
+
+def matches_fingerprint(rows, count: int, digest: bytes) -> bool:
+    """True if these rows are the set the fingerprint describes."""
+    ids = [row["message_id"] for row in rows]
+    return len(ids) == count and fingerprint(ids) == digest
+
+
+def ids_they_lack(rows, their_prefixes) -> list[str]:
+    """Ids among *rows* that a peer's id list does not name."""
+    theirs = set(their_prefixes)
+    return [row["message_id"] for row in sort_rows(rows)
+            if id_prefix(row["message_id"]) not in theirs]
+
+
+def prefixes_we_lack(rows, their_prefixes) -> list[bytes]:
+    """Prefixes a peer named that none of *rows* accounts for."""
+    ours = prefixes_of(rows)
+    return [prefix for prefix in their_prefixes if prefix not in ours]
+
+
+# --- wire format ---
+
+def _finite(value) -> float | None:
+    """A timestamp off the wire, or None if it is not a usable one."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    if not math.isfinite(number) or number < 0:
+        return None
+    return number
+
+
+def validate_ranges(value) -> list | None:
+    """Ranges as received, or None if any part of them is malformed.
+
+    Refused whole rather than in part: a peer that cannot describe a window
+    correctly has told us nothing we can safely act on, and acting on the
+    half that parsed would serve rows against a set we do not actually know.
+    """
+    if not isinstance(value, (list, tuple)) or len(value) > MAX_SYNC_RANGES:
+        return None
+
+    parsed: list = []
+    previous_hi: float | None = None
+    total_ids = 0
+    for item in value:
+        if not isinstance(item, (list, tuple)) or len(item) != 4:
+            return None
+        lo, hi, mode, payload = item
+        lo = _finite(lo)
+        hi = _finite(hi)
+        if lo is None or hi is None or lo > hi:
+            return None
+        if previous_hi is not None and lo < previous_hi:
+            return None
+        previous_hi = hi
+
+        if mode == RANGE_FINGERPRINT:
+            if not isinstance(payload, (list, tuple)) or len(payload) != 2:
+                return None
+            count, digest = payload
+            if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+                return None
+            if not isinstance(digest, bytes) or len(digest) != SYNC_FINGERPRINT_BYTES:
+                return None
+            parsed.append((lo, hi, RANGE_FINGERPRINT, (count, digest)))
+        elif mode == RANGE_IDLIST:
+            if not isinstance(payload, (list, tuple)):
+                return None
+            prefixes: list[bytes] = []
+            for prefix in payload:
+                if not isinstance(prefix, bytes) or len(prefix) != SYNC_ID_PREFIX_BYTES:
+                    return None
+                if prefixes and prefix <= prefixes[-1]:
+                    return None
+                prefixes.append(prefix)
+            total_ids += len(prefixes)
+            if total_ids > MAX_SYNC_LIST_IDS:
+                return None
+            parsed.append((lo, hi, RANGE_IDLIST, tuple(prefixes)))
+        else:
+            return None
+    return parsed
+
+
+def validate_needs(value) -> list | None:
+    """Need triples as received, or None if any part of them is malformed."""
+    if not isinstance(value, (list, tuple)) or len(value) > MAX_SYNC_NEEDS:
+        return None
+
+    parsed: list = []
+    for item in value:
+        if not isinstance(item, (list, tuple)) or len(item) != 3:
+            return None
+        lo, hi, prefix = item
+        lo = _finite(lo)
+        hi = _finite(hi)
+        if lo is None or hi is None or lo > hi:
+            return None
+        if not isinstance(prefix, bytes) or len(prefix) != SYNC_ID_PREFIX_BYTES:
+            return None
+        parsed.append((lo, hi, prefix))
+    return parsed
+
+
+def pack(value) -> bytes:
+    """Ranges or needs, packed for the field that carries them."""
+    return msgpack.packb(value, use_bin_type=True)
+
+
+def unpack_ranges(payload) -> list | None:
+    """Validated ranges from a wire payload, or None if unusable."""
+    return _unpack(payload, validate_ranges)
+
+
+def unpack_needs(payload) -> list | None:
+    """Validated need triples from a wire payload, or None if unusable."""
+    return _unpack(payload, validate_needs)
+
+
+def _unpack(payload, validator):
+    if not isinstance(payload, bytes):
+        return None
+    try:
+        unpacked = unpack_wire(payload)
+    except Exception:
+        return None
+    return validator(unpacked)
+
+
+def signature(ranges, needs) -> tuple:
+    """A comparable summary of what a request asked, to spot a repeat.
+
+    Two requests with the same signature ask the same question, so answering
+    the second cannot tell us anything the first did not: that is what bounds
+    a narrowing exchange against a peer whose answer never changes.
+    """
+    return (
+        tuple((lo, hi, mode, tuple(payload) if isinstance(payload, (list, tuple))
+               else payload)
+              for lo, hi, mode, payload in (ranges or [])),
+        tuple((lo, hi, prefix) for lo, hi, prefix in (needs or [])),
+    )
