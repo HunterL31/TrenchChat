@@ -169,6 +169,26 @@ def describe(rows, lo: float, hi: float) -> list[list]:
     return described
 
 
+def _id_count(ranges) -> int:
+    return sum(len(payload) for _lo, _hi, mode, payload in ranges
+               if mode == RANGE_IDLIST)
+
+
+def append_ranges(target: list, described: list) -> bool:
+    """Add a description to a message's ranges, if it still fits the caps.
+
+    False when it does not: the ranges left out are described again on the
+    next request, where a smaller difference makes room for them, so a message
+    is never sent carrying more than the receiver will accept.
+    """
+    if len(target) + len(described) > MAX_SYNC_RANGES:
+        return False
+    if _id_count(target) + _id_count(described) > MAX_SYNC_LIST_IDS:
+        return False
+    target.extend(described)
+    return True
+
+
 def matches_fingerprint(rows, count: int, digest: bytes) -> bool:
     """True if these rows are the set the fingerprint describes."""
     ids = [row["message_id"] for row in rows]
