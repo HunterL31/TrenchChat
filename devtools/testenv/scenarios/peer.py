@@ -121,6 +121,15 @@ class Peer:
     def close(self) -> None:
         self._client.close()
 
+    def set_http_timeout(self, secs: float | None = None) -> None:
+        """Change this client's per-request timeout, or put the default back.
+
+        The default suits a status poll. Handing a tester several megabytes to
+        share, or reading them back out of it, is a different request, and 15s
+        is not the promise to hold it to.
+        """
+        self._client.timeout = httpx.Timeout(_TIMEOUT if secs is None else secs)
+
     # --- plumbing ---
 
     def _get(self, path: str, **params):
