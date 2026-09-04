@@ -85,6 +85,12 @@ from trenchchat.core.protocol import (
     MT_REACTION,
     MT_SYNC_RESPONSE, F_SYNC_MESSAGES,
 )
+from trenchchat.core.protocol import (
+    F_SYNC_NEED, F_SYNC_RANGES, MT_SYNC_REQUEST, RANGE_FINGERPRINT, RANGE_IDLIST,
+    SYNC_FINGERPRINT_BYTES, message_id_from_wire, unpack_wire,
+)
+from trenchchat.core import sync_ranges
+from trenchchat.core.sync import MAX_NEED_IDS, MAX_SYNC_CONTINUATIONS
 from trenchchat.core.presence import PresenceManager
 from trenchchat.core.image import MAX_IMAGE_BYTES
 
@@ -1543,6 +1549,217 @@ class TestAdversarialSyncInjection:
         hinted = bob.storage.get_missed_message_ids(ch_hash, alice.identity.hash_hex)
         assert "hint-msg-1" not in hinted, \
             "A non-member seeded a missed-delivery hint"
+
+
+# ---------------------------------------------------------------------------
+# SYNC RECONCILIATION: what a description of a set may ask for
+# ---------------------------------------------------------------------------
+
+class TestAdversarialSyncRanges:
+    """
+    A reconciled request tells a responder what the requester holds, and a
+    need tells it which rows to look up. Both are peer-supplied, so both are
+    only ever a claim about the *requester's* own set: they may never widen
+    what the responder is willing to serve, and they may never cost it more
+    work than a bounded description of one window.
+    """
+
+    def _row(self, peer, ch_hash, content, ts):
+        msg_id = _compute_message_id(content, peer.identity.hash_hex, ts)
+        peer.storage.insert_message(
+            channel_hash=ch_hash, sender_hash=peer.identity.hash_hex,
+            sender_name="Alice", content=content, timestamp=ts, message_id=msg_id,
+            reply_to=None, last_seen_id=None, received_at=ts,
+            author_sig=sign_as(peer.identity.hash_hex, ch_hash, msg_id, ts, content),
+        )
+        return msg_id
+
+    def _capture(self, peer):
+        sent = []
+        peer.sync_mgr._send_raw = lambda dest_hex, fields: sent.append(fields) or True
+        return sent
+
+    def _request(self, ch_hash, fields):
+        return {F_MSG_TYPE: MT_SYNC_REQUEST,
+                F_CHANNEL_HASH: bytes.fromhex(ch_hash), **fields}
+
+    def test_a_non_members_range_request_is_refused_silently(self, peer_factory):
+        """Describing a set says nothing about being entitled to one."""
+        alice, _bob, ch_hash = _setup_channel_with_member(
+            peer_factory, member_perms=[SEND_MESSAGE]
+        )
+        carol = peer_factory("carol")
+        self._row(alice, ch_hash, "members only", time.time() - 60)
+
+        answers = self._capture(alice)
+        alice.sync_mgr._handle_sync_request(
+            self._request(ch_hash, {F_SYNC_RANGES: sync_ranges.pack(
+                sync_ranges.describe([], time.time() - 3600, time.time() + 300))}),
+            ch_hash, carol.identity.hash_hex,
+        )
+
+        assert answers == [], "a non-member's range request was answered"
+
+    def test_an_oversized_description_is_refused_whole(self, peer_factory):
+        """Past the caps it is not a peer describing a window, and no part of
+        it is acted on: half a description would have us serve rows against a
+        set the peer never actually described."""
+        alice, bob, ch_hash = _setup_channel_with_member(
+            peer_factory, member_perms=[SEND_MESSAGE]
+        )
+        self._row(alice, ch_hash, "would have been served", time.time() - 60)
+
+        oversized = [[float(i), float(i + 1), 1, []]
+                     for i in range(sync_ranges.MAX_SYNC_RANGES + 1)]
+        answers = self._capture(alice)
+        alice.sync_mgr._handle_sync_request(
+            self._request(ch_hash, {F_SYNC_RANGES: sync_ranges.pack(oversized)}),
+            ch_hash, bob.identity.hash_hex,
+        )
+        assert answers == [], "an over-cap description was answered anyway"
+
+        too_many_ids = [[0.0, 1e10, 1,
+                         sorted({bytes([i // 256, i % 256]) + b"\x00" * 6
+                                 for i in range(sync_ranges.MAX_SYNC_LIST_IDS + 1)})]]
+        alice.sync_mgr._handle_sync_request(
+            self._request(ch_hash, {F_SYNC_RANGES: sync_ranges.pack(too_many_ids)}),
+            ch_hash, bob.identity.hash_hex,
+        )
+        assert answers == [], "an over-cap id list was answered anyway"
+
+    def test_a_need_cannot_reach_rows_tenure_withholds(self, peer_factory):
+        """Naming a row by prefix is not entitlement to it."""
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+
+        ch_hash = alice.channel_mgr.create_channel("need-tenure", "", "invite")
+        time.sleep(0.02)
+        pre_join = self._row(alice, ch_hash, "before bob joined", time.time())
+        time.sleep(0.02)
+
+        alice.invite_mgr.publish_member_list(ch_hash, add_members=[bob.identity.hash])
+        assert wait_for_member(alice.storage, ch_hash, bob.identity.hash_hex, timeout=5)
+
+        answers = self._capture(alice)
+        alice.sync_mgr._handle_sync_request(
+            self._request(ch_hash, {F_SYNC_NEED: sync_ranges.pack(
+                [[0.0, time.time() + 300, sync_ranges.id_prefix(pre_join)]])}),
+            ch_hash, bob.identity.hash_hex,
+        )
+
+        assert len(answers) == 1, "the request went unanswered"
+        served = [message_id_from_wire(m["message_id"])
+                  for m in unpack_wire(answers[0][F_SYNC_MESSAGES])]
+        assert served == [], \
+            "a need reached history the requester's tenure withholds"
+
+    def test_a_responder_describing_ranges_forever_hits_the_budget(self, peer_factory):
+        """A description that never matches is still bounded.
+
+        A responder can always claim a range differs, and each claim is
+        cheap for it to make. The continuation budget is what stops that
+        from costing us a request per claim indefinitely.
+        """
+        alice, bob, ch_hash = _setup_channel_with_member(
+            peer_factory, member_perms=[SEND_MESSAGE]
+        )
+        requests = 0
+
+        def counting_send_raw(dest_hex, fields):
+            nonlocal requests
+            if fields.get(F_MSG_TYPE) == MT_SYNC_REQUEST:
+                requests += 1
+            return True
+
+        bob.sync_mgr._send_raw = counting_send_raw
+
+        base = time.time() - 10000
+        bob.sync_mgr._send_sync_request(alice.identity.hash_hex, ch_hash, base)
+        for i in range(MAX_SYNC_CONTINUATIONS + 5):
+            never_matches = [[base + i, base + i + 1000, RANGE_FINGERPRINT,
+                              [3, b"\xab" * SYNC_FINGERPRINT_BYTES]]]
+            bob.sync_mgr._handle_sync_response(
+                {
+                    F_MSG_TYPE:      MT_SYNC_RESPONSE,
+                    F_CHANNEL_HASH:  bytes.fromhex(ch_hash),
+                    F_SYNC_MESSAGES: msgpack.packb([], use_bin_type=True),
+                    F_SYNC_RANGES:   sync_ranges.pack(never_matches),
+                },
+                ch_hash, alice.identity.hash_hex,
+            )
+
+        assert requests - 1 == MAX_SYNC_CONTINUATIONS, (
+            f"expected the narrowing to stop after {MAX_SYNC_CONTINUATIONS} "
+            f"continuations, got {requests - 1}"
+        )
+
+    def test_a_repeated_description_does_not_chain_at_all(self, peer_factory):
+        """The same claim twice cannot get a different answer."""
+        alice, bob, ch_hash = _setup_channel_with_member(
+            peer_factory, member_perms=[SEND_MESSAGE]
+        )
+        requests = 0
+
+        def counting_send_raw(dest_hex, fields):
+            nonlocal requests
+            if fields.get(F_MSG_TYPE) == MT_SYNC_REQUEST:
+                requests += 1
+            return True
+
+        bob.sync_mgr._send_raw = counting_send_raw
+
+        base = time.time() - 10000
+        same = [[base, base + 1000, RANGE_FINGERPRINT,
+                 [3, b"\xab" * SYNC_FINGERPRINT_BYTES]]]
+        bob.sync_mgr._send_sync_request(alice.identity.hash_hex, ch_hash, base)
+        for _ in range(5):
+            bob.sync_mgr._handle_sync_response(
+                {
+                    F_MSG_TYPE:      MT_SYNC_RESPONSE,
+                    F_CHANNEL_HASH:  bytes.fromhex(ch_hash),
+                    F_SYNC_MESSAGES: msgpack.packb([], use_bin_type=True),
+                    F_SYNC_RANGES:   sync_ranges.pack(same),
+                },
+                ch_hash, alice.identity.hash_hex,
+            )
+
+        assert requests == 2, (
+            "a responder repeating one unmatchable range drove more than the "
+            f"single narrowing it earned, got {requests - 1} continuations"
+        )
+
+    def test_fake_prefixes_cost_one_bounded_ask_and_drop_nothing(self, peer_factory):
+        """An id list is a claim about the requester's rows, not ours.
+
+        Prefixes matching nothing anywhere are answered by asking for them
+        once, capped; the rows we do hold are still served, and none of them
+        is dropped for failing to appear in the claim.
+        """
+        alice, bob, ch_hash = _setup_channel_with_member(
+            peer_factory, member_perms=[SEND_MESSAGE]
+        )
+        base = time.time()
+        held = [self._row(alice, ch_hash, f"real {i}", base + i) for i in range(3)]
+
+        fake = sorted({bytes([i]) + b"\xee" * 7
+                       for i in range(sync_ranges.SYNC_LEAF_IDS)})
+        answers = self._capture(alice)
+        alice.sync_mgr._handle_sync_request(
+            self._request(ch_hash, {F_SYNC_RANGES: sync_ranges.pack(
+                [[base - 10, time.time() + 300, RANGE_IDLIST, fake]])}),
+            ch_hash, bob.identity.hash_hex,
+        )
+
+        assert len(answers) == 1
+        served = {message_id_from_wire(m["message_id"])
+                  for m in unpack_wire(answers[0][F_SYNC_MESSAGES])}
+        assert served == set(held), \
+            "rows the requester genuinely lacked were not served"
+        needs = sync_ranges.unpack_needs(answers[0][F_SYNC_NEED])
+        assert 0 < len(needs) <= MAX_NEED_IDS, \
+            "an id list of invented prefixes was not bounded by the need cap"
+        assert all(alice.storage.message_exists(mid) for mid in held), \
+            "a claim about the requester's rows changed ours"
 
 
 # ---------------------------------------------------------------------------
