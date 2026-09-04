@@ -26,6 +26,13 @@ LXMF fields layout:
     0x51  sync_scan_cursor  float, furthest timestamp the responder's sweep
                                           reached, even if withheld outright; only set
                                           when truncated (sync_response)
+    0x52  sync_ranges       bytes, msgpack [lo, hi, mode, payload] ranges
+                                          describing the sender's own rows, by
+                                          fingerprint or id prefix (sync_request and
+                                          sync_response; see core/sync_ranges.py)
+    0x53  sync_need         bytes, msgpack [lo, hi, prefix] triples naming rows
+                                          the sender lacks, for the receiver to
+                                          resolve against its own rows in that range
     0x60  voice_state       str, "joined" | "left" (voice signalling)
     0x61  voice_muted       bool, sender's current mute state
     0x62  voice_joined_at   float, when the sender joined the voice session

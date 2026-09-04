@@ -35,7 +35,7 @@ Each mechanism covers a failure scenario the others cannot.
 │ Mechanism 2: Missed-delivery hints                               │
 │   Covers: A went offline, but C/D received the hint while online │
 ├─────────────────────────────────────────────────────────────────┤
-│ Mechanism 3: Timestamp-fallback sync                             │
+│ Mechanism 3: Set reconciliation                                  │
 │   Covers: No hints exist; any peer with the messages can respond │
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -55,8 +55,8 @@ A → C   MT_MISSED_DELIVERY {B missed M}
 A ← B announce detected by PeerAnnounceHandler
 A → B   flush_pending: retry M directly          (Mechanism 1)
 
-B → C   MT_SYNC_REQUEST {channel, since_ts}
-C → B   MT_SYNC_RESPONSE {M, ...}               (Mechanism 2 — hint used)
+B → C   MT_SYNC_REQUEST {channel, what B holds}
+C → B   MT_SYNC_RESPONSE {M, ...}               (Mechanism 2, hint used)
 
                            C clears hints for B
                            B updates last_sync_at
@@ -132,9 +132,9 @@ After B confirms receipt (via `MT_SYNC_RESPONSE` processing), the hints for B ar
 
 ---
 
-## Mechanism 3: timestamp-fallback sync
+## Mechanism 3: reconciling what each side holds
 
-**File**: `trenchchat/core/sync.py`, `SyncManager`
+**File**: `trenchchat/core/sync.py`, `SyncManager`; the set arithmetic is `trenchchat/core/sync_ranges.py`
 
 When B reconnects (detected via `PeerAnnounceHandler`), or on startup, B sends `MT_SYNC_REQUEST` to all known peers for every subscribed channel:
 
@@ -142,33 +142,68 @@ When B reconnects (detected via `PeerAnnounceHandler`), or on startup, B sends `
 Fields:
   F_MSG_TYPE          → "sync_request"
   F_CHANNEL_HASH      → channel hash bytes
-  F_SYNC_WINDOW_START → last_sync_at timestamp from subscriptions table
+  F_SYNC_WINDOW_START → where B would resume from, kept for peers that predate ranges
+  F_SYNC_RANGES       → what B actually holds, as timestamp ranges
 ```
 
-`last_sync_at` is updated whenever B successfully receives a sync response, so subsequent syncs only request the incremental gap.
+### Why a watermark is not enough
 
-Any online peer that is subscribed (or is a member of an invite-only channel) responds. The responder's logic:
+A watermark answers "since when". After a partition it is asked to answer "which", and it cannot: if A holds {1,3,4} and B holds {1,2,4,5}, each side's watermark already sits past the other's gap, so neither ever asks for 2, 3 or 5. That is the shape `sync11` in `docs/testenv-scenarios.md` reproduced with four peers, and the trust horizon, the scan cursor and the never-backwards watermark rule were all attempts to paper over it from the timestamp side.
 
-1. **Resolve hints**: `storage.get_missed_message_ids(channel_hash, B_hash)`, then look those ids up directly (`storage.get_messages_by_ids`). These name exact messages B missed, including ones older than B's window.
-2. **Sweep**: `_collect_permitted_rows(...)` from `window_start`, capped at 50.
-3. **Merge and send** as `MT_SYNC_RESPONSE`, deduplicated by message id and ordered oldest first.
+Message ids are content hashes (`_compute_message_id`), so what the two sides actually disagree about is a *set of ids*. `F_SYNC_RANGES` describes that set:
 
-Hints **supplement** the sweep rather than replacing it. Letting a hint short-circuit the sweep breaks two ways, both of which strand B silently while the empty response reports the channel as synced:
+- A range is `[lo, hi, mode, payload]`, covering rows with `lo <= timestamp < hi`. Ranges in one message are ascending and non-overlapping.
+- `RANGE_FINGERPRINT` carries `[count, fp]`, where `fp` is 16 bytes of SHA-256 over the range's ids sorted and concatenated. Equal count and fingerprint means equal sets, and the range is not looked at again.
+- `RANGE_IDLIST` carries every id in the range by its leading 8 bytes, ascending. Small enough to diff outright, which ends the exchange for that range.
+
+`_describe_local` splits the window into at most `SYNC_RANGE_FANOUT` (16) sub-ranges of roughly equal row count, spelling out any sub-range holding at most `SYNC_LEAF_IDS` (32) rows and fingerprinting the rest. Boundaries always land on a row timestamp and never inside a group of rows sharing one: a boundary is a bare float, so a split group could never be compared consistently by either side. Holding nothing yields one empty id list, which is how a fresh join asks for a whole window in one field.
+
+A hash chain over the channel would be smaller still, and was rejected: a channel has many concurrent authors on a partitioning mesh, so its history is a DAG, and a chain needs somebody to sequence it. That is a center, which fails the first check in `.claude/rules/reticulum-zen.md`.
+
+### The exchange
+
+The responder compares each received range against its **serving view**: signed rows this requester's tenure entitles it to (`_filter_rows_by_tenure`). A row it will not relay is simply absent from every description it produces. What it asks for, by contrast, is measured against everything it holds, so a row it withholds is never requested back.
+
+- **An id list** resolves outright. Rows the requester did not name are sent in `F_SYNC_MESSAGES`. Prefixes the requester named that the responder does not hold become `F_SYNC_NEED` triples `[lo, hi, prefix]` on the same response.
+- **A fingerprint that matches** is skipped entirely.
+- **A fingerprint that differs** is described back: the responder's own id list for that range if it is small enough, otherwise up to 16 fingerprinted sub-ranges. The requester compares those against its own rows and sends a narrowed continuation request. Traffic is proportional to the difference, not to the history.
+
+Nothing is ever pushed unasked. A `F_SYNC_NEED` on a response is answered by a `MT_SYNC_RESPONSE` from the original requester, so the responder records a pending request of its own (`_record_pending_request`) before sending one; without that, the answer would arrive as unsolicited and be dropped. A need-only request is never classified as deep and is never throttled: it names rows outright, so it costs nothing a flood of them could turn into repeated full sweeps.
+
+The worked example takes two round trips. A holds {1,3,4} and B holds {1,2,4,5}:
+
+```
+A → B  sync_request   ranges = id list [1,3,4]
+B → A  sync_response  messages 2 and 5, need = prefix(3)
+A → B  sync_response  message 3
+```
+
+### What the legacy sweep still does
+
+A request carrying neither `F_SYNC_RANGES` nor `F_SYNC_NEED` gets the timestamp sweep exactly as before: `_collect_permitted_rows` from `min(window_start, trust_floor)`, capped at 50 rows, `F_SYNC_SCAN_CURSOR` when a truncated batch scanned past withheld rows, the `PEER_TRUST_HORIZON_SECS` widening for a peer never served before. That path is untouched, so a peer running an older build syncs with a new one exactly as it always did. Everything in the two paragraphs below applies to it and not to a reconciled request.
+
+The sweep fills a batch with rows the requester may actually see, **scanning past withheld ones** (bounded by `MAX_SWEEP_SCAN`). Tenure filtering can otherwise empty a batch while the responder still holds newer history the requester is entitled to, stranding them at that timestamp. A batch that hits `MAX_SWEEP_SCAN` while every scanned row was withheld carries `F_SYNC_SCAN_CURSOR` (how far the sweep actually reached) so the requester's *next* request resumes from there instead of asking the same withheld run over again; that field never touches the persisted watermark, only the next request's `F_SYNC_WINDOW_START`.
+
+Rows are grouped by timestamp as the sweep scans, and a batch or scan cursor never splits a group: `F_SYNC_WINDOW_START` and `F_SYNC_SCAN_CURSOR` are bare floats with no row-id tie-breaker, so several messages sharing the exact same timestamp (plausible on a coarse clock) must be included, or withheld and resumed from, as a whole, or whichever half landed on the wrong side of a split would be silently skipped by every future sweep (`Storage.get_messages_after` filters on strict `timestamp >`). A single group larger than `MAX_RESPONSE_MESSAGES` still ships whole rather than stalling forever. Internally, `_collect_permitted_rows` sweeps by a (timestamp, row id) cursor into `Storage.get_messages_after` so a group spanning an internal page boundary is scanned as one run.
+
+### Hints, caps and bounds
+
+Hints **supplement** the answer rather than replacing it. Letting a hint short-circuit it breaks two ways, both of which strand B silently while the empty response reports the channel as synced:
 
 - Hints are broadcast to every reachable subscriber, so most holders of a hint never have the message it names. That lookup resolves to nothing, and if it stood as the whole answer B would get nothing from that peer until the hint aged out.
 - A responder that answers only the hinted message never serves the newer history B also lacks, and the hint is never cleared on the responder side, so it would keep answering with the same one message on every future request.
 
-A hinted message **newer than where the sweep reached** is held back for the sweep to reach in order. B advances its watermark to the newest message in a response, so serving one out of band would strand everything between it and the sweep frontier.
+On the sweep path a hinted message **newer than where the sweep reached** is held back for the sweep to reach in order, because B advances its watermark to the newest message in a response. A reconciled request has no such frontier: B asks by id, so a row served out of timestamp order strands nothing.
 
-Every authorised request is answered, **including with an empty message list**. Silence is ambiguous ("nothing for you", "never received it", and "not allowed" all look identical), so a requester could never tell that it is actually up to date. Requests the responder refuses (unauthorised peer, or a throttled deep sweep) stay silent, so neither leaks a signal.
+Every authorised request is answered, **including with an empty message list**. Silence is ambiguous ("nothing for you", "never received it", and "not allowed" all look identical), so a requester could never tell that it is actually up to date. Requests the responder refuses (unauthorised peer, a throttled deep request, or a malformed description) stay silent, so none of them leaks a signal.
 
-The 50-message chunk limit keeps responses within LXMF message size constraints. A response that hits the cap carries `F_SYNC_TRUNCATED`, and the requester immediately asks the same peer for the next batch. Without that, everything past the cap waits for an unrelated announce to drive the next request. The chain is bounded by `MAX_SYNC_CONTINUATIONS` per (channel, peer) and only continues while the watermark actually advances, so a peer that flags every batch truncated can't induce unbounded requests.
+The 50-message chunk limit keeps responses within LXMF message size constraints. A response that hits the cap carries `F_SYNC_TRUNCATED` and the requester immediately asks the same peer again, rebuilt from what it now holds. The chain is bounded by `MAX_SYNC_CONTINUATIONS` per (channel, peer), and only continues on actual progress: a row accepted, or a question that differs from the last one put to that peer (`_continue_reconcile` compares `sync_ranges.signature`). A responder that repeats one unmatchable range earns exactly one narrowing, not a request per claim.
 
-The sweep fills a batch with rows the requester may actually see, **scanning past withheld ones** (`_collect_permitted_rows`, bounded by `MAX_SWEEP_SCAN`). Tenure filtering can otherwise empty a batch while the responder still holds newer history the requester is entitled to, stranding them at that timestamp. A batch that hits `MAX_SWEEP_SCAN` while every scanned row was withheld carries `F_SYNC_SCAN_CURSOR` (how far the sweep actually reached) so the requester's *next* request resumes from there instead of asking the same withheld run over again; that field never touches the persisted watermark (below), only the next request's `F_SYNC_WINDOW_START`.
+Inbound descriptions are refused whole rather than in part, and the caps are what a well-formed description of one window can produce: at most `MAX_SYNC_RANGES` (32) ranges and `MAX_SYNC_LIST_IDS` (512, which is 16 sub-ranges of 32) prefixes per message, `MAX_SYNC_NEEDS` (50) need triples, exact prefix and fingerprint widths, ascending non-overlapping ranges, and sorted id lists. Acting on the half of a description that parsed would mean serving rows against a set the peer never actually described.
 
-Rows are grouped by timestamp as the sweep scans, and a batch or scan cursor never splits a group: `F_SYNC_WINDOW_START` and `F_SYNC_SCAN_CURSOR` are bare floats with no row-id tie-breaker, so several messages sharing the exact same timestamp (plausible on a coarse clock) must be included, or withheld and resumed from, as a whole, or whichever half landed on the wrong side of a split would be silently skipped by every future sweep (`Storage.get_messages_after` filters on strict `timestamp >`). A single group larger than `MAX_RESPONSE_MESSAGES` still ships whole rather than stalling forever. Internally, `_collect_permitted_rows` sweeps by an (timestamp, row id) cursor into `Storage.get_messages_after` so a group spanning an internal page boundary is scanned as one run.
+A request is classified **deep** by how far its ranges actually reach: older than `SYNC_WINDOW_SECS` plus a clock-skew allowance, so a peer whose clock trails ours is never throttled for asking about the window it believes it is in. Deep requests are paced per (channel, peer) by `DEEP_SYNC_COOLDOWN_SECS` exactly as before.
 
-The requester's watermark only ever advances over messages it actually accepted, never past ones the responder withheld or it rejected itself, and never backwards, since a hint can serve a message older than everything already held. A permission decision is not permanent: a role or `full_sync` grant still propagating would otherwise leave history withheld for good, since the watermark would already be past it. The cost is that the responder re-scans that withheld run on each request, which is bounded and indexed.
+The requester's watermarks (`last_sync_at`, `sync_progress`) still advance only over messages actually accepted, never past ones the responder withheld or it rejected itself, and never backwards. They no longer decide *what* is asked for, though, so a grant that arrives late, or a row that turns up behind them, is recoverable rather than lost.
 
 On receiving `MT_SYNC_RESPONSE`, B inserts each message with `Storage.insert_message()`, which is idempotent, the `UNIQUE(message_id)` constraint silently discards duplicates. New messages fire the normal GUI message callbacks so the chat view updates live.
 
@@ -227,14 +262,16 @@ two mechanisms (pending retry, hints) still fire on every announce.
 
 ## Sync window
 
-Both hint TTL and the timestamp-fallback query are bounded by a configurable sync window:
+Both the hint TTL and the span a request reconciles are bounded by a configurable sync window:
 
 ```python
 SYNC_WINDOW_DAYS = 7   # in trenchchat/core/sync.py
 SYNC_WINDOW_SECS = SYNC_WINDOW_DAYS * 86400
 ```
 
-Requests never look back further than `now - SYNC_WINDOW_SECS`, preventing unbounded data exchange on long-offline clients.
+Requests never look back further than `now - SYNC_WINDOW_SECS`, preventing unbounded data exchange on long-offline clients. A fresh join, or a peer whose entitlement just changed, asks from `0.0` and reaches as far back as the responder is willing to serve, which is what the deep-sync cooldown paces.
+
+The window is also the horizon of what reconciliation can find. A message older than it is reachable only through a hint naming it directly; once that hint is purged, it is genuinely gone (`tests/test_sync_hints.py`).
 
 ---
 
@@ -249,7 +286,9 @@ Defined in `trenchchat/core/protocol.py`:
 | `F_MISSED_FOR` | `0x09` | `str` | `missed_delivery` |
 | `F_MISSED_MSG_ID` | `0x0A` | `str` | `missed_delivery` |
 | `F_SYNC_TRUNCATED` | `0x50` | `bool` | `sync_response` |
-| `F_SYNC_SCAN_CURSOR` | `0x51` | `float` | `sync_response` (only when truncated) |
+| `F_SYNC_SCAN_CURSOR` | `0x51` | `float` | `sync_response` (only on the sweep path, when truncated) |
+| `F_SYNC_RANGES` | `0x52` | `bytes` (msgpack) | `sync_request`, `sync_response` |
+| `F_SYNC_NEED` | `0x53` | `bytes` (msgpack) | `sync_request`, `sync_response` |
 
 ---
 
