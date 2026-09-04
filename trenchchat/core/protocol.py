@@ -129,7 +129,10 @@ F_FILE_CHUNK_ROOT   = 0x93   # bytes[32]: SHA-256 over the concatenated SHA-256s
 FILE_CHUNK_BYTES = 32 * 1024
 
 # Largest file a share may carry. Chosen against the slowest link the project
-# targets, and matched to what node file serving already runs under.
+# targets, and matched to what node file serving already runs under. Measured
+# there once, end to end: 5h 14m at SF7 with both ends on the radio, arriving
+# byte for byte, a quarter of it spent on requests that died after the bytes had
+# crossed (docs/testenv-scenarios.md, files11).
 MAX_SHARED_FILE_BYTES = 5 * 1024 * 1024
 
 # Matches fileutils.MAX_FILENAME_CHARS: a manifest name is what clean_filename

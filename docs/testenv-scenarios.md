@@ -704,7 +704,8 @@ The radio rows stay probes after this pass, and the ratios are the reason: four
 finishes in five at SF7 and three in five under 15% loss are measurements of a
 link, not a settled behaviour, and the runs that do not finish fail on RNS's own
 response handshake rather than on anything this project decides. A strict row
-here would report a bad radio as a regression. files10 is a probe for the same
+here would report a bad radio as a regression. files11 is a probe for that reason
+and because one five-hour run is one sample. files10 is a probe for the same
 reason and one more: what it measures is how one shared uplink is divided
 between members who all want the same file, and that is a spread of numbers
 rather than a behaviour.
@@ -721,6 +722,7 @@ rather than a behaviour.
 | files8 | A,B | files1 under `lossy` (62.5 kbps, 250±150 ms, **15% loss**), 512 KB | ⚠ Probe. At 32 KB chunks (16 of them), **three of five runs arrived, in 427.8-564.2s**, 8-9 requests and one lost each; the other two held 4 and 1 chunk after losing two. The same five runs before the retry-wait fix arrived **none of five**, and at 64 KB one of four arrived, in 214.2s. This link pays per request, so the chunk that helps files5 costs here. See the entry below |
 | files9 | A-H | A shares a 2 MB file in an invite-only channel and **every other tester posts its fetch inside the same second**, seven askers against a concurrent-serve cap of two | ✅ **5/5 runs at `--testers 8`, 136-309s.** All seven finish byte for byte every time. Four of the five never reached either cap and the whole fan-in is queueing: 3-49s each, 44s of spread, 84 requests and none lost. In the fifth all seven first requests landed together, five were refused by the serve cap, and each of those paid exactly 120.0s of silence for a slot that had freed inside a second; one was refused twice and finished at 242s. **0 of 3 finished in 924s before the rate-limit fix below** |
 | files10 | A,B,C,D | files9 at `lora_fast` (SF7, 5.5 kbps), 200 KB, three askers, testers slowed to a 60s announce cadence | ⚠ Probe. **Four runs of five finished all three members, in 1695-2737s**; in the fifth one member finished at 2557s and the other two were still holding 4 and 5 of 7 chunks at the 3000s ceiling. Each downloader takes 671-2672s against files5's 496-651s for a single one, and the three together move 230-377 B/s against that row's 315-413: one uplink divided three ways, not three uplinks. Nobody is starved, and **66 of the 97 lost requests across the five runs were dials at the two members who were themselves still downloading**, at 120s each. Multi-source is real here and not on broadband: four runs in five had a member served in part by an earlier finisher |
+| files11 | A,B | A shares a file of exactly `MAX_SHARED_FILE_BYTES` (5 MB, 160 chunks) in an invite-only channel at `lora_fast` (SF7, 5.5 kbps); one downloader, testers slowed to a 60s announce cadence | ⚠ Probe, one run. **It arrives byte for byte in 18842.2s, five hours and fourteen minutes**, at 278.3 B/s and 117.8s a chunk: manifest in 12.6s, first verified chunk at 110.1s, 46 ranges, the window climbing to 8 chunks (262 KB) and halving back. Seventeen requests were lost, every one a stall, and the 4442s they cost is 23.6% of the run; with that taken out the file moves at 364 B/s, inside files5's 315-413. No refusals, no rate limiting, no tracebacks, and 5,644,288 bytes of database at rest on both ends for a 5,242,880 byte file |
 
 #### files5: what the LoRa run says about the constants
 
@@ -783,9 +785,11 @@ Read against the constants:
   cost these runs their fastest requests and prevented none of the failures. The
   streak rule stays.
 - `FILE_REQUEST_MAX_CHUNKS` (16) is still never approached: the window reaches 2.
-- `MAX_SHARED_FILE_BYTES` (5 MB) is **3.5 to 4.4 hours** at the rates measured
-  here. Unchanged as an argument: the transfer is resumable across links, holders
-  and restarts, and the client is what should say so.
+- `MAX_SHARED_FILE_BYTES` (5 MB) reads as **3.5 to 4.4 hours** at the rates
+  measured here, which files11 has since run and measured at **5h 14m**: the
+  estimate counted the link and not the requests that die on it. Unchanged as an
+  argument either way: the transfer is resumable across links, holders and
+  restarts, and the client is what should say so.
 
 The half-rate result is the honest cost of a request-and-response transfer: each
 range is a resource with its own handshake and proof, and the link is idle
@@ -948,6 +952,92 @@ one of them took chunks from all three of the others. The same property is never
 needed on broadband (files9 sees it once in five), so this row is where the
 design's claim that any holder will do is actually exercised.
 
+#### files11: the ceiling, measured once
+
+`MAX_SHARED_FILE_BYTES` was chosen against a radio and then only ever read
+against a 200 KB transfer. This row is the ceiling itself: 5,242,880 bytes, 160
+chunks, SF7 at 5.5 kbps with both ends shaped, one downloader, one run, an
+eight-hour ceiling on the probe so that a slow run could not be recorded as a
+stopped one.
+
+**It arrives, byte for byte, in five hours and fourteen minutes.**
+
+| | |
+|---|---|
+| Manifest at the downloader | 12.6s |
+| First verified chunk | 110.1s |
+| Whole file | 18,842.2s (5h 14m) |
+| Rate over the transfer | 278.3 B/s, 117.8s a chunk |
+| Rate with the dead time taken out | 364.1 B/s |
+| Ranges landed | 46, averaging 3.5 chunks (114 KB) |
+| Window reached | 8 chunks (262 KB), climbing and halving throughout |
+| Gap between ranges | 65.0s / 350.2s / 1896.2s (min / median / max) |
+| Requests the holder handled | 62 |
+| Requests the downloader lost | 17, every one a stall |
+| Parked, waiting to ask again | 2401.7s |
+| Refusals, rate limiting, tracebacks | 0, 0, 0 |
+| Store at rest | 5,644,288 bytes of database, both ends, for 5,242,880 bytes of file |
+
+**A quarter of the wall clock is requests that died.** Seventeen stalls cost
+2,040s of stall sweep (120s each, the plane's own timer, since RNS gives a
+proven and unanswered request no failure callback) and 2,401.7s parked behind
+the retry wait afterwards: 4,442s, 23.6% of the run. Take those out and the
+file moves at 364 B/s, inside the 315-413 B/s files5 measured for 200 KB. The
+medium behaves exactly as it did at a fortieth of the size; what 5 MB adds is
+sixty-two chances to lose a request rather than six.
+
+The losses are the response failure this family [already records](#open), at a
+scale where it can be counted. The holder logged 21 resource failures over the
+five hours, 16 of them a proof that did not get back in time and 5 an
+advertisement that timed out on its uplink, and 10 of the 17 stalls have one of
+those inside the five minutes before them. Every stall was followed by a fresh
+link and a fresh identify (18 in all, one per stall plus the first) and the
+download carried on from the chunks it already held: nothing was re-fetched, no
+holder was ever suspected, and the file matched its manifest first time.
+
+**What the run does not show is a window that asks for too much.** The
+prediction going in was that the largest ranges would be the ones that died.
+Reconstructing the window from the holder's log accounts for 137 of the 160
+chunks, so it is indicative rather than exact (worker stdout is block buffered),
+and it puts lost requests at every window size the run used, single 32 KB ranges
+included. The second half of the run, where stalls come every seven minutes
+rather than every twenty-four, is also the half where the window is being
+halved constantly and so cannot have been large. Nothing here argues for
+bounding the window by size on a slow link.
+
+Read against the constants:
+
+- `MAX_SHARED_FILE_BYTES` (5 MB) is **5h 14m at SF7**, against the 3.5 to 4.4
+  hours estimated from files5. That estimate was 20% optimistic because it
+  counted the link and not the losses; 5.2 hours is the number to quote. The
+  ceiling is honest on this profile: the file arrives, every chunk is verified
+  against the signed root on the way in, the whole file is checked against the
+  manifest at the end, and the store cost at rest is 1.077x the file. Whether a
+  client should start a five-hour transfer without saying so is a client
+  question, and the answer is still that it should say so.
+- `FILE_CHUNK_BYTES` (32 KB) is unchanged by this run: 117.8s a chunk overall,
+  and about 71s a chunk through the clean stretches, which is the 70-110s files5
+  measured.
+- `FILE_STALL_SECS` (120s) is 2,040s of this run and is still the only thing
+  that ends these requests. Nothing cheaper exists in RNS to detect them with.
+- `DOWNLOAD_RETRY_SECS` (120s) is the other 2,402s, and it is the one number
+  this run argues with. After a stalled request the failed holder is skipped for
+  the round, and with a single-holder download that leaves no candidate, so the
+  download parks for two minutes behind the peer that served it a range minutes
+  earlier. `_round_reset` already treats a served range as the strongest sign of
+  a member there is; the wait after a stall does not. Halving the dead time here
+  is a rule change rather than a constant change, so it is [recorded](#open)
+  rather than made on one run's evidence.
+
+The resource numbers are the other half of the answer. The sender's process grew
+from 71.7 MB resident to 153.7 MB across the five hours, 11.9 MB of that the
+share itself; the downloader's grew from 71.7 MB to 93.2 MB. The database is the
+number that settles: 5,644,288 bytes at rest on both ends, 1.077x the file, and
+up to 9.4 MB mid-run while the WAL sidecar is unchecked, which is what a client
+should size a device against. The 82 MB the holder gained while serving about
+7 MB of ranges is one sample with debug logging on, and it is
+[recorded as open](#open) rather than chased here.
+
 ## The LoRa pass
 
 Every family re-run with `--link-profile lora_fast` (SF7, 5.5 kbps, 60±20ms, 1%
@@ -986,8 +1076,9 @@ failure.
   treating them as defects.
 
 The `files` family carries its own radio rows rather than a whole-family pass:
-files5 is files1 at SF7 and files10 is files9 at SF7, and the rest of the family
-is broadband because what it tests (a dead holder, a killed downloader, a
+files5 is files1 at SF7, files10 is files9 at SF7 and files11 is the 5 MB ceiling
+there, and the rest of the family is broadband because what it tests (a dead
+holder, a killed downloader, a
 non-member's request) is not about the link. One thing that pass makes plain: at SF7 the harness's own
 announces are a large fraction of the link, four testers announcing three
 destinations each every 10s against 687 bytes a second, so files5 slows every
@@ -1048,9 +1139,11 @@ Everything the matrix turned up, across all ten families.
 | **public5**: a public-channel join fires no sync request; backfill waits on the next peer announce | **Confirmed, and deliberately left.** 0 messages at join, backfill at 1.0s / 9.1s tracking the 10s heartbeat; up to 60s in the real client, and at SF7 it never arrived at all (see the LoRa pass). Deferred by decision, public-channel behaviour is being left alone for now |
 | **A presence beacon is evidence for its receiver only**, so a peer that beacons is never answered and its own view stays stale. In files3 the returning member beaconed the holder every 35s for three minutes and the holder, having fresh evidence of it, had no reason to beacon back: the holder read as offline the whole time | **Confirmed**, and the reason the presence gate above had to go. The fix belongs to `presence.py` (answer a beacon from a peer we have gone quiet toward, once, the way `FirstContactAnnouncer` answers a first announce), and is not made here: nothing in `files/` depends on it any more, and every other consumer of presence deserves its own look first |
 | **An identify that does not land makes every request on that link a silent refusal**: the file plane identifies once per link and then trusts that it did, so a lost identify packet leaves the holder refusing a member it cannot name. Seen twice in ten files8 runs, both times on the first request after a dial | **Confirmed**, and it recovers on its own: the stall sweep ends the request, the download parks, and the link is dropped as idle because a stalled request never refreshes it, so the next attempt dials and identifies again. The cost is about four minutes. Answering an unidentified requester with something rather than silence would halve it and is the one refusal that could say so safely, since it is decided before any lookup |
-| **A response resource that fails after it has started is silent to the requester**: RNS reports it through `RequestReceipt.request_timed_out`, which returns early unless the receipt is still `DELIVERED`, and the first resource part has already moved it to `RECEIVING`. The receipt then sits in the link's pending requests for ever | **Confirmed** in five of the six requests files5 stalled on at SF7: the holder's advertisement watchdog expired, or its resource proof did not get back in time, and the requester learned nothing until the plane's own 120s stall sweep. The sweep is what makes it survivable, and RNS exposes nothing cheaper to detect it with, so this is recorded rather than fixed |
+| **A response resource that fails after it has started is silent to the requester**: RNS reports it through `RequestReceipt.request_timed_out`, which returns early unless the receipt is still `DELIVERED`, and the first resource part has already moved it to `RECEIVING`. The receipt then sits in the link's pending requests for ever | **Confirmed** in five of the six requests files5 stalled on at SF7: the holder's advertisement watchdog expired, or its resource proof did not get back in time, and the requester learned nothing until the plane's own 120s stall sweep. The sweep is what makes it survivable, and RNS exposes nothing cheaper to detect it with, so this is recorded rather than fixed. files11 counts it over five hours: 17 of the 62 requests a 5 MB transfer took were lost this way, 23.6% of the run, and the holder's own log names 21 resource failures across it, 16 proofs that did not get back in time and 5 advertisements that timed out on its uplink |
 | **The concurrent-serve cap counts responses in flight, not downloads**: a slot is freed as soon as its link has no outgoing resource left, which on a fast link is the gap between two ranges of the same transfer. Seven members pulling one file at once reached it in one files9 run of five, and only because all seven first requests landed inside the same instant | **Confirmed.** Not wrong, but not the admission control the name suggests: what it bounds is concurrent response resources, and a fan-in it never refuses is served by rotation instead, which is what the four clean runs did in 44s of spread. No other number for it is better on this evidence; the run where it did fire cost 241s, and all of that was the silence below rather than the waiting |
 | **A fan-in spends most of its time proving that the other askers hold nothing**: when several members want one file, the only candidates besides the sharer are members who are themselves still downloading it, and a member with no path to its file plane costs the full 120s fetch timeout to give up on. 66 of the 97 requests files10 lost across five runs were those dials, about 1600s a run | **Confirmed**, and not covered by the path-table ordering: that decides the order candidates are asked in, not whether they are asked. The cheaper shape is to park when the only candidates left this round have no path, since a parked download re-asks after 120s and is put back by any sign of a member, rather than spending 240s discovering two dead ends first. Not changed here: `tests/test_files.py` specifies that a member with no path is still asked, which is the guard against never asking a holder that has simply gone quiet, and choosing between the two is a decision rather than a measurement |
+| **A stalled request from the only holder costs four minutes, not two**: the failed holder is skipped for the round, and where it is the only candidate the download parks for `DOWNLOAD_RETRY_SECS` on top of the 120s stall sweep that ended the request | **Confirmed**, and measured in files11: 17 stalls cost 2,040s of sweep and 2,401.7s parked, together 23.6% of a five-hour transfer, every one of them behind a peer that had served a range minutes earlier and went on serving the next one immediately. `_round_reset` already counts a served range as the strongest sign of a member there is; the park after a stall does not read it. Not changed here: the wait exists to stop a download hammering a holder that is not there, and telling those two cases apart is a rule change rather than a constant, on one run's evidence |
+| **A holder's process grows while it serves**: the sender in files11 went from 71.7 MB resident to 153.7 MB over five hours while serving 62 responses, about 7 MB of payload, and the downloader from 71.7 MB to 93.2 MB | **Recorded, not chased.** One sample, with every tester logging at debug, so an allocator high-water mark and a leak look the same from here. The database is the number that settles and it is clean: 5,644,288 bytes at rest for a 5,242,880 byte file on both ends, 1.077x, peaking near 9.4 MB mid-transfer while the WAL sidecar is unchecked. Worth a second look because a holder is the node with the least reason to be a large process |
 | **A refusal on the file plane costs the asker 120s of silence**: `None` from the serve handler means RNS sends nothing, and a request packet that is proven and then never answered has no failure callback in RNS, so only the plane's own stall sweep ends it | **Confirmed** in files4, at 120.1s and 127.5s, and measured again in files9: five members refused by the concurrent-serve cap each waited 120.0s for a slot that had freed within a second, one of them twice, which took that run's spread from 44s to 241s. Deliberate for a non-member, who learns nothing from silence. The cap refusal is the one that could safely answer instead: like the unidentified-requester refusal above it is decided before the request is parsed and before any membership lookup, so a bare "busy" tells an asker nothing the holder's own `files` announce does not already say. That is a wire change and belongs to a decision rather than to a stress pass |
 | **public6**, `full_sync` has no effect on public channels; any subscriber can pull full history | **Confirmed, and deliberately left.** Identical backfill with and without the grant, and the UI offers the toggle regardless, so it reads as a privacy control that is not one. Deferred by decision, same as public5 |
 
@@ -1062,6 +1155,7 @@ Two were written to demonstrate a gap and demonstrated its absence instead; the 
 |---|---|
 | **social3**, reactions have no backfill path, so an offline peer misses them permanently | D recovered the reaction in 14.1s and 15.2s. LXMF's own retry redelivers the broadcast once the link returns; no application-level backfill is needed for a peer whose path is known |
 | **public10**, a subscriber that misses a subscriber-list broadcast is stranded | It recovered every time, by the same LXMF retry. The no-retry gap only bites when the path was *never* resolved, a cold-start race, not an offline-peer case |
+| **The largest ranges are the ones that die**, the reasoning that would bound the window by size on a slow link | files11 lost 17 requests across a 5 MB transfer at SF7 and the reconstruction of its window (indicative: it accounts for 137 of the 160 chunks, since worker stdout is block buffered) puts them at every window size the run used, single 32 KB ranges included. The half of the run with a stall every seven minutes is also the half where the window was being halved constantly and cannot have been large |
 | **A 64 KB range cannot fit inside the 120s stall sweep**, the reasoning that halved `FILE_CHUNK_BYTES` | It fits. The sweep is a no-progress timer and every resource part resets it: 65 KB ranges took 127-201s at SF7 and finished. 32 KB is still the better number there by ratio (4 of 5, twice, against 2 of 5), but the mechanism was not the one written down: what killed the large ranges was the holder's own advertisement watchdog expiring while the advert sat in a queue on the uplink |
 
 ### One suspected gap that turned out not to be
@@ -1108,7 +1202,7 @@ How to run it, when a scenario is the right tool, and how to add one live in
 
 ## Status
 
-All fourteen families built and run: **123 scenarios, 97 strict and 26 probes**, counted from the registry rather than by hand, which the total here had drifted behind.
+All fourteen families built and run: **124 scenarios, 97 strict and 27 probes**, counted from the registry rather than by hand, which the total here had drifted behind.
 
 | Family | Scenarios | Result |
 |---|---|---|
@@ -1124,7 +1218,7 @@ All fourteen families built and run: **123 scenarios, 97 strict and 26 probes**,
 | `integrity`: message integrity | 4 (4 strict) | All passing; integrity2 found a real gap, now fixed and strict |
 | `nomad`: page browsing and hosting | 4 (3 strict, 1 probe) | All passing, 4/4 runs each; nomad3 confirmed bounded offline failure and recovery |
 | `interop`: direct messages with other LXMF clients | 4 (4 strict) | All passing against a real bare RNS+LXMF client; interop4 found a real gap, 5/5 after the fix |
-| `files`: shared files in invite-only channels | 10 (7 strict, 3 probes) | All strict rows passing; files1 alone found three defects, files8 a fourth, the two radio probes two more and files9 a seventh, all fixed. files5, files8 and files10 record what a slow link, a lossy one and a shared one each cost |
+| `files`: shared files in invite-only channels | 11 (7 strict, 4 probes) | All strict rows passing; files1 alone found three defects, files8 a fourth, the two radio probes two more and files9 a seventh, all fixed. files5, files8 and files10 record what a slow link, a lossy one and a shared one each cost, and files11 moves the 5 MB ceiling itself over SF7 in 5h 14m |
 
 **One strict scenario fails, on purpose.** sync11 is a real defect, left
 strict and failing so `--family sync` exits non-zero until it is resolved:

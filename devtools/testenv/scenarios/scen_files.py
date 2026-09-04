@@ -26,6 +26,7 @@ import hashlib
 import os
 import random
 import time
+from collections import Counter
 from pathlib import Path
 
 from asserts import hold_for, settle, wait_until, ScenarioFailure
@@ -36,8 +37,9 @@ from flows import (
 )
 from scenario import PROBE, scenario
 from trenchchat.core.files import DL_DONE, DL_UNAVAILABLE
-from trenchchat.core.protocol import FILE_CHUNK_BYTES
+from trenchchat.core.protocol import FILE_CHUNK_BYTES, MAX_SHARED_FILE_BYTES
 
+SIZE_5MB = MAX_SHARED_FILE_BYTES
 SIZE_2MB = 2 * 1024 * 1024
 SIZE_512KB = 512 * 1024
 SIZE_200KB = 200 * 1024
@@ -84,6 +86,20 @@ LORA_FAN_IN_TIMEOUT = 3000.0
 # Slow enough not to be load of its own against every downloader at once,
 # fast enough to catch a holder switch between two ranges.
 SAMPLE_INTERVAL = 1.0
+
+# The ceiling row gets a ceiling of its own. files5 moved 200 KB at 315-413 B/s
+# with both ends shaped, which put 5 MB between 3.5 and 4.6 hours before anyone
+# had run it; it measures 5h 14m, a quarter of which is requests that died.
+# Eight hours is not patience for its own sake: a run that is merely slow must
+# not be recorded as a run that stopped, and there is no second attempt to
+# spend finding out which it was.
+CEILING_FETCH_TIMEOUT = 8 * 3600.0
+# A chunk takes 70-110s at SF7, so a 5s sample cannot miss a served range, and
+# the polls cost the tester nothing next to what the radio is doing.
+CEILING_SAMPLE_SECS = 5.0
+# peer.py's own per-request timeout suits a status poll. Handing a tester 5 MB,
+# or reading it back, is the one request in this family that is not one.
+BIG_BODY_TIMEOUT = 300.0
 
 # The harness announces every 10s, which is 1000x a real client and, at SF7,
 # a large fraction of the link: four testers announcing three destinations
@@ -198,6 +214,18 @@ class _LogTail:
     def count(self, needle: str) -> int:
         return self._text().count(needle)
 
+    def each_line(self):
+        """Every line since this was made, one at a time.
+
+        A run measured in hours writes a capture measured in gigabytes, so a
+        scenario that reads one reads it in a single streaming pass rather
+        than holding the whole thing in memory.
+        """
+        with self._path.open("r", errors="replace") as fh:
+            fh.seek(self._offset)
+            for line in fh:
+                yield line.rstrip("\n")
+
 
 def _log_tail() -> _LogTail | None:
     path = os.environ.get("TC_TESTER_LOG")
@@ -262,6 +290,128 @@ def _serve_counts(tail, everyone) -> dict:
         "requests_served": tail.count("for: /tc/file"),
         "requests_failed": len(tail.lines_with("[files]", "failed:")),
         "tracebacks": tail.count("Traceback (most recent call last)"),
+    }
+
+
+def _tester_process(peer) -> tuple[int, Path] | None:
+    """A tester's worker pid and data directory, read out of /proc.
+
+    The orchestrator does not publish either, and a run this long is worth
+    knowing the cost of. None where /proc is not available, so the scenario
+    records that it could not look rather than asserting on nothing.
+    """
+    proc = Path("/proc")
+    if not proc.exists():
+        return None
+    for entry in proc.iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            argv = (entry / "cmdline").read_bytes().split(b"\0")
+        except OSError:
+            continue
+        if len(argv) < 4 or not argv[1].endswith(b"worker.py"):
+            continue
+        if argv[2].decode(errors="replace") != peer.tag:
+            continue
+        return int(entry.name), Path(argv[3].decode(errors="replace"))
+    return None
+
+
+def _rss_kb(pid: int) -> int | None:
+    try:
+        for line in Path(f"/proc/{pid}/status").read_text().splitlines():
+            if line.startswith("VmRSS:"):
+                return int(line.split()[1])
+    except (OSError, ValueError, IndexError):
+        return None
+    return None
+
+
+def _db_bytes(data_dir: Path) -> int:
+    """Everything SQLite is holding for one tester, main file and journals."""
+    return sum(f.stat().st_size for f in data_dir.glob("storage.db*"))
+
+
+def _resources(peer) -> dict:
+    """One tester's process memory and database size, right now."""
+    found = _tester_process(peer)
+    if found is None:
+        return {"read": "no worker process found under /proc"}
+    pid, data_dir = found
+    return {"rss_kb": _rss_kb(pid), "db_bytes": _db_bytes(data_dir)}
+
+
+def _failure_summary(line: str) -> str:
+    """A failed-request log line as "time reason"."""
+    stamp = ""
+    if line.startswith("[") and "]" in line:
+        stamp = line[1:line.index("]")].split(" ")[-1]
+    reason = line.rsplit("failed:", 1)[-1].strip()
+    return f"{stamp} {reason}".strip()
+
+
+def _request_tally(tail) -> dict:
+    """What the whole run's log says was served and what was lost, with causes.
+
+    A lost request exists nowhere else: RNS answers a refusal with silence,
+    and a request that stalls after being proven has no failure callback of
+    its own, so the downloader's own log line is the only record of either.
+    """
+    if tail is None:
+        return {"log": "no tester log captured"}
+    served = 0
+    rate_limited = 0
+    tracebacks = 0
+    lost: list[str] = []
+    for line in tail.each_line():
+        if "for: /tc/file" in line:
+            served += 1
+        elif "[files]" in line and "failed:" in line:
+            lost.append(_failure_summary(line))
+        elif "rate limit reached" in line:
+            rate_limited += 1
+        elif "Traceback (most recent call last)" in line:
+            tracebacks += 1
+    causes = Counter(entry.split(" ")[-1] for entry in lost)
+    return {"requests_served": served, "requests_lost": len(lost),
+            "lost_causes": dict(causes), "lost": lost,
+            "rate_limited": rate_limited, "tracebacks": tracebacks}
+
+
+def _range_trail(trail: list[tuple]) -> dict:
+    """A long download read off its samples: when ranges landed and how big.
+
+    A range is stored whole, so the jump in verified chunks between two
+    samples is the window that request asked for. The snapshot carries no
+    window and this is the same number seen from the other end.
+    """
+    ranges: list[dict] = []
+    parked = 0.0
+    first_chunk = None
+    for i, (secs, state, chunks, _holder, _reason) in enumerate(trail):
+        if chunks and first_chunk is None:
+            first_chunk = secs
+        if i + 1 >= len(trail):
+            continue
+        nxt = trail[i + 1]
+        if state == DL_UNAVAILABLE:
+            parked += nxt[0] - secs
+        if nxt[2] > chunks:
+            ranges.append({"at": nxt[0], "chunks": nxt[2] - chunks})
+    gaps = [round(ranges[i]["at"] - ranges[i - 1]["at"], 1)
+            for i in range(1, len(ranges))]
+    return {
+        "first_chunk_secs": first_chunk,
+        "ranges_landed": len(ranges),
+        "windows_reached": sorted({r["chunks"] for r in ranges}),
+        "secs_between_ranges": {
+            "min": min(gaps) if gaps else None,
+            "median": sorted(gaps)[len(gaps) // 2] if gaps else None,
+            "max": max(gaps) if gaps else None,
+        },
+        "parked_secs": round(parked, 1),
+        "states": sorted({state for _t, state, _c, _h, _r in trail if state}),
     }
 
 
@@ -845,4 +995,117 @@ def _lora_fan_in(env, peers) -> dict:
             f"{len(downloaders)} members asking at once did not all finish "
             f"200 KB over SF7 in {LORA_FAN_IN_TIMEOUT:.0f}s: "
             f"{notes['per_downloader']}")
+    return notes
+
+
+@scenario("files11", "The 5 MB ceiling over a LoRa SF7 link", peers="AB",
+          kind=PROBE)
+def h11(env):
+    """The largest file the protocol allows, on the slowest medium it claims.
+
+    `MAX_SHARED_FILE_BYTES` was decided against LoRa and then only ever read
+    against files5's 200 KB, and nothing above that had moved over a radio here
+    at all. This row moves it, once, and records what it cost: five hours and
+    fourteen minutes, byte for byte, a quarter of it spent on requests that
+    died after the bytes had crossed.
+
+    A probe, and not only because it measures a link. One run is one sample,
+    the ceiling bounding it is eight hours, and a second attempt is not
+    something a stress pass can spend. What one run can settle is whether 160
+    chunks arrive at all and arrive byte for byte, which is the claim the
+    constant makes.
+
+    Two testers rather than files5's three. A third member holds nothing,
+    never announces on the `files` aspect and is the dial a download spends
+    two minutes giving up on (files10 lost 66 requests that way); with the
+    sharer as the only candidate, what is measured is the transfer. Every
+    tester is slowed to a real announce cadence rather than only the two in
+    the channel, because at SF7 the harness's own announces are otherwise a
+    large part of what the shaped links carry.
+    """
+    a, b = env.peers("A", "B")
+    for peer in env.all():
+        env.orch.set_heartbeat(peer.tag, QUIET_HEARTBEAT_SECS)
+        env.wait_alive(peer)
+    for peer in (a, b):
+        peer.set_http_timeout(BIG_BODY_TIMEOUT)
+    try:
+        return _lora_ceiling(env, a, b)
+    finally:
+        for peer in (a, b):
+            peer.set_http_timeout()
+        for peer in env.all():
+            env.orch.set_heartbeat(peer.tag, DEFAULT_HEARTBEAT_SECS)
+            env.wait_alive(peer)
+
+
+def _lora_ceiling(env, a, b) -> dict:
+    ch = invite_only_channel(a, [b], "h11-private")
+    shaping = {p.tag: set_link_profile(env, p, LORA_FAST) for p in (a, b)}
+
+    data = _payload(SIZE_5MB, 11)
+    total = _chunks(len(data))
+    tail = _log_tail()
+    resources = {p.tag: {"before": _resources(p)} for p in (a, b)}
+
+    share_started = time.time()
+    message_id, file_hash = _share(a, ch, "h11-5mb.bin", data, "h11-file")
+    share_secs = round(time.time() - share_started, 1)
+    resources["A"]["after_share"] = _resources(a)
+    if a.file_state(ch, message_id) != "done":
+        raise ScenarioFailure(
+            f"the sender does not hold its own share: "
+            f"{a.file_card(ch, message_id)}")
+    manifest_secs = _await_manifest(b, ch, "h11-file", message_id,
+                                    LORA_FETCH_TIMEOUT)
+
+    started = b.start_file_fetch(ch, file_hash, message_id)
+    if not started.get("ok"):
+        raise ScenarioFailure(f"B was refused the download: {started}")
+
+    trail: list[tuple] = []
+    origin = time.time()
+
+    def _sample() -> bool:
+        status = _status(b, ch, file_hash)
+        trail.append((round(time.time() - origin, 1), status.get("state"),
+                      status.get("chunks_held", 0), status.get("holder"),
+                      status.get("reason")))
+        return status.get("state") == DL_DONE
+
+    arrived, _secs = settle(_sample, "B to finish 5 MB over a radio",
+                            CEILING_FETCH_TIMEOUT, interval=CEILING_SAMPLE_SECS)
+    fetch_secs = round(time.time() - origin, 1)
+    status = _status(b, ch, file_hash)
+    held = status.get("chunks_held", 0)
+    moved = len(data) if arrived else held * FILE_CHUNK_BYTES
+    for peer in (a, b):
+        resources[peer.tag]["at_end"] = _resources(peer)
+
+    notes = {
+        "shaping": shaping,
+        "heartbeat_secs": QUIET_HEARTBEAT_SECS,
+        "file_bytes": len(data),
+        "chunks": total,
+        "share_secs": share_secs,
+        "manifest_secs": round(manifest_secs, 1),
+        "arrived": arrived,
+        "fetch_secs": fetch_secs,
+        "chunks_held": held,
+        "bytes_per_sec": round(moved / fetch_secs, 1) if fetch_secs else None,
+        "secs_per_chunk": round(fetch_secs / held, 1) if held else None,
+    }
+    notes.update(_range_trail(trail))
+    notes["requests"] = _request_tally(tail)
+    notes["store_usage"] = {p.tag: p.file_usage()["usage"] for p in (a, b)}
+    notes["resources"] = resources
+    if not arrived:
+        notes["projected_secs"] = (round(fetch_secs * total / held, 1)
+                                   if held else None)
+        notes["surprise"] = (
+            f"5 MB did not finish over SF7 in {CEILING_FETCH_TIMEOUT:.0f}s, "
+            f"stopping at {held} of {total} chunks in state "
+            f"{status.get('state')} ({status.get('reason')})")
+        return notes
+    _verify(b, ch, file_hash, data)
     return notes
