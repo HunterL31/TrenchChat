@@ -640,22 +640,12 @@ class SyncManager:
             window_start = time.time() - SYNC_WINDOW_SECS
         window_start = max(window_start, 0.0)
 
-        # A peer we've never actually served before gets the benefit of the
-        # doubt for PEER_TRUST_HORIZON_SECS behind their claimed window_start
-        # -- their own channel-wide watermark can be inflated by a different
-        # responder's disjoint answer landing first in the same reconnect
-        # round (A1, test_sync_multipeer.py). A peer we HAVE served keeps
-        # resuming from what we actually gave them, not from this horizon.
-        #
-        # Read from sync_served, not sync_progress: the latter records what we
-        # received *from* this peer, and using it here collapsed the two
-        # directions onto one row, switching the widening off for any pair that
-        # had synced from each other (A7).
+        # How far we have actually served this peer. Read from sync_served,
+        # not sync_progress: the latter records what we received *from* them,
+        # and using it here collapsed the two directions onto one row (A7).
         served_progress = self._storage.get_peer_served_progress(
             channel_hash_hex, requester_hex
         )
-        trust_floor = max(served_progress, window_start - PEER_TRUST_HORIZON_SECS, 0.0)
-        sweep_start = min(window_start, trust_floor)
 
         ranges, needs, malformed = self._read_reconcile_fields(fields)
         if malformed:
@@ -712,6 +702,17 @@ class SyncManager:
             )
             rows = self._merge_rows(hinted_rows, diff_rows)
         else:
+            # A peer we've never actually served before gets the benefit of
+            # the doubt for PEER_TRUST_HORIZON_SECS behind their claimed
+            # window_start -- their own channel-wide watermark can be inflated
+            # by a different responder's disjoint answer landing first in the
+            # same reconnect round (A1, test_sync_multipeer.py). A peer we
+            # HAVE served keeps resuming from what we actually gave them, not
+            # from this horizon. A reconciled request needs none of this: it
+            # says which rows it holds rather than where it left off.
+            trust_floor = max(served_progress,
+                              window_start - PEER_TRUST_HORIZON_SECS, 0.0)
+            sweep_start = min(window_start, trust_floor)
             swept_rows, truncated, scan_cursor = self._collect_permitted_rows(
                 channel, channel_hash_hex, requester_hex, sweep_start
             )

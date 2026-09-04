@@ -323,3 +323,49 @@ def c11(env):
         raise ScenarioFailure(f"four-way reconcile incomplete: "
                               f"{diff_report(everyone, ch, expected)}")
     return {"reconcile_secs": round(elapsed, 1), "messages": len(expected)}
+
+
+@scenario("sync12", "Two peers each recover what the other wrote in their absence",
+          peers="AB")
+def c12(env):
+    """The interleaved gap, with nothing in memory to close it.
+
+    A writes while B is away, B writes while A is away, and both processes
+    are killed in between, so no pending-retry queue survives to deliver
+    either half. Each peer is then the sole holder of history the other's
+    progress with it has already run past: a watermark can say when it last
+    heard from a peer, never which of that peer's rows it is missing, so this
+    only converges if the two sides reconcile the sets themselves.
+    """
+    a, b = env.peers("A", "B")
+    ch = public_channel(a, [b], "c12-public")
+
+    a.send(ch, "c12-seed")
+    all_hold([b], ch, {"c12-seed"}, timeout=DISCOVERY_TIMEOUT)
+    expected = {"c12-seed"}
+
+    go_offline(b)
+    expected |= _send_batch(a, ch, "c12-a", 2)
+
+    # A dies holding its own two, so its pending queue for B dies with it.
+    env.orch.kill(a.tag)
+    wait_until(lambda: not a.alive(), "A's process to die")
+
+    go_online(b)
+    expected |= _send_batch(b, ch, "c12-b", 2)
+
+    env.orch.kill(b.tag)
+    wait_until(lambda: not b.alive(), "B's process to die")
+
+    env.orch.start(a.tag)
+    env.wait_alive(a)
+    env.orch.start(b.tag)
+    env.wait_alive(b)
+
+    both = [a, b]
+    arrived, elapsed = settle(lambda: all(p.contents(ch) == expected for p in both),
+                              "both peers to reconcile the two gaps", CONVERGE_TIMEOUT)
+    if not arrived:
+        raise ScenarioFailure(f"interleaved gap did not close: "
+                              f"{diff_report(both, ch, expected)}")
+    return {"reconcile_secs": round(elapsed, 1), "messages": len(expected)}
