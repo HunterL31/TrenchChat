@@ -174,9 +174,10 @@ def describe(rows, lo: float, hi: float,
     fingerprint by the same rule. Holding nothing yields one empty id list.
 
     The result never exceeds *budget* packed, bar the one case below. Id
-    lists are what grow, so they are the first thing given up: the largest is summarised as a fingerprint,
-    then the next, oldest first among equals so the newest range (where a peer
-    that is behind is most likely to be missing rows) keeps its ids longest.
+    lists are what grow, so they are the first thing given up: the largest is
+    summarised as a fingerprint, then the next, oldest first among equals so
+    the newest range (where a peer that is behind is most likely to be missing
+    rows) keeps its ids longest.
     If every range is a fingerprint and there are still too many to fit, the
     same span is described again in fewer, coarser ranges. Narrowing is
     slower, never wider.
@@ -243,16 +244,21 @@ def _id_count(ranges) -> int:
                if mode == RANGE_IDLIST)
 
 
-def append_ranges(target: list, described: list) -> bool:
-    """Add a description to a message's ranges, if it still fits the caps.
+def append_ranges(target: list, described: list,
+                  budget: int = SYNC_DESCRIPTION_BUDGET_BYTES) -> bool:
+    """Add a description to a message's ranges, if it still fits.
 
-    False when it does not: the ranges left out are described again on the
-    next request, where a smaller difference makes room for them, so a message
-    is never sent carrying more than the receiver will accept.
+    A message may need to narrow several ranges at once, and the budget is
+    what one message spends, not what one describe() call does. False when it
+    no longer fits: the ranges left out are described again on the next
+    request, where a smaller difference makes room for them, so narrowing gets
+    slower rather than a message getting bigger.
     """
     if len(target) + len(described) > MAX_SYNC_RANGES:
         return False
     if _id_count(target) + _id_count(described) > MAX_SYNC_LIST_IDS:
+        return False
+    if target and packed_size(target + described) > budget:
         return False
     target.extend(described)
     return True

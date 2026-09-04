@@ -174,6 +174,25 @@ class TestDescriptionBudget:
         else:
             raise AssertionError("narrowing never reached a range it could spell out")
 
+    def test_several_narrowed_ranges_in_one_message_stay_within_the_budget(self):
+        """The budget is what one message spends, not one describe() call."""
+        packed_ranges: list = []
+        added = 0
+        for start in range(0, 10):
+            described = sr.describe(_rows(300, start=start * 1e6),
+                                    start * 1e6, start * 1e6 + 1e6)
+            if sr.append_ranges(packed_ranges, described):
+                added += 1
+        assert added >= 1, "not even one description fitted"
+        assert sr.packed_size(packed_ranges) <= sr.SYNC_DESCRIPTION_BUDGET_BYTES
+
+    def test_the_first_description_is_never_refused_for_size(self):
+        """A message with nothing in it yet takes what it is given, so an
+        over-budget unsplittable range still travels."""
+        tied = [_row(i, 42.0) for i in range(100)]
+        packed_ranges: list = []
+        assert sr.append_ranges(packed_ranges, sr.describe(tied, 0.0, 100.0))
+
     def test_a_leaf_is_still_spelled_out(self):
         """The budget must clear one full leaf, or a leaf could never resolve."""
         described = sr.describe(_rows(sr.SYNC_LEAF_IDS), 0.0, 1e9)
