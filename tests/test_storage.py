@@ -190,6 +190,36 @@ class TestMessages:
         assert len(msgs) == 2
         assert all(m["timestamp"] > base + 2 for m in msgs)
 
+    def test_get_message_index_covers_the_half_open_range(self, db):
+        self._seed_channel(db)
+        base = time.time()
+        for i in range(5):
+            ts = base + i
+            db.insert_message("ch01", "s", "S", f"msg{i}", ts, f"id{i}", None, None, ts)
+        index = db.get_message_index("ch01", base + 1, base + 4)
+        assert [r["message_id"] for r in index] == ["id1", "id2", "id3"]
+        assert [r["timestamp"] for r in index] == [base + 1, base + 2, base + 3]
+        assert all(r["sender_hash"] == "s" for r in index)
+
+    def test_get_message_index_reports_whether_a_row_is_signed(self, db):
+        self._seed_channel(db)
+        ts = time.time()
+        db.insert_message("ch01", "s", "S", "unsigned", ts, "plain", None, None, ts)
+        db.insert_message("ch01", "s", "S", "signed", ts + 1, "signed", None, None,
+                          ts + 1, author_sig=b"\x01" * 64)
+        index = {r["message_id"]: bool(r["has_sig"])
+                 for r in db.get_message_index("ch01", 0.0, ts + 10)}
+        assert index == {"plain": False, "signed": True}
+
+    def test_get_message_index_is_scoped_to_one_channel(self, db):
+        self._seed_channel(db)
+        db.upsert_channel("ch02", "Other", "", "creator", "public", time.time())
+        ts = time.time()
+        db.insert_message("ch01", "s", "S", "here", ts, "mine", None, None, ts)
+        db.insert_message("ch02", "s", "S", "there", ts, "theirs", None, None, ts)
+        assert [r["message_id"] for r in db.get_message_index("ch01", 0.0, ts + 10)] \
+            == ["mine"]
+
     def test_reply_to_stored(self, db):
         self._seed_channel(db)
         ts = time.time()
