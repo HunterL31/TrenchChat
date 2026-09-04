@@ -173,8 +173,8 @@ def describe(rows, lo: float, hi: float,
     SYNC_RANGE_FANOUT sub-ranges split by equal row count, each an id list or a
     fingerprint by the same rule. Holding nothing yields one empty id list.
 
-    The result never exceeds *budget* packed. Id lists are what grow, so they
-    are the first thing given up: the largest is summarised as a fingerprint,
+    The result never exceeds *budget* packed, bar the one case below. Id
+    lists are what grow, so they are the first thing given up: the largest is summarised as a fingerprint,
     then the next, oldest first among equals so the newest range (where a peer
     that is behind is most likely to be missing rows) keeps its ids longest.
     If every range is a fingerprint and there are still too many to fit, the
