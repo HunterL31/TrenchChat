@@ -177,6 +177,14 @@ MAX_SWEEP_SCAN = MAX_RESPONSE_MESSAGES * 20
 # this enough to backfill a substantial history in one reconnect.
 MAX_SYNC_CONTINUATIONS = 20
 
+# How many messages of one deep exchange this responder will serve inside a
+# cooldown window. A deep reconcile is no longer a single sweep: the requester
+# summarises what it holds, we answer where we differ, and it narrows. Refusing
+# those narrowing steps strands it mid-exchange with no way to finish, so an
+# exchange already accepted is allowed to run, bounded by the requester's own
+# continuation budget plus the ask that started it.
+DEEP_SYNC_BURST = MAX_SYNC_CONTINUATIONS + 1
+
 # How many missed-delivery hints are queued for retry against a single
 # unreachable peer before the oldest is dropped, so a burst of failed
 # deliveries can't grow the retry queue without bound.
@@ -299,10 +307,10 @@ class SyncManager:
         self._pending_hints: dict[str, list[dict]] = {}
         self._pending_hints_lock = threading.Lock()
 
-        # (channel_hash_hex, peer_hex) -> time we last served that peer a
-        # deep backfill sweep for that channel.  In-memory only; a restart
-        # resets it, which is acceptable for a soft rate limit.
-        self._deep_sync_last_served: dict[tuple[str, str], tuple[float, str]] = {}
+        # (channel_hash_hex, peer_hex) -> (when this deep window opened, the
+        # policy it opened under, messages served in it). In-memory only; a
+        # restart resets it, which is acceptable for a soft rate limit.
+        self._deep_sync_last_served: dict[tuple[str, str], tuple[float, str, int]] = {}
         self._deep_sync_lock = threading.Lock()
 
         # (channel_hash_hex, peer_hex) -> last announce-driven sync request.
@@ -681,7 +689,9 @@ class SyncManager:
                        for lo, _hi, _mode, _payload in (ranges or []))
         else:
             deep = window_start < time.time() - SYNC_WINDOW_SECS
-        if deep and not self._deep_sync_allowed(channel_hash_hex, requester_hex):
+        narrowed = reconciling and not sync_ranges.is_summary(ranges, needs)
+        if deep and not self._deep_sync_allowed(channel_hash_hex, requester_hex,
+                                                narrowed):
             RNS.log(
                 f"TrenchChat [sync]: deep sync request from "
                 f"{requester_hex[:12]}… for {channel_hash_hex[:12]}… "
@@ -1585,15 +1595,24 @@ class SyncManager:
         floor = max(now - SYNC_WINDOW_SECS, 0.0)
         return min(max(since_ts, 0.0), floor), now + SYNC_CLOCK_SKEW_SECS
 
-    def _describe_local(self, channel_hash_hex: str, lo: float, hi: float) -> list:
+    def _describe_local(self, channel_hash_hex: str, lo: float, hi: float,
+                        narrow: bool = False) -> list:
         """How we describe our own rows in [lo, hi) to a peer.
+
+        A fresh request summarises the whole window as one fingerprint: a
+        routine re-check is almost always a no-op, and it should cost about
+        ninety bytes rather than a list of everything we hold. Only once a
+        peer has said the window differs is a *narrow* description worth
+        sending, which is what a continuation asks with.
 
         Only signed rows: an unsigned one cannot be relayed to anybody, so
         claiming it here would have peers withhold their own verifiable copy.
         """
         index = [r for r in self._storage.get_message_index(channel_hash_hex, lo, hi)
                  if _row_is_signed(r)]
-        return sync_ranges.describe(index, lo, hi)
+        if narrow:
+            return sync_ranges.describe(index, lo, hi)
+        return sync_ranges.summarise(index, lo, hi)
 
     def _record_asked(self, channel_hash_hex: str, dest_hex: str,
                       ranges: list | None, needs: list | None) -> None:
@@ -1607,14 +1626,17 @@ class SyncManager:
         """Ask a peer for anything on this channel we do not already hold.
 
         The request carries a description of our own rows, so the answer is
-        the difference rather than everything past a timestamp; *ranges* and
-        *needs*, when given, replace that with the narrower question a
-        continuation asks. F_SYNC_WINDOW_START is still sent exactly as
-        before, so a responder that predates ranges behaves as it always did.
+        the difference rather than everything past a timestamp: one
+        fingerprint over the whole window on a fresh ask, a narrowed
+        description on a continuation, or *ranges* and *needs* outright when
+        the caller has already worked out what to ask. F_SYNC_WINDOW_START is
+        still sent exactly as before, so a responder that predates ranges
+        behaves as it always did.
         """
         if ranges is None and needs is None:
             lo, hi = self._reconcile_window(since_ts)
-            ranges = self._describe_local(channel_hash_hex, lo, hi)
+            ranges = self._describe_local(channel_hash_hex, lo, hi,
+                                          narrow=continuation)
 
         if not continuation:
             with self._continuations_lock:
@@ -1857,14 +1879,16 @@ class SyncManager:
                         del self._pending_requests[key]
             return claimed
 
-    def _deep_sync_allowed(self, channel_hash_hex: str, requester_hex: str) -> bool:
-        """Rate-limit deep (pre-SYNC_WINDOW_SECS) backfill sweeps per (channel, peer).
+    def _deep_sync_allowed(self, channel_hash_hex: str, requester_hex: str,
+                           narrowed: bool = False) -> bool:
+        """Rate-limit deep (pre-SYNC_WINDOW_SECS) backfill per (channel, peer).
 
-        Records this attempt and returns True the first time a given peer
-        asks for a deep sweep on a channel, then False for any further
-        attempt within DEEP_SYNC_COOLDOWN_SECS. Only guards the timestamp-
-        sweep fallback -- hint-targeted responses are already small and
-        exact, not a bulk-sweep concern.
+        A *fresh* deep ask is served once per DEEP_SYNC_COOLDOWN_SECS: asking
+        it again can only produce the answer already given, and a flood of
+        them is what this exists to pace. A *narrowed* one continues an
+        exchange this peer already opened, where a refusal leaves it stranded
+        halfway through with nothing left to ask, so it is served while that
+        window lasts and until DEEP_SYNC_BURST messages have gone into it.
 
         A permissions change lifts the cooldown early: the refusal it would
         otherwise enforce was decided under a policy that no longer applies,
@@ -1879,11 +1903,15 @@ class SyncManager:
             for stale_key, entry in list(self._deep_sync_last_served.items()):
                 if now - entry[0] > DEEP_SYNC_COOLDOWN_PRUNE_SECS:
                     del self._deep_sync_last_served[stale_key]
-            last = self._deep_sync_last_served.get(key)
-            if (last is not None and now - last[0] < DEEP_SYNC_COOLDOWN_SECS
-                    and last[1] == policy):
-                return False
-            self._deep_sync_last_served[key] = (now, policy)
+            opened = self._deep_sync_last_served.get(key)
+            live = (opened is not None and now - opened[0] < DEEP_SYNC_COOLDOWN_SECS
+                    and opened[1] == policy)
+            if live:
+                if not narrowed or opened[2] >= DEEP_SYNC_BURST:
+                    return False
+                self._deep_sync_last_served[key] = (opened[0], policy, opened[2] + 1)
+                return True
+            self._deep_sync_last_served[key] = (now, policy, 1)
             return True
 
     def _announce_sync_due(self, channel_hash_hex: str, peer_hex: str) -> bool:

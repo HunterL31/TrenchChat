@@ -122,6 +122,91 @@ class TestDescribe:
         assert len(sr.describe(rows, 0.0, 20.0)[0][3]) == 1
 
 
+class TestSummarise:
+    def test_a_window_is_one_fingerprint(self):
+        rows = _rows(500)
+        summary = sr.summarise(rows, 0.0, 1e9)
+        assert len(summary) == 1
+        lo, hi, mode, payload = summary[0]
+        assert (lo, hi, mode) == (0.0, 1e9, RANGE_FINGERPRINT)
+        assert payload == [len(rows), sr.fingerprint(r["message_id"] for r in rows)]
+
+    def test_holding_nothing_stays_an_empty_id_list(self):
+        """A fresh join asks for the window outright rather than spending a
+        round trip proving it holds none of it."""
+        assert sr.summarise([], 5.0, 9.0) == [[5.0, 9.0, RANGE_IDLIST, []]]
+
+    def test_a_summary_is_cheap_at_every_size(self):
+        for count in (0, 5, 32, 100, 500, 2000, 10000):
+            packed = sr.packed_size(sr.summarise(_rows(count), 0.0, 1e9))
+            assert packed <= 100, \
+                f"a routine re-check holding {count} rows cost {packed} bytes"
+
+    def test_a_summary_matches_what_describe_would_fingerprint(self):
+        rows = _rows(40)
+        _lo, _hi, _mode, payload = sr.summarise(rows, 0.0, 1e9)[0]
+        assert sr.matches_fingerprint(rows, payload[0], payload[1])
+
+
+class TestDescriptionBudget:
+    @pytest.mark.parametrize("count", [0, 5, 32, 100, 500, 2000, 10000])
+    def test_a_description_never_exceeds_the_budget(self, count):
+        packed = sr.packed_size(sr.describe(_rows(count), 0.0, 1e9))
+        assert packed <= sr.SYNC_DESCRIPTION_BUDGET_BYTES, \
+            f"describing {count} rows cost {packed} bytes"
+
+    @pytest.mark.parametrize("count", [0, 5, 32, 100, 500, 2000, 10000])
+    def test_a_fresh_request_never_exceeds_the_budget(self, count):
+        packed = sr.packed_size(sr.summarise(_rows(count), 0.0, 1e9))
+        assert packed <= sr.SYNC_DESCRIPTION_BUDGET_BYTES
+
+    def test_narrowing_step_after_step_stays_within_the_budget(self):
+        """Every step of a narrowing chain, not just the first."""
+        rows = _rows(5000)
+        span = (0.0, 1e9)
+        for _step in range(6):
+            described = sr.describe(rows, *span)
+            assert sr.packed_size(described) <= sr.SYNC_DESCRIPTION_BUDGET_BYTES
+            widest = max(described, key=lambda r: len(sr.rows_in(rows, r[0], r[1])))
+            if widest[2] == RANGE_IDLIST:
+                break
+            span = (widest[0], widest[1])
+        else:
+            raise AssertionError("narrowing never reached a range it could spell out")
+
+    def test_a_leaf_is_still_spelled_out(self):
+        """The budget must clear one full leaf, or a leaf could never resolve."""
+        described = sr.describe(_rows(sr.SYNC_LEAF_IDS), 0.0, 1e9)
+        assert described[0][2] == RANGE_IDLIST
+        assert sr.packed_size(described) <= sr.SYNC_DESCRIPTION_BUDGET_BYTES
+
+    def test_id_lists_are_given_up_before_the_split_is_widened(self):
+        """A description over budget summarises ranges rather than dropping
+        coverage: every row stays inside some range."""
+        rows = _rows(300)
+        described = sr.describe(rows, 0.0, 1e9)
+        counted = sum(len(sr.rows_in(rows, lo, hi)) for lo, hi, _m, _p in described)
+        assert counted == len(rows)
+        assert described[0][0] == 0.0 and described[-1][1] == 1e9
+
+    def test_a_tied_timestamp_range_is_spelled_out_over_the_budget(self):
+        """It cannot be split, so a fingerprint there could never be narrowed:
+        the two sides would disagree about that range forever."""
+        rows = [_row(i, 42.0) for i in range(100)]
+        described = sr.describe(rows, 0.0, 100.0)
+        assert len(described) == 1
+        assert described[0][2] == RANGE_IDLIST
+        assert sr.packed_size(described) > sr.SYNC_DESCRIPTION_BUDGET_BYTES
+        assert sr.validate_ranges(described) is not None, \
+            "the one description allowed past the budget is refused on arrival"
+
+    def test_a_tied_range_past_the_inbound_cap_settles_instead(self):
+        rows = [_row(i, 42.0) for i in range(sr.MAX_SYNC_LIST_IDS + 1)]
+        described = sr.describe(rows, 0.0, 100.0)
+        assert [mode for _lo, _hi, mode, _p in described] == [RANGE_FINGERPRINT]
+        assert sr.packed_size(described) <= sr.SYNC_DESCRIPTION_BUDGET_BYTES
+
+
 class TestDiffs:
     def test_ids_they_lack_names_only_what_is_missing(self):
         rows = _rows(6)

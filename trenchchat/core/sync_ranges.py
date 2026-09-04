@@ -48,10 +48,22 @@ SYNC_RANGE_FANOUT = 16
 # cheaper than the round trip that comparing a fingerprint would cost.
 SYNC_LEAF_IDS = 32
 
-# Inbound caps. A well-formed description of one window is at most
-# SYNC_RANGE_FANOUT ranges, and a full split of id lists is exactly
-# SYNC_RANGE_FANOUT * SYNC_LEAF_IDS prefixes, so anything past these is not a
-# peer describing a window, and the whole field is refused.
+# What one description may cost on the wire, packed. Spelling ids out is what
+# this actually bounds: a prefix costs 10 bytes packed, so a description that
+# names every row costs about ten bytes a row, and a busy window ran to five
+# kilobytes before this existed. At 1 kbps that budget is four seconds of
+# airtime, and it clears one full leaf list (SYNC_LEAF_IDS ids pack to 344
+# bytes) so a leaf can always be spelled out rather than fingerprinted
+# forever. Over it, ranges are summarised by fingerprint instead: that costs a
+# round trip rather than a set of ids, and a round trip is the cheaper of the
+# two on a slow link.
+SYNC_DESCRIPTION_BUDGET_BYTES = 512
+
+# Inbound caps. These are the hard refusal bound, not the budget: a peer may
+# legitimately send a description built under different constants, so what is
+# refused is only what no honest peer could produce. A well-formed description
+# of one window is at most SYNC_RANGE_FANOUT ranges, and a full split of id
+# lists is exactly SYNC_RANGE_FANOUT * SYNC_LEAF_IDS prefixes.
 MAX_SYNC_RANGES = 32
 MAX_SYNC_LIST_IDS = SYNC_RANGE_FANOUT * SYNC_LEAF_IDS
 
@@ -135,26 +147,68 @@ def _split_bounds(rows: list, lo: float, hi: float,
     return bounds
 
 
-def describe(rows, lo: float, hi: float) -> list[list]:
-    """How a side names what it holds in [lo, hi) to a peer.
+def summarise(rows, lo: float, hi: float) -> list[list]:
+    """The whole of [lo, hi) as one fingerprint: what a fresh request sends.
+
+    A routine re-check is almost always a no-op, and asking it should cost
+    about ninety bytes rather than a list of everything the asker holds. Only
+    once a peer answers that the range differs is it worth spending a
+    description on where (describe() below).
+
+    Holding nothing stays a single empty id list, so a fresh join still asks
+    for the window outright and gets rows in the first answer instead of
+    spending a round trip proving it has none.
+    """
+    rows = rows_in(rows, lo, hi)
+    if not rows:
+        return [id_list_range(lo, hi, rows)]
+    return [fingerprint_range(lo, hi, rows)]
+
+
+def describe(rows, lo: float, hi: float,
+             budget: int = SYNC_DESCRIPTION_BUDGET_BYTES) -> list[list]:
+    """Where in [lo, hi) a difference might be: what a narrowing step sends.
 
     One id list when the range is small enough to spell out, otherwise up to
     SYNC_RANGE_FANOUT sub-ranges split by equal row count, each an id list or a
-    fingerprint by the same rule. Holding nothing yields one empty id list,
-    which is what makes a fresh join ask for the whole window in one field.
+    fingerprint by the same rule. Holding nothing yields one empty id list.
+
+    The result never exceeds *budget* packed. Id lists are what grow, so they
+    are the first thing given up: the largest is summarised as a fingerprint,
+    then the next, oldest first among equals so the newest range (where a peer
+    that is behind is most likely to be missing rows) keeps its ids longest.
+    If every range is a fingerprint and there are still too many to fit, the
+    same span is described again in fewer, coarser ranges. Narrowing is
+    slower, never wider.
 
     A range whose rows all share a single timestamp cannot be split at all. It
-    is spelled out however long that makes it, and only falls back to a
-    fingerprint when that would be longer than the receiver will accept: a
-    fingerprint that can never be narrowed settles as a permanent mismatch on
-    one range, where an id list past the cap would have the receiver refuse the
-    whole window.
+    is spelled out however long that makes it, budget or no budget, because a
+    fingerprint there could never be narrowed and the two sides would disagree
+    about it forever. Past what a receiver will accept it is summarised
+    anyway, and settles as a standing mismatch on one range rather than having
+    the whole window refused.
     """
     rows = sort_rows(rows_in(rows, lo, hi))
     if len(rows) <= SYNC_LEAF_IDS:
         return [id_list_range(lo, hi, rows)]
 
-    bounds = _split_bounds(rows, lo, hi)
+    described = _split_describe(rows, lo, hi, SYNC_RANGE_FANOUT)
+    if len(described) < 2:
+        # One timestamp, so there is nothing to split and nothing a
+        # fingerprint here could ever resolve: spell it out, budget or not.
+        return described
+
+    described = _fit_budget(described, rows, budget)
+    if packed_size(described) <= budget:
+        return described
+
+    coarse = max(2, budget // _FINGERPRINT_RANGE_BYTES)
+    return _fit_budget(_split_describe(rows, lo, hi, coarse), rows, budget)
+
+
+def _split_describe(rows: list, lo: float, hi: float, fanout: int) -> list[list]:
+    """Split [lo, hi) *fanout* ways and name each part by ids or fingerprint."""
+    bounds = _split_bounds(rows, lo, hi, fanout)
     if len(bounds) < 2:
         if len(rows) > MAX_SYNC_LIST_IDS:
             return [fingerprint_range(lo, hi, rows)]
@@ -166,6 +220,21 @@ def describe(rows, lo: float, hi: float) -> list[list]:
         described.append(id_list_range(sub_lo, sub_hi, sub)
                          if len(sub) <= SYNC_LEAF_IDS
                          else fingerprint_range(sub_lo, sub_hi, sub))
+    return described
+
+
+def _fit_budget(described: list[list], rows: list, budget: int) -> list[list]:
+    """Summarise id lists, largest first, until the description fits."""
+    while packed_size(described) > budget:
+        widest = -1
+        chosen = None
+        for i, (_lo, _hi, mode, payload) in enumerate(described):
+            if mode == RANGE_IDLIST and len(payload) > widest:
+                widest, chosen = len(payload), i
+        if chosen is None:
+            break
+        lo, hi, _mode, _payload = described[chosen]
+        described[chosen] = fingerprint_range(lo, hi, rows_in(rows, lo, hi))
     return described
 
 
@@ -187,6 +256,20 @@ def append_ranges(target: list, described: list) -> bool:
         return False
     target.extend(described)
     return True
+
+
+def is_summary(ranges, needs) -> bool:
+    """True if this describes a whole window rather than narrowing inside one.
+
+    A fresh ask is exactly one range: a fingerprint of everything the asker
+    holds there, or an empty id list when it holds nothing. Anything else,
+    more ranges, ids spelled out, or a need, is a step inside an exchange that
+    has already established the two sides differ.
+    """
+    if needs or not ranges or len(ranges) > 1:
+        return False
+    _lo, _hi, mode, payload = ranges[0]
+    return mode == RANGE_FINGERPRINT or not payload
 
 
 def matches_fingerprint(rows, count: int, digest: bytes) -> bool:
@@ -296,6 +379,19 @@ def validate_needs(value) -> list | None:
 def pack(value) -> bytes:
     """Ranges or needs, packed for the field that carries them."""
     return msgpack.packb(value, use_bin_type=True)
+
+
+def packed_size(ranges) -> int:
+    """What a description costs on the wire, packed."""
+    return len(pack(ranges))
+
+
+# An upper bound on one fingerprint range packed, used to work out how many of
+# them a budget affords. Measured rather than counted by hand, so a change to
+# the field layout cannot leave it quietly wrong.
+_FINGERPRINT_RANGE_BYTES = packed_size(
+    [[1e10, 1e10, RANGE_FINGERPRINT, [10 ** 9, b"\x00" * SYNC_FINGERPRINT_BYTES]]]
+)
 
 
 def unpack_ranges(payload) -> list | None:

@@ -156,7 +156,36 @@ Message ids are content hashes (`_compute_message_id`), so what the two sides ac
 - `RANGE_FINGERPRINT` carries `[count, fp]`, where `fp` is 16 bytes of SHA-256 over the range's ids sorted and concatenated. Equal count and fingerprint means equal sets, and the range is not looked at again.
 - `RANGE_IDLIST` carries every id in the range by its leading 8 bytes, ascending. Small enough to diff outright, which ends the exchange for that range.
 
-`_describe_local` splits the window into at most `SYNC_RANGE_FANOUT` (16) sub-ranges of roughly equal row count, spelling out any sub-range holding at most `SYNC_LEAF_IDS` (32) rows and fingerprinting the rest. Boundaries always land on a row timestamp and never inside a group of rows sharing one: a boundary is a bare float, so a split group could never be compared consistently by either side. Holding nothing yields one empty id list, which is how a fresh join asks for a whole window in one field.
+### Two stages, because a re-check is almost always a no-op
+
+Describing a set costs about ten bytes a row, and a routine re-check happens on every announce cooldown per (channel, peer) and almost always answers "nothing further". So a request has two shapes:
+
+- **A fresh request summarises** (`sync_ranges.summarise`): the whole window as a single fingerprint, about 110 bytes whatever the channel holds. A peer holding nothing sends one empty id list instead, so a fresh join still gets rows in the first answer rather than spending a round trip proving it has none.
+- **A narrowing request describes** (`sync_ranges.describe`): only once a peer has answered that the window differs is it worth saying where. `describe` splits the span into at most `SYNC_RANGE_FANOUT` (16) sub-ranges of roughly equal row count, spelling out any sub-range holding at most `SYNC_LEAF_IDS` (32) rows and fingerprinting the rest. Boundaries always land on a row timestamp and never inside a group of rows sharing one: a boundary is a bare float, so a split group could never be compared consistently by either side.
+
+The trade is one extra round trip whenever there is a real difference, against a steady state that costs a tenth of what it did. On a mesh, the routine case runs far more often than the reconnect case.
+
+Measured, as the whole packed field dict of one `MT_SYNC_REQUEST`, by how many signed rows the requester holds in the window:
+
+| Rows held | Before | Fresh request | Narrowing step |
+|---|---|---|---|
+| 0 | 89 B | 89 B | 89 B |
+| 5 | 139 B | 108 B | 139 B |
+| 32 | 413 B | 108 B | 413 B |
+| 100 | 1385 B | 108 B | 551 B |
+| 500 | 5440 B | 110 B | 510 B |
+| 2000 | 712 B | 110 B | 521 B |
+| 10000 | 744 B | 110 B | 532 B |
+
+(A request with no ranges at all, which is what an older peer sends, is 64 B. The old hump at 100 to 500 rows is every one of 16 sub-ranges being spelled out; past that, sub-ranges grow beyond `SYNC_LEAF_IDS` and become fingerprints on their own.)
+
+### The description budget
+
+`SYNC_DESCRIPTION_BUDGET_BYTES` (512) caps what any one description costs packed. Id lists are what grow, so they are the first thing given up: the largest is summarised as a fingerprint, then the next, until the description fits; if every range is already a fingerprint and there are still too many, the same span is described again in fewer, coarser ranges. Narrowing gets slower, never wider, and coverage is never dropped: every row stays inside some range.
+
+The budget clears one full leaf (32 ids pack to 344 bytes) on purpose. A leaf that could not be spelled out could never be resolved, and at 1 kbps 512 bytes is about four seconds of airtime, which is worth spending on a difference and not on a re-check.
+
+One case is deliberately allowed past it: a range whose rows all share a single timestamp cannot be split, so a fingerprint there could never be narrowed and the two sides would disagree about that range forever. It is spelled out however long that makes it, up to `MAX_SYNC_LIST_IDS`, past which it is summarised and settles as a standing mismatch on one range rather than having the whole window refused. `MAX_SYNC_RANGES` and `MAX_SYNC_LIST_IDS` remain the hard inbound refusal bound; the budget is what a well-behaved sender spends.
 
 A hash chain over the channel would be smaller still, and was rejected: a channel has many concurrent authors on a partitioning mesh, so its history is a DAG, and a chain needs somebody to sequence it. That is a center, which fails the first check in `.claude/rules/reticulum-zen.md`.
 
@@ -166,17 +195,21 @@ The responder compares each received range against its **serving view**: signed 
 
 - **An id list** resolves outright. Rows the requester did not name are sent in `F_SYNC_MESSAGES`. Prefixes the requester named that the responder does not hold become `F_SYNC_NEED` triples `[lo, hi, prefix]` on the same response.
 - **A fingerprint that matches** is skipped entirely.
-- **A fingerprint that differs** is described back: the responder's own id list for that range if it is small enough, otherwise up to 16 fingerprinted sub-ranges. The requester compares those against its own rows and sends a narrowed continuation request. Traffic is proportional to the difference, not to the history.
+- **A fingerprint that differs** is described back: the responder's own id list for that range if it is small enough, otherwise fingerprinted sub-ranges. The requester compares those against its own rows and sends a narrowed continuation request, which is the first message in the exchange to spell anything out. Traffic is proportional to the difference, not to the history.
 
 Nothing is ever pushed unasked. A `F_SYNC_NEED` on a response is answered by a `MT_SYNC_RESPONSE` from the original requester, so the responder records a pending request of its own (`_record_pending_request`) before sending one; without that, the answer would arrive as unsolicited and be dropped. A need-only request is never classified as deep and is never throttled: it names rows outright, so it costs nothing a flood of them could turn into repeated full sweeps.
 
-The worked example takes two round trips. A holds {1,3,4} and B holds {1,2,4,5}:
+The worked example takes three round trips. A holds {1,3,4} and B holds {1,2,4,5}:
 
 ```
-A → B  sync_request   ranges = id list [1,3,4]
+A → B  sync_request   ranges = fingerprint of the window
+B → A  sync_response  no rows, ranges = id list [1,2,4,5]
+A → B  sync_request   ranges = id list [1,3,4], need = prefixes of 2 and 5
 B → A  sync_response  messages 2 and 5, need = prefix(3)
 A → B  sync_response  message 3
 ```
+
+The first two messages are the price of the cheap steady state: had A spelled out its three ids in the first request, this would have been two round trips and every no-op re-check would have cost the same. `tests/test_sync_reconcile.py::TestWorkedExample` pins the exact sequence.
 
 ### What the legacy sweep still does
 
@@ -199,9 +232,9 @@ Every authorised request is answered, **including with an empty message list**. 
 
 The 50-message chunk limit keeps responses within LXMF message size constraints. A response that hits the cap carries `F_SYNC_TRUNCATED` and the requester immediately asks the same peer again, rebuilt from what it now holds. The chain is bounded by `MAX_SYNC_CONTINUATIONS` per (channel, peer), and only continues on actual progress: a row accepted, or a question that differs from the last one put to that peer (`_continue_reconcile` compares `sync_ranges.signature`). A responder that repeats one unmatchable range earns exactly one narrowing, not a request per claim.
 
-Inbound descriptions are refused whole rather than in part, and the caps are what a well-formed description of one window can produce: at most `MAX_SYNC_RANGES` (32) ranges and `MAX_SYNC_LIST_IDS` (512, which is 16 sub-ranges of 32) prefixes per message, `MAX_SYNC_NEEDS` (50) need triples, exact prefix and fingerprint widths, ascending non-overlapping ranges, and sorted id lists. Acting on the half of a description that parsed would mean serving rows against a set the peer never actually described.
+Inbound descriptions are refused whole rather than in part, and the caps are what a well-formed description of one window can produce: at most `MAX_SYNC_RANGES` (32) ranges and `MAX_SYNC_LIST_IDS` (512, which is 16 sub-ranges of 32) prefixes per message, `MAX_SYNC_NEEDS` (50) need triples, exact prefix and fingerprint widths, ascending non-overlapping ranges, and sorted id lists. These are the refusal bound, not the budget: a peer may legitimately have built its description under different constants, so what is refused is only what no honest peer could produce. Acting on the half of a description that parsed would mean serving rows against a set the peer never actually described.
 
-A request is classified **deep** by how far its ranges actually reach: older than `SYNC_WINDOW_SECS` plus a clock-skew allowance, so a peer whose clock trails ours is never throttled for asking about the window it believes it is in. Deep requests are paced per (channel, peer) by `DEEP_SYNC_COOLDOWN_SECS` exactly as before.
+A request is classified **deep** by how far its ranges actually reach: older than `SYNC_WINDOW_SECS` plus a clock-skew allowance, so a peer whose clock trails ours is never throttled for asking about the window it believes it is in. A fresh deep ask is paced per (channel, peer) by `DEEP_SYNC_COOLDOWN_SECS` exactly as before, but its *narrowing steps* are not: a deep reconcile is no longer one message, and refusing the steps would strand the requester halfway through with nothing left to ask. An exchange already accepted runs to `DEEP_SYNC_BURST` messages inside that window (the requester's own continuation budget plus the ask that opened it) and is refused past that, so a flood still cannot force unbounded work. `sync_ranges.is_summary` is what tells the two apart: a fresh ask is exactly one range covering the window, a narrowing step is anything else.
 
 The requester's watermarks (`last_sync_at`, `sync_progress`) still advance only over messages actually accepted, never past ones the responder withheld or it rejected itself, and never backwards. They no longer decide *what* is asked for, though, so a grant that arrives late, or a row that turns up behind them, is recoverable rather than lost.
 
