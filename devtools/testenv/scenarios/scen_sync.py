@@ -323,3 +323,90 @@ def c11(env):
         raise ScenarioFailure(f"four-way reconcile incomplete: "
                               f"{diff_report(everyone, ch, expected)}")
     return {"reconcile_secs": round(elapsed, 1), "messages": len(expected)}
+
+
+@scenario("sync12", "Two peers each recover what the other wrote in their absence",
+          peers="AB")
+def c12(env):
+    """The interleaved gap, with nothing in memory to close it.
+
+    A writes while B is away, B writes while A is away, and both processes
+    are killed in between, so no pending-retry queue survives to deliver
+    either half. Each peer is then the sole holder of history the other's
+    progress with it has already run past: a watermark can say when it last
+    heard from a peer, never which of that peer's rows it is missing, so this
+    only converges if the two sides reconcile the sets themselves.
+    """
+    a, b = env.peers("A", "B")
+    ch = public_channel(a, [b], "c12-public")
+
+    a.send(ch, "c12-seed")
+    all_hold([b], ch, {"c12-seed"}, timeout=DISCOVERY_TIMEOUT)
+    expected = {"c12-seed"}
+
+    go_offline(b)
+    expected |= _send_batch(a, ch, "c12-a", 2)
+
+    # A dies holding its own two, so its pending queue for B dies with it.
+    env.orch.kill(a.tag)
+    wait_until(lambda: not a.alive(), "A's process to die")
+
+    go_online(b)
+    expected |= _send_batch(b, ch, "c12-b", 2)
+
+    env.orch.kill(b.tag)
+    wait_until(lambda: not b.alive(), "B's process to die")
+
+    env.orch.start(a.tag)
+    env.wait_alive(a)
+    env.orch.start(b.tag)
+    env.wait_alive(b)
+
+    both = [a, b]
+    arrived, elapsed = settle(lambda: all(p.contents(ch) == expected for p in both),
+                              "both peers to reconcile the two gaps", CONVERGE_TIMEOUT)
+    if not arrived:
+        raise ScenarioFailure(f"interleaved gap did not close: "
+                              f"{diff_report(both, ch, expected)}")
+    return {"reconcile_secs": round(elapsed, 1), "messages": len(expected)}
+
+
+LONG_ABSENCE_BACKLOG = 3 * MAX_RESPONSE_MESSAGES
+
+
+@scenario("sync13", "A peer away across a long run from two senders catches up")
+def c13(env):
+    """An extended absence measured in what was missed: B is away while A and
+    C between them write three times what one answer can carry, so recovery
+    needs several rounds against two holders and must not serve a row twice
+    or stop at a cap. Every row must arrive and the channel must read synced.
+    """
+    a, b, c = env.peers("A", "B", "C")
+    ch = public_channel(a, [b, c], "c13-public")
+
+    a.send(ch, "c13-seed")
+    all_hold([b, c], ch, {"c13-seed"}, timeout=DISCOVERY_TIMEOUT)
+    expected = {"c13-seed"}
+
+    go_offline(b)
+    half = LONG_ABSENCE_BACKLOG // 2
+    expected |= _send_batch(a, ch, "c13-a", half)
+    expected |= _send_batch(c, ch, "c13-c", LONG_ABSENCE_BACKLOG - half)
+    all_hold([a, c], ch, expected, timeout=CONVERGE_TIMEOUT)
+
+    go_online(b)
+    arrived, elapsed = settle(lambda: b.contents(ch) == expected,
+                              f"B to recover all {LONG_ABSENCE_BACKLOG} messages",
+                              CONVERGE_TIMEOUT)
+    held = len(b.contents(ch))
+    if not arrived:
+        raise ScenarioFailure(
+            f"B holds {held}/{len(expected)}"
+            + (" -- stopped exactly at the response cap"
+               if (held - 1) % MAX_RESPONSE_MESSAGES == 0 else "")
+        )
+    settled, _ = settle(lambda: b.sync_status(ch).get("state") == "synced",
+                        "B's sync state to settle", CONVERGE_TIMEOUT)
+    if not settled:
+        raise ScenarioFailure(f"B recovered everything but reads {b.sync_status(ch)}")
+    return {"recovery_secs": round(elapsed, 1), "messages": held}

@@ -15,7 +15,8 @@ import RNS
 
 from tests.helpers import wait_for, wait_for_subscriber
 from trenchchat.core.presence import PresenceBeacon, PresenceManager
-from trenchchat.core.protocol import F_MSG_TYPE, MT_PRESENCE
+from trenchchat.core import sync_ranges
+from trenchchat.core.protocol import F_SYNC_PROBE, F_MSG_TYPE, MT_PRESENCE
 from trenchchat.network.router import Router
 
 
@@ -130,7 +131,9 @@ def test_outbound_only_contact_suppresses_beacon_but_not_online(peer_factory):
         "outbound-only contact must suppress the beacon"
 
 
-def test_beacon_message_carries_right_type_and_empty_content(peer_factory):
+def test_beacon_message_carries_type_and_a_probe_per_shared_channel(peer_factory):
+    """A beacon is the liveness type plus, for every channel shared with the
+    peer, a probe of what we hold there. Nothing else rides on it."""
     alice, bob, ch_hash, presence_mgr, beacon = _beaconing_peer(
         peer_factory, beacon_after_secs=5.0
     )
@@ -144,8 +147,11 @@ def test_beacon_message_carries_right_type_and_empty_content(peer_factory):
     msg = _beacons(received)[0]
     assert msg.fields.get(F_MSG_TYPE) == MT_PRESENCE
     assert msg.content == b""
-    assert set(msg.fields.keys()) == {F_MSG_TYPE}
-
+    assert set(msg.fields.keys()) == {F_MSG_TYPE, F_SYNC_PROBE}
+    probes = sync_ranges.unpack_probes(msg.fields[F_SYNC_PROBE])
+    assert probes is not None, "the beacon's probes did not validate"
+    assert [entry[0].hex() for entry in probes] == [ch_hash]
+    assert probes[0][1:] == alice.sync_mgr.local_probe(ch_hash)
 
 def test_inbound_beacon_is_inert_for_invite_manager(peer_factory):
     """Regression test: invite.py's _on_lxmf_message used to log a WARNING
