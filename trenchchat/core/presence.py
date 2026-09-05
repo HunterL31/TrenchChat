@@ -15,6 +15,7 @@ sends -- PresenceManager only records timestamps from announces and messages
 that are already being received elsewhere.
 """
 
+import math
 import random
 import time
 import threading
@@ -24,8 +25,9 @@ import LXMF
 import msgpack
 
 from trenchchat.core.actions import compute_channel_recipients
+from trenchchat.core import sync_ranges
 from trenchchat.core.protocol import (
-    F_MSG_TYPE, MT_GOODBYE, MT_PRESENCE, pack_fields,
+    F_MSG_TYPE, F_SYNC_PROBE, MT_GOODBYE, MT_PRESENCE, pack_fields,
 )
 from trenchchat.network.announce import lxmf_display_name
 
@@ -303,6 +305,13 @@ class PresenceBeacon:
     gone quiet with, so presence survives transport nodes that damp repeat
     announces (see module docstring).
 
+    A beacon also carries a sync probe for every channel shared with that
+    peer (F_SYNC_PROBE, core/sync_ranges.py): a count and fingerprint of
+    what we hold, about twenty bytes a channel on a message going out
+    anyway. The peer compares it against its own and only asks when they
+    differ, which is what lets a routine sync re-check cost no request at
+    all; SyncManager reads it.
+
     Two clocks matter here and must stay separate: PresenceManager's
     last_seen (inbound evidence a peer is alive) and this class's last_sent
     (our own outbound traffic, which only suppresses our beacon -- it must
@@ -426,7 +435,32 @@ class PresenceBeacon:
             "",
             desired_method=LXMF.LXMessage.DIRECT,
         )
-        lxm.fields = pack_fields({F_MSG_TYPE: msg_type})
+        fields = {F_MSG_TYPE: msg_type}
+        if msg_type == MT_PRESENCE:
+            probes = self._probes_for(peer_hex)
+            if probes is not None:
+                fields[F_SYNC_PROBE] = probes
+        lxm.fields = pack_fields(fields)
         self._router.send(lxm)
         self.record_sent(peer_hex)
         return lxm
+
+    def _probes_for(self, peer_hex: str) -> bytes | None:
+        """Packed probes for every channel this peer shares with us, or None."""
+        floor = sync_ranges.probe_floor(time.time())
+        entries: list = []
+        for sub in self._storage.get_subscriptions():
+            channel_hash = sub["channel_hash"]
+            recipients = compute_channel_recipients(
+                self._storage, self._subscription_mgr, channel_hash,
+                self._identity.hash_hex,
+            )
+            if peer_hex not in recipients:
+                continue
+            rows = sync_ranges.signed_rows(
+                self._storage.get_message_index(channel_hash, floor, math.inf)
+            )
+            entries.append([bytes.fromhex(channel_hash), *sync_ranges.probe(rows)])
+            if len(entries) >= sync_ranges.MAX_PROBED_CHANNELS:
+                break
+        return sync_ranges.pack(entries) if entries else None

@@ -364,3 +364,52 @@ class TestSignature:
     def test_a_narrower_question_has_a_different_signature(self):
         assert sr.signature(sr.describe(_rows(50), 0.0, 1e6), []) != \
             sr.signature(sr.describe(_rows(50), 0.0, 500.0), [])
+
+
+class TestProbes:
+    def test_a_probe_is_the_count_and_fingerprint_of_the_rows(self):
+        rows = _rows(40)
+        assert sr.probe(rows) == [40, sr.fingerprint(r["message_id"] for r in rows)]
+        assert sr.probe([]) == [0, sr.fingerprint([])]
+
+    def test_the_probe_floor_is_day_aligned(self):
+        now = 1_800_000_000.0 + 12345.0
+        floor = sr.probe_floor(now)
+        assert (floor + sr.SYNC_WINDOW_SECS) % sr.PROBE_ALIGN_SECS == 0
+        assert sr.probe_floor(now + 3600.0) == floor
+        assert sr.probe_floor(now + sr.PROBE_ALIGN_SECS) == floor + sr.PROBE_ALIGN_SECS
+
+    def test_signed_rows_drops_unsigned(self):
+        rows = [dict(_row(0, 1.0), has_sig=1), dict(_row(1, 2.0), has_sig=0)]
+        assert [r["message_id"] for r in sr.signed_rows(rows)] == [rows[0]["message_id"]]
+
+    def test_probes_round_trip_and_reject_malformed(self):
+        good = [[b"\x01" * sr.CHANNEL_HASH_BYTES, 3, b"\xab" * sr.SYNC_FINGERPRINT_BYTES]]
+        assert sr.unpack_probes(sr.pack(good)) == good
+        bad = [
+            [[b"\x01" * 15, 3, b"\xab" * sr.SYNC_FINGERPRINT_BYTES]],
+            [[b"\x01" * sr.CHANNEL_HASH_BYTES, -1, b"\xab" * sr.SYNC_FINGERPRINT_BYTES]],
+            [[b"\x01" * sr.CHANNEL_HASH_BYTES, True, b"\xab" * sr.SYNC_FINGERPRINT_BYTES]],
+            [[b"\x01" * sr.CHANNEL_HASH_BYTES, 3, b"\xab" * 5]],
+            [[b"\x01" * sr.CHANNEL_HASH_BYTES, 3]],
+            good * (sr.MAX_PROBED_CHANNELS + 1),
+            "not a list",
+        ]
+        for value in bad:
+            assert sr.unpack_probes(sr.pack(value)) is None, value
+
+
+class TestBlindSummary:
+    def test_a_blind_re_check_is_one_fingerprint(self):
+        rows = _rows(500)
+        summary = sr.summarise(rows, 0.0, 1e9, ladder=False)
+        assert len(summary) == 1
+        lo, hi, mode, payload = summary[0]
+        assert (lo, hi, mode) == (0.0, 1e9, RANGE_FINGERPRINT)
+        assert payload == [len(rows), sr.fingerprint(r["message_id"] for r in rows)]
+        assert sr.packed_size(summary) <= 100
+
+    def test_a_small_window_is_still_an_id_list_when_blind(self):
+        rows = _rows(3)
+        assert sr.summarise(rows, 0.0, 1e9, ladder=False)[0][2] == RANGE_IDLIST
+        assert sr.summarise([], 0.0, 1e9, ladder=False) == [[0.0, 1e9, RANGE_IDLIST, []]]

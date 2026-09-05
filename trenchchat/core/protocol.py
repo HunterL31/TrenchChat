@@ -99,6 +99,9 @@ F_SYNC_NEED         = 0x53   # bytes: msgpack list of [lo, hi, prefix] triples n
                              #         its own rows in that range
 F_SYNC_CONTINUES    = 0x54   # bool: this request continues an exchange the responder has
                              #       already answered, rather than opening one (sync_request)
+F_SYNC_PROBE        = 0x55   # bytes: msgpack list of [channel_hash, count, fp], the sender's
+                             #        signed rows per shared channel since the probe floor
+                             #        (presence beacons); see core/sync_ranges.py
 
 # How a range in F_SYNC_RANGES describes the rows it covers.
 RANGE_FINGERPRINT   = 0      # payload [count, fp]: a digest over the range's sorted ids
@@ -300,7 +303,7 @@ MT_AVATAR_UPDATE    = "avatar_update"
 MT_REACTION         = "reaction"        # notify channel: reactor added/removed emoji on a message
 MT_EMOJI_REQUEST    = "emoji_request"   # ask a peer for emoji image data by hash
 MT_EMOJI_RESPONSE   = "emoji_response"  # respond with the emoji image bytes
-MT_PRESENCE         = "presence"        # signed liveness beacon; empty content, no other fields
+MT_PRESENCE         = "presence"        # signed liveness beacon; empty content, probes at most
 MT_GOODBYE          = "goodbye"         # graceful-shutdown notice; empty content, no other fields
 MT_VOICE_JOIN       = "voice_join"      # sender entered the channel's voice session
 MT_VOICE_LEAVE      = "voice_leave"     # sender left the channel's voice session

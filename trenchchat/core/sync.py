@@ -58,6 +58,7 @@ grant that was still propagating when the request landed can be picked up
 later rather than being lost behind a watermark that ran past it.
 """
 
+import math
 import re
 import threading
 import time
@@ -72,14 +73,15 @@ from trenchchat.core.authorship import (
     public_key_for, remember_relayed_key, verify_message,
 )
 from trenchchat.core.image import MAX_IMAGE_BYTES, inbound_image_is_sane
-from trenchchat.core.messaging import Messaging, _compute_message_id
+from trenchchat.core.messaging import CAUSAL_WINDOW_SECS, Messaging, _compute_message_id
 from trenchchat.core.permissions import (
     FULL_SYNC, has_permission, is_open_join, permissions_from_json,
 )
 from trenchchat.core.protocol import (
     F_AUTHOR_KEYS, F_CHANNEL_HASH, F_MSG_TYPE,
     F_SYNC_WINDOW_START, F_SYNC_MESSAGES, F_SYNC_TRUNCATED, F_SYNC_SCAN_CURSOR,
-    F_SYNC_RANGES, F_SYNC_NEED, F_SYNC_CONTINUES, F_MISSED_FOR, F_MISSED_MSG_ID,
+    F_SYNC_RANGES, F_SYNC_NEED, F_SYNC_CONTINUES, F_SYNC_PROBE, F_MISSED_FOR,
+    F_MISSED_MSG_ID, MT_PRESENCE,
     MAX_CLOCK_SKEW_SECS, MT_MISSED_DELIVERY, MT_SYNC_REQUEST, MT_SYNC_RESPONSE,
     RANGE_IDLIST, SYNC_WINDOW_SECS,
     message_id_from_wire, message_id_to_wire, pack_fields, unpack_wire,
@@ -149,6 +151,19 @@ ANNOUNCE_SYNC_COOLDOWN_SECS = 120.0
 # Idle (channel, peer) announce-cooldown entries older than this are pruned
 # during recording, so the map stays bounded over a long session.
 ANNOUNCE_SYNC_PRUNE_SECS = 3600.0
+
+# A probe on a peer's presence beacon that matched what we hold stands in for
+# the announce-driven re-check of that (channel, peer) for this long: the
+# re-check would ask the question the probe just answered.
+PROBE_AGREE_SECS = ANNOUNCE_SYNC_COOLDOWN_SECS
+
+# A message names the newest message its author had seen (last_seen_id). Not
+# holding that one is evidence of a gap, and its author is a peer known to
+# hold it. Suspected gaps are asked about together on the next tick, after
+# the causal window has had its chance to deliver the row the ordinary way,
+# and bounded so a flood of dangling references cannot grow the set.
+SUSPECTED_GAP_GRACE_SECS = CAUSAL_WINDOW_SECS
+MAX_SUSPECTED_GAPS = 64
 
 # Consecutive unanswered re-asks to one peer on one channel before we stop.
 # A peer that keeps its path resolvable and simply never answers would
@@ -338,6 +353,20 @@ class SyncManager:
         self._deferred: set[tuple[str, str]] = set()
         self._deferred_lock = threading.Lock()
 
+        # What a peer's presence beacon last said about a channel, and when
+        # it last agreed with us: (channel_hash_hex, peer_hex) -> (at, fp)
+        # and -> at. A mismatch the cooldown would not let us act on yet
+        # waits in _probe_pending for tick().
+        self._probe_seen: dict[tuple[str, str], tuple[float, bytes]] = {}
+        self._probe_agreed: dict[tuple[str, str], float] = {}
+        self._probe_pending: set[tuple[str, str]] = set()
+        self._probe_lock = threading.Lock()
+
+        # (channel_hash_hex, message_id) -> (ask_after, peer_hex, referenced_from_ts)
+        # for a last_seen_id we did not hold when a message naming it arrived.
+        self._suspected: dict[tuple[str, str], tuple[float, str, float]] = {}
+        self._suspected_lock = threading.Lock()
+
         # channel_hash_hex -> the entitlement the last request was issued under
         self._sync_policy: dict[str, tuple[str, str]] = {}
         self._sync_policy_lock = threading.Lock()
@@ -428,13 +457,15 @@ class SyncManager:
             self._send_sync_request(peer_hex, channel_hash_hex, peer_since)
 
     def _on_message_stored(self, channel_hash_hex: str, message_id: str):
-        """Clear a hinted gap once the messages it named have all arrived.
+        """Clear a hinted gap once the messages it named have all arrived,
+        and note a gap a message's last_seen_id reveals.
 
         A hint says a message never reached us; the sender's own retry queue
         usually delivers it directly, which is not a sync response. Clearing
         the gap only from sync left every hinted channel reading INCOMPLETE
         for the rest of the session, long after the message turned up.
         """
+        self._note_reference(channel_hash_hex, message_id)
         if not self._status.has_gap(channel_hash_hex):
             return
         my_hex = self._identity.hash_hex
@@ -446,6 +477,57 @@ class SyncManager:
             return
         self._storage.clear_missed_deliveries(channel_hash_hex, my_hex)
         self._status.clear_gap(channel_hash_hex)
+
+    def _note_reference(self, channel_hash_hex: str, message_id: str) -> None:
+        """Remember a last_seen_id we do not hold, to ask its author for.
+
+        The row it came from says who saw the missing message, so that peer
+        can be asked for exactly it, by prefix, without any description of
+        the window. Asked on a later tick rather than now: within the causal
+        window the message is more likely still in flight than lost.
+        """
+        row = self._storage.get_message(channel_hash_hex, message_id)
+        if row is None:
+            return
+        referenced = row["last_seen_id"]
+        author = row["sender_hash"]
+        if (not referenced or not author or author == self._identity.hash_hex
+                or not _is_message_id(referenced)
+                or self._storage.has_message(channel_hash_hex, referenced)):
+            return
+        key = (channel_hash_hex, referenced)
+        with self._suspected_lock:
+            if key in self._suspected or len(self._suspected) >= MAX_SUSPECTED_GAPS:
+                return
+            self._suspected[key] = (time.time() + SUSPECTED_GAP_GRACE_SECS, author,
+                                    float(row["timestamp"]))
+
+    def _ask_suspected_gaps(self) -> None:
+        """Ask each author for the referenced rows still missing, one need
+        request per (channel, author). Asked once: if the answer never comes,
+        the ordinary reconcile still covers the gap."""
+        now = time.time()
+        due: dict[tuple[str, str], list] = {}
+        with self._suspected_lock:
+            for (channel_hash_hex, referenced), (ask_after, author, ts) in list(
+                    self._suspected.items()):
+                if ask_after > now:
+                    continue
+                del self._suspected[(channel_hash_hex, referenced)]
+                if self._storage.has_message(channel_hash_hex, referenced):
+                    continue
+                due.setdefault((channel_hash_hex, author), []).append(
+                    [ts - SYNC_WINDOW_SECS, ts + SYNC_CLOCK_SKEW_SECS,
+                     sync_ranges.id_prefix(referenced)]
+                )
+        for (channel_hash_hex, author), needs in due.items():
+            if not self._storage.is_subscribed(channel_hash_hex):
+                continue
+            if not self._peer_may_participate(channel_hash_hex, author):
+                continue
+            since_ts = self._storage.get_peer_sync_progress(channel_hash_hex, author)
+            self._send_sync_request(author, channel_hash_hex, since_ts,
+                                    needs=needs[:MAX_NEED_IDS])
 
     def _on_member_list_updated(self, channel_hash_hex: str):
         """Clear pending outbound messages for this channel if we were removed.
@@ -491,6 +573,10 @@ class SyncManager:
             if peer_hex not in self._get_channel_peers(channel_hash_hex):
                 continue
             if not self._announce_sync_due(channel_hash_hex, peer_hex):
+                continue
+            # A beacon probe that matched is the answer this request would
+            # have fetched; asking anyway spends a request and a reply on it.
+            if self._probe_agreed_recently(channel_hash_hex, peer_hex):
                 continue
             since_ts = self._storage.get_peer_sync_progress(channel_hash_hex, peer_hex)
             if self._send_sync_request(peer_hex, channel_hash_hex, since_ts):
@@ -561,6 +647,10 @@ class SyncManager:
             return
         if isinstance(msg_type, bytes):
             msg_type = msg_type.decode(errors="replace")
+        if msg_type == MT_PRESENCE:
+            if F_SYNC_PROBE in fields:
+                self._handle_probes(fields, self._sender_hex(message))
+            return
         if msg_type not in (MT_MISSED_DELIVERY, MT_SYNC_REQUEST, MT_SYNC_RESPONSE):
             return
 
@@ -570,12 +660,7 @@ class SyncManager:
         channel_hash_hex = (channel_hash_bytes.hex()
                             if isinstance(channel_hash_bytes, bytes)
                             else str(channel_hash_bytes))
-
-        sender_identity = (RNS.Identity.recall(message.source_hash)
-                           if message.source_hash else None)
-        sender_hex = (sender_identity.hash.hex()
-                      if sender_identity
-                      else (message.source_hash.hex() if message.source_hash else ""))
+        sender_hex = self._sender_hex(message)
 
         if msg_type == MT_MISSED_DELIVERY:
             self._handle_missed_delivery(fields, channel_hash_hex, sender_hex)
@@ -583,6 +668,106 @@ class SyncManager:
             self._handle_sync_request(fields, channel_hash_hex, sender_hex)
         elif msg_type == MT_SYNC_RESPONSE:
             self._handle_sync_response(fields, channel_hash_hex, sender_hex)
+
+    @staticmethod
+    def _sender_hex(message: LXMF.LXMessage) -> str:
+        """The sender's identity hex, falling back to its delivery hash."""
+        sender_identity = (RNS.Identity.recall(message.source_hash)
+                           if message.source_hash else None)
+        if sender_identity:
+            return sender_identity.hash.hex()
+        return message.source_hash.hex() if message.source_hash else ""
+
+    # --- probes ---
+
+    def local_probe(self, channel_hash_hex: str, now: float | None = None) -> list:
+        """Our own [count, fingerprint] for a channel over the probed span."""
+        floor = sync_ranges.probe_floor(time.time() if now is None else now)
+        rows = sync_ranges.signed_rows(
+            self._storage.get_message_index(channel_hash_hex, floor, math.inf)
+        )
+        return sync_ranges.probe(rows)
+
+    def _handle_probes(self, fields: dict, sender_hex: str) -> None:
+        """Compare what a peer's beacon says it holds against what we hold.
+
+        Agreement stands in for the next announce-driven re-check of that
+        pair. Disagreement is acted on once per change in what the peer
+        reports: a peer whose view legitimately differs from ours (a member
+        with less history entitlement, say) would otherwise cost an exchange
+        on every beacon, and a peer inventing a fingerprint can draw no more
+        than the announce cooldown already allows.
+        """
+        probes = sync_ranges.unpack_probes(fields.get(F_SYNC_PROBE))
+        if probes is None:
+            RNS.log(
+                f"TrenchChat [sync]: ignoring malformed probes on a beacon from "
+                f"{sender_hex[:12]}…",
+                RNS.LOG_WARNING,
+            )
+            return
+        if not sender_hex:
+            return
+        now = time.time()
+        to_ask: list[tuple[str, str]] = []
+        for channel_bytes, count, digest in probes:
+            channel_hash_hex = channel_bytes.hex()
+            if not self._storage.is_subscribed(channel_hash_hex):
+                continue
+            if not self._peer_may_participate(channel_hash_hex, sender_hex):
+                continue
+            key = (channel_hash_hex, sender_hex)
+            mine = self.local_probe(channel_hash_hex, now)
+            with self._probe_lock:
+                self._prune_probes_locked(now)
+                seen = self._probe_seen.get(key)
+                self._probe_seen[key] = (now, digest)
+                if mine == [count, digest]:
+                    self._probe_agreed[key] = now
+                    self._probe_pending.discard(key)
+                    continue
+                if seen is not None and seen[1] == digest:
+                    continue
+                self._probe_pending.add(key)
+                to_ask.append(key)
+        for key in to_ask:
+            self._ask_after_probe(*key)
+
+    def _ask_after_probe(self, channel_hash_hex: str, peer_hex: str) -> bool:
+        """Send the ladder to a peer whose probe disagreed, if the cooldown
+        allows; otherwise it stays pending for tick()."""
+        if not self._announce_sync_due(channel_hash_hex, peer_hex):
+            return False
+        since_ts = self._storage.get_peer_sync_progress(channel_hash_hex, peer_hex)
+        sent = self._send_sync_request(peer_hex, channel_hash_hex, since_ts, ladder=True)
+        if sent:
+            self._record_announce_sync(channel_hash_hex, peer_hex)
+            with self._probe_lock:
+                self._probe_pending.discard((channel_hash_hex, peer_hex))
+        return sent
+
+    def _flush_probe_pending(self) -> None:
+        with self._probe_lock:
+            pending = list(self._probe_pending)
+        for channel_hash_hex, peer_hex in pending:
+            if not self._storage.is_subscribed(channel_hash_hex):
+                with self._probe_lock:
+                    self._probe_pending.discard((channel_hash_hex, peer_hex))
+                continue
+            self._ask_after_probe(channel_hash_hex, peer_hex)
+
+    def _probe_agreed_recently(self, channel_hash_hex: str, peer_hex: str) -> bool:
+        with self._probe_lock:
+            at = self._probe_agreed.get((channel_hash_hex, peer_hex))
+        return at is not None and time.time() - at < PROBE_AGREE_SECS
+
+    def _prune_probes_locked(self, now: float) -> None:
+        for key, (at, _digest) in list(self._probe_seen.items()):
+            if now - at > ANNOUNCE_SYNC_PRUNE_SECS:
+                del self._probe_seen[key]
+        for key, at in list(self._probe_agreed.items()):
+            if now - at > ANNOUNCE_SYNC_PRUNE_SECS:
+                del self._probe_agreed[key]
 
     # --- handlers ---
 
@@ -1630,21 +1815,24 @@ class SyncManager:
         floor = max(now - SYNC_WINDOW_SECS, 0.0)
         return min(max(since_ts, 0.0), floor), now + SYNC_CLOCK_SKEW_SECS
 
-    def _describe_local(self, channel_hash_hex: str, lo: float, hi: float) -> list:
+    def _describe_local(self, channel_hash_hex: str, lo: float, hi: float,
+                        ladder: bool = False) -> list:
         """How we describe our own rows in [lo, hi) to a peer.
 
-        A summary: the newest few rows by id, the rest fingerprinted in
-        buckets that grow with age, a few hundred bytes rather than a list of
-        everything we hold. Only once a peer has said a range differs is a
-        narrow description of it worth sending, and that is built where the
-        answer is read (_reconcile_from_response), never here.
+        A blind re-check, where nothing yet says the peer differs, is one
+        fingerprint over the window. Once a difference is known (a beacon
+        probe disagreed, or an answer said more remains) it is the *ladder*:
+        the newest few rows by id, the rest fingerprinted in buckets that grow
+        with age, so the answer can carry rows at once. A narrow description
+        of a single range is built where the answer is read
+        (_reconcile_from_response), never here.
 
         Only signed rows: an unsigned one cannot be relayed to anybody, so
         claiming it here would have peers withhold their own verifiable copy.
         """
         index = [r for r in self._storage.get_message_index(channel_hash_hex, lo, hi)
                  if _row_is_signed(r)]
-        return sync_ranges.summarise(index, lo, hi)
+        return sync_ranges.summarise(index, lo, hi, ladder=ladder)
 
     def _record_asked(self, channel_hash_hex: str, dest_hex: str,
                       ranges: list | None, needs: list | None) -> None:
@@ -1654,7 +1842,7 @@ class SyncManager:
 
     def _send_sync_request(self, dest_hex: str, channel_hash_hex: str, since_ts: float,
                            continuation: bool = False, ranges: list | None = None,
-                           needs: list | None = None) -> bool:
+                           needs: list | None = None, ladder: bool = False) -> bool:
         """Ask a peer for anything on this channel we do not already hold.
 
         The request carries a description of our own rows, so the answer is
@@ -1665,7 +1853,7 @@ class SyncManager:
         """
         if ranges is None and needs is None:
             lo, hi = self._reconcile_window(since_ts)
-            ranges = self._describe_local(channel_hash_hex, lo, hi)
+            ranges = self._describe_local(channel_hash_hex, lo, hi, ladder=ladder)
 
         if not continuation:
             with self._continuations_lock:
@@ -1717,7 +1905,7 @@ class SyncManager:
         """Ask the same peer again, for the next batch or a narrowed range.
 
         Without *ranges* or *needs* the next batch is asked for with a fresh
-        summary of what we hold now, which the rows just received have
+        ladder of what we hold now, which the rows just received have
         changed. MAX_SYNC_CONTINUATIONS bounds a responder that always reports
         more remaining.
         """
@@ -1734,7 +1922,8 @@ class SyncManager:
             self._continuations[key] = count + 1
 
         return self._send_sync_request(peer_hex, channel_hash_hex, resume_ts,
-                                       continuation=True, ranges=ranges, needs=needs)
+                                       continuation=True, ranges=ranges, needs=needs,
+                                       ladder=True)
 
     def _continue_reconcile(self, channel_hash_hex: str, peer_hex: str,
                             ranges: list, needs: list) -> bool:
@@ -1774,7 +1963,8 @@ class SyncManager:
         return forms
 
     def tick(self) -> None:
-        """Re-ask peers whose answer never came.
+        """Re-ask peers whose answer never came, act on probes the cooldown
+        held back, and ask about gaps that messages have revealed.
 
         Every other trigger is an event: a peer announcing, or this node's own
         link returning. Both fire in a burst and then stop -- Reticulum
@@ -1785,6 +1975,9 @@ class SyncManager:
         returning peer waiting forever on an answer nobody is going to send
         (sync2 in docs/testenv-scenarios.md).
         """
+        self._flush_probe_pending()
+        self._ask_suspected_gaps()
+
         now = time.time()
         stale: dict[str, set[str]] = {}
         with self._pending_requests_lock:

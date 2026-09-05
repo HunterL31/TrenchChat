@@ -15,6 +15,9 @@ from tests.helpers import sign_as, wait_for, wait_for_member, wait_for_message
 from trenchchat.core import sync_ranges
 from trenchchat.core.messaging import _compute_message_id
 from trenchchat.core.protocol import (
+    F_SYNC_CONTINUES,
+    MT_PRESENCE,
+    F_SYNC_PROBE,
     F_CHANNEL_HASH, F_MSG_TYPE, F_SYNC_MESSAGES, F_SYNC_NEED, F_SYNC_RANGES,
     F_SYNC_WINDOW_START, MT_SYNC_REQUEST, MT_SYNC_RESPONSE,
     RANGE_FINGERPRINT, RANGE_IDLIST, message_id_from_wire, unpack_wire,
@@ -128,10 +131,11 @@ class TestWorkedExample:
     def test_a_recent_gap_is_filled_by_the_first_answer(self, peer_factory):
         """A peer that fell behind recently gets its rows in one round trip.
 
-        The ladder spells out the newest bucket by id, so a responder holding
-        newer rows in that span can send them at once instead of describing
-        the range back and waiting to be asked. The older buckets match and
-        are not mentioned again.
+        Once a difference is known (here, as a beacon probe would establish
+        it) the request is the ladder: it spells out the newest bucket by id,
+        so a responder holding newer rows in that span can send them at once
+        instead of describing the range back and waiting to be asked. The
+        older buckets match and are not mentioned again.
         """
         author = peer_factory("author")
         a = peer_factory("a")
@@ -151,10 +155,10 @@ class TestWorkedExample:
 
         a_sent = _capture(a)
         b_sent = _capture(b)
-        a.sync_mgr._send_sync_request(b.identity.hash_hex, ch_hash, base)
+        a.sync_mgr._send_sync_request(b.identity.hash_hex, ch_hash, base, ladder=True)
         ranges = sync_ranges.unpack_ranges(a_sent[0][F_SYNC_RANGES])
         assert len(ranges) > 1 and ranges[-1][2] == RANGE_IDLIST, \
-            "a fresh request over a busy window did not ladder"
+            "a request after a known mismatch did not ladder"
 
         b.sync_mgr._handle_sync_request(a_sent[0], ch_hash, a.identity.hash_hex)
         assert len(b_sent) == 1
@@ -457,8 +461,9 @@ class TestDeepReconcileThrottle:
 
 class TestRangesAreOnTheWire:
     def test_a_fresh_request_summarises_the_window(self, peer_factory):
-        """A routine re-check costs a ladder of fingerprints with the newest
-        few rows by id, never a list of everything held."""
+        """A blind re-check is one fingerprint; once a mismatch is known the
+        same request is the ladder, fingerprints with the newest rows by id.
+        Neither is ever a list of everything held."""
         alice = peer_factory("alice")
         bob = peer_factory("bob")
         ch_hash = alice.channel_mgr.create_channel("describe", "", "public")
@@ -470,59 +475,21 @@ class TestRangesAreOnTheWire:
 
         sent = _capture(bob)
         bob.sync_mgr._send_sync_request(alice.identity.hash_hex, ch_hash, base)
+        blind = sync_ranges.unpack_ranges(sent[0][F_SYNC_RANGES])
+        assert blind is not None, "the request's ranges did not validate"
+        assert [mode for _lo, _hi, mode, _payload in blind] == [RANGE_FINGERPRINT]
+        assert blind[0][3] == (len(held), sync_ranges.fingerprint(held))
 
-        ranges = sync_ranges.unpack_ranges(sent[0][F_SYNC_RANGES])
-        assert ranges is not None, "the request's ranges did not validate"
+        bob.sync_mgr._send_sync_request(alice.identity.hash_hex, ch_hash, base, ladder=True)
+        ranges = sync_ranges.unpack_ranges(sent[1][F_SYNC_RANGES])
         assert [mode for _lo, _hi, mode, _payload in ranges] == \
             [RANGE_FINGERPRINT] * (len(ranges) - 1) + [RANGE_IDLIST]
         assert set(ranges[-1][3]) == \
             {sync_ranges.id_prefix(mid) for mid in held[-sync_ranges.SYNC_SUMMARY_LADDER[0]:]}
         assert sum(payload[0] for _lo, _hi, mode, payload in ranges[:-1]) == \
             len(held) - sync_ranges.SYNC_SUMMARY_LADDER[0]
-        assert len(sent[0][F_SYNC_RANGES]) <= sync_ranges.SYNC_DESCRIPTION_BUDGET_BYTES
-
-    def test_a_continuation_describes_what_we_already_hold(self, peer_factory):
-        """Only once a peer says the window differs is a list worth sending."""
-        alice = peer_factory("alice")
-        bob = peer_factory("bob")
-        ch_hash = alice.channel_mgr.create_channel("narrow", "", "public")
-        _seed_channel_on_peer(bob, ch_hash, "narrow", alice.identity.hash_hex)
-
-        base = time.time() - 30
-        held = [_insert_message(bob.storage, ch_hash, alice.identity.hash_hex,
-                                f"held {i}", base + i) for i in range(3)]
-
-        sent = _capture(bob)
-        bob.sync_mgr._send_sync_request(alice.identity.hash_hex, ch_hash, base,
-                                        continuation=True)
-
-        ranges = sync_ranges.unpack_ranges(sent[0][F_SYNC_RANGES])
-        assert ranges is not None, "the continuation's ranges did not validate"
-        named = {prefix for _lo, _hi, _mode, payload in ranges for prefix in payload}
-        assert named == {sync_ranges.id_prefix(mid) for mid in held}
-
-    def test_an_unsigned_row_is_not_claimed(self, peer_factory):
-        """An unsigned row cannot be relayed to anyone, so claiming to hold it
-        would stop peers offering their own verifiable copy."""
-        alice = peer_factory("alice")
-        bob = peer_factory("bob")
-        ch_hash = alice.channel_mgr.create_channel("unsigned", "", "public")
-        _seed_channel_on_peer(bob, ch_hash, "unsigned", alice.identity.hash_hex)
-
-        ts = time.time() - 30
-        bob.storage.insert_message(
-            channel_hash=ch_hash, sender_hash=alice.identity.hash_hex,
-            sender_name="Alice", content="legacy", timestamp=ts,
-            message_id=_compute_message_id("legacy", alice.identity.hash_hex, ts),
-            reply_to=None, last_seen_id=None, received_at=ts,
-        )
-
-        sent = _capture(bob)
-        bob.sync_mgr._send_sync_request(alice.identity.hash_hex, ch_hash, ts)
-
-        ranges = sync_ranges.unpack_ranges(sent[0][F_SYNC_RANGES])
-        assert [payload for _lo, _hi, _mode, payload in ranges] == [()], \
-            "an unsigned row was named as something we hold"
+        for f in sent:
+            assert len(f[F_SYNC_RANGES]) <= sync_ranges.SYNC_DESCRIPTION_BUDGET_BYTES
 
 
 @pytest.mark.parametrize("field", [F_SYNC_RANGES, F_SYNC_NEED])
@@ -735,3 +702,185 @@ class TestExtendedAbsence:
                 lambda: peer.sync_mgr.status.get_state(ch_hash) == SyncState.SYNCED,
                 timeout=10,
             ), f"{peer.identity.hash_hex[:8]} never settled"
+
+
+def _probe_fields(peer, ch_hash) -> dict:
+    """The presence fields a peer's beacon would carry for one channel."""
+    return {
+        F_MSG_TYPE: MT_PRESENCE,
+        F_SYNC_PROBE: sync_ranges.pack(
+            [[bytes.fromhex(ch_hash), *peer.sync_mgr.local_probe(ch_hash)]]
+        ),
+    }
+
+
+class TestBeaconProbes:
+    """A probe on a presence beacon decides whether, and how, to ask."""
+
+    def _pair(self, peer_factory, name, shared: int, extra_on_b: int = 0):
+        a = peer_factory("a")
+        b = peer_factory("b")
+        author_hex = a.identity.hash_hex
+        ch_hash = a.channel_mgr.create_channel(name, "", "public")
+        _seed_channel_on_peer(b, ch_hash, name, author_hex)
+        a.subscription_mgr._subscribers[ch_hash] = {b.identity.hash_hex}
+        base = time.time() - 600
+        held = []
+        for i in range(shared + extra_on_b):
+            mid = _insert_message(b.storage, ch_hash, author_hex, f"row {i}", base + i)
+            if i < shared:
+                _insert_message(a.storage, ch_hash, author_hex, f"row {i}", base + i)
+            held.append(mid)
+        return a, b, ch_hash, held
+
+    def test_an_agreeing_probe_stands_in_for_the_announce_re_check(self, peer_factory):
+        a, b, ch_hash, _held = self._pair(peer_factory, "probe-agree", shared=20)
+        a_sent = _capture(a)
+
+        a.sync_mgr._handle_probes(_probe_fields(b, ch_hash), b.identity.hash_hex)
+        a.sync_mgr.on_peer_appeared(b.identity.hash_hex)
+        assert _requests(a_sent) == [], \
+            "a re-check was sent although the peer's probe had just matched"
+
+    def test_without_a_probe_the_announce_re_check_is_one_fingerprint(self, peer_factory):
+        a, b, ch_hash, _held = self._pair(peer_factory, "probe-blind", shared=20)
+        a_sent = _capture(a)
+
+        a.sync_mgr.on_peer_appeared(b.identity.hash_hex)
+        requests = _requests(a_sent)
+        assert len(requests) == 1
+        ranges = sync_ranges.unpack_ranges(requests[0][F_SYNC_RANGES])
+        assert [mode for _lo, _hi, mode, _payload in ranges] == [RANGE_FINGERPRINT], \
+            "a blind re-check spelled out more than one fingerprint"
+        assert not requests[0].get(F_SYNC_CONTINUES)
+
+    def test_a_differing_probe_draws_the_ladder_and_rows_in_one_answer(self, peer_factory):
+        a, b, ch_hash, held = self._pair(peer_factory, "probe-differ", shared=58,
+                                         extra_on_b=2)
+        a_sent = _capture(a)
+        b_sent = _capture(b)
+
+        a.sync_mgr._handle_probes(_probe_fields(b, ch_hash), b.identity.hash_hex)
+        requests = _requests(a_sent)
+        assert len(requests) == 1, "a differing probe did not draw exactly one request"
+        ranges = sync_ranges.unpack_ranges(requests[0][F_SYNC_RANGES])
+        assert len(ranges) > 1 and ranges[-1][2] == RANGE_IDLIST, \
+            "the request after a known mismatch was not the ladder"
+
+        b.sync_mgr._handle_sync_request(requests[0], ch_hash, a.identity.hash_hex)
+        assert len(b_sent) == 1
+        assert _served_ids(b_sent[0]) == set(held[58:]), \
+            "the first answer did not carry exactly the rows A lacked"
+        a.sync_mgr._handle_sync_response(b_sent[0], ch_hash, b.identity.hash_hex)
+        assert all(a.storage.message_exists(mid) for mid in held)
+
+    def test_an_unchanged_differing_probe_is_acted_on_once(self, peer_factory):
+        a, b, ch_hash, _held = self._pair(peer_factory, "probe-repeat", shared=58,
+                                          extra_on_b=2)
+        a_sent = _capture(a)
+        fields = _probe_fields(b, ch_hash)
+        for _ in range(4):
+            a.sync_mgr._handle_probes(fields, b.identity.hash_hex)
+            a.sync_mgr.tick()
+        assert len(_requests(a_sent)) == 1, \
+            "the same disagreeing probe drew more than one request"
+
+    def test_a_probe_held_by_the_cooldown_is_sent_on_a_later_tick(self, peer_factory,
+                                                                    monkeypatch):
+        import trenchchat.core.sync as sync_module
+        a, b, ch_hash, _held = self._pair(peer_factory, "probe-held", shared=58,
+                                          extra_on_b=2)
+        a_sent = _capture(a)
+        # A just asked this peer on an announce, so the probe cannot ask yet.
+        a.sync_mgr.on_peer_appeared(b.identity.hash_hex)
+        assert len(_requests(a_sent)) == 1
+
+        a.sync_mgr._handle_probes(_probe_fields(b, ch_hash), b.identity.hash_hex)
+        assert len(_requests(a_sent)) == 1, "the probe asked inside the cooldown"
+
+        monkeypatch.setattr(sync_module, "ANNOUNCE_SYNC_COOLDOWN_SECS", 0.0)
+        a.sync_mgr.tick()
+        assert len(_requests(a_sent)) == 2, "the held probe was not asked once due"
+        ranges = sync_ranges.unpack_ranges(_requests(a_sent)[1][F_SYNC_RANGES])
+        assert ranges[-1][2] == RANGE_IDLIST
+
+    def test_a_malformed_probe_is_ignored(self, peer_factory):
+        a, b, ch_hash, _held = self._pair(peer_factory, "probe-bad", shared=5, extra_on_b=2)
+        a_sent = _capture(a)
+        a.sync_mgr._handle_probes(
+            {F_MSG_TYPE: MT_PRESENCE, F_SYNC_PROBE: sync_ranges.pack([[b"\x00" * 3, 1, b"x"]])},
+            b.identity.hash_hex,
+        )
+        a.sync_mgr._handle_probes({F_MSG_TYPE: MT_PRESENCE, F_SYNC_PROBE: b"\xc1"},
+                                  b.identity.hash_hex)
+        assert _requests(a_sent) == []
+
+    def test_a_real_beacon_reaches_the_sync_manager(self, peer_factory):
+        """End to end: B's beacon carries its probe, A's sync manager reads it
+        off the router and asks, and B answers with the rows."""
+        from trenchchat.core.presence import PresenceBeacon
+        a, b, ch_hash, held = self._pair(peer_factory, "probe-e2e", shared=58, extra_on_b=2)
+        b.subscription_mgr._subscribers[ch_hash] = {a.identity.hash_hex}
+        beacon = PresenceBeacon(b.identity, b.storage, b.router, b.subscription_mgr,
+                                b.presence_mgr, beacon_after_secs=0.0)
+        beacon.tick()
+        assert wait_for(lambda: all(a.storage.message_exists(mid) for mid in held),
+                        timeout=10), "A never recovered the rows B's beacon revealed"
+
+
+class TestReferencedGaps:
+    def test_a_missing_last_seen_id_is_asked_for_from_its_author(self, peer_factory,
+                                                                  monkeypatch):
+        """A message names the newest message its author had seen; not
+        holding that one is a gap, and the author is known to hold it."""
+        import trenchchat.core.sync as sync_module
+        monkeypatch.setattr(sync_module, "SUSPECTED_GAP_GRACE_SECS", 0.0)
+        a = peer_factory("a")
+        b = peer_factory("b")
+        ch_hash = a.channel_mgr.create_channel("referenced-gap", "", "public")
+        _seed_channel_on_peer(b, ch_hash, "referenced-gap", a.identity.hash_hex)
+        a.subscription_mgr._subscribers[ch_hash] = {b.identity.hash_hex}
+        b.subscription_mgr._subscribers[ch_hash] = {a.identity.hash_hex}
+        b_hex = b.identity.hash_hex
+
+        base = time.time() - 120
+        missing = _insert_message(b.storage, ch_hash, b_hex, "only b has this", base)
+        ts = base + 10
+        content = "seen it"
+        msg_id = _compute_message_id(content, b_hex, ts)
+        for holder in (a, b):
+            holder.storage.insert_message(
+                channel_hash=ch_hash, sender_hash=b_hex, sender_name="B",
+                content=content, timestamp=ts, message_id=msg_id, reply_to=None,
+                last_seen_id=missing, received_at=ts,
+                author_sig=sign_as(b_hex, ch_hash, msg_id, ts, content),
+            )
+
+        a_sent = _tap(a)
+        a.sync_mgr._on_message_stored(ch_hash, msg_id)
+        assert not a.storage.message_exists(missing)
+        a.sync_mgr.tick()
+
+        requests = _requests(a_sent)
+        assert len(requests) == 1 and F_SYNC_RANGES not in requests[0], \
+            "the gap was not asked for as a need-only request"
+        needs = sync_ranges.unpack_needs(requests[0][F_SYNC_NEED])
+        assert [prefix for _lo, _hi, prefix in needs] == [sync_ranges.id_prefix(missing)]
+        assert wait_for_message(a.storage, ch_hash, missing, timeout=5), \
+            "the referenced message never arrived"
+
+    def test_a_reference_already_held_or_own_is_not_queued(self, peer_factory):
+        a = peer_factory("a")
+        ch_hash = a.channel_mgr.create_channel("referenced-own", "", "public")
+        me = a.identity.hash_hex
+        base = time.time() - 60
+        first = _insert_message(a.storage, ch_hash, me, "first", base)
+        ts = base + 1
+        msg_id = _compute_message_id("second", me, ts)
+        a.storage.insert_message(
+            channel_hash=ch_hash, sender_hash=me, sender_name="A", content="second",
+            timestamp=ts, message_id=msg_id, reply_to=None, last_seen_id=first,
+            received_at=ts, author_sig=sign_as(me, ch_hash, msg_id, ts, "second"),
+        )
+        a.sync_mgr._on_message_stored(ch_hash, msg_id)
+        assert a.sync_mgr._suspected == {}

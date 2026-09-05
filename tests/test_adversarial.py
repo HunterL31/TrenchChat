@@ -60,6 +60,8 @@ from trenchchat.core.invite import _sign, _signed_payload
 from trenchchat.core.messaging import _compute_message_id
 from trenchchat.core.naming import dm_hash_for
 from trenchchat.core.protocol import (
+    MT_PRESENCE,
+    F_SYNC_PROBE,
     DM_ENVELOPE_TYPE, LXMF_FIELD_CUSTOM_DATA, LXMF_FIELD_CUSTOM_TYPE,
     pack_dm_envelope, pack_fields,
 )
@@ -1729,6 +1731,40 @@ class TestAdversarialSyncRanges:
             "a responder repeating one unmatchable range drove more than the "
             f"single narrowing it earned, got {requests - 1} continuations"
         )
+
+    def test_fake_probes_draw_one_request_per_cooldown(self, peer_factory):
+        """A member inventing fingerprints on its beacons can make us ask, but
+        no more often than an announce already could."""
+        alice, bob, ch_hash = _setup_channel_with_member(
+            peer_factory, member_perms=[SEND_MESSAGE]
+        )
+        sent = self._capture(alice)
+        for n in range(5):
+            probes = sync_ranges.pack([[bytes.fromhex(ch_hash), n + 1,
+                                        bytes([n]) * SYNC_FINGERPRINT_BYTES]])
+            alice.sync_mgr._handle_probes(
+                {F_MSG_TYPE: MT_PRESENCE, F_SYNC_PROBE: probes}, bob.identity.hash_hex
+            )
+            alice.sync_mgr.tick()
+        requests = [f for f in sent if f.get(F_MSG_TYPE) == MT_SYNC_REQUEST]
+        assert len(requests) == 1, (
+            f"five invented probes inside one cooldown drew {len(requests)} requests"
+        )
+
+    def test_a_probe_from_a_non_member_is_ignored(self, peer_factory):
+        alice, _bob, ch_hash = _setup_channel_with_member(
+            peer_factory, member_perms=[SEND_MESSAGE]
+        )
+        mallory = peer_factory("mallory")
+        sent = self._capture(alice)
+        probes = sync_ranges.pack([[bytes.fromhex(ch_hash), 99,
+                                    b"\x00" * SYNC_FINGERPRINT_BYTES]])
+        alice.sync_mgr._handle_probes(
+            {F_MSG_TYPE: MT_PRESENCE, F_SYNC_PROBE: probes}, mallory.identity.hash_hex
+        )
+        alice.sync_mgr.tick()
+        assert not [f for f in sent if f.get(F_MSG_TYPE) == MT_SYNC_REQUEST], \
+            "a non-member's probe drew a request"
 
     def test_a_continued_deep_exchange_is_bounded(self, peer_factory):
         """Continuation steps continue an exchange we accepted, not a new one.

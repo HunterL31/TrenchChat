@@ -35,7 +35,7 @@ import msgpack
 
 from trenchchat.core.protocol import (
     RANGE_FINGERPRINT, RANGE_IDLIST, SYNC_FINGERPRINT_BYTES,
-    SYNC_ID_PREFIX_BYTES, unpack_wire,
+    SYNC_ID_PREFIX_BYTES, SYNC_WINDOW_SECS, unpack_wire,
 )
 
 # Sub-ranges a mismatched range is split into. Wide rather than binary: each
@@ -66,6 +66,17 @@ SYNC_DESCRIPTION_BUDGET_BYTES = 512
 # resolution goes; a responder that receives ids sends the missing rows at
 # once, where a fingerprint could only be described back.
 SYNC_SUMMARY_LADDER = (8, 16, 32, 64, 128)
+
+# A probe is a channel's count and fingerprint carried on a presence beacon,
+# so two peers learn whether they differ without either sending a request.
+# Both sides must fingerprint the same span for that to mean anything, and
+# "now minus the window" drifts by the second, so the span starts at a day
+# boundary instead: rows only ever leave it once a day, at the same moment
+# for everyone. Beacons go per peer, so one carries every channel shared with
+# that peer, up to this many.
+PROBE_ALIGN_SECS = 86400
+MAX_PROBED_CHANNELS = 16
+CHANNEL_HASH_BYTES = 16
 
 # Inbound caps. These are the hard refusal bound, not the budget: a peer may
 # legitimately send a description built under different constants, so what is
@@ -155,7 +166,7 @@ def _split_bounds(rows: list, lo: float, hi: float,
     return bounds
 
 
-def summarise(rows, lo: float, hi: float) -> list[list]:
+def summarise(rows, lo: float, hi: float, ladder: bool = True) -> list[list]:
     """The whole of [lo, hi) in a few ranges weighted to the newest end: what a
     fresh request sends.
 
@@ -170,10 +181,19 @@ def summarise(rows, lo: float, hi: float) -> list[list]:
     Boundaries sit on row timestamps and never inside a group sharing one, for
     the same reason as _split_bounds. A newest bucket that a tie stretches past
     SYNC_LEAF_IDS is fingerprinted rather than spelled out.
+
+    With *ladder* False the window is one fingerprint, about a hundred bytes
+    whatever it holds: the shape for a blind re-check, where nothing yet says
+    the two sides differ and spelling anything out would usually be wasted.
+    The ladder is for when a difference is already known (a probe disagreed,
+    or an answer said more remains) and the round trip it saves is worth the
+    bytes.
     """
     rows = sort_rows(rows_in(rows, lo, hi))
     if len(rows) <= SYNC_SUMMARY_LADDER[0]:
         return [id_list_range(lo, hi, rows)]
+    if not ladder:
+        return [fingerprint_range(lo, hi, rows)]
 
     bounds = _ladder_bounds(rows, lo, hi)
     described: list[list] = []
@@ -317,6 +337,49 @@ def append_ranges(target: list, described: list,
         return False
     target.extend(described)
     return True
+
+
+def signed_rows(index) -> list:
+    """The rows of a message index that carry an author signature: the only
+    ones either side may relay, so the only ones a description or a probe
+    counts."""
+    return [r for r in index if r["has_sig"]]
+
+
+def probe_floor(now: float) -> float:
+    """Where the probed span starts: the sync window back from the start of
+    the current day, the same instant on every peer whose clock agrees on
+    the date."""
+    return math.floor(now / PROBE_ALIGN_SECS) * PROBE_ALIGN_SECS - SYNC_WINDOW_SECS
+
+
+def probe(rows) -> list:
+    """A channel's [count, fingerprint] over *rows*, for a presence beacon."""
+    ids = [row["message_id"] for row in rows]
+    return [len(ids), fingerprint(ids)]
+
+
+def validate_probes(value) -> list | None:
+    """The probes a beacon carries, or None if any of it is malformed."""
+    if not isinstance(value, list) or len(value) > MAX_PROBED_CHANNELS:
+        return None
+    probes: list = []
+    for entry in value:
+        if not isinstance(entry, list) or len(entry) != 3:
+            return None
+        channel, count, digest = entry
+        if not isinstance(channel, bytes) or len(channel) != CHANNEL_HASH_BYTES:
+            return None
+        if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+            return None
+        if not isinstance(digest, bytes) or len(digest) != SYNC_FINGERPRINT_BYTES:
+            return None
+        probes.append([channel, count, digest])
+    return probes
+
+
+def unpack_probes(payload) -> list | None:
+    return _unpack(payload, validate_probes)
 
 
 def matches_fingerprint(rows, count: int, digest: bytes) -> bool:

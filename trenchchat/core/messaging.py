@@ -34,6 +34,8 @@ LXMF fields layout:
                                           the sender lacks, for the receiver to
                                           resolve against its own rows in that range
     0x54  continues         bool:       request continues an exchange already answered
+    0x55  sync_probe        bytes, msgpack [channel_hash, count, fp] per shared channel
+                                          (presence beacons)
     0x60  voice_state       str, "joined" | "left" (voice signalling)
     0x61  voice_muted       bool, sender's current mute state
     0x62  voice_joined_at   float, when the sender joined the voice session
