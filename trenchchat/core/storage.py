@@ -1831,6 +1831,25 @@ class Storage:
             LIMIT ?
         """, (channel_hash, since_ts, since_ts, after_id, limit))
 
+    def get_message_index(self, channel_hash: str, lo_ts: float,
+                          hi_ts: float) -> list[sqlite3.Row]:
+        """Identifying columns only for a channel's rows in [lo_ts, hi_ts).
+
+        What set reconciliation compares is ids, so a range is described
+        without ever loading the content and attachments a full row carries.
+        Served by idx_messages_channel_ts, ordered the way sync_ranges expects
+        (oldest first, ties broken by insertion order). has_sig says whether a
+        row is relayable at all: an unsigned one cannot be verified by anyone
+        we hand it to.
+        """
+        return self._fetchall("""
+            SELECT message_id, timestamp, sender_hash,
+                   (author_sig IS NOT NULL AND length(author_sig) > 0) AS has_sig
+            FROM messages
+            WHERE channel_hash = ? AND timestamp >= ? AND timestamp < ?
+            ORDER BY timestamp ASC, id ASC
+        """, (channel_hash, lo_ts, hi_ts))
+
     def get_messages_by_ids(self, channel_hash: str,
                             message_ids: list[str]) -> list[sqlite3.Row]:
         """Fetch a channel's messages matching the given ids, oldest first."""

@@ -12,7 +12,7 @@ Field key registry
 0x20–0x2F  Member-list fields
 0x30–0x3F  Subscription fields
 0x40–0x4F  Reaction fields
-0x50–0x5F  Sync status fields
+0x50–0x5F  Sync fields
 0x60–0x6F  Voice fields
 0x70–0x7F  Message integrity fields
 0x80–0x8F  Friends / direct message fields
@@ -86,11 +86,35 @@ F_SUBSCRIBER_LIST   = 0x30   # bytes: msgpack list of hex identity hashes
 F_SUBSCRIBER_VERSION = 0x31  # int: monotonic counter per channel
 F_SUBSCRIBER_SIG    = 0x32   # bytes: owner Ed25519 signature over the list
 
-# --- Sync status fields ---
+# --- Sync fields ---
 F_SYNC_TRUNCATED    = 0x50   # bool: responder capped this batch; it holds more history
 F_SYNC_SCAN_CURSOR  = 0x51   # float: furthest timestamp the responder's sweep reached,
                              #         even if every row there was withheld from the
                              #         requester (sync_response, only set when truncated)
+F_SYNC_RANGES       = 0x52   # bytes: msgpack list of [lo, hi, mode, payload] ranges
+                             #         describing the sender's own rows (sync_request and
+                             #         sync_response); see core/sync_ranges.py
+F_SYNC_NEED         = 0x53   # bytes: msgpack list of [lo, hi, prefix] triples naming rows
+                             #         the sender lacks, for the receiver to resolve against
+                             #         its own rows in that range
+F_SYNC_CONTINUES    = 0x54   # bool: this request continues an exchange the responder has
+                             #       already answered, rather than opening one (sync_request)
+F_SYNC_PROBE        = 0x55   # bytes: msgpack list of [channel_hash, count, fp], the sender's
+                             #        signed rows per shared channel since the probe floor
+                             #        (presence beacons); see core/sync_ranges.py
+
+# How a range in F_SYNC_RANGES describes the rows it covers.
+RANGE_FINGERPRINT   = 0      # payload [count, fp]: a digest over the range's sorted ids
+RANGE_IDLIST        = 1      # payload [prefix, ...]: every id in the range, by prefix
+
+# A fingerprint is a truncated SHA-256: long enough that two different sets
+# colliding is not a thing that happens, short enough to send sixteen of them.
+SYNC_FINGERPRINT_BYTES = 16
+
+# How much of an id an id list or a need names it by. A full id is 32 bytes and
+# a range holds up to 32 of them, so the whole prefix is what makes spelling a
+# range out affordable on a slow link.
+SYNC_ID_PREFIX_BYTES = 8
 
 # --- Voice fields ---
 F_VOICE_STATE       = 0x60   # str: "joined" | "left"
@@ -279,7 +303,7 @@ MT_AVATAR_UPDATE    = "avatar_update"
 MT_REACTION         = "reaction"        # notify channel: reactor added/removed emoji on a message
 MT_EMOJI_REQUEST    = "emoji_request"   # ask a peer for emoji image data by hash
 MT_EMOJI_RESPONSE   = "emoji_response"  # respond with the emoji image bytes
-MT_PRESENCE         = "presence"        # signed liveness beacon; empty content, no other fields
+MT_PRESENCE         = "presence"        # signed liveness beacon; empty content, probes at most
 MT_GOODBYE          = "goodbye"         # graceful-shutdown notice; empty content, no other fields
 MT_VOICE_JOIN       = "voice_join"      # sender entered the channel's voice session
 MT_VOICE_LEAVE      = "voice_leave"     # sender left the channel's voice session

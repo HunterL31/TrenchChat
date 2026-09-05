@@ -198,7 +198,7 @@ degraded or interrupted link.
 
 | ID | Peers | Actions | Expected result |
 |---|---|---|---|
-Built: sync1–sync5, sync7–sync11. C6 (deep-sync cooldown) and C12 (a 7-day-old window)
+Built: sync1–sync5, sync7–sync13. C6 (deep-sync cooldown) and C12 (a 7-day-old window)
 need control of the clock and stay deferred.
 
 | ID | Peers | Actions | Expected result |
@@ -212,38 +212,118 @@ need control of the clock and stay deferred.
 | sync10 | A,B,C,D | Hub killed (total partition); each peer sends 1; hub restarted | ✅ All four reconcile in 12.1s once the hub returns |
 | sync8 | A,D | D joins without `full_sync`; A grants `full_sync` to member | ✅ The backlog arrives 3.0s after the grant, without D restarting |
 | sync9 | A,B,C | A kicks C; C requests sync | ✅ C's transcript stays frozen at the kick |
-| sync11 | A,B,C,D | All 4 offline simultaneously, each sends 2 locally, all come online | ❌ **Still fails.** One watermark defect found and fixed (below); the scenario itself reconciles only sometimes. 1 pass in 5 runs |
+| sync11 | A,B,C,D | All 4 offline simultaneously, each sends 2 locally, all come online | ✅ **Fixed.** 6/6 on broadband (20–38s to reconcile) and **3/3 on `lora_fast`** (55–61s to reconcile, 126–127s wall clock) once presence beacons carry a sync probe; was 1/5 before reconciliation, 4/5 to 5/5 with reconciliation alone, and 0/3 on `lora_fast` under every variant until the probe. See below |
+| sync12 | A,B | A writes while B is away, both processes killed, B writes while A is away, both restarted | ✅ Both hold all five in 2.5–4.0s, 5/5 runs; 3/3 on `lora_fast` under both fresh-request shapes (14–41s to reconcile with one fingerprint, 59–74s wall clock with the ladder). No pending queue survives the restarts, so the recovery is a pull from each side. Note: it passes on the pre-reconciliation sweep too, measured; see below |
+| sync13 | A,B,C | B offline; A and C between them send 150 (three answers' worth); B online | ✅ B recovers all 150 and reads `synced`, 8.2–15.7s, 3/3. On `lora_fast` the run times out in its own setup: 150 live messages between A and C did not all land in 1080s, so B never came back and the recovery phase was not measured; a LoRa result needs a smaller backlog |
 | C12 | A,B | B offline past `SYNC_WINDOW_SECS` (7 days, clock-shifted); B online | Deferred, needs clock control |
 
-#### sync11: still open
+#### sync11: mostly fixed by reconciliation
 
-A four-way partition reconciles only sometimes: **2 passes in 7 runs**, and the
-missing rows are always the *first* message each peer wrote in isolation, never
-the second. Which peers lose which rows moves between runs, so it is not a
-deterministic defect.
+A four-way partition used to reconcile only sometimes: **2 passes in 7 runs**
+originally, 1 in 5 by the last measurement, always losing the *first* message
+each peer wrote in isolation, never the second.
 
-One cause was found here and is fixed: `sync_progress` was written from both
-directions against the same key, collapsing the responder's trust-horizon floor
-so history older than a requester's watermark was stranded on both sides.
+Two causes were found and fixed. The first: `sync_progress` was written from
+both directions against the same key, collapsing the responder's trust-horizon
+floor so history older than a requester's watermark was stranded on both sides.
 Pinned by `TestResponderAcquiresOlderHistoryLater` in
 `tests/test_sync_multipeer.py`. It was **not** the whole story, one passing run
 was recorded as a fix while the scenario still failed four runs in five, which
 is where the "a single pass is not a fix" rule came from.
 
+The second is the mechanism itself: a request said only "everything since T",
+and after a four-way partition every peer's T already sits past somebody's
+gap. `MT_SYNC_REQUEST` now carries a description of the ids the requester
+actually holds (`F_SYNC_RANGES`, `docs/offline-sync.md`), so a responder
+answers with the difference rather than with a suffix of its own transcript.
+**4 passes in 5 runs** after that, reconciling in 19.7–110.7s, and it passed
+again in a full `--family sync` run (10/10 strict), so 5 of the 6 runs
+observed. With the description budget (a fresh ask is one whole-window
+fingerprint, narrowing steps held to 512 bytes) it went **5/5**, 47–150s, so
+the extra round trip that shape costs did not regress it on broadband.
+
 Ruled out: author-signature rejection. `messages_rejected` reads 0 for every
 peer in every observed run, and integrity1 independently shows that relayed
 history from a departed author verifies fine.
 
-Leading hypothesis: the deep-sync cooldown. A four-way reconcile needs several
-rounds (a peer can only relay what it has itself received) and the cooldown
-serves one deep request per pair per 60s. sync2 turned out to be exactly that
-shape, so the retry tick added for it may help here too; unmeasured so far.
+The remaining failure is a different shape, and it is about *when* a peer asks
+rather than what it asks for. In the one failing run of five, A was missing
+`B-alone-0` and B was missing `A-alone-0` while C and D held all nine: both
+gaps were reachable from two peers that had already answered. A peer that has
+been answered has no reason to ask again, and `ANNOUNCE_SYNC_COOLDOWN_SECS`
+paces the announce-driven re-ask at 120s per (channel, peer), so a row that
+arrives at C moments after C answered A waits for the next window. Describing
+the set fixes what an ask can recover; it does not add an ask.
 
-On a slow link it fails with the same fingerprint, pointing at a second
-mechanism: `PEER_TRUST_HORIZON_SECS = 300` widens a responder's sweep by a
-wall-clock constant, but how far back that must reach scales with how long the
-exchange takes, 31.7s on broadband, 1141s at SF7. A fixed constant guarding a
-link-speed-dependent window is the shape of the bug. Unverified.
+On `lora_fast` it fails **0/3**, each run identical: B short exactly
+`A-alone-0` after ~1150s while A, C and D hold all nine. Same shape as the
+broadband remainder, one row reachable from peers that already answered, and
+on a radio every re-ask window is a bigger share of the scaled timeout.
+Two controls, same profile, same shape: the reconciliation commit before the
+description budget (`396914d`, no extra round trip) fails **0/2**, so the
+budget did not cause it, and the pre-branch code (`a804c0d`) fails
+**0/1** with A and B each short three rows rather than one, so it is not a
+regression of reconciliation either; the branch leaves it strictly better off.
+It was already listed as failing on LoRa in the LoRa pass below.
+
+#### sync11: closed by the beacon probe
+
+What was left after reconciliation was a peer with nothing to prompt it: the
+stranded row sat on peers that had already answered, and the announce-driven
+re-ask is paced at 120s per (channel, peer), a large share of the scaled
+timeout on a radio. A presence beacon now carries each shared channel's count
+and fingerprint (`F_SYNC_PROBE`, `docs/offline-sync.md`), so a peer that
+falls out of step is told so by the next beacon it hears, about twenty bytes
+on a message that was going out anyway, and asks with the ladder at once.
+With that, sync11 reconciles **5/5** at broadband in 20–38s (60–79s wall
+clock) plus the family run, and **3/3 on `lora_fast`** in 55–61s, against
+0/3 under every earlier variant and 1146–1189s to time out. The
+announce-driven re-check is also skipped for a pair whose probe just agreed,
+so the steady state costs less than it did before any of this.
+
+#### The two fresh-request shapes, measured against each other
+
+Two layouts of a fresh request were built and run through the same scenarios:
+one fingerprint over the whole window (about 110 bytes), and the ladder that
+is on the branch now (the newest 8 rows by id, older history in doubling
+fingerprint buckets, 89 to 374 bytes). The ladder closes a recent gap in one
+round trip because the responder can serve the rows straight from the id
+list; the single fingerprint spends a round trip describing first.
+
+| Scenario | One fingerprint | Ladder | Probe, then ladder (current) |
+|---|---|---|---|
+| sync11, broadband ×5 | 5/5, 47–150s | 4/5, 60–151s, the failure the known one-row shape | 5/5, 60–79s |
+| sync11, `lora_fast` ×3 | 0/3 | 0/3 | **3/3**, 126–127s |
+| sync12, `lora_fast` ×3 | 3/3, 14–41s reconcile | 3/3, 59–74s wall clock | 3/3, 13–66s reconcile |
+| sync12, broadband ×5 | 5/5 | 5/5, 2.5–3.5s reconcile | 1/1 in the family run, 2.5s reconcile |
+| sync13, broadband ×3 | not run | 3/3, 8–16s | 1/1 in the family run, 14.8s |
+
+The scenarios did not separate the first two: sync11's remainder was re-ask
+pacing under either shape, and sync12 is within the trust horizon under
+either. What separated them was the request-size table in
+`docs/offline-sync.md` and the round trip: the ladder cost about 260 bytes
+more on every routine re-check and saved one round trip on the common recent
+gap. The current design keeps both: a blind re-check is the single
+fingerprint, a probe on the beacon says when the two sides differ, and only
+then is the ladder sent. Both shapes remain in `sync_ranges.summarise`
+behind one flag.
+
+#### sync12: what it does and does not prove
+
+Two peers, each the sole holder of what it wrote while the other was away, with
+both processes killed in between so no pending-retry queue survives. It passes
+5/5 (1.5–4.0s) and 3/3 on `lora_fast` (14.1–41.4s to reconcile, measured after
+the description budget landed).
+
+It was written expecting to fail without reconciliation, and **it does not**:
+re-run with `F_SYNC_RANGES` suppressed, it still passes in 6.6s. The reason is
+`PEER_TRUST_HORIZON_SECS`, a responder that has never served a given peer
+sweeps from 300s behind that peer's claimed window start, which covers a gap
+this short between a pair that has never synced. The interleaved gap only
+defeats the sweep once a peer has been served past it, which needs a third
+peer's answer to move the watermark: that is sync11, and sync11 is where the
+measurement lives. sync12 stays strict as a guard on two-peer convergence with
+nothing in memory to fall back on.
 
 #### sync2: fixed, after three causes
 
@@ -664,6 +744,74 @@ does not name), and leave joiners alone.
 | nomad3 | A,B | B fetches once; A goes offline; B requests an uncached page; A returns; B fetches a new page | ⚠ **Confirmed.** The offline fetch never arrives and never hangs; the dial ladder gives up within its bounded backoff (browse accepted, nothing after 90s). After A returns, a fresh page fetch succeeds in 20.1s, tracking path re-resolution. Probe |
 | nomad4 | A,B | B fetches A's index; a new page is written into A's directory; A's process is restarted; B fetches the new page | ✅ Hosting comes back from config on boot and the new page fetches in 0.5s over a fresh link. 4/4 runs. Note: it passes with the dead-link redial disabled too; RNS closes the link when the host dies, so this is not that fix's guard (`tests/test_node_transport.py` is) |
 
+### `bw`: bytes on the wire
+
+A probe, not a check: it reads every tester's Reticulum interface counters
+(`/reticulum/interfaces`, rxb and txb) at the edges of each phase and records
+what crossed the wire. Heartbeat announces are set to an hour first, so the
+idle figure is the application's own background traffic and not the test
+environment's announce cadence.
+
+| ID | Peers | Actions | Measured |
+|---|---|---|---|
+| bw1 | A,B,C,D | One public channel, five seed messages, then: 600s idle; each peer sends one message; B away for 60s across four messages, then back | Run on the pre-reconciliation commit (`a804c0d`) and on the current head, same harness, same day. Idle (all four peers, rx and tx, 600s): 175 KB before, 203 KB after, of which 8 KB after was the tail of the restart burst. Beacons in the window: 116 and 117. Four messages to three peers each: 14.9 KB and 14.5 KB. B's recovery above idle: about 14 KB either way, 1.5s. Details below |
+
+#### What the wire carries
+
+Per LXMF control message, one way, with its share of link setup, proofs and
+keepalives (the idle total divided by the messages the tester logs show):
+
+| | Payload | On the wire |
+|---|---|---|
+| Presence beacon, before | 31 B | about 750 B |
+| Presence beacon with one channel's probe, now | 75 B | about 830 B |
+| A chat message to one recipient | about 20 B of text | about 620 B |
+| Blind sync re-check request, now | 110 B | about 700 B |
+| Sync re-check request, before | 64 B | about 700 B |
+
+The payload is a rounding error. What a message costs on this transport is
+the LXMF envelope, the link it travels over and the delivery proof that comes
+back, so the size of a request barely matters and the *number* of messages
+is everything. That is the measurement that justifies the probe design: it
+adds bytes to a message that was going out anyway and removes messages.
+
+At the deployed cadence (beacons after 180s of silence, re-announce every 3h,
+`PRESENCE_TIMEOUT_SECS` 300s), projected from the figures above, per peer per
+day, sent, for a channel of four:
+
+| | Before | Now |
+|---|---|---|
+| Presence beacons (720/day) | 540 KB | 600 KB |
+| Sync re-checks on announces (24/day) | 34 KB | 0 when a probe agreed within the presence timeout |
+| Announces (8 rounds/day) | 6 KB | 6 KB |
+| Total, idle | about 580 KB | about 610 KB |
+
+Received traffic is the mirror image. A channel of ten multiplies the beacon
+line by three. For comparison, a client that speaks only LXMF (Sideband,
+MeshChat) idles on announces alone: single-digit kilobytes a day. TrenchChat's
+idle cost is two orders of magnitude above that floor, and all of it is
+presence, which predates this branch and is untouched by it. The sync changes
+are a rounding error on that line in either direction; what they changed is
+that a peer which fell out of step now hears so from the next beacon and
+recovers in one round trip, which is what closed sync11 on LoRa.
+
+The lever that would matter is the beacon itself: 750 bytes on the wire for
+31 bytes of meaning, because it is a full LXMF direct delivery with a link and
+a proof. Sending presence as an opportunistic single-packet LXMF message, and
+backing the interval off for a peer that stays quiet, would cut the idle line
+by most of an order of magnitude. Recorded here as the next thing worth
+doing, not done.
+
+Two things the measurement caught and this branch fixed: `PROBE_AGREE_SECS`
+was 120s against a 180s beacon interval, so at the deployed cadence most
+agreements would have been stale by the time an announce arrived and the
+re-check would rarely have been skipped; it is now the presence timeout. And a
+pair that had never exchanged a row asked about all of history on every
+routine re-check (progress zero read as "from the beginning"), was paced as a
+deep ask, and re-asked ninety seconds later when the pacing refused it, which
+is the 8 KB of restart tail in the idle figure above; a routine re-check with
+no progress now starts at the sync window.
+
 ## The LoRa pass
 
 Every family re-run with `--link-profile lora_fast` (SF7, 5.5 kbps, 60±20ms, 1%
@@ -719,7 +867,10 @@ Everything the matrix turned up, across all ten families.
 | **A sync answer was dropped when the responder could not yet address the requester**, and unlike every other send path it did not even request a path. The requester sat at `pending`, unable to tell silence from refusal | Fixed: the answer is held (for no longer than the requester will accept one) and re-sent when the peer announces. This is most of sync2; see below |
 | **sync2**, a returning peer recovered nothing, in half of all runs | **Fixed**, after three causes: no trigger for this node's own link returning, the responder's answer dropped on an unresolved path, and a silent refusal with nothing left to re-ask. 12/12 after the last. Regression tests in `tests/test_sync_multipeer.py` |
 | **Nothing noticed our own link returning**: every catch-up path is driven by hearing *from* a peer, so the node that was itself away had no trigger | Fixed: `connectivity.py`'s `LinkWatcher` polls Reticulum's interface state and resyncs on the transition back to online, ignoring shared-instance client interfaces. Tests in `tests/test_connectivity.py` |
+| **A watermark cannot describe a set**: `MT_SYNC_REQUEST` said only "everything since T", so after a partition where both sides kept writing, each side's T already sat past the other's gap and neither ever asked for it. Every rule around it (the trust horizon, the scan cursor, the tied-timestamp group rule, never moving the watermark backwards) existed to paper over that | Fixed: a request now describes the message ids it holds as timestamp ranges, fingerprinted or spelled out by prefix, and the responder answers with the difference and asks for what it lacks itself (`trenchchat/core/sync_ranges.py`, `docs/offline-sync.md`). sync11 went from 1 pass in 5 to 5 in 5 on broadband (still 0/3 on `lora_fast`); tests in `tests/test_sync_ranges.py` and `tests/test_sync_reconcile.py`. A request carrying no ranges still gets the old sweep, so a peer running an older build is unaffected |
 | **A sync row rejected for an unverifiable author signature did not bound the watermark**, so a batch of `[rejected_old, accepted_new]` skipped past it and no future sweep would offer it again | Fixed on this branch: the signature-rejection path now sets `failed_ts` the same way a failed insert does. A row with an *implausible timestamp* deliberately does not, since it cannot be placed and would let one bad row freeze sync. Regression test in `tests/test_sync_multipeer.py` |
+| **A peer with nothing to prompt it never re-asked**: after reconciliation fixed what a request could recover, sync11 still lost one row on LoRa every run, held by peers that had already answered, because the only re-ask trigger was an announce paced at 120s per (channel, peer) | Fixed: presence beacons carry a probe (count and fingerprint) per shared channel, so a peer out of step is told by the next beacon and asks with the ladder; a probe that agrees stands in for the announce re-check. sync11 3/3 on `lora_fast` from 0/3, 6/6 on broadband. Tests in `tests/test_sync_reconcile.py::TestBeaconProbes` and `tests/test_adversarial.py` |
+| **A difference left out for the byte budget was forgotten**: a narrowing request that could not fit every mismatched range relied on the next request to re-ask them, but a responder that answered the part it received with rows and no ranges gave the requester nothing to continue from, so both peers reported synced while each still lacked rows. Found by the extended-absence tests, not by any scenario | Fixed: more-remains is remembered per (channel, peer), on a capped answer or a description either side could not fit, and once the narrowing in flight has run its course the requester asks again with a fresh summary of what it now holds. A continuation says so on the wire (`F_SYNC_CONTINUES`) so a deep exchange's steps are paced as steps rather than refused as repeats. Tests in `tests/test_sync_reconcile.py::TestExtendedAbsence`; sync13 is the scenario |
 | **One `sync_progress` row written from both directions**, collapsing the responder's trust-horizon floor and stranding history older than a requester's watermark | Root-caused and fixed by splitting the serve direction into a `sync_served` table; regression test in `tests/test_sync_multipeer.py`. Found through sync11, but **it did not fix sync11**; see below |
 | **invite11**, `kick` and `manage_roles` were grantable to any role, but a non-admin's member-list document is rejected by every recipient, so the grant did nothing on the network | Fixed by narrowing the permission: both are dropped from the member role on read and on write, and neither client offers them. Scenario rewritten to the new rule; regression tests in `tests/test_permissions.py` |
 | **restart1**, `_subscriber_versions` lived only in memory, so a restarted owner renumbered from 1 and every later list was rejected as a replay | Fixed on `main` by the August security audit, which persists the counter in a `subscriber_list_versions` table and re-checks the version under the commit lock. This branch's own fix was dropped at the merge in favour of it; the end-to-end regression test in `tests/test_subscriptions.py` stays |
@@ -737,7 +888,6 @@ Everything the matrix turned up, across all ten families.
 | Finding | Detail |
 |---|---|
 | **api4**, the dev environment shares one API token across every tester, and the orchestrator's unauthenticated `/config` serves it | **Confirmed** (probe). Fine for a dev box; it means port 8800 is the real trust boundary, not the tester ports |
-| **sync11**, a four-way partition reconciles only sometimes: 2 passes in 7 runs, always losing the *first* message a peer wrote in isolation | **Partly root-caused.** The watermark collision above was one cause and is fixed. The deep-sync cooldown refusing a returning peer's request silently, once per pair per 60s, is the leading candidate for the rest |
 | **invite16**, `invite` remains grantable to the member role (invite11's narrowing covers only `kick` and `manage_roles`), and the token check and join-request handler honour it, but the admission document a member publishes is rejected by every peer, including the inviter itself, whose own `_accept_document` refuses it | **Confirmed** (probe). The invitee's token is spent while membership lands nowhere. The same disagreement invite11 had, awaiting the same kind of decision: narrow the grant or admit the inviter's document. invite14 and invite15 show the identical grants working at admin rank |
 | **invite17**, leaving an invite-only channel propagates to nobody: `leave_channel()` unsubscribes locally and notifies only the creator's *subscriber* set, and no member-list update is published | **Confirmed** (probe). Every roster (the leaver's own included) keeps the departed member, and senders keep addressing it; only the leaver's `is_subscribed` gate goes quiet. A UI reading the roster shows a ghost member indefinitely. A self-removal document would hit the same trusted-signer wall as invite16, so the fix likely belongs to the owner or an admin noticing the goodbye |
 | **voice11**: `loss_pct`, the metric `docs/voice.md` designates for the UI's per-peer quality indicator, cannot see a starved link. It counts gaps between frames that arrived, so a link delivering 8% of the audio reports ~6% loss, and `link_state` still reads `streaming` | **Confirmed** across three runs. The signal that shows it now exists (`rx_quality`'s `rate_fps`, added for voice13, plus the listener's starved playout ticks) and the UI still reads `loss_pct` |
@@ -798,13 +948,13 @@ How to run it, when a scenario is the right tool, and how to add one live in
 
 ## Status
 
-All twelve families built and run: **100 scenarios, 78 strict and 22 probes.**
+All twelve families built and run: **101 scenarios, 79 strict and 22 probes.**
 
 | Family | Scenarios | Result |
 |---|---|---|
 | `public`: public channels | 11 (7 strict, 4 probes) | All passing, three consecutive clean runs |
 | `invite`: invite-only and membership | 20 (17 strict, 3 probes) | All passing; invite11 rewritten to the narrowed `kick` rule; invite16 and invite17 (probes) record the ineffective member `invite` grant and the invisible leave; invite19 and invite20 each found a real defect, 5/5 after the fix |
-| `sync`: offline and sync | 10 (9 strict, 1 probe) | 8/9, **sync11 fails**, 2 passes in 7 runs. sync2 fixed, 12/12 |
+| `sync`: offline and sync | 11 (10 strict, 1 probe) | Whole family green in one run (10/10 strict). sync2 fixed, 12/12. sync11 reconciles 4/5 to 5/5 on broadband since requests describe what they hold, up from 1 in 5, and 0/3 on `lora_fast`; sync12 added for the two-peer shape, 5/5 and 3/3 on `lora_fast`; sync13 added for a long absence, 3/3 |
 | `links`: degraded links | 10 (5 strict, 5 probes) | All passing, on genuinely shaped links |
 | `servers`: servers | 8 (7 strict, 1 probe) | All passing; servers7 is the reported channel-invite defect, 5/5 after the fix |
 | `social`: reactions, presence, identity | 10 (9 strict, 1 probe) | All passing; social3's prediction refuted |
@@ -813,12 +963,13 @@ All twelve families built and run: **100 scenarios, 78 strict and 22 probes.**
 | `api`: the API surface | 5 (4 strict, 1 probe) | All passing; api4 records the shared-token property; api5 covers the pushed network map, 5/5 |
 | `integrity`: message integrity | 4 (4 strict) | All passing; integrity2 found a real gap, now fixed and strict |
 | `nomad`: page browsing and hosting | 4 (3 strict, 1 probe) | All passing, 4/4 runs each; nomad3 confirmed bounded offline failure and recovery |
+| `bw`: bytes on the wire | 1 (probe) | Measured before and after reconciliation; see the family's section |
 | `interop`: direct messages with other LXMF clients | 4 (4 strict) | All passing against a real bare RNS+LXMF client; interop4 found a real gap, 5/5 after the fix |
 
-**78 of 79 strict scenarios pass.** The one failure is a real defect, left
-strict and failing on purpose, so `--family sync` exits non-zero until it is
-resolved: sync11, intermittently (2 passes in 7). invite11 is now passing on
-the narrowed `kick` rule described above.
+**All strict scenarios pass**, sync11 included: 6/6 on broadband and 3/3 on
+`lora_fast` since beacons carry a sync probe, from 1/5 and 0/3 when this
+family was first run. invite11 is now passing on the narrowed
+`kick` rule described above.
 
 Re-run against `main` after the August security audit merged (PR 52): the suite
 is unchanged at 53/55, so the audit regressed nothing here. Its one effect on
@@ -831,9 +982,8 @@ on-demand run rather than the per-PR gate.
 
 Remaining work:
 
-1. Finish sync11: confirm the deep-sync cooldown is what strands the remaining
-   `-alone-0` rows, then decide whether a refusal should answer with an
-   explicit "throttled" rather than silence.
+1. Decide whether a refusal should answer with an explicit "throttled" rather
+   than silence; sync11 itself is closed by the beacon probe.
 2. Let `SyncStatusTracker` distinguish "refused" from "waiting", today both
    read as `pending` forever.
 3. Surface held-back messages in the UI rather than in a log line.

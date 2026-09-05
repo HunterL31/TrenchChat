@@ -141,9 +141,13 @@ Full detail in `docs/offline-sync.md`. Summary:
 2. **Missed-delivery hints** (`sync.py` + `missed_deliveries` table): sender broadcasts a hint to
    currently-reachable subscribers naming which peer missed which message; any of them can serve it
    later via sync.
-3. **Timestamp-fallback sync**: on reconnect, a peer requests everything since its last sync
-   timestamp; any online member can respond, checking hints first, then falling back to a bounded
-   timestamp query (`SYNC_WINDOW_DAYS = 7`).
+3. **Set reconciliation** (`sync.py` + `sync_ranges.py`): a routine request fingerprints the whole
+   window in about 110 bytes; only once a peer answers that it differs do the two sides describe
+   where, as timestamp ranges spelled out by id prefix when small and fingerprinted when not. Any
+   online member answers with the difference, asking in the same message for anything it lacks
+   itself. Ranges that differ are split and re-asked, bounded by `SYNC_WINDOW_DAYS = 7` and by
+   `SYNC_DESCRIPTION_BUDGET_BYTES` per message. A request carrying no ranges gets the old timestamp
+   sweep, unchanged.
 
 All three are channel-only; direct messages use none of them (see above).
 

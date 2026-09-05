@@ -169,6 +169,11 @@ class TestHintDurabilityAcrossRestart:
         A hint's recovery guarantee is bounded at SYNC_WINDOW_SECS: one recorded
         long enough ago is purged by the startup sweep on the holder's next
         restart, and the message it named becomes unreachable through it.
+
+        The message itself sits before the sync window too, so the hint is
+        genuinely the only route to it: reconciliation describes the window
+        and nothing older, and would otherwise recover a message this test is
+        about not recovering.
         """
         alice = peer_factory("alice")
         bob = peer_factory("bob")
@@ -180,7 +185,8 @@ class TestHintDurabilityAcrossRestart:
 
         ts = time.time()
         msg_id = _insert_message(carol.storage, ch_hash, alice.identity.hash_hex,
-                                  "hint older than the sync window", ts)
+                                  "hint older than the sync window",
+                                  ts - SYNC_WINDOW_SECS - 3600)
         carol.storage.record_missed_delivery(ch_hash, bob.identity.hash_hex, msg_id)
 
         old_recorded_at = time.time() - SYNC_WINDOW_SECS - 3600
@@ -217,10 +223,11 @@ class TestHintHolderDataLoss:
         """
         The recovery guarantee only holds as long as some peer still has both the
         message and the hint naming it. If the sole holder's missed_deliveries
-        rows are cleared and the requester's watermark is already past the
-        message's timestamp, nothing -- no hint, no timestamp sweep -- can
-        recover it. This test documents that real horizon: it is not a bug, it
-        is the edge of what the mechanism promises.
+        rows are cleared and the message predates the sync window, nothing --
+        no hint, no reconciliation -- can recover it. This test documents that
+        real horizon: it is not a bug, it is the edge of what the mechanism
+        promises. Inside the window, reconciliation would find the message on
+        its own; the horizon is the window, not the requester's watermark.
         """
         alice = peer_factory("alice")
         bob = peer_factory("bob")
@@ -232,7 +239,8 @@ class TestHintHolderDataLoss:
 
         ts = time.time()
         msg_id = _insert_message(carol.storage, ch_hash, carol.identity.hash_hex,
-                                  "only Carol ever has this either", ts)
+                                  "only Carol ever has this either",
+                                  ts - SYNC_WINDOW_SECS - 3600)
         carol.storage.record_missed_delivery(ch_hash, bob.identity.hash_hex, msg_id)
         carol.storage.clear_missed_deliveries(ch_hash, bob.identity.hash_hex)
 
