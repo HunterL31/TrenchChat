@@ -198,7 +198,7 @@ degraded or interrupted link.
 
 | ID | Peers | Actions | Expected result |
 |---|---|---|---|
-Built: sync1–sync5, sync7–sync12. C6 (deep-sync cooldown) and C12 (a 7-day-old window)
+Built: sync1–sync5, sync7–sync13. C6 (deep-sync cooldown) and C12 (a 7-day-old window)
 need control of the clock and stay deferred.
 
 | ID | Peers | Actions | Expected result |
@@ -212,8 +212,9 @@ need control of the clock and stay deferred.
 | sync10 | A,B,C,D | Hub killed (total partition); each peer sends 1; hub restarted | ✅ All four reconcile in 12.1s once the hub returns |
 | sync8 | A,D | D joins without `full_sync`; A grants `full_sync` to member | ✅ The backlog arrives 3.0s after the grant, without D restarting |
 | sync9 | A,B,C | A kicks C; C requests sync | ✅ C's transcript stays frozen at the kick |
-| sync11 | A,B,C,D | All 4 offline simultaneously, each sends 2 locally, all come online | ⚠ **Fixed on broadband, open on LoRa.** 5/5 (47–150s) once requests describe the ids they hold and a fresh ask is one fingerprint; 4/5 before the budget change, 1/5 before reconciliation. 0/3 on `lora_fast`, one peer short one row each time; see below |
-| sync12 | A,B | A writes while B is away, both processes killed, B writes while A is away, both restarted | ✅ Both hold all five in 1.5–4.0s, 5/5 runs; 3/3 on `lora_fast` (14–41s to reconcile) after the description budget. No pending queue survives the restarts, so the recovery is a pull from each side. Note: it passes on the pre-reconciliation sweep too, measured; see below |
+| sync11 | A,B,C,D | All 4 offline simultaneously, each sends 2 locally, all come online | ⚠ **Mostly fixed on broadband, open on LoRa.** 5/5 (47–150s) with a single-fingerprint fresh ask and 4/5 (60–151s) with the ladder, against 1/5 before reconciliation; the failures share one shape, one peer short one row. 0/3 on `lora_fast` under every variant measured; see below |
+| sync12 | A,B | A writes while B is away, both processes killed, B writes while A is away, both restarted | ✅ Both hold all five in 2.5–4.0s, 5/5 runs; 3/3 on `lora_fast` under both fresh-request shapes (14–41s to reconcile with one fingerprint, 59–74s wall clock with the ladder). No pending queue survives the restarts, so the recovery is a pull from each side. Note: it passes on the pre-reconciliation sweep too, measured; see below |
+| sync13 | A,B,C | B offline; A and C between them send 150 (three answers' worth); B online | ✅ B recovers all 150 and reads `synced`, 8.2–15.7s, 3/3. On `lora_fast` the run times out in its own setup: 150 live messages between A and C did not all land in 1080s, so B never came back and the recovery phase was not measured; a LoRa result needs a smaller backlog |
 | C12 | A,B | B offline past `SYNC_WINDOW_SECS` (7 days, clock-shifted); B online | Deferred, needs clock control |
 
 #### sync11: mostly fixed by reconciliation
@@ -264,6 +265,33 @@ budget did not cause it, and the pre-branch code (`a804c0d`) fails
 **0/1** with A and B each short three rows rather than one, so it is not a
 regression of reconciliation either; the branch leaves it strictly better off.
 It was already listed as failing on LoRa in the LoRa pass below.
+
+#### The two fresh-request shapes, measured against each other
+
+Two layouts of a fresh request were built and run through the same scenarios:
+one fingerprint over the whole window (about 110 bytes), and the ladder that
+is on the branch now (the newest 8 rows by id, older history in doubling
+fingerprint buckets, 89 to 374 bytes). The ladder closes a recent gap in one
+round trip because the responder can serve the rows straight from the id
+list; the single fingerprint spends a round trip describing first.
+
+| Scenario | One fingerprint | Ladder |
+|---|---|---|
+| sync11, broadband ×5 | 5/5, 47–150s | 4/5, 60–151s, the failure the known one-row shape |
+| sync11, `lora_fast` ×3 | 0/3 | 0/3 |
+| sync12, `lora_fast` ×3 | 3/3, 14–41s reconcile | 3/3, 59–74s wall clock |
+| sync12, broadband ×5 | 5/5 | 5/5, 2.5–3.5s reconcile |
+| sync13, broadband ×3 | not run | 3/3, 8–16s |
+
+The scenarios do not separate them: sync11's remainder is re-ask pacing under
+either shape, and sync12 is within the trust horizon under either. The one
+result that moved, 5/5 against 4/5 on broadband sync11, is a single failure of
+an intermittent scenario with the same fingerprint as its other failures, a
+flake report rather than a regression until it repeats. What separates them is
+the request-size table in `docs/offline-sync.md` and the round trip: the
+ladder costs about 260 bytes more on every routine re-check and saves one
+round trip on the common recent gap. Both are in git; the choice is a
+boundary policy in `sync_ranges.summarise`.
 
 #### sync12: what it does and does not prove
 
@@ -843,7 +871,7 @@ All twelve families built and run: **101 scenarios, 79 strict and 22 probes.**
 |---|---|---|
 | `public`: public channels | 11 (7 strict, 4 probes) | All passing, three consecutive clean runs |
 | `invite`: invite-only and membership | 20 (17 strict, 3 probes) | All passing; invite11 rewritten to the narrowed `kick` rule; invite16 and invite17 (probes) record the ineffective member `invite` grant and the invisible leave; invite19 and invite20 each found a real defect, 5/5 after the fix |
-| `sync`: offline and sync | 11 (10 strict, 1 probe) | Whole family green in one run (10/10 strict). sync2 fixed, 12/12. sync11 reconciles 5/5 on broadband since requests describe what they hold, up from 1 in 5, and 0/3 on `lora_fast`; sync12 added for the two-peer shape, 5/5 and 3/3 on `lora_fast` |
+| `sync`: offline and sync | 11 (10 strict, 1 probe) | Whole family green in one run (10/10 strict). sync2 fixed, 12/12. sync11 reconciles 4/5 to 5/5 on broadband since requests describe what they hold, up from 1 in 5, and 0/3 on `lora_fast`; sync12 added for the two-peer shape, 5/5 and 3/3 on `lora_fast`; sync13 added for a long absence, 3/3 |
 | `links`: degraded links | 10 (5 strict, 5 probes) | All passing, on genuinely shaped links |
 | `servers`: servers | 8 (7 strict, 1 probe) | All passing; servers7 is the reported channel-invite defect, 5/5 after the fix |
 | `social`: reactions, presence, identity | 10 (9 strict, 1 probe) | All passing; social3's prediction refuted |
@@ -856,7 +884,7 @@ All twelve families built and run: **101 scenarios, 79 strict and 22 probes.**
 
 **79 of 80 strict scenarios pass.** The one failure is a real defect, left
 strict and failing on purpose, so `--family sync` exits non-zero until it is
-resolved: sync11, 5/5 on broadband since a fresh ask became one fingerprint, but
+resolved: sync11, 4/5 to 5/5 on broadband since requests describe what they hold, but
 0/3 on `lora_fast` with the remaining cause recorded above. invite11 is now passing on the narrowed
 `kick` rule described above.
 
