@@ -79,7 +79,7 @@ from trenchchat.core.permissions import (
 from trenchchat.core.protocol import (
     F_AUTHOR_KEYS, F_CHANNEL_HASH, F_MSG_TYPE,
     F_SYNC_WINDOW_START, F_SYNC_MESSAGES, F_SYNC_TRUNCATED, F_SYNC_SCAN_CURSOR,
-    F_SYNC_RANGES, F_SYNC_NEED, F_MISSED_FOR, F_MISSED_MSG_ID,
+    F_SYNC_RANGES, F_SYNC_NEED, F_SYNC_CONTINUES, F_MISSED_FOR, F_MISSED_MSG_ID,
     MAX_CLOCK_SKEW_SECS, MT_MISSED_DELIVERY, MT_SYNC_REQUEST, MT_SYNC_RESPONSE,
     RANGE_IDLIST, SYNC_WINDOW_SECS,
     message_id_from_wire, message_id_to_wire, pack_fields, unpack_wire,
@@ -332,6 +332,11 @@ class SyncManager:
         # answer, so this is what ends a narrowing exchange.
         self._last_asked: dict[tuple[str, str], tuple] = {}
         self._last_asked_lock = threading.Lock()
+        # (channel_hash_hex, peer_hex) pairs where a difference was left
+        # undescribed for the budget and must be asked about again once the
+        # narrowing in flight has run its course.
+        self._deferred: set[tuple[str, str]] = set()
+        self._deferred_lock = threading.Lock()
 
         # channel_hash_hex -> the entitlement the last request was issued under
         self._sync_policy: dict[str, tuple[str, str]] = {}
@@ -664,6 +669,7 @@ class SyncManager:
             )
             return
         reconciling = ranges is not None or needs is not None
+        continues = reconciling and bool(fields.get(F_SYNC_CONTINUES, False))
 
         # Hints name exact messages this peer missed, including ones older than
         # their window.  They supplement the timestamp sweep rather than
@@ -689,9 +695,8 @@ class SyncManager:
                        for lo, _hi, _mode, _payload in (ranges or []))
         else:
             deep = window_start < time.time() - SYNC_WINDOW_SECS
-        narrowed = reconciling and not sync_ranges.is_summary(ranges, needs)
         if deep and not self._deep_sync_allowed(channel_hash_hex, requester_hex,
-                                                narrowed):
+                                                continues):
             RNS.log(
                 f"TrenchChat [sync]: deep sync request from "
                 f"{requester_hex[:12]}… for {channel_hash_hex[:12]}… "
@@ -825,7 +830,9 @@ class SyncManager:
 
         Returns the rows it is missing, how to describe any range that still
         differs, the rows we are missing ourselves, and whether more remains
-        than one response can carry.
+        than one response can carry: rows past the cap, or descriptions past
+        the budget. Either way the requester asks again from what it then
+        holds, so nothing left out here is lost.
 
         What we may send is the serving view: signed rows this requester's
         tenure entitles it to, so a withheld row is simply absent from every
@@ -835,6 +842,7 @@ class SyncManager:
         send_ids: list[str] = []
         reply_ranges: list = []
         my_needs: list = []
+        deferred = False
 
         for lo, hi, mode, payload in ranges or []:
             index = self._storage.get_message_index(channel_hash_hex, lo, hi)
@@ -848,9 +856,9 @@ class SyncManager:
                     if len(my_needs) < MAX_NEED_IDS:
                         my_needs.append([lo, hi, prefix])
             elif not sync_ranges.matches_fingerprint(serving, payload[0], payload[1]):
-                sync_ranges.append_ranges(
-                    reply_ranges, sync_ranges.describe(serving, lo, hi)
-                )
+                if not sync_ranges.append_ranges(
+                        reply_ranges, sync_ranges.describe(serving, lo, hi)):
+                    deferred = True
 
         rows = self._get_messages_by_ids(channel_hash_hex, send_ids)
         if needs:
@@ -858,7 +866,8 @@ class SyncManager:
                 rows, self._rows_for_needs(channel, channel_hash_hex,
                                            requester_hex, needs)
             )
-        return rows, reply_ranges, my_needs, len(send_ids) > MAX_RESPONSE_MESSAGES
+        more = deferred or len(send_ids) > MAX_RESPONSE_MESSAGES
+        return rows, reply_ranges, my_needs, more
 
     def _rows_for_needs(self, channel, channel_hash_hex: str, peer_hex: str,
                         needs: list) -> list:
@@ -1349,22 +1358,41 @@ class SyncManager:
         # Only chain a follow-up when there is something new to ask, or
         # somewhere new to resume from; a responder that repeats itself can't
         # induce a loop.
-        cont_ranges, cont_needs = self._reconcile_from_response(
+        cont_ranges, cont_needs, deferred = self._reconcile_from_response(
             channel_hash_hex, peer_ranges or []
         )
+        # More remains when an answer was capped, or when either side left a
+        # difference undescribed for the budget. That is remembered per peer
+        # rather than acted on at once, because the narrowing this answer
+        # also asked for has to run its course first; once it has, asking
+        # again from what we now hold is a different question (a reconciled
+        # request describes holdings, not a resume point). It is asked when
+        # an answer has moved something: a row we did not hold, a difference
+        # of our own, something the responder described, or a resume point
+        # that advanced. An answer that moved nothing leaves it owed for the
+        # next one that does (two peers reconciling each other at once fill
+        # ranges out from under a step in flight, so a step can honestly
+        # bring nothing while the wider difference remains), and a responder
+        # repeating itself with nothing new never earns another request.
+        key = (channel_hash_hex, peer_hex)
+        if truncated or deferred:
+            with self._deferred_lock:
+                self._deferred.add(key)
         if not self._continue_reconcile(channel_hash_hex, peer_hex,
                                         cont_ranges, cont_needs):
-            # A row we did not already hold is progress in its own right: a
-            # reconciled request describes what we hold, not where we resumed
-            # from, so the batch after it asks a different question even when
-            # the watermark it was issued under has not moved.
-            if truncated and (inserted_count or resume_ts > requested_since):
+            progress = (inserted_count or deferred or peer_ranges or peer_needs
+                        or resume_ts > requested_since)
+            with self._deferred_lock:
+                owed = key in self._deferred and bool(progress)
+                if owed:
+                    self._deferred.discard(key)
+            if owed:
                 self._continue_sync(channel_hash_hex, peer_hex, resume_ts)
 
     # --- helpers ---
 
     def _reconcile_from_response(self, channel_hash_hex: str,
-                                 ranges: list) -> tuple[list, list]:
+                                 ranges: list) -> tuple[list, list, bool]:
         """What to ask a responder next, given how it described its own rows.
 
         An id list resolves outright: what it names and we lack becomes a
@@ -1372,9 +1400,14 @@ class SyncManager:
         ever sent unasked -- so we describe that range back instead, and it
         asks. A fingerprint says only that the range differs, so we describe
         our side of it and let the next round narrow it.
+
+        Also returns whether anything that differed was left out for the
+        budget, so the caller knows to ask again rather than treat the
+        responder's next answer as the end of the exchange.
         """
         cont_ranges: list = []
         cont_needs: list = []
+        deferred = False
 
         for lo, hi, mode, payload in ranges:
             index = self._storage.get_message_index(channel_hash_hex, lo, hi)
@@ -1383,14 +1416,16 @@ class SyncManager:
                 for prefix in sync_ranges.prefixes_we_lack(index, payload):
                     if len(cont_needs) < MAX_NEED_IDS:
                         cont_needs.append([lo, hi, prefix])
+                    else:
+                        deferred = True
                 if not sync_ranges.ids_they_lack(signed, payload):
                     continue
             elif sync_ranges.matches_fingerprint(signed, payload[0], payload[1]):
                 continue
-            sync_ranges.append_ranges(
-                cont_ranges, sync_ranges.describe(signed, lo, hi)
-            )
-        return cont_ranges, cont_needs
+            if not sync_ranges.append_ranges(
+                    cont_ranges, sync_ranges.describe(signed, lo, hi)):
+                deferred = True
+        return cont_ranges, cont_needs, deferred
 
     def _answer_needs(self, channel_hash_hex: str, peer_hex: str,
                       needs: list) -> None:
@@ -1595,23 +1630,20 @@ class SyncManager:
         floor = max(now - SYNC_WINDOW_SECS, 0.0)
         return min(max(since_ts, 0.0), floor), now + SYNC_CLOCK_SKEW_SECS
 
-    def _describe_local(self, channel_hash_hex: str, lo: float, hi: float,
-                        narrow: bool = False) -> list:
+    def _describe_local(self, channel_hash_hex: str, lo: float, hi: float) -> list:
         """How we describe our own rows in [lo, hi) to a peer.
 
-        A fresh request summarises the window: the newest few rows by id,
-        the rest fingerprinted in buckets that grow with age, a few hundred
-        bytes rather than a list of everything we hold. Only once a peer has
-        said a range differs is a *narrow* description of it worth sending,
-        which is what a continuation asks with.
+        A summary: the newest few rows by id, the rest fingerprinted in
+        buckets that grow with age, a few hundred bytes rather than a list of
+        everything we hold. Only once a peer has said a range differs is a
+        narrow description of it worth sending, and that is built where the
+        answer is read (_reconcile_from_response), never here.
 
         Only signed rows: an unsigned one cannot be relayed to anybody, so
         claiming it here would have peers withhold their own verifiable copy.
         """
         index = [r for r in self._storage.get_message_index(channel_hash_hex, lo, hi)
                  if _row_is_signed(r)]
-        if narrow:
-            return sync_ranges.describe(index, lo, hi)
         return sync_ranges.summarise(index, lo, hi)
 
     def _record_asked(self, channel_hash_hex: str, dest_hex: str,
@@ -1626,17 +1658,14 @@ class SyncManager:
         """Ask a peer for anything on this channel we do not already hold.
 
         The request carries a description of our own rows, so the answer is
-        the difference rather than everything past a timestamp: one
-        fingerprint over the whole window on a fresh ask, a narrowed
-        description on a continuation, or *ranges* and *needs* outright when
-        the caller has already worked out what to ask. F_SYNC_WINDOW_START is
-        still sent exactly as before, so a responder that predates ranges
-        behaves as it always did.
+        the difference rather than everything past a timestamp: a summary of
+        the window unless the caller passes *ranges* and *needs* it has
+        already worked out. F_SYNC_WINDOW_START is still sent exactly as
+        before, so a responder that predates ranges behaves as it always did.
         """
         if ranges is None and needs is None:
             lo, hi = self._reconcile_window(since_ts)
-            ranges = self._describe_local(channel_hash_hex, lo, hi,
-                                          narrow=continuation)
+            ranges = self._describe_local(channel_hash_hex, lo, hi)
 
         if not continuation:
             with self._continuations_lock:
@@ -1654,6 +1683,11 @@ class SyncManager:
             request_fields[F_SYNC_RANGES] = sync_ranges.pack(ranges)
         if needs:
             request_fields[F_SYNC_NEED] = sync_ranges.pack(needs)
+        if continuation:
+            request_fields[F_SYNC_CONTINUES] = True
+        else:
+            with self._deferred_lock:
+                self._deferred.discard((channel_hash_hex, dest_hex))
         sent = self._send_raw(dest_hex, request_fields)
         if sent:
             self._record_asked(channel_hash_hex, dest_hex, ranges, needs)
@@ -1680,7 +1714,13 @@ class SyncManager:
 
     def _continue_sync(self, channel_hash_hex: str, peer_hex: str, resume_ts: float,
                        ranges: list | None = None, needs: list | None = None) -> bool:
-        """Ask the same peer again, for the next batch or a narrowed range."""
+        """Ask the same peer again, for the next batch or a narrowed range.
+
+        Without *ranges* or *needs* the next batch is asked for with a fresh
+        summary of what we hold now, which the rows just received have
+        changed. MAX_SYNC_CONTINUATIONS bounds a responder that always reports
+        more remaining.
+        """
         key = (channel_hash_hex, peer_hex)
         with self._continuations_lock:
             count = self._continuations.get(key, 0)
@@ -1880,15 +1920,17 @@ class SyncManager:
             return claimed
 
     def _deep_sync_allowed(self, channel_hash_hex: str, requester_hex: str,
-                           narrowed: bool = False) -> bool:
+                           continues: bool = False) -> bool:
         """Rate-limit deep (pre-SYNC_WINDOW_SECS) backfill per (channel, peer).
 
-        A *fresh* deep ask is served once per DEEP_SYNC_COOLDOWN_SECS: asking
+        A fresh deep ask is served once per DEEP_SYNC_COOLDOWN_SECS: asking
         it again can only produce the answer already given, and a flood of
-        them is what this exists to pace. A *narrowed* one continues an
-        exchange this peer already opened, where a refusal leaves it stranded
-        halfway through with nothing left to ask, so it is served while that
-        window lasts and until DEEP_SYNC_BURST messages have gone into it.
+        them is what this exists to pace. A request flagged as continuing
+        (F_SYNC_CONTINUES) is a step of an exchange this peer already opened,
+        where a refusal leaves it stranded halfway through with nothing left
+        to ask, so it is served while that window lasts and until
+        DEEP_SYNC_BURST messages have gone into it. The flag is the
+        requester's claim, so it buys nothing past that burst.
 
         A permissions change lifts the cooldown early: the refusal it would
         otherwise enforce was decided under a policy that no longer applies,
@@ -1907,7 +1949,7 @@ class SyncManager:
             live = (opened is not None and now - opened[0] < DEEP_SYNC_COOLDOWN_SECS
                     and opened[1] == policy)
             if live:
-                if not narrowed or opened[2] >= DEEP_SYNC_BURST:
+                if not continues or opened[2] >= DEEP_SYNC_BURST:
                     return False
                 self._deep_sync_last_served[key] = (opened[0], policy, opened[2] + 1)
                 return True

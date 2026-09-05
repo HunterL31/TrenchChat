@@ -173,11 +173,6 @@ class TestSummarise:
             assert packed <= 320, \
                 f"a routine re-check holding {count} rows cost {packed} bytes"
 
-    def test_a_summary_reads_as_one(self):
-        for count in (0, 5, 100, 5000):
-            assert sr.is_summary(sr.summarise(_rows(count), 0.0, 1e9), None)
-        assert not sr.is_summary(sr.describe(_rows(5000), 0.0, 1e9), None)
-
 
 class TestDescriptionBudget:
     @pytest.mark.parametrize("count", [0, 5, 32, 100, 500, 2000, 10000])

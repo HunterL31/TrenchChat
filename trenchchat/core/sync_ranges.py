@@ -319,24 +319,6 @@ def append_ranges(target: list, described: list,
     return True
 
 
-def is_summary(ranges, needs) -> bool:
-    """True if this looks like a whole window rather than narrowing inside one.
-
-    A fresh ask is what summarise() builds: at most one range per rung of the
-    ladder plus the oldest remainder, fingerprints throughout except the
-    newest, which may be a short id list, and no need. A narrowing step that
-    happens to take the same shape is only ever paced as a fresh deep ask, and
-    the requester's retry re-asks it inside the next cooldown.
-    """
-    if needs or not ranges or len(ranges) > len(SYNC_SUMMARY_LADDER) + 1:
-        return False
-    for _lo, _hi, mode, _payload in ranges[:-1]:
-        if mode != RANGE_FINGERPRINT:
-            return False
-    _lo, _hi, mode, payload = ranges[-1]
-    return mode == RANGE_FINGERPRINT or len(payload) <= SYNC_SUMMARY_LADDER[0]
-
-
 def matches_fingerprint(rows, count: int, digest: bytes) -> bool:
     """True if these rows are the set the fingerprint describes."""
     ids = [row["message_id"] for row in rows]

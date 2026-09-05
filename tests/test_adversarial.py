@@ -86,7 +86,7 @@ from trenchchat.core.protocol import (
     MT_SYNC_RESPONSE, F_SYNC_MESSAGES,
 )
 from trenchchat.core.protocol import (
-    F_SYNC_NEED, F_SYNC_RANGES, MT_SYNC_REQUEST, RANGE_FINGERPRINT, RANGE_IDLIST,
+    F_SYNC_NEED, F_SYNC_RANGES, F_SYNC_CONTINUES, MT_SYNC_REQUEST, RANGE_FINGERPRINT, RANGE_IDLIST,
     SYNC_FINGERPRINT_BYTES, message_id_from_wire, unpack_wire,
 )
 from trenchchat.core import sync_ranges
@@ -1730,13 +1730,15 @@ class TestAdversarialSyncRanges:
             f"single narrowing it earned, got {requests - 1} continuations"
         )
 
-    def test_a_narrowed_deep_exchange_is_bounded(self, peer_factory):
-        """Narrowing steps continue an exchange we accepted, not a new one.
+    def test_a_continued_deep_exchange_is_bounded(self, peer_factory):
+        """Continuation steps continue an exchange we accepted, not a new one.
 
         Refusing them would strand an honest requester halfway through a deep
-        reconcile, so they are served while the window lasts; past
-        DEEP_SYNC_BURST messages it is no longer an exchange making progress
-        and is refused like any other flood.
+        reconcile, so a request flagged F_SYNC_CONTINUES is served while the
+        window lasts; past DEEP_SYNC_BURST messages it is no longer an
+        exchange making progress and is refused like any other flood. The
+        flag is the requester's own claim, so an unflagged repeat is paced as
+        a fresh ask and a flagged flood buys nothing past the burst.
         """
         alice, bob, ch_hash = _setup_channel_with_member(
             peer_factory, member_perms=[SEND_MESSAGE]
@@ -1762,12 +1764,18 @@ class TestAdversarialSyncRanges:
             [deep_lo, deep_hi / 2, RANGE_IDLIST, []],
             [deep_hi / 2, deep_hi, RANGE_IDLIST, []],
         ])
+        alice.sync_mgr._handle_sync_request(
+            self._request(ch_hash, {F_SYNC_RANGES: narrowed}),
+            ch_hash, bob.identity.hash_hex,
+        )
+        assert len(answers) == 1, \
+            "a deep request not flagged as continuing was served inside the cooldown"
+
         for _ in range(DEEP_SYNC_BURST + 5):
             alice.sync_mgr._handle_sync_request(
-                self._request(ch_hash, {F_SYNC_RANGES: narrowed}),
+                self._request(ch_hash, {F_SYNC_RANGES: narrowed, F_SYNC_CONTINUES: True}),
                 ch_hash, bob.identity.hash_hex,
             )
-
         assert len(answers) == DEEP_SYNC_BURST, (
             f"a deep exchange ran to {len(answers)} answers, past the "
             f"{DEEP_SYNC_BURST} one honest exchange can need"

@@ -547,3 +547,191 @@ def test_a_malformed_reconcile_field_is_refused_whole(peer_factory, field):
     )
 
     assert answers == [], "a malformed request was answered anyway"
+
+
+def _tap(peer):
+    """Record everything a peer sends while still delivering it."""
+    sent = []
+    original = peer.sync_mgr._send_raw
+
+    def tapped(dest_hex, fields):
+        sent.append(fields)
+        return original(dest_hex, fields)
+
+    peer.sync_mgr._send_raw = tapped
+    return sent
+
+
+def _requests(sent) -> list:
+    return [f for f in sent if f.get(F_MSG_TYPE) == MT_SYNC_REQUEST]
+
+
+def _rows_served(sent) -> list[str]:
+    served: list[str] = []
+    for f in sent:
+        if f.get(F_MSG_TYPE) == MT_SYNC_RESPONSE and f.get(F_SYNC_MESSAGES):
+            served.extend(_served_ids(f))
+    return served
+
+
+class TestExtendedAbsence:
+    """A peer that was away long enough to miss far more than one answer holds.
+
+    An absence is measured here in what it missed, not in wall-clock time: the
+    rows are inserted with the timestamps the absence would have produced.
+    """
+
+    def _pair(self, peer_factory, name):
+        """A creates the channel and B joins it, so each has exactly one peer
+        and every request in the exchange is between the two of them."""
+        a = peer_factory("a")
+        b = peer_factory("b")
+        author_hex = a.identity.hash_hex
+        ch_hash = a.channel_mgr.create_channel(name, "", "public")
+        _seed_channel_on_peer(b, ch_hash, name, author_hex)
+        a.subscription_mgr._subscribers[ch_hash] = {b.identity.hash_hex}
+        return a, b, author_hex, ch_hash
+
+    def test_a_long_absence_backfills_the_whole_run(self, peer_factory):
+        """Away across 300 rows: everything arrives, once, in bounded rounds.
+
+        The newest bucket of A's ladder spans everything written after it
+        left, so the first answer already carries a capped batch, and each
+        continuation narrows to what is still missing rather than resuming
+        from a timestamp. No row is served twice.
+        """
+        a, b, author_hex, ch_hash = self._pair(peer_factory, "long-absence")
+        base = time.time() - 3600
+        held = 40
+        missed = 300
+        for i in range(held):
+            _insert_message(a.storage, ch_hash, author_hex, f"row {i}", base + i * 5)
+        for i in range(held + missed):
+            _insert_message(b.storage, ch_hash, author_hex, f"row {i}", base + i * 5)
+
+        a_sent = _tap(a)
+        b_sent = _tap(b)
+        a.sync_mgr._request_sync_for_channel(ch_hash)
+
+        assert wait_for(
+            lambda: len(a.storage.get_messages(ch_hash, limit=1000)) == held + missed,
+            timeout=30,
+        ), (f"backfill stalled at {len(a.storage.get_messages(ch_hash, limit=1000))} "
+            f"of {held + missed}")
+        assert wait_for(
+            lambda: a.sync_mgr.status.get_state(ch_hash) == SyncState.SYNCED, timeout=10
+        ), f"channel never settled, got {a.sync_mgr.status.get_state(ch_hash)}"
+
+        served = _rows_served(b_sent)
+        assert len(served) == len(set(served)) == missed, \
+            f"{len(served)} rows served for a gap of {missed}"
+        batches = -(-missed // MAX_RESPONSE_MESSAGES)
+        assert len(_requests(a_sent)) <= batches + 2, \
+            f"{len(_requests(a_sent))} requests to recover {batches} batches"
+
+    def test_a_gap_in_the_middle_of_a_long_history(self, peer_factory):
+        """Away for a stretch that the newest bucket no longer covers.
+
+        The missing rows sit behind hundreds A did receive afterwards, so the
+        ladder's id list does not reach them and the fingerprint buckets they
+        fall in have to be narrowed. They are still all found, and only they
+        are served.
+        """
+        a, b, author_hex, ch_hash = self._pair(peer_factory, "middle-gap")
+        base = time.time() - 3600
+        total = 300
+        gap = range(100, 160)
+        for i in range(total):
+            _insert_message(b.storage, ch_hash, author_hex, f"row {i}", base + i * 5)
+            if i not in gap:
+                _insert_message(a.storage, ch_hash, author_hex, f"row {i}", base + i * 5)
+
+        a_sent = _tap(a)
+        b_sent = _tap(b)
+        a.sync_mgr._request_sync_for_channel(ch_hash)
+
+        assert wait_for(
+            lambda: len(a.storage.get_messages(ch_hash, limit=1000)) == total, timeout=30
+        ), (f"backfill stalled at {len(a.storage.get_messages(ch_hash, limit=1000))} "
+            f"of {total}")
+        assert wait_for(
+            lambda: a.sync_mgr.status.get_state(ch_hash) == SyncState.SYNCED, timeout=10
+        )
+        served = _rows_served(b_sent)
+        assert len(served) == len(set(served)) == len(gap), \
+            f"{len(served)} rows served for a gap of {len(gap)}"
+        # One summary, one narrowing into the described buckets, one
+        # re-summary after the capped batch, one narrowing for the rest.
+        assert len(_requests(a_sent)) <= 5, \
+            f"{len(_requests(a_sent))} requests to close one mid-history gap"
+
+    def test_an_absence_longer_than_the_sync_window(self, peer_factory):
+        """Away past SYNC_WINDOW_SECS: a deep exchange, still completed.
+
+        A's own progress with B predates the window, so the request reaches
+        back to it and is classified deep. The responder paces a fresh deep
+        ask but must keep serving the narrowing steps of the exchange it
+        opened, or A would be stranded halfway with nothing left to ask.
+        """
+        a, b, author_hex, ch_hash = self._pair(peer_factory, "beyond-window")
+        now = time.time()
+        old_base = now - SYNC_WINDOW_SECS - 3 * 86400
+        for i in range(20):
+            for holder in (a, b):
+                _insert_message(holder.storage, ch_hash, author_hex, f"old {i}",
+                                old_base + i * 60)
+        recent_base = now - SYNC_WINDOW_SECS - 86400
+        span = SYNC_WINDOW_SECS + 86400 - 120
+        missed = 120
+        for i in range(missed):
+            _insert_message(b.storage, ch_hash, author_hex, f"while away {i}",
+                            recent_base + i * (span / missed))
+        a.storage.advance_peer_sync_progress(ch_hash, b.identity.hash_hex,
+                                             old_base + 19 * 60)
+
+        b_sent = _tap(b)
+        a.sync_mgr._request_sync_for_channel(ch_hash)
+
+        assert wait_for(
+            lambda: len(a.storage.get_messages(ch_hash, limit=1000)) == 20 + missed,
+            timeout=30,
+        ), (f"deep backfill stalled at {len(a.storage.get_messages(ch_hash, limit=1000))} "
+            f"of {20 + missed}")
+        assert wait_for(
+            lambda: a.sync_mgr.status.get_state(ch_hash) == SyncState.SYNCED, timeout=10
+        ), f"channel never settled, got {a.sync_mgr.status.get_state(ch_hash)}"
+        served = _rows_served(b_sent)
+        assert len(served) == len(set(served)) == missed
+
+    def test_both_sides_wrote_at_length_while_apart(self, peer_factory):
+        """Two long disjoint histories, interleaved in time, merge both ways."""
+        a, b, author_hex, ch_hash = self._pair(peer_factory, "both-wrote")
+        base = time.time() - 3600
+        shared = 50
+        each = 80
+        for i in range(shared):
+            for holder in (a, b):
+                _insert_message(holder.storage, ch_hash, author_hex, f"shared {i}",
+                                base + i)
+        apart = base + shared
+        for i in range(each):
+            _insert_message(a.storage, ch_hash, a.identity.hash_hex, f"a alone {i}",
+                            apart + i * 2)
+            _insert_message(b.storage, ch_hash, b.identity.hash_hex, f"b alone {i}",
+                            apart + i * 2 + 1)
+
+        a.sync_mgr._request_sync_for_channel(ch_hash)
+        b.sync_mgr._request_sync_for_channel(ch_hash)
+
+        total = shared + 2 * each
+        for peer in (a, b):
+            assert wait_for(
+                lambda: len(peer.storage.get_messages(ch_hash, limit=1000)) == total,
+                timeout=30,
+            ), (f"{peer.identity.hash_hex[:8]} stalled at "
+                f"{len(peer.storage.get_messages(ch_hash, limit=1000))} of {total}")
+        for peer in (a, b):
+            assert wait_for(
+                lambda: peer.sync_mgr.status.get_state(ch_hash) == SyncState.SYNCED,
+                timeout=10,
+            ), f"{peer.identity.hash_hex[:8]} never settled"

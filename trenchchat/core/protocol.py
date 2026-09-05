@@ -97,6 +97,8 @@ F_SYNC_RANGES       = 0x52   # bytes: msgpack list of [lo, hi, mode, payload] ra
 F_SYNC_NEED         = 0x53   # bytes: msgpack list of [lo, hi, prefix] triples naming rows
                              #         the sender lacks, for the receiver to resolve against
                              #         its own rows in that range
+F_SYNC_CONTINUES    = 0x54   # bool: this request continues an exchange the responder has
+                             #       already answered, rather than opening one (sync_request)
 
 # How a range in F_SYNC_RANGES describes the rows it covers.
 RANGE_FINGERPRINT   = 0      # payload [count, fp]: a digest over the range's sorted ids

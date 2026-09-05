@@ -369,3 +369,44 @@ def c12(env):
         raise ScenarioFailure(f"interleaved gap did not close: "
                               f"{diff_report(both, ch, expected)}")
     return {"reconcile_secs": round(elapsed, 1), "messages": len(expected)}
+
+
+LONG_ABSENCE_BACKLOG = 3 * MAX_RESPONSE_MESSAGES
+
+
+@scenario("sync13", "A peer away across a long run from two senders catches up")
+def c13(env):
+    """An extended absence measured in what was missed: B is away while A and
+    C between them write three times what one answer can carry, so recovery
+    needs several rounds against two holders and must not serve a row twice
+    or stop at a cap. Every row must arrive and the channel must read synced.
+    """
+    a, b, c = env.peers("A", "B", "C")
+    ch = public_channel(a, [b, c], "c13-public")
+
+    a.send(ch, "c13-seed")
+    all_hold([b, c], ch, {"c13-seed"}, timeout=DISCOVERY_TIMEOUT)
+    expected = {"c13-seed"}
+
+    go_offline(b)
+    half = LONG_ABSENCE_BACKLOG // 2
+    expected |= _send_batch(a, ch, "c13-a", half)
+    expected |= _send_batch(c, ch, "c13-c", LONG_ABSENCE_BACKLOG - half)
+    all_hold([a, c], ch, expected, timeout=CONVERGE_TIMEOUT)
+
+    go_online(b)
+    arrived, elapsed = settle(lambda: b.contents(ch) == expected,
+                              f"B to recover all {LONG_ABSENCE_BACKLOG} messages",
+                              CONVERGE_TIMEOUT)
+    held = len(b.contents(ch))
+    if not arrived:
+        raise ScenarioFailure(
+            f"B holds {held}/{len(expected)}"
+            + (" -- stopped exactly at the response cap"
+               if (held - 1) % MAX_RESPONSE_MESSAGES == 0 else "")
+        )
+    settled, _ = settle(lambda: b.sync_status(ch).get("state") == "synced",
+                        "B's sync state to settle", CONVERGE_TIMEOUT)
+    if not settled:
+        raise ScenarioFailure(f"B recovered everything but reads {b.sync_status(ch)}")
+    return {"recovery_secs": round(elapsed, 1), "messages": held}
