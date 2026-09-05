@@ -884,3 +884,49 @@ class TestReferencedGaps:
         )
         a.sync_mgr._on_message_stored(ch_hash, msg_id)
         assert a.sync_mgr._suspected == {}
+
+
+class TestRoutineReCheckWindow:
+    def test_a_peer_never_synced_from_is_asked_about_the_recent_window(self, peer_factory):
+        """No progress with a peer is not a request for all of history.
+
+        A pair that has never had a row to exchange would otherwise make a
+        deep ask on every routine re-check, be paced as one, and re-ask
+        ninety seconds later when the pacing refused it.
+        """
+        a = peer_factory("a")
+        b = peer_factory("b")
+        ch_hash = a.channel_mgr.create_channel("recent-window", "", "public")
+        _seed_channel_on_peer(b, ch_hash, "recent-window", a.identity.hash_hex)
+        a.subscription_mgr._subscribers[ch_hash] = {b.identity.hash_hex}
+        for i in range(20):
+            _insert_message(a.storage, ch_hash, a.identity.hash_hex, f"row {i}",
+                            time.time() - 100 + i)
+        assert a.storage.get_peer_sync_progress(ch_hash, b.identity.hash_hex) == 0.0
+
+        a_sent = _capture(a)
+        a.sync_mgr.on_peer_appeared(b.identity.hash_hex)
+        request = _requests(a_sent)[0]
+        ranges = sync_ranges.unpack_ranges(request[F_SYNC_RANGES])
+        assert ranges[0][0] >= time.time() - SYNC_WINDOW_SECS - 5, \
+            "a routine re-check reached back to the start of history"
+        assert request[F_SYNC_WINDOW_START] >= time.time() - SYNC_WINDOW_SECS - 5
+
+    def test_a_fresh_join_still_asks_from_the_start(self, peer_factory):
+        a = peer_factory("a")
+        b = peer_factory("b")
+        ch_hash = a.channel_mgr.create_channel("full-ask", "", "public")
+        _seed_channel_on_peer(b, ch_hash, "full-ask", a.identity.hash_hex)
+        a.subscription_mgr._subscribers[ch_hash] = {b.identity.hash_hex}
+
+        a_sent = _capture(a)
+        a.sync_mgr._request_sync_for_channel(ch_hash, 0.0)
+        request = _requests(a_sent)[0]
+        assert request[F_SYNC_WINDOW_START] == 0.0
+        assert sync_ranges.unpack_ranges(request[F_SYNC_RANGES])[0][0] == 0.0
+
+    def test_probe_agreement_outlasts_the_beacon_interval(self):
+        from trenchchat.core.presence import PRESENCE_BEACON_AFTER_SECS
+        from trenchchat.core.sync import PROBE_AGREE_SECS
+        assert PROBE_AGREE_SECS > PRESENCE_BEACON_AFTER_SECS, \
+            "an agreement would go stale before the next beacon could renew it"

@@ -201,6 +201,10 @@ One case is deliberately allowed past it: a range whose rows all share a single 
 
 A hash chain over the channel would be smaller still, and was rejected: a channel has many concurrent authors on a partitioning mesh, so its history is a DAG, and a chain needs somebody to sequence it. That is a center, which fails the first check in `.claude/rules/reticulum-zen.md`.
 
+### What it costs, measured
+
+`bw1` in `docs/testenv-scenarios.md` read the interface counters on both sides of this change. On this transport a control message costs about 700 to 800 bytes on the wire whatever its payload, because it is an LXMF direct delivery with a link and a proof; a beacon's 31 bytes and a re-check's 64 bytes both ride in that. So the number of messages is what matters, and that is the shape of the design: probes add bytes to beacons that go out anyway and remove the request and reply a re-check cost, the ladder is sent only when a difference is known, and idle traffic is dominated by presence beacons before and after alike.
+
 ### The exchange
 
 The responder compares each received range against its **serving view**: signed rows this requester's tenure entitles it to (`_filter_rows_by_tenure`). A row it will not relay is simply absent from every description it produces. What it asks for, by contrast, is measured against everything it holds, so a row it withholds is never requested back.

@@ -744,6 +744,74 @@ does not name), and leave joiners alone.
 | nomad3 | A,B | B fetches once; A goes offline; B requests an uncached page; A returns; B fetches a new page | ⚠ **Confirmed.** The offline fetch never arrives and never hangs; the dial ladder gives up within its bounded backoff (browse accepted, nothing after 90s). After A returns, a fresh page fetch succeeds in 20.1s, tracking path re-resolution. Probe |
 | nomad4 | A,B | B fetches A's index; a new page is written into A's directory; A's process is restarted; B fetches the new page | ✅ Hosting comes back from config on boot and the new page fetches in 0.5s over a fresh link. 4/4 runs. Note: it passes with the dead-link redial disabled too; RNS closes the link when the host dies, so this is not that fix's guard (`tests/test_node_transport.py` is) |
 
+### `bw`: bytes on the wire
+
+A probe, not a check: it reads every tester's Reticulum interface counters
+(`/reticulum/interfaces`, rxb and txb) at the edges of each phase and records
+what crossed the wire. Heartbeat announces are set to an hour first, so the
+idle figure is the application's own background traffic and not the test
+environment's announce cadence.
+
+| ID | Peers | Actions | Measured |
+|---|---|---|---|
+| bw1 | A,B,C,D | One public channel, five seed messages, then: 600s idle; each peer sends one message; B away for 60s across four messages, then back | Run on the pre-reconciliation commit (`a804c0d`) and on the current head, same harness, same day. Idle (all four peers, rx and tx, 600s): 175 KB before, 203 KB after, of which 8 KB after was the tail of the restart burst. Beacons in the window: 116 and 117. Four messages to three peers each: 14.9 KB and 14.5 KB. B's recovery above idle: about 14 KB either way, 1.5s. Details below |
+
+#### What the wire carries
+
+Per LXMF control message, one way, with its share of link setup, proofs and
+keepalives (the idle total divided by the messages the tester logs show):
+
+| | Payload | On the wire |
+|---|---|---|
+| Presence beacon, before | 31 B | about 750 B |
+| Presence beacon with one channel's probe, now | 75 B | about 830 B |
+| A chat message to one recipient | about 20 B of text | about 620 B |
+| Blind sync re-check request, now | 110 B | about 700 B |
+| Sync re-check request, before | 64 B | about 700 B |
+
+The payload is a rounding error. What a message costs on this transport is
+the LXMF envelope, the link it travels over and the delivery proof that comes
+back, so the size of a request barely matters and the *number* of messages
+is everything. That is the measurement that justifies the probe design: it
+adds bytes to a message that was going out anyway and removes messages.
+
+At the deployed cadence (beacons after 180s of silence, re-announce every 3h,
+`PRESENCE_TIMEOUT_SECS` 300s), projected from the figures above, per peer per
+day, sent, for a channel of four:
+
+| | Before | Now |
+|---|---|---|
+| Presence beacons (720/day) | 540 KB | 600 KB |
+| Sync re-checks on announces (24/day) | 34 KB | 0 when a probe agreed within the presence timeout |
+| Announces (8 rounds/day) | 6 KB | 6 KB |
+| Total, idle | about 580 KB | about 610 KB |
+
+Received traffic is the mirror image. A channel of ten multiplies the beacon
+line by three. For comparison, a client that speaks only LXMF (Sideband,
+MeshChat) idles on announces alone: single-digit kilobytes a day. TrenchChat's
+idle cost is two orders of magnitude above that floor, and all of it is
+presence, which predates this branch and is untouched by it. The sync changes
+are a rounding error on that line in either direction; what they changed is
+that a peer which fell out of step now hears so from the next beacon and
+recovers in one round trip, which is what closed sync11 on LoRa.
+
+The lever that would matter is the beacon itself: 750 bytes on the wire for
+31 bytes of meaning, because it is a full LXMF direct delivery with a link and
+a proof. Sending presence as an opportunistic single-packet LXMF message, and
+backing the interval off for a peer that stays quiet, would cut the idle line
+by most of an order of magnitude. Recorded here as the next thing worth
+doing, not done.
+
+Two things the measurement caught and this branch fixed: `PROBE_AGREE_SECS`
+was 120s against a 180s beacon interval, so at the deployed cadence most
+agreements would have been stale by the time an announce arrived and the
+re-check would rarely have been skipped; it is now the presence timeout. And a
+pair that had never exchanged a row asked about all of history on every
+routine re-check (progress zero read as "from the beginning"), was paced as a
+deep ask, and re-asked ninety seconds later when the pacing refused it, which
+is the 8 KB of restart tail in the idle figure above; a routine re-check with
+no progress now starts at the sync window.
+
 ## The LoRa pass
 
 Every family re-run with `--link-profile lora_fast` (SF7, 5.5 kbps, 60±20ms, 1%
@@ -895,6 +963,7 @@ All twelve families built and run: **101 scenarios, 79 strict and 22 probes.**
 | `api`: the API surface | 5 (4 strict, 1 probe) | All passing; api4 records the shared-token property; api5 covers the pushed network map, 5/5 |
 | `integrity`: message integrity | 4 (4 strict) | All passing; integrity2 found a real gap, now fixed and strict |
 | `nomad`: page browsing and hosting | 4 (3 strict, 1 probe) | All passing, 4/4 runs each; nomad3 confirmed bounded offline failure and recovery |
+| `bw`: bytes on the wire | 1 (probe) | Measured before and after reconciliation; see the family's section |
 | `interop`: direct messages with other LXMF clients | 4 (4 strict) | All passing against a real bare RNS+LXMF client; interop4 found a real gap, 5/5 after the fix |
 
 **All strict scenarios pass**, sync11 included: 6/6 on broadband and 3/3 on

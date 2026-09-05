@@ -74,6 +74,7 @@ from trenchchat.core.authorship import (
 )
 from trenchchat.core.image import MAX_IMAGE_BYTES, inbound_image_is_sane
 from trenchchat.core.messaging import CAUSAL_WINDOW_SECS, Messaging, _compute_message_id
+from trenchchat.core.presence import PRESENCE_TIMEOUT_SECS
 from trenchchat.core.permissions import (
     FULL_SYNC, has_permission, is_open_join, permissions_from_json,
 )
@@ -154,8 +155,11 @@ ANNOUNCE_SYNC_PRUNE_SECS = 3600.0
 
 # A probe on a peer's presence beacon that matched what we hold stands in for
 # the announce-driven re-check of that (channel, peer) for this long: the
-# re-check would ask the question the probe just answered.
-PROBE_AGREE_SECS = ANNOUNCE_SYNC_COOLDOWN_SECS
+# re-check would ask the question the probe just answered. As long as the
+# peer counts as present, since a beacon arrives at most that often; shorter
+# than the beacon interval and most agreements would be stale by the time an
+# announce came.
+PROBE_AGREE_SECS = PRESENCE_TIMEOUT_SECS
 
 # A message names the newest message its author had seen (last_seen_id). Not
 # holding that one is evidence of a gap, and its author is a peer known to
@@ -453,8 +457,21 @@ class SyncManager:
             return
         for peer_hex in peers:
             peer_since = since_ts if since_ts is not None else \
-                self._storage.get_peer_sync_progress(channel_hash_hex, peer_hex)
+                self._resume_point(channel_hash_hex, peer_hex)
             self._send_sync_request(peer_hex, channel_hash_hex, peer_since)
+
+    def _resume_point(self, channel_hash_hex: str, peer_hex: str) -> float:
+        """Where a routine re-check of this peer starts.
+
+        Our progress with them, or the start of the sync window when we have
+        none yet. Zero would mean the whole transcript, which is a deep ask,
+        paced and answered from the beginning of history; a pair that has
+        simply never had a row to exchange would make one on every re-check.
+        """
+        progress = self._storage.get_peer_sync_progress(channel_hash_hex, peer_hex)
+        if progress > 0.0:
+            return progress
+        return max(time.time() - SYNC_WINDOW_SECS, 0.0)
 
     def _on_message_stored(self, channel_hash_hex: str, message_id: str):
         """Clear a hinted gap once the messages it named have all arrived,
@@ -525,7 +542,7 @@ class SyncManager:
                 continue
             if not self._peer_may_participate(channel_hash_hex, author):
                 continue
-            since_ts = self._storage.get_peer_sync_progress(channel_hash_hex, author)
+            since_ts = self._resume_point(channel_hash_hex, author)
             self._send_sync_request(author, channel_hash_hex, since_ts,
                                     needs=needs[:MAX_NEED_IDS])
 
@@ -578,7 +595,7 @@ class SyncManager:
             # have fetched; asking anyway spends a request and a reply on it.
             if self._probe_agreed_recently(channel_hash_hex, peer_hex):
                 continue
-            since_ts = self._storage.get_peer_sync_progress(channel_hash_hex, peer_hex)
+            since_ts = self._resume_point(channel_hash_hex, peer_hex)
             if self._send_sync_request(peer_hex, channel_hash_hex, since_ts):
                 self._record_announce_sync(channel_hash_hex, peer_hex)
 
@@ -738,7 +755,7 @@ class SyncManager:
         allows; otherwise it stays pending for tick()."""
         if not self._announce_sync_due(channel_hash_hex, peer_hex):
             return False
-        since_ts = self._storage.get_peer_sync_progress(channel_hash_hex, peer_hex)
+        since_ts = self._resume_point(channel_hash_hex, peer_hex)
         sent = self._send_sync_request(peer_hex, channel_hash_hex, since_ts, ladder=True)
         if sent:
             self._record_announce_sync(channel_hash_hex, peer_hex)
@@ -2003,7 +2020,7 @@ class SyncManager:
                     )
                     continue
                 self._retry_counts[key] = tries + 1
-                since_ts = self._storage.get_peer_sync_progress(channel_hash_hex, peer_hex)
+                since_ts = self._resume_point(channel_hash_hex, peer_hex)
                 RNS.log(
                     f"TrenchChat [sync]: re-asking {peer_hex[:12]}… for "
                     f"{channel_hash_hex[:12]}… — no answer to the last request "
