@@ -123,13 +123,44 @@ class TestDescribe:
 
 
 class TestSummarise:
-    def test_a_window_is_one_fingerprint(self):
+    def test_a_small_window_is_one_id_list(self):
+        rows = _rows(sr.SYNC_SUMMARY_LADDER[0])
+        assert sr.summarise(rows, 0.0, 1e9) == \
+            [[0.0, 1e9, RANGE_IDLIST, sorted(sr.prefixes_of(rows))]]
+
+    def test_a_busy_window_ladders_from_the_newest_end(self):
         rows = _rows(500)
         summary = sr.summarise(rows, 0.0, 1e9)
-        assert len(summary) == 1
-        lo, hi, mode, payload = summary[0]
-        assert (lo, hi, mode) == (0.0, 1e9, RANGE_FINGERPRINT)
-        assert payload == [len(rows), sr.fingerprint(r["message_id"] for r in rows)]
+        counts = [len(sr.rows_in(rows, lo, hi)) for lo, hi, _mode, _payload in summary]
+        ladder = list(sr.SYNC_SUMMARY_LADDER)
+        assert counts[::-1][:len(ladder)] == ladder
+        assert counts[0] == 500 - sum(ladder)
+        assert [mode for _lo, _hi, mode, _payload in summary] == \
+            [RANGE_FINGERPRINT] * len(ladder) + [RANGE_IDLIST]
+
+    def test_the_ladder_covers_the_window_contiguously(self):
+        rows = _rows(300)
+        summary = sr.summarise(rows, 0.0, 1e9)
+        assert summary[0][0] == 0.0 and summary[-1][1] == 1e9
+        for earlier, later in zip(summary, summary[1:]):
+            assert earlier[1] == later[0]
+        for lo, hi, mode, payload in summary[:-1]:
+            assert sr.matches_fingerprint(sr.rows_in(rows, lo, hi), payload[0], payload[1])
+
+    def test_a_cut_never_splits_a_tied_timestamp(self):
+        rows = [_row(i, 100.0 + i // 10) for i in range(60)]
+        summary = sr.summarise(rows, 0.0, 200.0)
+        for lo, hi, _mode, _payload in summary:
+            inside = {r["timestamp"] for r in sr.rows_in(rows, lo, hi)}
+            outside = {r["timestamp"] for r in rows} - inside
+            assert not inside & outside
+        assert summary[-1][2] == RANGE_IDLIST and len(summary[-1][3]) == 10
+
+    def test_a_newest_bucket_a_tie_stretches_past_the_leaf_is_fingerprinted(self):
+        rows = [_row(i, 42.0) for i in range(sr.SYNC_LEAF_IDS + 5)] + \
+            [_row(100, 10.0), _row(101, 11.0)]
+        summary = sr.summarise(rows, 0.0, 100.0)
+        assert summary[-1][2] == RANGE_FINGERPRINT
 
     def test_holding_nothing_stays_an_empty_id_list(self):
         """A fresh join asks for the window outright rather than spending a
@@ -139,13 +170,13 @@ class TestSummarise:
     def test_a_summary_is_cheap_at_every_size(self):
         for count in (0, 5, 32, 100, 500, 2000, 10000):
             packed = sr.packed_size(sr.summarise(_rows(count), 0.0, 1e9))
-            assert packed <= 100, \
+            assert packed <= 320, \
                 f"a routine re-check holding {count} rows cost {packed} bytes"
 
-    def test_a_summary_matches_what_describe_would_fingerprint(self):
-        rows = _rows(40)
-        _lo, _hi, _mode, payload = sr.summarise(rows, 0.0, 1e9)[0]
-        assert sr.matches_fingerprint(rows, payload[0], payload[1])
+    def test_a_summary_reads_as_one(self):
+        for count in (0, 5, 100, 5000):
+            assert sr.is_summary(sr.summarise(_rows(count), 0.0, 1e9), None)
+        assert not sr.is_summary(sr.describe(_rows(5000), 0.0, 1e9), None)
 
 
 class TestDescriptionBudget:

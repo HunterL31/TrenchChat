@@ -59,6 +59,14 @@ SYNC_LEAF_IDS = 32
 # two on a slow link.
 SYNC_DESCRIPTION_BUDGET_BYTES = 512
 
+# How a fresh request lays out the window, counted in rows from the newest
+# end: the newest bucket is spelled out by id, each older one is fingerprinted
+# and twice the size of the last, and whatever is older still is one range. A
+# peer that was away has its gap at the recent end, so that is where the
+# resolution goes; a responder that receives ids sends the missing rows at
+# once, where a fingerprint could only be described back.
+SYNC_SUMMARY_LADDER = (8, 16, 32, 64, 128)
+
 # Inbound caps. These are the hard refusal bound, not the budget: a peer may
 # legitimately send a description built under different constants, so what is
 # refused is only what no honest peer could produce. A well-formed description
@@ -148,21 +156,68 @@ def _split_bounds(rows: list, lo: float, hi: float,
 
 
 def summarise(rows, lo: float, hi: float) -> list[list]:
-    """The whole of [lo, hi) as one fingerprint: what a fresh request sends.
+    """The whole of [lo, hi) in a few ranges weighted to the newest end: what a
+    fresh request sends.
 
-    A routine re-check is almost always a no-op, and asking it should cost
-    about ninety bytes rather than a list of everything the asker holds. Only
-    once a peer answers that the range differs is it worth spending a
-    description on where (describe() below).
+    The newest SYNC_SUMMARY_LADDER[0] rows go by id, so a peer that fell behind
+    recently gets its rows in the very first answer. Older rows go as
+    fingerprints in buckets that double in size, ending in one range for
+    everything older than the ladder reaches, so the whole window is still
+    covered and a gap anywhere is still found. A window holding no more than
+    the newest bucket is one id list, which also keeps a fresh join asking for
+    the window outright.
 
-    Holding nothing stays a single empty id list, so a fresh join still asks
-    for the window outright and gets rows in the first answer instead of
-    spending a round trip proving it has none.
+    Boundaries sit on row timestamps and never inside a group sharing one, for
+    the same reason as _split_bounds. A newest bucket that a tie stretches past
+    SYNC_LEAF_IDS is fingerprinted rather than spelled out.
     """
-    rows = rows_in(rows, lo, hi)
-    if not rows:
+    rows = sort_rows(rows_in(rows, lo, hi))
+    if len(rows) <= SYNC_SUMMARY_LADDER[0]:
         return [id_list_range(lo, hi, rows)]
-    return [fingerprint_range(lo, hi, rows)]
+
+    bounds = _ladder_bounds(rows, lo, hi)
+    described: list[list] = []
+    for i, (sub_lo, sub_hi) in enumerate(bounds):
+        sub = rows_in(rows, sub_lo, sub_hi)
+        newest = i == len(bounds) - 1
+        if newest and len(sub) <= SYNC_LEAF_IDS:
+            described.append(id_list_range(sub_lo, sub_hi, sub))
+        else:
+            described.append(fingerprint_range(sub_lo, sub_hi, sub))
+    return described
+
+
+def _ladder_bounds(rows: list, lo: float, hi: float) -> list[tuple[float, float]]:
+    """Contiguous [lo, hi) sub-ranges cut from the newest end by the ladder.
+
+    Rows must be sorted oldest first. Each cut lands on the first row of a
+    timestamp group, so a tie only ever makes a bucket larger, never splits
+    it; a cut that would land on or before the previous one is dropped.
+    """
+    total = len(rows)
+    cuts: list[float] = []
+    taken = 0
+    for size in SYNC_SUMMARY_LADDER:
+        taken += size
+        if taken >= total:
+            break
+        idx = total - taken
+        while idx > 0 and rows[idx - 1]["timestamp"] == rows[idx]["timestamp"]:
+            idx -= 1
+        if idx <= 0:
+            break
+        boundary = float(rows[idx]["timestamp"])
+        if boundary <= float(lo) or (cuts and boundary >= cuts[-1]):
+            continue
+        cuts.append(boundary)
+
+    bounds: list[tuple[float, float]] = []
+    start = float(lo)
+    for boundary in reversed(cuts):
+        bounds.append((start, boundary))
+        start = boundary
+    bounds.append((start, float(hi)))
+    return bounds
 
 
 def describe(rows, lo: float, hi: float,
@@ -265,17 +320,21 @@ def append_ranges(target: list, described: list,
 
 
 def is_summary(ranges, needs) -> bool:
-    """True if this describes a whole window rather than narrowing inside one.
+    """True if this looks like a whole window rather than narrowing inside one.
 
-    A fresh ask is exactly one range: a fingerprint of everything the asker
-    holds there, or an empty id list when it holds nothing. Anything else,
-    more ranges, ids spelled out, or a need, is a step inside an exchange that
-    has already established the two sides differ.
+    A fresh ask is what summarise() builds: at most one range per rung of the
+    ladder plus the oldest remainder, fingerprints throughout except the
+    newest, which may be a short id list, and no need. A narrowing step that
+    happens to take the same shape is only ever paced as a fresh deep ask, and
+    the requester's retry re-asks it inside the next cooldown.
     """
-    if needs or not ranges or len(ranges) > 1:
+    if needs or not ranges or len(ranges) > len(SYNC_SUMMARY_LADDER) + 1:
         return False
-    _lo, _hi, mode, payload = ranges[0]
-    return mode == RANGE_FINGERPRINT or not payload
+    for _lo, _hi, mode, _payload in ranges[:-1]:
+        if mode != RANGE_FINGERPRINT:
+            return False
+    _lo, _hi, mode, payload = ranges[-1]
+    return mode == RANGE_FINGERPRINT or len(payload) <= SYNC_SUMMARY_LADDER[0]
 
 
 def matches_fingerprint(rows, count: int, digest: bytes) -> bool:

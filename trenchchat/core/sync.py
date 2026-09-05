@@ -1599,11 +1599,11 @@ class SyncManager:
                         narrow: bool = False) -> list:
         """How we describe our own rows in [lo, hi) to a peer.
 
-        A fresh request summarises the whole window as one fingerprint: a
-        routine re-check is almost always a no-op, and it should cost about
-        ninety bytes rather than a list of everything we hold. Only once a
-        peer has said the window differs is a *narrow* description worth
-        sending, which is what a continuation asks with.
+        A fresh request summarises the window: the newest few rows by id,
+        the rest fingerprinted in buckets that grow with age, a few hundred
+        bytes rather than a list of everything we hold. Only once a peer has
+        said a range differs is a *narrow* description of it worth sending,
+        which is what a continuation asks with.
 
         Only signed rows: an unsigned one cannot be relayed to anybody, so
         claiming it here would have peers withhold their own verifiable copy.

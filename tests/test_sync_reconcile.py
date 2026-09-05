@@ -66,15 +66,14 @@ def _served_ids(fields) -> set[str]:
 
 
 class TestWorkedExample:
-    def test_two_peers_converge_in_three_round_trips(self, peer_factory):
+    def test_two_peers_converge_in_one_round_trip(self, peer_factory):
         """A holds {1,3,4}, B holds {1,2,4,5}: both end holding 1 to 5.
 
-        The exact exchange, because the shape of it is the design. A asks with
-        one fingerprint over the window, which is what a routine re-check
-        costs. B says the window differs and describes its own rows, without
-        sending any. A diffs that, asks for what it lacks and describes what
-        it holds, and B answers with the rows and an ask of its own. Nothing
-        is ever pushed that was not asked for.
+        The exact exchange, because the shape of it is the design. A holds no
+        more than the newest bucket, so its fresh request names its rows by
+        id. B diffs that in one step: it serves the two rows A lacks and asks
+        for the one row it lacks itself, in the same answer. A stores them and
+        answers the ask. Nothing is ever pushed that was not asked for.
         """
         author = peer_factory("author")
         a = peer_factory("a")
@@ -95,54 +94,79 @@ class TestWorkedExample:
         a_sent = _capture(a)
         b_sent = _capture(b)
 
-        # 1. A asks with a single fingerprint over the whole window.
+        # 1. A asks, naming the three rows it holds.
         a.sync_mgr._send_sync_request(b.identity.hash_hex, ch_hash, base)
         assert len(a_sent) == 1, "A sent more than the one request"
         first_request = sync_ranges.unpack_ranges(a_sent[0][F_SYNC_RANGES])
-        assert [mode for _lo, _hi, mode, _payload in first_request] == \
-            [RANGE_FINGERPRINT], "a fresh request spelled out what it holds"
+        assert [mode for _lo, _hi, mode, _payload in first_request] == [RANGE_IDLIST]
+        assert set(first_request[0][3]) == {sync_ranges.id_prefix(ids[n]) for n in (1, 3, 4)}
 
-        # 2. B says the window differs and describes its own rows, no rows sent.
+        # 2. B serves exactly what A lacks and asks for the one row it lacks.
         b.sync_mgr._handle_sync_request(a_sent[0], ch_hash, a.identity.hash_hex)
         assert len(b_sent) == 1, "B answered with more than one message"
-        assert _served_ids(b_sent[0]) == set(), \
-            "B pushed rows for a range it only knew differed"
-        described = sync_ranges.unpack_ranges(b_sent[0][F_SYNC_RANGES])
-        assert [mode for _lo, _hi, mode, _payload in described] == [RANGE_IDLIST]
-        assert set(described[0][3]) == {sync_ranges.id_prefix(ids[n])
-                                        for n in (1, 2, 4, 5)}
-
-        # 3. A diffs it: asks for what it lacks, describes what it holds.
-        a.sync_mgr._handle_sync_response(b_sent[0], ch_hash, b.identity.hash_hex)
-        assert len(a_sent) == 2, "A did not follow up on the difference"
-        needs = sync_ranges.unpack_needs(a_sent[1][F_SYNC_NEED])
-        assert {prefix for _lo, _hi, prefix in needs} == \
-            {sync_ranges.id_prefix(ids[2]), sync_ranges.id_prefix(ids[5])}
-        mine = sync_ranges.unpack_ranges(a_sent[1][F_SYNC_RANGES])
-        assert set(mine[0][3]) == {sync_ranges.id_prefix(ids[n]) for n in (1, 3, 4)}
-
-        # 4. B serves exactly what A lacks and asks for the one row it lacks.
-        b.sync_mgr._handle_sync_request(a_sent[1], ch_hash, a.identity.hash_hex)
-        assert len(b_sent) == 2
-        assert _served_ids(b_sent[1]) == {ids[2], ids[5]}, \
+        assert _served_ids(b_sent[0]) == {ids[2], ids[5]}, \
             "B served something other than exactly what A was missing"
-        b_needs = sync_ranges.unpack_needs(b_sent[1][F_SYNC_NEED])
+        assert F_SYNC_RANGES not in b_sent[0], "B described a range it had already resolved"
+        b_needs = sync_ranges.unpack_needs(b_sent[0][F_SYNC_NEED])
         assert [prefix for _lo, _hi, prefix in b_needs] == \
             [sync_ranges.id_prefix(ids[3])], \
             "B did not ask for the one message it was missing"
 
-        # 5. A stores them and answers B's ask. That is the last message.
-        a.sync_mgr._handle_sync_response(b_sent[1], ch_hash, b.identity.hash_hex)
+        # 3. A stores them and answers B's ask. That is the last message.
+        a.sync_mgr._handle_sync_response(b_sent[0], ch_hash, b.identity.hash_hex)
         assert {n for n in ids if a.storage.message_exists(ids[n])} == {1, 2, 3, 4, 5}
-        assert len(a_sent) == 3, "A sent something beyond the answer to B's need"
-        answer = a_sent[2]
+        assert len(a_sent) == 2, "A sent something beyond the answer to B's need"
+        answer = a_sent[1]
         assert answer[F_MSG_TYPE] == MT_SYNC_RESPONSE
         assert _served_ids(answer) == {ids[3]}, \
             "A's answer carried something other than the row B asked for"
 
         b.sync_mgr._handle_sync_response(answer, ch_hash, a.identity.hash_hex)
         assert {n for n in ids if b.storage.message_exists(ids[n])} == {1, 2, 3, 4, 5}
-        assert len(b_sent) == 2, "B pushed a message nobody asked for"
+        assert len(b_sent) == 1, "B pushed a message nobody asked for"
+
+    def test_a_recent_gap_is_filled_by_the_first_answer(self, peer_factory):
+        """A peer that fell behind recently gets its rows in one round trip.
+
+        The ladder spells out the newest bucket by id, so a responder holding
+        newer rows in that span can send them at once instead of describing
+        the range back and waiting to be asked. The older buckets match and
+        are not mentioned again.
+        """
+        author = peer_factory("author")
+        a = peer_factory("a")
+        b = peer_factory("b")
+        author_hex = author.identity.hash_hex
+
+        ch_hash = author.channel_mgr.create_channel("recent-gap", "", "public")
+        _seed_channel_on_peer(a, ch_hash, "recent-gap", author_hex)
+        _seed_channel_on_peer(b, ch_hash, "recent-gap", author_hex)
+
+        base = time.time() - 600
+        shared = [_insert_message(b.storage, ch_hash, author_hex, f"row {i}", base + i)
+                  for i in range(60)]
+        for i in range(58):
+            _insert_message(a.storage, ch_hash, author_hex, f"row {i}", base + i)
+        missing = set(shared[58:])
+
+        a_sent = _capture(a)
+        b_sent = _capture(b)
+        a.sync_mgr._send_sync_request(b.identity.hash_hex, ch_hash, base)
+        ranges = sync_ranges.unpack_ranges(a_sent[0][F_SYNC_RANGES])
+        assert len(ranges) > 1 and ranges[-1][2] == RANGE_IDLIST, \
+            "a fresh request over a busy window did not ladder"
+
+        b.sync_mgr._handle_sync_request(a_sent[0], ch_hash, a.identity.hash_hex)
+        assert len(b_sent) == 1
+        assert _served_ids(b_sent[0]) == missing, \
+            "the first answer did not carry exactly the rows A lacked"
+        assert F_SYNC_RANGES not in b_sent[0], \
+            "B described ranges that already matched"
+        assert F_SYNC_NEED not in b_sent[0], "B asked for rows it already held"
+
+        a.sync_mgr._handle_sync_response(b_sent[0], ch_hash, b.identity.hash_hex)
+        assert all(a.storage.message_exists(mid) for mid in shared)
+        assert len(a_sent) == 1, "A followed up when nothing was left to ask"
 
 
 class TestGapBehindTheWatermark:
@@ -433,25 +457,28 @@ class TestDeepReconcileThrottle:
 
 class TestRangesAreOnTheWire:
     def test_a_fresh_request_summarises_the_window(self, peer_factory):
-        """A routine re-check costs one fingerprint, not a list of holdings."""
+        """A routine re-check costs a ladder of fingerprints with the newest
+        few rows by id, never a list of everything held."""
         alice = peer_factory("alice")
         bob = peer_factory("bob")
         ch_hash = alice.channel_mgr.create_channel("describe", "", "public")
         _seed_channel_on_peer(bob, ch_hash, "describe", alice.identity.hash_hex)
 
-        base = time.time() - 30
+        base = time.time() - 300
         held = [_insert_message(bob.storage, ch_hash, alice.identity.hash_hex,
-                                f"held {i}", base + i) for i in range(3)]
+                                f"held {i}", base + i) for i in range(100)]
 
         sent = _capture(bob)
         bob.sync_mgr._send_sync_request(alice.identity.hash_hex, ch_hash, base)
 
         ranges = sync_ranges.unpack_ranges(sent[0][F_SYNC_RANGES])
         assert ranges is not None, "the request's ranges did not validate"
-        assert len(ranges) == 1
-        lo, hi, mode, payload = ranges[0]
-        assert mode == RANGE_FINGERPRINT
-        assert payload == (len(held), sync_ranges.fingerprint(held))
+        assert [mode for _lo, _hi, mode, _payload in ranges] == \
+            [RANGE_FINGERPRINT] * (len(ranges) - 1) + [RANGE_IDLIST]
+        assert set(ranges[-1][3]) == \
+            {sync_ranges.id_prefix(mid) for mid in held[-sync_ranges.SYNC_SUMMARY_LADDER[0]:]}
+        assert sum(payload[0] for _lo, _hi, mode, payload in ranges[:-1]) == \
+            len(held) - sync_ranges.SYNC_SUMMARY_LADDER[0]
         assert len(sent[0][F_SYNC_RANGES]) <= sync_ranges.SYNC_DESCRIPTION_BUDGET_BYTES
 
     def test_a_continuation_describes_what_we_already_hold(self, peer_factory):

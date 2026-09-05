@@ -160,22 +160,22 @@ Message ids are content hashes (`_compute_message_id`), so what the two sides ac
 
 Describing a set costs about ten bytes a row, and a routine re-check happens on every announce cooldown per (channel, peer) and almost always answers "nothing further". So a request has two shapes:
 
-- **A fresh request summarises** (`sync_ranges.summarise`): the whole window as a single fingerprint, about 110 bytes whatever the channel holds. A peer holding nothing sends one empty id list instead, so a fresh join still gets rows in the first answer rather than spending a round trip proving it has none.
+- **A fresh request summarises** (`sync_ranges.summarise`): the newest `SYNC_SUMMARY_LADDER[0]` (8) rows spelled out by id, then fingerprinted buckets that double in size with age (16, 32, 64, 128), then one fingerprint for everything older, so the whole window is covered in at most six ranges and a few hundred bytes whatever the channel holds. The resolution sits at the recent end because that is where a peer that was away has its gap, and the newest bucket goes by id rather than fingerprint because a responder that receives ids can send the missing rows in the same answer, where a fingerprint could only be described back. A peer holding no more than the newest bucket sends one id list, so a fresh join still gets rows in the first answer rather than spending a round trip proving it has none.
 - **A narrowing request describes** (`sync_ranges.describe`): only once a peer has answered that the window differs is it worth saying where. `describe` splits the span into at most `SYNC_RANGE_FANOUT` (16) sub-ranges of roughly equal row count, spelling out any sub-range holding at most `SYNC_LEAF_IDS` (32) rows and fingerprinting the rest. Boundaries always land on a row timestamp and never inside a group of rows sharing one: a boundary is a bare float, so a split group could never be compared consistently by either side.
 
-The trade is one extra round trip whenever there is a real difference, against a steady state that costs a tenth of what it did. On a mesh, the routine case runs far more often than the reconnect case.
+The trade is a few hundred bytes on every routine re-check, against a steady state that once cost five kilobytes and a recent gap that now closes in a single round trip: the first answer carries the rows. A gap older than the ladder reaches costs the extra round trip of describing the bucket it fell in. A single whole-window fingerprint (about 110 bytes) was measured as the alternative; it saves the bytes and spends the round trip on every difference, and the scenario numbers for both are in `docs/testenv-scenarios.md`.
 
 Measured, as the whole packed field dict of one `MT_SYNC_REQUEST`, by how many signed rows the requester holds in the window:
 
-| Rows held | Before | Fresh request | Narrowing step |
-|---|---|---|---|
-| 0 | 89 B | 89 B | 89 B |
-| 5 | 139 B | 108 B | 139 B |
-| 32 | 413 B | 108 B | 413 B |
-| 100 | 1385 B | 108 B | 551 B |
-| 500 | 5440 B | 110 B | 510 B |
-| 2000 | 712 B | 110 B | 521 B |
-| 10000 | 744 B | 110 B | 532 B |
+| Rows held | Before | One fingerprint | Ladder (fresh request) | Narrowing step |
+|---|---|---|---|---|
+| 0 | 89 B | 89 B | 89 B | 89 B |
+| 5 | 139 B | 108 B | 139 B | 139 B |
+| 32 | 413 B | 108 B | 249 B | 413 B |
+| 100 | 1385 B | 108 B | 290 B | 551 B |
+| 500 | 5440 B | 110 B | 373 B | 510 B |
+| 2000 | 712 B | 110 B | 374 B | 521 B |
+| 10000 | 744 B | 110 B | 374 B | 532 B |
 
 (A request with no ranges at all, which is what an older peer sends, is 64 B. The old hump at 100 to 500 rows is every one of 16 sub-ranges being spelled out; past that, sub-ranges grow beyond `SYNC_LEAF_IDS` and become fingerprints on their own.)
 
