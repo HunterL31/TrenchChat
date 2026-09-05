@@ -15,11 +15,14 @@ environment's 30s silence threshold, six times the real client's 180s;
 divide the idle figures by six for the deployed cadence.
 """
 
+import os
+
 from asserts import all_hold, hold_for, settle
 from flows import go_offline, go_online, public_channel, DISCOVERY_TIMEOUT
 from scenario import PROBE, scenario
 
-IDLE_SECS = 300.0
+# Longer idle windows average more beacon cycles; TC_BW_IDLE_SECS overrides.
+IDLE_SECS = float(os.environ.get("TC_BW_IDLE_SECS", 300.0))
 QUIET_BEFORE_MEASURING_SECS = 90.0
 AWAY_SECS = 60.0
 AFTER_RETURN_SECS = 90.0
