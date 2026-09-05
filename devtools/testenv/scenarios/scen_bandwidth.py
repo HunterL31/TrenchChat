@@ -15,15 +15,12 @@ environment's 30s silence threshold, six times the real client's 180s;
 divide the idle figures by six for the deployed cadence.
 """
 
-import time
-
 from asserts import all_hold, hold_for, settle
 from flows import go_offline, go_online, public_channel, DISCOVERY_TIMEOUT
 from scenario import PROBE, scenario
 
 IDLE_SECS = 300.0
-QUIET_BEFORE_MEASURING_SECS = 60.0
-ANNOUNCE_WINDOW_SECS = 45.0
+QUIET_BEFORE_MEASURING_SECS = 90.0
 AWAY_SECS = 60.0
 AFTER_RETURN_SECS = 90.0
 LONG_HEARTBEAT_SECS = 3600.0
@@ -60,16 +57,21 @@ def _wait(secs: float, what: str) -> None:
     hold_for(lambda: True, what, secs)
 
 
-@scenario("bw1", "Bytes on the wire: idle, an announce, a few messages, one peer away",
-          kind=PROBE)
+@scenario("bw1", "Bytes on the wire: idle, a few messages, one peer away", kind=PROBE)
 def bw1(env):
     """Four peers on one public channel, measured phase by phase.
 
-    idle: nothing happens for IDLE_SECS. announce: A re-announces once, and
-    whatever that prompts is counted. activity: each peer sends one message.
-    away: B drops its link, A and C write while it is gone, B comes back and
-    recovers. B's own counters restart with its interface, so its away figure
-    is what it moved after reconnecting.
+    idle: nothing happens for IDLE_SECS. activity: each peer sends one
+    message. away: B drops its link, A and C write while it is gone, B comes
+    back and recovers. B's own counters restart with its interface, so its
+    away figure is what it moved after reconnecting.
+
+    Changing a tester's heartbeat restarts it, so every tester is restarted
+    once before the quiet window and the window is long enough for the
+    startup syncs and announces that follow to drain. An announce round is
+    not measured here for the same reason: there is no way to make a tester
+    announce without restarting it, and a restart is a startup, not an
+    announce.
     """
     a, b, c, d = env.peers("A", "B", "C", "D")
     everyone = [a, b, c, d]
@@ -83,20 +85,15 @@ def bw1(env):
 
     for p in everyone:
         env.orch.set_heartbeat(p.tag, LONG_HEARTBEAT_SECS)
-    _wait(QUIET_BEFORE_MEASURING_SECS, "the setup burst to drain")
+        env.wait_alive(p)
+    all_hold(everyone, ch, expected, timeout=DISCOVERY_TIMEOUT)
+    _wait(QUIET_BEFORE_MEASURING_SECS, "the restart burst to drain")
 
     out: dict = {}
 
     before = _snapshot(everyone)
     _wait(IDLE_SECS, "an idle window")
     _record(out, "idle", _delta(before, _snapshot(everyone)), IDLE_SECS)
-
-    before = _snapshot(everyone)
-    env.orch.set_heartbeat(a.tag, 1.0)
-    time.sleep(2.0)
-    env.orch.set_heartbeat(a.tag, LONG_HEARTBEAT_SECS)
-    _wait(ANNOUNCE_WINDOW_SECS, "one announce round to play out")
-    _record(out, "announce", _delta(before, _snapshot(everyone)))
 
     before = _snapshot(everyone)
     for p in everyone:
