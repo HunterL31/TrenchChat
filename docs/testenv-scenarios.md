@@ -1352,7 +1352,7 @@ How to run it, when a scenario is the right tool, and how to add one live in
 
 ## Status
 
-All twelve families built and run: **101 scenarios, 79 strict and 22 probes.**
+All fifteen families built and run: **127 scenarios, 99 strict and 28 probes**, counted from the registry rather than by hand.
 
 | Family | Scenarios | Result |
 |---|---|---|
