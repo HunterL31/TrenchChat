@@ -5,6 +5,7 @@ import 'dart:convert';
 
 import '../theme/theme_spec.dart';
 import 'models/message.dart';
+import 'models/rrc.dart';
 
 sealed class TcEvent {
   const TcEvent();
@@ -109,6 +110,29 @@ sealed class TcEvent {
         return NomadNodeEvent(
           json['node_hash'] as String,
           json['display_name'] as String? ?? '',
+        );
+      case 'rrc_hub':
+        return RrcHubEvent(
+          json['hub_hash'] as String,
+          json['name'] as String? ?? '',
+        );
+      case 'rrc_session':
+        return RrcSessionEvent(
+          json['hub_hash'] as String? ?? '',
+          json['state'] as String? ?? 'idle',
+          json['reason'] as String? ?? '',
+        );
+      case 'rrc_room':
+        return RrcRoomEvent(
+          json['room'] as String? ?? '',
+          json['state'] as String? ?? '',
+        );
+      case 'rrc_message':
+        final line = json['line'];
+        if (line is! Map<String, dynamic>) return null;
+        return RrcMessageEvent(
+          json['room'] as String? ?? '',
+          RRCLine.fromJson(line),
         );
       case 'nomad_fetch':
         return NomadFetchEvent(
@@ -331,4 +355,36 @@ class NomadFetchEvent extends TcEvent {
   final String status;
   final double progress;
   final String? reason;
+}
+
+/// An RRC hub announced itself on the mesh (or refreshed its name). Hubs are
+/// heard, never looked up: there is no directory to ask.
+class RrcHubEvent extends TcEvent {
+  const RrcHubEvent(this.hubHash, this.name);
+  final String hubHash;
+  final String name;
+}
+
+/// The session with a hub moved. A link loss lands here as 'idle': RRC has no
+/// continuity across links, so the rooms go with it.
+class RrcSessionEvent extends TcEvent {
+  const RrcSessionEvent(this.hubHash, this.state, this.reason);
+  final String hubHash;
+  final String state;
+  final String reason;
+}
+
+/// A room was joined or parted, as the hub confirmed it.
+class RrcRoomEvent extends TcEvent {
+  const RrcRoomEvent(this.room, this.state);
+  final String room;
+  final String state;
+}
+
+/// One line arrived in a joined room. The transcript is session-scoped and
+/// never stored, so this event is the only place a line is ever delivered.
+class RrcMessageEvent extends TcEvent {
+  const RrcMessageEvent(this.room, this.line);
+  final String room;
+  final RRCLine line;
 }

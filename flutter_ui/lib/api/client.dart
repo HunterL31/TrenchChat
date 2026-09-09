@@ -21,6 +21,7 @@ import 'models/network_map.dart';
 import 'models/nomad.dart';
 import 'models/permissions.dart';
 import 'models/reticulum_config.dart';
+import 'models/rrc.dart';
 import 'models/server.dart';
 import 'models/settings.dart';
 import 'models/voice.dart';
@@ -864,9 +865,8 @@ class ApiClient {
     return (_decode(res) as Map<String, dynamic>)['ok'] as bool? ?? false;
   }
 
-  /// A channel's presence roster: one entry per subscriber/member with their
-  /// identity hash, display name and online state. Populated for open-join
-  /// channels too, sourced from subscribers by the backend.
+  /// A channel's presence roster: one entry per member with their identity
+  /// hash, display name and online state.
   Future<List<PresenceEntry>> getChannelPresence(String channelHashHex) async {
     final res = await _http.get(_u('/channels/$channelHashHex/presence'));
     return (_decode(res) as List<dynamic>)
@@ -1045,6 +1045,117 @@ class ApiClient {
   Future<NomadHosting> refreshNomadHosting() async {
     final res = await _http.post(_u('/nomad/hosting/refresh'));
     return NomadHosting.fromJson(_decode(res) as Map<String, dynamic>);
+  }
+
+  // --- rrc (public chat) ---
+
+  /// A room name starts with '#', which a URL cannot carry literally, so it
+  /// travels without one and the backend puts it back.
+  static String _roomSegment(String room) =>
+      Uri.encodeComponent(room.startsWith('#') ? room.substring(1) : room);
+
+  Future<RRCState> getRrcState() async {
+    final res = await _http.get(_u('/rrc'));
+    return RRCState.fromJson(_decode(res) as Map<String, dynamic>);
+  }
+
+  Future<List<RRCHub>> getRrcHubs() async {
+    final res = await _http.get(_u('/rrc/hubs'));
+    return (_decode(res) as List<dynamic>)
+        .map((e) => RRCHub.fromJson(e as Map<String, dynamic>))
+        .toList();
+  }
+
+  Future<RRCSession> rrcConnect(String hubHash) async {
+    final res = await _http.post(
+      _u('/rrc/connect'),
+      headers: _jsonHeaders,
+      body: jsonEncode({'hub_hash': hubHash}),
+    );
+    final body = _decode(res) as Map<String, dynamic>;
+    return RRCSession.fromJson(
+        (body['session'] as Map<String, dynamic>?) ?? const {});
+  }
+
+  Future<RRCSession> rrcDisconnect() async {
+    final res = await _http.post(_u('/rrc/disconnect'));
+    final body = _decode(res) as Map<String, dynamic>;
+    return RRCSession.fromJson(
+        (body['session'] as Map<String, dynamic>?) ?? const {});
+  }
+
+  Future<bool> rrcJoinRoom(String room) async {
+    final res = await _http.post(
+      _u('/rrc/rooms'),
+      headers: _jsonHeaders,
+      body: jsonEncode({'room': room}),
+    );
+    return (_decode(res) as Map<String, dynamic>)['ok'] as bool? ?? false;
+  }
+
+  Future<bool> rrcPartRoom(String room) async {
+    final res = await _http.post(
+      _u('/rrc/rooms/part'),
+      headers: _jsonHeaders,
+      body: jsonEncode({'room': room}),
+    );
+    return (_decode(res) as Map<String, dynamic>)['ok'] as bool? ?? false;
+  }
+
+  Future<List<RRCLine>> getRrcLines(String room) async {
+    final res = await _http.get(_u('/rrc/rooms/${_roomSegment(room)}/messages'));
+    return (_decode(res) as List<dynamic>)
+        .map((e) => RRCLine.fromJson(e as Map<String, dynamic>))
+        .toList();
+  }
+
+  Future<bool> sendRrcMessage(String room, String text,
+      {bool notice = false}) async {
+    final res = await _http.post(
+      _u('/rrc/rooms/${_roomSegment(room)}/messages'),
+      headers: _jsonHeaders,
+      body: jsonEncode({'text': text, 'notice': notice}),
+    );
+    return (_decode(res) as Map<String, dynamic>)['ok'] as bool? ?? false;
+  }
+
+  Future<List<String>> getRrcRoster(String room) async {
+    final res = await _http.get(_u('/rrc/rooms/${_roomSegment(room)}/roster'));
+    return (_decode(res) as List<dynamic>).map((e) => '$e').toList();
+  }
+
+  Future<String> setRrcNickname(String nickname) async {
+    final res = await _http.post(
+      _u('/rrc/nickname'),
+      headers: _jsonHeaders,
+      body: jsonEncode({'nickname': nickname}),
+    );
+    final body = _decode(res) as Map<String, dynamic>;
+    return body['nickname'] as String? ?? '';
+  }
+
+  Future<List<String>> setRrcBookmark(String hubHash, bool bookmarked) async {
+    final res = await _http.post(
+      _u('/rrc/bookmarks'),
+      headers: _jsonHeaders,
+      body: jsonEncode({'hub_hash': hubHash, 'bookmarked': bookmarked}),
+    );
+    final body = _decode(res) as Map<String, dynamic>;
+    return [for (final e in (body['bookmarks'] as List<dynamic>? ?? [])) '$e'];
+  }
+
+  Future<RRCHosting> getRrcHosting() async {
+    final res = await _http.get(_u('/rrc/hosting'));
+    return RRCHosting.fromJson(_decode(res) as Map<String, dynamic>);
+  }
+
+  Future<RRCHosting> setRrcHosting({bool? enabled, String? hubName}) async {
+    final res = await _http.post(
+      _u('/rrc/hosting'),
+      headers: _jsonHeaders,
+      body: jsonEncode({'enabled': enabled, 'hub_name': hubName}),
+    );
+    return RRCHosting.fromJson(_decode(res) as Map<String, dynamic>);
   }
 
   /// A browser-openable URL for a cached /file/ download. Carries the token

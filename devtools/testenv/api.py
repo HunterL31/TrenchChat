@@ -1706,8 +1706,6 @@ def create_app(backend: Backend, *, token: str | None = None,
 
     @app.get("/channels/{channel_hash}/presence")
     def channel_presence(channel_hash: str):
-        # Roster source follows the channel kind: subscribers for open-join
-        # (no members table), members for invite-only. Same shape either way.
         return [
             {
                 "identity_hash": peer_hex,

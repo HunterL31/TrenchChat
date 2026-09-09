@@ -20,9 +20,8 @@ class ChannelPermissions {
   /// keeps compose enabled rather than locking everyone out.
   final bool sendMessage;
 
-  /// Whether a file may be attached here. Fails closed: an older backend, or
-  /// an open-join channel (which has no member list to authorise a serve
-  /// against), reports nothing and the attach control stays hidden.
+  /// Whether a file may be attached here. Fails closed: a backend that
+  /// reports nothing leaves the attach control hidden.
   final bool shareFiles;
 
   /// Fails closed against an older backend that doesn't report it.

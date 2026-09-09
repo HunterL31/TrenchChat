@@ -37,6 +37,7 @@ import 'compose_bar.dart';
 import 'friends_tab.dart';
 import 'iface_tab.dart';
 import 'map_tab.dart';
+import 'public_tab.dart';
 import 'message_list.dart';
 import 'presence_panel.dart';
 import 'server_rail.dart';
@@ -343,9 +344,9 @@ class _MainWindowState extends State<MainWindow> {
             ? state.voiceRosterByChannel[channelHash] ?? const []
             : const [];
         final inVoice = state.voiceChannelHash != null;
-        // GUI gate, mirroring actions.join_voice_channel: open-join channels
-        // need no permission row; the actions guard and VoiceManager's core
-        // enforcement remain the real boundaries.
+        // Client gate only, mirroring actions.join_voice_channel: the
+        // actions guard and VoiceManager's core enforcement are the real
+        // boundaries.
         final canJoinVoice = channel != null &&
             channelHash != null &&
             !inVoice &&
@@ -480,7 +481,13 @@ class _MainWindowState extends State<MainWindow> {
                       ChannelTab.iface => IfaceTab(state: state),
                       ChannelTab.friends =>
                         FriendsTab(state: state, onOpenNomadPage: _openLink),
-                      ChannelTab.browse => BrowserTab(state: state),
+                      ChannelTab.browse => BrowserTab(
+                          state: state,
+                          onOpenRrc: (link) {
+                            state.openRrcLink(link);
+                            setState(() => _tab = ChannelTab.public);
+                          }),
+                      ChannelTab.public => PublicTab(state: state),
                       ChannelTab.chat => MessageList(
                             messages: messages,
                             meHashHex: state.meHashHex,

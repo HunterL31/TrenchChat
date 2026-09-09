@@ -22,6 +22,7 @@ import signal
 import subprocess
 import sys
 import time
+import traceback
 from pathlib import Path
 
 _SCENARIOS_DIR = Path(__file__).resolve().parent
@@ -64,7 +65,16 @@ class Env:
         self.orch = orch
 
     def peers(self, *tags: str) -> tuple[Peer, ...]:
-        return tuple(self._peers[t] for t in tags)
+        """The testers a scenario asked for, each with its identity resolved.
+
+        Reading the hash here rather than on first use means a scenario can
+        still name a peer it has since killed or taken offline, which several
+        of them assert about. It is cached, so this costs one call per peer.
+        """
+        chosen = tuple(self._peers[t] for t in tags)
+        for peer in chosen:
+            peer.hash  # noqa: B018 -- resolving it is the point
+        return chosen
 
     def wait_alive(self, peer: Peer, timeout: float = 120.0) -> None:
         """Wait for a tester's API after a kill/start cycle."""
@@ -215,8 +225,22 @@ def _run_one(scen, env: Env) -> Result:
     except ScenarioFailure as e:
         return Result(scen.id, scen.title, scen.kind, "fail", time.time() - started, str(e))
     except Exception as e:
+        # An unexpected exception with no frame is unactionable: the same
+        # ConnectError reads identically whether a tester died, a call
+        # outlived a kill, or the orchestrator went away.
+        frames = traceback.extract_tb(e.__traceback__)
+        ours = [f for f in frames if _SCENARIO_DIR in Path(f.filename).parts]
+        body = [f for f in ours if Path(f.filename).name.startswith("scen_")]
+        picked = [f"{Path(f.filename).name}:{f.lineno} in {f.name}"
+                  for f in body[-1:] + (ours or frames)[-1:]]
+        where = " <- ".join(dict.fromkeys(picked))
         return Result(scen.id, scen.title, scen.kind, "error", time.time() - started,
-                      f"{type(e).__name__}: {e}")
+                      f"{type(e).__name__}: {e} (at {where})")
+
+
+# The directory every scenario and its helpers live in, so a traceback is
+# reported at the line a scenario actually ran rather than inside httpx.
+_SCENARIO_DIR = "scenarios"
 
 
 _MARK = {"pass": "PASS", "surprise": "NOTE", "fail": "FAIL", "error": "ERR "}

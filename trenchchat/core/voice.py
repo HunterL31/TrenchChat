@@ -136,8 +136,8 @@ class VoiceManager:
         """Enter a channel's voice session.
 
         Returns False if already in a session, the channel is unknown, the
-        caller lacks voice_chat on a non-open-join channel, or the session
-        is full. Link dialing and audio start are asynchronous.
+        caller lacks voice_chat, or the session is full. Link dialing and
+        audio start are asynchronous.
         """
         if self._session_channel is not None:
             return False

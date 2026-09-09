@@ -661,12 +661,9 @@ class Storage:
     def _migrate_tenure(self):
         """Create membership_tenure table and backfill current members if the table is new.
 
-        Skips open-join channels: ChannelManager.create_channel deliberately
-        never opens tenure for them, so backfilling one here from the members
-        table would make has_any_tenure() true and wrongly turn on tenure
-        filtering for subscribers who hold no tenure record of their own --
-        this runs on every startup, not just a genuine schema upgrade, since
-        an open-join channel's tenure count legitimately stays at 0 forever.
+        Every channel opens tenure on creation now, so a channel with no
+        rows here predates the feature and is backfilled once. This runs on
+        every startup rather than only on a genuine schema upgrade.
         """
         # The table is created by SCHEMA, but it may be empty on first run with
         # an existing database.  Backfill open intervals from current members.
@@ -1754,9 +1751,9 @@ class Storage:
     def has_any_tenure(self, channel_hash: str) -> bool:
         """Return True if the membership_tenure table has any rows for this channel.
 
-        Used to decide whether to apply tenure checks, if no tenure data exists
-        (e.g. an open-join channel or a channel bootstrapped before this feature),
-        tenure checks are skipped rather than incorrectly rejecting all messages.
+        Used to decide whether to apply tenure checks: with no tenure data
+        (a channel bootstrapped before this feature) they are skipped rather
+        than incorrectly rejecting every message.
 
         Resolving to the server scope is load-bearing: a channel inside a server
         has no tenure rows under its own hash, so without this the sync tenure

@@ -278,9 +278,26 @@ class TcIcons {
     ],
   ]);
 
+  /// A transmitter: the RRC surface, where chat goes through a hub rather
+  /// than peer to peer.
+  static const relay = TcIconData('relay', [
+    [
+      Offset(8, 5.5), Offset(8, 13),
+    ],
+    [
+      Offset(6, 13), Offset(10, 13),
+    ],
+    [
+      Offset(5.5, 7), Offset(4, 5), Offset(5.5, 3),
+    ],
+    [
+      Offset(10.5, 7), Offset(12, 5), Offset(10.5, 3),
+    ],
+  ]);
+
   static const List<TcIconData> all = [
     settings, lock, plus, join, emoji, hash, users, close, search, send, sync, map, iface,
-    mic, micMuted, headset, menu, globe,
+    mic, micMuted, headset, menu, globe, relay,
   ];
 }
 

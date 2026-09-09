@@ -65,10 +65,6 @@ class TestServerCreation:
         assert alice.storage.get_role(h, alice.identity.hash_hex) == ROLE_OWNER
         assert alice.storage.has_any_tenure(h) is True
 
-    def test_server_is_never_open_join(self, peer_factory):
-        alice = peer_factory("alice")
-        h = alice.server_mgr.create_server("S")
-
     def test_server_does_not_appear_in_channel_list(self, peer_factory):
         alice = peer_factory("alice")
         h = alice.server_mgr.create_server("S")

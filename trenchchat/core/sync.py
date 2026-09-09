@@ -1212,9 +1212,8 @@ class SyncManager:
         ones this affects.
 
         The tenure checks below are only applied when tenure data exists for
-        the channel (skips open-join
-        channels and channels bootstrapped before this feature). Two
-        independent checks:
+        the channel, which skips channels bootstrapped before this feature.
+        Two independent checks:
           - sender: the claimed author must actually have been a member at
             that timestamp, or the message could be a kicked member's replay
             or an outright forgery.

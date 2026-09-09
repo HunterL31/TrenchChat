@@ -8,12 +8,11 @@ import 'package:flutter_ui/app_state.dart';
 
 import 'fake_backend.dart';
 
-Map<String, Object?> _channelJson(String name, {bool openJoin = true, String? serverHash}) => {
+Map<String, Object?> _channelJson(String name, {String? serverHash}) => {
       'hash': 'hash-$name',
       'name': name,
       'description': '',
       'creator_hash': 'creator',
-      'open_join': openJoin,
       'created_at': 0,
       'server_hash': serverHash,
     };

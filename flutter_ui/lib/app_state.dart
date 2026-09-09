@@ -19,6 +19,7 @@ import 'api/models/link_quality.dart';
 import 'api/models/member.dart';
 import 'api/models/message.dart';
 import 'api/models/nomad.dart';
+import 'api/models/rrc.dart';
 import 'api/models/permissions.dart';
 import 'api/models/server.dart';
 import 'api/models/settings.dart';
@@ -213,6 +214,39 @@ class AppState extends ChangeNotifier {
 
   /// Saved page bookmarks. Local-only, like [friends].
   List<NomadBookmark> nomadBookmarks = [];
+
+  /// Public chat over RRC. None of this is stored anywhere: a hub keeps no
+  /// history and neither do we, so everything here dies with the session and
+  /// with the process. See docs/rrc.md.
+  RRCState rrcState = const RRCState.empty();
+
+  /// Transcripts per room, from GET on join and kept live by
+  /// [RrcMessageEvent]. Bounded backend-side at MAX_ROOM_LINES.
+  final Map<String, List<RRCLine>> rrcLinesByRoom = {};
+
+  /// Our own hub. Off until switched on: hosting announces this node as a
+  /// service and carries other people's traffic.
+  RRCHosting rrcHosting = const RRCHosting.off();
+
+  /// Why the last session ended, when the hub or the link said. Cleared on
+  /// the next connect.
+  String rrcSessionReason = '';
+
+  /// An rrc:// link waiting for the PUBLIC tab to open it. Set when a link is
+  /// followed from somewhere else in the app and taken exactly once, so
+  /// re-entering the tab later does not dial a hub again.
+  RRCLink? rrcPendingLink;
+
+  RRCLink? takeRrcPendingLink() {
+    final link = rrcPendingLink;
+    rrcPendingLink = null;
+    return link;
+  }
+
+  void openRrcLink(RRCLink link) {
+    rrcPendingLink = link;
+    notifyListeners();
+  }
 
   int _networkMapRevision = 0;
 
@@ -956,6 +990,125 @@ class AppState extends ChangeNotifier {
   Future<void> loadNomadBookmarks() async {
     try {
       nomadBookmarks = await api.getNomadBookmarks();
+      notifyListeners();
+    } catch (e) {
+      _reportActionError(e);
+    }
+  }
+
+  // --- rrc (public chat) ---
+
+  Future<void> refreshRrc() async {
+    try {
+      rrcState = await api.getRrcState();
+      notifyListeners();
+    } catch (e) {
+      _reportActionError(e);
+    }
+  }
+
+  Future<void> refreshRrcHosting() async {
+    try {
+      rrcHosting = await api.getRrcHosting();
+      notifyListeners();
+    } catch (e) {
+      _reportActionError(e);
+    }
+  }
+
+  /// Opens a session to a hub. Never automatic: the hub learns this node's
+  /// identity and sees every room joined and every line typed, so the caller
+  /// asks first.
+  Future<bool> connectRrcHub(String hubHash) async {
+    try {
+      rrcSessionReason = '';
+      rrcLinesByRoom.clear();
+      await api.rrcConnect(hubHash);
+      await refreshRrc();
+      return true;
+    } catch (e) {
+      _reportActionError(e);
+      return false;
+    }
+  }
+
+  Future<void> disconnectRrc() async {
+    try {
+      await api.rrcDisconnect();
+      rrcLinesByRoom.clear();
+      await refreshRrc();
+    } catch (e) {
+      _reportActionError(e);
+    }
+  }
+
+  Future<bool> joinRrcRoom(String room) async {
+    try {
+      final ok = await api.rrcJoinRoom(room);
+      await refreshRrc();
+      if (ok) await loadRrcLines(room);
+      return ok;
+    } catch (e) {
+      _reportActionError(e);
+      return false;
+    }
+  }
+
+  Future<void> partRrcRoom(String room) async {
+    try {
+      await api.rrcPartRoom(room);
+      rrcLinesByRoom.remove(room);
+      await refreshRrc();
+    } catch (e) {
+      _reportActionError(e);
+    }
+  }
+
+  /// Reads a room's transcript back from the backend. Only what this node was
+  /// present for exists: the hub holds nothing older to ask for.
+  Future<void> loadRrcLines(String room) async {
+    try {
+      rrcLinesByRoom[room] = await api.getRrcLines(room);
+      notifyListeners();
+    } catch (e) {
+      _reportActionError(e);
+    }
+  }
+
+  /// Sends one line. A leading '/me ' becomes an ACTION, which every other
+  /// RRC client renders as an emote.
+  Future<bool> sendRrcMessage(String room, String text) async {
+    try {
+      return await api.sendRrcMessage(room, text);
+    } catch (e) {
+      _reportActionError(e);
+      return false;
+    }
+  }
+
+  Future<bool> setRrcNickname(String nickname) async {
+    try {
+      await api.setRrcNickname(nickname);
+      await refreshRrc();
+      return true;
+    } catch (e) {
+      _reportActionError(e);
+      return false;
+    }
+  }
+
+  Future<void> setRrcBookmark(String hubHash, bool bookmarked) async {
+    try {
+      await api.setRrcBookmark(hubHash, bookmarked);
+      await refreshRrc();
+    } catch (e) {
+      _reportActionError(e);
+    }
+  }
+
+  Future<void> setRrcHosting({bool? enabled, String? hubName}) async {
+    try {
+      rrcHosting = await api.setRrcHosting(enabled: enabled, hubName: hubName);
       notifyListeners();
     } catch (e) {
       _reportActionError(e);
@@ -1907,6 +2060,48 @@ class AppState extends ChangeNotifier {
         if (existing == null && friends.isNotEmpty) {
           unawaited(loadFriends());
         }
+        notifyListeners();
+      case RrcHubEvent(:final hubHash, :final name):
+        final existing = rrcState.hubs.indexWhere((h) => h.hash == hubHash);
+        final now = DateTime.now().millisecondsSinceEpoch / 1000.0;
+        final hub = RRCHub(
+          hash: hubHash,
+          name: name.isEmpty && existing >= 0
+              ? rrcState.hubs[existing].name
+              : name,
+          heardAt: now,
+          bookmarked: rrcState.bookmarks.contains(hubHash),
+          connected: rrcState.session.hub == hubHash,
+        );
+        final hubs = [...rrcState.hubs];
+        if (existing >= 0) {
+          hubs[existing] = hub;
+        } else {
+          hubs.add(hub);
+        }
+        hubs.sort((a, b) => b.heardAt.compareTo(a.heardAt));
+        rrcState = RRCState(
+          session: rrcState.session,
+          hubs: hubs,
+          nickname: rrcState.nickname,
+          bookmarks: rrcState.bookmarks,
+          rosters: rrcState.rosters,
+        );
+        notifyListeners();
+      case RrcSessionEvent(:final state, :final reason):
+        rrcSessionReason = reason;
+        // A session change moves the rooms with it, and a dropped link takes
+        // every transcript, so the whole surface is re-read rather than
+        // patched from an event that only names the new state.
+        if (state == 'idle' || state == 'unreachable') rrcLinesByRoom.clear();
+        unawaited(refreshRrc());
+      case RrcRoomEvent(:final room, :final state):
+        if (state == 'parted') {
+          rrcLinesByRoom.remove(room);
+        }
+        unawaited(refreshRrc());
+      case RrcMessageEvent(:final room, :final line):
+        rrcLinesByRoom.putIfAbsent(room, () => []).add(line);
         notifyListeners();
       case FileFetchEvent(
           :final fileHash,

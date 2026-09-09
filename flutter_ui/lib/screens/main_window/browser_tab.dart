@@ -9,6 +9,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../../api/models/nomad.dart';
+import '../../api/models/rrc.dart';
 import '../../app_state.dart';
 import '../../format.dart';
 import '../../micron/micron_parser.dart';
@@ -23,9 +24,13 @@ import '../dialogs/nomad_hosting_dialog.dart';
 import '../dialogs/rename_bookmark_dialog.dart';
 
 class BrowserTab extends StatefulWidget {
-  const BrowserTab({super.key, required this.state});
+  const BrowserTab({super.key, required this.state, this.onOpenRrc});
 
   final AppState state;
+
+  /// Called with an rrc:// link the PUBLIC tab should open. Null leaves such
+  /// a link refused, which is what a test that only exercises browsing gets.
+  final ValueChanged<RRCLink>? onOpenRrc;
 
   @override
   State<BrowserTab> createState() => _BrowserTabState();
@@ -807,6 +812,11 @@ class _BrowserTabState extends State<BrowserTab> {
       setState(() => _info = unsupported);
       return;
     }
+    final rrc = parseRrcLink(target);
+    if (rrc != null && widget.onOpenRrc != null) {
+      widget.onOpenRrc!(rrc);
+      return;
+    }
     if (target.contains(':/file/') || target.startsWith('/file/')) {
       _fetchFile(target);
       return;
@@ -823,8 +833,8 @@ class _BrowserTabState extends State<BrowserTab> {
           'mutual friends — add the peer from the FRIENDS tab first.';
     }
     if (lower.startsWith('rrc://')) {
-      return 'That is a link to an RRC voice hub, which this browser does '
-          'not open.';
+      return 'That link names an RRC hub, but not by a destination hash, so '
+          'there is nothing to dial.';
     }
     return null;
   }

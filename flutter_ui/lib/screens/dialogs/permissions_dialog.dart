@@ -1,8 +1,6 @@
 // Channel permissions dialog -- port of invite_dialogs.py's
 // ChannelPermissionsDialog role matrix over GET/POST /channels/{h}/permissions.
-// The Qt dialog also edits the open-join/discoverable flags; the permissions
-// endpoint doesn't expose those, so this port covers the per-role matrix. The
-// caller gates on MANAGE_CHANNEL; edit_channel_permissions re-checks it
+// The caller gates on MANAGE_CHANNEL; edit_channel_permissions re-checks it
 // server-side regardless.
 import 'package:flutter/material.dart';
 

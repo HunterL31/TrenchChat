@@ -11,12 +11,21 @@ import '../../widgets/tc_button.dart';
 import '../../widgets/tc_icon.dart';
 import '../../widgets/tc_tooltip.dart';
 
-enum ChannelTab { chat, map, iface, friends, browse }
+enum ChannelTab { chat, public, map, iface, friends, browse }
 
 /// Below this header width -- narrower than the compact breakpoint, which is
-/// the whole window -- the tabs render as icons and the link label drops, so
-/// the channel name stays visible and the FRIENDS tab stays on-screen.
+/// the whole window -- the topic and the link-quality label drop, so the
+/// channel name stays visible.
 const double _denseHeaderWidth = 560;
+
+/// Below this the tab labels drop to icons. Six labelled tabs need more room
+/// than the topic does, so they get their own threshold rather than going
+/// with it and taking the topic down early.
+const double _labelledTabsWidth = 800;
+
+/// What the connection pill adds when it is up. It only shows while live
+/// updates are down, and when it does the tab labels are what gives.
+const double _connectionPillWidth = 120;
 
 class ChannelHeader extends StatelessWidget {
   const ChannelHeader({
@@ -67,14 +76,19 @@ class ChannelHeader extends StatelessWidget {
 
     return LayoutBuilder(
       builder: (context, constraints) {
-        final dense = compact || constraints.maxWidth < _denseHeaderWidth;
-        return _buildBar(context, tc, hopsLabel, dense);
+        final pill = connectionState == TcConnState.connected
+            ? 0.0
+            : _connectionPillWidth;
+        final dense = compact || constraints.maxWidth < _denseHeaderWidth + pill;
+        final iconTabs =
+            compact || constraints.maxWidth < _labelledTabsWidth + pill;
+        return _buildBar(context, tc, hopsLabel, dense, iconTabs);
       },
     );
   }
 
-  Widget _buildBar(
-      BuildContext context, TCSectionColors tc, String hopsLabel, bool dense) {
+  Widget _buildBar(BuildContext context, TCSectionColors tc, String hopsLabel,
+      bool dense, bool iconTabs) {
     return Container(
       height: 42,
       padding: const EdgeInsets.symmetric(horizontal: 12),
@@ -156,19 +170,22 @@ class ChannelHeader extends StatelessWidget {
             children: [
               _HeaderTab(
                   label: 'CHAT', icon: TcIcons.hash, tab: ChannelTab.chat,
-                  active: activeTab, onTap: onTabSelected, compact: dense),
+                  active: activeTab, onTap: onTabSelected, compact: iconTabs),
+              _HeaderTab(
+                  label: 'PUBLIC', icon: TcIcons.relay, tab: ChannelTab.public,
+                  active: activeTab, onTap: onTabSelected, compact: iconTabs),
               _HeaderTab(
                   label: 'MAP', icon: TcIcons.map, tab: ChannelTab.map,
-                  active: activeTab, onTap: onTabSelected, compact: dense),
+                  active: activeTab, onTap: onTabSelected, compact: iconTabs),
               _HeaderTab(
                   label: 'IFACE', icon: TcIcons.iface, tab: ChannelTab.iface,
-                  active: activeTab, onTap: onTabSelected, compact: dense),
+                  active: activeTab, onTap: onTabSelected, compact: iconTabs),
               _HeaderTab(
                   label: 'FRIENDS', icon: TcIcons.users, tab: ChannelTab.friends,
-                  active: activeTab, onTap: onTabSelected, compact: dense),
+                  active: activeTab, onTap: onTabSelected, compact: iconTabs),
               _HeaderTab(
                   label: 'NET', icon: TcIcons.globe, tab: ChannelTab.browse,
-                  active: activeTab, onTap: onTabSelected, compact: dense),
+                  active: activeTab, onTap: onTabSelected, compact: iconTabs),
             ],
           ),
         ],

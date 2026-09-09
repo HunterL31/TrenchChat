@@ -74,9 +74,8 @@ class ServerManager:
             display_name=self._identity.display_name,
             role=ROLE_OWNER,
         )
-        # Unconditional, unlike ChannelManager's open-join gate: servers are
-        # always invite-only, so tenure always applies. Without it the owner's
-        # own messages would be filtered out of every sync response.
+        # Without this the owner's own messages would be filtered out of
+        # every sync response.
         self._storage.open_tenure(hash_hex, self._identity.hash_hex, created_at)
         RNS.log(f"TrenchChat [server]: created '{name}' ({hash_hex[:12]}…)",
                 RNS.LOG_NOTICE)
