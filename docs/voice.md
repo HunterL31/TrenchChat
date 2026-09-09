@@ -150,6 +150,20 @@ stream that dies mid-call is rebuilt by a cooldown-limited watchdog in
   runs the target's authorize callback, so core enforcement is exercised).
 - `tests/test_voice_audio.py`: jitter buffer (always runs), mixer/Opus
   (skip cleanly without numpy/libopus).
+- `tests/test_voice_speech.py`: a real sentence, measured where a
+  listener hears it. `tests/speech.py` synthesises the utterance (four
+  words at distinct falling pitches, a fricative onset, a breath pause)
+  and scores what comes back: per-band envelope correlation, word count,
+  word order by pitch, onset timing, and how quiet the pauses stayed.
+  It runs at two levels: through the codec and the packet format with no
+  clock in it, and microphone to speaker between real peers, where
+  `tests/fake_audio.py` stands in for sounddevice with a scripted
+  microphone and a recording speaker so the whole production pipeline
+  (gate, encoder, transport, jitter buffer, decoder, mixer, 20 ms
+  playout) runs unmodified. A test that sends placeholder bytes cannot
+  see a codec peak past the frame length field, a gate that drops an
+  already-numbered frame, or a stream that arrives complete but
+  unintelligible; this is where those live.
 - `tests/test_voice_quality.py`: receive-quality metrics (loss, late,
   jitter), and a comparison against Discord's standard voice profile:
   same codec settings (Opus 48 kHz mono, 20 ms frames), the Discord
