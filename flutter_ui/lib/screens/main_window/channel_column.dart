@@ -48,6 +48,7 @@ class ChannelColumn extends StatelessWidget {
     this.onEditPermissions,
     this.onLeaveChannel,
     this.unreadCounts = const {},
+    this.mentionCounts = const {},
   });
 
   final String? serverName;
@@ -108,6 +109,10 @@ class ChannelColumn extends StatelessWidget {
   /// Channel hash -> unread message count. Zero or missing draws nothing;
   /// anything else brightens the row and adds the same count pill DM rows use.
   final Map<String, int> unreadCounts;
+
+  /// Channel hash -> unread messages that name this identity. Drawn as a
+  /// distinct pill so a ping is not lost in a busy channel's unread count.
+  final Map<String, int> mentionCounts;
 
   /// The right-click menu for one channel row. Leaving is
   /// offered for standalone channels only: membership of a server's channel
@@ -210,6 +215,7 @@ class ChannelColumn extends StatelessWidget {
                       incomplete: syncStates[c.hash] == 'incomplete',
                       menuItems: _menuFor(c),
                       unread: unreadCounts[c.hash] ?? 0,
+                      mentions: mentionCounts[c.hash] ?? 0,
                     ),
                 ],
                 if (directChannels.isNotEmpty || onCreateDirectChannel != null) ...[
@@ -223,6 +229,7 @@ class ChannelColumn extends StatelessWidget {
                       incomplete: syncStates[c.hash] == 'incomplete',
                       menuItems: _menuFor(c),
                       unread: unreadCounts[c.hash] ?? 0,
+                      mentions: mentionCounts[c.hash] ?? 0,
                     ),
                 ],
                 if (dms.isNotEmpty || onStartDm != null) ...[
@@ -346,6 +353,30 @@ class _UnreadPill extends StatelessWidget {
       ),
       child: Text(
         '$count',
+        style: TextStyle(fontSize: TCType.textMicro, color: tc.bgApp),
+      ),
+    );
+  }
+}
+
+/// The ping pill: an unread count that names the reader. Distinct from the
+/// plain unread pill because being addressed is a different thing from
+/// having missed something.
+class _MentionPill extends StatelessWidget {
+  const _MentionPill({required this.count});
+  final int count;
+
+  @override
+  Widget build(BuildContext context) {
+    final tc = SectionTheme.of(context);
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+      decoration: BoxDecoration(
+        color: tc.accentSecondary,
+        borderRadius: tcCorners(context, scale: 0.5),
+      ),
+      child: Text(
+        '@$count',
         style: TextStyle(fontSize: TCType.textMicro, color: tc.bgApp),
       ),
     );
@@ -498,6 +529,7 @@ class _ChannelRow extends StatefulWidget {
     this.incomplete = false,
     this.menuItems = const [],
     this.unread = 0,
+    this.mentions = 0,
   });
 
   final Channel channel;
@@ -506,6 +538,7 @@ class _ChannelRow extends StatefulWidget {
   final bool incomplete;
   final List<TcContextMenuItem> menuItems;
   final int unread;
+  final int mentions;
 
   @override
   State<_ChannelRow> createState() => _ChannelRowState();
@@ -565,7 +598,10 @@ class _ChannelRowState extends State<_ChannelRow> {
                     ),
                   ),
                 ),
-                if (widget.unread > 0 && !selected) ...[
+                if (widget.mentions > 0 && !selected) ...[
+                  _MentionPill(count: widget.mentions),
+                  const SizedBox(width: 4),
+                ] else if (widget.unread > 0 && !selected) ...[
                   _UnreadPill(count: widget.unread),
                   const SizedBox(width: 4),
                 ],

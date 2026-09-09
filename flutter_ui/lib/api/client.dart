@@ -164,12 +164,22 @@ class ApiClient {
         .toList();
   }
 
-  /// Unread message counts per subscribed channel, own messages excluded.
-  Future<Map<String, int>> getChannelUnread() async {
+  /// Unread message counts per subscribed channel, own messages excluded,
+  /// and the subset of those that mention this identity. A backend that does
+  /// not report mentions yields an empty map, which draws no ping badges.
+  Future<({Map<String, int> unread, Map<String, int> mentions})>
+      getChannelUnread() async {
     final res = await _http.get(_u('/channels/unread'));
     final body = _decode(res) as Map<String, dynamic>;
-    final counts = body['counts'] as Map<String, dynamic>? ?? {};
-    return counts.map((k, v) => MapEntry(k, (v as num).toInt()));
+    return (
+      unread: _countMap(body['counts']),
+      mentions: _countMap(body['mentions']),
+    );
+  }
+
+  static Map<String, int> _countMap(Object? value) {
+    if (value is! Map<String, dynamic>) return const {};
+    return value.map((k, v) => MapEntry(k, (v as num).toInt()));
   }
 
   /// Advances the channel's read watermark to now.

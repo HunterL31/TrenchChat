@@ -25,6 +25,7 @@ import 'api/models/settings.dart';
 import 'api/models/voice.dart';
 import 'api/ws.dart';
 import 'attachments.dart';
+import 'mentions.dart';
 import 'theme/theme_spec.dart';
 
 /// How long reaction events for one channel are coalesced before the
@@ -118,6 +119,11 @@ class AppState extends ChangeNotifier {
   /// Loaded from GET /channels/unread, bumped live on WS messages for
   /// channels not on screen, and zeroed when a channel is selected.
   final Map<String, int> unreadByChannel = {};
+
+  /// Unread messages that name this identity, per channel. A subset of
+  /// [unreadByChannel], counted apart so a ping is not lost in a busy
+  /// channel's badge.
+  final Map<String, int> mentionsByChannel = {};
 
   /// Per-channel sync state from the backend's SyncStatusTracker. "incomplete"
   /// means history is known to be missing -- including rows a peer served that
@@ -454,6 +460,7 @@ class AppState extends ChangeNotifier {
   /// costs nothing but a stale badge on next launch.
   void _clearUnread(String channelHashHex) {
     unreadByChannel[channelHashHex] = 0;
+    mentionsByChannel[channelHashHex] = 0;
     unawaited(api.markChannelRead(channelHashHex).catchError((_) => false));
   }
 
@@ -462,11 +469,18 @@ class AppState extends ChangeNotifier {
   /// on screen always reads as caught up.
   Future<void> refreshUnreadCounts() async {
     try {
+      final counts = await api.getChannelUnread();
       unreadByChannel
         ..clear()
-        ..addAll(await api.getChannelUnread());
+        ..addAll(counts.unread);
+      mentionsByChannel
+        ..clear()
+        ..addAll(counts.mentions);
       final selected = selectedChannelHash;
-      if (selected != null) unreadByChannel[selected] = 0;
+      if (selected != null) {
+        unreadByChannel[selected] = 0;
+        mentionsByChannel[selected] = 0;
+      }
     } catch (_) {
       // Live WS bumps still maintain the in-session counts.
     }
@@ -1803,6 +1817,9 @@ class AppState extends ChangeNotifier {
       return;
     }
     unreadByChannel[channelHash] = (unreadByChannel[channelHash] ?? 0) + 1;
+    if (contentMentions(message.content, meHashHex)) {
+      mentionsByChannel[channelHash] = (mentionsByChannel[channelHash] ?? 0) + 1;
+    }
   }
 
   /// Applies a socket event directly, so tests can exercise event handling
