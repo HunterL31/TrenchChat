@@ -80,6 +80,9 @@ _DEFAULT_PORT = 8810
 
 _STARTUP_SYNC_DELAY_SECS = 3.0
 
+# uvicorn's HTTP implementation, named rather than left on "auto".
+_HTTP_IMPLEMENTATION = "h11"
+
 _DESKTOP_BINARIES = {
     "Windows": "build/windows/x64/runner/Release/flutter_ui.exe",
     "Linux": "build/linux/x64/release/bundle/flutter_ui",
@@ -177,6 +180,22 @@ def _require_websocket_support() -> None:
         "  Install one into this interpreter and start again:\n"
         f"    {sys.executable} -m pip install \"uvicorn[standard]\"\n"
     )
+
+
+def _server_config(app, port: int) -> "uvicorn.Config":
+    """uvicorn's configuration for the API server.
+
+    The HTTP implementation is named because "auto" takes httptools whenever
+    it imports, and a frozen build can carry an httptools whose compiled
+    parser did not come with it. uvicorn then raises in its protocol factory
+    for every connection: the port accepts and answers nothing, so the client
+    sits on its loading spinner with no error to show. h11 is pure Python and
+    installs with uvicorn, so it cannot arrive half-built.
+    """
+    import uvicorn
+
+    return uvicorn.Config(app, host="127.0.0.1", port=port,
+                          log_level="warning", http=_HTTP_IMPLEMENTATION)
 
 
 def main():
@@ -277,8 +296,7 @@ def main():
         # Mounted last, so every API route declared above still wins.
         app.mount("/", StaticFiles(directory=str(_WEB_DIR), html=True), name="web-client")
 
-    server = uvicorn.Server(uvicorn.Config(
-        app, host="127.0.0.1", port=args.port, log_level="warning"))
+    server = uvicorn.Server(_server_config(app, args.port))
     server_thread = threading.Thread(target=server.run, daemon=True, name="api-server")
     server_thread.start()
     deadline = time.time() + 15
