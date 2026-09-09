@@ -47,7 +47,8 @@ CACHE_PRUNE_INTERVAL_SECS = 300.0
 NO_CACHE_GRACE_SECS = 60.0
 
 # NomadNet's shorthand for the nomadnetwork.node destination type. Other
-# schemes (lxmf@, rrc://, p:) name destinations this browser does not dial.
+# schemes (lxmf@, p:) name destinations this browser does not dial; an
+# rrc:// link is handed to the RRC client rather than refused.
 NODE_SCHEME_PREFIX = "nnn@"
 
 # Ceilings on what a page's input fields can put on the wire.

@@ -169,8 +169,8 @@ class ReactionManager:
                      emoji_hash: str, subscriber_hashes: list[str]) -> None:
         """Record and broadcast a new reaction.
 
-        Stores the reaction locally first, then sends MT_REACTION to every
-        subscriber in the channel (excluding ourselves).
+        Stores the reaction locally first, then sends MT_REACTION to everyone
+        in *subscriber_hashes* but us, holding what cannot go out yet.
         """
         self._storage.insert_reaction(
             message_id=message_id,
