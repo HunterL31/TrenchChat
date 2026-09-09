@@ -100,8 +100,7 @@ Rules for the client, same as every other manager:
   own main thread (the API layer does this via `EventBus`); never touch
   UI state directly from them.
 - **Gate the join control** on `storage.has_permission(channel_hash,
-  self_hex, VOICE_CHAT)` (open-join channels need no permission row),
-  that is the client layer of the three-layer enforcement
+  self_hex, VOICE_CHAT)`, the client layer of the three-layer enforcement
   (`.claude/rules/permission-enforcement.md`). The Flutter client
   implements this gate in `main_window.dart` via
   `GET /channels/{h}/my_permissions`; its voice UI lives in

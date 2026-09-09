@@ -359,7 +359,7 @@ Auto-joining a channel via an accepted invite fires an additional sync trigger, 
 
   Both checks are applied on both sides of a sync exchange: the responder filters before sending (`_handle_sync_request`), and the requester filters again on what it receives (`_handle_sync_response`), defense in depth against a single compromised or bugged peer skipping the check on its side.
 
-  If a channel has zero rows in `membership_tenure` (an open-join channel, or one bootstrapped before tenure tracking existed), tenure checks are skipped entirely (`storage.has_any_tenure()`) rather than incorrectly rejecting everything.
+  If a channel has zero rows in `membership_tenure` (one bootstrapped before tenure tracking existed), tenure checks are skipped entirely (`storage.has_any_tenure()`) rather than incorrectly rejecting everything.
 
 ### The `full_sync` permission
 

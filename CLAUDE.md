@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 TrenchChat is a decentralized, end-to-end encrypted group chat application built on the
 [Reticulum Network Stack](https://reticulum.network/) (RNS) and [LXMF](https://github.com/markqvist/LXMF).
 There is no server: every client is a peer, addressed by a cryptographic identity, and messages are
-unicast LXMF packets sent directly to each subscriber (no broadcast/multicast layer). It runs over
+unicast LXMF packets sent directly to each member (no broadcast/multicast layer). It runs over
 whatever transport Reticulum supports (LoRa, packet radio, TCP/IP, serial, etc).
 
 **The client UI is the Flutter app in `flutter_ui/`** (web + desktop), launched via
@@ -72,7 +72,7 @@ needed for normal development.
 
 ### Core managers (`trenchchat/core/`)
 
-`identity.py`, `channel.py`, `messaging.py`, `subscription.py`, `invite.py`, `sync.py`, `storage.py`
+`identity.py`, `channel.py`, `messaging.py`, `invite.py`, `sync.py`, `storage.py`
 (SQLite, optionally SQLCipher-encrypted), `permissions.py`, `presence.py`, `reaction.py`, `avatar.py`,
 `user_directory.py`, `friends.py`, `direct.py` (one-to-one conversations), `propagation.py`,
 `lockbox.py` (PIN-based encryption gate), `link_quality.py`, `image.py`,
@@ -113,11 +113,19 @@ asyncio via `EventBus`.
   backend over the same profile (`trenchchat/single_instance.py` + the launcher's `/ui/open`).
 - Backend URL resolution lives in `lib/main.dart` (`resolveBaseUrl`): dart-define → web `?api=` →
   web page origin → desktop `TC_API_URL` env var → tester-A default `127.0.0.1:8801`.
+- Public chat is its own tab (`screens/main_window/public_tab.dart`), not a channel: RRC state is
+  session-scoped and reaches `AppState` through `/rrc/*` and the `rrc_*` events, never `Storage`.
+  Connecting to a hub is always confirmed, because a hub sees this node's identity and everything
+  it says; `docs/rrc.md` has the trust model.
 - Tests: `flutter analyze && flutter test` after any `flutter_ui/` change. Widget tests inject
   `AppState(baseUrl, httpClient: backend.client())` with `test/fake_backend.dart` (MockClient);
-  flutter_test stubs real HTTP. Golden baselines are Windows-rendered: 4 goldens permanently fail
-  on Linux from ~0.1% anti-aliasing drift (primitives ×3 + regions channel_header); leave them
-  unless their content genuinely changed, and regenerate goldens on Windows when possible.
+  flutter_test stubs real HTTP. Golden baselines are Windows-rendered, so a set of goldens fails
+  on Linux from anti-aliasing drift alone (10 as of the RRC work: primitives ×3, main_window ×2,
+  windows ×4, regions channel_column). Measure that baseline on a clean tree before reading a
+  golden failure as yours; leave a drift failure alone, and regenerate on Windows when the
+  content genuinely changed. The PUBLIC tab changed two on purpose (`icons`, since the icon pack
+  gained `relay`, and `regions channel_header`, since the tab bar gained a tab); both are waiting
+  on a Windows regeneration.
 
 ### Direct messages: mutual friends only, propagation instead of sync
 
@@ -192,12 +200,11 @@ which wipes display names and can demote the owner). Full rationale in
 
 ### Known application-layer hardening gaps
 
-`docs/security-improvements.md` documents three known, not-yet-fixed gaps and design options for each:
-display-name spoofing (self-asserted,
-unverified), and no rate limiting on inbound control messages. Reticulum/LXMF's crypto (X25519 +
-AES-256, Ed25519 signing) is not in question; these are all application-layer trust gaps. Read this
-doc before touching `subscription.py`'s `MT_SUBSCRIBER_LIST` handling or any control-message ingestion
-path.
+`docs/security-improvements.md` documents two known, not-yet-fixed gaps and design options for
+each: display-name spoofing (self-asserted, unverified), and no rate limiting on inbound control
+messages. Reticulum/LXMF's crypto (X25519 + AES-256, Ed25519 signing) is not in question; these
+are application-layer trust gaps. Read that doc before touching any control-message ingestion
+path. Its subscriber-list sections are history: that protocol went with public channels.
 
 ## Test architecture
 

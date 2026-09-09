@@ -9,7 +9,8 @@ crypto.
 It supersedes the earlier version of this file, which described three gaps
 (unsigned subscriber lists, display-name spoofing, no rate limiting) and
 proposed fixes. One of those proposals rested on a false premise; see
-"Correction" below.
+"Correction" below. The first gap is gone rather than fixed: subscriber lists
+were removed with open-join channels.
 
 ---
 
@@ -72,13 +73,20 @@ nothing did.
   and emoji requests have their own throttles. This does not help against Sybil
   attacks.
 
-### Subscriber lists are now signed and versioned
-`MT_SUBSCRIBER_LIST` carries an owner Ed25519 signature over
-`(channel_hash, version, packed_list)` and a monotonic per-channel version.
-Receivers reject unsigned lists, bad signatures, and any version not newer than
-what they hold, and discard entries that are not well-formed identity hex. The
-subscriber set drives message delivery, so forging it redirected a peer's
-outbound traffic and replaying an old one resurrected removed subscribers.
+### Subscriber lists were signed and versioned, then removed outright
+`MT_SUBSCRIBER_LIST` carried an owner Ed25519 signature over
+`(channel_hash, version, packed_list)` and a monotonic per-channel version,
+because the subscriber set drove message delivery: forging it redirected a
+peer's outbound traffic and replaying an old one resurrected removed
+subscribers.
+
+**That protocol no longer exists.** It served open-join channels and nothing
+else, and public chat is RRC now (`docs/rrc.md`), so `subscription.py`, both
+tables and the whole signed document went with them. Delivery is addressed
+from the signed member-list document instead. Kept here as the record of a
+retired attack surface, not as a live guarantee: the replay rule it describes
+still governs member-list documents, which is what scenario `restart1`
+covers.
 
 ### Sync
 - **Unsolicited history injection**: a `MT_SYNC_RESPONSE` writes messages into
@@ -104,9 +112,10 @@ which a modified client does not run. `_signer_may_apply` now diffs against
 
 - `MANAGE_CHANNEL` previously had no core enforcement anywhere, and
   `broadcast_permissions` had no check on either side, so any admin could
-  rewrite every role's permissions network-wide, including flipping
-  `open_join`, which disables the `send_message` gate and the sync membership
-  check for every recipient.
+  rewrite every role's permissions network-wide. The worst of it was flipping
+  `open_join`, which disabled the `send_message` gate and the sync membership
+  check for every recipient; that flag is gone, the missing enforcement was
+  the real defect and it is fixed either way.
 - Owner-list mutations were ungated: an admin could add themselves as owner and
   demote the real one. Only an existing owner may change the owner set.
 - Member removal requires `KICK`; admin changes require `MANAGE_ROLES`.
@@ -267,8 +276,9 @@ nothing, and the launcher starts normally when it does.
   broadcast on the shared mesh. Released messages now also pass the control
   throttle instead of arriving as one burst.
 - **Emoji responses must answer a request we made**, and the shared-channel
-  check names the requester on open-join channels, it previously returned true
-  for anyone whenever we were in any public channel, which made it vacuous.
+  check names the requester. It previously returned true for anyone whenever we
+  were in any open-join channel, which made it vacuous; those channels are gone,
+  but the check is written to name the requester either way.
 - **Per-identity throttle maps are capped.** Identities are free to mint, so
   these cannot be bounded by how many peers talk to us.
 - **Chat messages fail closed on a missing channel row**, matching
@@ -351,10 +361,11 @@ four patterns the first pass had not systematically looked for.
   protected `creator_hash` and `server_hash` from being overwritten this way
   but not `permissions`, so a demoted creator (still holding the destination)
   could announce their private channel as public and flip `open_join`, after
-  which the message handler stops checking membership and `SEND_MESSAGE`
-  entirely. A known channel's announce now refreshes only name and
-  description, and `creator_hash` comes from the announcing identity rather
-  than the payload.
+  which the message handler stopped checking membership and `SEND_MESSAGE`
+  entirely. A known channel's announce refreshed only name and description
+  after the fix, and `creator_hash` came from the announcing identity rather
+  than the payload. Channel announces have since been removed with open-join
+  channels, so the path this describes no longer exists.
 - Tenure was repaired from message timestamps. `_repair_tenure_from_message_history`
   widened a member's join time to cover any older stored message from them,
   but that timestamp is self-asserted and bounded only against the future, so
@@ -672,9 +683,9 @@ survive a restart.
 A shared file never travels with the message. The message carries a manifest
 (name, size, SHA-256, chunk root) under 200 bytes, and the bytes move only when
 a member asks a holder for a range of chunks over the file plane
-(`network/file_transport.py`, aspect `files`). Invite-only channels only: an
-open-join channel has no member list to authorise a serve against, so
-`actions.file_share_refusal` refuses a manifest there.
+(`network/file_transport.py`, aspect `files`). A serve is authorised against
+the member list, which every channel now has: `actions.file_share_refusal`
+refuses a manifest for a channel this node holds no record of.
 
 **What a member learns.** Every manifest, because it rides the message. A holder
 also learns which member asked it for which file, and when. Members already hold

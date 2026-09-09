@@ -56,23 +56,30 @@ When adding a new field:
 
 Control messages are identified by `fields[F_MSG_TYPE]`. Defined values:
 
-| Constant | Value | Module |
-|----------|-------|--------|
-| `MT_SUBSCRIBE` | `"subscribe"` | `subscription.py` |
-| `MT_UNSUBSCRIBE` | `"unsubscribe"` | `subscription.py` |
-| `MT_SUBSCRIBER_LIST` | `"subscriber_list"` | `subscription.py` |
+| Constant | Value | Handled in |
+|----------|-------|------------|
 | `MT_INVITE` | `"invite"` | `invite.py` |
 | `MT_JOIN_REQUEST` | `"join_request"` | `invite.py` |
 | `MT_MEMBER_LIST_UPDATE` | `"member_list_update"` | `invite.py` |
 | `MT_MISSED_DELIVERY` | `"missed_delivery"` | `sync.py` |
 | `MT_SYNC_REQUEST` | `"sync_request"` | `sync.py` |
 | `MT_SYNC_RESPONSE` | `"sync_response"` | `sync.py` |
+| `MT_AVATAR_UPDATE` | `"avatar_update"` | `avatar.py` |
+| `MT_REACTION` | `"reaction"` | `reaction.py` |
+| `MT_EMOJI_REQUEST` | `"emoji_request"` | `reaction.py` |
+| `MT_EMOJI_RESPONSE` | `"emoji_response"` | `reaction.py` |
+| `MT_PRESENCE` | `"presence"` | `presence.py`, and `sync.py` for its probes |
+| `MT_GOODBYE` | `"goodbye"` | `presence.py` |
 | `MT_VOICE_JOIN` | `"voice_join"` | `voice.py` |
 | `MT_VOICE_LEAVE` | `"voice_leave"` | `voice.py` |
 | `MT_VOICE_STATE` | `"voice_state"` | `voice.py` |
 | `MT_FRIEND_REQUEST` | `"friend_request"` | `friends.py` |
 | `MT_FRIEND_ACCEPT` | `"friend_accept"` | `friends.py` |
 | `MT_FRIEND_DECLINE` | `"friend_decline"` | `friends.py` |
+
+Every one is defined in `protocol.py`; the module column says which manager
+acts on it. RRC has no entry here at all: its own message types live in
+`core/rrc_wire.py` and never travel inside an LXMF envelope.
 
 Chat messages have **no** `F_MSG_TYPE` field. Handlers should check `F_MSG_TYPE in fields`
 to distinguish control messages from chat messages.

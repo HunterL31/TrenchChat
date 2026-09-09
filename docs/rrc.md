@@ -60,7 +60,9 @@ end-to-end between members, and its sync responder was already a member. A
 hub is not a member of anything. It is a stranger who sees everything.
 
 The client says so before the first connection to a hub, and never connects
-without being asked to.
+without being asked to. That confirmation is the PUBLIC tab's one gate, and
+`public_tab_test.dart` holds it: a hub is never dialled without it, an
+`rrc://` link included.
 
 ## Deliberate non-fixes
 
@@ -114,6 +116,8 @@ leave open-join channels where they were. It was rejected for three reasons:
 | Client: hubs, rooms, transcripts | `trenchchat/core/rrc.py` |
 | Hub: sessions, rooms, forwarding | `trenchchat/core/rrc_hub.py` |
 | Hub discovery | `network/announce.py::HubAnnounceHandler` |
+| Endpoints | `devtools/testenv/api.py`'s `/rrc/*` |
+| Client surface | `flutter_ui/lib/screens/main_window/public_tab.dart` |
 
 `rrc_wire.py` is the interop contract and is not TrenchChat's to change; its
 numbers come from specification document 3 and rrcd's `EX1-RRCD.md`, and

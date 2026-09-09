@@ -111,7 +111,7 @@ Run the test suite after any change to `trenchchat/`:
 
 ## How It Works
 
-TrenchChat assigns every user a stable cryptographic identity derived from an Ed25519/X25519 keypair stored locally at `~/.trenchchat/identity`. Channels are addressed by a hash derived from the creator's identity and the channel name. Messages are unicast LXMF packets sent directly to each subscriber; there is no broadcast or multicast layer.
+TrenchChat assigns every user a stable cryptographic identity derived from an Ed25519/X25519 keypair stored locally at `~/.trenchchat/identity`. Channels are addressed by a hash derived from the creator's identity and the channel name. Messages are unicast LXMF packets sent directly to each member; there is no broadcast or multicast layer.
 
 ### Channels
 
@@ -154,8 +154,9 @@ trenchchat/
     identity.py             Keypair management
     channel.py              Channel creation and announce
     messaging.py            Send / receive chat messages
-    subscription.py         Subscribe / unsubscribe, subscriber list sync
     invite.py               Invite token flow and signed member-list documents
+    rrc.py                  Public chat: RRC client, hubs and rooms
+    rrc_hub.py              Public chat: hosting a hub for other clients
     storage.py              SQLite persistence
     sync.py                 Offline sync (missed-delivery hints + gap fill)
   network/
