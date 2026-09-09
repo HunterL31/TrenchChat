@@ -1186,6 +1186,67 @@ should size a device against. The 82 MB the holder gained while serving about
 7 MB of ranges is one sample with debug logging on, and it is
 [recorded as open](#open) rather than chased here.
 
+### `rrc`: public chat over Reticulum Relay Chat
+
+One tester hosts an `rrc.hub` destination, the others hear its announce, dial
+it, identify, exchange HELLO/WELCOME and join a room. This is the layer
+pytest's `FakeRRCTransport` cannot reach: announce propagation, path
+resolution, link establishment, and identify racing the first HELLO.
+
+Three of the five rows exist to pin RRC's own bargain rather than to catch a
+regression in our code. A hub buffers nothing, so `rrc3` proves a late
+joiner gets no backlog, and `rrc5` proves a lost hub takes the whole session
+with it. Both would look like defects if they were not written down as
+intended, and both are what stops anyone quietly adding a store to the hub
+and calling it an improvement.
+
+The manual interop check (joining a room on a real `rrcd`, and being joined
+by a real `rrc-gui` or `rrc-web` client) is documented in `scen_rrc.py` and
+is not automated. Our own suite agreeing with itself proves nothing about
+compatibility.
+
+| ID | Peers | Actions | Expected result |
+|---|---|---|---|
+| rrc1 | A,B | A enables hosting; B hears the announce, dials, identifies and is welcomed | ✅ **3/3 runs, 32s** on broadband, **47s** on `lora_fast`. B reads the hub's advertised name back off the WELCOME and A's hub reports one client |
+| rrc2 | A,B,C | B and C both join `#general` on A's hub and talk both ways | ✅ **3/3 runs, 33-34s** on broadband, **62s** on `lora_fast`. The hub holds both in the room and neither sees its own line come back |
+| rrc3 | A,B,C | B says a line while alone, C joins afterwards, B says another | ✅ **3/3 runs, 49s** on broadband, **70s** on `lora_fast`. C never receives the first line (held for 15s) and receives the second. **This row found the receipt defect below**: it failed on `lora_fast` at 344s before the fix |
+| rrc4 | A,B,C | C parts; B says a line; then B parts too | ✅ **3/3 runs, 48-49s** on broadband, **129s** on `lora_fast`. A parted client is sent nothing (held 15s), and the room stops existing once the last member leaves |
+| rrc5 | A,B | A switches hosting off while B is joined, then on again | ✅ **5/5 runs, 39s** on broadband, **64s** on `lora_fast`. B's session ends and its rooms clear; reconnecting is a new session with an empty transcript. **This row found the re-registration defect below** |
+
+#### rrc3: chat packets asked for delivery receipts nobody read
+
+`rrc3` failed on `lora_fast` and passed on broadband, which is the shape the
+LoRa pass exists to find. Both link-plane sends went out as
+`RNS.Packet(link, payload).send()`, and `create_receipt` defaults to `True`,
+so every chat line, every JOIN and every PONG created a receipt RNS then
+tracked for delivery proof and retransmission. Nothing in the RRC planes
+ever read one. At 100 Mbps that overhead is invisible; at 5.5 kbps it was
+enough that a message sent into a two-member room did not arrive inside
+270s.
+
+Both sends now pass `create_receipt=False`, matching what
+`voice_transport.py` already does for every link packet it sends. The row
+went from timing out at 344s to passing in 70s.
+
+The same fix carries a second one that was not the cause but was a real
+defect: `Packet.send()` returns `False` when it could not send at all, and
+both call sites ignored it and reported success. A line reported as sent
+that never left is the one lie a chat client must not tell, so both now
+check the return and log a warning.
+
+#### rrc5: a hosting stop made the next start impossible
+
+Switching hosting off dropped the `RNS.Destination` reference without
+deregistering it, so switching it back on tried to register the same
+destination twice and RNS refused with
+`KeyError: Attempt to register an already registered destination`. The
+destination now outlives a stop and a `None` hub name is what means "not
+hosting", which is the shape `node_transport.py` already used.
+
+pytest did not catch this and could not have: `FakeHostTransport` has no
+destination to register, so its stop/start cycle is unconditionally clean.
+This is the case the scenario suite exists for.
+
 ## The LoRa pass
 
 Every family re-run with `--link-profile lora_fast` (SF7, 5.5 kbps, 60±20ms, 1%
@@ -1370,6 +1431,7 @@ All fifteen families built and run: **127 scenarios, 99 strict and 28 probes**, 
 | `bw`: bytes on the wire | 1 (probe) | Measured before and after reconciliation; see the family's section |
 | `interop`: direct messages with other LXMF clients | 4 (4 strict) | All passing against a real bare RNS+LXMF client; interop4 found a real gap, 5/5 after the fix |
 | `files`: shared files in invite-only channels | 11 (7 strict, 4 probes) | All strict rows passing; files1 alone found three defects, files8 a fourth, the two radio probes two more and files9 a seventh, all fixed. files5, files8 and files10 record what a slow link, a lossy one and a shared one each cost, and files11 moves the 5 MB ceiling itself over SF7 in 5h 14m |
+| `rrc`: public chat over Reticulum Relay Chat | 5 (5 strict) | All passing on broadband and on `lora_fast`; rrc3 found the delivery-receipt overhead and rrc5 the destination re-registration, both fixed |
 
 **All strict scenarios pass**, sync11 included: 6/6 on broadband and 3/3 on
 `lora_fast` since beacons carry a sync probe, from 1/5 and 0/3 when this

@@ -178,6 +178,11 @@ class RRCBookmarkRequest(BaseModel):
     bookmarked: bool = True
 
 
+class RRCHostingRequest(BaseModel):
+    enabled: bool | None = None
+    hub_name: str | None = None
+
+
 class NomadBookmarkDeleteRequest(BaseModel):
     # The path contains '/', so deletion takes a body rather than a URL segment.
     node_hash: str
@@ -1527,6 +1532,16 @@ def create_app(backend: Backend, *, token: str | None = None,
     def rrc_set_bookmark(req: RRCBookmarkRequest):
         return {"ok": True, **actions.rrc_set_bookmark(
             backend.rrc, req.hub_hash, req.bookmarked)}
+
+    @app.get("/rrc/hosting")
+    def get_rrc_hosting():
+        return backend.rrc_hub.status()
+
+    @app.post("/rrc/hosting")
+    def set_rrc_hosting(req: RRCHostingRequest):
+        status = actions.rrc_set_hosting(
+            backend.rrc_hub, enabled=req.enabled, hub_name=req.hub_name)
+        return {"ok": True, **status}
 
     # --- servers ---
 

@@ -49,6 +49,7 @@ from trenchchat.core.audio.engine import make_tone_pipeline
 from trenchchat.core.files import FileManager
 from trenchchat.core.node_browser import NodeBrowserManager
 from trenchchat.core.rrc import RRCManager
+from trenchchat.core.rrc_hub import RRCHubManager
 from trenchchat.network.router import Router
 from trenchchat.network.file_transport import RNSFileTransport
 from trenchchat.network.node_transport import RNSNodeTransport
@@ -350,6 +351,10 @@ class Backend:
         self.rrc_transport = RNSRRCTransport(self.identity)
         self.rrc = RRCManager(self.identity, self.config,
                               transport=self.rrc_transport)
+        # One transport serves both halves: this node can speak to a hub and
+        # be one, which is what keeps rrcd from being the only hub there is.
+        self.rrc_hub = RRCHubManager(self.config, self.rrc_transport)
+        self.rrc_hub.restore()
 
         def _on_hub_discovered(hub_hex: str, hub_name: str, iface) -> None:
             self.rrc.note_hub(hub_hex, hub_name)

@@ -617,6 +617,47 @@ class Peer:
         return {e["identity_hash"]: e["link_state"]
                 for e in self.voice_roster(channel_hash)}
 
+    # --- rrc (public chat) ---
+
+    def rrc_state(self) -> dict:
+        return self._get("/rrc")
+
+    def rrc_hubs(self) -> list[dict]:
+        return self._get("/rrc/hubs")
+
+    def rrc_set_hosting(self, *, enabled: bool | None = None,
+                        hub_name: str | None = None) -> dict:
+        return self._post("/rrc/hosting",
+                          {"enabled": enabled, "hub_name": hub_name})
+
+    def rrc_hosting(self) -> dict:
+        return self._get("/rrc/hosting")
+
+    def rrc_connect(self, hub_hash: str) -> dict:
+        return self._post("/rrc/connect", {"hub_hash": hub_hash})
+
+    def rrc_disconnect(self) -> dict:
+        return self._post("/rrc/disconnect")
+
+    def rrc_join(self, room: str) -> dict:
+        return self._post("/rrc/rooms", {"room": room})
+
+    def rrc_part(self, room: str) -> dict:
+        return self._post("/rrc/rooms/part", {"room": room})
+
+    def rrc_say(self, room: str, text: str) -> dict:
+        return self._post(f"/rrc/rooms/{room.lstrip('#')}/messages",
+                          {"text": text})
+
+    def rrc_lines(self, room: str) -> list[dict]:
+        return self._get(f"/rrc/rooms/{room.lstrip('#')}/messages")
+
+    def rrc_texts(self, room: str) -> list[str]:
+        return [line["text"] for line in self.rrc_lines(room)]
+
+    def rrc_rooms(self) -> dict:
+        return self.rrc_state()["session"]["rooms"]
+
     # --- nomad page browsing ---
 
     def nomad_nodes(self) -> list[dict]:

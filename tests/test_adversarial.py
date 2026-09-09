@@ -51,11 +51,20 @@ import LXMF
 import RNS
 
 from tests.conftest import forge
+from tests.fake_rrc import (
+    FakeHostTransport, FakeHubRegistry, FakeRRCTransport, unwelcomed_session,
+)
 from tests.helpers import sign_as, wait_for, wait_for_member
 from trenchchat.network.router import (
     PATH_REQUEST_GLOBAL_BURST, PATH_REQUEST_MAX_SOURCES, QUARANTINE_MAX_PER_SENDER,
 )
+from trenchchat.config import Config
 from trenchchat.core import actions
+from trenchchat.core import rrc_wire
+from trenchchat.core.rrc_hub import (
+    ERR_NOT_IN_ROOM, ERR_NOT_WELCOMED, ERR_RATE, ERR_TOO_LONG,
+    ERR_TOO_MANY_ROOMS, HUB_LIMITS, RRCHubManager,
+)
 from trenchchat.core.invite import _sign, _signed_payload
 from trenchchat.core.messaging import _compute_message_id
 from trenchchat.core.naming import dm_hash_for
@@ -4564,3 +4573,139 @@ class TestAdversarialMessageRequests:
 
         held = alice.storage.get_message_requests(mallory_hex)
         assert len(held) <= MAX_HELD_PER_SENDER
+
+
+class TestAdversarialRRCHub:
+    """A hosted RRC hub takes packets from anyone who can reach it.
+
+    Unlike a channel, a hub has no member list to authorise against and no
+    invite to have been granted: reaching it is the only qualification, so
+    every rule it has must hold against a client that ignores all of them.
+    """
+
+    def _hub(self, tmp_path):
+        registry = FakeHubRegistry()
+        host = FakeHostTransport("cc" * 16, registry)
+        hub = RRCHubManager(Config(data_dir=tmp_path), host,
+                            hub_name="adversarial")
+        hub.start()
+        return hub, host, registry
+
+    def _session(self, host, registry, client_hex, *, welcomed=True):
+        transport = FakeRRCTransport(client_hex, registry)
+        session = unwelcomed_session(host, transport, client_hex)
+        if welcomed:
+            host.handle(session, rrc_wire.pack_envelope(
+                rrc_wire.T_HELLO, src=bytes.fromhex(client_hex)))
+        return session, transport
+
+    def _errors(self, host):
+        return [e.get(rrc_wire.K_BODY) for _, e in host.sent
+                if e.get(rrc_wire.K_T) == rrc_wire.T_ERROR]
+
+    def test_a_client_that_skips_hello_is_refused(self, tmp_path):
+        hub, host, registry = self._hub(tmp_path)
+        session, _ = self._session(host, registry, "de" * 16, welcomed=False)
+
+        host.handle(session, rrc_wire.pack_envelope(
+            rrc_wire.T_JOIN, src=bytes.fromhex("de" * 16), room="#general"))
+
+        assert self._errors(host) == [ERR_NOT_WELCOMED]
+        assert hub.status()["rooms"] == {}
+
+    def test_a_forged_sender_is_replaced_with_the_authenticated_one(
+            self, tmp_path):
+        """The link is the only proof of who a client is, so whatever it puts
+        in K_SRC is discarded rather than believed."""
+        hub, host, registry = self._hub(tmp_path)
+        victim_hex, mallory_hex = "a1" * 16, "de" * 16
+        victim, _ = self._session(host, registry, victim_hex)
+        mallory, _ = self._session(host, registry, mallory_hex)
+        for session, who in ((victim, victim_hex), (mallory, mallory_hex)):
+            host.handle(session, rrc_wire.pack_envelope(
+                rrc_wire.T_JOIN, src=bytes.fromhex(who), room="#general"))
+
+        host.sent.clear()
+        host.handle(mallory, rrc_wire.pack_envelope(
+            rrc_wire.T_MSG, src=bytes.fromhex(victim_hex), room="#general",
+            body="the victim did not say this"))
+
+        forwarded = [e for _, e in host.sent
+                     if e.get(rrc_wire.K_T) == rrc_wire.T_MSG]
+        assert forwarded, "the message was not forwarded at all"
+        assert all(e[rrc_wire.K_SRC].hex() == mallory_hex for e in forwarded)
+
+    def test_speaking_in_a_room_never_joined_is_refused(self, tmp_path):
+        hub, host, registry = self._hub(tmp_path)
+        mallory, _ = self._session(host, registry, "de" * 16)
+        host.sent.clear()
+
+        host.handle(mallory, rrc_wire.pack_envelope(
+            rrc_wire.T_MSG, src=bytes.fromhex("de" * 16), room="#general",
+            body="shouting into a room i am not in"))
+
+        assert ERR_NOT_IN_ROOM in self._errors(host)
+        assert hub.status()["rooms"] == {}
+
+    def test_a_flood_is_rate_limited_rather_than_forwarded(self, tmp_path):
+        hub, host, registry = self._hub(tmp_path)
+        mallory_hex = "de" * 16
+        mallory, _ = self._session(host, registry, mallory_hex)
+        host.handle(mallory, rrc_wire.pack_envelope(
+            rrc_wire.T_JOIN, src=bytes.fromhex(mallory_hex), room="#general"))
+        host.sent.clear()
+
+        limit = HUB_LIMITS[rrc_wire.LIMIT_MSGS_PER_MINUTE]
+        for i in range(limit * 3):
+            host.handle(mallory, rrc_wire.pack_envelope(
+                rrc_wire.T_MSG, src=bytes.fromhex(mallory_hex),
+                room="#general", body=f"flood {i}"))
+
+        assert ERR_RATE in self._errors(host)
+        accepted = len([e for _, e in host.sent
+                        if e.get(rrc_wire.K_T) == rrc_wire.T_MSG])
+        assert accepted <= limit
+
+    def test_the_room_cap_holds_against_a_client_that_ignores_it(self, tmp_path):
+        hub, host, registry = self._hub(tmp_path)
+        mallory_hex = "de" * 16
+        mallory, _ = self._session(host, registry, mallory_hex)
+
+        limit = HUB_LIMITS[rrc_wire.LIMIT_ROOMS_PER_SESSION]
+        for i in range(limit * 3):
+            host.handle(mallory, rrc_wire.pack_envelope(
+                rrc_wire.T_JOIN, src=bytes.fromhex(mallory_hex),
+                room=f"#room{i}"))
+
+        assert ERR_TOO_MANY_ROOMS in self._errors(host)
+        assert len(hub.status()["rooms"]) <= limit
+
+    def test_an_oversized_body_is_refused_not_relayed(self, tmp_path):
+        hub, host, registry = self._hub(tmp_path)
+        mallory_hex = "de" * 16
+        mallory, _ = self._session(host, registry, mallory_hex)
+        host.handle(mallory, rrc_wire.pack_envelope(
+            rrc_wire.T_JOIN, src=bytes.fromhex(mallory_hex), room="#general"))
+        host.sent.clear()
+
+        host.handle(mallory, rrc_wire.pack_envelope(
+            rrc_wire.T_MSG, src=bytes.fromhex(mallory_hex), room="#general",
+            body="x" * (HUB_LIMITS[rrc_wire.LIMIT_MSG_BODY_BYTES] + 100)))
+
+        assert ERR_TOO_LONG in self._errors(host)
+        assert not [e for _, e in host.sent
+                    if e.get(rrc_wire.K_T) == rrc_wire.T_MSG]
+
+    def test_a_malformed_envelope_never_reaches_the_hub(self, tmp_path):
+        """The wire layer is the hub's first gate: rubbish is dropped before
+        anything stateful sees it."""
+        hub, host, registry = self._hub(tmp_path)
+        mallory, _ = self._session(host, registry, "de" * 16)
+        host.sent.clear()
+
+        for payload in (b"", b"\xff\xff\xff", b"not cbor",
+                        b"\x00" * (rrc_wire.MAX_ENVELOPE_BYTES + 10)):
+            host.handle(mallory, payload)
+
+        assert host.sent == []
+        assert hub.status()["clients"] == 1

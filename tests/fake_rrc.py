@@ -13,6 +13,7 @@ adversarial behaviour baked in. Session state, the HELLO/WELCOME order and
 the room model are the real ones; only the transport underneath is fake.
 """
 
+import os
 import threading
 import time
 
@@ -21,7 +22,7 @@ from trenchchat.core.rrc_wire import (
     CAP_RESOURCE_ENVELOPE, DEFAULT_LIMITS, K_BODY, K_DST, K_ID, K_NICK,
     K_ROOM, K_T, T_ACTION, T_ERROR, T_HELLO, T_JOIN, T_JOINED, T_MSG,
     T_NOTICE, T_PART, T_PARTED, T_PING, T_PONG, T_WELCOME,
-    pack_envelope, unpack_envelope,
+    capabilities_of, limits_of, pack_envelope, unpack_envelope,
 )
 from trenchchat.network.rrc_transport import (
     REASON_CLOSED, REASON_LOCAL, REASON_NO_PATH, SESSION_ACTIVE,
@@ -30,6 +31,10 @@ from trenchchat.network.rrc_transport import (
 )
 
 FAKE_DELIVERY_DELAY = 0.02
+
+
+def _new_session_id() -> str:
+    return os.urandom(8).hex()
 
 
 class FakeHubRegistry:
@@ -349,12 +354,16 @@ class FakeRRCTransport(RRCTransportBase):
                 if self._state != SESSION_HANDSHAKING:
                     return
                 self._state = SESSION_ACTIVE
-                body = envelope.get(K_BODY) or {}
+                body = envelope.get(K_BODY) if isinstance(
+                    envelope.get(K_BODY), dict) else {}
+                # Read off the WELCOME rather than out of the hub object, so
+                # a real RRCHubManager and a FakeHub are indistinguishable
+                # from here, which is what the real transport does too.
                 self._info = {
-                    "name": body.get(B_NAME, "") if isinstance(body, dict) else "",
-                    "version": body.get(B_VERSION, "") if isinstance(body, dict) else "",
-                    "capabilities": dict(self._session.hub.capabilities),
-                    "limits": dict(self._session.hub.limits),
+                    "name": body.get(B_NAME, ""),
+                    "version": body.get(B_VERSION, ""),
+                    "capabilities": capabilities_of(envelope),
+                    "limits": limits_of(envelope),
                 }
             self._notify_session(hub_hex, SESSION_ACTIVE)
             self._notify_envelope(hub_hex, envelope)
@@ -368,3 +377,130 @@ class FakeRRCTransport(RRCTransportBase):
                 msg_id=envelope.get(K_ID)))
             return
         self._notify_envelope(hub_hex, envelope)
+
+
+class FakeHostTransport(RRCTransportBase):
+    """The hosting half of the transport, backed by the registry.
+
+    Lets a real RRCHubManager be the hub a FakeRRCTransport connects to, so
+    a test exercises the actual hub code rather than FakeHub's stand-in. It
+    exposes the same three methods FakeHub does, which is what the client
+    transport calls.
+    """
+
+    def __init__(self, hub_hex: str, registry: FakeHubRegistry):
+        super().__init__()
+        self.hub_hex = hub_hex
+        self._registry = registry
+        self._lock = threading.RLock()
+        self._hosting = False
+        self._name = ""
+        self._sessions: dict[str, "FakeSession"] = {}
+        self._by_client: dict[str, str] = {}
+        self.dropped: list[tuple[str, str]] = []
+        self.announces = 0
+        # Every envelope the hub emitted, so a test can assert on the hub
+        # directly instead of needing a client to receive it.
+        self.sent: list[tuple[str, dict]] = []
+
+    # --- hosting API ---
+
+    def start_hosting(self, hub_name: str) -> str:
+        with self._lock:
+            self._hosting = True
+            self._name = hub_name
+        with self._registry.lock:
+            self._registry.hubs[self.hub_hex] = self
+        self.announce()
+        return self.hub_hex
+
+    def stop_hosting(self) -> None:
+        with self._lock:
+            self._hosting = False
+            self._sessions.clear()
+            self._by_client.clear()
+        with self._registry.lock:
+            self._registry.hubs.pop(self.hub_hex, None)
+
+    def announce(self) -> None:
+        self.announces += 1
+
+    def hosted_hash(self) -> str | None:
+        with self._lock:
+            return self.hub_hex if self._hosting else None
+
+    def send_to_client(self, session_id: str, payload: bytes) -> bool:
+        envelope = unpack_envelope(payload)
+        if envelope is not None:
+            self.sent.append((session_id, envelope))
+        with self._lock:
+            session = self._sessions.get(session_id)
+        if session is None:
+            return False
+        session.deliver(payload)
+        return True
+
+    def drop_client(self, session_id: str, reason: str = "") -> None:
+        with self._lock:
+            session = self._sessions.pop(session_id, None)
+            if session is not None:
+                self._by_client.pop(session.client_hex, None)
+        self.dropped.append((session_id, reason))
+
+    # --- what the client transport calls, matching FakeHub ---
+
+    def open_session(self, session: "FakeSession") -> None:
+        session_id = _new_session_id()
+        with self._lock:
+            self._sessions[session_id] = session
+            self._by_client[session.client_hex] = session_id
+
+    def handle(self, session: "FakeSession", payload: bytes) -> None:
+        with self._lock:
+            session_id = self._by_client.get(session.client_hex)
+        if session_id is None:
+            return
+        envelope = unpack_envelope(payload)
+        if envelope is None:
+            return
+        self._notify_client_envelope(session_id, session.client_hex, envelope)
+
+    def close_session(self, client_hex: str) -> None:
+        with self._lock:
+            session_id = self._by_client.pop(client_hex, None)
+            if session_id is not None:
+                self._sessions.pop(session_id, None)
+        if session_id is not None:
+            self._notify_client_gone(session_id)
+
+    # --- unused client half ---
+
+    def connect(self, hub_hash_hex: str) -> None:
+        raise NotImplementedError("this transport only hosts")
+
+    def disconnect(self, hub_hash_hex: str, reason: str = REASON_LOCAL) -> None:
+        raise NotImplementedError("this transport only hosts")
+
+    def send(self, hub_hash_hex: str, payload: bytes) -> bool:
+        return False
+
+    def session_state(self, hub_hash_hex: str) -> str:
+        return SESSION_IDLE
+
+    def hub_info(self, hub_hash_hex: str) -> dict:
+        return {}
+
+    def tick(self) -> None:
+        pass
+
+
+def unwelcomed_session(host: FakeHostTransport, transport: "FakeRRCTransport",
+                       client_hex: str) -> "FakeSession":
+    """A session open on the hub that has not sent HELLO.
+
+    No honest client reaches this state, which is exactly why a test needs
+    to build one: it is the only way to exercise the hub's WELCOME gate.
+    """
+    session = FakeSession(transport, host, client_hex)
+    host.open_session(session)
+    return session

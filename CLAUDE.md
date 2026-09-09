@@ -82,7 +82,12 @@ browsing is anonymous unless the user opts a specific node into identify-on-conn
 `files.py` (files shared in invite-only channels: a message carries only a manifest and the bytes
 are pulled chunk by chunk from any member holding them, over `network/file_transport.py` on the
 `files` aspect; the trust model, the deliberate costs and the store budgets are in
-`docs/security-improvements.md`).
+`docs/security-improvements.md`),
+`rrc.py` and `rrc_hub.py` (public chat, which is Reticulum Relay Chat rather than anything this
+project defines: the client speaks to any rrcd-compatible hub and this node can be one, over
+`network/rrc_transport.py` on the `rrc.hub` aspect, with the wire format in `core/rrc_wire.py`.
+RRC rooms are ephemeral and touch no table at all; the accepted centre, what a hub can see and the
+deliberate non-fixes are in `docs/rrc.md`).
 UI code must never construct LXMF messages or touch protocol fields directly: it reads
 `Storage`-backed state for display and delegates all mutations to the relevant core manager via
 the HTTP/WS API. RNS/LXMF callbacks fire on background threads; the API layer marshals them into

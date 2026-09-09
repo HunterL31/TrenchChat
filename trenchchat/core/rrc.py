@@ -410,8 +410,11 @@ class RRCManager:
         if room is None:
             return
         with self._lock:
-            if room not in self._rooms:
-                return
+            joined = room in self._rooms
+        if not joined:
+            RNS.log(f"TrenchChat [rrc]: dropped a line for {room}, "
+                    f"which this session is not in", RNS.LOG_DEBUG)
+            return
         self._record(room, msg_type, envelope.get(K_SRC), text,
                      envelope.get(K_NICK, ""),
                      timestamp_ms=envelope.get(K_TS),

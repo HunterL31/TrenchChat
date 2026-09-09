@@ -22,6 +22,7 @@ This module never touches Storage or core managers, matching
 voice_transport.py's layering: callbacks up, tick() down.
 """
 
+import os
 import threading
 import time
 
@@ -30,7 +31,8 @@ import RNS
 from trenchchat.core.rrc_wire import (
     B_CAPS, B_NAME, B_VERSION, CAP_ACTION, DEFAULT_LIMITS,
     HUB_APP_NAME, HUB_ASPECT,
-    K_BODY, K_ID, K_T, T_HELLO, T_PING, T_PONG, T_WELCOME,
+    K_BODY, K_ID, K_T, MAX_HUB_NAME_BYTES,
+    T_HELLO, T_PING, T_PONG, T_WELCOME,
     capabilities_of, limits_of, pack_envelope, unpack_envelope,
 )
 from trenchchat.version import app_version
@@ -59,6 +61,16 @@ RRC_DIAL_TIMEOUT_SECS = 30.0
 RRC_PACKET_RATE_LIMIT = 60
 RRC_PACKET_RATE_WINDOW = 1.0
 
+# Hosting. A hub is a service other people have to find, so it re-announces,
+# but on a long interval: an announce is a broadcast on shared spectrum, and
+# a hub that shouted every minute would cost every listener for nothing.
+RRC_ANNOUNCE_INTERVAL_SECS = 900.0
+# Links accepted but not yet welcomed. Nothing here has said who it is, so
+# this cap is the only thing bounding them.
+MAX_PENDING_CLIENT_LINKS = 32
+# Clients one hub will carry at once.
+MAX_CLIENT_SESSIONS = 64
+
 CLIENT_NAME = "TrenchChat"
 
 # What this client can do, advertised in HELLO. Only what is implemented is
@@ -77,6 +89,8 @@ class RRCTransportBase:
     def __init__(self):
         self._envelope_cb = None
         self._session_cb = None
+        self._client_envelope_cb = None
+        self._client_gone_cb = None
 
     def set_envelope_callback(self, cb) -> None:
         """cb(hub_hex, envelope): one validated inbound envelope."""
@@ -105,6 +119,53 @@ class RRCTransportBase:
 
     def tick(self) -> None:
         raise NotImplementedError
+
+    # --- hosting ---
+
+    def set_client_envelope_callback(self, cb) -> None:
+        """cb(session_id, identity_hex, envelope): one envelope from a client."""
+        self._client_envelope_cb = cb
+
+    def set_client_gone_callback(self, cb) -> None:
+        """cb(session_id): a client's link closed."""
+        self._client_gone_cb = cb
+
+    def start_hosting(self, hub_name: str) -> str | None:
+        raise NotImplementedError
+
+    def stop_hosting(self) -> None:
+        raise NotImplementedError
+
+    def announce(self) -> None:
+        raise NotImplementedError
+
+    def hosted_hash(self) -> str | None:
+        raise NotImplementedError
+
+    def send_to_client(self, session_id: str, payload: bytes) -> bool:
+        raise NotImplementedError
+
+    def drop_client(self, session_id: str, reason: str = "") -> None:
+        raise NotImplementedError
+
+    def _notify_client_envelope(self, session_id: str, identity_hex: str,
+                                envelope: dict) -> None:
+        if self._client_envelope_cb is None:
+            return
+        try:
+            self._client_envelope_cb(session_id, identity_hex, envelope)
+        except Exception as e:
+            RNS.log(f"TrenchChat [rrc]: client envelope callback error: {e}",
+                    RNS.LOG_ERROR)
+
+    def _notify_client_gone(self, session_id: str) -> None:
+        if self._client_gone_cb is None:
+            return
+        try:
+            self._client_gone_cb(session_id)
+        except Exception as e:
+            RNS.log(f"TrenchChat [rrc]: client gone callback error: {e}",
+                    RNS.LOG_ERROR)
 
     def _notify_envelope(self, hub_hex: str, envelope: dict) -> None:
         if self._envelope_cb is None:
@@ -146,6 +207,17 @@ class _Session:
         return RRC_DIAL_BACKOFF[index]
 
 
+class _ClientLink:
+    """One inbound client link on a hosted hub."""
+
+    def __init__(self, session_id: str, link):
+        self.session_id = session_id
+        self.link = link
+        self.opened_at = time.time()
+        self.identified = False
+        self.packet_times: list[float] = []
+
+
 class RNSRRCTransport(RRCTransportBase):
     """Real RNS Link implementation of the RRC hub plane."""
 
@@ -155,6 +227,15 @@ class RNSRRCTransport(RRCTransportBase):
         self._lock = threading.RLock()
         self._sessions: dict[str, _Session] = {}
         self._link_owner: dict[int, str] = {}
+
+        self._hub_dest = None
+        # None means not hosting. The destination outlives a stop, because
+        # RNS refuses to register the same one twice and a stop/start cycle
+        # would otherwise fail on the second start.
+        self._hub_name: str | None = None
+        self._last_announce = 0.0
+        self._clients: dict[str, _ClientLink] = {}
+        self._client_of_link: dict[int, str] = {}
 
     # --- commands ---
 
@@ -210,6 +291,9 @@ class RNSRRCTransport(RRCTransportBase):
 
     def tick(self) -> None:
         now = time.time()
+        if self._hub_name is not None and \
+                now - self._last_announce >= RRC_ANNOUNCE_INTERVAL_SECS:
+            self.announce()
         redial: list[str] = []
         expired: list[tuple[str, str]] = []
         with self._lock:
@@ -420,12 +504,20 @@ class RNSRRCTransport(RRCTransportBase):
         if link is None:
             return False
         try:
-            RNS.Packet(link, payload).send()
-            return True
+            # send() returns False when it could not go: a closed link, or no
+            # interface that would carry it. Ignoring that reports a line as
+            # sent that never left, which is the one lie a chat client must
+            # not tell.
+            sent = RNS.Packet(link, payload, create_receipt=False).send()
         except Exception as e:
             RNS.log(f"TrenchChat [rrc]: send to {hub_hex[:12]}… failed: {e}",
                     RNS.LOG_WARNING)
             return False
+        if sent is False:
+            RNS.log(f"TrenchChat [rrc]: {len(payload)}B for {hub_hex[:12]}… "
+                    f"could not be sent", RNS.LOG_WARNING)
+            return False
+        return True
 
     def _on_closed(self, link) -> None:
         hub_hex = self._owner_of(link)
@@ -443,6 +535,165 @@ class RNSRRCTransport(RRCTransportBase):
         # A new link is a new session: RRC keeps no continuity across one, so
         # the caller has to rejoin rather than assume its rooms survived.
         self._notify_session(hub_hex, SESSION_IDLE, REASON_CLOSED)
+
+
+    # --- hosting ---
+
+    def start_hosting(self, hub_name: str) -> str | None:
+        """Serve rrc.hub from this node, and announce that it is up."""
+        with self._lock:
+            if self._hub_dest is None:
+                self._hub_dest = RNS.Destination(
+                    self._identity.rns_identity,
+                    RNS.Destination.IN,
+                    RNS.Destination.SINGLE,
+                    HUB_APP_NAME,
+                    HUB_ASPECT,
+                )
+                self._hub_dest.set_link_established_callback(self._on_client_link)
+            self._hub_name = hub_name
+            dest_hash = self._hub_dest.hash.hex()
+        self.announce()
+        RNS.log(f"TrenchChat [rrc]: hosting hub {dest_hash[:12]}… "
+                f"({hub_name})", RNS.LOG_NOTICE)
+        return dest_hash
+
+    def stop_hosting(self) -> None:
+        with self._lock:
+            clients = list(self._clients.values())
+            self._clients.clear()
+            self._client_of_link.clear()
+            self._hub_name = None
+        for client in clients:
+            self._teardown(client.link)
+
+    def announce(self) -> None:
+        """Announce the hosted hub, carrying its name as plain UTF-8.
+
+        The specification fixes the aspect but not the payload, so the
+        simplest encoding any client can read is the one that goes out.
+        """
+        with self._lock:
+            dest = self._hub_dest
+            name = self._hub_name
+        if dest is None or name is None:
+            return
+        try:
+            dest.announce(app_data=name.encode("utf-8")[:MAX_HUB_NAME_BYTES]
+                          or None)
+            self._last_announce = time.time()
+        except Exception as e:
+            RNS.log(f"TrenchChat [rrc]: hub announce failed: {e}", RNS.LOG_WARNING)
+
+    def hosted_hash(self) -> str | None:
+        with self._lock:
+            if self._hub_dest is None or self._hub_name is None:
+                return None
+            return self._hub_dest.hash.hex()
+
+    def send_to_client(self, session_id: str, payload: bytes) -> bool:
+        with self._lock:
+            client = self._clients.get(session_id)
+            link = client.link if client is not None else None
+        if link is None:
+            return False
+        try:
+            sent = RNS.Packet(link, payload, create_receipt=False).send()
+        except Exception as e:
+            RNS.log(f"TrenchChat [rrc]: send to client failed: {e}",
+                    RNS.LOG_WARNING)
+            return False
+        if sent is False:
+            RNS.log(f"TrenchChat [rrc]: {len(payload)}B for client "
+                    f"{session_id[:8]}… could not be sent", RNS.LOG_WARNING)
+            return False
+        return True
+
+    def drop_client(self, session_id: str, reason: str = "") -> None:
+        with self._lock:
+            client = self._clients.pop(session_id, None)
+            if client is not None:
+                self._client_of_link.pop(id(client.link), None)
+        if client is None:
+            return
+        if reason:
+            RNS.log(f"TrenchChat [rrc]: dropping client {session_id[:8]}…: "
+                    f"{reason}", RNS.LOG_WARNING)
+        self._teardown(client.link)
+
+    def _on_client_link(self, link) -> None:
+        link.set_packet_callback(self._on_client_packet)
+        link.set_link_closed_callback(self._on_client_link_closed)
+        evicted = None
+        session_id = os.urandom(8).hex()
+        with self._lock:
+            if self._hub_dest is None or self._hub_name is None:
+                accepted = False
+            elif len(self._clients) >= MAX_CLIENT_SESSIONS:
+                accepted = False
+            else:
+                # Nothing here has identified yet, so the pending cap is the
+                # only bound on links held before a HELLO arrives; drop the
+                # oldest rather than grow.
+                pending = [c for c in self._clients.values() if not c.identified]
+                if len(pending) >= MAX_PENDING_CLIENT_LINKS:
+                    oldest = min(pending, key=lambda c: c.opened_at)
+                    evicted = self._clients.pop(oldest.session_id, None)
+                    if evicted is not None:
+                        self._client_of_link.pop(id(evicted.link), None)
+                self._clients[session_id] = _ClientLink(session_id, link)
+                self._client_of_link[id(link)] = session_id
+                accepted = True
+        if evicted is not None:
+            self._notify_client_gone(evicted.session_id)
+            self._teardown(evicted.link)
+        if not accepted:
+            self._teardown(link)
+
+    def _on_client_packet(self, data, packet) -> None:
+        link = packet.link
+        now = time.time()
+        with self._lock:
+            session_id = self._client_of_link.get(id(link))
+            client = self._clients.get(session_id) if session_id else None
+            if client is None or not self._allow_client_packet(client, now):
+                return
+
+        envelope = unpack_envelope(data)
+        if envelope is None:
+            return
+        remote = link.get_remote_identity()
+        if remote is None:
+            # RRC has no accounts: the Link is the authentication, so an
+            # unidentified client has said nothing this hub can attribute.
+            # The identify packet can lose the race with a first HELLO, and
+            # the client retries, so this waits rather than dropping the link.
+            return
+        with self._lock:
+            client.identified = True
+        self._notify_client_envelope(session_id, remote.hash.hex(), envelope)
+
+    def _allow_client_packet(self, client: "_ClientLink", now: float) -> bool:
+        cutoff = now - RRC_PACKET_RATE_WINDOW
+        client.packet_times = [t for t in client.packet_times if t > cutoff]
+        if len(client.packet_times) >= RRC_PACKET_RATE_LIMIT:
+            return False
+        client.packet_times.append(now)
+        return True
+
+    def _on_client_link_closed(self, link) -> None:
+        with self._lock:
+            session_id = self._client_of_link.pop(id(link), None)
+            if session_id is not None:
+                self._clients.pop(session_id, None)
+        if session_id is not None:
+            self._notify_client_gone(session_id)
+
+    def _teardown(self, link) -> None:
+        try:
+            link.teardown()
+        except Exception as e:
+            RNS.log(f"TrenchChat [rrc]: link teardown error: {e}", RNS.LOG_DEBUG)
 
 
 def _text(value) -> str:

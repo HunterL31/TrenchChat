@@ -835,6 +835,19 @@ def rrc_set_bookmark(rrc, hub_hash: str, bookmarked: bool) -> dict:
     return {"bookmarks": rrc.bookmarks()}
 
 
+def rrc_set_hosting(rrc_hub, *, enabled: bool | None = None,
+                    hub_name: str | None = None) -> dict:
+    """Apply a partial RRC hosting change and return the new status.
+
+    Hosting is what keeps RRC from having one centre: a hub anyone can run
+    is a hub anyone can replace. It stays off until asked for, because it
+    announces this node as a service and carries other people's traffic.
+    """
+    if hub_name is not None and not hub_name.strip() and enabled:
+        raise ValueError("hub name must not be empty")
+    return rrc_hub.set_hosting(enabled=enabled, hub_name=hub_name)
+
+
 def rrc_state(rrc) -> dict:
     """Everything a client needs to draw the RRC surface in one read."""
     session = rrc.session()

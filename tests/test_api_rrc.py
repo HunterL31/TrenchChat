@@ -17,8 +17,11 @@ import pytest
 
 from trenchchat.config import Config
 from trenchchat.core.rrc import ROOM_JOINED, RRCManager
+from trenchchat.core.rrc_hub import RRCHubManager
 
-from tests.fake_rrc import FakeHub, FakeHubRegistry, FakeRRCTransport
+from tests.fake_rrc import (
+    FakeHostTransport, FakeHub, FakeHubRegistry, FakeRRCTransport,
+)
 from tests.helpers import wait_for
 
 _TESTENV_DIR = Path(__file__).resolve().parents[1] / "devtools" / "testenv"
@@ -67,6 +70,8 @@ def backend(tmp_path, registry):
                                display_name="Tester")
     transport = FakeRRCTransport(SELF, registry)
     backend.rrc = RRCManager(identity, config, transport=transport)
+    backend.rrc_hub = RRCHubManager(config, FakeHostTransport("ab" * 16,
+                                                              registry))
     yield backend
     transport.join_threads()
 
@@ -94,7 +99,8 @@ class TestAuth:
         ("post", "/rrc/connect"), ("post", "/rrc/disconnect"),
         ("post", "/rrc/rooms"), ("post", "/rrc/rooms/part"),
         ("post", "/rrc/rooms/x/messages"), ("post", "/rrc/nickname"),
-        ("post", "/rrc/bookmarks"),
+        ("post", "/rrc/bookmarks"), ("get", "/rrc/hosting"),
+        ("post", "/rrc/hosting"),
     ])
     def test_every_rrc_endpoint_needs_the_token(self, client, method, path):
         res = client.post(path, json={}) if method == "post" else client.get(path)
@@ -224,3 +230,42 @@ class TestNicknameAndBookmarks:
         res = client.post("/rrc/bookmarks", headers=AUTH,
                           json={"hub_hash": "nope", "bookmarked": True})
         assert res.status_code == 400
+
+
+@needs_backend
+class TestHosting:
+    def test_hosting_is_off_until_asked_for(self, client):
+        """A hub announces this node as a service and carries other people's
+        traffic, so it is never on by default."""
+        status = client.get("/rrc/hosting", headers=AUTH).json()
+        assert status["enabled"] is False
+        assert status["hub_hash"] is None
+
+    def test_turning_hosting_on_reports_the_hub_address(self, client):
+        res = client.post("/rrc/hosting", headers=AUTH,
+                          json={"enabled": True, "hub_name": "my hub"})
+        assert res.status_code == 200
+        body = res.json()
+        assert body["enabled"] is True
+        assert body["hub_hash"] == "ab" * 16
+        assert body["name"] == "my hub"
+
+    def test_turning_hosting_off_again(self, client):
+        client.post("/rrc/hosting", headers=AUTH,
+                    json={"enabled": True, "hub_name": "my hub"})
+        res = client.post("/rrc/hosting", headers=AUTH, json={"enabled": False})
+        assert res.json()["enabled"] is False
+        assert client.get("/rrc/hosting", headers=AUTH).json()["hub_hash"] is None
+
+    def test_an_empty_name_with_hosting_on_is_refused(self, client):
+        res = client.post("/rrc/hosting", headers=AUTH,
+                          json={"enabled": True, "hub_name": "   "})
+        assert res.status_code == 400
+
+    def test_the_status_reports_what_the_hub_is_carrying(self, client):
+        client.post("/rrc/hosting", headers=AUTH,
+                    json={"enabled": True, "hub_name": "my hub"})
+        status = client.get("/rrc/hosting", headers=AUTH).json()
+        assert status["clients"] == 0
+        assert status["rooms"] == {}
+        assert status["limits"]
