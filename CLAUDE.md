@@ -212,7 +212,10 @@ Tests are integration tests that exercise real `Identity`/`Storage`/`Router`/man
 mocks. `tests/conftest.py`'s `peer_factory` fixture builds fully-wired `TestPeer`s sharing one
 session-scoped `RNS.Reticulum` instance; a `TestTransport` shim intercepts `router.send()` and delivers
 directly to the recipient's callbacks (async, via a thread, matching real LXMF timing) instead of
-going over the network. `tests/helpers.py` has `wait_for`-style polling helpers for the resulting
+going over the network. A fake transport that delivers on a thread (`fake_rrc.py`, `fake_node.py`,
+`fake_file_transport.py`) must be drained with `join_threads()` in the fixture that built it: leftover
+threads keep waking during later tests and are enough on their own to fail a timing-sensitive one
+elsewhere in the suite. `tests/helpers.py` has `wait_for`-style polling helpers for the resulting
 eventual-consistency assertions. **Tests are the specification**: never weaken or delete a test to make
 it pass: a failing test after a change means the change conflicts with intended behavior; fix the
 implementation, or if the behavior change is intentional, replace the test with one covering the new
