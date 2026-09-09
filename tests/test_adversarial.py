@@ -73,7 +73,7 @@ from trenchchat.core.storage import FRIEND_PENDING_IN, FRIEND_PENDING_OUT
 from trenchchat.core.permissions import (
     ALL_PERMISSIONS, FULL_SYNC, INVITE, KICK, MANAGE_CHANNEL, MANAGE_ROLES,
     PRESET_OPEN, PRESET_PRIVATE, ROLE_ADMIN, ROLE_MEMBER, ROLE_OWNER, SEND_MESSAGE,
-    is_open_join, permissions_from_json,
+    SHARE_FILES, VOICE_CHAT, is_open_join, permissions_from_json,
 )
 from trenchchat.core.subscription import SubscriptionManager, _subscriber_payload
 from trenchchat.core.protocol import (
@@ -97,6 +97,18 @@ from trenchchat.core.sync import (
 )
 from trenchchat.core.presence import PresenceManager
 from trenchchat.core.image import MAX_IMAGE_BYTES
+from tests.test_files import (
+    blob, chunk_fetches, file_channel, hostile_serve, list_fetches,
+    wait_for_file_message, wait_for_state,
+)
+from tests.test_files import download as file_download
+from tests.test_files import share as file_share
+from trenchchat.core.actions import build_file_manifest
+from trenchchat.core.files import DL_DONE, DL_UNAVAILABLE, chunk_count_for
+from trenchchat.core.protocol import (
+    F_FILE_CHUNK_ROOT, F_FILE_HASH, F_FILE_NAME, F_FILE_SIZE,
+    MAX_SHARED_FILE_BYTES,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -1994,6 +2006,417 @@ class TestAdversarialPayloadLimits:
         assert rows, "The message itself should still be delivered"
         assert not rows[0]["image_data"], \
             "An over-cap image attachment was stored"
+
+
+class TestAdversarialFileManifest:
+    """A file message names a file; the manifest is the whole of what travels.
+
+    Every part of it is asserted by the sender, so a receiver checks the
+    author signature against what arrived and only then judges the manifest:
+    a forged one is dropped, an unusable one costs the message its attachment
+    and its signature but not its row.
+    """
+
+    _FILE_BYTES = b"survey data\n" * 500
+
+    def _file_lxm(self, sender, recipient, ch_hash, content, ts, manifest,
+                  sign_over_manifest: bool = True):
+        dest = RNS.Destination(
+            recipient.identity.rns_identity, RNS.Destination.OUT,
+            RNS.Destination.SINGLE, "lxmf", "delivery",
+        )
+        lxm = LXMF.LXMessage(dest, sender.router.delivery_destination, content,
+                             desired_method=LXMF.LXMessage.DIRECT)
+        msg_id = _compute_message_id(content, sender.identity.hash_hex, ts)
+        signed = manifest if sign_over_manifest else None
+        lxm.fields = pack_fields({
+            F_CHANNEL_HASH:    bytes.fromhex(ch_hash),
+            F_DISPLAY_NAME:    "Alice",
+            F_TIMESTAMP:       ts,
+            F_MESSAGE_ID:      msg_id,
+            F_FILE_NAME:       manifest["name"],
+            F_FILE_SIZE:       manifest["size"],
+            F_FILE_HASH:       manifest["hash"],
+            F_FILE_CHUNK_ROOT: manifest["chunk_root"],
+            F_AUTHOR_SIG:      sign_as(sender.identity.hash_hex, ch_hash, msg_id,
+                                       ts, content, manifest=signed),
+        })
+        lxm.signature_validated = True
+        return lxm, msg_id
+
+    def test_a_manifest_naming_a_path_is_stripped(self, peer_factory):
+        """A name that needed cleaning is refused, not repaired."""
+        alice, bob, ch_hash = _setup_channel_with_member(
+            peer_factory, member_perms=[SEND_MESSAGE]
+        )
+        manifest = {"name": "../../etc/passwd", "size": 12,
+                    "hash": b"\x11" * 32, "chunk_root": b"\x22" * 32}
+        lxm, msg_id = self._file_lxm(alice, bob, ch_hash, "here", time.time(),
+                                     manifest)
+
+        bob.router._on_message_received(lxm)
+        time.sleep(0.3)
+
+        rows = [m for m in bob.storage.get_messages(ch_hash)
+                if m["message_id"] == msg_id]
+        assert rows, "the message itself should still be delivered"
+        assert rows[0]["file_name"] is None
+        assert rows[0]["file_hash"] is None
+        assert rows[0]["file_stripped"], "the refusal must be recorded on the row"
+        assert not rows[0]["author_sig"], \
+            "a signature that covers a manifest we refused must not be kept"
+
+    def test_an_oversized_size_is_stripped(self, peer_factory):
+        alice, bob, ch_hash = _setup_channel_with_member(
+            peer_factory, member_perms=[SEND_MESSAGE]
+        )
+        manifest = {"name": "huge.bin", "size": MAX_SHARED_FILE_BYTES + 1,
+                    "hash": b"\x11" * 32, "chunk_root": b"\x22" * 32}
+        lxm, msg_id = self._file_lxm(alice, bob, ch_hash, "huge", time.time(),
+                                     manifest)
+
+        bob.router._on_message_received(lxm)
+        time.sleep(0.3)
+
+        rows = [m for m in bob.storage.get_messages(ch_hash)
+                if m["message_id"] == msg_id]
+        assert rows, "the message itself should still be delivered"
+        assert rows[0]["file_size"] is None
+        assert rows[0]["file_stripped"]
+
+    def test_a_manifest_the_signature_does_not_cover_is_dropped(self, peer_factory):
+        """The forgery case: a manifest bolted onto a message signed without it."""
+        alice, bob, ch_hash = _setup_channel_with_member(
+            peer_factory, member_perms=[SEND_MESSAGE]
+        )
+        manifest = build_file_manifest("survey.csv", self._FILE_BYTES)
+        lxm, msg_id = self._file_lxm(alice, bob, ch_hash, "here", time.time(),
+                                     manifest, sign_over_manifest=False)
+
+        bob.router._on_message_received(lxm)
+        time.sleep(0.3)
+
+        ids = [m["message_id"] for m in bob.storage.get_messages(ch_hash)]
+        assert msg_id not in ids, \
+            "a manifest outside the author signature was stored anyway"
+
+    def test_a_genuine_manifest_is_delivered(self, peer_factory):
+        """Positive control: the same message, signed over its manifest."""
+        alice, bob, ch_hash = _setup_channel_with_member(
+            peer_factory, member_perms=[SEND_MESSAGE]
+        )
+        manifest = build_file_manifest("survey.csv", self._FILE_BYTES)
+        lxm, msg_id = self._file_lxm(alice, bob, ch_hash, "here", time.time(),
+                                     manifest)
+
+        bob.router._on_message_received(lxm)
+        time.sleep(0.3)
+
+        rows = [m for m in bob.storage.get_messages(ch_hash)
+                if m["message_id"] == msg_id]
+        assert rows, "a correctly signed file message was not delivered"
+        assert rows[0]["file_name"] == "survey.csv"
+        assert not rows[0]["file_stripped"]
+
+    def test_a_manifest_from_a_non_member_is_dropped(self, peer_factory):
+        """The inbound gate is unchanged: a file message is a message."""
+        alice, bob, ch_hash = _setup_channel_with_member(
+            peer_factory, member_perms=[SEND_MESSAGE]
+        )
+        carol = peer_factory("carol")
+        carol.storage.upsert_channel(ch_hash, "test-ch", "",
+                                     alice.identity.hash_hex, PRESET_PRIVATE,
+                                     time.time())
+        carol.storage.subscribe(ch_hash)
+
+        carol.messaging.send_message(
+            channel_hash_hex=ch_hash,
+            content="a file nobody asked for",
+            subscriber_hashes=[bob.identity.hash_hex],
+            manifest=build_file_manifest("survey.csv", self._FILE_BYTES),
+        )
+        time.sleep(0.3)
+
+        assert all(m["sender_hash"] != carol.identity.hash_hex
+                   for m in bob.storage.get_messages(ch_hash)), \
+            "Bob stored a file message from someone who is not a member"
+
+    def test_a_direct_message_refuses_a_manifest(self, peer_factory):
+        """A conversation reaches clients that are not TrenchChat; it stays readable."""
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+        alice.friends_mgr.add_friend(bob.identity.hash_hex)
+        bob.friends_mgr.add_friend(alice.identity.hash_hex)
+
+        # Without a manifest the same send works, so the refusal below is
+        # about the manifest and not about the friendship.
+        assert alice.messaging.send_direct(bob.identity.hash_hex, "hello") \
+            is not None
+        assert alice.messaging.send_direct(
+            bob.identity.hash_hex, "have this file",
+            manifest=build_file_manifest("survey.csv", self._FILE_BYTES),
+        ) is None
+
+        conversation = alice.direct_mgr.conversation_hash(bob.identity.hash_hex)
+        assert all(m["content"] != "have this file"
+                   for m in alice.storage.get_messages(conversation))
+
+
+# ---------------------------------------------------------------------------
+# FILE SERVE GATE: who may pull a byte of a shared file
+# ---------------------------------------------------------------------------
+
+class TestFileServeGate:
+    """The holder answers a request, so the holder is where the check lives.
+
+    A file is served only to a peer that identified on the link and sits in
+    the stored member list of an invite-only channel the file was shared in.
+    Everything else is answered with silence, and a file this node does not
+    hold complete is answered the same way, so a stranger cannot use the
+    refusals to learn what exists here.
+    """
+
+    def _shared(self, peer_factory, *names, chunks: int = 2):
+        peers, ch_hash = file_channel(peer_factory, *names)
+        data = blob(chunks, seed=11)
+        manifest = file_share(peers[0], ch_hash, "survey.bin", data)
+        return peers, ch_hash, data, manifest["hash"].hex()
+
+    def test_an_unidentified_requester_is_refused(self, peer_factory):
+        (alice, _bob), _ch, _data, file_hash = self._shared(
+            peer_factory, "alice", "bob")
+
+        assert alice.file_transport.serve(None, file_hash, 0, 1, False) is None
+        assert alice.file_transport.serve(None, file_hash, 0, 0, True) is None
+
+    def test_a_non_member_is_refused(self, peer_factory):
+        (alice, _bob), _ch, _data, file_hash = self._shared(
+            peer_factory, "alice", "bob")
+        mallory = peer_factory("mallory")
+
+        assert alice.file_transport.serve(
+            mallory.identity.hash_hex, file_hash, 0, 1, False) is None
+
+    def test_a_member_of_another_channel_is_refused(self, peer_factory):
+        (alice, _bob), _ch, _data, file_hash = self._shared(
+            peer_factory, "alice", "bob")
+        dave = peer_factory("dave")
+        other = alice.channel_mgr.create_channel("other-ch", "",
+                                                 permissions=dict(PRESET_PRIVATE))
+        alice.invite_mgr.publish_member_list(other, add_members=[dave.identity.hash])
+        assert wait_for_member(alice.storage, other, dave.identity.hash_hex)
+
+        assert alice.file_transport.serve(
+            dave.identity.hash_hex, file_hash, 0, 1, False) is None
+
+    def test_an_unknown_hash_is_refused(self, peer_factory):
+        (alice, bob), _ch, _data, _file_hash = self._shared(
+            peer_factory, "alice", "bob")
+
+        assert alice.file_transport.serve(
+            bob.identity.hash_hex, "ab" * 32, 0, 1, False) is None
+
+    def test_an_index_past_the_end_is_refused(self, peer_factory):
+        (alice, bob), _ch, data, file_hash = self._shared(
+            peer_factory, "alice", "bob")
+        past_the_end = chunk_count_for(len(data))
+
+        assert alice.file_transport.serve(
+            bob.identity.hash_hex, file_hash, past_the_end, 1, False) is None
+        assert alice.file_transport.serve(
+            bob.identity.hash_hex, file_hash, 0, 1, False) is not None
+
+    def test_a_file_held_only_in_part_is_refused(self, peer_factory):
+        (alice, bob, carol), ch_hash, _data, file_hash = self._shared(
+            peer_factory, "alice", "bob", "carol", chunks=3)
+        msg_id = wait_for_file_message(bob, ch_hash, file_hash)
+        bob.file_transport.stall_chunks.add((alice.identity.hash_hex, 1))
+        bob.file_mgr.request_download(ch_hash, msg_id)
+        wait_for_state(bob, file_hash, DL_UNAVAILABLE)
+        assert bob.storage.get_file(file_hash)["complete"] == 0
+
+        assert bob.file_transport.serve(
+            carol.identity.hash_hex, file_hash, 0, 1, False) is None
+
+    def test_a_holder_that_serves_a_bad_chunk_is_skipped(self, peer_factory):
+        (alice, bob, carol), ch_hash, data, file_hash = self._shared(
+            peer_factory, "alice", "bob", "carol", chunks=3)
+        file_download(carol, ch_hash, file_hash)
+        alice.file_transport.set_serve_callback(hostile_serve(data))
+
+        file_download(bob, ch_hash, file_hash)
+
+        assert bob.file_mgr.file_bytes(file_hash) == data
+        holders = {holder for holder, _first, _count
+                   in chunk_fetches(bob.file_transport.registry,
+                                    bob.identity.hash_hex, file_hash)}
+        assert carol.identity.hash_hex in holders
+
+    def test_a_chunk_list_that_does_not_match_the_root_is_refused(
+            self, peer_factory):
+        (alice, bob, carol), ch_hash, data, file_hash = self._shared(
+            peer_factory, "alice", "bob", "carol", chunks=3)
+        file_download(carol, ch_hash, file_hash)
+        alice.file_transport.set_serve_callback(
+            hostile_serve(data, bad_list=True))
+
+        file_download(bob, ch_hash, file_hash)
+
+        assert bob.file_mgr.file_bytes(file_hash) == data
+        asked = list_fetches(bob.file_transport.registry,
+                             bob.identity.hash_hex, file_hash)
+        assert asked[0] == alice.identity.hash_hex
+        assert carol.identity.hash_hex in asked
+
+# ---------------------------------------------------------------------------
+# SHARE_FILES: a member an admin has kept to text
+# ---------------------------------------------------------------------------
+
+class TestShareFilesGate:
+    """A file is a message, so send_message is the floor and share_files
+    narrows it. The client gate hides the attach control, the outbound guard
+    refuses the manifest before it is signed, and the receiver drops a file
+    message from a member without the permission: the last is the only layer
+    that holds when the sender is the bad client.
+
+    Downloading is not gated on it. A member who may not attach a file may
+    still fetch one another member shared, and holding it makes them a holder
+    like anyone else.
+    """
+
+    _FILE_BYTES = b"survey data\n" * 500
+
+    def _text_only_member(self, peer_factory):
+        """Alice (owner) and Bob, a member who may send but not share."""
+        return _setup_channel_with_member(
+            peer_factory, member_perms=[SEND_MESSAGE, VOICE_CHAT]
+        )
+
+    def test_a_file_message_from_a_member_without_it_is_dropped(self, peer_factory):
+        """The core layer: Bob's client ignores its own guard and sends anyway."""
+        alice, bob, ch_hash = self._text_only_member(peer_factory)
+        assert not bob.storage.has_permission(
+            ch_hash, bob.identity.hash_hex, SHARE_FILES)
+        manifest = build_file_manifest("survey.csv", self._FILE_BYTES)
+
+        bob.messaging.send_message(
+            channel_hash_hex=ch_hash,
+            content="have this",
+            subscriber_hashes=[alice.identity.hash_hex],
+            manifest=manifest,
+        )
+        time.sleep(0.3)
+
+        assert all(m["sender_hash"] != bob.identity.hash_hex
+                   for m in alice.storage.get_messages(ch_hash)), \
+            "Alice stored a file message from a member without share_files"
+
+    def test_the_same_member_is_still_heard_in_text(self, peer_factory):
+        """Control: the drop is about the manifest, not about Bob."""
+        alice, bob, ch_hash = self._text_only_member(peer_factory)
+
+        bob.messaging.send_message(
+            channel_hash_hex=ch_hash,
+            content="just words",
+            subscriber_hashes=[alice.identity.hash_hex],
+        )
+
+        assert wait_for(
+            lambda: any(m["content"] == "just words"
+                        for m in alice.storage.get_messages(ch_hash)),
+            timeout=5,
+        ), "a plain message from the same member was dropped too"
+
+    def test_the_outbound_guard_refuses_it_before_it_is_signed(self, peer_factory):
+        alice, bob, ch_hash = self._text_only_member(peer_factory)
+        manifest = build_file_manifest("survey.csv", self._FILE_BYTES)
+
+        result = actions.send_message_result(
+            bob.storage, bob.subscription_mgr, bob.messaging, ch_hash,
+            bob.identity.hash_hex, "have this", manifest=manifest,
+        )
+
+        assert result == {"sent": False,
+                          "reason": actions.REASON_NO_SHARE_PERMISSION}
+        assert bob.storage.get_messages(ch_hash) == [], \
+            "the refused message was stored locally anyway"
+
+    def test_share_file_stores_nothing_when_the_guard_refuses(self, peer_factory):
+        alice, bob, ch_hash = self._text_only_member(peer_factory)
+        manifest = build_file_manifest("survey.csv", self._FILE_BYTES)
+
+        result = actions.share_file(
+            bob.file_mgr, bob.storage, bob.subscription_mgr, bob.messaging,
+            ch_hash, bob.identity.hash_hex, "survey.csv", self._FILE_BYTES,
+        )
+
+        assert result["shared"] is False
+        assert result["reason"] == actions.REASON_NO_SHARE_PERMISSION
+        assert bob.storage.get_file(manifest["hash"].hex()) is None, \
+            "Bob was made the holder of a file nobody may ask him for"
+
+    def test_a_member_without_it_may_still_download(self, peer_factory):
+        """Downloading needs membership only; the serve gate asks nothing else."""
+        peers, ch_hash = file_channel(peer_factory, "alice", "bob")
+        alice, bob = peers
+        text_only = dict(PRESET_PRIVATE)
+        text_only[ROLE_MEMBER] = [SEND_MESSAGE, VOICE_CHAT]
+        for peer in peers:
+            peer.storage.set_channel_permissions(ch_hash, text_only)
+        assert not bob.storage.has_permission(
+            ch_hash, bob.identity.hash_hex, SHARE_FILES)
+
+        data = blob(2, seed=23)
+        manifest = file_share(alice, ch_hash, "survey.bin", data)
+        status = file_download(bob, ch_hash, manifest["hash"].hex())
+
+        assert status["state"] == DL_DONE
+        assert bob.file_mgr.file_bytes(manifest["hash"].hex()) == data
+
+    def test_taking_it_away_stops_the_next_share(self, peer_factory):
+        """An admin narrows a channel that already allowed files.
+
+        The change travels as a signed permissions document, so the receiver
+        is applying its own copy of it when it drops the next file message.
+        """
+        alice, bob, ch_hash = _setup_channel_with_member(peer_factory)
+        first = build_file_manifest("first.csv", self._FILE_BYTES)
+        bob.messaging.send_message(
+            channel_hash_hex=ch_hash, content="first",
+            subscriber_hashes=[alice.identity.hash_hex], manifest=first,
+        )
+        assert wait_for(
+            lambda: any(m["file_hash"] == first["hash"].hex()
+                        for m in alice.storage.get_messages(ch_hash)),
+            timeout=5,
+        ), "the control share never arrived"
+
+        text_only = dict(PRESET_PRIVATE)
+        text_only[ROLE_MEMBER] = [SEND_MESSAGE, VOICE_CHAT]
+        assert actions.edit_channel_permissions(
+            alice.storage, alice.invite_mgr, ch_hash,
+            alice.identity.hash_hex, text_only,
+        )
+        assert wait_for(
+            lambda: not bob.storage.has_permission(
+                ch_hash, bob.identity.hash_hex, SHARE_FILES),
+            timeout=5,
+        ), "Bob never received the permissions change"
+
+        second = build_file_manifest("second.csv", self._FILE_BYTES + b"!")
+        bob.messaging.send_message(
+            channel_hash_hex=ch_hash, content="second",
+            subscriber_hashes=[alice.identity.hash_hex], manifest=second,
+        )
+        time.sleep(0.3)
+
+        assert all(m["file_hash"] != second["hash"].hex()
+                   for m in alice.storage.get_messages(ch_hash)), \
+            "Alice took a file message after removing share_files from members"
+        assert not actions.send_message(
+            bob.storage, bob.subscription_mgr, bob.messaging, ch_hash,
+            bob.identity.hash_hex, "second", manifest=second,
+        ), "Bob's own guard still offered the share"
 
 
 # ---------------------------------------------------------------------------

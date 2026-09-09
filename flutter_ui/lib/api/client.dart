@@ -240,10 +240,15 @@ class ApiClient {
   }
 
   /// [reason] is the backend's machine-readable cause when [ok] is false
-  /// (`no_send_permission`, `no_recipients`).
+  /// (`no_send_permission`, `no_recipients`, and every attachment refusal in
+  /// api.py's REASON_* set). [fileName] and [fileDataB64] go together and
+  /// never travel with an image: one message carries one or the other.
   Future<({bool ok, String? reason})> sendMessage(
       String channelHashHex, String content,
-      {String? replyTo, String? imageDataB64}) async {
+      {String? replyTo,
+      String? imageDataB64,
+      String? fileName,
+      String? fileDataB64}) async {
     final res = await _http.post(
       _u('/channels/$channelHashHex/messages'),
       headers: _jsonHeaders,
@@ -251,10 +256,32 @@ class ApiClient {
         'content': content,
         'reply_to': ?replyTo,
         'image_data_b64': ?imageDataB64,
+        'file_name': ?fileName,
+        'file_data_b64': ?fileDataB64,
       }),
     );
+    // An attachment refused before anything was stored comes back 400 with a
+    // reason, which is an answer rather than a failure; anything else without
+    // one is still an exception.
+    final refusal = _refusalReason(res);
+    if (refusal != null) return (ok: false, reason: refusal);
     final body = _decode(res) as Map<String, dynamic>;
     return (ok: body['ok'] as bool? ?? false, reason: body['reason'] as String?);
+  }
+
+  /// The machine-readable reason in a 400 body, or null when the response is
+  /// not one of those refusals.
+  String? _refusalReason(http.Response res) {
+    if (res.statusCode != 400) return null;
+    try {
+      final body = jsonDecode(_bodyText(res));
+      if (body is Map<String, dynamic> && body['reason'] is String) {
+        return body['reason'] as String;
+      }
+    } on FormatException {
+      return null;
+    }
+    return null;
   }
 
   /// The image attached to a message, or null when it has none.
@@ -271,6 +298,50 @@ class ApiClient {
     } catch (_) {
       return null;
     }
+  }
+
+  /// Starts the download of the file a message names, or joins one already
+  /// running. Null when the backend has no such file to answer for, which is
+  /// its one answer for unknown, stripped, and not-a-member alike.
+  Future<FileFetch?> fetchFile(
+      String channelHashHex, String fileHash, String messageId) async {
+    final res = await _http.post(
+      _u('/channels/$channelHashHex/files/$fileHash/fetch'),
+      headers: _jsonHeaders,
+      body: jsonEncode({'message_id': messageId}),
+    );
+    if (res.statusCode == 404) return null;
+    final body = _decode(res) as Map<String, dynamic>;
+    if (body['ok'] != true) return null;
+    return FileFetch.fromJson(body);
+  }
+
+  /// How a download is doing, for a client that missed the events.
+  Future<FileFetch?> fileFetchStatus(String channelHashHex, String fileHash) async {
+    final res = await _http.get(_u('/channels/$channelHashHex/files/$fileHash/fetch'));
+    if (res.statusCode == 404) return null;
+    final body = _decode(res) as Map<String, dynamic>;
+    if (body['ok'] != true) return null;
+    return FileFetch.fromJson(body);
+  }
+
+  /// The file's bytes, or null while this node does not hold all of them.
+  /// Same never-throw contract as [getMessageImage]: a file nobody has
+  /// fetched yet is routine rather than exceptional.
+  Future<Uint8List?> getFileBytes(String channelHashHex, String fileHash) async {
+    try {
+      final res = await _http.get(_u('/channels/$channelHashHex/files/$fileHash'));
+      if (res.statusCode != 200) return null;
+      return res.bodyBytes;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// What the file store holds, and the largest file this backend shares.
+  Future<FileUsage> fileUsage() async {
+    final res = await _http.get(_u('/files/usage'));
+    return FileUsage.fromJson(_decode(res) as Map<String, dynamic>);
   }
 
   Future<ChannelPermissions> getMyPermissions(String channelHashHex) async {

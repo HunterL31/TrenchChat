@@ -41,6 +41,7 @@ MANAGE_CHANNEL = "manage_channel"
 CREATE_CHANNEL = "create_channel"
 FULL_SYNC = "full_sync"
 VOICE_CHAT = "voice_chat"
+SHARE_FILES = "share_files"
 
 # Permissions a plain member may never hold, whatever a permissions blob says.
 #
@@ -53,7 +54,7 @@ VOICE_CHAT = "voice_chat"
 ADMIN_ONLY_PERMISSIONS = (KICK, MANAGE_ROLES)
 
 ALL_PERMISSIONS = (SEND_MESSAGE, INVITE, KICK, MANAGE_ROLES, MANAGE_CHANNEL,
-                   CREATE_CHANNEL, FULL_SYNC, VOICE_CHAT)
+                   CREATE_CHANNEL, FULL_SYNC, VOICE_CHAT, SHARE_FILES)
 
 # ---------------------------------------------------------------------------
 # Channel-level flags
@@ -69,22 +70,25 @@ FLAG_DISCOVERABLE = "discoverable"
 PRESET_PRIVATE: dict[str, Any] = {
     FLAG_OPEN_JOIN: False,
     FLAG_DISCOVERABLE: False,
-    ROLE_ADMIN: [SEND_MESSAGE, INVITE, KICK, MANAGE_ROLES, VOICE_CHAT],
-    ROLE_MEMBER: [SEND_MESSAGE, VOICE_CHAT],
+    ROLE_ADMIN: [SEND_MESSAGE, INVITE, KICK, MANAGE_ROLES, VOICE_CHAT,
+                 SHARE_FILES],
+    ROLE_MEMBER: [SEND_MESSAGE, VOICE_CHAT, SHARE_FILES],
 }
 
 PRESET_OPEN: dict[str, Any] = {
     FLAG_OPEN_JOIN: True,
     FLAG_DISCOVERABLE: True,
-    ROLE_ADMIN: [SEND_MESSAGE, INVITE, KICK, MANAGE_ROLES, VOICE_CHAT],
-    ROLE_MEMBER: [SEND_MESSAGE, INVITE, VOICE_CHAT],
+    ROLE_ADMIN: [SEND_MESSAGE, INVITE, KICK, MANAGE_ROLES, VOICE_CHAT,
+                 SHARE_FILES],
+    ROLE_MEMBER: [SEND_MESSAGE, INVITE, VOICE_CHAT, SHARE_FILES],
 }
 
 PRESET_SERVER: dict[str, Any] = {
     FLAG_OPEN_JOIN: False,
     FLAG_DISCOVERABLE: False,
-    ROLE_ADMIN: [SEND_MESSAGE, INVITE, KICK, MANAGE_ROLES, CREATE_CHANNEL, VOICE_CHAT],
-    ROLE_MEMBER: [SEND_MESSAGE, VOICE_CHAT],
+    ROLE_ADMIN: [SEND_MESSAGE, INVITE, KICK, MANAGE_ROLES, CREATE_CHANNEL,
+                 VOICE_CHAT, SHARE_FILES],
+    ROLE_MEMBER: [SEND_MESSAGE, VOICE_CHAT, SHARE_FILES],
 }
 
 PRESETS = {
@@ -197,14 +201,42 @@ def permissions_from_json(blob: str) -> dict:
     return sanitise_permissions(perms)
 
 
+def mentions_permission(perms: dict, permission: str) -> bool:
+    """Whether any role list in *perms* names this permission at all."""
+    for role in ALL_ROLES:
+        granted = perms.get(role)
+        if isinstance(granted, list) and permission in granted:
+            return True
+    return False
+
+
 def has_permission(perms: dict, role: str, permission: str) -> bool:
     """Check whether *role* grants *permission* under the given config.
 
     The owner role always has every permission.
+
+    SHARE_FILES carries a compatibility rule, and this is the one place it
+    lives. A file is a message: SEND_MESSAGE is the floor and SHARE_FILES
+    exists so an admin can narrow it. A channel whose permissions blob was
+    written before the permission existed names it nowhere, which cannot be
+    told apart from a blob that names it nowhere on purpose, so the reading
+    is chosen rather than guessed: a blob mentioning share_files in any role
+    list is read exactly as written, and one mentioning it nowhere grants it
+    wherever send_message is granted. Existing private channels keep sharing
+    without anyone republishing permissions, and the first time an admin
+    grants or withholds it for any role the explicit lists rule again. The
+    trade is that clearing it from every role at once reads as a blob that
+    never knew it; a channel is made text-only by clearing send_message, or
+    by leaving share_files on one role and off the other.
     """
     if role == ROLE_OWNER:
         return True
-    return permission in perms.get(role, [])
+    granted = perms.get(role, [])
+    if permission in granted:
+        return True
+    if permission == SHARE_FILES and not mentions_permission(perms, SHARE_FILES):
+        return SEND_MESSAGE in granted
+    return False
 
 
 def is_open_join(perms: dict) -> bool:

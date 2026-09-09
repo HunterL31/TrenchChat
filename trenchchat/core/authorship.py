@@ -22,11 +22,12 @@ from trenchchat.core.storage import Storage
 
 def sign_message(rns_identity, channel_hash_hex: str, message_id: str,
                  timestamp: float, content: str, reply_to: str | None,
-                 last_seen_id: str | None, image_data: bytes | None) -> bytes:
+                 last_seen_id: str | None, image_data: bytes | None,
+                 manifest: dict | None = None) -> bytes:
     """Sign a message we are authoring."""
     return rns_identity.sign(author_digest(
         channel_hash_hex, message_id, timestamp, content,
-        reply_to, last_seen_id, image_data,
+        reply_to, last_seen_id, image_data, manifest,
     ))
 
 
@@ -123,7 +124,8 @@ def verify_message(storage: Storage, author_hex: str, signature: bytes,
                    channel_hash_hex: str, message_id: str, timestamp: float,
                    content: str, reply_to: str | None,
                    last_seen_id: str | None,
-                   image_data: bytes | None) -> bool:
+                   image_data: bytes | None,
+                   manifest: dict | None = None) -> bool:
     """True if this message really was authored by author_hex as presented.
 
     False also covers "we cannot check yet" -- an author whose key we have
@@ -136,7 +138,7 @@ def verify_message(storage: Storage, author_hex: str, signature: bytes,
         return False
     digest = author_digest(
         channel_hash_hex, message_id, timestamp, content,
-        reply_to, last_seen_id, image_data,
+        reply_to, last_seen_id, image_data, manifest,
     )
     try:
         return bool(identity.validate(signature, digest))

@@ -18,6 +18,7 @@ from tests.helpers import (
     wait_for_member,
     wait_for_message,
 )
+from trenchchat.core.actions import build_file_manifest
 from trenchchat.core.messaging import _compute_message_id
 from trenchchat.core.sync import MAX_REACTIONS_PER_MESSAGE
 
@@ -1689,6 +1690,117 @@ class TestImageSync:
         bob_msgs = bob.storage.get_messages(ch_hash)
         synced = next(m for m in bob_msgs if m["message_id"] == img_id)
         assert bytes(synced["image_data"]) == _FAKE_JPEG
+
+
+# ---------------------------------------------------------------------------
+# File manifests in sync
+# ---------------------------------------------------------------------------
+
+_FILE_BYTES = b"survey data\n" * 500
+
+
+class TestFileManifestSync:
+    """History relays what a file is called and what it hashes to, never the file."""
+
+    def test_row_to_dict_carries_the_manifest_and_no_bytes(self):
+        from trenchchat.core.sync import SyncManager
+        import sqlite3
+
+        manifest = build_file_manifest("survey.csv", _FILE_BYTES)
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.execute("""
+            CREATE TABLE t (
+                sender_hash TEXT, sender_name TEXT, content TEXT,
+                timestamp REAL, message_id TEXT, reply_to TEXT,
+                last_seen_id TEXT, image_data BLOB, file_name TEXT,
+                file_size INTEGER, file_hash TEXT, file_chunk_root TEXT
+            )
+        """)
+        conn.execute(
+            "INSERT INTO t VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            ("aabb", "Alice", "the survey", 1000.0, "mid3", None, None, None,
+             manifest["name"], manifest["size"], manifest["hash"].hex(),
+             manifest["chunk_root"].hex()),
+        )
+        conn.commit()
+        row = conn.execute("SELECT * FROM t").fetchone()
+
+        result = SyncManager._row_to_dict(row)
+        assert result["file_name"] == "survey.csv"
+        assert result["file_size"] == len(_FILE_BYTES)
+        assert result["file_hash"] == manifest["hash"]
+        assert result["file_chunk_root"] == manifest["chunk_root"]
+        assert "image_data" not in result
+        assert not any(isinstance(v, bytes) and len(v) > 64 for v in result.values()), \
+            "a sync row must never carry file bytes"
+
+    def test_row_to_dict_omits_the_manifest_when_there_is_none(self):
+        from trenchchat.core.sync import SyncManager
+        import sqlite3
+
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.execute("""
+            CREATE TABLE t (
+                sender_hash TEXT, sender_name TEXT, content TEXT,
+                timestamp REAL, message_id TEXT, reply_to TEXT,
+                last_seen_id TEXT, image_data BLOB, file_name TEXT,
+                file_size INTEGER, file_hash TEXT, file_chunk_root TEXT
+            )
+        """)
+        conn.execute(
+            "INSERT INTO t VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            ("aabb", "Alice", "no file", 1000.0, "mid4", None, None, None,
+             None, None, None, None),
+        )
+        conn.commit()
+        row = conn.execute("SELECT * FROM t").fetchone()
+
+        result = SyncManager._row_to_dict(row)
+        assert "file_name" not in result
+        assert "file_hash" not in result
+
+    def test_sync_round_trip_preserves_the_manifest(self, peer_factory):
+        """A file message reaches a returning member as its manifest alone."""
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+
+        ch_hash = alice.channel_mgr.create_channel("file-sync", "", "public")
+        _seed_channel_on_peer(bob, ch_hash, "file-sync", alice.identity.hash_hex)
+
+        ts = time.time()
+        manifest = build_file_manifest("survey.csv", _FILE_BYTES)
+        msg_id = _compute_message_id("the survey", alice.identity.hash_hex, ts)
+        alice.storage.insert_message(
+            channel_hash=ch_hash,
+            sender_hash=alice.identity.hash_hex,
+            sender_name="Alice",
+            content="the survey",
+            timestamp=ts,
+            message_id=msg_id,
+            reply_to=None,
+            last_seen_id=None,
+            received_at=ts,
+            author_sig=sign_as(alice.identity.hash_hex, ch_hash, msg_id, ts,
+                               "the survey", manifest=manifest),
+            manifest=manifest,
+        )
+
+        bob.sync_mgr._send_sync_request(alice.identity.hash_hex, ch_hash, ts - 100)
+
+        assert wait_for_message(bob.storage, ch_hash, msg_id, timeout=5), \
+            "Bob did not receive the synced file message"
+
+        synced = next(m for m in bob.storage.get_messages(ch_hash)
+                      if m["message_id"] == msg_id)
+        assert synced["file_name"] == "survey.csv"
+        assert synced["file_size"] == len(_FILE_BYTES)
+        assert synced["file_hash"] == manifest["hash"].hex()
+        assert synced["file_chunk_root"] == manifest["chunk_root"].hex()
+        assert not synced["file_stripped"]
+        assert bob.storage.get_file(manifest["hash"].hex()) is None, \
+            "sync must not leave Bob holding the file itself"
 
 
 class TestServerScopedTenure:

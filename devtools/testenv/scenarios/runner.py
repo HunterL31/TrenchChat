@@ -26,7 +26,8 @@ from pathlib import Path
 
 _SCENARIOS_DIR = Path(__file__).resolve().parent
 _TESTENV_DIR = _SCENARIOS_DIR.parent
-for _p in (str(_SCENARIOS_DIR), str(_TESTENV_DIR)):
+_REPO_ROOT = _TESTENV_DIR.parent.parent
+for _p in (str(_SCENARIOS_DIR), str(_TESTENV_DIR), str(_REPO_ROOT)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
@@ -48,6 +49,7 @@ import scen_bandwidth  # noqa: F401,E402  (registers family bw)
 import scen_nomad   # noqa: F401,E402  (registers family nomad)
 import scen_interop # noqa: F401,E402  (registers family interop)
 import scen_dm     # noqa: F401,E402  (registers family dm)
+import scen_files  # noqa: F401,E402  (registers family files)
 
 _ORCHESTRATOR = _TESTENV_DIR / "orchestrator.py"
 _BOOT_TIMEOUT = 180.0
@@ -102,6 +104,9 @@ def _boot(testers: int, log_path: str | None = None) -> subprocess.Popen:
     if log_path:
         env["TC_TESTENV_LOGLEVEL"] = "7"
         sink = open(log_path, "w")
+        # Named for the scenarios too: a refusal is silent on the wire, so
+        # proving one happened means reading the holder's log for it.
+        os.environ["TC_TESTER_LOG"] = str(Path(log_path).resolve())
         print(f"  capturing tester logs to {log_path}")
     return subprocess.Popen(
         [sys.executable, str(_ORCHESTRATOR), "--testers", str(testers)],
