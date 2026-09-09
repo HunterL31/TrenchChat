@@ -10,12 +10,17 @@ started.
 Closing that window no longer ends the run -- the node stays up in the tray
 -- so the launcher has to notice the close, report it once, and be able to
 open a window again against the backend that is still running.
+
+A windowed build fails quietly in another way too: the server it starts has
+to answer, not merely bind. An HTTP implementation that imports but cannot
+parse leaves the port accepting connections it never replies to.
 """
 
 import sys
 import threading
 import time
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 
@@ -78,6 +83,26 @@ def test_uvicorn_logging_configures_without_a_console(log_dir, monkeypatch):
 
     uvicorn.Config(lambda scope, receive, send: None,
                    host="127.0.0.1", port=8810, log_level="warning")
+
+
+def test_the_server_never_picks_the_httptools_parser(monkeypatch):
+    """An httptools that imports without its compiled parser must not be used.
+
+    A frozen build can carry exactly that. uvicorn's "auto" prefers httptools
+    whenever it imports, then raises in its protocol factory for every
+    connection: the port accepts and answers nothing, and the client waits on
+    its loading state with no error to show.
+    """
+    pytest.importorskip("uvicorn")
+    from uvicorn.protocols.http.h11_impl import H11Protocol
+
+    monkeypatch.setitem(sys.modules, "httptools", ModuleType("httptools"))
+    monkeypatch.delitem(sys.modules, "uvicorn.protocols.http.auto", raising=False)
+
+    config = main_flutter._server_config(lambda scope, receive, send: None, 8810)
+    config.load()
+
+    assert config.http_protocol_class is H11Protocol
 
 
 def test_version_flag_prints_the_build_and_starts_nothing(monkeypatch, capsys):
