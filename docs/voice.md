@@ -164,6 +164,18 @@ stream that dies mid-call is rebuilt by a cooldown-limited watchdog in
   see a codec peak past the frame length field, a gate that drops an
   already-numbered frame, or a stream that arrives complete but
   unintelligible; this is where those live.
+- `tests/test_voice_over_links.py`: the same sentence over links people
+  actually have. `tests/fake_network.py` puts the dev environment's own
+  shaping model (`link_profiles.py` plus `link_shaper.schedule`) in front
+  of the in-process transport, so `home_fibre`, `home_wifi` and
+  `mobile_lte` mean the same thing in pytest as they do when the scenario
+  suite shapes a real socket with them, and adds the two things a profile
+  cannot say: independently timed packets, which reorder when jitter
+  exceeds the 40 ms between them, and a stall that holds everything and
+  releases it in a burst. What they pin: an ordinary home link is
+  untouched, Wi-Fi and LTE cost quality and not words, a stall costs
+  continuity and never ordering or sync, and repeated stalls do not
+  accumulate delay across a call.
 - `tests/test_voice_quality.py`: receive-quality metrics (loss, late,
   jitter), and a comparison against Discord's standard voice profile:
   same codec settings (Opus 48 kHz mono, 20 ms frames), the Discord
@@ -191,6 +203,38 @@ is still sending, dead air) and `plc` (concealed mid-stream gaps).
 Headless testenv workers run the real jitter buffer, decoder and 20 ms
 playout thread and discard the PCM, so what they measure is what a
 desktop listener would have heard.
+
+### `starved` cannot tell a pause from an outage (known, not fixed)
+
+Measured over the shaped paths in `tests/test_voice_over_links.py`, one
+sentence with a single 0.5 s pause in it: a flawless call on a 12 ms link
+scores 13-14 starved ticks, and the same sentence over a path stalled
+twice for 250 ms, audibly broken (envelope correlation 0.97 against
+0.45), scores 18-19. Most of both numbers is the speaker's own pause. The
+`_PLAYOUT_ACTIVE_WINDOW_SECS` heuristic in `core/audio/engine.py` is meant
+to exclude that, but at 0.5 s it excludes only silence *longer* than half
+a second, so the first half of every conversational pause is counted as
+dead air. A talker who pauses ten times reports 250 starved ticks on a
+perfect link.
+
+Shortening the window does not fix it. While nothing is arriving, a
+gated sender and a dead path look identical to the listener, so a window
+tight enough to exclude a pause also stops counting a real outage; both
+converge on a couple of ticks per event. What separates them is that a
+stall delays frames while a gate keeps the sequence contiguous, and the
+sender is the only party that knows which happened at the time. Two ways
+out, neither taken:
+
+- Judge a starve when the stream resumes: a first frame that continues
+  the sequence exactly was the speaker's pause, a jump was loss. Needs
+  the starve counted retrospectively rather than per tick.
+- Mark the first packet after a gate reopen on the wire, one bit in
+  VP_AUDIO, and count only unmarked gaps. Costs a wire-format version.
+
+Until then, `starved` is a weak signal and should not be the whole of a
+connection indicator; `rate_fps`, `loss_pct` and `jitter_ms` carry the
+load, and `starved` only distinguishes a slow sender, which is what it
+was added for.
 
 ## Packaging
 

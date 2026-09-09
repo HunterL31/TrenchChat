@@ -16,6 +16,7 @@ from trenchchat.network.voice_transport import (
     PEER_CONNECTING, PEER_IDLE, PEER_STREAMING, PEER_UNREACHABLE,
     VoiceTransportBase,
 )
+from trenchchat.network.voice_wire import pack_audio
 
 FAKE_DIAL_FALLBACK_SECS = 1.0
 FAKE_GIVE_UP_ATTEMPTS = 4
@@ -39,10 +40,12 @@ class FakeVoiceTransport(VoiceTransportBase):
     def __init__(self, self_hex: str, registry: FakeVoiceRegistry, *,
                  delivery_delay: float = FAKE_DELIVERY_DELAY,
                  drop_every_n: int = 0,
-                 fail_connect_to: set[str] | None = None):
+                 fail_connect_to: set[str] | None = None,
+                 path=None):
         super().__init__()
         self.self_hex = self_hex
         self.registry = registry
+        self.path = path
         self._delay = delivery_delay
         self.drop_every_n = drop_every_n
         self.fail_connect_to: set[str] = set(fail_connect_to or ())
@@ -131,19 +134,31 @@ class FakeVoiceTransport(VoiceTransportBase):
         self._tx_counter += 1
         if self.drop_every_n and self._tx_counter % self.drop_every_n == 0:
             return
+        arrives_at = self._arrival(seq, frames)
+        if arrives_at is None:
+            return
         for peer_hex in list(self._streams):
             target = self.registry.transports.get(peer_hex)
             if target is None:
                 continue
 
-            def _deliver(t=target, s=seq, f=list(frames)):
-                time.sleep(self._delay)
+            def _deliver(t=target, s=seq, f=list(frames), at=arrives_at):
+                delay = at - time.monotonic() if at else self._delay
+                if delay > 0:
+                    time.sleep(delay)
                 if self.self_hex in t._streams:
                     t._notify_frames(self.self_hex, s, f)
 
             thread = threading.Thread(target=_deliver, daemon=True)
             self._threads.append(thread)
             thread.start()
+
+    def _arrival(self, seq: int, frames: list[bytes]) -> float | None:
+        """Monotonic arrival time from the shaped path, 0.0 for the fixed
+        delay, or None when the path dropped the packet."""
+        if self.path is None:
+            return 0.0
+        return self.path.send_at(len(pack_audio(seq, frames)))
 
     # --- state ---
 

@@ -68,6 +68,28 @@ LINK_PROFILES: dict[str, LinkProfile] = {
             name="broadband", label="Broadband",
             description="No shaping at all -- the environment's original behaviour.",
         ),
+        # Unshaped is not the same as good: home_fibre is what a fast real
+        # link costs, and it is the floor a feature has to work over.
+        LinkProfile(
+            name="home_fibre", label="Home fibre",
+            description="A good consumer link: fast, steady, near-perfect.",
+            bitrate_bps=100_000_000, latency_ms=12.0, jitter_ms=3.0,
+            loss_pct=0.05,
+        ),
+        LinkProfile(
+            name="home_wifi", label="Home Wi-Fi",
+            description="Consumer broadband over shared Wi-Fi: bandwidth to "
+                        "spare, timing that wanders.",
+            bitrate_bps=25_000_000, latency_ms=30.0, jitter_ms=20.0,
+            loss_pct=0.7,
+        ),
+        LinkProfile(
+            name="mobile_lte", label="Mobile LTE",
+            description="A phone on a cell: the worst timing most users "
+                        "will ever call over.",
+            bitrate_bps=8_000_000, latency_ms=70.0, jitter_ms=45.0,
+            loss_pct=1.5,
+        ),
         LinkProfile(
             name="satellite", label="Satellite",
             description="Plenty of bandwidth, punishing round trips.",
