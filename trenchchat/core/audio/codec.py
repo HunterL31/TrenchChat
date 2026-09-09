@@ -17,7 +17,7 @@ ensure_voice_libs_findable()
 
 import opuslib
 
-from trenchchat.network.voice_wire import CODEC_OPUS
+from trenchchat.network.voice_wire import CODEC_OPUS, VOICE_MAX_FRAME_BYTES
 
 OPUS_SAMPLE_RATE = 48000
 OPUS_FRAME_MS = 20
@@ -40,7 +40,16 @@ class OpusCodec:
         self._decoder = opuslib.Decoder(OPUS_SAMPLE_RATE, OPUS_CHANNELS)
 
     def encode(self, pcm: bytes) -> bytes:
-        return self._encoder.encode(pcm, FRAME_SAMPLES)
+        """Encode one frame, never wider than the wire's length field.
+
+        max_data_bytes is a ceiling libopus honours by spending fewer bits
+        on that frame. Without it a VBR peak (an abrupt fricative at the
+        top of the configured bitrate range) runs past VOICE_MAX_FRAME_BYTES
+        and pack_audio rejects the whole bundle, losing every frame in it.
+        """
+        return opuslib.api.encoder.encode(
+            self._encoder.encoder_state, pcm, FRAME_SAMPLES,
+            VOICE_MAX_FRAME_BYTES)
 
     def decode(self, data: bytes | None) -> bytes:
         if data is None:

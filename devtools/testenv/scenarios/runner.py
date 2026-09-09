@@ -152,6 +152,9 @@ def _wait_environment(orch: Orchestrator, testers: int) -> Env:
 # batch), rounded up so a pass fails on behaviour rather than on patience.
 _PROFILE_SCALE = {
     "broadband": 1.0,
+    "home_fibre": 1.0,
+    "home_wifi": 1.5,
+    "mobile_lte": 2.0,
     "satellite": 2.0,
     "lossy": 6.0,
     "serial": 4.0,

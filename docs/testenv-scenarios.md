@@ -40,7 +40,7 @@ tester's API (8801+) or one orchestrator call (8800).
 | **Messaging** | send message, reply to message, send image, add reaction, remove reaction, import custom emoji |
 | **Files** | share a file with a message, start a download, read a download's state, read the bytes back, read the store's usage, dial a holder's file plane directly (a harness hook, so a non-member's request can reach the wire at all) |
 | **Lifecycle** | go offline (link drop), go online, kill process, start process, restart, reset tester, kill/start hub |
-| **Link** | set profile, the names `link_profiles.py` actually defines: `broadband`, `satellite`, `serial` (9600), `lora_fast` (SF7), `lora_long` (SF10), `packet_radio`, `lossy` (15% loss), `custom` (explicit bitrate/latency/jitter/loss) |
+| **Link** | set profile, the names `link_profiles.py` actually defines: `broadband` (unshaped), `home_fibre`, `home_wifi`, `mobile_lte`, `satellite`, `serial` (9600), `lora_fast` (SF7), `lora_long` (SF10), `packet_radio`, `lossy` (15% loss), `custom` (explicit bitrate/latency/jitter/loss) |
 
 ## Observable vocabulary
 

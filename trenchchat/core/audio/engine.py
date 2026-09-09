@@ -361,8 +361,14 @@ class AudioPipeline:
             if len(pcm) != FRAME_PCM_BYTES:
                 continue
             if not self._gate_open(pcm):
-                bundle.clear()
-                bundle_size = 4
+                # Flush rather than drop: those frames passed the gate and
+                # already hold sequence numbers, so discarding them loses
+                # the last of an utterance and leaves a hole the listener
+                # reports as packet loss and conceals over.
+                if bundle:
+                    self._on_encoded(bundle_seq, list(bundle))
+                    bundle.clear()
+                    bundle_size = 4
                 continue
             try:
                 encoded = self._encoder.encode(pcm)
