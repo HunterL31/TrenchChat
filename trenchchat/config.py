@@ -43,6 +43,18 @@ _DEFAULTS = {
         "enabled": False,
         "node_name": "",
     },
+    "rrc": {
+        # Hosting an RRC hub for other people, off unless asked for.
+        "hosting_enabled": False,
+        "hub_name": "",
+        # The label this client asks hubs to show. Advisory: a hub may
+        # shorten it, refuse it or ignore it, and it is never identity.
+        "nickname": "",
+        # Hubs worth keeping across restarts. A hub announces on its own
+        # schedule, so a client that remembers none may hear of none for a
+        # long time after a restart.
+        "bookmarks": [],
+    },
 }
 
 # Opus bitrate bounds. The upper bound keeps VBR peaks under the 255-byte
@@ -336,6 +348,45 @@ class Config:
     @nomad_node_name.setter
     def nomad_node_name(self, value: str):
         self._data["nomad_node"]["node_name"] = str(value)
+        self.save()
+
+    # --- rrc ---
+
+    @property
+    def rrc_hosting_enabled(self) -> bool:
+        return bool(self._data["rrc"]["hosting_enabled"])
+
+    @rrc_hosting_enabled.setter
+    def rrc_hosting_enabled(self, value: bool):
+        self._data["rrc"]["hosting_enabled"] = bool(value)
+        self.save()
+
+    @property
+    def rrc_hub_name(self) -> str:
+        return str(self._data["rrc"]["hub_name"])
+
+    @rrc_hub_name.setter
+    def rrc_hub_name(self, value: str):
+        self._data["rrc"]["hub_name"] = str(value)
+        self.save()
+
+    @property
+    def rrc_nickname(self) -> str:
+        return str(self._data["rrc"]["nickname"])
+
+    @rrc_nickname.setter
+    def rrc_nickname(self, value: str):
+        self._data["rrc"]["nickname"] = str(value)
+        self.save()
+
+    @property
+    def rrc_bookmarks(self) -> list:
+        stored = self._data["rrc"]["bookmarks"]
+        return list(stored) if isinstance(stored, list) else []
+
+    @rrc_bookmarks.setter
+    def rrc_bookmarks(self, value: list):
+        self._data["rrc"]["bookmarks"] = [str(v) for v in value]
         self.save()
 
     # --- ui theme ---

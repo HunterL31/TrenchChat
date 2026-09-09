@@ -765,6 +765,88 @@ def set_node_identify(node_browser, node_hash: str, enabled: bool) -> dict:
     return node_browser.set_identify(node_hash, enabled)
 
 
+def rrc_connect(rrc, hub_hash: str) -> dict:
+    """Open an RRC session to a hub and report where that leaves us.
+
+    Connecting identifies this node to the hub, which then sees every room
+    joined and every line typed, so it is always the user's explicit act:
+    nothing here connects on a client's behalf, and no bookmark auto-dials.
+    """
+    if not rrc.connect(hub_hash):
+        raise ValueError("not a hub address")
+    return rrc.session()
+
+
+def rrc_disconnect(rrc) -> dict:
+    rrc.disconnect()
+    return rrc.session()
+
+
+def rrc_join_room(rrc, room: str) -> dict:
+    """Join a room on the connected hub.
+
+    Refuses rather than queues when there is no session: RRC has no offline
+    delivery, so a join held for later would be a promise the protocol
+    cannot keep.
+    """
+    if not rrc.is_active():
+        raise ValueError("not connected to a hub")
+    if not rrc.join_room(room):
+        raise ValueError("could not join that room")
+    return {"rooms": rrc.rooms()}
+
+
+def rrc_part_room(rrc, room: str) -> dict:
+    if not rrc.part_room(room):
+        raise ValueError("not in that room")
+    return {"rooms": rrc.rooms()}
+
+
+def rrc_send_message(rrc, room: str, text: str, *, notice: bool = False) -> dict:
+    """Send one line to a joined room, as a MSG, ACTION or NOTICE.
+
+    A hub keeps nothing, so a line that cannot go out now never goes out at
+    all. The refusal is reported rather than swallowed, so the client can
+    say so instead of showing a message that was never sent.
+    """
+    sent = rrc.send_notice(room, text) if notice else rrc.send_message(room, text)
+    if not sent:
+        raise ValueError("could not send to that room")
+    return {"lines": rrc.lines(room)[-1:]}
+
+
+def rrc_set_nickname(rrc, nickname: str) -> dict:
+    """Set the label this client asks hubs to show.
+
+    A nickname is advisory in RRC: a hub may shorten it, refuse it or ignore
+    it, and it never stands in for the identity hash.
+    """
+    if not rrc.set_nickname(nickname):
+        raise ValueError("that nickname cannot be used")
+    return {"nickname": rrc.nickname()}
+
+
+def rrc_set_bookmark(rrc, hub_hash: str, bookmarked: bool) -> dict:
+    if bookmarked:
+        if not rrc.add_bookmark(hub_hash):
+            raise ValueError("could not bookmark that hub")
+    else:
+        rrc.remove_bookmark(hub_hash)
+    return {"bookmarks": rrc.bookmarks()}
+
+
+def rrc_state(rrc) -> dict:
+    """Everything a client needs to draw the RRC surface in one read."""
+    session = rrc.session()
+    return {
+        "session": session,
+        "hubs": rrc.known_hubs(),
+        "nickname": rrc.nickname(),
+        "bookmarks": rrc.bookmarks(),
+        "rosters": {room: rrc.roster(room) for room in session["rooms"]},
+    }
+
+
 def friends_with_pages(friends_mgr, node_browser) -> list[dict]:
     """The friends list, each entry carrying "nomad_node_hash" when that
     friend's node has been heard on the mesh (None otherwise), so a client

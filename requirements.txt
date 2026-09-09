@@ -14,6 +14,12 @@
 rns==1.4.2
 lxmf==1.1.1
 msgpack==1.1.2
+# RRC (Reticulum Relay Chat) speaks CBOR, not msgpack, so interop with
+# rrcd and its other clients requires this alongside msgpack rather than
+# instead of it. It decodes bytes straight off the mesh, so
+# core/rrc_wire.py caps the payload before decoding and validates every
+# field after; treat a bump the way Pillow's is treated.
+cbor2==6.1.4
 configobj==5.0.9
 sqlcipher3==0.6.2
 Pillow==12.1.1

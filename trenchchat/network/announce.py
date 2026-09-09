@@ -13,6 +13,10 @@ import msgpack
 
 from trenchchat import APP_NAME, APP_ASPECT_CHANNEL, APP_ASPECT_USER
 from trenchchat.core.protocol import unpack_wire
+from trenchchat.core.rrc_wire import (
+    HUB_APP_NAME as RRC_HUB_APP_NAME, HUB_ASPECT as RRC_HUB_ASPECT,
+    MAX_HUB_NAME_BYTES,
+)
 
 # Path table index for the receiving interface (from RNS.Transport constants).
 _IDX_PT_RVCD_IF = 5
@@ -155,6 +159,64 @@ class NodeAnnounceHandler:
             self._callback(destination_hash.hex(), display_name, iface)
         except Exception as e:
             RNS.log(f"TrenchChat: node announce callback error: {e}", RNS.LOG_ERROR)
+
+
+class HubAnnounceHandler:
+    """
+    Listens for RRC hub announces (rrc.hub).
+
+    Fires on_hub_discovered(hub_hash_hex, hub_name, interface). The hash is
+    the hub's *destination* hash, which is what a client dials. The name is
+    whatever the hub put in its app_data: unsigned, unverified, presentation
+    only, and read defensively because the specification fixes the aspect
+    but not the payload.
+    """
+
+    aspect_filter = f"{RRC_HUB_APP_NAME}.{RRC_HUB_ASPECT}"
+
+    def __init__(self, on_hub_discovered):
+        self._callback = on_hub_discovered
+
+    def received_announce(self, destination_hash: bytes,
+                          announced_identity: RNS.Identity,
+                          app_data: bytes,
+                          announce_packet_hash: bytes):
+        if announced_identity is None:
+            return
+        try:
+            iface = _receiving_interface_for(destination_hash)
+            self._callback(destination_hash.hex(), _hub_name(app_data), iface)
+        except Exception as e:
+            RNS.log(f"TrenchChat [rrc]: hub announce callback error: {e}",
+                    RNS.LOG_ERROR)
+
+
+def _hub_name(app_data: bytes) -> str:
+    """The display name from a hub announce, or "" if it carries none.
+
+    rrcd has announced a plain UTF-8 name and a msgpack map at different
+    points, so both are read and anything else is simply no name.
+    """
+    if not app_data:
+        return ""
+    try:
+        decoded = msgpack.unpackb(app_data, raw=False)
+        if isinstance(decoded, dict):
+            decoded = decoded.get("name", "")
+        if isinstance(decoded, bytes):
+            decoded = decoded.decode("utf-8", errors="replace")
+        if isinstance(decoded, str):
+            return _printable(decoded)
+    except Exception:
+        pass
+    try:
+        return _printable(app_data.decode("utf-8", errors="replace"))
+    except Exception:
+        return ""
+
+
+def _printable(value: str) -> str:
+    return "".join(c for c in value if c.isprintable())[:MAX_HUB_NAME_BYTES]
 
 
 def lxmf_display_name(identity_hash: bytes) -> str:

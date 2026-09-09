@@ -54,6 +54,7 @@ from trenchchat.core.permissions import (
 )
 from trenchchat.core.presence import resolve_display_name
 from trenchchat.core.protocol import MAX_SHARED_FILE_BYTES
+from trenchchat.core.rrc_wire import normalise_room
 from trenchchat.core.storage import (
     FILE_STORE_MAX_BYTES, OWN_FILE_STORE_MAX_BYTES, PARTIAL_STORE_MAX_BYTES,
 )
@@ -153,6 +154,28 @@ class NomadBookmarkRequest(BaseModel):
     node_hash: str
     path: str
     label: str = ""
+
+
+class RRCConnectRequest(BaseModel):
+    hub_hash: str
+
+
+class RRCRoomRequest(BaseModel):
+    room: str
+
+
+class RRCSendRequest(BaseModel):
+    text: str
+    notice: bool = False
+
+
+class RRCNicknameRequest(BaseModel):
+    nickname: str
+
+
+class RRCBookmarkRequest(BaseModel):
+    hub_hash: str
+    bookmarked: bool = True
 
 
 class NomadBookmarkDeleteRequest(BaseModel):
@@ -732,6 +755,24 @@ def create_app(backend: Backend, *, token: str | None = None,
     backend.sync_mgr.status.add_status_callback(_on_sync_status)
     backend.add_link_callback(_on_link_status)
     backend.network_monitor.add_change_callback(_on_network_map_changed)
+
+    def _on_rrc_hub(hub_hash_hex: str, hub_name: str):
+        bus.emit("rrc_hub", hub_hash=hub_hash_hex, name=hub_name)
+
+    def _on_rrc_session(hub_hash_hex: str, state: str, reason: str):
+        bus.emit("rrc_session", hub_hash=hub_hash_hex, state=state,
+                 reason=reason)
+
+    def _on_rrc_room(room: str, state: str):
+        bus.emit("rrc_room", room=room, state=state)
+
+    def _on_rrc_line(room: str, line: dict):
+        bus.emit("rrc_message", room=room, line=line)
+
+    backend.rrc.add_hub_callback(_on_rrc_hub)
+    backend.rrc.add_session_callback(_on_rrc_session)
+    backend.rrc.add_room_callback(_on_rrc_room)
+    backend.rrc.add_line_callback(_on_rrc_line)
     def _on_nomad_node(node_hash_hex: str, display_name: str):
         bus.emit("nomad_node", node_hash=node_hash_hex,
                  display_name=display_name)
@@ -1432,6 +1473,60 @@ def create_app(backend: Backend, *, token: str | None = None,
     @app.post("/nomad/hosting/refresh")
     def refresh_nomad_hosting():
         return {"ok": True, **backend.node_browser.refresh_hosted_pages()}
+
+    # --- rrc (public chat) ---
+
+    @app.get("/rrc")
+    def rrc_state():
+        return actions.rrc_state(backend.rrc)
+
+    @app.get("/rrc/hubs")
+    def list_rrc_hubs():
+        return backend.rrc.known_hubs()
+
+    @app.post("/rrc/connect")
+    def rrc_connect(req: RRCConnectRequest):
+        return {"ok": True, "session": actions.rrc_connect(backend.rrc,
+                                                           req.hub_hash)}
+
+    @app.post("/rrc/disconnect")
+    def rrc_disconnect():
+        return {"ok": True, "session": actions.rrc_disconnect(backend.rrc)}
+
+    @app.post("/rrc/rooms")
+    def rrc_join_room(req: RRCRoomRequest):
+        return {"ok": True, **actions.rrc_join_room(backend.rrc, req.room)}
+
+    @app.post("/rrc/rooms/part")
+    def rrc_part_room(req: RRCRoomRequest):
+        return {"ok": True, **actions.rrc_part_room(backend.rrc, req.room)}
+
+    # A room name starts with '#', which a URL cannot carry literally, so
+    # these take it without one and normalise_room puts it back.
+    @app.get("/rrc/rooms/{room}/messages")
+    def rrc_room_messages(room: str):
+        # A transcript is what this node was present for and nothing else:
+        # the hub keeps no history, so there is nothing older to ask for.
+        return backend.rrc.lines(normalise_room(room))
+
+    @app.post("/rrc/rooms/{room}/messages")
+    def rrc_send(room: str, req: RRCSendRequest):
+        return {"ok": True, **actions.rrc_send_message(
+            backend.rrc, normalise_room(room), req.text, notice=req.notice)}
+
+    @app.get("/rrc/rooms/{room}/roster")
+    def rrc_room_roster(room: str):
+        return backend.rrc.roster(normalise_room(room))
+
+    @app.post("/rrc/nickname")
+    def rrc_set_nickname(req: RRCNicknameRequest):
+        return {"ok": True, **actions.rrc_set_nickname(backend.rrc,
+                                                       req.nickname)}
+
+    @app.post("/rrc/bookmarks")
+    def rrc_set_bookmark(req: RRCBookmarkRequest):
+        return {"ok": True, **actions.rrc_set_bookmark(
+            backend.rrc, req.hub_hash, req.bookmarked)}
 
     # --- servers ---
 

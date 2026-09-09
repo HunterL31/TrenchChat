@@ -48,12 +48,15 @@ from trenchchat.core.voice import VoiceManager
 from trenchchat.core.audio.engine import make_tone_pipeline
 from trenchchat.core.files import FileManager
 from trenchchat.core.node_browser import NodeBrowserManager
+from trenchchat.core.rrc import RRCManager
 from trenchchat.network.router import Router
 from trenchchat.network.file_transport import RNSFileTransport
 from trenchchat.network.node_transport import RNSNodeTransport
+from trenchchat.network.rrc_transport import RNSRRCTransport
 from trenchchat.network.voice_transport import RNSVoiceTransport
 from trenchchat.network.announce import (
-    FirstContactAnnouncer, NodeAnnounceHandler, PathResponseHandler,
+    FirstContactAnnouncer, HubAnnounceHandler, NodeAnnounceHandler,
+    PathResponseHandler,
     PeerAnnounceHandler, PropagationAnnounceHandler, UserAnnounceHandler,
 )
 from trenchchat.version import record_launch
@@ -344,6 +347,18 @@ class Backend:
             NodeAnnounceHandler(_on_node_discovered)
         )
 
+        self.rrc_transport = RNSRRCTransport(self.identity)
+        self.rrc = RRCManager(self.identity, self.config,
+                              transport=self.rrc_transport)
+
+        def _on_hub_discovered(hub_hex: str, hub_name: str, iface) -> None:
+            self.rrc.note_hub(hub_hex, hub_name)
+            self.network_monitor.note_change()
+
+        RNS.Transport.register_announce_handler(
+            HubAnnounceHandler(_on_hub_discovered)
+        )
+
         # A trenchchat.user announce is
         # the strongest signal a peer is a TrenchChat client (not just any
         # LXMF client), so it feeds both the directory and presence.
@@ -519,6 +534,10 @@ class Backend:
                     self.file_mgr.tick()
                 except Exception as e:
                     RNS.log(f"TesterBackend: file tick failed: {e}", RNS.LOG_WARNING)
+                try:
+                    self.rrc.tick()
+                except Exception as e:
+                    RNS.log(f"TesterBackend: rrc tick failed: {e}", RNS.LOG_WARNING)
                 try:
                     self.friends_mgr.tick()
                 except Exception as e:
