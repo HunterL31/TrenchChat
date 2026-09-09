@@ -21,7 +21,8 @@ from asserts import (
 )
 from flows import (
     go_offline, go_online, invite_and_accept, invite_only_channel,
-    BACKFILL_TIMEOUT, DISCOVERY_TIMEOUT,
+    ADMIN_WITH_FULL_SYNC, BACKFILL_TIMEOUT, DISCOVERY_TIMEOUT,
+    MEMBER_WITH_FULL_SYNC,
 )
 from scenario import PROBE, scenario
 
@@ -32,11 +33,6 @@ TRUNCATING_BACKLOG = MAX_RESPONSE_MESSAGES + 10
 
 # Reconciling several peers' disjoint history takes more than one exchange.
 CONVERGE_TIMEOUT = 180.0
-
-# full_sync is the only permission that changes what a responder will serve.
-ADMIN_WITH_FULL_SYNC = ["send_message", "invite", "kick", "manage_roles", "full_sync"]
-MEMBER_WITH_FULL_SYNC = ["send_message", "full_sync"]
-
 
 def _send_batch(peer, channel_hash: str, prefix: str, count: int) -> set[str]:
     """Send count messages and return the content set, zero-padded so the
@@ -206,7 +202,7 @@ def c7(env):
 def c8(env):
     """Entitlement changed, so the next request must re-ask from the start
     rather than resuming from a watermark that already ran past the withheld
-    rows. Needs an invite-only channel: full_sync does nothing on a public one."""
+    rows."""
     a, d = env.peers("A", "D")
     ch = a.create_channel("c8-private")
 

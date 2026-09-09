@@ -4358,6 +4358,18 @@ class TestAdversarialRRCHub:
     every rule it has must hold against a client that ignores all of them.
     """
 
+    @pytest.fixture(autouse=True)
+    def _joined_transports(self):
+        """Every FakeRRCTransport a test here builds, drained on the way out.
+
+        Its deliveries run on threads, and leaving them running is enough to
+        make a timing-sensitive test elsewhere in the suite fail.
+        """
+        self._transports: list = []
+        yield
+        for transport in self._transports:
+            transport.join_threads()
+
     def _hub(self, tmp_path):
         registry = FakeHubRegistry()
         host = FakeHostTransport("cc" * 16, registry)
@@ -4368,6 +4380,7 @@ class TestAdversarialRRCHub:
 
     def _session(self, host, registry, client_hex, *, welcomed=True):
         transport = FakeRRCTransport(client_hex, registry)
+        self._transports.append(transport)
         session = unwelcomed_session(host, transport, client_hex)
         if welcomed:
             host.handle(session, rrc_wire.pack_envelope(

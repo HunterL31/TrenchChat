@@ -93,6 +93,9 @@ and never sent all present as "nobody answered".
 
 1. `--tester-log` captures every tester's RNS output at debug level. Refusals
    in `sync.py` are logged there and nowhere else.
+1. An `ERR` names the scenario line it came from, so read that first: an
+   unexpected exception is usually the scenario calling a tester it has
+   killed or reset, not a defect in the code under test.
 2. If the log cannot tell you *why*, add the log line rather than guessing;
    a silent `return` in a handler is a bug in its own right, since the peer on
    the other side cannot distinguish it from packet loss either.

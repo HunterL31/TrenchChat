@@ -214,13 +214,24 @@ class TestSyncRequestResponse:
         # response chains its own continuation immediately, which legitimately
         # carries the watermark on to the final message before this line runs.
         # Both outcomes are correct, and both are far past wall-clock.
-        last_sync_at = bob.storage.get_subscriptions()[0]["last_sync_at"]
         first_batch_end = window_start + MAX_RESPONSE_MESSAGES
         last_message_ts = window_start + total
-        assert first_batch_end <= last_sync_at <= last_message_ts, (
+
+        def watermark() -> float:
+            return bob.storage.get_subscriptions()[0]["last_sync_at"]
+
+        # The watermark is written after the rows it covers, so reading it the
+        # instant the last row of the batch lands catches it at 0 often enough
+        # to fail a loaded suite. Waiting for it to move asserts the same
+        # thing; the range check below is what actually holds the contract.
+        assert wait_for(lambda: watermark() >= first_batch_end, timeout=5), (
             "last_sync_at did not advance to a delivered message's timestamp: "
-            f"expected between {first_batch_end} and {last_message_ts}, "
-            f"got {last_sync_at}"
+            f"expected at least {first_batch_end}, got {watermark()}"
+        )
+        last_sync_at = watermark()
+        assert last_sync_at <= last_message_ts, (
+            f"last_sync_at ran past the last message delivered: got "
+            f"{last_sync_at}, expected no more than {last_message_ts}"
         )
 
         bob.sync_mgr._send_sync_request(carol.identity.hash_hex, ch_hash, last_sync_at)

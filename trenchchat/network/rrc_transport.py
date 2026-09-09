@@ -29,7 +29,8 @@ import time
 import RNS
 
 from trenchchat.core.rrc_wire import (
-    B_CAPS, B_NAME, B_VERSION, CAP_ACTION, DEFAULT_LIMITS,
+    advertise_capabilities, B_CAPS, B_NAME, B_VERSION, CAP_ACTION,
+    DEFAULT_LIMITS,
     HUB_APP_NAME, HUB_ASPECT,
     K_BODY, K_ID, K_T, MAX_HUB_NAME_BYTES,
     T_HELLO, T_PING, T_PONG, T_WELCOME,
@@ -419,7 +420,7 @@ class RNSRRCTransport(RRCTransportBase):
         hello = pack_envelope(T_HELLO, src=self._identity.hash, body={
             B_NAME: CLIENT_NAME,
             B_VERSION: app_version(),
-            B_CAPS: dict(CLIENT_CAPABILITIES),
+            B_CAPS: advertise_capabilities(CLIENT_CAPABILITIES),
         })
         with self._lock:
             session = self._sessions.get(hub_hex)

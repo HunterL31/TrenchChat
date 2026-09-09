@@ -124,10 +124,42 @@ numbers come from specification document 3 and rrcd's `EX1-RRCD.md`, and
 `tests/test_rrc_wire.py` asserts them one by one so a drift is caught here
 rather than by a user whose messages stopped arriving.
 
-## Capabilities: only claim what is implemented
+## Capabilities: only claim what is implemented, and spell it both ways
 
 Both halves advertise `CAP_ACTION` and nothing else. A hub reads an
 advertised capability as permission to use it, so claiming
 `CAP_RESOURCE_ENVELOPE` or `CAP_DIRECT_NOTICE` without acting on them would
 cause real dropped messages rather than a graceful degradation. They join
 the advertised set when the code behind them exists, not before.
+
+Specification document 3 leaves the shape of the capability field open and
+its own wording describes string keys and arrays of strings, while rrcd
+numbers them. A peer may therefore send either. `advertise_capabilities`
+puts both spellings in one map and `capabilities_of` reads all four shapes
+(map or list, numbered or named), so neither kind of peer sees us as
+supporting nothing. Both ends must ignore what they do not recognise anyway,
+which is the forward-compatibility rule the specification states outright.
+It costs eight bytes on a `HELLO` and eight on a `WELCOME`, each sent once
+per session, which is the cheapest place in the protocol to spend them.
+
+## What has and has not been checked against the specification
+
+`tests/test_rrc_wire.py` pins every number, and these were re-read from the
+published specification rather than trusted from memory:
+
+- **Confirmed.** Envelope keys 0 to 7, the 43-byte fixed overhead and the
+  422-byte worst-case budget, every core message type (1, 2, 10 to 13, 20 to
+  22, 30, 31, 40), the `HELLO` and `WELCOME` body keys 0 to 3, and the five
+  hub-limit names, which are the only string keys in the protocol.
+- **Not confirmed, because it lives in rrcd's own extension document rather
+  than the published specification**: `K_DST = 8`, `T_RESOURCE_ENVELOPE = 50`
+  and the capability numbers. Both of the first two sit inside ranges
+  document 3 reserves for the core (envelope keys below 50, message types
+  below 64), so either rrcd is squatting there deliberately or these numbers
+  drifted on the way in. Matching rrcd is the whole point, so they stay where
+  they are, but this is the place a real interop run should look first.
+
+None of the three unconfirmed numbers is ever sent: this node advertises
+neither capability behind them, never emits a `K_DST` notice or a resource
+envelope, and refuses both inbound. A wrong number there costs us nothing
+we currently do; it would matter the day either capability is implemented.

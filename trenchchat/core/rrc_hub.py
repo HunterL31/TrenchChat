@@ -25,7 +25,8 @@ import time
 import RNS
 
 from trenchchat.core.rrc_wire import (
-    B_CAPS, B_LIMITS, B_NAME, B_VERSION, CAP_ACTION, DEFAULT_LIMITS,
+    advertise_capabilities, B_CAPS, B_LIMITS, B_NAME, B_VERSION, CAP_ACTION,
+    DEFAULT_LIMITS,
     K_BODY, K_DST, K_ID, K_NICK, K_ROOM, K_T, LIMIT_MSGS_PER_MINUTE,
     LIMIT_MSG_BODY_BYTES, LIMIT_ROOMS_PER_SESSION, T_ACTION, T_ERROR,
     T_HELLO, T_JOIN, T_JOINED, T_MSG, T_NOTICE, T_PART, T_PARTED, T_PING,
@@ -208,7 +209,7 @@ class RRCHubManager:
         self._send(session.session_id, T_WELCOME, body={
             B_NAME: self._name or f"{HUB_SOFTWARE} hub",
             B_VERSION: app_version(),
-            B_CAPS: dict(HUB_CAPABILITIES),
+            B_CAPS: advertise_capabilities(HUB_CAPABILITIES),
             B_LIMITS: dict(HUB_LIMITS),
         })
         RNS.log(f"TrenchChat [rrc-hub]: welcomed "

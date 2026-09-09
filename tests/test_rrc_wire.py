@@ -278,6 +278,43 @@ class TestCapabilities:
         assert w.capabilities_of({}) == {}
         assert w.capabilities_of(self._hello("nonsense")) == {}
 
+    def test_a_named_capability_map_is_read(self):
+        """Specification document 3 leaves B_CAPS open and its own wording
+        describes string keys, so a conformant peer may name them. Reading
+        only numbers would see such a peer as supporting nothing."""
+        caps = self._hello({"action": True, "resource_envelope": False})
+        assert w.capabilities_of(caps) == {
+            w.CAP_ACTION: True, w.CAP_RESOURCE_ENVELOPE: False,
+        }
+
+    def test_a_named_capability_list_is_read(self):
+        caps = self._hello(["action", "direct_notice"])
+        assert w.capabilities_of(caps) == {
+            w.CAP_ACTION: True, w.CAP_DIRECT_NOTICE: True,
+        }
+
+    def test_a_name_is_matched_regardless_of_case_and_padding(self):
+        assert w.capabilities_of(self._hello({" ACTION ": True})) == \
+            {w.CAP_ACTION: True}
+
+    def test_a_name_nobody_has_defined_is_ignored_not_guessed_at(self):
+        caps = self._hello({"telepathy": True, "action": True})
+        assert w.capabilities_of(caps) == {w.CAP_ACTION: True}
+
+    def test_what_goes_out_carries_both_spellings(self):
+        """A peer that reads numbers and one that reads names must both see
+        the same answer, and neither may be told we support something extra."""
+        both = w.advertise_capabilities({w.CAP_ACTION: True})
+        assert both == {w.CAP_ACTION: True, "action": True}
+        assert w.capabilities_of({w.K_BODY: {w.B_CAPS: both}}) == \
+            {w.CAP_ACTION: True}
+
+    def test_every_capability_number_has_exactly_one_name(self):
+        assert set(w.CAP_NAMES) == {
+            w.CAP_RESOURCE_ENVELOPE, w.CAP_ACTION, w.CAP_DIRECT_NOTICE,
+        }
+        assert len(set(w.CAP_NAMES.values())) == len(w.CAP_NAMES)
+
 
 class TestHubLimits:
     def _welcome(self, limits) -> dict:

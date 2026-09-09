@@ -370,8 +370,8 @@ the first ask is served and ~120s when it takes a retry.
 | social6 | A,B,C | A changes display name | ✅ Propagates; directory search finds the new name |
 | social7 | A,B,C | A adds B as a friend with a nickname | ✅ Local only, C sees nothing, B is not notified |
 | social8 | A,B,C | B replies to A's message; C reacts to the reply | ✅ `reply_to` and the reaction target resolve identically on all three |
-| social9 | A,B,C | Same conversation on an **invite-only** channel: B replies to A's message; C reacts to the reply | ✅ Resolves identically there too, 4/4 runs in 23–29s, member-list fan-out carries replies and reactions the same way the subscriber set does |
-| social10 | A,B,C | B imports a custom emoji and reacts with it | ✅ A and C converge on the count and fetch the image over `MT_EMOJI_REQUEST`, in 0.0–3.5s after the count landed. 4/4 runs |
+| social9 | A,B,C | The same conversation once more: B replies to A's message; C reacts to the reply | ✅ Resolves identically, 4/4 runs in 23–29s. Written when it was the invite-only counterpart to social8's public channel; both are invite-only now, and it still earns its place as the reply-plus-reaction shape under a second author |
+| social10 | A,B,C | B imports a custom emoji and reacts with it | ✅ A and C converge on the count and fetch the image over `MT_EMOJI_REQUEST`, in 0.0–3.5s after the count landed. **5/5 runs since the reaction retry queue**; it was 0/5 the moment the family moved off public channels, because B and C meet in a member-list document rather than in traffic and B's reaction to C was addressed before the path resolved |
 | social11 | A,B | A is slowed to a real client's announce cadence; B is wiped so it has heard nobody; A invites B | ✅ **3/3 runs, 20–25s.** Found a real defect first; see below. Fails in 64s without the fix |
 
 ### interop: direct messages with clients that are not TrenchChat
@@ -525,7 +525,7 @@ loses honest history with nothing but a log line to show for it.
 | ID | Peers | Actions | Expected result |
 |---|---|---|---|
 | integrity1 | A,B,C,D | C offline; A sends 2; A's process killed; C online and backfills from B | ✅ C accepts and correctly attributes history whose author is gone, in 11.1s. A relay's own signature is not what C checks |
-| integrity2 | A,B,C,D | B owns the channel; A sends, then dies; D wiped to a **new identity**, joins and backfills | ✅ **Was a confirmed gap, now fixed.** As a probe it measured 4.0s for the live owner's message and *never* for the dead author's. Responders now send each batch's author keys, and D holds both. Strict since |
+| integrity2 | A,B,C,D | B owns the channel and grants `full_sync`; A sends, then dies; D wiped to a **new identity**, joins and backfills | ✅ **Was a confirmed gap, now fixed.** As a probe it measured 4.0s for the live owner's message and *never* for the dead author's. Responders now send each batch's author keys, and D holds both, in 0.0s each. Strict since. It was staged on a public channel until those were removed; `full_sync` replaces what open-join gave it for free, since D joins after both messages and tenure would otherwise withhold them on their timestamps alone |
 | integrity3 | A,B,C,D | A sends a real 64×64 JPEG | ✅ All three receivers hold it with `image_stripped: false` and can fetch the bytes. The signature covers the attachment, so the two travel together |
 | integrity4 | A,B,C,D | A sends a 68-byte PNG declaring 20000×20000 (400M pixels) | ✅ Delivered as text with no attachment on all four. The sender's own API is the gate: `prepare_image` fails closed rather than forwarding bytes it could not re-encode |
 
@@ -1282,12 +1282,13 @@ SF10 as a question about payload sizes instead.
 
 **The `public` family is retired.** Public channels were removed when public chat moved to RRC (see `docs/rrc.md`), and the eleven `public` scenarios went with them. Their findings are kept below as the record of what that feature cost, not as open leads: public5, public6 and public10 describe behaviour nothing in the tree has any more.
 
-Everything the matrix turned up, across all ten families.
+Everything the matrix turned up, across every family.
 
 ### Fixed
 
 | Finding | Detail |
 |---|---|
+| **A reaction to a peer whose path was not yet resolved was lost for good.** Two members of an invite-only channel meet in a member-list document rather than in traffic, so the first reaction one sends the other is regularly addressed before Reticulum has resolved a path. `_broadcast_reaction` fired a path request and dropped it, and a reaction has none of the three recovery mechanisms behind it | Fixed: reactions use the same bounded `ControlRetryQueue` as invite, friends and sync, flushed on the path response as well as on the announce, because a real client announces every few hours. social10 went from 0/5 to 5/5; regression tests in `tests/test_reactions.py::TestReactionRetryQueue`. Invisible while the family was staged on public channels, where the joiner's own subscribe had already warmed the path |
 | **History died with its author**, a peer who joins after an author leaves could never read that author's messages, because verifying needs a key only the author's own announce could supply | Fixed: a sync response carries a deduplicated `{author: public key}` map, and a relayed key is cached only if it hashes back to the identity claiming it. integrity2 went from *never* to 0.0s; regression test in `tests/test_sync_multipeer.py` |
 | **Join and invite were sent once and never retried**, `_send_raw` in `subscription.py` and `invite.py` dropped the message outright when the recipient's path was unresolved, which is exactly when a first join or a first invite happens | Fixed: both hold the message in a bounded `ControlRetryQueue` and flush it when the peer announces. Regression tests in `tests/test_subscriptions.py` and `tests/test_invites.py` |
 | **A sync answer was dropped when the responder could not yet address the requester**, and unlike every other send path it did not even request a path. The requester sat at `pending`, unable to tell silence from refusal | Fixed: the answer is held (for no longer than the requester will accept one) and re-sent when the peer announces. This is most of sync2; see below |
@@ -1399,11 +1400,11 @@ All fifteen families built and run: **127 scenarios, 99 strict and 28 probes**, 
 | `sync`: offline and sync | 11 (10 strict, 1 probe) | Whole family green in one run (10/10 strict). sync2 fixed, 12/12. sync11 reconciles 4/5 to 5/5 on broadband since requests describe what they hold, up from 1 in 5, and 0/3 on `lora_fast`; sync12 added for the two-peer shape, 5/5 and 3/3 on `lora_fast`; sync13 added for a long absence, 3/3 |
 | `links`: degraded links | 10 (5 strict, 5 probes) | All passing, on genuinely shaped links |
 | `servers`: servers | 8 (7 strict, 1 probe) | All passing; servers7 is the reported channel-invite defect, 5/5 after the fix |
-| `social`: reactions, presence, identity | 10 (9 strict, 1 probe) | All passing; social3's prediction refuted |
+| `social`: reactions, presence, identity | 11 (10 strict, 1 probe) | All passing; social3's prediction refuted; social10 found the dropped-reaction defect once the family moved off public channels, 5/5 after the retry queue |
 | `restart`: restart and ordering | 5 (3 strict, 2 probes) | All passing; restart1 confirmed, then fixed; restart3 confirmed |
 | `voice`: live group voice | 13 (10 strict, 3 probes) | All passing; voice13 found a real cadence defect, 5/5 after the fix; voice4, voice5 and voice11 recorded gaps |
 | `api`: the API surface | 5 (4 strict, 1 probe) | All passing; api4 records the shared-token property; api5 covers the pushed network map, 5/5 |
-| `integrity`: message integrity | 4 (4 strict) | All passing; integrity2 found a real gap, now fixed and strict |
+| `integrity`: message integrity | 4 (4 strict) | All passing; integrity2 found a real gap, now fixed and strict, and was restaged on `full_sync` when tenure started applying to every channel |
 | `nomad`: page browsing and hosting | 4 (3 strict, 1 probe) | All passing, 4/4 runs each; nomad3 confirmed bounded offline failure and recovery |
 | `bw`: bytes on the wire | 1 (probe) | Measured before and after reconciliation; see the family's section |
 | `interop`: direct messages with other LXMF clients | 4 (4 strict) | All passing against a real bare RNS+LXMF client; interop4 found a real gap, 5/5 after the fix |
@@ -1414,6 +1415,14 @@ All fifteen families built and run: **127 scenarios, 99 strict and 28 probes**, 
 `lora_fast` since beacons carry a sync probe, from 1/5 and 0/3 when this
 family was first run. invite11 is now passing on the narrowed
 `kick` rule described above.
+
+Re-measured after public channels were removed and every family restaged onto
+invite-only ones: `restart` 3/3, `invite` 17/17, `social` 10/10, `sync` 11/11,
+`voice` 10/10, `links` 5/5, `integrity` 4/4. The restaging was not free, and
+that is the point of running it: social10 exposed a real dropped-reaction
+defect (fixed, above), integrity1 exposed a harness fault where a scenario
+named a peer it had killed, and integrity2 needed `full_sync` because tenure
+now applies to every channel.
 
 Re-run against `main` after the August security audit merged (PR 52): the suite
 is unchanged at 53/55, so the audit regressed nothing here. Its one effect on

@@ -22,7 +22,8 @@ import zlib
 from asserts import all_hold, settle, wait_until, ScenarioFailure
 from flows import (
     go_offline, go_online, invite_and_accept, invite_only_channel,
-    BACKFILL_TIMEOUT, DISCOVERY_TIMEOUT, RECONNECT_TIMEOUT,
+    ADMIN_WITH_FULL_SYNC, BACKFILL_TIMEOUT, DISCOVERY_TIMEOUT,
+    MEMBER_WITH_FULL_SYNC, RECONNECT_TIMEOUT,
 )
 from scenario import PROBE, scenario
 
@@ -108,16 +109,23 @@ def j2(env):
 
     D is wiped to a brand-new identity after A is dead, so it has never seen
     A's announce and holds nothing of A in either its own key cache or RNS's.
-    The channel stays discoverable because B owns it, not A.
+    The channel survives because B owns it, not A.
 
     This ran as a probe first and confirmed the gap it predicted: D backfilled
     everything the live owner wrote and silently lost everything the departed
     author wrote, because resolve_author() had no key to find and
     verify_message() cannot tell "unverifiable" from "forged". Responders now
     send each batch's author keys alongside it, so it is strict.
+
+    The channel grants full_sync because D joins after both messages were
+    written, and without it tenure withholds them from D on their timestamps
+    alone. That would test tenure, which sync8 already covers, and never reach
+    the verification this is about.
     """
     a, b, c, d = env.peers("A", "B", "C", "D")
-    ch = invite_only_channel(b, [a, c], "j2-chan")
+    ch = invite_only_channel(b, [a, c], "j2-chan",
+                             permissions=(ADMIN_WITH_FULL_SYNC,
+                                          MEMBER_WITH_FULL_SYNC))
 
     by_a = {"only-A-wrote-this"}
     by_b = {"only-B-wrote-this"}
@@ -143,9 +151,14 @@ def j2(env):
                            BACKFILL_TIMEOUT)
 
     if not got_b:
+        # Nothing arriving reads the same whether D never joined, joined
+        # without subscribing, or asked and was refused; naming what D holds
+        # is what tells those apart.
         raise ScenarioFailure(
-            "D backfilled nothing at all, so this measures join and backfill "
-            "rather than author verification"
+            f"D backfilled nothing at all, so this measures join and backfill "
+            f"rather than author verification. D holds channels "
+            f"{[c['hash'][:12] for c in d.channels()]} and a roster of "
+            f"{len(d.members(ch))} for this one"
         )
     if not got_a:
         raise ScenarioFailure(

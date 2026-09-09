@@ -49,8 +49,10 @@ K_BODY = 6
 K_NICK = 7
 K_DST = 8
 
-# Message types. 0 to 49 are reserved for the core protocol; 50 up are
-# extensions, and T_RESOURCE_ENVELOPE is rrcd's.
+# Message types. Specification document 3 reserves 0 to 63 for the core
+# protocol and leaves 64 up to extensions; T_RESOURCE_ENVELOPE is rrcd's, and
+# sits at 50 because that is where rrcd put it, inside the reserved range.
+# Matching rrcd is the point, so it stays there; see docs/rrc.md.
 T_HELLO = 1
 T_WELCOME = 2
 T_JOIN = 10
@@ -77,6 +79,18 @@ B_LIMITS = 3
 CAP_RESOURCE_ENVELOPE = 0
 CAP_ACTION = 1
 CAP_DIRECT_NOTICE = 2
+
+# The same capabilities by name. Specification document 3 leaves the shape of
+# B_CAPS open and its own wording describes string keys, while rrcd numbers
+# them, so a peer may send either. Both spellings go out and both are read:
+# an unknown one is ignored at each end, which is what the forward
+# compatibility rules require anyway.
+CAP_NAMES = {
+    CAP_RESOURCE_ENVELOPE: "resource_envelope",
+    CAP_ACTION: "action",
+    CAP_DIRECT_NOTICE: "direct_notice",
+}
+_CAP_BY_NAME = {name: number for number, name in CAP_NAMES.items()}
 
 # Hub limits, advertised in the WELCOME body under B_LIMITS. String keys,
 # unlike everything else here, because the specification names them.
@@ -336,22 +350,51 @@ def body_text(envelope: dict) -> str:
     return ""
 
 
-def capabilities_of(envelope: dict) -> dict:
-    """The capability map from a HELLO or WELCOME body.
+def advertise_capabilities(caps: dict) -> dict:
+    """A capability map spelled both ways, for a peer that reads either."""
+    both: dict = {}
+    for number, supported in caps.items():
+        both[number] = supported
+        name = CAP_NAMES.get(number)
+        if name is not None:
+            both[name] = supported
+    return both
 
-    Capabilities are a map keyed by capability number. rrcd's own clients
-    have shipped them as a list too, so both are read and the result is
-    always a map.
+
+def _cap_number(key) -> int | None:
+    """The capability a key names, however the peer chose to spell it."""
+    if isinstance(key, bool):
+        return None
+    if isinstance(key, int):
+        return key
+    if isinstance(key, str):
+        return _CAP_BY_NAME.get(key.strip().lower())
+    return None
+
+
+def capabilities_of(envelope: dict) -> dict:
+    """The capability map from a HELLO or WELCOME body, keyed by number.
+
+    A peer may send a map or a list, and may name capabilities by number or
+    by the names in CAP_NAMES; all four shapes are read. Anything else is
+    ignored rather than guessed at.
     """
     body = envelope.get(K_BODY)
     if not isinstance(body, dict):
         return {}
     caps = body.get(B_CAPS)
+    found: dict = {}
     if isinstance(caps, dict):
-        return {k: v for k, v in caps.items() if isinstance(k, int)}
-    if isinstance(caps, list):
-        return {c: True for c in caps if isinstance(c, int) and not isinstance(c, bool)}
-    return {}
+        for key, value in caps.items():
+            number = _cap_number(key)
+            if number is not None:
+                found[number] = value
+    elif isinstance(caps, list):
+        for entry in caps:
+            number = _cap_number(entry)
+            if number is not None:
+                found[number] = True
+    return found
 
 
 def limits_of(envelope: dict) -> dict:

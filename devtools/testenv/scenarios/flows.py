@@ -27,6 +27,11 @@ NEGATIVE_HOLD_SECS = 15.0
 INVITE_TIMEOUT = 25.0
 INVITE_ATTEMPTS = 3
 
+# full_sync is the only permission that changes what a responder will serve:
+# without it, tenure withholds every message written before a peer joined.
+ADMIN_WITH_FULL_SYNC = ["send_message", "invite", "kick", "manage_roles", "full_sync"]
+MEMBER_WITH_FULL_SYNC = ["send_message", "full_sync"]
+
 
 def offer_invite(inviter, invitee, channel_hash: str) -> None:
     """Re-issue an invite until the invitee holds it as pending.
