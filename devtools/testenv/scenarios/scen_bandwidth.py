@@ -78,7 +78,7 @@ def bw1(env):
     """
     a, b, c, d = env.peers("A", "B", "C", "D")
     everyone = [a, b, c, d]
-    ch = invite_only_channel(a, [b, c, d], "bw1-public")
+    ch = invite_only_channel(a, [b, c, d], "bw1-chan")
     expected = set()
     for i in range(5):
         content = f"bw1-seed-{i}"

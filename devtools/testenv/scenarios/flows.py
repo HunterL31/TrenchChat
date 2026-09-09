@@ -7,13 +7,12 @@ than slept through.
 """
 
 from asserts import (
-    discovered_hashes, roster, rosters_identical, settle,
+    roster, rosters_identical, settle,
     wait_until, ScenarioFailure,
 )
 
-# Announces drive discovery and, on a public channel, backfill. worker.py runs
-# the heartbeat at 10s, so anything announce-triggered needs room for more than
-# one cycle.
+# Announces drive first contact and backfill. worker.py runs the heartbeat at
+# 10s, so anything announce-triggered needs room for more than one cycle.
 DISCOVERY_TIMEOUT = 60.0
 BACKFILL_TIMEOUT = 90.0
 
@@ -27,14 +26,6 @@ NEGATIVE_HOLD_SECS = 15.0
 # invitee's path resolves is dropped and nothing re-sends it.
 INVITE_TIMEOUT = 25.0
 INVITE_ATTEMPTS = 3
-
-
-def await_discovery(peers, channel_hash: str, timeout: float = DISCOVERY_TIMEOUT) -> None:
-    for p in peers:
-        wait_until(lambda p=p: channel_hash in discovered_hashes(p),
-                   f"{p.tag} to discover the channel", timeout)
-
-
 
 
 def offer_invite(inviter, invitee, channel_hash: str) -> None:
@@ -81,7 +72,7 @@ def invite_only_channel(owner, invitees, name: str, permissions=None) -> str:
     *permissions* is an (admin, member) pair applied before anyone is invited,
     for scenarios that need a grant in place from the start.
     """
-    channel_hash = owner.create_channel(name, "invite")
+    channel_hash = owner.create_channel(name)
     if permissions is not None:
         admin, member = permissions
         owner.set_permissions(channel_hash, admin=admin, member=member)

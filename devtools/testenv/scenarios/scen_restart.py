@@ -12,7 +12,7 @@ from asserts import (
     all_hold, roster, settle, roster_views, wait_until, ScenarioFailure,
 )
 from flows import (
-    await_discovery, invite_and_accept, invite_only_channel,
+    invite_and_accept, invite_only_channel,
     DISCOVERY_TIMEOUT,
 )
 from scenario import PROBE, scenario
@@ -20,20 +20,19 @@ from scenario import PROBE, scenario
 RESTART_SETTLE = 120.0
 
 
-@scenario("restart1", "A restarted owner keeps numbering subscriber lists upward")
+@scenario("restart1", "A restarted owner keeps numbering member lists upward")
 def g1(env):
-    """Regression guard for a fixed bug.
+    """Regression guard, carried over from the subscriber-list version it
+    used to cover.
 
-    _subscriber_versions was an in-memory dict, so a restarted owner started
-    numbering from 1 again while its subscribers still held the higher version
-    from before. Receivers reject anything not newer than what they hold, so
-    every list published after the restart was discarded as a replay, leaving
-    existing subscribers permanently unaware of anyone who joined afterwards.
-    The counter is persisted now; this fails again if that regresses.
+    A member-list document is accepted only when its version is newer than
+    the one a peer already holds, so an owner that restarted and began
+    numbering from 1 again would have every later document discarded as a
+    replay, leaving existing members permanently unaware of anyone admitted
+    afterwards. The version is persisted; this fails again if that regresses.
     """
     a, b, c, d = env.peers("A", "B", "C", "D")
-    ch = invite_only_channel(a, [b, c], "g1-public")
-    await_discovery([d], ch)
+    ch = invite_only_channel(a, [b, c], "g1-restart")
 
     a.send(ch, "before-restart")
     all_hold([b, c], ch, {"before-restart"}, timeout=DISCOVERY_TIMEOUT)
@@ -74,13 +73,13 @@ def g1(env):
 @scenario("restart2", "Every peer's state survives a full restart")
 def g2(env):
     a, b, c, d = env.peers("A", "B", "C", "D")
-    public = invite_only_channel(a, [b, c, d], "g2-public")
+    shared = invite_only_channel(a, [b, c, d], "g2-shared")
     private = invite_only_channel(a, [b], "g2-private")
 
     messages = {f"g2-{i}" for i in range(3)}
     for content in sorted(messages):
-        a.send(public, content)
-    all_hold([b, c, d], public, messages, timeout=DISCOVERY_TIMEOUT)
+        a.send(shared, content)
+    all_hold([b, c, d], shared, messages, timeout=DISCOVERY_TIMEOUT)
 
     identities = {p.tag: p.hash for p in (a, b, c, d)}
     private_roster = roster(a, private)
@@ -95,7 +94,7 @@ def g2(env):
             raise ScenarioFailure(f"{peer.tag} came back with a different identity")
 
     for peer in (a, b, c, d):
-        wait_until(lambda peer=peer: peer.contents(public) == messages,
+        wait_until(lambda peer=peer: peer.contents(shared) == messages,
                    f"{peer.tag} to still hold its message history", RESTART_SETTLE)
     if roster(a, private) != private_roster:
         raise ScenarioFailure("the invite-only roster did not survive the restart")
@@ -108,7 +107,7 @@ def g3(env):
     instant a channel is created -- before the invitee's path is known -- is
     dropped silently. Measures how many attempts it actually takes."""
     a, b = env.peers("A", "B")
-    ch = a.create_channel("g3-private", "invite")
+    ch = a.create_channel("g3-private")
 
     attempts = 0
     landed = False
@@ -151,7 +150,7 @@ def g4(env):
 @scenario("restart5", "A wiped tester returns as a different identity")
 def g5(env):
     a, b, c = env.peers("A", "B", "C")
-    ch = invite_only_channel(a, [b, c], "g5-public")
+    ch = invite_only_channel(a, [b, c], "g5-shared")
     old_hash = c.hash
 
     a.send(ch, "before-wipe")
@@ -169,4 +168,4 @@ def g5(env):
     # The owner still lists the identity that will never return.
     if old_hash not in roster(a, ch):
         raise ScenarioFailure("the owner dropped the wiped peer without being told")
-    return {"stale_subscriber_retained": True}
+    return {"stale_member_retained": True}

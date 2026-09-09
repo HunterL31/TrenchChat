@@ -415,19 +415,12 @@ class Peer:
 
     # --- channels ---
 
-    def create_channel(self, name: str, access: str = "public",
-                       description: str = "") -> str:
-        return self._post("/channels", {"name": name, "access": access,
+    def create_channel(self, name: str, description: str = "") -> str:
+        return self._post("/channels", {"name": name,
                                         "description": description})["hash"]
 
     def channels(self) -> list[dict]:
         return self._get("/channels")
-
-    def discovered(self) -> list[dict]:
-        return self._get("/channels/discovered")
-
-    def join(self, channel_hash: str) -> bool:
-        return self._post(f"/channels/{channel_hash}/join")["ok"]
 
     def leave(self, channel_hash: str) -> bool:
         return self._post(f"/channels/{channel_hash}/leave")["ok"]

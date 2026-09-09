@@ -70,7 +70,7 @@ def j1(env):
     messages it will never ask for again.
     """
     a, b, c, d = env.peers("A", "B", "C", "D")
-    ch = invite_only_channel(a, [b, c, d], "j1-public")
+    ch = invite_only_channel(a, [b, c, d], "j1-chan")
 
     go_offline(c)
 
@@ -117,7 +117,7 @@ def j2(env):
     send each batch's author keys alongside it, so it is strict.
     """
     a, b, c, d = env.peers("A", "B", "C", "D")
-    ch = invite_only_channel(b, [a, c], "j2-public")
+    ch = invite_only_channel(b, [a, c], "j2-chan")
 
     by_a = {"only-A-wrote-this"}
     by_b = {"only-B-wrote-this"}
@@ -170,7 +170,7 @@ def j3(env):
     accepted and readable at the far end.
     """
     a, b, c, d = env.peers("A", "B", "C", "D")
-    ch = invite_only_channel(a, [b, c, d], "j3-public")
+    ch = invite_only_channel(a, [b, c, d], "j3-chan")
 
     a.send(ch, "with-picture", image_data_b64=small_jpeg())
     all_hold([b, c, d], ch, {"with-picture"}, timeout=DISCOVERY_TIMEOUT)
@@ -199,7 +199,7 @@ def j4(env):
     should ever have to decide what to do with it.
     """
     a, b, c, d = env.peers("A", "B", "C", "D")
-    ch = invite_only_channel(a, [b, c, d], "j4-public")
+    ch = invite_only_channel(a, [b, c, d], "j4-chan")
 
     a.send(ch, "hostile-attachment", image_data_b64=bomb_png())
     all_hold([a, b, c, d], ch, {"hostile-attachment"}, timeout=DISCOVERY_TIMEOUT)

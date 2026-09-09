@@ -20,7 +20,7 @@ from asserts import (
     all_hold, diff_report, hold_for, roster, settle, wait_until, ScenarioFailure,
 )
 from flows import (
-    go_offline, go_online, invite_and_accept, invite_only_channel, invite_only_channel,
+    go_offline, go_online, invite_and_accept, invite_only_channel,
     BACKFILL_TIMEOUT, DISCOVERY_TIMEOUT,
 )
 from scenario import PROBE, scenario
@@ -50,7 +50,7 @@ def _send_batch(peer, channel_hash: str, prefix: str, count: int) -> set[str]:
 @scenario("sync1", "A link-dropped peer receives what it missed")
 def c1(env):
     a, b, c = env.peers("A", "B", "C")
-    ch = invite_only_channel(a, [b, c], "c1-public")
+    ch = invite_only_channel(a, [b, c], "c1-chan")
 
     go_offline(b)
     missed = _send_batch(a, ch, "c1", 3)
@@ -68,7 +68,7 @@ def c2(env):
     """Mechanism 2. B misses three messages, then A goes offline before B
     returns -- so whatever B ends up with came from C or D, not the sender."""
     a, b, c, d = env.peers("A", "B", "C", "D")
-    ch = invite_only_channel(a, [b, c, d], "c2-public")
+    ch = invite_only_channel(a, [b, c, d], "c2-chan")
 
     go_offline(b)
     missed = _send_batch(a, ch, "c2", 3)
@@ -100,7 +100,7 @@ def c3(env):
     """Mechanism 3 from a cold start. Unlike sync1's link drop, nothing survives
     in memory -- no pending queue, no sync status, no subscriber cache."""
     a, b, c = env.peers("A", "B", "C")
-    ch = invite_only_channel(a, [b, c], "c3-public")
+    ch = invite_only_channel(a, [b, c], "c3-chan")
 
     before = _send_batch(a, ch, "c3-pre", 2)
     all_hold([b, c], ch, before, timeout=DISCOVERY_TIMEOUT)
@@ -127,7 +127,7 @@ def c4(env):
     the requester must chain its own follow-up. Without that chaining D stops
     at 50 of 60."""
     a, d = env.peers("A", "D")
-    ch = invite_only_channel(a, [d], "c4-public")
+    ch = invite_only_channel(a, [d], "c4-chan")
 
     go_offline(d)
     backlog = _send_batch(a, ch, "c4", TRUNCATING_BACKLOG)
@@ -152,7 +152,7 @@ def c5(env):
     """Disjoint history: nobody holds everything B and C each need, so a
     channel-wide watermark would strand one of them."""
     a, b, c = env.peers("A", "B", "C")
-    ch = invite_only_channel(a, [b, c], "c5-public")
+    ch = invite_only_channel(a, [b, c], "c5-chan")
 
     go_offline(b)
     first = _send_batch(a, ch, "c5-first", 5)
@@ -180,7 +180,7 @@ def c7(env):
     """SyncStatusTracker is what a client shows the user. Records the state a
     channel lands in after a normal offline round trip."""
     a, b = env.peers("A", "B")
-    ch = invite_only_channel(a, [b], "c7-public")
+    ch = invite_only_channel(a, [b], "c7-chan")
 
     go_offline(b)
     missed = _send_batch(a, ch, "c7", 3)
@@ -208,7 +208,7 @@ def c8(env):
     rather than resuming from a watermark that already ran past the withheld
     rows. Needs an invite-only channel: full_sync does nothing on a public one."""
     a, d = env.peers("A", "D")
-    ch = a.create_channel("c8-private", "invite")
+    ch = a.create_channel("c8-private")
 
     backlog = _send_batch(a, ch, "c8", 3)
     a.invite(ch, d.hash)
@@ -259,7 +259,7 @@ def c10(env):
     all four at once -- every peer keeps writing locally with nothing
     reachable."""
     a, b, c, d = env.peers("A", "B", "C", "D")
-    ch = invite_only_channel(a, [b, c, d], "c10-public")
+    ch = invite_only_channel(a, [b, c, d], "c10-chan")
 
     a.send(ch, "before-partition")
     all_hold([b, c, d], ch, {"before-partition"}, timeout=DISCOVERY_TIMEOUT)
@@ -298,7 +298,7 @@ def c11(env):
     docs/testenv-scenarios.md.
     """
     a, b, c, d = env.peers("A", "B", "C", "D")
-    ch = invite_only_channel(a, [b, c, d], "c11-public")
+    ch = invite_only_channel(a, [b, c, d], "c11-chan")
 
     a.send(ch, "seed")
     all_hold([b, c, d], ch, {"seed"}, timeout=DISCOVERY_TIMEOUT)
@@ -338,7 +338,7 @@ def c12(env):
     only converges if the two sides reconcile the sets themselves.
     """
     a, b = env.peers("A", "B")
-    ch = invite_only_channel(a, [b], "c12-public")
+    ch = invite_only_channel(a, [b], "c12-chan")
 
     a.send(ch, "c12-seed")
     all_hold([b], ch, {"c12-seed"}, timeout=DISCOVERY_TIMEOUT)
@@ -382,7 +382,7 @@ def c13(env):
     or stop at a cap. Every row must arrive and the channel must read synced.
     """
     a, b, c = env.peers("A", "B", "C")
-    ch = invite_only_channel(a, [b, c], "c13-public")
+    ch = invite_only_channel(a, [b, c], "c13-chan")
 
     a.send(ch, "c13-seed")
     all_hold([b, c], ch, {"c13-seed"}, timeout=DISCOVERY_TIMEOUT)

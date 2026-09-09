@@ -27,7 +27,7 @@ from asserts import (
     wait_until, ScenarioFailure,
 )
 from flows import (
-    go_offline, go_online, invite_only_channel, invite_only_channel, set_link_profile,
+    go_offline, go_online, invite_only_channel, set_link_profile,
     BROADBAND, LORA_FAST, DISCOVERY_TIMEOUT, NEGATIVE_HOLD_SECS,
 )
 from scenario import PROBE, scenario

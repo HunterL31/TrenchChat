@@ -45,7 +45,7 @@ def _send_batch(peer, channel_hash: str, prefix: str, count: int) -> set[str]:
 @scenario("links1", "A lossy sender still reaches every peer")
 def d1(env):
     a, b, c, d = env.peers("A", "B", "C", "D")
-    ch = invite_only_channel(a, [b, c, d], "d1-public")
+    ch = invite_only_channel(a, [b, c, d], "d1-chan")
 
     summary = set_link_profile(env, a, LOSSY)
     expected = _send_batch(a, ch, "d1", 10)
@@ -66,7 +66,7 @@ def d2(env):
     """Serial 9600: slow enough to be a real constraint, bounded enough that a
     stall is distinguishable from the simulation working."""
     a, b = env.peers("A", "B")
-    ch = invite_only_channel(a, [b], "d2-public")
+    ch = invite_only_channel(a, [b], "d2-chan")
 
     summary = set_link_profile(env, b, SERIAL)
     expected = _send_batch(a, ch, "d2", 5)
@@ -85,7 +85,7 @@ def d2(env):
 @scenario("links3", "Peers on four different links still converge")
 def d3(env):
     a, b, c, d = env.peers("A", "B", "C", "D")
-    ch = invite_only_channel(a, [b, c, d], "d3-public")
+    ch = invite_only_channel(a, [b, c, d], "d3-chan")
 
     profiles = {}
     for peer, profile in ((a, BROADBAND), (b, SATELLITE), (c, LORA_FAST), (d, SERIAL)):
@@ -111,7 +111,7 @@ def d4(env):
     """The combination the offline mechanisms are actually for: a bad link and
     an intermittent one at the same time."""
     a, b = env.peers("A", "B")
-    ch = invite_only_channel(a, [b], "d4-public")
+    ch = invite_only_channel(a, [b], "d4-chan")
     summary = set_link_profile(env, b, LOSSY)
 
     first = _send_batch(a, ch, "d4-first", 5)
@@ -135,7 +135,7 @@ def d5(env):
     """The documented "a tester on a slow profile falls behind" case, asserted
     rather than assumed. Announces and beacons compete with the payload here."""
     a, b, c, d = env.peers("A", "B", "C", "D")
-    ch = invite_only_channel(a, [b, c, d], "d5-public")
+    ch = invite_only_channel(a, [b, c, d], "d5-chan")
 
     for peer in (a, b, c, d):
         summary = set_link_profile(env, peer, LORA_FAST)
@@ -160,7 +160,7 @@ def d6(env):
     them the way a real bad radio does -- the link stays nominally up the whole
     time and simply loses 15% of frames."""
     a, b, c = env.peers("A", "B", "C")
-    ch = invite_only_channel(a, [b, c], "d6-public")
+    ch = invite_only_channel(a, [b, c], "d6-chan")
 
     summary = set_link_profile(env, b, LOSSY)
     if not b.net_status()["online"]:
@@ -187,7 +187,7 @@ def d7(env):
     """AX.25 1200 baud with 5% loss -- the worst link TrenchChat claims to
     support for text. Nothing else in the suite touches it."""
     a, b = env.peers("A", "B")
-    ch = invite_only_channel(a, [b], "d7-public")
+    ch = invite_only_channel(a, [b], "d7-chan")
     summary = set_link_profile(env, b, PACKET_RADIO)
 
     expected = _send_batch(a, ch, "d7", 3)
@@ -207,7 +207,7 @@ def d8(env):
     """The slowest LoRa profile, and the one the README warns a tester falls
     behind on. links5 uses SF7; this is the order-of-magnitude slower case."""
     a, b = env.peers("A", "B")
-    ch = invite_only_channel(a, [b], "d8-public")
+    ch = invite_only_channel(a, [b], "d8-chan")
     summary = set_link_profile(env, b, LORA_LONG)
 
     expected = _send_batch(a, ch, "d8", 3)
@@ -229,7 +229,7 @@ def d9(env):
     make every scenario built on it meaningless -- which is precisely what a
     mistyped profile name already did once."""
     a, b = env.peers("A", "B")
-    ch = invite_only_channel(a, [b], "d9-public")
+    ch = invite_only_channel(a, [b], "d9-chan")
 
     summary = set_link_profile(env, b, CUSTOM, bitrate_bps=32000,
                                latency_ms=120, jitter_ms=20, loss_pct=8)
@@ -255,7 +255,7 @@ def d10(env):
     RNS config waits for a restart. A scenario that changes a profile part-way
     depends on the live half actually being live."""
     a, b = env.peers("A", "B")
-    ch = invite_only_channel(a, [b], "d10-public")
+    ch = invite_only_channel(a, [b], "d10-chan")
 
     fast = set_link_profile(env, b, BROADBAND)
     first = _send_batch(a, ch, "d10-fast", 3)

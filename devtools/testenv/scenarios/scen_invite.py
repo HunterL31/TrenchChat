@@ -11,7 +11,7 @@ See docs/testenv-scenarios.md for the matrix these implement.
 """
 
 from asserts import (
-    all_hold, discovered_hashes, hold_for, joined_hashes, roster, roster_views,
+    all_hold, hold_for, joined_hashes, roster, roster_views,
     rosters_identical, settle, wait_until, ScenarioFailure,
 )
 from flows import (
@@ -35,11 +35,14 @@ MEMBER_DEFAULT = [SEND_MESSAGE]
 @scenario("invite1", "An invite-only channel is never announced")
 def b1(env):
     a, b, c, d = env.peers("A", "B", "C", "D")
-    ch = a.create_channel("b1-private", "invite")
+    ch = a.create_channel("b1-private")
 
-    # Nothing to wait for -- proving absence means holding the window open.
-    hold_for(lambda: all(ch not in discovered_hashes(p) for p in (b, c, d)),
-             "the channel to stay undiscovered", NEGATIVE_HOLD_SECS)
+    # A channel reaches a peer only through an invite, so nobody but the
+    # creator holds it. Proving absence means holding the window open.
+    hold_for(lambda: all(ch not in {c["hash"] for c in p.channels()}
+                         for p in (b, c, d)),
+             "the channel to stay unknown to everyone uninvited",
+             NEGATIVE_HOLD_SECS)
     if ch not in {c["hash"] for c in a.channels()}:
         raise ScenarioFailure("creator does not hold its own invite-only channel")
     return {}
@@ -66,8 +69,8 @@ def b3(env):
     only place the permission actually changes an outcome."""
     a, b, c = env.peers("A", "B", "C")
 
-    plain = a.create_channel("b3-plain", "invite")
-    granted = a.create_channel("b3-fullsync", "invite")
+    plain = a.create_channel("b3-plain")
+    granted = a.create_channel("b3-fullsync")
     a.set_permissions(granted, admin=ADMIN_DEFAULT + [FULL_SYNC],
                       member=MEMBER_DEFAULT + [FULL_SYNC])
 

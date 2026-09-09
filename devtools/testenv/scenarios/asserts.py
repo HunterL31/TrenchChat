@@ -83,9 +83,6 @@ def roster(peer, channel_hash: str) -> dict[str, str]:
     return {m["identity_hash"]: m["role"] for m in peer.members(channel_hash)}
 
 
-def discovered_hashes(peer) -> set[str]:
-    return {c["hash"] for c in peer.discovered()}
-
 def joined_hashes(peer) -> set[str]:
     return {c["hash"] for c in peer.channels()}
 
