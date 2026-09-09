@@ -21,7 +21,6 @@ Channel _channel(String hash, String name) => Channel(
       name: name,
       description: '',
       creatorHash: 'creator',
-      openJoin: true,
       createdAt: 0,
       serverHash: null,
     );

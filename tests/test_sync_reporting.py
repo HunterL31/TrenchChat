@@ -14,7 +14,7 @@ import pytest
 import RNS
 import LXMF
 
-from tests.helpers import sign_as, delivery_dest_hash_hex, wait_for, wait_for_message
+from tests.helpers import mirror_members, sign_as, delivery_dest_hash_hex, wait_for, wait_for_message
 from trenchchat.core import sync_status
 from trenchchat.core.image import MAX_IMAGE_BYTES
 from trenchchat.core.messaging import _compute_message_id
@@ -30,12 +30,6 @@ from trenchchat.core.sync_status import SyncState
 # Helpers (duplicated from tests/test_sync.py per the established pattern)
 # ---------------------------------------------------------------------------
 
-def _seed_channel_on_peer(peer, ch_hash, channel_name, creator_hash,
-                           access_mode="public"):
-    """Give a peer knowledge of a channel and subscribe them to it."""
-    peer.storage.upsert_channel(ch_hash, channel_name, "", creator_hash,
-                                access_mode, time.time())
-    peer.storage.subscribe(ch_hash)
 
 
 def _insert_message(storage, ch_hash, sender_hex, content, ts=None):
@@ -91,6 +85,11 @@ def _sync_response_fields(messages: list[dict], truncated: bool = False,
 # Group F: status honesty
 # ---------------------------------------------------------------------------
 
+# These suites backdate history, so tenure starts well before it: they
+# simulate a member who has been in the channel all along, which is what
+# the real invite flow would have recorded.
+_ANCIENT_SECS = 30 * 86400
+
 class TestPruneMustBeDrivenFromOutside:
     """F1: SyncStatusTracker resolves a stalled request only when pruned.
 
@@ -115,9 +114,8 @@ class TestPruneMustBeDrivenFromOutside:
         bob = peer_factory("bob")
         carol = peer_factory("carol")
 
-        ch_hash = alice.channel_mgr.create_channel("f1-stall", "", "public")
-        _seed_channel_on_peer(bob, ch_hash, "f1-stall", alice.identity.hash_hex)
-        _seed_channel_on_peer(carol, ch_hash, "f1-stall", alice.identity.hash_hex)
+        ch_hash = alice.channel_mgr.create_channel("f1-stall", "")
+        mirror_members(ch_hash, alice, bob, carol, joined_at=time.time() - _ANCIENT_SECS)
 
         # Simulate a peer that received the request but never answers --
         # crashed, buggy, or malicious.
@@ -151,9 +149,8 @@ class TestPruneMustBeDrivenFromOutside:
         bob = peer_factory("bob")
         carol = peer_factory("carol")
 
-        ch_hash = alice.channel_mgr.create_channel("f1-manual-prune", "", "public")
-        _seed_channel_on_peer(bob, ch_hash, "f1-manual-prune", alice.identity.hash_hex)
-        _seed_channel_on_peer(carol, ch_hash, "f1-manual-prune", alice.identity.hash_hex)
+        ch_hash = alice.channel_mgr.create_channel("f1-manual-prune", "")
+        mirror_members(ch_hash, alice, bob, carol, joined_at=time.time() - _ANCIENT_SECS)
 
         carol.sync_mgr._handle_sync_request = lambda *a, **kw: None
         bob.sync_mgr._send_sync_request(carol.identity.hash_hex, ch_hash, time.time())
@@ -195,9 +192,9 @@ class TestSyncedIsScopedToKnownPeers:
         eve = peer_factory("eve")
         frank = peer_factory("frank")
 
-        ch_hash = alice.channel_mgr.create_channel("f2-scale", "", "public")
-        for peer in (bob, carol, dave, eve, frank):
-            _seed_channel_on_peer(peer, ch_hash, "f2-scale", alice.identity.hash_hex)
+        ch_hash = alice.channel_mgr.create_channel("f2-scale", "")
+        mirror_members(ch_hash, alice, bob, carol, dave, eve, frank,
+                       joined_at=time.time() - _ANCIENT_SECS)
 
         _insert_message(
             frank.storage, ch_hash, alice.identity.hash_hex,
@@ -246,10 +243,8 @@ class TestPartialMultiResponderHonesty:
         dave = peer_factory("dave")
         unreachable_hex = "ee" * 16
 
-        ch_hash = alice.channel_mgr.create_channel("f3-partial", "", "public")
-        _seed_channel_on_peer(bob, ch_hash, "f3-partial", alice.identity.hash_hex)
-        _seed_channel_on_peer(carol, ch_hash, "f3-partial", alice.identity.hash_hex)
-        _seed_channel_on_peer(dave, ch_hash, "f3-partial", alice.identity.hash_hex)
+        ch_hash = alice.channel_mgr.create_channel("f3-partial", "")
+        mirror_members(ch_hash, alice, bob, carol, dave, joined_at=time.time() - _ANCIENT_SECS)
 
         dave.sync_mgr._handle_sync_request = lambda *a, **kw: None
 
@@ -278,46 +273,6 @@ class TestPartialMultiResponderHonesty:
         )
 
 
-class TestPublicChannelAfterRestart:
-    def test_empty_local_peer_cache_after_restart_reports_waiting(self, peer_factory):
-        """
-        SubscriptionManager._subscribers is in-memory only.  After a restart,
-        a public channel with real subscribers on the network looks
-        peer-less to the local process, and note_no_peers() reports WAITING.
-
-        Bob owns this channel (not just subscribes to it): _get_channel_peers
-        always adds the stored channel's creator_hash regardless of the
-        subscriber cache, so a peer who merely joined someone else's public
-        channel always finds at least the creator and never actually reaches
-        an empty peer set here -- only the owner's own post-restart view can
-        be genuinely peer-less.  This confirms the current code path; see
-        the accompanying report for whether WAITING (implying "asked, nobody
-        reachable") or a distinct UNKNOWN/stale-cache state would be the more
-        honest label for "we don't actually know who's out there any more".
-        """
-        bob = peer_factory("bob")
-        carol = peer_factory("carol")
-
-        ch_hash = bob.channel_mgr.create_channel("f4-restart", "", "public")
-        _seed_channel_on_peer(carol, ch_hash, "f4-restart", bob.identity.hash_hex)
-
-        # Bob previously knew Carol as a subscriber, then "restarted" --
-        # SubscriptionManager's in-memory table is wiped, exactly as it would
-        # be by a fresh process over the same on-disk storage.
-        bob.subscription_mgr._subscribers[ch_hash] = {carol.identity.hash_hex}
-        bob.subscription_mgr._subscribers.clear()
-
-        bob.sync_mgr._request_sync_for_channel(ch_hash, time.time())
-
-        state = bob.sync_mgr.status.get_state(ch_hash)
-        assert state == SyncState.WAITING, (
-            f"expected the post-restart peer-less request to report WAITING, got {state}"
-        )
-
-
-# ---------------------------------------------------------------------------
-# Group G: transport / identity edges
-# ---------------------------------------------------------------------------
 
 class TestPendingRequestKeyCollision:
     def test_second_request_to_same_peer_overwrites_the_first(self, peer_factory):
@@ -333,9 +288,8 @@ class TestPendingRequestKeyCollision:
         bob = peer_factory("bob")
         carol = peer_factory("carol")
 
-        ch_hash = alice.channel_mgr.create_channel("g1-overwrite", "", "public")
-        _seed_channel_on_peer(bob, ch_hash, "g1-overwrite", alice.identity.hash_hex)
-        _seed_channel_on_peer(carol, ch_hash, "g1-overwrite", alice.identity.hash_hex)
+        ch_hash = alice.channel_mgr.create_channel("g1-overwrite", "")
+        mirror_members(ch_hash, alice, bob, carol, joined_at=time.time() - _ANCIENT_SECS)
 
         ts = time.time()
 
@@ -393,8 +347,8 @@ class TestPendingRequestKeyCollision:
         bob = peer_factory("bob")
         carol = peer_factory("carol")
 
-        ch_hash = alice.channel_mgr.create_channel("g1-keyforms", "", "public")
-        _seed_channel_on_peer(bob, ch_hash, "g1-keyforms", alice.identity.hash_hex)
+        ch_hash = alice.channel_mgr.create_channel("g1-keyforms", "")
+        mirror_members(ch_hash, alice, bob, joined_at=time.time() - _ANCIENT_SECS)
 
         bob.sync_mgr._record_pending_request(ch_hash, carol.identity.hash_hex, time.time())
 
@@ -434,8 +388,8 @@ class TestQuarantineExpiry:
         alice = peer_factory("alice")
         bob = peer_factory("bob")
 
-        ch_hash = alice.channel_mgr.create_channel("g2-baseline", "", "public")
-        _seed_channel_on_peer(bob, ch_hash, "g2-baseline", alice.identity.hash_hex)
+        ch_hash = alice.channel_mgr.create_channel("g2-baseline", "")
+        mirror_members(ch_hash, alice, bob, joined_at=time.time() - _ANCIENT_SECS)
 
         msg_id = _insert_message(alice.storage, ch_hash, alice.identity.hash_hex,
                                  "hint target")
@@ -469,8 +423,8 @@ class TestQuarantineExpiry:
         alice = peer_factory("alice")
         bob = peer_factory("bob")
 
-        ch_hash = alice.channel_mgr.create_channel("g2-ttl", "", "public")
-        _seed_channel_on_peer(bob, ch_hash, "g2-ttl", alice.identity.hash_hex)
+        ch_hash = alice.channel_mgr.create_channel("g2-ttl", "")
+        mirror_members(ch_hash, alice, bob, joined_at=time.time() - _ANCIENT_SECS)
 
         msg_id = _insert_message(alice.storage, ch_hash, alice.identity.hash_hex,
                                  "hint target 2")
@@ -513,9 +467,8 @@ class TestMissedDeliveryHintNoRetry:
         bob = peer_factory("bob")
         dave = peer_factory("dave")
 
-        ch_hash = alice.channel_mgr.create_channel("g3-hint-drop", "", "public")
-        _seed_channel_on_peer(bob, ch_hash, "g3-hint-drop", alice.identity.hash_hex)
-        _seed_channel_on_peer(dave, ch_hash, "g3-hint-drop", alice.identity.hash_hex)
+        ch_hash = alice.channel_mgr.create_channel("g3-hint-drop", "")
+        mirror_members(ch_hash, alice, bob, dave, joined_at=time.time() - _ANCIENT_SECS)
 
         msg_id = _insert_message(alice.storage, ch_hash, alice.identity.hash_hex,
                                  "Bob missed this")
@@ -571,9 +524,8 @@ class TestOversizedImageViaSync:
         bob = peer_factory("bob")
         carol = peer_factory("carol")
 
-        ch_hash = alice.channel_mgr.create_channel("g4-oversized-sync", "", "public")
-        _seed_channel_on_peer(bob, ch_hash, "g4-oversized-sync", alice.identity.hash_hex)
-        _seed_channel_on_peer(carol, ch_hash, "g4-oversized-sync", alice.identity.hash_hex)
+        ch_hash = alice.channel_mgr.create_channel("g4-oversized-sync", "")
+        mirror_members(ch_hash, alice, bob, carol, joined_at=time.time() - _ANCIENT_SECS)
 
         ts = time.time()
         bob.sync_mgr._send_sync_request(carol.identity.hash_hex, ch_hash, ts)

@@ -18,7 +18,7 @@ divide the idle figures by six for the deployed cadence.
 import os
 
 from asserts import all_hold, hold_for, settle
-from flows import go_offline, go_online, public_channel, DISCOVERY_TIMEOUT
+from flows import go_offline, go_online, invite_only_channel, DISCOVERY_TIMEOUT
 from scenario import PROBE, scenario
 
 # Longer idle windows average more beacon cycles; TC_BW_IDLE_SECS overrides.
@@ -78,7 +78,7 @@ def bw1(env):
     """
     a, b, c, d = env.peers("A", "B", "C", "D")
     everyone = [a, b, c, d]
-    ch = public_channel(a, [b, c, d], "bw1-public")
+    ch = invite_only_channel(a, [b, c, d], "bw1-public")
     expected = set()
     for i in range(5):
         content = f"bw1-seed-{i}"

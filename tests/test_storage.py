@@ -16,7 +16,7 @@ from trenchchat.core.fileutils import OWNER_RW_MODE
 from trenchchat.core.permissions import (
     CREATE_CHANNEL, INVITE, PRESET_PRIVATE, PRESET_SERVER, ROLE_ADMIN,
     ROLE_MEMBER, ROLE_OWNER, SEND_MESSAGE,
-    is_discoverable, is_open_join, permissions_from_json,
+    permissions_from_json,
 )
 from trenchchat.core.storage import Storage
 from trenchchat.core.lockbox import sqlcipher_hex_key
@@ -37,7 +37,7 @@ def db(tmp_path) -> Storage:
 class TestChannels:
     def test_upsert_and_get_channel(self, db):
         db.upsert_channel("aabbcc", "General", "A test channel",
-                          "creator01", "public", time.time())
+                          "creator01", time.time())
         ch = db.get_channel("aabbcc")
         assert ch is not None
         assert ch["name"] == "General"
@@ -45,12 +45,11 @@ class TestChannels:
         assert ch["creator_hash"] == "creator01"
         import json
         perms = json.loads(ch["permissions"])
-        assert perms["open_join"] is True
 
     def test_upsert_updates_existing(self, db):
         ts = time.time()
-        db.upsert_channel("aabbcc", "Old Name", "", "creator01", "public", ts)
-        db.upsert_channel("aabbcc", "New Name", "Updated", "creator01", "public", ts)
+        db.upsert_channel("aabbcc", "Old Name", "", "creator01", ts)
+        db.upsert_channel("aabbcc", "New Name", "Updated", "creator01", ts)
         ch = db.get_channel("aabbcc")
         assert ch["name"] == "New Name"
         assert ch["description"] == "Updated"
@@ -63,14 +62,14 @@ class TestChannels:
 
     def test_get_all_channels_ordered_by_name(self, db):
         ts = time.time()
-        db.upsert_channel("h1", "Zebra", "", "c1", "public", ts)
-        db.upsert_channel("h2", "Alpha", "", "c1", "public", ts)
-        db.upsert_channel("h3", "Mango", "", "c1", "public", ts)
+        db.upsert_channel("h1", "Zebra", "", "c1", ts)
+        db.upsert_channel("h2", "Alpha", "", "c1", ts)
+        db.upsert_channel("h3", "Mango", "", "c1", ts)
         names = [r["name"] for r in db.get_all_channels()]
         assert names == ["Alpha", "Mango", "Zebra"]
 
     def test_touch_channel_updates_last_seen(self, db):
-        db.upsert_channel("aabbcc", "G", "", "c1", "public", time.time())
+        db.upsert_channel("aabbcc", "G", "", "c1", time.time())
         before = db.get_channel("aabbcc")["last_seen"]
         time.sleep(0.05)
         db.touch_channel("aabbcc")
@@ -87,7 +86,7 @@ class TestChannels:
 
 class TestMessages:
     def _seed_channel(self, db):
-        db.upsert_channel("ch01", "Test", "", "creator", "public", time.time())
+        db.upsert_channel("ch01", "Test", "", "creator", time.time())
 
     def test_insert_and_retrieve_message(self, db):
         self._seed_channel(db)
@@ -213,7 +212,7 @@ class TestMessages:
 
     def test_get_message_index_is_scoped_to_one_channel(self, db):
         self._seed_channel(db)
-        db.upsert_channel("ch02", "Other", "", "creator", "public", time.time())
+        db.upsert_channel("ch02", "Other", "", "creator", time.time())
         ts = time.time()
         db.insert_message("ch01", "s", "S", "here", ts, "mine", None, None, ts)
         db.insert_message("ch02", "s", "S", "there", ts, "theirs", None, None, ts)
@@ -236,7 +235,7 @@ class TestMessages:
 
 class TestSubscriptions:
     def _seed_channel(self, db):
-        db.upsert_channel("ch01", "Test", "", "creator", "public", time.time())
+        db.upsert_channel("ch01", "Test", "", "creator", time.time())
 
     def test_subscribe_and_is_subscribed(self, db):
         self._seed_channel(db)
@@ -258,7 +257,7 @@ class TestSubscriptions:
 
     def test_get_subscriptions(self, db):
         for i in range(3):
-            db.upsert_channel(f"ch0{i}", f"Ch{i}", "", "c", "public", time.time())
+            db.upsert_channel(f"ch0{i}", f"Ch{i}", "", "c", time.time())
             db.subscribe(f"ch0{i}")
         subs = db.get_subscriptions()
         assert len(subs) == 3
@@ -287,7 +286,7 @@ class TestSubscriptions:
 
 class TestChannelUnread:
     def _seed(self, db):
-        db.upsert_channel("ch01", "Test", "", "creator", "public", time.time())
+        db.upsert_channel("ch01", "Test", "", "creator", time.time())
         db.subscribe("ch01")
 
     def _insert(self, db, sender, msg_id, ts):
@@ -321,7 +320,7 @@ class TestChannelUnread:
         assert db.get_unread_counts("me0000") == {"ch01": 0}
 
     def test_unsubscribed_channels_are_absent(self, db):
-        db.upsert_channel("ch02", "Other", "", "creator", "public", time.time())
+        db.upsert_channel("ch02", "Other", "", "creator", time.time())
         assert db.get_unread_counts("me0000") == {}
 
     def test_mark_read_on_an_unsubscribed_channel_is_false(self, db):
@@ -334,7 +333,7 @@ class TestChannelUnread:
 
 class TestMembers:
     def _seed_channel(self, db):
-        db.upsert_channel("ch01", "Test", "", "creator", "invite", time.time())
+        db.upsert_channel("ch01", "Test", "", "creator", time.time())
 
     def test_upsert_and_is_member(self, db):
         self._seed_channel(db)
@@ -388,7 +387,7 @@ class TestMembers:
 
 class TestMemberListVersions:
     def _seed_channel(self, db):
-        db.upsert_channel("ch01", "Test", "", "creator", "invite", time.time())
+        db.upsert_channel("ch01", "Test", "", "creator", time.time())
 
     def test_upsert_and_get_version(self, db):
         self._seed_channel(db)
@@ -519,7 +518,7 @@ class TestStorageEncryption:
         db_path = tmp_path / "enc.db"
         s = Storage(db_path=db_path, encryption_key=key)
         try:
-            s.upsert_channel("aabb", "Enc Chan", "", "creator01", "public", time.time())
+            s.upsert_channel("aabb", "Enc Chan", "", "creator01", time.time())
             ch = s.get_channel("aabb")
             assert ch is not None
             assert ch["name"] == "Enc Chan"
@@ -533,7 +532,7 @@ class TestStorageEncryption:
         key = os.urandom(32)
         db_path = tmp_path / "enc.db"
         s = Storage(db_path=db_path, encryption_key=key)
-        s.upsert_channel("aabb", "Secret", "", "c1", "public", time.time())
+        s.upsert_channel("aabb", "Secret", "", "c1", time.time())
         s.close()
 
         # Attempting to query via plain sqlite3 should raise DatabaseError
@@ -552,7 +551,7 @@ class TestStorageEncryption:
         db_path = tmp_path / "enc.db"
 
         s = Storage(db_path=db_path, encryption_key=key)
-        s.upsert_channel("aabb", "Hidden", "", "c1", "public", time.time())
+        s.upsert_channel("aabb", "Hidden", "", "c1", time.time())
         s.close()
 
         with pytest.raises(Exception):
@@ -568,7 +567,7 @@ class TestStorageEncryption:
 
         # Create plain DB and write a record.
         s = Storage(db_path=db_path)
-        s.upsert_channel("cc11", "MigChan", "", "creator", "public", time.time())
+        s.upsert_channel("cc11", "MigChan", "", "creator", time.time())
         s.close()
 
         # Migrate to encrypted using a temporary helper instance.
@@ -589,7 +588,7 @@ class TestStorageEncryption:
 
         # Create encrypted DB.
         s = Storage(db_path=db_path, encryption_key=key)
-        s.upsert_channel("dd22", "DecChan", "", "creator", "public", time.time())
+        s.upsert_channel("dd22", "DecChan", "", "creator", time.time())
         s.close()
 
         # Migrate to plaintext using a temporary helper instance.
@@ -742,7 +741,7 @@ class TestMembershipTenure:
         """Existing members are backfilled into tenure on first open."""
         db = Storage(db_path=tmp_path / "bf.db")
         # Manually insert a member row, bypassing tenure so we can test backfill
-        db.upsert_channel(CHAN, "Test", "", "creator", "invite", time.time())
+        db.upsert_channel(CHAN, "Test", "", "creator", time.time())
         t0 = time.time() - 10
         db._conn.execute(
             "INSERT INTO members (channel_hash, identity_hash, display_name, role, added_at)"
@@ -761,7 +760,7 @@ class TestMembershipTenure:
         """A joined_at backfilled too late (e.g. from a stale
         members.added_at) is widened to cover a message already on file
         that predates it."""
-        db.upsert_channel(CHAN, "Test", "", "creator", "invite", time.time())
+        db.upsert_channel(CHAN, "Test", "", "creator", time.time())
         t0 = 1_000_000.0
         bad_joined_at = t0 + 500.0
         db.open_tenure(CHAN, ID_A, bad_joined_at)
@@ -777,7 +776,7 @@ class TestMembershipTenure:
         assert db.was_member_at(CHAN, ID_A, t0)
 
     def test_repair_tenure_does_not_widen_when_message_is_within_interval(self, db):
-        db.upsert_channel(CHAN, "Test", "", "creator", "invite", time.time())
+        db.upsert_channel(CHAN, "Test", "", "creator", time.time())
         t0 = 1_000_000.0
         db.open_tenure(CHAN, ID_A, t0)
         db.insert_message(
@@ -795,7 +794,7 @@ class TestMembershipTenure:
         assert row["joined_at"] == t0
 
     def test_repair_tenure_skips_identity_with_no_tenure_record(self, db):
-        db.upsert_channel(CHAN, "Test", "", "creator", "invite", time.time())
+        db.upsert_channel(CHAN, "Test", "", "creator", time.time())
         db.insert_message(
             channel_hash=CHAN, sender_hash=ID_B, sender_name="B",
             content="hi", timestamp=1_000_000.0, message_id="repair-m3",
@@ -814,7 +813,7 @@ class TestMembershipTenure:
         an empty messages table."""
         db_path = tmp_path / "existing.db"
         db1 = Storage(db_path=db_path)
-        db1.upsert_channel(CHAN, "Test", "", "creator", "invite", time.time())
+        db1.upsert_channel(CHAN, "Test", "", "creator", time.time())
         t0 = 1_000_000.0
         db1.open_tenure(CHAN, ID_A, t0 + 500.0)
         db1.insert_message(
@@ -899,7 +898,7 @@ class TestMessageImageData:
     _FAKE_JPEG = b"\xff\xd8\xff\xe0" + b"\x00" * 100
 
     def _setup_channel(self, db):
-        db.upsert_channel(self._CHAN, "Test", "", self._SENDER, "public", 1.0)
+        db.upsert_channel(self._CHAN, "Test", "", self._SENDER, 1.0)
         db.subscribe(self._CHAN)
 
     def test_insert_message_with_image_stores_blob(self, db):
@@ -1193,8 +1192,6 @@ class TestPermissionMirror:
         _make_server_with_channel(db)
         db.set_server_permissions(SERVER_H, dict(PRESET_SERVER))
         perms = permissions_from_json(db.get_channel(CHAN_IN_SERVER)["permissions"])
-        assert is_open_join(perms) is False
-        assert is_discoverable(perms) is False
 
     def test_get_channel_permissions_does_not_resolve(self, db):
         """Permissions are mirrored down, never resolved up; resolving here
@@ -1348,29 +1345,6 @@ class TestFriends:
         db2.close()
 
 
-class TestSubscriberListVersions:
-    """The replay watermark for signed subscriber lists has to be durable."""
-
-    def test_absent_by_default(self, db):
-        assert db.get_all_subscriber_list_versions() == {}
-
-    def test_survives_close_reopen(self, tmp_path):
-        channel = "ab" * 16
-        db_path = tmp_path / "subs.db"
-        db1 = Storage(db_path=db_path)
-        db1.set_subscriber_list_version(channel, 5)
-        db1.close()
-
-        db2 = Storage(db_path=db_path)
-        assert db2.get_all_subscriber_list_versions() == {channel: 5}
-        db2.close()
-
-    def test_never_regresses(self, db):
-        channel = "ab" * 16
-        db.set_subscriber_list_version(channel, 5)
-        db.set_subscriber_list_version(channel, 3)
-        assert db.get_all_subscriber_list_versions()[channel] == 5
-
 
 class TestHasMessage:
     """message_id is globally unique, so a failed insert is not proof of presence."""
@@ -1385,7 +1359,7 @@ class TestHasMessage:
     def test_reports_only_this_channel(self, db):
         here, elsewhere = "ab" * 16, "cd" * 16
         for channel in (here, elsewhere):
-            db.upsert_channel(channel, "c", "", "creator", "public", 1000.0)
+            db.upsert_channel(channel, "c", "", "creator", 1000.0)
         assert self._insert(db, elsewhere, "mid-1") is True
 
         # Same id, different channel: the insert is refused and nothing landed
@@ -1399,24 +1373,6 @@ class TestHasMessage:
         assert db.has_message("ab" * 16, "nope") is False
 
 
-class TestIsChannelSubscriber:
-    def test_reflects_the_subscriber_set(self, db):
-        channel, peer = "ab" * 16, "cc" * 16
-        assert db.is_channel_subscriber(channel, peer) is False
-
-        db.add_channel_subscriber(channel, peer)
-        assert db.is_channel_subscriber(channel, peer) is True
-
-        db.remove_channel_subscriber(channel, peer)
-        assert db.is_channel_subscriber(channel, peer) is False
-
-    def test_blank_identity(self, db):
-        assert db.is_channel_subscriber("ab" * 16, "") is False
-
-
-# ---------------------------------------------------------------------------
-# Tenure repair takes its evidence from our own clock, not the sender's
-# ---------------------------------------------------------------------------
 
 class TestTenureRepairEvidence:
     """_repair_tenure_from_message_history widens a member's join time.

@@ -76,7 +76,6 @@ def _api_backend(peer):
     backend.identity = peer.identity
     backend.storage = peer.storage
     backend.messaging = peer.messaging
-    backend.subscription_mgr = peer.subscription_mgr
     backend.presence_mgr = peer.presence_mgr
     backend.file_mgr = peer.file_mgr
     backend.invite_mgr.list_pending_invites.return_value = []

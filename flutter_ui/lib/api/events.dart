@@ -47,11 +47,6 @@ sealed class TcEvent {
           json['server_hash'] as String,
           json['server_name'] as String? ?? '',
         );
-      case 'channel_discovered':
-        return ChannelDiscoveredEvent(
-          json['channel_hash'] as String,
-          json['channel_name'] as String,
-        );
       case 'invite_received':
         return InviteReceivedEvent(
           json['channel_hash'] as String,
@@ -191,15 +186,6 @@ class ServerJoinedEvent extends TcEvent {
   final String serverName;
 }
 
-/// A standalone public channel was heard via a real-time announce but not
-/// yet joined. Carries only hash + name, so handlers that need the full
-/// channel record (description, creator, open_join) should re-fetch
-/// GET /channels/discovered rather than construct one from this event.
-class ChannelDiscoveredEvent extends TcEvent {
-  const ChannelDiscoveredEvent(this.channelHash, this.channelName);
-  final String channelHash;
-  final String channelName;
-}
 
 /// An invite arrived (or was refreshed) for a channel or server. Full detail
 /// (inviter, expiry, scope) comes from re-fetching GET /invites.

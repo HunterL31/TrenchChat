@@ -43,7 +43,6 @@ import time
 import RNS
 
 from trenchchat.core.fileutils import clean_filename
-from trenchchat.core.permissions import is_open_join, permissions_from_json
 from trenchchat.core.protocol import (
     FILE_CHUNK_BYTES, chunk_hashes, chunk_root, file_manifest,
 )
@@ -433,10 +432,7 @@ class FileManager:
     def _may_serve(self, file_hash_hex: str, requester_hex: str) -> bool:
         """Whether the requester is a member of a channel holding this file."""
         for channel_hash_hex in self._storage.file_channels(file_hash_hex):
-            channel = self._storage.get_channel(channel_hash_hex)
-            if channel is None:
-                continue
-            if is_open_join(permissions_from_json(channel["permissions"])):
+            if self._storage.get_channel(channel_hash_hex) is None:
                 continue
             if self._storage.is_member(channel_hash_hex, requester_hex):
                 return True

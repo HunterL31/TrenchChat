@@ -13,6 +13,7 @@ import time
 import pytest
 
 from tests.helpers import (
+    mirror_members,
     sign_as,
     wait_for,
     wait_for_member,
@@ -27,12 +28,6 @@ from trenchchat.core.sync import MAX_REACTIONS_PER_MESSAGE
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _seed_channel_on_peer(peer, ch_hash, channel_name, creator_hash,
-                           access_mode="public"):
-    """Give a peer knowledge of a channel and subscribe them to it."""
-    peer.storage.upsert_channel(ch_hash, channel_name, "", creator_hash,
-                                access_mode, time.time())
-    peer.storage.subscribe(ch_hash)
 
 
 def _insert_message(storage, ch_hash, sender_hex, content, ts=None):
@@ -58,6 +53,11 @@ def _insert_message(storage, ch_hash, sender_hex, content, ts=None):
 # Missed-delivery hints
 # ---------------------------------------------------------------------------
 
+# These suites backdate history, so tenure starts well before it: they
+# simulate a member who has been in the channel all along, which is what
+# the real invite flow would have recorded.
+_ANCIENT_SECS = 30 * 86400
+
 class TestMissedDeliveryHints:
     def test_hint_recorded_locally_on_missed_delivery(self, peer_factory):
         """
@@ -68,7 +68,7 @@ class TestMissedDeliveryHints:
         bob = peer_factory("bob")
         carol = peer_factory("carol")
 
-        ch_hash = alice.channel_mgr.create_channel("hint-test", "", "public")
+        ch_hash = alice.channel_mgr.create_channel("hint-test", "")
 
         ts = time.time()
         msg_id = _insert_message(alice.storage, ch_hash, alice.identity.hash_hex,
@@ -95,8 +95,8 @@ class TestMissedDeliveryHints:
         bob = peer_factory("bob")
         carol = peer_factory("carol")
 
-        ch_hash = alice.channel_mgr.create_channel("broadcast-hint", "", "public")
-        _seed_channel_on_peer(carol, ch_hash, "broadcast-hint", alice.identity.hash_hex)
+        ch_hash = alice.channel_mgr.create_channel("broadcast-hint", "")
+        mirror_members(ch_hash, alice, carol, joined_at=time.time() - _ANCIENT_SECS)
 
         ts = time.time()
         msg_id = _insert_message(alice.storage, ch_hash, alice.identity.hash_hex,
@@ -131,9 +131,8 @@ class TestSyncRequestResponse:
         bob = peer_factory("bob")
         carol = peer_factory("carol")
 
-        ch_hash = alice.channel_mgr.create_channel("sync-test", "", "public")
-        _seed_channel_on_peer(carol, ch_hash, "sync-test", alice.identity.hash_hex)
-        _seed_channel_on_peer(bob, ch_hash, "sync-test", alice.identity.hash_hex)
+        ch_hash = alice.channel_mgr.create_channel("sync-test", "")
+        mirror_members(ch_hash, alice, carol, bob, joined_at=time.time() - _ANCIENT_SECS)
 
         ts = time.time()
         content = "Missed by Bob"
@@ -158,9 +157,8 @@ class TestSyncRequestResponse:
         bob = peer_factory("bob")
         carol = peer_factory("carol")
 
-        ch_hash = alice.channel_mgr.create_channel("fallback-sync", "", "public")
-        _seed_channel_on_peer(carol, ch_hash, "fallback-sync", alice.identity.hash_hex)
-        _seed_channel_on_peer(bob, ch_hash, "fallback-sync", alice.identity.hash_hex)
+        ch_hash = alice.channel_mgr.create_channel("fallback-sync", "")
+        mirror_members(ch_hash, alice, carol, bob, joined_at=time.time() - _ANCIENT_SECS)
 
         window_start = time.time()
         msg_ids = []
@@ -191,9 +189,8 @@ class TestSyncRequestResponse:
         bob = peer_factory("bob")
         carol = peer_factory("carol")
 
-        ch_hash = alice.channel_mgr.create_channel("capped-sync", "", "public")
-        _seed_channel_on_peer(carol, ch_hash, "capped-sync", alice.identity.hash_hex)
-        _seed_channel_on_peer(bob, ch_hash, "capped-sync", alice.identity.hash_hex)
+        ch_hash = alice.channel_mgr.create_channel("capped-sync", "")
+        mirror_members(ch_hash, alice, carol, bob, joined_at=time.time() - _ANCIENT_SECS)
 
         window_start = time.time()
         total = MAX_RESPONSE_MESSAGES + 10
@@ -244,9 +241,8 @@ class TestSyncRequestResponse:
         bob = peer_factory("bob")
         carol = peer_factory("carol")
 
-        ch_hash = alice.channel_mgr.create_channel("continue-sync", "", "public")
-        _seed_channel_on_peer(carol, ch_hash, "continue-sync", alice.identity.hash_hex)
-        _seed_channel_on_peer(bob, ch_hash, "continue-sync", alice.identity.hash_hex)
+        ch_hash = alice.channel_mgr.create_channel("continue-sync", "")
+        mirror_members(ch_hash, alice, carol, bob, joined_at=time.time() - _ANCIENT_SECS)
 
         window_start = time.time()
         total = MAX_RESPONSE_MESSAGES + 10
@@ -284,9 +280,8 @@ class TestSyncRequestResponse:
         bob = peer_factory("bob")
         carol = peer_factory("carol")
 
-        ch_hash = alice.channel_mgr.create_channel("budget-sync", "", "public")
-        _seed_channel_on_peer(carol, ch_hash, "budget-sync", alice.identity.hash_hex)
-        _seed_channel_on_peer(bob, ch_hash, "budget-sync", alice.identity.hash_hex)
+        ch_hash = alice.channel_mgr.create_channel("budget-sync", "")
+        mirror_members(ch_hash, alice, carol, bob, joined_at=time.time() - _ANCIENT_SECS)
 
         requests = []
 
@@ -346,9 +341,8 @@ class TestSyncRequestResponse:
         bob = peer_factory("bob")
         carol = peer_factory("carol")
 
-        ch_hash = alice.channel_mgr.create_channel("ack-sync", "", "public")
-        _seed_channel_on_peer(carol, ch_hash, "ack-sync", alice.identity.hash_hex)
-        _seed_channel_on_peer(bob, ch_hash, "ack-sync", alice.identity.hash_hex)
+        ch_hash = alice.channel_mgr.create_channel("ack-sync", "")
+        mirror_members(ch_hash, alice, carol, bob, joined_at=time.time() - _ANCIENT_SECS)
 
         responses = []
         original = carol.sync_mgr._send_raw
@@ -376,9 +370,8 @@ class TestSyncRequestResponse:
         bob = peer_factory("bob")
         carol = peer_factory("carol")
 
-        ch_hash = alice.channel_mgr.create_channel("closed-ack", "", "invite")
-        _seed_channel_on_peer(carol, ch_hash, "closed-ack", alice.identity.hash_hex,
-                              access_mode="invite")
+        ch_hash = alice.channel_mgr.create_channel("closed-ack", "")
+        mirror_members(ch_hash, alice, carol, joined_at=time.time() - _ANCIENT_SECS)
 
         responses = []
         original = carol.sync_mgr._send_raw
@@ -404,9 +397,8 @@ class TestSyncRequestResponse:
         bob = peer_factory("bob")
         carol = peer_factory("carol")
 
-        ch_hash = alice.channel_mgr.create_channel("idem-sync", "", "public")
-        _seed_channel_on_peer(carol, ch_hash, "idem-sync", alice.identity.hash_hex)
-        _seed_channel_on_peer(bob, ch_hash, "idem-sync", alice.identity.hash_hex)
+        ch_hash = alice.channel_mgr.create_channel("idem-sync", "")
+        mirror_members(ch_hash, alice, carol, bob, joined_at=time.time() - _ANCIENT_SECS)
 
         window_start = time.time()
         ts = window_start + 1
@@ -431,9 +423,8 @@ class TestSyncRequestResponse:
         bob = peer_factory("bob")
         carol = peer_factory("carol")
 
-        ch_hash = alice.channel_mgr.create_channel("clear-hints", "", "public")
-        _seed_channel_on_peer(carol, ch_hash, "clear-hints", alice.identity.hash_hex)
-        _seed_channel_on_peer(bob, ch_hash, "clear-hints", alice.identity.hash_hex)
+        ch_hash = alice.channel_mgr.create_channel("clear-hints", "")
+        mirror_members(ch_hash, alice, carol, bob, joined_at=time.time() - _ANCIENT_SECS)
 
         ts = time.time()
         msg_id = _insert_message(carol.storage, ch_hash, alice.identity.hash_hex,
@@ -460,9 +451,8 @@ class TestSyncRequestResponse:
         bob = peer_factory("bob")
         carol = peer_factory("carol")
 
-        ch_hash = alice.channel_mgr.create_channel("hint-shadow", "", "public")
-        _seed_channel_on_peer(carol, ch_hash, "hint-shadow", alice.identity.hash_hex)
-        _seed_channel_on_peer(bob, ch_hash, "hint-shadow", alice.identity.hash_hex)
+        ch_hash = alice.channel_mgr.create_channel("hint-shadow", "")
+        mirror_members(ch_hash, alice, carol, bob, joined_at=time.time() - _ANCIENT_SECS)
 
         ts = time.time()
         carol.storage.record_missed_delivery(ch_hash, bob.identity.hash_hex,
@@ -481,9 +471,8 @@ class TestSyncRequestResponse:
         bob = peer_factory("bob")
         carol = peer_factory("carol")
 
-        ch_hash = alice.channel_mgr.create_channel("hint-plus-sweep", "", "public")
-        _seed_channel_on_peer(carol, ch_hash, "hint-plus-sweep", alice.identity.hash_hex)
-        _seed_channel_on_peer(bob, ch_hash, "hint-plus-sweep", alice.identity.hash_hex)
+        ch_hash = alice.channel_mgr.create_channel("hint-plus-sweep", "")
+        mirror_members(ch_hash, alice, carol, bob, joined_at=time.time() - _ANCIENT_SECS)
 
         ts = time.time()
         hinted_id = _insert_message(carol.storage, ch_hash, alice.identity.hash_hex,
@@ -511,9 +500,8 @@ class TestSyncRequestResponse:
         bob = peer_factory("bob")
         carol = peer_factory("carol")
 
-        ch_hash = alice.channel_mgr.create_channel("busy-hint", "", "public")
-        _seed_channel_on_peer(carol, ch_hash, "busy-hint", alice.identity.hash_hex)
-        _seed_channel_on_peer(bob, ch_hash, "busy-hint", alice.identity.hash_hex)
+        ch_hash = alice.channel_mgr.create_channel("busy-hint", "")
+        mirror_members(ch_hash, alice, carol, bob, joined_at=time.time() - _ANCIENT_SECS)
 
         ts = time.time()
         for i in range(1, MAX_RESPONSE_MESSAGES + 10):
@@ -548,9 +536,8 @@ class TestSyncRequestResponse:
         bob = peer_factory("bob")
         carol = peer_factory("carol")
 
-        ch_hash = alice.channel_mgr.create_channel("hint-throttle", "", "public")
-        _seed_channel_on_peer(carol, ch_hash, "hint-throttle", alice.identity.hash_hex)
-        _seed_channel_on_peer(bob, ch_hash, "hint-throttle", alice.identity.hash_hex)
+        ch_hash = alice.channel_mgr.create_channel("hint-throttle", "")
+        mirror_members(ch_hash, alice, carol, bob, joined_at=time.time() - _ANCIENT_SECS)
 
         ts = time.time()
         for i in range(1, MAX_RESPONSE_MESSAGES + 11):
@@ -594,9 +581,8 @@ class TestSyncRequestResponse:
         bob = peer_factory("bob")
         carol = peer_factory("carol")
 
-        ch_hash = alice.channel_mgr.create_channel("no-rewind", "", "public")
-        _seed_channel_on_peer(carol, ch_hash, "no-rewind", alice.identity.hash_hex)
-        _seed_channel_on_peer(bob, ch_hash, "no-rewind", alice.identity.hash_hex)
+        ch_hash = alice.channel_mgr.create_channel("no-rewind", "")
+        mirror_members(ch_hash, alice, carol, bob, joined_at=time.time() - _ANCIENT_SECS)
 
         ts = time.time()
         old_id = _insert_message(carol.storage, ch_hash, alice.identity.hash_hex,
@@ -627,8 +613,8 @@ class TestDeepSyncRateLimit:
         alice = peer_factory("alice")
         bob = peer_factory("bob")
 
-        ch_hash = alice.channel_mgr.create_channel("deep-sync-ch", "", "public")
-        _seed_channel_on_peer(bob, ch_hash, "deep-sync-ch", alice.identity.hash_hex)
+        ch_hash = alice.channel_mgr.create_channel("deep-sync-ch", "")
+        mirror_members(ch_hash, alice, bob, joined_at=time.time() - _ANCIENT_SECS)
 
         old_ts = time.time() - SYNC_WINDOW_SECS - 3600
         msg_id = _insert_message(alice.storage, ch_hash, alice.identity.hash_hex,
@@ -650,8 +636,8 @@ class TestDeepSyncRateLimit:
         alice = peer_factory("alice")
         bob = peer_factory("bob")
 
-        ch_hash = alice.channel_mgr.create_channel("deep-sync-throttle-ch", "", "public")
-        _seed_channel_on_peer(bob, ch_hash, "deep-sync-throttle-ch", alice.identity.hash_hex)
+        ch_hash = alice.channel_mgr.create_channel("deep-sync-throttle-ch", "")
+        mirror_members(ch_hash, alice, bob, joined_at=time.time() - _ANCIENT_SECS)
 
         old_ts = time.time() - SYNC_WINDOW_SECS - 3600
         first_id = _insert_message(alice.storage, ch_hash, alice.identity.hash_hex,
@@ -678,8 +664,8 @@ class TestDeepSyncRateLimit:
         alice = peer_factory("alice")
         bob = peer_factory("bob")
 
-        ch_hash = alice.channel_mgr.create_channel("recent-sync-ch", "", "public")
-        _seed_channel_on_peer(bob, ch_hash, "recent-sync-ch", alice.identity.hash_hex)
+        ch_hash = alice.channel_mgr.create_channel("recent-sync-ch", "")
+        mirror_members(ch_hash, alice, bob, joined_at=time.time() - _ANCIENT_SECS)
 
         window_start = time.time()
         first_id = _insert_message(alice.storage, ch_hash, alice.identity.hash_hex,
@@ -708,8 +694,8 @@ class TestFlushPending:
         alice = peer_factory("alice")
         bob = peer_factory("bob")
 
-        ch_hash = alice.channel_mgr.create_channel("flush-manual", "", "public")
-        _seed_channel_on_peer(bob, ch_hash, "flush-manual", alice.identity.hash_hex)
+        ch_hash = alice.channel_mgr.create_channel("flush-manual", "")
+        mirror_members(ch_hash, alice, bob, joined_at=time.time() - _ANCIENT_SECS)
 
         ts = time.time()
         content = "Manually queued"
@@ -754,8 +740,8 @@ class TestFlushPending:
         alice = peer_factory("alice")
         bob = peer_factory("bob")
 
-        ch_hash = alice.channel_mgr.create_channel("flush-clear", "", "public")
-        _seed_channel_on_peer(bob, ch_hash, "flush-clear", alice.identity.hash_hex)
+        ch_hash = alice.channel_mgr.create_channel("flush-clear", "")
+        mirror_members(ch_hash, alice, bob, joined_at=time.time() - _ANCIENT_SECS)
 
         ts = time.time()
         msg_id = _compute_message_id("Clear me", alice.identity.hash_hex, ts)
@@ -791,9 +777,8 @@ class TestFlushPending:
         bob   = peer_factory("bob")
         carol = peer_factory("carol")
 
-        ch_hash = alice.channel_mgr.create_channel("flush-fail-hint", "", "public")
-        _seed_channel_on_peer(bob,   ch_hash, "flush-fail-hint", alice.identity.hash_hex)
-        _seed_channel_on_peer(carol, ch_hash, "flush-fail-hint", alice.identity.hash_hex)
+        ch_hash = alice.channel_mgr.create_channel("flush-fail-hint", "")
+        mirror_members(ch_hash, alice, bob, carol, joined_at=time.time() - _ANCIENT_SECS)
 
         ts = time.time()
         content = "Will fail on flush"
@@ -868,9 +853,8 @@ class TestStartupSync:
         bob = peer_factory("bob")
         carol = peer_factory("carol")
 
-        ch_hash = alice.channel_mgr.create_channel("startup-sync", "", "public")
-        _seed_channel_on_peer(carol, ch_hash, "startup-sync", alice.identity.hash_hex)
-        _seed_channel_on_peer(bob, ch_hash, "startup-sync", alice.identity.hash_hex)
+        ch_hash = alice.channel_mgr.create_channel("startup-sync", "")
+        mirror_members(ch_hash, alice, carol, bob, joined_at=time.time() - _ANCIENT_SECS)
 
         window_start = time.time()
         ts = window_start + 1
@@ -878,7 +862,6 @@ class TestStartupSync:
                                   "Startup sync message", ts)
 
         # Manually add Carol as a known subscriber so sync_mgr can find her
-        bob.subscription_mgr._subscribers[ch_hash] = {carol.identity.hash_hex}
         bob.storage.update_last_sync(ch_hash)
 
         bob.sync_mgr.request_sync_all()
@@ -911,7 +894,7 @@ class TestSyncOnChannelJoin:
         alice = peer_factory("alice")
         bob = peer_factory("bob")
 
-        ch_hash = alice.channel_mgr.create_channel("history-on-join", "", "invite")
+        ch_hash = alice.channel_mgr.create_channel("history-on-join", "")
         alice.invite_mgr.publish_member_list(ch_hash)
 
         # Spy on Bob's SyncManager -- his join is what should trigger an
@@ -1009,7 +992,7 @@ class TestSyncOnChannelJoin:
         alice = peer_factory("alice")
         bob = peer_factory("bob")
 
-        ch_hash = alice.channel_mgr.create_channel("history-on-join-default", "", "invite")
+        ch_hash = alice.channel_mgr.create_channel("history-on-join-default", "")
         alice.invite_mgr.publish_member_list(ch_hash)
 
         alice.messaging.send_message(
@@ -1057,13 +1040,11 @@ class TestSyncOnChannelJoin:
         bob = peer_factory("bob")
         carol = peer_factory("carol")
 
-        ch_hash = alice.channel_mgr.create_channel("no-forged-tenure", "", "invite")
+        ch_hash = alice.channel_mgr.create_channel("no-forged-tenure", "")
         alice.invite_mgr.publish_member_list(ch_hash, add_members=[bob.identity.hash])
         assert wait_for_member(alice.storage, ch_hash, bob.identity.hash_hex, timeout=5)
 
-        bob.storage.upsert_channel(ch_hash, "no-forged-tenure", "", alice.identity.hash_hex,
-                                   "invite", time.time())
-        bob.storage.subscribe(ch_hash)
+        mirror_members(ch_hash, alice, bob, joined_at=time.time() - _ANCIENT_SECS)
 
         forged_doc = bob.invite_mgr._build_document(
             ch_hash,
@@ -1119,9 +1100,7 @@ def _setup_invite_channel(peer_factory):
     # invite it accepted. Seeding the record first is what the real invite flow
     # achieves, and it also removes a race between the document arriving and
     # the test's own mirroring.
-    bob.storage.upsert_channel(ch_hash, "tenure-ch", "", alice.identity.hash_hex,
-                               perms, time.time())
-    bob.storage.subscribe(ch_hash)
+    mirror_members(ch_hash, alice, bob, joined_at=time.time() - _ANCIENT_SECS)
     alice.invite_mgr.publish_member_list(ch_hash, add_members=[bob.identity.hash])
     assert wait_for_member(alice.storage, ch_hash, bob.identity.hash_hex)
     bob.storage.upsert_member(ch_hash, bob.identity.hash_hex, "Bob", role=ROLE_MEMBER)
@@ -1138,9 +1117,7 @@ class TestTenureSyncFiltering:
         """
         alice, bob, ch_hash, perms = _setup_invite_channel(peer_factory)
         carol = peer_factory("carol")
-        carol.storage.upsert_channel(ch_hash, "tenure-ch", "", alice.identity.hash_hex,
-                                     perms, time.time())
-        carol.storage.subscribe(ch_hash)
+        mirror_members(ch_hash, alice, carol, joined_at=time.time() - _ANCIENT_SECS)
 
         join_ts = time.time() - 300
 
@@ -1189,9 +1166,7 @@ class TestTenureSyncFiltering:
         """
         alice, bob, ch_hash, perms = _setup_invite_channel(peer_factory)
         carol = peer_factory("carol")
-        carol.storage.upsert_channel(ch_hash, "tenure-ch", "", alice.identity.hash_hex,
-                                     perms, time.time())
-        carol.storage.subscribe(ch_hash)
+        mirror_members(ch_hash, alice, carol, joined_at=time.time() - _ANCIENT_SECS)
 
         join_ts = time.time() - 300
 
@@ -1259,7 +1234,7 @@ class TestTenureSyncFiltering:
         alice = peer_factory("alice")
         bob = peer_factory("bob")
 
-        ch_hash = alice.channel_mgr.create_channel("owner-tenure-ch", "", "invite")
+        ch_hash = alice.channel_mgr.create_channel("owner-tenure-ch", "")
 
         alice.invite_mgr.publish_member_list(ch_hash, add_members=[bob.identity.hash])
         assert wait_for_member(alice.storage, ch_hash, bob.identity.hash_hex)
@@ -1289,7 +1264,7 @@ class TestTenureSyncFiltering:
         alice = peer_factory("alice")
         bob = peer_factory("bob")
 
-        ch_hash = alice.channel_mgr.create_channel("bounded-sync-ch", "", "invite")
+        ch_hash = alice.channel_mgr.create_channel("bounded-sync-ch", "")
         # A real sleep between each ordering boundary, not just call order --
         # time.time() on Windows can return the identical value across calls
         # a few ms apart, and was_member_at()'s joined_at <= timestamp check
@@ -1357,7 +1332,7 @@ class TestTenureSyncFiltering:
         alice = peer_factory("alice")
         bob = peer_factory("bob")
 
-        ch_hash = alice.channel_mgr.create_channel("withheld-watermark", "", "invite")
+        ch_hash = alice.channel_mgr.create_channel("withheld-watermark", "")
         # See test_pre_join_history_excluded_by_default for why these sleeps
         # are needed instead of relying on call ordering alone.
         time.sleep(0.02)
@@ -1405,7 +1380,7 @@ class TestTenureSyncFiltering:
         alice = peer_factory("alice")
         bob = peer_factory("bob")
 
-        ch_hash = alice.channel_mgr.create_channel("sweep-past", "", "invite")
+        ch_hash = alice.channel_mgr.create_channel("sweep-past", "")
         time.sleep(0.02)
         for i in range(MAX_RESPONSE_MESSAGES + 5):
             _insert_message(alice.storage, ch_hash, alice.identity.hash_hex,
@@ -1567,14 +1542,21 @@ class TestTenureSyncFiltering:
 
     def test_no_tenure_data_allows_sync_without_filtering(self, peer_factory):
         """
-        When no tenure data exists for a channel (e.g. open-join channel or
-        legacy data), sync proceeds without filtering, no false rejections.
+        A peer bootstrapped from a roster, or one predating the feature,
+        holds membership with no tenure rows at all. Sync proceeds without
+        filtering there rather than rejecting everything.
         """
         alice = peer_factory("alice")
         bob = peer_factory("bob")
 
-        ch_hash = alice.channel_mgr.create_channel("no-tenure-sync", "", "public")
-        _seed_channel_on_peer(bob, ch_hash, "no-tenure-sync", alice.identity.hash_hex)
+        ch_hash = alice.channel_mgr.create_channel("no-tenure-sync", "")
+        mirror_members(ch_hash, alice, bob, tenure=False)
+        # create_channel opens the owner's own interval, so clearing the
+        # table is what actually produces the tenure-blind state.
+        for peer in (alice, bob):
+            peer.storage._conn.execute(
+                "DELETE FROM membership_tenure WHERE channel_hash = ?", (ch_hash,))
+            peer.storage._conn.commit()
 
         ts = time.time()
         msg_id = _insert_message(alice.storage, ch_hash, alice.identity.hash_hex,
@@ -1656,8 +1638,8 @@ class TestImageSync:
         alice = peer_factory("alice")
         bob = peer_factory("bob")
 
-        ch_hash = alice.channel_mgr.create_channel("img-sync", "", "public")
-        _seed_channel_on_peer(bob, ch_hash, "img-sync", alice.identity.hash_hex)
+        ch_hash = alice.channel_mgr.create_channel("img-sync", "")
+        mirror_members(ch_hash, alice, bob, joined_at=time.time() - _ANCIENT_SECS)
 
         # Timestamped after channel creation, not before -- create_channel()
         # opens the owner's own tenure at creation time, so a message
@@ -1766,8 +1748,8 @@ class TestFileManifestSync:
         alice = peer_factory("alice")
         bob = peer_factory("bob")
 
-        ch_hash = alice.channel_mgr.create_channel("file-sync", "", "public")
-        _seed_channel_on_peer(bob, ch_hash, "file-sync", alice.identity.hash_hex)
+        ch_hash = alice.channel_mgr.create_channel("file-sync", "")
+        mirror_members(ch_hash, alice, bob, joined_at=time.time() - _ANCIENT_SECS)
 
         ts = time.time()
         manifest = build_file_manifest("survey.csv", _FILE_BYTES)
@@ -1828,7 +1810,7 @@ class TestServerScopedTenure:
             alice.storage, alice.channel_mgr, alice.invite_mgr,
             s, alice.identity.hash_hex, "general")
 
-        actions.send_message(alice.storage, alice.subscription_mgr, alice.messaging,
+        actions.send_message(alice.storage, alice.messaging,
                              ch, alice.identity.hash_hex, "before bob joined")
         time.sleep(0.2)
 
@@ -1873,8 +1855,8 @@ class TestReactionSync:
         alice = peer_factory("alice")
         bob = peer_factory("bob")
 
-        ch_hash = alice.channel_mgr.create_channel("reaction-sync", "", "public")
-        _seed_channel_on_peer(bob, ch_hash, "reaction-sync", alice.identity.hash_hex)
+        ch_hash = alice.channel_mgr.create_channel("reaction-sync", "")
+        mirror_members(ch_hash, alice, bob, joined_at=time.time() - _ANCIENT_SECS)
 
         ts = time.time()
         rx_id = _compute_message_id("reacted message", alice.identity.hash_hex, ts)
@@ -1900,7 +1882,7 @@ class TestReactionSync:
     def test_message_with_no_reactions_omits_the_key(self, peer_factory):
         """The payload only grows for messages that actually carry reactions."""
         alice = peer_factory("alice")
-        ch_hash = alice.channel_mgr.create_channel("no-reactions", "", "public")
+        ch_hash = alice.channel_mgr.create_channel("no-reactions", "")
         ts = time.time()
         self._seed_message(alice, ch_hash, "sync_rx_002", ts)
 
@@ -1910,7 +1892,7 @@ class TestReactionSync:
 
     def test_synced_reactions_are_capped_per_message(self, peer_factory):
         alice = peer_factory("alice")
-        ch_hash = alice.channel_mgr.create_channel("many-reactions", "", "public")
+        ch_hash = alice.channel_mgr.create_channel("many-reactions", "")
         ts = time.time()
         self._seed_message(alice, ch_hash, "sync_rx_003", ts)
         for i in range(MAX_REACTIONS_PER_MESSAGE + 8):
@@ -2042,10 +2024,8 @@ class TestAnnounceSyncCooldown:
     def _shared_channel(self, peer_factory):
         alice = peer_factory("alice")
         bob = peer_factory("bob")
-        ch_hash = alice.channel_mgr.create_channel("announce-cooldown", "", "public")
-        _seed_channel_on_peer(bob, ch_hash, "announce-cooldown",
-                              alice.identity.hash_hex)
-        bob.subscription_mgr._subscribers[ch_hash] = {alice.identity.hash_hex}
+        ch_hash = alice.channel_mgr.create_channel("announce-cooldown", "")
+        mirror_members(ch_hash, alice, bob, joined_at=time.time() - _ANCIENT_SECS)
         return alice, bob, ch_hash
 
     def _spy_requests(self, peer):
@@ -2105,7 +2085,8 @@ class TestAnnounceSyncCooldown:
         """One peer's cooldown must not swallow another peer's first request."""
         alice, bob, ch_hash = self._shared_channel(peer_factory)
         carol = peer_factory("carol")
-        bob.subscription_mgr._subscribers[ch_hash].add(carol.identity.hash_hex)
+        mirror_members(ch_hash, alice, bob, carol,
+                       joined_at=time.time() - _ANCIENT_SECS)
         seen = self._spy_requests(bob)
 
         bob.sync_mgr.on_peer_appeared(alice.identity.hash_hex)

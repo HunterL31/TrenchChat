@@ -18,7 +18,7 @@ from trenchchat.core.files import REASON_STORAGE, build_manifest
 from trenchchat.core.node_browser import parse_nomad_url
 from trenchchat.core.permissions import (
     CREATE_CHANNEL, KICK, MANAGE_CHANNEL, MANAGE_ROLES, SEND_MESSAGE,
-    SHARE_FILES, VOICE_CHAT, is_open_join, permissions_from_json,
+    SHARE_FILES, VOICE_CHAT,
 )
 from trenchchat.core.protocol import file_manifest
 
@@ -28,7 +28,6 @@ MAX_THEME_NAME_LEN = 64
 REASON_NO_SEND_PERMISSION = "no_send_permission"
 REASON_NO_SHARE_PERMISSION = "no_share_permission"
 REASON_NO_CHANNEL = "no_channel"
-REASON_OPEN_JOIN = "open_join_channel"
 REASON_BAD_MANIFEST = "bad_manifest"
 
 DIRECTORY_SCOPE_ALL = "all"
@@ -38,74 +37,37 @@ DIRECTORY_SCOPE_SHARED = "shared"
 
 def create_channel(channel_mgr, invite_mgr, name: str, description: str,
                    permissions: dict) -> str:
-    """Create a channel and, for invite-only channels, publish the initial
-    member list document (without this, the channel has no signed member
-    list for peers to validate future updates against)."""
+    """Create a channel and publish its initial member list document.
+
+    Without the document the channel has no signed member list for peers to
+    validate future updates against.
+    """
     hash_hex = channel_mgr.create_channel(
         name=name, description=description, permissions=permissions,
     )
-    if not is_open_join(permissions):
-        invite_mgr.publish_member_list(hash_hex)
+    invite_mgr.publish_member_list(hash_hex)
     return hash_hex
 
 
-def join_public_channel(storage, subscription_mgr, channel_hash_hex: str) -> bool:
-    """Subscribe to a known open-join channel. Returns False if the channel
-    isn't in local storage yet (e.g. never discovered), or if it's
-    invite-only -- membership there is granted only via a signed member-list
-    document from an admin/owner, never a bare local subscribe. This is a
-    second layer behind announce_channel()'s discoverability guard: if an
-    invite-only channel's row ever ends up in local storage some other way
-    (a stale row from before a permissions change, a future discovery path),
-    this still can't be used to self-admit into it."""
-    channel = storage.get_channel(channel_hash_hex)
-    if channel is None:
-        return False
-    if not is_open_join(permissions_from_json(channel["permissions"])):
-        return False
-    subscription_mgr.subscribe(channel_hash_hex, channel["creator_hash"])
-    return True
+def compute_channel_recipients(storage, channel_hash_hex: str) -> list[str]:
+    """The delivery target set for a channel: every member.
 
-
-def compute_channel_recipients(storage, subscription_mgr, channel_hash_hex: str,
-                               self_hash_hex: str) -> list[str]:
+    No permission gate here; callers that need one (chat message sends do,
+    reaction broadcasts do not) apply it themselves.
     """
-    The delivery target set for a channel, matching how its access mode
-    determines recipients:
-      - invite-only: every member in the members table
-      - open-join:   the live subscriber set, plus self so the caller's
-                      own send is stored locally even with zero subscribers
-
-    No permission gate here -- callers that need one (chat message sends
-    do; reaction broadcasts don't) apply it themselves. Used for both.
-    """
-    channel = storage.get_channel(channel_hash_hex)
-    perms = permissions_from_json(channel["permissions"]) if channel else {}
-
-    if channel and not is_open_join(perms):
-        return [row["identity_hash"] for row in storage.get_members(channel_hash_hex)]
-
-    subs = subscription_mgr.get_subscribers(channel_hash_hex)
-    dests = list(subs) if subs else []
-    if self_hash_hex not in dests:
-        dests.append(self_hash_hex)
-    return dests
+    return [row["identity_hash"] for row in storage.get_members(channel_hash_hex)]
 
 
-def compute_send_recipients(storage, subscription_mgr, channel_hash_hex: str,
+def compute_send_recipients(storage, channel_hash_hex: str,
                             sender_hash_hex: str) -> list[str] | None:
     """
-    compute_channel_recipients(), gated on SEND_MESSAGE for non-open
-    channels. Returns None if the sender lacks permission to send (the
-    caller should treat this as a silent no-op, matching the GUI).
+    compute_channel_recipients(), gated on SEND_MESSAGE. Returns None if the
+    sender lacks permission to send, which the caller treats as a silent
+    no-op the way the client does.
     """
-    channel = storage.get_channel(channel_hash_hex)
-    perms = permissions_from_json(channel["permissions"]) if channel else {}
-    if channel and not is_open_join(perms):
-        if not storage.has_permission(channel_hash_hex, sender_hash_hex, SEND_MESSAGE):
-            return None
-
-    return compute_channel_recipients(storage, subscription_mgr, channel_hash_hex, sender_hash_hex)
+    if not storage.has_permission(channel_hash_hex, sender_hash_hex, SEND_MESSAGE):
+        return None
+    return compute_channel_recipients(storage, channel_hash_hex)
 
 
 def build_file_manifest(name: str, data: bytes) -> dict | None:
@@ -124,18 +86,15 @@ def file_share_refusal(storage, channel_hash_hex: str,
     """Why a file share here would be refused, or None if it is allowed.
 
     A manifest is only offered where a member list can authorise a serve, so
-    an open-join channel and a channel this node holds no record of are
-    refused whatever the roles say. Beyond that a file is a message:
-    SEND_MESSAGE is the floor, and SHARE_FILES is what an admin narrows it
-    with. The outbound half of the SHARE_FILES gate; the core enforcement is
-    in Messaging._on_lxmf_message, which holds against a peer calling in
-    directly.
+    a channel this node holds no record of is refused whatever the roles say.
+    Beyond that a file is a message: SEND_MESSAGE is the floor, and
+    SHARE_FILES is what an admin narrows it with. The outbound half of the
+    SHARE_FILES gate; the core enforcement is in Messaging._on_lxmf_message,
+    which holds against a peer calling in directly.
     """
     channel = storage.get_channel(channel_hash_hex)
     if channel is None:
         return REASON_NO_CHANNEL
-    if is_open_join(permissions_from_json(channel["permissions"])):
-        return REASON_OPEN_JOIN
     if not storage.has_permission(channel_hash_hex, sender_hash_hex, SEND_MESSAGE):
         return REASON_NO_SEND_PERMISSION
     if not storage.has_permission(channel_hash_hex, sender_hash_hex, SHARE_FILES):
@@ -143,7 +102,7 @@ def file_share_refusal(storage, channel_hash_hex: str,
     return None
 
 
-def send_message_result(storage, subscription_mgr, messaging,
+def send_message_result(storage, messaging,
                         channel_hash_hex: str, sender_hash_hex: str,
                         content: str, *,
                         image_data: bytes | None = None,
@@ -165,7 +124,7 @@ def send_message_result(storage, subscription_mgr, messaging,
         if manifest is None:
             return {"sent": False, "reason": REASON_BAD_MANIFEST}
     recipients = compute_send_recipients(
-        storage, subscription_mgr, channel_hash_hex, sender_hash_hex
+        storage, channel_hash_hex, sender_hash_hex
     )
     if recipients is None:
         return {"sent": False, "reason": REASON_NO_SEND_PERMISSION}
@@ -180,19 +139,19 @@ def send_message_result(storage, subscription_mgr, messaging,
     return {"sent": True, "reason": None}
 
 
-def send_message(storage, subscription_mgr, messaging, channel_hash_hex: str,
+def send_message(storage, messaging, channel_hash_hex: str,
                  sender_hash_hex: str, content: str, *,
                  image_data: bytes | None = None,
                  reply_to: str | None = None,
                  manifest: dict | None = None) -> bool:
     """send_message_result() for callers that only need whether it went."""
     return send_message_result(
-        storage, subscription_mgr, messaging, channel_hash_hex, sender_hash_hex,
+        storage, messaging, channel_hash_hex, sender_hash_hex,
         content, image_data=image_data, reply_to=reply_to, manifest=manifest,
     )["sent"]
 
 
-def share_file(file_mgr, storage, subscription_mgr, messaging,
+def share_file(file_mgr, storage, messaging,
                channel_hash_hex: str, self_hash_hex: str, name: str,
                data: bytes, content: str = "") -> dict:
     """Store a file, then send the message that names it.
@@ -215,7 +174,7 @@ def share_file(file_mgr, storage, subscription_mgr, messaging,
     if manifest is None:
         return {"shared": False, "sent": False, "reason": REASON_STORAGE,
                 "manifest": None}
-    result = send_message_result(storage, subscription_mgr, messaging,
+    result = send_message_result(storage, messaging,
                                  channel_hash_hex, self_hash_hex, content,
                                  manifest=manifest)
     return {"shared": True, "sent": result["sent"],
@@ -274,12 +233,12 @@ def edit_channel_permissions(storage, invite_mgr, channel_hash_hex: str,
     return True
 
 
-def leave_channel(storage, subscription_mgr, channel_hash_hex: str) -> bool:
+def leave_channel(storage, channel_hash_hex: str) -> bool:
     """Returns False if the channel isn't in local storage."""
     channel = storage.get_channel(channel_hash_hex)
     if channel is None:
         return False
-    subscription_mgr.unsubscribe(channel_hash_hex, channel["creator_hash"])
+    storage.unsubscribe(channel_hash_hex)
     return True
 
 
@@ -288,17 +247,14 @@ def join_voice_channel(storage, voice_mgr, channel_hash_hex: str,
     """Outbound VOICE_CHAT guard + delegate to VoiceManager.join_voice.
 
     Returns False (silent no-op) if the channel is unknown, the caller lacks
-    voice_chat on a non-open-join channel, or the join itself fails (already
-    in a session, session full). Core-side enforcement in VoiceManager is
-    still the real security boundary; this mirrors the GUI pre-flight guard.
+    voice_chat, or the join itself fails (already in a session, session
+    full). Core-side enforcement in VoiceManager is still the real security
+    boundary; this mirrors the client's pre-flight guard.
     """
-    channel = storage.get_channel(channel_hash_hex)
-    if channel is None:
+    if storage.get_channel(channel_hash_hex) is None:
         return False
-    perms = permissions_from_json(channel["permissions"])
-    if not is_open_join(perms):
-        if not storage.has_permission(channel_hash_hex, self_hash_hex, VOICE_CHAT):
-            return False
+    if not storage.has_permission(channel_hash_hex, self_hash_hex, VOICE_CHAT):
+        return False
     return voice_mgr.join_voice(channel_hash_hex)
 
 
@@ -411,7 +367,7 @@ def edit_server_permissions(storage, invite_mgr, server_hash_hex: str,
     return True
 
 
-def leave_server(storage, subscription_mgr, server_hash_hex: str,
+def leave_server(storage, server_hash_hex: str,
                  my_hex: str) -> bool:
     """Leave a server: unsubscribe from every channel and drop local membership.
 
@@ -422,12 +378,12 @@ def leave_server(storage, subscription_mgr, server_hash_hex: str,
     if storage.get_server(server_hash_hex) is None:
         return False
     for row in storage.get_server_channels(server_hash_hex):
-        subscription_mgr.unsubscribe(row["hash"], row["creator_hash"])
+        storage.unsubscribe(row["hash"])
     storage.remove_member(server_hash_hex, my_hex)
     return True
 
 
-def channel_roster_hexes(storage, subscription_mgr,
+def channel_roster_hexes(storage,
                          channel_hash_hex: str) -> list[str]:
     """Identity hashes making up a channel's roster, for presence and quality.
 
@@ -438,27 +394,19 @@ def channel_roster_hexes(storage, subscription_mgr,
     channel = storage.get_channel(channel_hash_hex)
     if channel is None:
         return []
-    perms = permissions_from_json(channel["permissions"])
-    if is_open_join(perms):
-        return sorted(subscription_mgr.get_subscribers(channel_hash_hex))
     return [row["identity_hash"] for row in storage.get_members(channel_hash_hex)]
 
 
 def shared_channel_peers(storage, self_hash_hex: str) -> set[str]:
     """Identity hashes sharing at least one channel with this node.
 
-    Unions the members table with the durable subscriber copy across the
-    channels this node is subscribed to, so both access modes are covered.
     Direct-message conversations keep no subscriptions row, so they never
     contribute a peer here.
     """
-    subscribed = {row["channel_hash"] for row in storage.get_subscriptions()}
-    all_subscribers = storage.get_all_channel_subscribers()
-
     peers: set[str] = set()
-    for channel_hash in subscribed:
-        peers.update(row["identity_hash"] for row in storage.get_members(channel_hash))
-        peers.update(all_subscribers.get(channel_hash, set()))
+    for row in storage.get_subscriptions():
+        peers.update(m["identity_hash"]
+                     for m in storage.get_members(row["channel_hash"]))
     peers.discard(self_hash_hex)
     return peers
 
@@ -594,7 +542,7 @@ def dm_recipients(direct_mgr, conversation_hash_hex: str,
     return [peer]
 
 
-def conversation_recipients(storage, subscription_mgr, direct_mgr,
+def conversation_recipients(storage, direct_mgr,
                             channel_hash_hex: str, self_hash_hex: str,
                             trenchchat_only: bool = False) -> list[str]:
     """Recipients for any address, conversation or channel.
@@ -606,8 +554,7 @@ def conversation_recipients(storage, subscription_mgr, direct_mgr,
     if direct_mgr is not None and direct_mgr.is_conversation(channel_hash_hex):
         return dm_recipients(direct_mgr, channel_hash_hex,
                              trenchchat_only=trenchchat_only) or []
-    return compute_channel_recipients(storage, subscription_mgr, channel_hash_hex,
-                                      self_hash_hex)
+    return compute_channel_recipients(storage, channel_hash_hex)
 
 
 # ---------------------------------------------------------------------------

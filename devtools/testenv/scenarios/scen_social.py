@@ -16,7 +16,7 @@ import io
 
 from asserts import all_hold, hold_for, settle, wait_until, ScenarioFailure
 from flows import (
-    go_offline, go_online, invite_only_channel, public_channel,
+    go_offline, go_online, invite_only_channel, invite_only_channel,
     DISCOVERY_TIMEOUT, NEGATIVE_HOLD_SECS,
 )
 from scenario import PROBE, scenario
@@ -58,7 +58,7 @@ def f1(env):
     """The owner is in the broadcast subscriber payload; before it was, the
     owner alone never saw reactions, since reactions have no sync fallback."""
     a, b, c, d = env.peers("A", "B", "C", "D")
-    ch = public_channel(a, [b, c, d], "f1-public")
+    ch = invite_only_channel(a, [b, c, d], "f1-public")
 
     a.send(ch, "react-to-me")
     all_hold([b, c, d], ch, {"react-to-me"}, timeout=DISCOVERY_TIMEOUT)
@@ -74,7 +74,7 @@ def f1(env):
 @scenario("social2", "Removing a reaction clears it everywhere")
 def f2(env):
     a, b, c = env.peers("A", "B", "C")
-    ch = public_channel(a, [b, c], "f2-public")
+    ch = invite_only_channel(a, [b, c], "f2-public")
 
     a.send(ch, "react-to-me")
     all_hold([b, c], ch, {"react-to-me"}, timeout=DISCOVERY_TIMEOUT)
@@ -98,7 +98,7 @@ def f3(env):
     """Matrix row social3. Chat messages have three recovery mechanisms; reactions
     have none, so an offline peer should miss one permanently."""
     a, b, d = env.peers("A", "B", "D")
-    ch = public_channel(a, [b, d], "f3-public")
+    ch = invite_only_channel(a, [b, d], "f3-public")
 
     a.send(ch, "react-to-me")
     all_hold([b, d], ch, {"react-to-me"}, timeout=DISCOVERY_TIMEOUT)
@@ -122,7 +122,7 @@ def f3(env):
 @scenario("social4", "Presence flips to offline when a peer drops")
 def f4(env):
     a, b, c = env.peers("A", "B", "C")
-    public_channel(a, [b, c], "f4-public")
+    invite_only_channel(a, [b, c], "f4-public")
 
     wait_until(lambda: a.presence(b.hash).get("is_online"), "A to see B online",
                DISCOVERY_TIMEOUT)
@@ -136,7 +136,7 @@ def f4(env):
 @scenario("social5", "An avatar propagates and can be removed")
 def f5(env):
     a, b, c = env.peers("A", "B", "C")
-    public_channel(a, [b, c], "f5-public")
+    invite_only_channel(a, [b, c], "f5-public")
 
     a.set_avatar(_tiny_png())
     for peer in (b, c):
@@ -161,7 +161,7 @@ def f5(env):
 @scenario("social6", "A display-name change propagates to the directory")
 def f6(env):
     a, b, c = env.peers("A", "B", "C")
-    public_channel(a, [b, c], "f6-public")
+    invite_only_channel(a, [b, c], "f6-public")
 
     a.set_display_name("Renamed Tester")
     for peer in (b, c):
@@ -178,7 +178,7 @@ def f6(env):
 @scenario("social7", "A friend entry stays on the device that made it")
 def f7(env):
     a, b, c = env.peers("A", "B", "C")
-    public_channel(a, [b, c], "f7-public")
+    invite_only_channel(a, [b, c], "f7-public")
 
     a.add_friend(b.hash, nickname="Nickname Only A Sees")
     wait_until(lambda: any(f["identity_hash"] == b.hash for f in a.friends()),
@@ -194,7 +194,7 @@ def f7(env):
 @scenario("social8", "A reply and a reaction on it resolve the same way everywhere")
 def f8(env):
     a, b, c = env.peers("A", "B", "C")
-    ch = public_channel(a, [b, c], "f8-public")
+    ch = invite_only_channel(a, [b, c], "f8-public")
 
     a.send(ch, "original")
     all_hold([b, c], ch, {"original"}, timeout=DISCOVERY_TIMEOUT)
@@ -258,7 +258,7 @@ def f10(env):
     holds; receivers must fetch the image over MT_EMOJI_REQUEST before they
     can render what the count already shows."""
     a, b, c = env.peers("A", "B", "C")
-    ch = public_channel(a, [b, c], "f10-public")
+    ch = invite_only_channel(a, [b, c], "f10-public")
 
     a.send(ch, "react-to-me")
     all_hold([b, c], ch, {"react-to-me"}, timeout=DISCOVERY_TIMEOUT)

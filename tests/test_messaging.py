@@ -10,6 +10,7 @@ import pytest
 import RNS
 
 from tests.helpers import (
+    mirror_members,
     wait_for,
     wait_for_message,
 )
@@ -24,16 +25,14 @@ from trenchchat.core.permissions import PRESET_PRIVATE, SEND_MESSAGE
 class TestSendReceive:
     def test_send_receive_message(self, peer_factory):
         """
-        Alice creates a public channel, Bob subscribes, Alice sends a message;
+        Alice creates a channel with Bob in it and sends a message;
         Bob's storage receives it via TestTransport.
         """
         alice = peer_factory("alice")
         bob = peer_factory("bob")
 
-        ch_hash = alice.channel_mgr.create_channel("chat", "", "public")
-        bob.storage.upsert_channel(ch_hash, "chat", "", alice.identity.hash_hex,
-                                   "public", time.time())
-        bob.storage.subscribe(ch_hash)
+        ch_hash = alice.channel_mgr.create_channel("chat", "")
+        mirror_members(ch_hash, alice, bob)
 
         content = "Hello Bob!"
         alice.messaging.send_message(
@@ -62,7 +61,7 @@ class TestSendReceive:
         skipped in the delivery loop but the local insert still happens).
         """
         alice = peer_factory("alice")
-        ch_hash = alice.channel_mgr.create_channel("local", "", "public")
+        ch_hash = alice.channel_mgr.create_channel("local", "")
 
         content = "Stored locally"
         alice.messaging.send_message(
@@ -81,7 +80,7 @@ class TestSendReceive:
         Inserting the same message_id twice results in only one stored copy.
         """
         alice = peer_factory("alice")
-        ch_hash = alice.channel_mgr.create_channel("idem", "", "public")
+        ch_hash = alice.channel_mgr.create_channel("idem", "")
 
         ts = time.time()
         kwargs = dict(
@@ -110,10 +109,8 @@ class TestSendReceive:
         alice = peer_factory("alice")
         bob = peer_factory("bob")
 
-        ch_hash = alice.channel_mgr.create_channel("replies", "", "public")
-        bob.storage.upsert_channel(ch_hash, "replies", "", alice.identity.hash_hex,
-                                   "public", time.time())
-        bob.storage.subscribe(ch_hash)
+        ch_hash = alice.channel_mgr.create_channel("replies", "")
+        mirror_members(ch_hash, alice, bob)
         alice.storage.subscribe(ch_hash)
 
         orig_content = "Original message"
@@ -155,10 +152,8 @@ class TestSendReceive:
         alice = peer_factory("alice")
         bob = peer_factory("bob")
 
-        ch_hash = alice.channel_mgr.create_channel("callbacks", "", "public")
-        bob.storage.upsert_channel(ch_hash, "callbacks", "", alice.identity.hash_hex,
-                                   "public", time.time())
-        bob.storage.subscribe(ch_hash)
+        ch_hash = alice.channel_mgr.create_channel("callbacks", "")
+        mirror_members(ch_hash, alice, bob)
 
         received = []
         bob.messaging.add_message_callback(
@@ -182,7 +177,7 @@ class TestSendReceive:
         alice = peer_factory("alice")
         bob = peer_factory("bob")
 
-        ch_hash = alice.channel_mgr.create_channel("unsub-test", "", "public")
+        ch_hash = alice.channel_mgr.create_channel("unsub-test", "")
         # Bob is NOT subscribed
 
         content = "Should be dropped"
@@ -204,11 +199,9 @@ class TestSendReceive:
         bob = peer_factory("bob")
         carol = peer_factory("carol")
 
-        ch_hash = alice.channel_mgr.create_channel("multi", "", "public")
+        ch_hash = alice.channel_mgr.create_channel("multi", "")
         for peer in [bob, carol]:
-            peer.storage.upsert_channel(ch_hash, "multi", "", alice.identity.hash_hex,
-                                        "public", time.time())
-            peer.storage.subscribe(ch_hash)
+            mirror_members(ch_hash, alice, peer)
 
         content = "Broadcast message"
         alice.messaging.send_message(
@@ -233,7 +226,7 @@ class TestSendMessagePermission:
         bob = peer_factory("bob")
 
         # Alice creates an invite-only channel and adds Bob as a member.
-        ch_hash = alice.channel_mgr.create_channel("restricted", "", "invite")
+        ch_hash = alice.channel_mgr.create_channel("restricted", "")
         alice.invite_mgr.publish_member_list(
             ch_hash, add_members=[bob.identity.hash]
         )
@@ -242,9 +235,7 @@ class TestSendMessagePermission:
         assert wait_for_member(alice.storage, ch_hash, bob.identity.hash_hex)
 
         # Bob's storage also needs the channel and membership so his receiver accepts it.
-        bob.storage.upsert_channel(ch_hash, "restricted", "", alice.identity.hash_hex,
-                                   "invite", time.time())
-        bob.storage.subscribe(ch_hash)
+        mirror_members(ch_hash, alice, bob)
         bob.storage.upsert_member(ch_hash, bob.identity.hash_hex, "Bob", role="member")
 
         # Alice revokes send_message from members.
@@ -270,10 +261,8 @@ class TestSendMessagePermission:
         alice = peer_factory("alice")
         bob = peer_factory("bob")
 
-        ch_hash = alice.channel_mgr.create_channel("owner-send", "", "invite")
-        bob.storage.upsert_channel(ch_hash, "owner-send", "", alice.identity.hash_hex,
-                                   "invite", time.time())
-        bob.storage.subscribe(ch_hash)
+        ch_hash = alice.channel_mgr.create_channel("owner-send", "")
+        mirror_members(ch_hash, alice, bob)
         bob.storage.upsert_member(ch_hash, alice.identity.hash_hex, "Alice", role="owner")
 
         # Strip send_message from every non-owner role.
@@ -305,7 +294,7 @@ class TestImageMessages:
     def test_send_image_stored_locally(self, peer_factory):
         """Sending a message with image_data stores the blob in the sender's DB."""
         alice = peer_factory("alice")
-        ch_hash = alice.channel_mgr.create_channel("img-local", "", "public")
+        ch_hash = alice.channel_mgr.create_channel("img-local", "")
         alice.messaging.send_message(
             channel_hash_hex=ch_hash,
             content="Here is a photo",
@@ -321,10 +310,8 @@ class TestImageMessages:
         alice = peer_factory("alice")
         bob = peer_factory("bob")
 
-        ch_hash = alice.channel_mgr.create_channel("img-peer", "", "public")
-        bob.storage.upsert_channel(ch_hash, "img-peer", "", alice.identity.hash_hex,
-                                   "public", time.time())
-        bob.storage.subscribe(ch_hash)
+        ch_hash = alice.channel_mgr.create_channel("img-peer", "")
+        mirror_members(ch_hash, alice, bob)
 
         alice.messaging.send_message(
             channel_hash_hex=ch_hash,
@@ -347,10 +334,8 @@ class TestImageMessages:
         alice = peer_factory("alice")
         bob = peer_factory("bob")
 
-        ch_hash = alice.channel_mgr.create_channel("img-only", "", "public")
-        bob.storage.upsert_channel(ch_hash, "img-only", "", alice.identity.hash_hex,
-                                   "public", time.time())
-        bob.storage.subscribe(ch_hash)
+        ch_hash = alice.channel_mgr.create_channel("img-only", "")
+        mirror_members(ch_hash, alice, bob)
 
         alice.messaging.send_message(
             channel_hash_hex=ch_hash,
@@ -372,10 +357,8 @@ class TestImageMessages:
         alice = peer_factory("alice")
         bob = peer_factory("bob")
 
-        ch_hash = alice.channel_mgr.create_channel("no-img", "", "public")
-        bob.storage.upsert_channel(ch_hash, "no-img", "", alice.identity.hash_hex,
-                                   "public", time.time())
-        bob.storage.subscribe(ch_hash)
+        ch_hash = alice.channel_mgr.create_channel("no-img", "")
+        mirror_members(ch_hash, alice, bob)
 
         alice.messaging.send_message(
             channel_hash_hex=ch_hash,
@@ -404,7 +387,7 @@ class TestFileManifestMessages:
 
     def test_manifest_stored_locally_on_send(self, peer_factory):
         alice = peer_factory("alice")
-        ch_hash = alice.channel_mgr.create_channel("file-local", "", "public")
+        ch_hash = alice.channel_mgr.create_channel("file-local", "")
         manifest = build_file_manifest("survey.csv", _FILE_BYTES)
 
         alice.messaging.send_message(
@@ -425,10 +408,8 @@ class TestFileManifestMessages:
         alice = peer_factory("alice")
         bob = peer_factory("bob")
 
-        ch_hash = alice.channel_mgr.create_channel("file-peer", "", "public")
-        bob.storage.upsert_channel(ch_hash, "file-peer", "", alice.identity.hash_hex,
-                                   "public", time.time())
-        bob.storage.subscribe(ch_hash)
+        ch_hash = alice.channel_mgr.create_channel("file-peer", "")
+        mirror_members(ch_hash, alice, bob)
 
         manifest = build_file_manifest("survey.csv", _FILE_BYTES)
         alice.messaging.send_message(
@@ -457,10 +438,8 @@ class TestFileManifestMessages:
         alice = peer_factory("alice")
         bob = peer_factory("bob")
 
-        ch_hash = alice.channel_mgr.create_channel("no-file", "", "public")
-        bob.storage.upsert_channel(ch_hash, "no-file", "", alice.identity.hash_hex,
-                                   "public", time.time())
-        bob.storage.subscribe(ch_hash)
+        ch_hash = alice.channel_mgr.create_channel("no-file", "")
+        mirror_members(ch_hash, alice, bob)
 
         alice.messaging.send_message(
             channel_hash_hex=ch_hash,
@@ -486,7 +465,7 @@ class TestDeliveryState:
 
     def test_message_to_unknown_path_is_pending_not_delivered(self, peer_factory):
         alice = peer_factory("alice")
-        ch_hash = alice.channel_mgr.create_channel("pending", "", "public")
+        ch_hash = alice.channel_mgr.create_channel("pending", "")
 
         # A recipient no identity was ever created for: recall() returns None,
         # so the message is queued rather than sent.
@@ -504,10 +483,8 @@ class TestDeliveryState:
         alice = peer_factory("alice")
         bob = peer_factory("bob")
 
-        ch_hash = alice.channel_mgr.create_channel("flush-state", "", "public")
-        bob.storage.upsert_channel(ch_hash, "flush-state", "", alice.identity.hash_hex,
-                                   "public", time.time())
-        bob.storage.subscribe(ch_hash)
+        ch_hash = alice.channel_mgr.create_channel("flush-state", "")
+        mirror_members(ch_hash, alice, bob)
 
         # Force the path to be unknown at send time so the message is queued.
         monkeypatch.setattr(RNS.Identity, "recall", staticmethod(lambda *a, **k: None))
@@ -533,10 +510,8 @@ class TestDeliveryState:
         alice = peer_factory("alice")
         bob = peer_factory("bob")
 
-        ch_hash = alice.channel_mgr.create_channel("reachable", "", "public")
-        bob.storage.upsert_channel(ch_hash, "reachable", "", alice.identity.hash_hex,
-                                   "public", time.time())
-        bob.storage.subscribe(ch_hash)
+        ch_hash = alice.channel_mgr.create_channel("reachable", "")
+        mirror_members(ch_hash, alice, bob)
 
         alice.messaging.send_message(
             channel_hash_hex=ch_hash,
@@ -550,10 +525,8 @@ class TestDeliveryState:
         alice = peer_factory("alice")
         bob = peer_factory("bob")
 
-        ch_hash = alice.channel_mgr.create_channel("failed-state", "", "public")
-        bob.storage.upsert_channel(ch_hash, "failed-state", "", alice.identity.hash_hex,
-                                   "public", time.time())
-        bob.storage.subscribe(ch_hash)
+        ch_hash = alice.channel_mgr.create_channel("failed-state", "")
+        mirror_members(ch_hash, alice, bob)
 
         alice.messaging.send_message(
             channel_hash_hex=ch_hash,
@@ -572,7 +545,7 @@ class TestDeliveryState:
 
     def test_delivery_status_callback_fires_on_change(self, peer_factory):
         alice = peer_factory("alice")
-        ch_hash = alice.channel_mgr.create_channel("cb-state", "", "public")
+        ch_hash = alice.channel_mgr.create_channel("cb-state", "")
 
         events = []
         alice.messaging.add_delivery_status_callback(
@@ -590,7 +563,7 @@ class TestDeliveryState:
 
     def test_own_only_message_has_no_delivery_state(self, peer_factory):
         alice = peer_factory("alice")
-        ch_hash = alice.channel_mgr.create_channel("self-only", "", "public")
+        ch_hash = alice.channel_mgr.create_channel("self-only", "")
 
         alice.messaging.send_message(
             channel_hash_hex=ch_hash,
@@ -645,10 +618,8 @@ class TestMessageIdWireEncoding:
 
     @staticmethod
     def _channel(alice, bob) -> str:
-        ch_hash = alice.channel_mgr.create_channel("wire", "", "public")
-        bob.storage.upsert_channel(ch_hash, "wire", "", alice.identity.hash_hex,
-                                   "public", time.time())
-        bob.storage.subscribe(ch_hash)
+        ch_hash = alice.channel_mgr.create_channel("wire", "")
+        mirror_members(ch_hash, alice, bob)
         return ch_hash
 
     @staticmethod

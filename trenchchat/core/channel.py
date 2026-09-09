@@ -1,26 +1,26 @@
 """
-Channel management: create, announce, and discover channels.
+Channel management: create and restore channels.
 
 A channel is an RNS.Destination(SINGLE) whose aspect path is:
     trenchchat.channel.<sanitised_name>
 
 The channel hash is its globally unique address derived from the
 creator's identity + the aspect path.
+
+Channels are always invite-only and are never announced. Membership travels
+in a signed member-list document (core/invite.py), so the destination exists
+only to derive a hash that bakes in the creator's identity, the same shape
+servers have. Public chat is RRC and lives in core/rrc.py; see docs/rrc.md.
 """
 
 import time
 import RNS
-import msgpack
 
 from trenchchat import APP_NAME, APP_ASPECT_CHANNEL
 from trenchchat.core.identity import Identity
 from trenchchat.core.naming import NameInUseError, channel_hash_for, sanitise_name
-from trenchchat.core.permissions import (
-    PRESET_OPEN, PRESET_PRIVATE, PRESETS, ROLE_OWNER,
-    is_discoverable, is_open_join, permissions_from_json,
-)
+from trenchchat.core.permissions import PRESET_PRIVATE, ROLE_OWNER
 from trenchchat.core.storage import Storage
-from trenchchat.network.announce import ChannelAnnounceHandler
 
 _sanitise_name = sanitise_name
 
@@ -30,34 +30,17 @@ class ChannelManager:
         self._identity = identity
         self._storage = storage
         self._owned_destinations: dict[str, RNS.Destination] = {}
-        self._discovered_callbacks: list = []
-        self._announce_handler = ChannelAnnounceHandler(self._on_channel_discovered)
-        RNS.Transport.register_announce_handler(self._announce_handler)
-
-    def add_channel_discovered_callback(self, callback):
-        """callback(channel_hash_hex, channel_name): fired when a new public channel is heard."""
-        if callback not in self._discovered_callbacks:
-            self._discovered_callbacks.append(callback)
-
-    def remove_channel_discovered_callback(self, callback):
-        if callback in self._discovered_callbacks:
-            self._discovered_callbacks.remove(callback)
 
     # --- create ---
 
     def create_channel(self, name: str, description: str = "",
-                       access_mode: str = "public",
                        permissions: dict | None = None,
                        server_hash: str | None = None) -> str:
         """Create a new channel owned by the local identity.
 
-        *permissions* is the full permissions dict.  For backward compat,
-        *access_mode* (``"public"`` / ``"invite"``) is also accepted and
-        converted to the matching preset.
-
         When *server_hash* is set the channel belongs to a server, which owns
         its membership, roles and tenure: no owner member row and no tenure
-        interval are written here, and the channel is never announced.
+        interval are written here.
 
         Returns the channel hash hex string.
 
@@ -65,10 +48,7 @@ class ChannelManager:
         address *name* derives to.
         """
         if permissions is None:
-            permissions = PRESETS.get(
-                {"public": "open", "invite": "private"}.get(access_mode, access_mode),
-                PRESET_PRIVATE,
-            )
+            permissions = dict(PRESET_PRIVATE)
 
         aspect = _sanitise_name(name)
         hash_hex = channel_hash_for(self._identity.hash, name)
@@ -112,109 +92,8 @@ class ChannelManager:
         # actually joined. Uses created_at rather than a fresh time.time()
         # call so the tenure interval starts at the exact moment the channel
         # itself was created, not some microseconds-later timestamp.
-        #
-        # Gated to non-open-join channels only: public channels never use
-        # the member-list/tenure system at all (membership there is tracked
-        # by SubscriptionManager instead), so giving the owner a tenure row
-        # would make has_any_tenure() true and wrongly engage tenure
-        # filtering -- including the requester-side check -- for peers who
-        # joined via subscription and have no tenure data of their own,
-        # rejecting their sync requests entirely.
-        if not is_open_join(permissions):
-            self._storage.open_tenure(hash_hex, self._identity.hash_hex, created_at)
-        self.announce_channel(hash_hex)
+        self._storage.open_tenure(hash_hex, self._identity.hash_hex, created_at)
         return hash_hex
-
-    # --- announce ---
-
-    def announce_channel(self, channel_hash_hex: str,
-                         attached_interface=None) -> None:
-        """Announce a single owned channel.
-
-        If attached_interface is given the announce is sent only on that
-        interface; otherwise it is broadcast on all interfaces. Invite-only
-        channels are never announced regardless of the discoverable flag --
-        broadcasting them would leak their name/description/creator to any
-        peer listening for trenchchat.channel announces, defeating the point
-        of using a signed member-list document instead of mesh-wide
-        discovery for them. discoverable and open_join are stored as
-        independent flags (ChannelPermissionsDialog exposes both), so
-        open_join must be checked here too rather than trusting discoverable
-        alone -- otherwise toggling "Discoverable" on in the permissions
-        dialog broadcasts an invite-only channel's existence to the whole
-        mesh even though open_join stays off.
-        """
-        dest = self._owned_destinations.get(channel_hash_hex)
-        if dest is None:
-            return
-        channel = self._storage.get_channel(channel_hash_hex)
-        if channel is None:
-            return
-        perms = permissions_from_json(channel["permissions"])
-        if not is_discoverable(perms) or not is_open_join(perms):
-            return
-        access = "public" if is_open_join(perms) else "invite"
-        app_data = msgpack.packb({
-            "name": channel["name"],
-            "description": channel["description"],
-            "access": access,
-            "creator": self._identity.hash_hex,
-        }, use_bin_type=True)
-        dest.announce(app_data=app_data, attached_interface=attached_interface)
-
-    def announce_all_owned(self, attached_interface=None) -> None:
-        """Announce all owned channels.
-
-        If attached_interface is given the announce is sent only on that
-        interface; otherwise it is broadcast on all interfaces.
-        """
-        for hash_hex in self._owned_destinations:
-            self.announce_channel(hash_hex, attached_interface=attached_interface)
-
-    # --- discover ---
-
-    def _on_channel_discovered(self, destination_hash: bytes,
-                                announced_identity: RNS.Identity,
-                                metadata: dict,
-                                iface=None):
-        hash_hex = destination_hash.hex()
-        name = metadata.get("name", hash_hex[:8])
-        description = metadata.get("description", "")
-        access_mode = metadata.get("access", "public")
-        # Taken from the announcing identity, never from the payload: the
-        # destination hash is bound to that identity by RNS, while "creator"
-        # is unsigned text -- and creator_hash goes on to serve as a
-        # trusted-signer fallback when validating member list documents.
-        creator_hash = announced_identity.hash.hex() if announced_identity else ""
-
-        already_known = self._storage.get_channel(hash_hex) is not None
-        if already_known:
-            # Discovery metadata is unsigned and unversioned, so it may refresh
-            # the presentation fields but never the permissions column: that is
-            # governed by signed member list documents behind MANAGE_CHANNEL,
-            # and letting an announce rewrite it turns open_join on for a
-            # private channel -- after which the inbound message handler stops
-            # checking membership at all.
-            self._storage.update_discovered_metadata(hash_hex, name, description)
-        else:
-            self._storage.upsert_channel(
-                hash=hash_hex,
-                name=name,
-                description=description,
-                creator_hash=creator_hash,
-                access_mode=access_mode,
-                created_at=time.time(),
-            )
-
-        channel = self._storage.get_channel(hash_hex)
-        perms = permissions_from_json(channel["permissions"]) if channel else {}
-        if not already_known and is_discoverable(perms):
-            for cb in self._discovered_callbacks:
-                try:
-                    cb(hash_hex, name)
-                except Exception as e:
-                    RNS.log(f"TrenchChat: channel discovered callback error: {e}",
-                            RNS.LOG_ERROR)
 
     # --- owned channel destination lookup ---
 

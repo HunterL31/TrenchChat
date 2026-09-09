@@ -91,17 +91,6 @@ void main() {
     expect(avatar, isNull);
   });
 
-  test('joinChannel decodes the ok flag', () async {
-    final client = ApiClient(
-      baseUrl: 'http://example.test',
-      client: MockClient((request) async {
-        expect(request.url.path, '/channels/chan-hash/join');
-        return http.Response(jsonEncode({'ok': true}), 200);
-      }),
-    );
-
-    expect(await client.joinChannel('chan-hash'), isTrue);
-  });
 
   test('leaveChannel posts to the channel\'s leave route', () async {
     final client = ApiClient(

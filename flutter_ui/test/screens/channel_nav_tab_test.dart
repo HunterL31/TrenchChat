@@ -23,7 +23,6 @@ Map<String, Object?> _channelJson(String name) => {
       'name': name,
       'description': '',
       'creator_hash': 'creator',
-      'open_join': true,
       'created_at': 0,
       'server_hash': null,
     };

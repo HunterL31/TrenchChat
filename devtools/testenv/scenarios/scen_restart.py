@@ -9,11 +9,11 @@ See docs/testenv-scenarios.md for the matrix these implement.
 """
 
 from asserts import (
-    all_hold, roster, settle, subscriber_views, wait_until, ScenarioFailure,
+    all_hold, roster, settle, roster_views, wait_until, ScenarioFailure,
 )
 from flows import (
-    await_discovery, invite_and_accept, invite_only_channel, join_all,
-    public_channel, DISCOVERY_TIMEOUT,
+    await_discovery, invite_and_accept, invite_only_channel,
+    DISCOVERY_TIMEOUT,
 )
 from scenario import PROBE, scenario
 
@@ -32,7 +32,7 @@ def g1(env):
     The counter is persisted now; this fails again if that regresses.
     """
     a, b, c, d = env.peers("A", "B", "C", "D")
-    ch = public_channel(a, [b, c], "g1-public")
+    ch = invite_only_channel(a, [b, c], "g1-public")
     await_discovery([d], ch)
 
     a.send(ch, "before-restart")
@@ -40,15 +40,15 @@ def g1(env):
 
     env.orch.restart(a.tag)
     env.wait_alive(a)
-    wait_until(lambda: b.hash in a.subscribers(ch),
-               "the restarted owner to reload its subscriber set from storage",
+    wait_until(lambda: b.hash in roster(a, ch),
+               "the restarted owner to reload its roster from storage",
                RESTART_SETTLE)
 
-    join_all([d], ch, a)
+    invite_and_accept(a, d, ch)
 
-    b_learns, b_secs = settle(lambda: d.hash in b.subscribers(ch),
+    b_learns, b_secs = settle(lambda: d.hash in roster(b, ch),
                               "B to learn about D after the owner restarted", 90.0)
-    c_learns, _ = settle(lambda: d.hash in c.subscribers(ch),
+    c_learns, _ = settle(lambda: d.hash in roster(c, ch),
                          "C to learn about D after the owner restarted", 30.0)
 
     # The user-visible consequence: B addresses its sends to a list without D.
@@ -61,7 +61,7 @@ def g1(env):
         "c_learned_about_d": c_learns,
         "learn_secs": round(b_secs, 1) if b_learns else None,
         "b_message_reached_d": reached,
-        "subscriber_views": subscriber_views([a, b, c, d], ch),
+        "roster_views": roster_views([a, b, c, d], ch),
     }
     if not (b_learns and c_learns and reached):
         raise ScenarioFailure(
@@ -74,7 +74,7 @@ def g1(env):
 @scenario("restart2", "Every peer's state survives a full restart")
 def g2(env):
     a, b, c, d = env.peers("A", "B", "C", "D")
-    public = public_channel(a, [b, c, d], "g2-public")
+    public = invite_only_channel(a, [b, c, d], "g2-public")
     private = invite_only_channel(a, [b], "g2-private")
 
     messages = {f"g2-{i}" for i in range(3)}
@@ -151,7 +151,7 @@ def g4(env):
 @scenario("restart5", "A wiped tester returns as a different identity")
 def g5(env):
     a, b, c = env.peers("A", "B", "C")
-    ch = public_channel(a, [b, c], "g5-public")
+    ch = invite_only_channel(a, [b, c], "g5-public")
     old_hash = c.hash
 
     a.send(ch, "before-wipe")
@@ -167,6 +167,6 @@ def g5(env):
         raise ScenarioFailure("a wiped tester came back holding channels")
 
     # The owner still lists the identity that will never return.
-    if old_hash not in a.subscribers(ch):
+    if old_hash not in roster(a, ch):
         raise ScenarioFailure("the owner dropped the wiped peer without being told")
     return {"stale_subscriber_retained": True}

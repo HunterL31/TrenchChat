@@ -18,9 +18,9 @@ from trenchchat.core.storage import Storage
 from trenchchat.core.permissions import (
     ALL_PERMISSIONS,
     FULL_SYNC, INVITE, KICK, MANAGE_CHANNEL, MANAGE_ROLES,
-    PRESET_OPEN, PRESET_PRIVATE, PRESET_SERVER, PRESETS, ROLE_ADMIN,
-    ROLE_MEMBER, ROLE_OWNER, SEND_MESSAGE, SHARE_FILES, has_permission,
-    is_discoverable, is_open_join, mentions_permission, offered_permissions,
+    PRESET_PRIVATE, PRESET_SERVER, PRESETS, ROLE_ADMIN,
+    ROLE_MEMBER, ROLE_OWNER, SEND_MESSAGE, SHARE_FILES, grantable_to,
+    has_permission, mentions_permission,
     permissions_from_json, permissions_to_json, role_rank,
 )
 
@@ -53,25 +53,20 @@ class TestPermissionHelpers:
         assert not has_permission(PRESET_PRIVATE, ROLE_MEMBER, INVITE)
         assert not has_permission(PRESET_PRIVATE, ROLE_MEMBER, KICK)
 
-    def test_member_open_preset_can_invite(self):
-        assert has_permission(PRESET_OPEN, ROLE_MEMBER, INVITE)
+
 
     def test_role_rank_ordering(self):
         assert role_rank(ROLE_OWNER) > role_rank(ROLE_ADMIN) > role_rank(ROLE_MEMBER)
 
-    def test_is_open_join(self):
-        assert is_open_join(PRESET_OPEN) is True
-        assert is_open_join(PRESET_PRIVATE) is False
 
-    def test_is_discoverable(self):
-        assert is_discoverable(PRESET_OPEN) is True
-        assert is_discoverable(PRESET_PRIVATE) is False
+
+
 
     def test_full_sync_off_by_default_for_every_role(self):
         """full_sync is a per-role permission, same shape as send_message/
         invite/etc -- off for both roles under the default presets, exactly
         like every other permission not explicitly granted."""
-        for perms in (PRESET_OPEN, PRESET_PRIVATE):
+        for perms in (PRESET_PRIVATE, PRESET_PRIVATE):
             assert not has_permission(perms, ROLE_ADMIN, FULL_SYNC)
             assert not has_permission(perms, ROLE_MEMBER, FULL_SYNC)
 
@@ -99,7 +94,6 @@ class TestPermissionHelpers:
         blob = permissions_to_json(PRESET_PRIVATE)
         assert isinstance(blob, str)
         restored = permissions_from_json(blob)
-        assert restored["open_join"] == PRESET_PRIVATE["open_join"]
         assert set(restored["admin"]) == set(PRESET_PRIVATE["admin"])
 
 
@@ -145,7 +139,6 @@ class TestStoragePermissions:
     def test_get_channel_permissions(self, db):
         self._seed(db)
         perms = db.get_channel_permissions("ch01")
-        assert perms["open_join"] is False
         assert SEND_MESSAGE in perms["member"]
 
     def test_set_channel_permissions(self, db):
@@ -155,25 +148,17 @@ class TestStoragePermissions:
         db.set_channel_permissions("ch01", custom)
         assert db.has_permission("ch01", "member_id", INVITE)
 
-    def test_open_preset_member_can_invite(self, db):
-        db.upsert_channel("ch02", "Open", "", "creator", PRESET_OPEN, time.time())
-        db.upsert_member("ch02", "member_id", "Member", role=ROLE_MEMBER)
-        assert db.has_permission("ch02", "member_id", INVITE)
 
-
-# ---------------------------------------------------------------------------
-# Role-based channel creation
-# ---------------------------------------------------------------------------
 
 class TestRoleBasedCreation:
     def test_creator_gets_owner_role(self, peer_factory):
         alice = peer_factory("alice")
-        ch_hash = alice.channel_mgr.create_channel("owner-test", "", "invite")
+        ch_hash = alice.channel_mgr.create_channel("owner-test", "")
         assert alice.storage.get_role(ch_hash, alice.identity.hash_hex) == ROLE_OWNER
 
     def test_creator_has_all_permissions(self, peer_factory):
         alice = peer_factory("alice")
-        ch_hash = alice.channel_mgr.create_channel("perms-test", "", "invite")
+        ch_hash = alice.channel_mgr.create_channel("perms-test", "")
         for perm in ALL_PERMISSIONS:
             assert alice.storage.has_permission(ch_hash, alice.identity.hash_hex, perm)
 
@@ -212,7 +197,7 @@ class TestBroadcastPermissions:
     def test_owner_role_preserved_after_broadcast(self, peer_factory):
         """broadcast_permissions must not demote the owner in the local members table."""
         alice = peer_factory("alice")
-        ch_hash = alice.channel_mgr.create_channel("perm-broadcast", "", "invite")
+        ch_hash = alice.channel_mgr.create_channel("perm-broadcast", "")
         alice.invite_mgr.publish_member_list(ch_hash)
 
         # Remove send_message from members (the scenario that triggered the bug)
@@ -227,7 +212,7 @@ class TestBroadcastPermissions:
     def test_permissions_updated_in_db_after_broadcast(self, peer_factory):
         """The new permissions dict is persisted before broadcast_permissions is called."""
         alice = peer_factory("alice")
-        ch_hash = alice.channel_mgr.create_channel("perm-db", "", "invite")
+        ch_hash = alice.channel_mgr.create_channel("perm-db", "")
 
         custom = dict(PRESET_PRIVATE)
         custom["member"] = [SEND_MESSAGE, INVITE]
@@ -241,7 +226,7 @@ class TestBroadcastPermissions:
     def test_version_incremented_after_broadcast(self, peer_factory):
         """broadcast_permissions increments the member list version."""
         alice = peer_factory("alice")
-        ch_hash = alice.channel_mgr.create_channel("perm-ver", "", "invite")
+        ch_hash = alice.channel_mgr.create_channel("perm-ver", "")
         alice.invite_mgr.publish_member_list(ch_hash)
 
         before = alice.storage.get_member_list_version(ch_hash)
@@ -259,7 +244,7 @@ class TestBroadcastPermissions:
         alice = peer_factory("alice")
         bob   = peer_factory("bob")
 
-        ch_hash = alice.channel_mgr.create_channel("promote-regression", "", "invite")
+        ch_hash = alice.channel_mgr.create_channel("promote-regression", "")
         alice.invite_mgr.publish_member_list(ch_hash, add_members=[bob.identity.hash])
 
         # Promote Bob to admin; this is the operation that triggered the bug
@@ -280,7 +265,7 @@ class TestVoiceChatPermission:
 
     def test_presets_grant_voice_chat_to_member_and_admin(self):
         from trenchchat.core.permissions import PRESET_SERVER, VOICE_CHAT
-        for perms in (PRESET_PRIVATE, PRESET_OPEN, PRESET_SERVER):
+        for perms in (PRESET_PRIVATE, PRESET_PRIVATE, PRESET_SERVER):
             assert has_permission(perms, ROLE_MEMBER, VOICE_CHAT)
             assert has_permission(perms, ROLE_ADMIN, VOICE_CHAT)
             assert has_permission(perms, ROLE_OWNER, VOICE_CHAT)
@@ -341,16 +326,11 @@ class TestAdminOnlyPermissions:
             alice.storage.get_channel(ch_hash)["permissions"])
         assert KICK not in stored[ROLE_MEMBER]
 
-    def test_full_sync_is_not_offered_on_an_open_channel(self):
-        """It decides how much history a member may pull, and an open-join
-        channel serves history to any subscriber -- so the toggle would be a
-        privacy control that is not one."""
-        assert FULL_SYNC not in offered_permissions(PRESET_OPEN, ROLE_MEMBER)
-        assert FULL_SYNC in offered_permissions(PRESET_PRIVATE, ROLE_MEMBER)
+
 
     def test_kick_is_never_offered_to_a_member(self):
-        for preset in (PRESET_OPEN, PRESET_PRIVATE, PRESET_SERVER):
-            offered = offered_permissions(preset, ROLE_MEMBER)
+        for preset in (PRESET_PRIVATE, PRESET_PRIVATE, PRESET_SERVER):
+            offered = grantable_to(ROLE_MEMBER)
             assert KICK not in offered
             assert MANAGE_ROLES not in offered
             assert SEND_MESSAGE in offered
@@ -373,7 +353,7 @@ class TestShareFilesPermission:
         assert SHARE_FILES in ALL_PERMISSIONS
 
     def test_presets_grant_it_to_member_and_admin(self):
-        for perms in (PRESET_PRIVATE, PRESET_OPEN, PRESET_SERVER):
+        for perms in (PRESET_PRIVATE, PRESET_PRIVATE, PRESET_SERVER):
             assert has_permission(perms, ROLE_MEMBER, SHARE_FILES)
             assert has_permission(perms, ROLE_ADMIN, SHARE_FILES)
             assert has_permission(perms, ROLE_OWNER, SHARE_FILES)
@@ -421,14 +401,14 @@ class TestShareFilesPermission:
     def test_mentions_permission_reads_role_lists_only(self):
         assert mentions_permission(PRESET_PRIVATE, SHARE_FILES)
         assert not mentions_permission({ROLE_MEMBER: [SEND_MESSAGE]}, SHARE_FILES)
-        assert not mentions_permission({"open_join": False}, SHARE_FILES)
+        assert not mentions_permission({"discoverable": False}, SHARE_FILES)
 
     def test_it_is_offered_to_both_roles(self):
-        assert SHARE_FILES in offered_permissions(PRESET_PRIVATE, ROLE_MEMBER)
-        assert SHARE_FILES in offered_permissions(PRESET_PRIVATE, ROLE_ADMIN)
+        assert SHARE_FILES in grantable_to(ROLE_MEMBER)
+        assert SHARE_FILES in grantable_to(ROLE_ADMIN)
 
     def test_storage_applies_the_rule_to_a_stored_legacy_blob(self, db):
-        legacy = {"open_join": False, ROLE_ADMIN: [SEND_MESSAGE],
+        legacy = {ROLE_ADMIN: [SEND_MESSAGE],
                   ROLE_MEMBER: [SEND_MESSAGE]}
         db.upsert_channel("ch_legacy", "Legacy", "", "creator", legacy, time.time())
         db.upsert_member("ch_legacy", "member_id", "Member", role=ROLE_MEMBER)

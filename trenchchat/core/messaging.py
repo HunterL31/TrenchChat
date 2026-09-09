@@ -76,7 +76,7 @@ import LXMF
 
 from trenchchat.core.identity import Identity
 from trenchchat.core.permissions import (
-    SEND_MESSAGE, SHARE_FILES, is_open_join, permissions_from_json,
+    SEND_MESSAGE, SHARE_FILES,
 )
 from trenchchat.core.protocol import (
     F_CHANNEL_HASH, F_DISPLAY_NAME, F_TIMESTAMP, F_MESSAGE_ID,
@@ -526,8 +526,6 @@ class Messaging:
         channel = self._storage.get_channel(channel_hash_hex)
         if channel is None:
             return False
-        if is_open_join(permissions_from_json(channel["permissions"])):
-            return True
         return self._storage.is_member(channel_hash_hex, dest_hex)
 
     def _queue_pending(self, dest_hex: str, msg_params: dict) -> None:
@@ -793,25 +791,23 @@ class Messaging:
             )
             return
 
-        perms = permissions_from_json(channel["permissions"])
-        if not is_open_join(perms):
-            if not self._storage.is_member(channel_hash_hex, sender_hex):
-                return
-            if not self._storage.has_permission(channel_hash_hex, sender_hex, SEND_MESSAGE):
-                RNS.log(
-                    f"TrenchChat: dropping message from {sender_hex[:12]}… — "
-                    f"no {SEND_MESSAGE} permission on channel {channel_hash_hex[:12]}…",
-                    RNS.LOG_WARNING,
-                )
-                return
-            if carries_manifest(fields) and not self._storage.has_permission(
-                    channel_hash_hex, sender_hex, SHARE_FILES):
-                RNS.log(
-                    f"TrenchChat: dropping file message from {sender_hex[:12]}…: "
-                    f"no {SHARE_FILES} permission on channel {channel_hash_hex[:12]}…",
-                    RNS.LOG_WARNING,
-                )
-                return
+        if not self._storage.is_member(channel_hash_hex, sender_hex):
+            return
+        if not self._storage.has_permission(channel_hash_hex, sender_hex, SEND_MESSAGE):
+            RNS.log(
+                f"TrenchChat: dropping message from {sender_hex[:12]}… — "
+                f"no {SEND_MESSAGE} permission on channel {channel_hash_hex[:12]}…",
+                RNS.LOG_WARNING,
+            )
+            return
+        if carries_manifest(fields) and not self._storage.has_permission(
+                channel_hash_hex, sender_hex, SHARE_FILES):
+            RNS.log(
+                f"TrenchChat: dropping file message from {sender_hex[:12]}…: "
+                f"no {SHARE_FILES} permission on channel {channel_hash_hex[:12]}…",
+                RNS.LOG_WARNING,
+            )
+            return
 
         self._store_chat_message(message, fields, channel_hash_hex, sender_hex)
 

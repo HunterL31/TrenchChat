@@ -15,7 +15,7 @@ from unittest.mock import patch
 
 import RNS
 
-from tests.helpers import wait_for, wait_for_subscriber
+from tests.helpers import mirror_members, wait_for
 from trenchchat.core.presence import PresenceBeacon, PresenceManager
 from trenchchat.core.protocol import F_MSG_TYPE, MT_GOODBYE
 
@@ -26,16 +26,12 @@ def _signing_off_peer(peer_factory):
     alice = peer_factory("alice")
     bob = peer_factory("bob")
 
-    ch_hash = alice.channel_mgr.create_channel("goodbye-test", "", "public")
-    bob.storage.upsert_channel(ch_hash, "goodbye-test", "", alice.identity.hash_hex,
-                               "public", time.time())
-    bob.subscription_mgr.subscribe(ch_hash, owner_hash_hex=alice.identity.hash_hex)
-    assert wait_for_subscriber(alice, ch_hash, bob.identity.hash_hex, timeout=5), \
-        "Alice never saw Bob's subscription"
+    ch_hash = alice.channel_mgr.create_channel("goodbye-test", "")
+    mirror_members(ch_hash, alice, bob)
 
     alice_presence = PresenceManager(alice.identity.hash_hex)
     alice_beacon = PresenceBeacon(
-        alice.identity, alice.storage, alice.router, alice.subscription_mgr,
+        alice.identity, alice.storage, alice.router,
         alice_presence, jitter_fraction=0.0,
     )
 
@@ -152,7 +148,7 @@ def test_announce_offline_with_no_channel_peers_is_a_noop(peer_factory):
     alice = peer_factory("alice")
     presence = PresenceManager(alice.identity.hash_hex)
     beacon = PresenceBeacon(
-        alice.identity, alice.storage, alice.router, alice.subscription_mgr,
+        alice.identity, alice.storage, alice.router,
         presence, jitter_fraction=0.0,
     )
     assert beacon.announce_offline() == 0

@@ -11,7 +11,7 @@ import time
 
 import pytest
 
-from tests.helpers import sign_as, wait_for, wait_for_member, wait_for_message
+from tests.helpers import mirror_members, sign_as, wait_for, wait_for_member, wait_for_message
 from trenchchat.core import sync_ranges
 from trenchchat.core.messaging import _compute_message_id
 from trenchchat.core.protocol import (
@@ -26,12 +26,6 @@ from trenchchat.core.sync import MAX_RESPONSE_MESSAGES, SYNC_WINDOW_SECS
 from trenchchat.core.sync_status import SyncState
 
 
-def _seed_channel_on_peer(peer, ch_hash, channel_name, creator_hash,
-                          access_mode="public"):
-    """Give a peer knowledge of a channel and subscribe them to it."""
-    peer.storage.upsert_channel(ch_hash, channel_name, "", creator_hash,
-                                access_mode, time.time())
-    peer.storage.subscribe(ch_hash)
 
 
 def _insert_message(storage, ch_hash, sender_hex, content, ts):
@@ -68,6 +62,12 @@ def _served_ids(fields) -> set[str]:
             for m in unpack_wire(fields[F_SYNC_MESSAGES])}
 
 
+
+# These suites backdate history, so tenure starts well before it: they
+# simulate a member who has been in the channel all along, which is what
+# the real invite flow would have recorded.
+_ANCIENT_SECS = 30 * 86400
+
 class TestWorkedExample:
     def test_two_peers_converge_in_one_round_trip(self, peer_factory):
         """A holds {1,3,4}, B holds {1,2,4,5}: both end holding 1 to 5.
@@ -83,9 +83,8 @@ class TestWorkedExample:
         b = peer_factory("b")
         author_hex = author.identity.hash_hex
 
-        ch_hash = author.channel_mgr.create_channel("worked-example", "", "public")
-        _seed_channel_on_peer(a, ch_hash, "worked-example", author_hex)
-        _seed_channel_on_peer(b, ch_hash, "worked-example", author_hex)
+        ch_hash = author.channel_mgr.create_channel("worked-example", "")
+        mirror_members(ch_hash, author, a, b, joined_at=time.time() - _ANCIENT_SECS)
 
         base = time.time() - 60
         ids = {}
@@ -142,9 +141,8 @@ class TestWorkedExample:
         b = peer_factory("b")
         author_hex = author.identity.hash_hex
 
-        ch_hash = author.channel_mgr.create_channel("recent-gap", "", "public")
-        _seed_channel_on_peer(a, ch_hash, "recent-gap", author_hex)
-        _seed_channel_on_peer(b, ch_hash, "recent-gap", author_hex)
+        ch_hash = author.channel_mgr.create_channel("recent-gap", "")
+        mirror_members(ch_hash, author, a, b, joined_at=time.time() - _ANCIENT_SECS)
 
         base = time.time() - 600
         shared = [_insert_message(b.storage, ch_hash, author_hex, f"row {i}", base + i)
@@ -187,10 +185,8 @@ class TestGapBehindTheWatermark:
         b = peer_factory("b")
         author_hex = author.identity.hash_hex
 
-        ch_hash = author.channel_mgr.create_channel("behind-watermark", "", "public")
-        _seed_channel_on_peer(a, ch_hash, "behind-watermark", author_hex)
-        _seed_channel_on_peer(b, ch_hash, "behind-watermark", author_hex)
-        a.subscription_mgr._subscribers[ch_hash] = {b.identity.hash_hex}
+        ch_hash = author.channel_mgr.create_channel("behind-watermark", "")
+        mirror_members(ch_hash, author, a, b, joined_at=time.time() - _ANCIENT_SECS)
 
         base = time.time() - 600
         shared = _insert_message(a.storage, ch_hash, author_hex, "both hold this", base)
@@ -217,10 +213,8 @@ class TestBackfill:
         b = peer_factory("b")
         author_hex = author.identity.hash_hex
 
-        ch_hash = author.channel_mgr.create_channel("fresh-join", "", "public")
-        _seed_channel_on_peer(a, ch_hash, "fresh-join", author_hex)
-        _seed_channel_on_peer(b, ch_hash, "fresh-join", author_hex)
-        a.subscription_mgr._subscribers[ch_hash] = {b.identity.hash_hex}
+        ch_hash = author.channel_mgr.create_channel("fresh-join", "")
+        mirror_members(ch_hash, author, a, b, joined_at=time.time() - _ANCIENT_SECS)
 
         base = time.time() - 400
         total = 200
@@ -251,10 +245,8 @@ class TestBackfill:
         b = peer_factory("b")
         author_hex = author.identity.hash_hex
 
-        ch_hash = author.channel_mgr.create_channel("range-truncation", "", "public")
-        _seed_channel_on_peer(a, ch_hash, "range-truncation", author_hex)
-        _seed_channel_on_peer(b, ch_hash, "range-truncation", author_hex)
-        a.subscription_mgr._subscribers[ch_hash] = {b.identity.hash_hex}
+        ch_hash = author.channel_mgr.create_channel("range-truncation", "")
+        mirror_members(ch_hash, author, a, b, joined_at=time.time() - _ANCIENT_SECS)
 
         base = time.time() - 300
         shared = []
@@ -291,7 +283,7 @@ class TestWithheldHistorySettles:
         alice = peer_factory("alice")
         bob = peer_factory("bob")
 
-        ch_hash = alice.channel_mgr.create_channel("withheld-settles", "", "invite")
+        ch_hash = alice.channel_mgr.create_channel("withheld-settles", "")
         time.sleep(0.02)
         pre_join = [
             _insert_message(alice.storage, ch_hash, alice.identity.hash_hex,
@@ -348,9 +340,8 @@ class TestLegacyRequests:
         bob = peer_factory("bob")
         carol = peer_factory("carol")
 
-        ch_hash = alice.channel_mgr.create_channel("legacy-sweep", "", "public")
-        _seed_channel_on_peer(carol, ch_hash, "legacy-sweep", alice.identity.hash_hex)
-        _seed_channel_on_peer(bob, ch_hash, "legacy-sweep", alice.identity.hash_hex)
+        ch_hash = alice.channel_mgr.create_channel("legacy-sweep", "")
+        mirror_members(ch_hash, alice, carol, bob, joined_at=time.time() - _ANCIENT_SECS)
 
         window_start = time.time() - 100
         old = _insert_message(carol.storage, ch_hash, alice.identity.hash_hex,
@@ -380,8 +371,8 @@ class TestDeepReconcileThrottle:
     def _channel(self, peer_factory):
         alice = peer_factory("alice")
         bob = peer_factory("bob")
-        ch_hash = alice.channel_mgr.create_channel("deep-ranges", "", "public")
-        _seed_channel_on_peer(bob, ch_hash, "deep-ranges", alice.identity.hash_hex)
+        ch_hash = alice.channel_mgr.create_channel("deep-ranges", "")
+        mirror_members(ch_hash, alice, bob, joined_at=time.time() - _ANCIENT_SECS)
         return alice, bob, ch_hash
 
     def test_a_range_request_reaching_past_the_window_is_throttled(self, peer_factory):
@@ -466,8 +457,8 @@ class TestRangesAreOnTheWire:
         Neither is ever a list of everything held."""
         alice = peer_factory("alice")
         bob = peer_factory("bob")
-        ch_hash = alice.channel_mgr.create_channel("describe", "", "public")
-        _seed_channel_on_peer(bob, ch_hash, "describe", alice.identity.hash_hex)
+        ch_hash = alice.channel_mgr.create_channel("describe", "")
+        mirror_members(ch_hash, alice, bob, joined_at=time.time() - _ANCIENT_SECS)
 
         base = time.time() - 300
         held = [_insert_message(bob.storage, ch_hash, alice.identity.hash_hex,
@@ -498,8 +489,8 @@ def test_a_malformed_reconcile_field_is_refused_whole(peer_factory, field):
     a set the peer never actually described."""
     alice = peer_factory("alice")
     bob = peer_factory("bob")
-    ch_hash = alice.channel_mgr.create_channel("malformed", "", "public")
-    _seed_channel_on_peer(bob, ch_hash, "malformed", alice.identity.hash_hex)
+    ch_hash = alice.channel_mgr.create_channel("malformed", "")
+    mirror_members(ch_hash, alice, bob, joined_at=time.time() - _ANCIENT_SECS)
     _insert_message(alice.storage, ch_hash, alice.identity.hash_hex,
                     "would have been served", time.time() - 10)
 
@@ -554,9 +545,10 @@ class TestExtendedAbsence:
         a = peer_factory("a")
         b = peer_factory("b")
         author_hex = a.identity.hash_hex
-        ch_hash = a.channel_mgr.create_channel(name, "", "public")
-        _seed_channel_on_peer(b, ch_hash, name, author_hex)
-        a.subscription_mgr._subscribers[ch_hash] = {b.identity.hash_hex}
+        ch_hash = a.channel_mgr.create_channel(name, "")
+        # The history these tests write predates the channel, so tenure has
+        # to start before it or the responder omits every row.
+        mirror_members(ch_hash, a, b, joined_at=time.time() - _ANCIENT_SECS)
         return a, b, author_hex, ch_hash
 
     def test_a_long_absence_backfills_the_whole_run(self, peer_factory):
@@ -721,9 +713,8 @@ class TestBeaconProbes:
         a = peer_factory("a")
         b = peer_factory("b")
         author_hex = a.identity.hash_hex
-        ch_hash = a.channel_mgr.create_channel(name, "", "public")
-        _seed_channel_on_peer(b, ch_hash, name, author_hex)
-        a.subscription_mgr._subscribers[ch_hash] = {b.identity.hash_hex}
+        ch_hash = a.channel_mgr.create_channel(name, "")
+        mirror_members(ch_hash, a, b, joined_at=time.time() - _ANCIENT_SECS)
         base = time.time() - 600
         held = []
         for i in range(shared + extra_on_b):
@@ -820,8 +811,7 @@ class TestBeaconProbes:
         off the router and asks, and B answers with the rows."""
         from trenchchat.core.presence import PresenceBeacon
         a, b, ch_hash, held = self._pair(peer_factory, "probe-e2e", shared=58, extra_on_b=2)
-        b.subscription_mgr._subscribers[ch_hash] = {a.identity.hash_hex}
-        beacon = PresenceBeacon(b.identity, b.storage, b.router, b.subscription_mgr,
+        beacon = PresenceBeacon(b.identity, b.storage, b.router,
                                 b.presence_mgr, beacon_after_secs=0.0)
         beacon.tick()
         assert wait_for(lambda: all(a.storage.message_exists(mid) for mid in held),
@@ -837,10 +827,8 @@ class TestReferencedGaps:
         monkeypatch.setattr(sync_module, "SUSPECTED_GAP_GRACE_SECS", 0.0)
         a = peer_factory("a")
         b = peer_factory("b")
-        ch_hash = a.channel_mgr.create_channel("referenced-gap", "", "public")
-        _seed_channel_on_peer(b, ch_hash, "referenced-gap", a.identity.hash_hex)
-        a.subscription_mgr._subscribers[ch_hash] = {b.identity.hash_hex}
-        b.subscription_mgr._subscribers[ch_hash] = {a.identity.hash_hex}
+        ch_hash = a.channel_mgr.create_channel("referenced-gap", "")
+        mirror_members(ch_hash, a, b, joined_at=time.time() - _ANCIENT_SECS)
         b_hex = b.identity.hash_hex
 
         base = time.time() - 120
@@ -871,7 +859,7 @@ class TestReferencedGaps:
 
     def test_a_reference_already_held_or_own_is_not_queued(self, peer_factory):
         a = peer_factory("a")
-        ch_hash = a.channel_mgr.create_channel("referenced-own", "", "public")
+        ch_hash = a.channel_mgr.create_channel("referenced-own", "")
         me = a.identity.hash_hex
         base = time.time() - 60
         first = _insert_message(a.storage, ch_hash, me, "first", base)
@@ -896,9 +884,8 @@ class TestRoutineReCheckWindow:
         """
         a = peer_factory("a")
         b = peer_factory("b")
-        ch_hash = a.channel_mgr.create_channel("recent-window", "", "public")
-        _seed_channel_on_peer(b, ch_hash, "recent-window", a.identity.hash_hex)
-        a.subscription_mgr._subscribers[ch_hash] = {b.identity.hash_hex}
+        ch_hash = a.channel_mgr.create_channel("recent-window", "")
+        mirror_members(ch_hash, a, b, joined_at=time.time() - _ANCIENT_SECS)
         for i in range(20):
             _insert_message(a.storage, ch_hash, a.identity.hash_hex, f"row {i}",
                             time.time() - 100 + i)
@@ -915,9 +902,8 @@ class TestRoutineReCheckWindow:
     def test_a_fresh_join_still_asks_from_the_start(self, peer_factory):
         a = peer_factory("a")
         b = peer_factory("b")
-        ch_hash = a.channel_mgr.create_channel("full-ask", "", "public")
-        _seed_channel_on_peer(b, ch_hash, "full-ask", a.identity.hash_hex)
-        a.subscription_mgr._subscribers[ch_hash] = {b.identity.hash_hex}
+        ch_hash = a.channel_mgr.create_channel("full-ask", "")
+        mirror_members(ch_hash, a, b, joined_at=time.time() - _ANCIENT_SECS)
 
         a_sent = _capture(a)
         a.sync_mgr._request_sync_for_channel(ch_hash, 0.0)

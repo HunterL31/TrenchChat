@@ -13,7 +13,7 @@ from unittest.mock import patch
 import LXMF
 import RNS
 
-from tests.helpers import wait_for, wait_for_subscriber
+from tests.helpers import mirror_members, wait_for
 from trenchchat.core.presence import PresenceBeacon, PresenceManager
 from trenchchat.core import sync_ranges
 from trenchchat.core.protocol import F_SYNC_PROBE, F_MSG_TYPE, MT_PRESENCE
@@ -22,28 +22,24 @@ from trenchchat.network.router import Router
 
 def _beacons(received):
     """The presence beacons among captured deliveries. The subscription setup
-    makes Alice broadcast a subscriber_list to Bob, which can race into a
-    test's delivery capture; keying on MT_PRESENCE keeps that setup traffic
-    from being mistaken for (or masking) a beacon."""
+    can race into a test's delivery capture; keying on MT_PRESENCE keeps
+    setup traffic from being mistaken for (or masking) a beacon."""
     return [m for m in received if m.fields.get(F_MSG_TYPE) == MT_PRESENCE]
 
 
 def _beaconing_peer(peer_factory, beacon_after_secs: float = 30.0):
-    """Alice owns an open channel Bob subscribes to, giving Alice a channel
-    peer (Bob) to beacon. Returns (alice, bob, ch_hash, presence_mgr, beacon)."""
+    """Alice owns a channel Bob is in, giving Alice a channel peer to beacon.
+
+    Returns (alice, bob, ch_hash, presence_mgr, beacon)."""
     alice = peer_factory("alice")
     bob = peer_factory("bob")
 
-    ch_hash = alice.channel_mgr.create_channel("beacon-test", "", "public")
-    bob.storage.upsert_channel(ch_hash, "beacon-test", "", alice.identity.hash_hex,
-                               "public", time.time())
-    bob.subscription_mgr.subscribe(ch_hash, owner_hash_hex=alice.identity.hash_hex)
-    assert wait_for_subscriber(alice, ch_hash, bob.identity.hash_hex, timeout=5), \
-        "Alice never saw Bob's subscription"
+    ch_hash = alice.channel_mgr.create_channel("beacon-test", "")
+    mirror_members(ch_hash, alice, bob)
 
     presence_mgr = PresenceManager(alice.identity.hash_hex)
     beacon = PresenceBeacon(
-        alice.identity, alice.storage, alice.router, alice.subscription_mgr,
+        alice.identity, alice.storage, alice.router,
         presence_mgr, beacon_after_secs=beacon_after_secs, jitter_fraction=0.0,
     )
     return alice, bob, ch_hash, presence_mgr, beacon

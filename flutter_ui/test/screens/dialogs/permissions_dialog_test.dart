@@ -95,7 +95,6 @@ void main() {
         name: 'ops',
         description: '',
         creatorHash: 'creator',
-        openJoin: false,
         createdAt: 0,
         serverHash: serverHash,
       );

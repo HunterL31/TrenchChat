@@ -14,8 +14,8 @@ from trenchchat.config import DATA_DIR
 from trenchchat.core.fileutils import secure_file
 from trenchchat.core.lockbox import sqlcipher_hex_key
 from trenchchat.core.permissions import (
-    PRESET_OPEN, PRESET_PRIVATE, PRESET_SERVER, ROLE_ADMIN, ROLE_MEMBER, ROLE_OWNER,
-    has_permission as _check_permission, is_open_join,
+    PRESET_PRIVATE, PRESET_SERVER, ROLE_ADMIN, ROLE_MEMBER, ROLE_OWNER,
+    has_permission as _check_permission,
     permissions_from_json, permissions_to_json,
 )
 from trenchchat.core.protocol import FILE_CHUNK_BYTES, SYNC_WINDOW_SECS
@@ -177,12 +177,6 @@ CREATE TABLE IF NOT EXISTS identity_keys (
     learned_at    REAL NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS subscriber_list_versions (
-    channel_hash TEXT PRIMARY KEY,
-    version      INTEGER NOT NULL,
-    updated_at   REAL NOT NULL
-);
-
 CREATE TABLE IF NOT EXISTS missed_deliveries (
     channel_hash   TEXT NOT NULL,
     recipient_hash TEXT NOT NULL,
@@ -193,17 +187,6 @@ CREATE TABLE IF NOT EXISTS missed_deliveries (
 
 CREATE INDEX IF NOT EXISTS idx_missed_deliveries_recipient
     ON missed_deliveries(recipient_hash, channel_hash);
-
--- Durable copy of SubscriptionManager's in-memory subscriber sets, so a
--- restart doesn't strand a public channel's peer discovery. Carries no more
--- trust than the in-memory set did: it is a cache of a peer identity, not a
--- signed record.
-CREATE TABLE IF NOT EXISTS channel_subscribers (
-    channel_hash  TEXT NOT NULL,
-    identity_hash TEXT NOT NULL,
-    added_at      REAL NOT NULL,
-    PRIMARY KEY (channel_hash, identity_hash)
-);
 
 -- Per-(channel, peer) sync watermark, distinct from subscriptions.last_sync_at
 -- (which stays the channel-wide "newest message I hold"). Lets a request to
@@ -538,7 +521,10 @@ class Storage:
                 "SELECT hash, access_mode FROM channels WHERE permissions = '{}'"
             ).fetchall()
             for row in rows:
-                preset = PRESET_OPEN if row["access_mode"] == "public" else PRESET_PRIVATE
+                # Both legacy modes convert to the private preset: an
+                # open-join channel is purged just below, so minting one here
+                # would only resurrect what that pass is about to delete.
+                preset = PRESET_PRIVATE
                 self._conn.execute(
                     "UPDATE channels SET permissions = ? WHERE hash = ?",
                     (permissions_to_json(preset), row["hash"]),
@@ -571,6 +557,7 @@ class Storage:
         if changed:
             self._conn.commit()
 
+        self._purge_open_join_channels()
         self._migrate_tenure()
         self._migrate_image_data()
         self._migrate_author_sig()
@@ -690,15 +677,8 @@ class Storage:
             rows = self._conn.execute(
                 "SELECT channel_hash, identity_hash, added_at FROM members"
             ).fetchall()
-            to_insert = []
-            for r in rows:
-                channel_row = self._conn.execute(
-                    "SELECT permissions FROM channels WHERE hash = ?",
-                    (r["channel_hash"],),
-                ).fetchone()
-                if channel_row and is_open_join(permissions_from_json(channel_row["permissions"])):
-                    continue
-                to_insert.append((r["channel_hash"], r["identity_hash"], r["added_at"]))
+            to_insert = [(r["channel_hash"], r["identity_hash"], r["added_at"])
+                         for r in rows]
             if to_insert:
                 self._conn.executemany("""
                     INSERT OR IGNORE INTO membership_tenure
@@ -706,6 +686,63 @@ class Storage:
                     VALUES (?, ?, ?, NULL)
                 """, to_insert)
                 self._conn.commit()
+
+    def _purge_open_join_channels(self) -> None:
+        """Delete channels that were open-join, and everything hanging off them.
+
+        Public channels are gone: public chat is RRC now (see docs/rrc.md).
+        A stored open-join channel has no member list, so nothing downstream
+        could authorise a send, a sync or a file serve for it, and leaving the
+        rows would present a channel that can only ever be read.
+
+        This destroys messages with no recovery path. It is a deliberate,
+        one-way upgrade step, logged per channel so a user can see what went.
+        Runs after _migrate_permissions so the blob is there to read, and
+        before the tenure passes so neither backfills a channel about to go.
+        """
+        if not self._has_column("channels", "permissions"):
+            return
+        rows = self._conn.execute(
+            "SELECT hash, name, permissions FROM channels"
+        ).fetchall()
+        doomed = []
+        for row in rows:
+            try:
+                perms = json.loads(row["permissions"] or "{}")
+            except (TypeError, ValueError):
+                continue
+            if isinstance(perms, dict) and perms.get("open_join") is True:
+                doomed.append((row["hash"], row["name"]))
+        if not doomed:
+            return
+
+        for channel_hash, name in doomed:
+            count = self._conn.execute(
+                "SELECT COUNT(*) AS n FROM messages WHERE channel_hash = ?",
+                (channel_hash,),
+            ).fetchone()["n"]
+            RNS.log(
+                f"TrenchChat [storage]: removing public channel '{name}' "
+                f"({channel_hash[:12]}…) and its {count} messages; public "
+                f"chat is RRC now",
+                RNS.LOG_WARNING,
+            )
+            for table in ("messages", "subscriptions", "members",
+                          "membership_tenure", "reactions"):
+                if self._table_exists(table):
+                    self._conn.execute(
+                        f"DELETE FROM {table} WHERE channel_hash = ?",
+                        (channel_hash,))
+            self._conn.execute("DELETE FROM channels WHERE hash = ?",
+                               (channel_hash,))
+        self._conn.commit()
+
+    def _table_exists(self, name: str) -> bool:
+        row = self._conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (name,),
+        ).fetchone()
+        return row is not None
 
     def _repair_tenure_from_message_history(self):
         """Widen each member's earliest tenure interval to cover any locally
@@ -1112,16 +1149,19 @@ class Storage:
         """Create or update a channel.
 
         *permissions* can be a JSON string, a dict (will be serialised), or
-        a legacy access-mode string (``"public"`` / ``"invite"``).
-        The legacy *access_mode* keyword is also accepted.
+        a legacy access-mode string, which is accepted for compatibility but
+        always means the private preset. The legacy *access_mode* keyword is
+        also accepted.
         """
         if access_mode and not permissions:
             permissions = access_mode
         if isinstance(permissions, dict):
             permissions = permissions_to_json(permissions)
         elif permissions in ("public", "invite"):
-            preset = PRESET_OPEN if permissions == "public" else PRESET_PRIVATE
-            permissions = permissions_to_json(preset)
+            # The legacy strings are still accepted so an old caller does not
+            # crash, but both mean the private preset now: public channels
+            # are gone and nothing may mint one through this path.
+            permissions = permissions_to_json(PRESET_PRIVATE)
         elif not permissions:
             permissions = permissions_to_json(PRESET_PRIVATE)
         with self._tx():
@@ -1335,57 +1375,11 @@ class Storage:
         """, (self_hash,))
         return {row["channel_hash"]: row["unread"] for row in rows}
 
-    # --- channel subscribers (durable copy of SubscriptionManager state) ---
 
-    def add_channel_subscriber(self, channel_hash: str, identity_hash: str) -> None:
-        with self._tx():
-            self._conn.execute("""
-                INSERT OR IGNORE INTO channel_subscribers
-                    (channel_hash, identity_hash, added_at)
-                VALUES (?, ?, ?)
-            """, (channel_hash, identity_hash, time.time()))
 
-    def remove_channel_subscriber(self, channel_hash: str, identity_hash: str) -> None:
-        with self._tx():
-            self._conn.execute(
-                "DELETE FROM channel_subscribers WHERE channel_hash = ? AND identity_hash = ?",
-                (channel_hash, identity_hash),
-            )
 
-    def replace_channel_subscribers(self, channel_hash: str,
-                                    identity_hashes: set[str] | list[str]) -> None:
-        """Replace the full subscriber set for a channel atomically."""
-        with self._tx():
-            self._conn.execute(
-                "DELETE FROM channel_subscribers WHERE channel_hash = ?", (channel_hash,)
-            )
-            now = time.time()
-            self._conn.executemany("""
-                INSERT INTO channel_subscribers (channel_hash, identity_hash, added_at)
-                VALUES (?, ?, ?)
-            """, [(channel_hash, ih, now) for ih in identity_hashes])
 
-    def is_channel_subscriber(self, channel_hash: str, identity_hash: str) -> bool:
-        """True if this identity is in the channel's known subscriber set."""
-        if not identity_hash:
-            return False
-        return self._fetchone(
-            "SELECT 1 FROM channel_subscribers "
-            "WHERE channel_hash = ? AND identity_hash = ?",
-            (channel_hash, identity_hash),
-        ) is not None
 
-    def get_all_channel_subscribers(self) -> dict[str, set[str]]:
-        """Return every channel's persisted subscriber set, keyed by channel hash.
-
-        Used once at startup to seed SubscriptionManager's in-memory cache;
-        per-call lookups afterward stay in memory rather than hitting storage.
-        """
-        rows = self._fetchall("SELECT channel_hash, identity_hash FROM channel_subscribers")
-        result: dict[str, set[str]] = {}
-        for row in rows:
-            result.setdefault(row["channel_hash"], set()).add(row["identity_hash"])
-        return result
 
     # --- per-(channel, peer) sync progress ---
 
@@ -1498,17 +1492,16 @@ class Storage:
     def is_trenchchat_peer(self, identity_hash: str) -> bool:
         """Whether durable local state proves this identity runs TrenchChat.
 
-        Three sources, any of which only a TrenchChat client can produce: a
-        channel member list, the durable subscriber copy, and a direct-message
-        peer that has sent the TrenchChat envelope. A friends row is
-        deliberately not one -- a contact can be any LXMF client.
+        Two sources, either of which only a TrenchChat client can produce: a
+        channel member list, and a direct-message peer that has sent the
+        TrenchChat envelope. A friends row is deliberately not one -- a
+        contact can be any LXMF client.
 
         Single-row lookups rather than get_trenchchat_peer_identities(), which
         materialises every member: this runs on every announce heard.
         """
         for sql in (
             "SELECT 1 FROM members WHERE identity_hash = ? LIMIT 1",
-            "SELECT 1 FROM channel_subscribers WHERE identity_hash = ? LIMIT 1",
             "SELECT 1 FROM dm_conversations WHERE peer_hash = ? "
             "AND peer_is_trenchchat = 1 LIMIT 1",
         ):
@@ -1748,23 +1741,13 @@ class Storage:
     def shares_any_channel(self, peer_hex: str) -> bool:
         """True if peer_hex is a member of, or subscriber to, any channel we hold.
 
-        An open-join channel still has to name the peer: treating anyone as
-        known merely because we are in some public channel makes the check
-        vacuous.
+        A channel has to name the peer: treating anyone as known merely
+        because we share a channel with somebody makes the check vacuous.
         """
         if not peer_hex:
             return False
         for sub in self.get_subscriptions():
-            ch = sub["channel_hash"]
-            channel = self.get_channel(ch)
-            if channel is None:
-                continue
-            if is_open_join(permissions_from_json(channel["permissions"])):
-                if (self.is_channel_subscriber(ch, peer_hex)
-                        or channel["creator_hash"] == peer_hex):
-                    return True
-                continue
-            if self.is_member(ch, peer_hex):
+            if self.is_member(sub["channel_hash"], peer_hex):
                 return True
         return False
 
@@ -1879,31 +1862,7 @@ class Storage:
         )
         return bytes(row["public_key"]) if row else None
 
-    def get_all_subscriber_list_versions(self) -> dict[str, int]:
-        """Every channel's highest seen subscriber-list version.
 
-        Persisted because the version is the only replay defence on a signed
-        subscriber list: a counter that resets on restart lets a captured
-        older list -- still validly signed -- be replayed to resurrect removed
-        subscribers, and the subscriber set is what drives outbound delivery.
-        """
-        rows = self._fetchall("SELECT channel_hash, version FROM subscriber_list_versions")
-        return {row["channel_hash"]: row["version"] for row in rows}
-
-    def set_subscriber_list_version(self, channel_hash: str, version: int) -> None:
-        """Record a channel's subscriber-list version, never moving backwards.
-
-        Keyed by the raw channel hash, like the subscriber set itself: a
-        subscriber list is per-channel and is not shared with a server scope.
-        """
-        with self._tx():
-            self._conn.execute("""
-                INSERT INTO subscriber_list_versions (channel_hash, version, updated_at)
-                VALUES (?, ?, ?)
-                ON CONFLICT(channel_hash) DO UPDATE SET
-                    version=MAX(version, excluded.version),
-                    updated_at=excluded.updated_at
-            """, (channel_hash, version, time.time()))
 
     # --- message sync helpers ---
 

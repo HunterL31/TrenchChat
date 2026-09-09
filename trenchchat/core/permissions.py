@@ -57,35 +57,16 @@ ALL_PERMISSIONS = (SEND_MESSAGE, INVITE, KICK, MANAGE_ROLES, MANAGE_CHANNEL,
                    CREATE_CHANNEL, FULL_SYNC, VOICE_CHAT, SHARE_FILES)
 
 # ---------------------------------------------------------------------------
-# Channel-level flags
-# ---------------------------------------------------------------------------
-
-FLAG_OPEN_JOIN = "open_join"
-FLAG_DISCOVERABLE = "discoverable"
-
-# ---------------------------------------------------------------------------
 # Default presets
 # ---------------------------------------------------------------------------
 
 PRESET_PRIVATE: dict[str, Any] = {
-    FLAG_OPEN_JOIN: False,
-    FLAG_DISCOVERABLE: False,
     ROLE_ADMIN: [SEND_MESSAGE, INVITE, KICK, MANAGE_ROLES, VOICE_CHAT,
                  SHARE_FILES],
     ROLE_MEMBER: [SEND_MESSAGE, VOICE_CHAT, SHARE_FILES],
 }
 
-PRESET_OPEN: dict[str, Any] = {
-    FLAG_OPEN_JOIN: True,
-    FLAG_DISCOVERABLE: True,
-    ROLE_ADMIN: [SEND_MESSAGE, INVITE, KICK, MANAGE_ROLES, VOICE_CHAT,
-                 SHARE_FILES],
-    ROLE_MEMBER: [SEND_MESSAGE, INVITE, VOICE_CHAT, SHARE_FILES],
-}
-
 PRESET_SERVER: dict[str, Any] = {
-    FLAG_OPEN_JOIN: False,
-    FLAG_DISCOVERABLE: False,
     ROLE_ADMIN: [SEND_MESSAGE, INVITE, KICK, MANAGE_ROLES, CREATE_CHANNEL,
                  VOICE_CHAT, SHARE_FILES],
     ROLE_MEMBER: [SEND_MESSAGE, VOICE_CHAT, SHARE_FILES],
@@ -93,7 +74,6 @@ PRESET_SERVER: dict[str, Any] = {
 
 PRESETS = {
     "private": PRESET_PRIVATE,
-    "open": PRESET_OPEN,
     "server": PRESET_SERVER,
 }
 
@@ -117,9 +97,6 @@ def is_valid_permissions(perms: object) -> bool:
     """True if *perms* has the shape this module expects."""
     if not isinstance(perms, dict):
         return False
-    for flag in (FLAG_OPEN_JOIN, FLAG_DISCOVERABLE):
-        if flag in perms and not isinstance(perms[flag], bool):
-            return False
     for role in (ROLE_OWNER, ROLE_ADMIN, ROLE_MEMBER):
         if role not in perms:
             continue
@@ -136,19 +113,6 @@ def grantable_to(role: str) -> tuple[str, ...]:
     if role == ROLE_MEMBER:
         return tuple(p for p in ALL_PERMISSIONS if p not in ADMIN_ONLY_PERMISSIONS)
     return ALL_PERMISSIONS
-
-
-def offered_permissions(perms: dict, role: str) -> tuple[str, ...]:
-    """Permissions worth showing for *role* on a channel with *perms*.
-
-    Narrower than grantable_to: FULL_SYNC decides how much history a member
-    may pull, and an open-join channel serves its history to any subscriber,
-    so offering the toggle there presents a privacy control that is not one.
-    """
-    offered = grantable_to(role)
-    if is_open_join(perms):
-        offered = tuple(p for p in offered if p != FULL_SYNC)
-    return offered
 
 
 def sanitise_permissions(perms: dict) -> dict:
@@ -237,11 +201,3 @@ def has_permission(perms: dict, role: str, permission: str) -> bool:
     if permission == SHARE_FILES and not mentions_permission(perms, SHARE_FILES):
         return SEND_MESSAGE in granted
     return False
-
-
-def is_open_join(perms: dict) -> bool:
-    return bool(perms.get(FLAG_OPEN_JOIN, False))
-
-
-def is_discoverable(perms: dict) -> bool:
-    return bool(perms.get(FLAG_DISCOVERABLE, True))

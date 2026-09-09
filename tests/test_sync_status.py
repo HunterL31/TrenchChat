@@ -9,7 +9,7 @@ import time
 
 import pytest
 
-from tests.helpers import sign_as, wait_for
+from tests.helpers import mirror_members, sign_as, wait_for
 from trenchchat.core import sync_status
 from trenchchat.core.messaging import _compute_message_id
 from trenchchat.core.protocol import (
@@ -51,16 +51,12 @@ def _insert_message(storage, ch_hash, sender_hex, content, ts=None):
     return msg_id
 
 
-def _seed_channel_on_peer(peer, ch_hash, channel_name, creator_hash,
-                          access_mode="public"):
-    peer.storage.upsert_channel(ch_hash, channel_name, "", creator_hash,
-                                access_mode, time.time())
-    peer.storage.subscribe(ch_hash)
 
 
-# ---------------------------------------------------------------------------
-# State derivation
-# ---------------------------------------------------------------------------
+# These suites backdate history, so tenure starts well before it: they
+# simulate a member who has been in the channel all along, which is what
+# the real invite flow would have recorded.
+_ANCIENT_SECS = 30 * 86400
 
 class TestStateDerivation:
     def test_unknown_before_any_activity(self, tracker):
@@ -241,9 +237,8 @@ class TestSyncManagerIntegration:
         bob = peer_factory("bob")
         carol = peer_factory("carol")
 
-        ch_hash = alice.channel_mgr.create_channel("status-empty", "", "public")
-        _seed_channel_on_peer(carol, ch_hash, "status-empty", alice.identity.hash_hex)
-        _seed_channel_on_peer(bob, ch_hash, "status-empty", alice.identity.hash_hex)
+        ch_hash = alice.channel_mgr.create_channel("status-empty", "")
+        mirror_members(ch_hash, alice, carol, bob, joined_at=time.time() - _ANCIENT_SECS)
 
         bob.sync_mgr._send_sync_request(carol.identity.hash_hex, ch_hash, time.time())
 
@@ -257,9 +252,8 @@ class TestSyncManagerIntegration:
         bob = peer_factory("bob")
         carol = peer_factory("carol")
 
-        ch_hash = alice.channel_mgr.create_channel("status-count", "", "public")
-        _seed_channel_on_peer(carol, ch_hash, "status-count", alice.identity.hash_hex)
-        _seed_channel_on_peer(bob, ch_hash, "status-count", alice.identity.hash_hex)
+        ch_hash = alice.channel_mgr.create_channel("status-count", "")
+        mirror_members(ch_hash, alice, carol, bob, joined_at=time.time() - _ANCIENT_SECS)
 
         window_start = time.time()
         for i in range(3):
@@ -282,8 +276,8 @@ class TestSyncManagerIntegration:
         alice = peer_factory("alice")
         bob = peer_factory("bob")
 
-        ch_hash = alice.channel_mgr.create_channel("status-waiting", "", "public")
-        _seed_channel_on_peer(bob, ch_hash, "status-waiting", alice.identity.hash_hex)
+        ch_hash = alice.channel_mgr.create_channel("status-waiting", "")
+        mirror_members(ch_hash, alice, bob, joined_at=time.time() - _ANCIENT_SECS)
 
         unknown_peer = "de" * 16
         sent = bob.sync_mgr._send_sync_request(unknown_peer, ch_hash, time.time())
@@ -299,8 +293,8 @@ class TestSyncManagerIntegration:
         alice = peer_factory("alice")
         bob = peer_factory("bob")
 
-        ch_hash = alice.channel_mgr.create_channel("status-unsent", "", "public")
-        _seed_channel_on_peer(bob, ch_hash, "status-unsent", alice.identity.hash_hex)
+        ch_hash = alice.channel_mgr.create_channel("status-unsent", "")
+        mirror_members(ch_hash, alice, bob, joined_at=time.time() - _ANCIENT_SECS)
 
         unknown_peer = "de" * 16
         bob.sync_mgr._send_sync_request(unknown_peer, ch_hash, time.time())
@@ -319,9 +313,8 @@ class TestSyncManagerIntegration:
         bob = peer_factory("bob")
         carol = peer_factory("carol")
 
-        ch_hash = alice.channel_mgr.create_channel("status-gap", "", "public")
-        _seed_channel_on_peer(carol, ch_hash, "status-gap", alice.identity.hash_hex)
-        _seed_channel_on_peer(bob, ch_hash, "status-gap", alice.identity.hash_hex)
+        ch_hash = alice.channel_mgr.create_channel("status-gap", "")
+        mirror_members(ch_hash, alice, carol, bob, joined_at=time.time() - _ANCIENT_SECS)
 
         msg_id = _insert_message(alice.storage, ch_hash, alice.identity.hash_hex,
                                  "Bob will miss this")
@@ -455,9 +448,8 @@ class TestOfflinePeerIsNotReportedAsMissingHistory:
         bob = peer_factory("bob")
         carol = peer_factory("carol")
 
-        ch_hash = alice.channel_mgr.create_channel("offline-peer", "", "public")
-        _seed_channel_on_peer(bob, ch_hash, "offline-peer", alice.identity.hash_hex)
-        _seed_channel_on_peer(carol, ch_hash, "offline-peer", alice.identity.hash_hex)
+        ch_hash = alice.channel_mgr.create_channel("offline-peer", "")
+        mirror_members(ch_hash, alice, bob, carol, joined_at=time.time() - _ANCIENT_SECS)
 
         carol.sync_mgr._handle_sync_request = lambda *a, **kw: None
         bob.sync_mgr._send_sync_request(carol.identity.hash_hex, ch_hash, time.time())
@@ -482,9 +474,8 @@ class TestHintedGapClearsWhenTheMessageArrives:
         bob = peer_factory("bob")
         carol = peer_factory("carol")
 
-        ch_hash = alice.channel_mgr.create_channel("hint-held", "", "public")
-        _seed_channel_on_peer(bob, ch_hash, "hint-held", alice.identity.hash_hex)
-        _seed_channel_on_peer(carol, ch_hash, "hint-held", alice.identity.hash_hex)
+        ch_hash = alice.channel_mgr.create_channel("hint-held", "")
+        mirror_members(ch_hash, alice, bob, carol, joined_at=time.time() - _ANCIENT_SECS)
 
         msg_id = _insert_message(bob.storage, ch_hash, alice.identity.hash_hex,
                                  "Bob already has this")
@@ -507,9 +498,8 @@ class TestHintedGapClearsWhenTheMessageArrives:
         bob = peer_factory("bob")
         carol = peer_factory("carol")
 
-        ch_hash = alice.channel_mgr.create_channel("hint-then-delivery", "", "public")
-        _seed_channel_on_peer(bob, ch_hash, "hint-then-delivery", alice.identity.hash_hex)
-        _seed_channel_on_peer(carol, ch_hash, "hint-then-delivery", alice.identity.hash_hex)
+        ch_hash = alice.channel_mgr.create_channel("hint-then-delivery", "")
+        mirror_members(ch_hash, alice, bob, carol, joined_at=time.time() - _ANCIENT_SECS)
 
         ts = time.time()
         content = "Delivered late, by retry"

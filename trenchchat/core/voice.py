@@ -26,7 +26,7 @@ import LXMF
 from trenchchat.core.actions import compute_channel_recipients
 from trenchchat.core.identity import Identity
 from trenchchat.core.permissions import (
-    VOICE_CHAT, is_open_join, permissions_from_json,
+    VOICE_CHAT,
 )
 from trenchchat.core.protocol import (
     F_CHANNEL_HASH, F_MSG_TYPE, F_TIMESTAMP,
@@ -35,7 +35,6 @@ from trenchchat.core.protocol import (
     pack_fields,
 )
 from trenchchat.core.storage import Storage
-from trenchchat.core.subscription import SubscriptionManager
 from trenchchat.network.router import Router
 from trenchchat.network.voice_transport import PEER_STREAMING
 from trenchchat.network.voice_wire import (
@@ -74,14 +73,13 @@ class VoiceManager:
     """Voice session lifecycle, signalling, and per-channel rosters."""
 
     def __init__(self, identity: Identity, storage: Storage, router: Router,
-                 subscription_mgr: SubscriptionManager, config=None,
+                 config=None,
                  transport=None, audio_factory=None,
                  state_refresh_secs: float = VOICE_STATE_REFRESH_SECS,
                  roster_ttl_secs: float = VOICE_ROSTER_TTL_SECS):
         self._identity = identity
         self._storage = storage
         self._router = router
-        self._subscription_mgr = subscription_mgr
         self._config = config
         self._transport = transport
         self._audio_factory = audio_factory
@@ -425,28 +423,19 @@ class VoiceManager:
     # --- permission enforcement ---
 
     def _may_voice_self(self, channel_hash_hex: str) -> bool:
-        channel = self._storage.get_channel(channel_hash_hex)
-        if channel is None:
+        if self._storage.get_channel(channel_hash_hex) is None:
             return False
-        perms = permissions_from_json(channel["permissions"])
-        if is_open_join(perms):
-            return True
         return self._storage.has_permission(
             channel_hash_hex, self._identity.hash_hex, VOICE_CHAT)
 
     def _peer_may_voice(self, channel_hash_hex: str, sender_hex: str) -> bool:
         """Core inbound enforcement: may this peer participate in voice?
 
-        Unknown channels fail closed. Open-join channels have no member
-        table to check against, so any authenticated sender is allowed,
-        the same semantics send_message uses.
+        Unknown channels fail closed, and voice always needs the grant: there
+        is no longer a channel kind with no member table to check against.
         """
-        channel = self._storage.get_channel(channel_hash_hex)
-        if channel is None:
+        if self._storage.get_channel(channel_hash_hex) is None:
             return False
-        perms = permissions_from_json(channel["permissions"])
-        if is_open_join(perms):
-            return True
         if not self._storage.is_member(channel_hash_hex, sender_hex):
             return False
         return self._storage.has_permission(
@@ -883,10 +872,7 @@ class VoiceManager:
         return fields
 
     def _broadcast(self, msg_type: str, channel_hash_hex: str):
-        recipients = compute_channel_recipients(
-            self._storage, self._subscription_mgr, channel_hash_hex,
-            self._identity.hash_hex,
-        )
+        recipients = compute_channel_recipients(self._storage, channel_hash_hex)
         fields = self._voice_fields(msg_type, channel_hash_hex)
         for dest_hex in recipients:
             if dest_hex == self._identity.hash_hex:

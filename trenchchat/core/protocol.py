@@ -82,10 +82,9 @@ F_SCOPE_KIND        = 0x28   # str: "server" when this control message targets a
                              #         server scope; absent/"channel" means a single
                              #         channel. The scope hash rides in F_CHANNEL_HASH.
 
-# --- Subscription fields ---
-F_SUBSCRIBER_LIST   = 0x30   # bytes: msgpack list of hex identity hashes
-F_SUBSCRIBER_VERSION = 0x31  # int: monotonic counter per channel
-F_SUBSCRIBER_SIG    = 0x32   # bytes: owner Ed25519 signature over the list
+# 0x30-0x3F was the subscription range: the signed subscriber-list document
+# open-join channels used instead of a member list. Public chat is RRC now
+# (docs/rrc.md), so the range is free.
 
 # --- Sync fields ---
 F_SYNC_TRUNCATED    = 0x50   # bool: responder capped this batch; it holds more history
@@ -323,9 +322,6 @@ def inbound_image(fields: dict):
 
 
 # --- Message type strings ---
-MT_SUBSCRIBE        = "subscribe"
-MT_UNSUBSCRIBE      = "unsubscribe"
-MT_SUBSCRIBER_LIST  = "subscriber_list"
 MT_INVITE           = "invite"
 MT_JOIN_REQUEST     = "join_request"
 MT_MEMBER_LIST_UPDATE = "member_list_update"
@@ -402,8 +398,7 @@ import hashlib  # noqa: E402
 import struct  # noqa: E402
 
 # Domain tag, so an author signature can never be replayed as one of the other
-# structures the same Ed25519 key signs (invite tokens, member lists,
-# subscriber lists).
+# structures the same Ed25519 key signs (invite tokens, member lists).
 AUTHOR_SIG_DOMAIN = b"trenchchat-author-v1"
 
 

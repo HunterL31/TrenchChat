@@ -43,7 +43,6 @@ void main() {
         'name': 'lounge',
         'description': '',
         'creator_hash': 'creator',
-        'open_join': true,
         'created_at': 0,
         'server_hash': null,
       }),

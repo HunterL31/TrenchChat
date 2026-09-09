@@ -161,44 +161,44 @@ class TestSetAvatar:
     def test_set_avatar_updates_config(self, avatar_mgr, config):
         jpeg = _make_test_jpeg()
         result = compress_avatar(jpeg)
-        avatar_mgr.set_avatar(result, lambda _: set())
+        avatar_mgr.set_avatar(result)
         assert config.avatar_bytes == result
 
     def test_set_avatar_increments_version(self, avatar_mgr, config):
         jpeg = _make_test_jpeg()
         result = compress_avatar(jpeg)
         initial_version = config.avatar_version
-        avatar_mgr.set_avatar(result, lambda _: set())
+        avatar_mgr.set_avatar(result)
         assert config.avatar_version == initial_version + 1
 
     def test_remove_avatar_clears_bytes(self, avatar_mgr, config):
         jpeg = _make_test_jpeg()
         result = compress_avatar(jpeg)
-        avatar_mgr.set_avatar(result, lambda _: set())
+        avatar_mgr.set_avatar(result)
         # Advance mock time so rate limit doesn't fire
         avatar_mgr._last_changed = 0.0
-        avatar_mgr.remove_avatar(lambda _: set())
+        avatar_mgr.remove_avatar()
         assert config.avatar_bytes is None
 
     def test_set_avatar_rejects_oversized(self, avatar_mgr):
         oversized = b"x" * (MAX_AVATAR_BYTES + 1)
         with pytest.raises(ValueError, match="max is"):
-            avatar_mgr.set_avatar(oversized, lambda _: set())
+            avatar_mgr.set_avatar(oversized)
 
     def test_set_avatar_fires_callback_with_own_identity(self, avatar_mgr):
         fired = []
         avatar_mgr.add_avatar_callback(fired.append)
         jpeg = compress_avatar(_make_test_jpeg())
-        avatar_mgr.set_avatar(jpeg, lambda _: set())
+        avatar_mgr.set_avatar(jpeg)
         assert fired == [avatar_mgr._identity.hash_hex]
 
     def test_remove_avatar_fires_callback_with_own_identity(self, avatar_mgr, config):
         jpeg = compress_avatar(_make_test_jpeg())
-        avatar_mgr.set_avatar(jpeg, lambda _: set())
+        avatar_mgr.set_avatar(jpeg)
         avatar_mgr._last_changed = 0.0
         fired = []
         avatar_mgr.add_avatar_callback(fired.append)
-        avatar_mgr.remove_avatar(lambda _: set())
+        avatar_mgr.remove_avatar()
         assert fired == [avatar_mgr._identity.hash_hex]
 
     def test_set_avatar_clears_delivery_records(self, avatar_mgr):
@@ -207,7 +207,7 @@ class TestSetAvatar:
         avatar_mgr._storage.upsert_avatar_delivery(peer_hex, 1)
         assert avatar_mgr._storage.get_avatar_delivery_version(peer_hex) == 1
 
-        avatar_mgr.set_avatar(jpeg, lambda _: set())
+        avatar_mgr.set_avatar(jpeg)
         assert avatar_mgr._storage.get_avatar_delivery_version(peer_hex) is None
 
 
@@ -218,23 +218,23 @@ class TestSetAvatar:
 class TestSendRateLimit:
     def test_second_set_avatar_within_rate_limit_raises(self, avatar_mgr):
         jpeg = compress_avatar(_make_test_jpeg())
-        avatar_mgr.set_avatar(jpeg, lambda _: set())
+        avatar_mgr.set_avatar(jpeg)
         with pytest.raises(RuntimeError, match="rate limited"):
-            avatar_mgr.set_avatar(jpeg, lambda _: set())
+            avatar_mgr.set_avatar(jpeg)
 
     def test_set_avatar_allowed_after_rate_limit_elapsed(self, avatar_mgr):
         jpeg = compress_avatar(_make_test_jpeg())
-        avatar_mgr.set_avatar(jpeg, lambda _: set())
+        avatar_mgr.set_avatar(jpeg)
         # Manually backdate the last change to simulate time passing
         avatar_mgr._last_changed = time.time() - SEND_RATE_LIMIT_SECS - 1
         # Should not raise
-        avatar_mgr.set_avatar(jpeg, lambda _: set())
+        avatar_mgr.set_avatar(jpeg)
 
     def test_remove_avatar_also_rate_limited(self, avatar_mgr):
         jpeg = compress_avatar(_make_test_jpeg())
-        avatar_mgr.set_avatar(jpeg, lambda _: set())
+        avatar_mgr.set_avatar(jpeg)
         with pytest.raises(RuntimeError, match="rate limited"):
-            avatar_mgr.remove_avatar(lambda _: set())
+            avatar_mgr.remove_avatar()
 
 
 # ---------------------------------------------------------------------------
@@ -476,7 +476,7 @@ class TestDeliveryTracking:
         peer_hex = "55" * 16
         avatar_mgr._storage.upsert_avatar_delivery(peer_hex, 1)  # had the old avatar
 
-        avatar_mgr.remove_avatar(subscriber_lookup=lambda ch: set())  # no shared channels
+        avatar_mgr.remove_avatar()  # no shared channels
 
         sent = []
         avatar_mgr._send_avatar_to = lambda h, d, v: sent.append((h, d, v))
@@ -622,24 +622,10 @@ class TestOnlyTrenchChatPeersArePushedAvatars:
 
         mgr._router.send.assert_called_once()
 
-    def test_channel_subscriber_is_sent_the_avatar(self, gated_avatar_mgr, config):
-        mgr, _directory = gated_avatar_mgr
-        self._own_avatar(config)
-        peer_hex = "ca" * 16
-        channel_hex = "ce" * 16
-        mgr._storage.upsert_channel(
-            hash=channel_hex, name="public", description="",
-            creator_hash="aa" * 16, permissions=PRESET_PRIVATE, created_at=0.0,
-        )
-        mgr._storage.add_channel_subscriber(channel_hex, peer_hex)
 
-        self._flush(mgr, peer_hex)
-
-        mgr._router.send.assert_called_once()
-
-    def test_fanout_skips_a_foreign_peer(self, gated_avatar_mgr, config):
-        """set_avatar()'s fan-out goes through the same gate: a peer a lookup
-        offers but nothing durable backs is not sent to either."""
+    def test_fanout_reaches_members_and_nobody_else(self, gated_avatar_mgr, config):
+        """The fan-out is the member roster: an identity this node shares no
+        channel with is not sent an avatar."""
         mgr, _directory = gated_avatar_mgr
         member_hex = "da" * 16
         _share_channel_with(mgr, member_hex)
@@ -650,8 +636,7 @@ class TestOnlyTrenchChatPeersArePushedAvatars:
                 patch("trenchchat.core.avatar.RNS.Transport.request_path"), \
                 patch("trenchchat.core.avatar.RNS.Destination"), \
                 patch("trenchchat.core.avatar.LXMF.LXMessage"):
-            mgr.set_avatar(compress_avatar(_make_test_jpeg()),
-                           lambda _ch: {stranger_hex})
+            mgr.set_avatar(compress_avatar(_make_test_jpeg()))
 
         assert mgr._router.send.call_count == 1
         assert mgr._storage.get_avatar_delivery_version(member_hex) is not None

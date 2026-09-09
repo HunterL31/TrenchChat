@@ -54,12 +54,21 @@ from tests.conftest import forge
 from tests.fake_rrc import (
     FakeHostTransport, FakeHubRegistry, FakeRRCTransport, unwelcomed_session,
 )
-from tests.helpers import sign_as, wait_for, wait_for_member
+from tests.helpers import (
+    clear_tenure, know_channel, mirror_members, sign_as, wait_for,
+    wait_for_member,
+)
 from trenchchat.network.router import (
     PATH_REQUEST_GLOBAL_BURST, PATH_REQUEST_MAX_SOURCES, QUARANTINE_MAX_PER_SENDER,
 )
 from trenchchat.config import Config
 from trenchchat.core import actions
+from trenchchat.core.invite import encode_roster
+from trenchchat.core.protocol import (
+    F_CHANNEL_CREATOR, F_CHANNEL_NAME, F_SCOPE_KIND,
+)
+from trenchchat.core.naming import channel_hash_for, server_hash_for
+from trenchchat.core.permissions import CREATE_CHANNEL, PRESET_SERVER
 from trenchchat.core import rrc_wire
 from trenchchat.core.rrc_hub import (
     ERR_NOT_IN_ROOM, ERR_NOT_WELCOMED, ERR_RATE, ERR_TOO_LONG,
@@ -81,12 +90,10 @@ from trenchchat.core.friends import (
 from trenchchat.core.storage import FRIEND_PENDING_IN, FRIEND_PENDING_OUT
 from trenchchat.core.permissions import (
     ALL_PERMISSIONS, FULL_SYNC, INVITE, KICK, MANAGE_CHANNEL, MANAGE_ROLES,
-    PRESET_OPEN, PRESET_PRIVATE, ROLE_ADMIN, ROLE_MEMBER, ROLE_OWNER, SEND_MESSAGE,
-    SHARE_FILES, VOICE_CHAT, is_open_join, permissions_from_json,
+    PRESET_PRIVATE, ROLE_ADMIN, ROLE_MEMBER, ROLE_OWNER, SEND_MESSAGE,
+    SHARE_FILES, VOICE_CHAT, permissions_from_json,
 )
-from trenchchat.core.subscription import SubscriptionManager, _subscriber_payload
 from trenchchat.core.protocol import (
-    F_SUBSCRIBER_LIST, F_SUBSCRIBER_SIG, F_SUBSCRIBER_VERSION, MT_SUBSCRIBER_LIST,
     F_ADMIN_HASH, F_CHANNEL_HASH, F_DISPLAY_NAME, F_EXPIRY_TS, F_INVITE_TOKEN,
     F_INVITEE_HASH, F_INVITE_ISSUED_TS, F_MEMBER_LIST_DOC, F_MESSAGE_ID, F_MSG_TYPE,
     F_TIMESTAMP,
@@ -124,6 +131,10 @@ from trenchchat.core.protocol import (
 # Helpers
 # ---------------------------------------------------------------------------
 
+# Far enough back that a backdated test message is still inside tenure.
+_ANCIENT_SECS = 30 * 86400
+
+
 def _setup_channel_with_member(peer_factory, *, member_perms=None):
     """
     Create alice (owner) and bob (member) on a shared invite-only channel.
@@ -144,9 +155,14 @@ def _setup_channel_with_member(peer_factory, *, member_perms=None):
 
     # Mirror the channel and membership on Bob's side so his receiver can
     # apply the same permission checks.
-    bob.storage.upsert_channel(ch_hash, "test-ch", "", alice.identity.hash_hex,
-                               perms, time.time())
-    bob.storage.subscribe(ch_hash)
+    mirror_members(ch_hash, alice, bob)
+    # Backdate only Bob's own view, so a test may relay him a message older
+    # than the channel without it being refused as predating its author's
+    # membership. Alice keeps publish_member_list's authoritative intervals,
+    # which the kick tests read.
+    clear_tenure(bob, ch_hash)
+    for identity in (alice.identity.hash_hex, bob.identity.hash_hex):
+        bob.storage.open_tenure(ch_hash, identity, time.time() - _ANCIENT_SECS)
     bob.storage.upsert_member(ch_hash, bob.identity.hash_hex, "Bob", role=ROLE_MEMBER)
     bob.storage.upsert_member(ch_hash, alice.identity.hash_hex, "Alice", role=ROLE_OWNER)
     bob.storage.set_channel_permissions(ch_hash, perms)
@@ -181,13 +197,11 @@ class TestAdversarialSendMessage:
         alice = peer_factory("alice")
         carol = peer_factory("carol")
 
-        ch_hash = alice.channel_mgr.create_channel("members-only", "", "invite")
+        ch_hash = alice.channel_mgr.create_channel("members-only", "")
         alice.invite_mgr.publish_member_list(ch_hash)
 
         # Carol is not a member, she just knows the channel hash
-        carol.storage.upsert_channel(ch_hash, "members-only", "",
-                                     alice.identity.hash_hex, "invite", time.time())
-        carol.storage.subscribe(ch_hash)
+        know_channel(carol, ch_hash, alice)
 
         carol.messaging.send_message(
             channel_hash_hex=ch_hash,
@@ -214,7 +228,7 @@ class TestAdversarialInvite:
         alice = peer_factory("alice")
         carol = peer_factory("carol")
 
-        ch_hash = alice.channel_mgr.create_channel("forge-test", "", "invite")
+        ch_hash = alice.channel_mgr.create_channel("forge-test", "")
         alice.invite_mgr.publish_member_list(ch_hash)
 
         expiry = time.time() + 3600
@@ -280,7 +294,7 @@ class TestAdversarialInvite:
         alice = peer_factory("alice")
         carol = peer_factory("carol")
 
-        ch_hash = alice.channel_mgr.create_channel("expire-ch", "", "invite")
+        ch_hash = alice.channel_mgr.create_channel("expire-ch", "")
         alice.invite_mgr.publish_member_list(ch_hash)
 
         token, expiry = alice.invite_mgr.generate_invite_token(
@@ -568,8 +582,8 @@ class TestAdversarialTokenMisuse:
         alice = peer_factory("alice")
         carol = peer_factory("carol")
 
-        ch_a = alice.channel_mgr.create_channel("channel-a", "", "invite")
-        ch_b = alice.channel_mgr.create_channel("channel-b", "", "invite")
+        ch_a = alice.channel_mgr.create_channel("channel-a", "")
+        ch_b = alice.channel_mgr.create_channel("channel-b", "")
         alice.invite_mgr.publish_member_list(ch_a)
         alice.invite_mgr.publish_member_list(ch_b)
 
@@ -602,7 +616,7 @@ class TestAdversarialTokenMisuse:
         carol = peer_factory("carol")
         dave  = peer_factory("dave")
 
-        ch_hash = alice.channel_mgr.create_channel("swap-test", "", "invite")
+        ch_hash = alice.channel_mgr.create_channel("swap-test", "")
         alice.invite_mgr.publish_member_list(ch_hash)
 
         # Token is legitimately issued for Carol
@@ -778,7 +792,7 @@ class TestAdversarialMemberListIntegrity:
         alice = peer_factory("alice")
         bob   = peer_factory("bob")
 
-        ch_hash = alice.channel_mgr.create_channel("tiebreak-ch", "", "invite")
+        ch_hash = alice.channel_mgr.create_channel("tiebreak-ch", "")
         # Add Bob as admin so he is a trusted signer
         alice.invite_mgr.publish_member_list(
             ch_hash, add_members=[bob.identity.hash], add_admins=[bob.identity.hash]
@@ -850,8 +864,8 @@ class TestAdversarialMemberListIntegrity:
         alice = peer_factory("alice")
         bob   = peer_factory("bob")
 
-        ch_a = alice.channel_mgr.create_channel("channel-a", "", "invite")
-        ch_b = alice.channel_mgr.create_channel("channel-b", "", "invite")
+        ch_a = alice.channel_mgr.create_channel("channel-a", "")
+        ch_b = alice.channel_mgr.create_channel("channel-b", "")
 
         # Publish initial member lists for both channels
         alice.invite_mgr.publish_member_list(ch_a, add_members=[bob.identity.hash])
@@ -1154,9 +1168,7 @@ class TestAdversarialTenure:
         }]
 
         # Mirror kick on Bob's storage so the member list callback fires correctly
-        bob.storage.upsert_channel(ch_hash, "test-ch", "", alice.identity.hash_hex,
-                                   "invite", time.time())
-        bob.storage.subscribe(ch_hash)
+        mirror_members(ch_hash, alice, bob)
 
         # Simulate receiving the kick by calling the member list callback on Bob's SyncManager
         # (remove Bob from Bob's own member table to reflect the kick)
@@ -1657,7 +1669,7 @@ class TestAdversarialSyncRanges:
         alice = peer_factory("alice")
         bob = peer_factory("bob")
 
-        ch_hash = alice.channel_mgr.create_channel("need-tenure", "", "invite")
+        ch_hash = alice.channel_mgr.create_channel("need-tenure", "")
         time.sleep(0.02)
         pre_join = self._row(alice, ch_hash, "before bob joined", time.time())
         time.sleep(0.02)
@@ -2133,10 +2145,7 @@ class TestAdversarialFileManifest:
             peer_factory, member_perms=[SEND_MESSAGE]
         )
         carol = peer_factory("carol")
-        carol.storage.upsert_channel(ch_hash, "test-ch", "",
-                                     alice.identity.hash_hex, PRESET_PRIVATE,
-                                     time.time())
-        carol.storage.subscribe(ch_hash)
+        know_channel(carol, ch_hash, alice)
 
         carol.messaging.send_message(
             channel_hash_hex=ch_hash,
@@ -2341,7 +2350,7 @@ class TestShareFilesGate:
         manifest = build_file_manifest("survey.csv", self._FILE_BYTES)
 
         result = actions.send_message_result(
-            bob.storage, bob.subscription_mgr, bob.messaging, ch_hash,
+            bob.storage, bob.messaging, ch_hash,
             bob.identity.hash_hex, "have this", manifest=manifest,
         )
 
@@ -2355,7 +2364,7 @@ class TestShareFilesGate:
         manifest = build_file_manifest("survey.csv", self._FILE_BYTES)
 
         result = actions.share_file(
-            bob.file_mgr, bob.storage, bob.subscription_mgr, bob.messaging,
+            bob.file_mgr, bob.storage, bob.messaging,
             ch_hash, bob.identity.hash_hex, "survey.csv", self._FILE_BYTES,
         )
 
@@ -2423,7 +2432,7 @@ class TestShareFilesGate:
                    for m in alice.storage.get_messages(ch_hash)), \
             "Alice took a file message after removing share_files from members"
         assert not actions.send_message(
-            bob.storage, bob.subscription_mgr, bob.messaging, ch_hash,
+            bob.storage, bob.messaging, ch_hash,
             bob.identity.hash_hex, "second", manifest=second,
         ), "Bob's own guard still offered the share"
 
@@ -2952,7 +2961,7 @@ class TestAdversarialUnsolicitedChannelInjection:
         """
         alice = peer_factory("alice")
         bob = peer_factory("bob")
-        ch_hash = alice.channel_mgr.create_channel("anchored-ch", "", "invite")
+        ch_hash = alice.channel_mgr.create_channel("anchored-ch", "")
 
         token, expiry = alice.invite_mgr.generate_invite_token(
             ch_hash, bob.identity.hash
@@ -2966,138 +2975,6 @@ class TestAdversarialUnsolicitedChannelInjection:
             timeout=5,
         ), "Bob did not join via the real invite flow"
 
-
-class TestAdversarialSubscriberList:
-    """
-    The subscriber set drives who outbound channel messages are delivered to,
-    so forging or replaying it redirects or severs a peer's traffic.
-    """
-
-    def _setup(self, peer_factory):
-        alice = peer_factory("alice")
-        bob = peer_factory("bob")
-        ch_hash = alice.channel_mgr.create_channel("open-ch", "", "public")
-        bob.storage.upsert_channel(ch_hash, "open-ch", "", alice.identity.hash_hex,
-                                   PRESET_OPEN, time.time())
-        bob.storage.subscribe(ch_hash)
-        return alice, bob, ch_hash
-
-    def _send(self, sender, target, ch_hash, packed, version, sig):
-        fields = {
-            F_MSG_TYPE:           MT_SUBSCRIBER_LIST,
-            F_CHANNEL_HASH:       bytes.fromhex(ch_hash),
-            F_SUBSCRIBER_LIST:    packed,
-            F_SUBSCRIBER_VERSION: version,
-            F_SUBSCRIBER_SIG:     sig,
-        }
-        target.subscription_mgr._handle_subscriber_list(
-            fields, ch_hash, sender.identity.hash_hex
-        )
-
-    def test_unsigned_subscriber_list_is_rejected(self, peer_factory):
-        alice, bob, ch_hash = self._setup(peer_factory)
-        packed = msgpack.packb(["cc" * 16], use_bin_type=True)
-
-        bob.subscription_mgr._handle_subscriber_list(
-            {
-                F_MSG_TYPE:        MT_SUBSCRIBER_LIST,
-                F_CHANNEL_HASH:    bytes.fromhex(ch_hash),
-                F_SUBSCRIBER_LIST: packed,
-            },
-            ch_hash,
-            alice.identity.hash_hex,
-        )
-
-        assert "cc" * 16 not in bob.subscription_mgr.get_subscribers(ch_hash), \
-            "An unsigned subscriber list was applied"
-
-    def test_forged_signature_is_rejected(self, peer_factory):
-        alice, bob, ch_hash = self._setup(peer_factory)
-        mallory = peer_factory("mallory")
-        packed = msgpack.packb([mallory.identity.hash_hex], use_bin_type=True)
-        payload = _subscriber_payload(ch_hash, 1, packed)
-        # Signed by Mallory, but claiming to come from the owner.
-        sig = _sign(mallory.identity.rns_identity, payload)
-
-        self._send(alice, bob, ch_hash, packed, 1, sig)
-
-        assert mallory.identity.hash_hex not in \
-            bob.subscription_mgr.get_subscribers(ch_hash), \
-            "A subscriber list with a forged owner signature was applied"
-
-    def test_replayed_older_version_is_rejected(self, peer_factory):
-        alice, bob, ch_hash = self._setup(peer_factory)
-
-        def signed(members, version):
-            packed = msgpack.packb(members, use_bin_type=True)
-            sig = _sign(alice.identity.rns_identity,
-                        _subscriber_payload(ch_hash, version, packed))
-            return packed, version, sig
-
-        current = ["aa" * 16, "bb" * 16]
-        self._send(alice, bob, ch_hash, *signed(current, 5))
-        assert set(bob.subscription_mgr.get_subscribers(ch_hash)) == set(current)
-
-        # A genuine older list, replayed to resurrect a removed subscriber.
-        self._send(alice, bob, ch_hash, *signed(["aa" * 16, "dd" * 16], 3))
-
-        assert "dd" * 16 not in bob.subscription_mgr.get_subscribers(ch_hash), \
-            "An older signed subscriber list was replayed successfully"
-
-    def test_replay_is_still_rejected_after_a_restart(self, peer_factory):
-        """The version watermark has to outlive the process.
-
-        A captured older list stays validly signed forever, so if the
-        watermark only lives in memory a restart re-opens the replay --
-        resurrecting a removed subscriber, which is who delivery goes to.
-        """
-        alice, bob, ch_hash = self._setup(peer_factory)
-
-        def signed(members, version):
-            packed = msgpack.packb(members, use_bin_type=True)
-            sig = _sign(alice.identity.rns_identity,
-                        _subscriber_payload(ch_hash, version, packed))
-            return packed, version, sig
-
-        current = ["aa" * 16, "bb" * 16]
-        self._send(alice, bob, ch_hash, *signed(current, 5))
-
-        # Bob restarts: a fresh manager over the same storage, exactly as the
-        # app rebuilds it. The roster is persisted, so the watermark must be.
-        restarted = SubscriptionManager(bob.identity, bob.storage, bob.router)
-        assert set(restarted.get_subscribers(ch_hash)) == set(current)
-
-        restarted._handle_subscriber_list(
-            {
-                F_MSG_TYPE:           MT_SUBSCRIBER_LIST,
-                F_CHANNEL_HASH:       bytes.fromhex(ch_hash),
-                F_SUBSCRIBER_LIST:    signed(["aa" * 16, "dd" * 16], 3)[0],
-                F_SUBSCRIBER_VERSION: 3,
-                F_SUBSCRIBER_SIG:     signed(["aa" * 16, "dd" * 16], 3)[2],
-            },
-            ch_hash,
-            alice.identity.hash_hex,
-        )
-
-        assert "dd" * 16 not in restarted.get_subscribers(ch_hash), \
-            "An older signed subscriber list was replayed across a restart"
-        assert set(restarted.get_subscribers(ch_hash)) == set(current)
-
-
-# ---------------------------------------------------------------------------
-# SERVERS
-#
-# A server roster is a signed list of channel hashes that the receiver turns
-# into local channel rows re-parented under that server. Every entry is a
-# capability claim, so each one is checked three independent ways.
-# ---------------------------------------------------------------------------
-
-from trenchchat.core.invite import encode_roster
-from trenchchat.core.naming import channel_hash_for, server_hash_for
-from trenchchat.core.permissions import CREATE_CHANNEL, PRESET_SERVER
-from trenchchat.core.protocol import (
-    F_CHANNEL_CREATOR, F_CHANNEL_NAME, F_SCOPE_KIND,
-)
 
 
 def _server_with_member(peer_factory, member_perms=None):
@@ -3155,7 +3032,6 @@ def _roster_row(creator_hash: bytes, name: str, ch_hash: str | None = None):
         "creator_hash": creator_hash.hex(),
         "created_at": time.time(),
     }
-
 
 class TestAdversarialCreateChannel:
     def test_member_without_create_channel_cannot_create(self, peer_factory):
@@ -3591,9 +3467,7 @@ class TestAdversarialRelayTampering:
             peer_factory, member_perms=[SEND_MESSAGE]
         )
         carol = peer_factory("carol")
-        carol.storage.upsert_channel(ch_hash, "test-ch", "", alice.identity.hash_hex,
-                                     PRESET_PRIVATE, time.time())
-        carol.storage.subscribe(ch_hash)
+        know_channel(carol, ch_hash, alice)
         return alice, bob, carol, ch_hash
 
     def _row(self, author_hex, ch_hash, ts, content, sig=None):
@@ -3742,103 +3616,6 @@ class TestAdversarialRelayTampering:
 # Channel announces are discovery hints, not a channel of authority
 # ---------------------------------------------------------------------------
 
-class TestAdversarialChannelAnnounce:
-    """app_data on a channel announce is unsigned and unversioned.
-
-    RNS binds the destination hash to the announcing identity, so only a
-    channel's creator can announce it -- but "creator" is not "still in
-    charge", and the payload itself is free text either way.
-    """
-
-    def _announce(self, peer, channel_hash_hex, announcer, **metadata):
-        peer.channel_mgr._on_channel_discovered(
-            bytes.fromhex(channel_hash_hex),
-            announcer.identity.rns_identity,
-            metadata,
-        )
-
-    def _perms(self, peer, channel_hash_hex):
-        return permissions_from_json(
-            peer.storage.get_channel(channel_hash_hex)["permissions"])
-
-    def test_an_announce_cannot_open_a_private_channel(self, peer_factory):
-        """
-        open_join is what makes the inbound message handler stop checking
-        membership and SEND_MESSAGE, so flipping it opens a private
-        transcript to anyone on the mesh.
-        """
-        alice = peer_factory("alice")
-        ch_hash = alice.channel_mgr.create_channel("private", "", permissions=PRESET_PRIVATE)
-        assert not is_open_join(self._perms(alice, ch_hash))
-
-        self._announce(alice, ch_hash, alice, name="private", access="public")
-
-        assert not is_open_join(self._perms(alice, ch_hash)), \
-            "an unsigned announce flipped a private channel to open_join"
-
-    def test_an_announce_cannot_revert_a_signed_permission_change(self, peer_factory):
-        """MANAGE_CHANNEL owns this column; discovery metadata does not."""
-        alice = peer_factory("alice")
-        ch_hash = alice.channel_mgr.create_channel("open", "", permissions=PRESET_OPEN)
-
-        tightened = dict(PRESET_OPEN)
-        tightened[ROLE_MEMBER] = [SEND_MESSAGE]
-        alice.storage.set_channel_permissions(ch_hash, tightened)
-
-        self._announce(alice, ch_hash, alice, name="open", access="public")
-
-        assert self._perms(alice, ch_hash)[ROLE_MEMBER] == [SEND_MESSAGE], \
-            "a routine announce reverted a signed permission change"
-
-    def test_creator_hash_comes_from_the_announcer_not_the_payload(self, peer_factory):
-        """
-        creator_hash is a trusted-signer fallback when validating member list
-        documents, so a payload-supplied one launders signing authority.
-        """
-        alice = peer_factory("alice")
-        victim = peer_factory("victim")
-        attacker = peer_factory("attacker")
-        forged_hash = "cc" * 16
-
-        self._announce(alice, forged_hash, attacker,
-                       name="theirs", access="public",
-                       creator=victim.identity.hash_hex)
-
-        stored = alice.storage.get_channel(forged_hash)
-        assert stored["creator_hash"] == attacker.identity.hash_hex, \
-            "an announce named someone else as the channel creator"
-
-    def test_a_first_sighting_still_records_the_announced_metadata(self, peer_factory):
-        """The narrowing must not break discovery itself."""
-        alice = peer_factory("alice")
-        attacker = peer_factory("attacker")
-        new_hash = "dd" * 16
-
-        self._announce(alice, new_hash, attacker, name="fresh",
-                       description="hello", access="public")
-
-        stored = alice.storage.get_channel(new_hash)
-        assert stored["name"] == "fresh"
-        assert stored["description"] == "hello"
-        assert is_open_join(self._perms(alice, new_hash))
-
-    def test_a_later_announce_still_refreshes_name_and_description(self, peer_factory):
-        alice = peer_factory("alice")
-        attacker = peer_factory("attacker")
-        new_hash = "ee" * 16
-
-        self._announce(alice, new_hash, attacker, name="before", access="public")
-        self._announce(alice, new_hash, attacker, name="after",
-                       description="renamed", access="public")
-
-        stored = alice.storage.get_channel(new_hash)
-        assert stored["name"] == "after"
-        assert stored["description"] == "renamed"
-
-
-# ---------------------------------------------------------------------------
-# A kick has to reach every admin, not only the one that performed it
-# ---------------------------------------------------------------------------
 
 class TestAdversarialKickedMemberRejoin:
     """spent_invite_tokens and the revocation sentinel are written only by the
@@ -4041,9 +3818,7 @@ class TestAdversarialSyncedReactions:
             peer_factory, member_perms=[SEND_MESSAGE]
         )
         carol = peer_factory("carol")
-        carol.storage.upsert_channel(ch_hash, "test-ch", "", alice.identity.hash_hex,
-                                     PRESET_PRIVATE, time.time())
-        carol.storage.subscribe(ch_hash)
+        know_channel(carol, ch_hash, alice)
         return alice, bob, carol, ch_hash
 
     def _serve(self, to_peer, from_peer, ch_hash, rows):
@@ -4398,7 +4173,7 @@ class TestAdversarialTrustAnchorUnion:
         alice = peer_factory("alice")
         bob = peer_factory("bob")
         mallory = peer_factory("mallory")
-        ch_hash = alice.channel_mgr.create_channel("private", "", "invite")
+        ch_hash = alice.channel_mgr.create_channel("private", "")
 
         # Bob accepted an invite from alice, so both anchors exist for him.
         bob.storage.record_accepted_invite(
@@ -4425,7 +4200,7 @@ class TestAdversarialTrustAnchorUnion:
         alice = peer_factory("alice")
         bob = peer_factory("bob")
         carol = peer_factory("carol")
-        ch_hash = alice.channel_mgr.create_channel("private", "", "invite")
+        ch_hash = alice.channel_mgr.create_channel("private", "")
 
         bob.storage.upsert_channel(
             hash=ch_hash, name="private", description="",

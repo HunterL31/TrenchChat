@@ -11,7 +11,7 @@ import LXMF
 import RNS
 import msgpack
 
-from trenchchat import APP_NAME, APP_ASPECT_CHANNEL, APP_ASPECT_USER
+from trenchchat import APP_NAME, APP_ASPECT_USER
 from trenchchat.core.protocol import unpack_wire
 from trenchchat.core.rrc_wire import (
     HUB_APP_NAME as RRC_HUB_APP_NAME, HUB_ASPECT as RRC_HUB_ASPECT,
@@ -20,14 +20,6 @@ from trenchchat.core.rrc_wire import (
 
 # Path table index for the receiving interface (from RNS.Transport constants).
 _IDX_PT_RVCD_IF = 5
-
-
-def _parse_channel_app_data(app_data: bytes) -> dict:
-    try:
-        return unpack_wire(app_data)
-    except Exception as e:
-        RNS.log(f"TrenchChat: failed to parse channel app_data: {e}", RNS.LOG_DEBUG)
-        return {}
 
 
 def _receiving_interface_for(destination_hash: bytes):
@@ -44,58 +36,6 @@ def _receiving_interface_for(destination_hash: bytes):
     except Exception:
         pass
     return None
-
-
-class ChannelAnnounceHandler:
-    """
-    Listens for announces from any trenchchat.channel.* destination
-    and fires on_channel_discovered(channel_hash, identity, metadata, interface).
-    The interface argument is the RNS interface the announce arrived on, or
-    None if it could not be determined.
-
-    aspect_filter is deliberately None (receive every announce on the
-    network) rather than "trenchchat.channel". RNS.Transport dispatches
-    announces by exact hash match: it computes
-    hash_from_name_and_identity(aspect_filter, announced_identity) and only
-    calls received_announce() if that equals the announce's own destination
-    hash. A channel's real destination hash is derived from a *three*
-    component aspect path -- "trenchchat.channel.<sanitised-name>", the
-    channel name is part of what makes the hash unique per channel -- so a
-    fixed two-component aspect_filter can never equal any real channel's
-    hash; "trenchchat.channel" alone matches nothing, ever. There is no
-    prefix/wildcard form of aspect_filter to express "any channel name", so
-    the only way to actually receive these announces is to take everything
-    and filter by app_data shape instead (below). This is not a strictly
-    verified filter -- any node could shape-match a payload -- but channel
-    discovery was never a trust boundary: the creator's identity and any
-    channel content are independently verified elsewhere (signed member
-    list documents, LXMF message signatures), not by the discovery
-    mechanism itself.
-    """
-
-    aspect_filter = None
-
-    def __init__(self, on_channel_discovered):
-        self._callback = on_channel_discovered
-
-    def received_announce(self, destination_hash: bytes,
-                          announced_identity: RNS.Identity,
-                          app_data: bytes,
-                          announce_packet_hash: bytes):
-        if not app_data:
-            return
-        metadata = _parse_channel_app_data(app_data)
-        # Cheap shape check so the network-wide firehose (every RNS
-        # announce, not just TrenchChat's) doesn't do real work -- storage
-        # writes, callback dispatch -- for the vast majority of announces
-        # that aren't ours.
-        if not isinstance(metadata, dict) or "name" not in metadata or "access" not in metadata:
-            return
-        iface = _receiving_interface_for(destination_hash)
-        try:
-            self._callback(destination_hash, announced_identity, metadata, iface)
-        except Exception as e:
-            RNS.log(f"TrenchChat: channel announce callback error: {e}", RNS.LOG_ERROR)
 
 
 class PeerAnnounceHandler:
@@ -378,11 +318,10 @@ class FirstContactAnnouncer:
     two announces: they hear us, we are no longer new to them, and it stops.
     """
 
-    def __init__(self, router, channel_mgr, self_hex: str,
+    def __init__(self, router, self_hex: str,
                  coalesce_secs: float = FIRST_CONTACT_COALESCE_SECS,
                  max_answered: int = MAX_ANSWERED_PEERS) -> None:
         self._router = router
-        self._channel_mgr = channel_mgr
         self._self_hex = self_hex
         self._coalesce = coalesce_secs
         self._max_answered = max_answered
@@ -443,7 +382,5 @@ class FirstContactAnnouncer:
         try:
             self._router.announce(attached_interface=iface)
             self._router.announce_user(attached_interface=iface)
-            if self._channel_mgr is not None:
-                self._channel_mgr.announce_all_owned(attached_interface=iface)
         except Exception as e:
             RNS.log(f"TrenchChat: first-contact announce failed: {e}", RNS.LOG_WARNING)

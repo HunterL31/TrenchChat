@@ -79,10 +79,10 @@ class TestInboundNameRecording:
         stub.user_directory.record_user.assert_not_called()
 
     def test_control_message_does_not_record_a_name(self):
-        from trenchchat.core.protocol import F_MSG_TYPE, MT_SUBSCRIBE
+        from trenchchat.core.protocol import F_MSG_TYPE, MT_SYNC_REQUEST
         stub = _stub_backend()
         msg = SimpleNamespace(
-            fields={F_MSG_TYPE: MT_SUBSCRIBE}, source_hash=b"\x00" * 16)
+            fields={F_MSG_TYPE: MT_SYNC_REQUEST}, source_hash=b"\x00" * 16)
         backend_core.Backend._on_inbound_message(stub, msg)
         # Control messages seed only a confirmed peer; unknown peer records nothing.
         stub.user_directory.record_user.assert_not_called()

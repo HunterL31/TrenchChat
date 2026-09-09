@@ -61,9 +61,10 @@ needed for normal development.
   `RNS.Identity.recall()` takes a destination hash, not an identity hash; get this wrong and lookups
   silently fail. See `.claude/rules/reticulum-lxmf-guidelines.md` for the exact patterns to follow
   (path requests must never block with `time.sleep`; use fire-and-forget + retry queue instead).
-- Channels are addressed by a hash derived from the creator's identity + channel name. Public channels
-  are announced on the mesh; invite-only channels are not, and use a versioned, signed member-list
-  document instead (`trenchchat/core/invite.py`).
+- Channels are addressed by a hash derived from the creator's identity + channel name. They are
+  always invite-only and never announced, and membership travels in a versioned, signed member-list
+  document (`trenchchat/core/invite.py`). Public chat is not a channel at all: it is RRC, and it
+  lives in `core/rrc.py` and `core/rrc_hub.py` (see `docs/rrc.md`).
 - All LXMF field keys and message-type strings live in **`trenchchat/core/protocol.py`**, the single
   source of truth, deliberately dependency-free to avoid circular imports. Never redefine a field
   constant elsewhere; the field layout docstring at the top of `trenchchat/core/messaging.py` documents
@@ -192,7 +193,7 @@ which wipes display names and can demote the owner). Full rationale in
 ### Known application-layer hardening gaps
 
 `docs/security-improvements.md` documents three known, not-yet-fixed gaps and design options for each:
-unsigned subscriber-list updates on public channels (spoofable), display-name spoofing (self-asserted,
+display-name spoofing (self-asserted,
 unverified), and no rate limiting on inbound control messages. Reticulum/LXMF's crypto (X25519 +
 AES-256, Ed25519 signing) is not in question; these are all application-layer trust gaps. Read this
 doc before touching `subscription.py`'s `MT_SUBSCRIBER_LIST` handling or any control-message ingestion

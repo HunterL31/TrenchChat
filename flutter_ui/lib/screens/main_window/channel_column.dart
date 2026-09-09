@@ -33,7 +33,6 @@ class ChannelColumn extends StatelessWidget {
     this.onTapInvite,
     this.onCreateChannel,
     this.onCreateDirectChannel,
-    this.onJoinChannel,
     this.dms = const [],
     this.onSelectDm,
     this.onDeleteDm,
@@ -63,7 +62,6 @@ class ChannelColumn extends StatelessWidget {
   /// Creates a standalone channel regardless of which server is selected;
   /// keeps direct channels reachable while a server occupies the main button.
   final VoidCallback? onCreateDirectChannel;
-  final VoidCallback? onJoinChannel;
 
   /// Direct-message conversations. Distinct from [directChannels], which are
   /// channels outside any server -- a conversation has two people in it and is
@@ -144,8 +142,6 @@ class ChannelColumn extends StatelessWidget {
         ),
       if (serverName != null && onCreateDirectChannel != null)
         TcContextMenuItem(label: 'New direct channel', onTap: onCreateDirectChannel!),
-      if (onJoinChannel != null)
-        TcContextMenuItem(label: 'Join channel…', onTap: onJoinChannel!),
       if (onStartDm != null)
         TcContextMenuItem(label: 'Message a friend…', onTap: onStartDm!),
     ];
@@ -586,8 +582,6 @@ class _ChannelRowState extends State<_ChannelRow> {
                   ),
                   const SizedBox(width: 4),
                 ],
-                if (widget.channel.isInviteOnly)
-                  TcIcon(TcIcons.lock, size: TCType.textMicro, color: tc.textTertiary),
               ],
             ),
           ),

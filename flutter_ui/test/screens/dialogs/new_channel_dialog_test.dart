@@ -38,28 +38,6 @@ void main() {
     state.dispose();
   });
 
-  testWidgets('standalone channel dialog offers an access preset picker', (tester) async {
-    await tester.pumpWidget(_harness(state));
-    await tester.tap(find.text('open'));
-    await tester.pumpAndSettle();
-
-    expect(find.text('New Channel'), findsOneWidget);
-    expect(find.text('ACCESS'), findsOneWidget);
-    expect(find.text('PUBLIC'), findsOneWidget);
-    expect(find.text('INVITE-ONLY'), findsOneWidget);
-  });
-
-  testWidgets('in-server channel dialog omits the access preset picker', (tester) async {
-    await tester.pumpWidget(_harness(state, serverHashHex: 'server-hash'));
-    await tester.tap(find.text('open'));
-    await tester.pumpAndSettle();
-
-    expect(find.text('New Channel in Server'), findsOneWidget);
-    expect(find.text('ACCESS'), findsNothing);
-    expect(find.text('PUBLIC'), findsNothing);
-    expect(find.text('INVITE-ONLY'), findsNothing);
-  });
-
   testWidgets('rejects an empty name without calling the API', (tester) async {
     await tester.pumpWidget(_harness(state));
     await tester.tap(find.text('open'));
@@ -147,17 +125,4 @@ void main() {
     expect(wired.actionError, isNull);
   });
 
-  testWidgets('tapping an access option selects it', (tester) async {
-    await tester.pumpWidget(_harness(state));
-    await tester.tap(find.text('open'));
-    await tester.pumpAndSettle();
-
-    // Public is selected by default; switching to invite-only must not throw
-    // and must leave exactly one option visible as each label.
-    await tester.tap(find.text('INVITE-ONLY'));
-    await tester.pump();
-
-    expect(find.text('PUBLIC'), findsOneWidget);
-    expect(find.text('INVITE-ONLY'), findsOneWidget);
-  });
 }

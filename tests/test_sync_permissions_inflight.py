@@ -26,7 +26,7 @@ import time
 
 import msgpack
 
-from tests.helpers import sign_as, wait_for_member, wait_for_message
+from tests.helpers import mirror_members, sign_as, wait_for_member, wait_for_message
 from trenchchat.core.messaging import _compute_message_id
 from trenchchat.core.permissions import (
     FULL_SYNC, PRESET_PRIVATE, ROLE_ADMIN, ROLE_MEMBER, ROLE_OWNER, SEND_MESSAGE,
@@ -82,9 +82,9 @@ def _setup_tenured_channel(peer_factory, member_perms=None):
     perms = dict(PRESET_PRIVATE)
     perms[ROLE_MEMBER] = member_perms if member_perms is not None else [SEND_MESSAGE]
     ch_hash = alice.channel_mgr.create_channel("inflight-ch", "", permissions=perms)
-    bob.storage.upsert_channel(ch_hash, "inflight-ch", "", alice.identity.hash_hex,
-                                perms, time.time())
-    bob.storage.subscribe(ch_hash)
+    # tenure=False because this file's scenarios need precise control over
+    # who holds which interval on which side; they seed their own.
+    mirror_members(ch_hash, alice, bob, tenure=False)
     alice.invite_mgr.publish_member_list(ch_hash, add_members=[bob.identity.hash])
     assert wait_for_member(alice.storage, ch_hash, bob.identity.hash_hex)
     bob.storage.upsert_member(ch_hash, bob.identity.hash_hex, "Bob", role=ROLE_MEMBER)
@@ -439,9 +439,7 @@ class TestTenureFailOpenAsymmetry:
         """
         alice, bob, ch_hash, perms = _setup_tenured_channel(peer_factory)
         carol = peer_factory("carol")
-        carol.storage.upsert_channel(ch_hash, "inflight-ch", "", alice.identity.hash_hex,
-                                      perms, time.time())
-        carol.storage.subscribe(ch_hash)
+        mirror_members(ch_hash, alice, carol, tenure=False)
         # Carol knows the real membership (needed for _peer_may_participate
         # to let Alice's request through at all) but deliberately has no
         # tenure rows -- has_any_tenure and is_member are independent

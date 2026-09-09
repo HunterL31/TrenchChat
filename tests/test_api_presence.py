@@ -3,7 +3,7 @@ The per-channel presence and link-quality endpoints the Flutter client reads.
 
 Open-join channels keep no members table, so a roster derived from members
 alone reads ONLINE-0 / UNKNOWN forever. These endpoints source the roster from
-the subscriber list for open-join channels, and from members for invite-only
+the channel's member list
 ones -- the contract the Dart client codes against.
 
 Like test_api_channels.py these need no peer: the backend is a MagicMock stubbed
@@ -17,9 +17,6 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from trenchchat.core.permissions import (
-    PRESET_OPEN, PRESET_PRIVATE, permissions_to_json,
-)
 
 _TESTENV_DIR = Path(__file__).resolve().parents[1] / "devtools" / "testenv"
 if str(_TESTENV_DIR) not in sys.path:
@@ -69,64 +66,3 @@ def client(backend):
                     base_url="http://127.0.0.1:8801") as client:
         yield client
 
-
-@needs_backend
-class TestOpenJoinPresence:
-    def _open_join(self, backend):
-        backend.storage.get_channel.return_value = {
-            "permissions": permissions_to_json(PRESET_OPEN)}
-        backend.subscription_mgr.get_subscribers.return_value = {PEER_A, PEER_B}
-
-    def test_presence_sources_the_roster_from_subscribers(self, client, backend):
-        self._open_join(backend)
-
-        res = client.get(f"/channels/{CH}/presence", headers=AUTH)
-        assert res.status_code == 200
-        entries = res.json()
-        assert {e["identity_hash"] for e in entries} == {PEER_A, PEER_B}
-        for e in entries:
-            assert e["is_online"] is True
-            assert e["last_seen"] == 123.0
-            assert isinstance(e["display_name"], str)
-        # Members are never consulted for an open-join channel.
-        backend.storage.get_members.assert_not_called()
-
-    def test_link_quality_sources_the_roster_from_subscribers(self, client, backend):
-        self._open_join(backend)
-
-        res = client.get(f"/channels/{CH}/link_quality", headers=AUTH)
-        assert res.status_code == 200
-        entries = res.json()
-        assert {e["identity_hash"] for e in entries} == {PEER_A, PEER_B}
-        for e in entries:
-            assert isinstance(e["quality"], int)
-            assert isinstance(e["quality_label"], str)
-            # The client scores the roster and shows the winning peer's hop
-            # count, so every entry carries one (null when there is no path).
-            assert "hops" in e
-
-    def test_link_quality_leaves_the_local_identity_out(self, client, backend):
-        backend.storage.get_channel.return_value = {
-            "permissions": permissions_to_json(PRESET_OPEN)}
-        backend.subscription_mgr.get_subscribers.return_value = {
-            PEER_A, backend.identity.hash_hex}
-
-        res = client.get(f"/channels/{CH}/link_quality", headers=AUTH)
-        assert res.status_code == 200
-        # A link to yourself always scores EXCELLENT; including it would pin
-        # the client's meter to full bars whatever the mesh is doing.
-        assert {e["identity_hash"] for e in res.json()} == {PEER_A}
-
-
-@needs_backend
-class TestInviteOnlyUnchanged:
-    def test_presence_still_uses_members_for_invite_only(self, client, backend):
-        backend.storage.get_channel.return_value = {
-            "permissions": permissions_to_json(PRESET_PRIVATE)}
-        backend.storage.get_members.return_value = [
-            {"identity_hash": PEER_A}, {"identity_hash": PEER_B}]
-
-        res = client.get(f"/channels/{CH}/presence", headers=AUTH)
-        assert res.status_code == 200
-        assert {e["identity_hash"] for e in res.json()} == {PEER_A, PEER_B}
-        backend.subscription_mgr.get_subscribers.assert_not_called()

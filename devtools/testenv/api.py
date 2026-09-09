@@ -48,9 +48,8 @@ from trenchchat.core.interfaces_config import (
 from trenchchat.core.naming import NameInUseError
 from trenchchat.core.permissions import (
     ALL_PERMISSIONS, CREATE_CHANNEL, INVITE, KICK, MANAGE_CHANNEL, MANAGE_ROLES,
-    ROLE_ADMIN, ROLE_MEMBER, PRESET_OPEN, PRESET_PRIVATE, SEND_MESSAGE,
-    SHARE_FILES, VOICE_CHAT, is_open_join, offered_permissions,
-    permissions_from_json,
+    ROLE_ADMIN, ROLE_MEMBER, PRESET_PRIVATE, SEND_MESSAGE,
+    SHARE_FILES, VOICE_CHAT, grantable_to,
 )
 from trenchchat.core.presence import resolve_display_name
 from trenchchat.core.protocol import MAX_SHARED_FILE_BYTES
@@ -74,7 +73,6 @@ from backend_core import Backend
 class CreateChannelRequest(BaseModel):
     name: str
     description: str = ""
-    access: str = "public"  # "public" | "invite"
 
 
 class CreateServerRequest(BaseModel):
@@ -307,7 +305,6 @@ def _channel_to_dict(row) -> dict[str, Any]:
         "name": row["name"],
         "description": row["description"],
         "creator_hash": row["creator_hash"],
-        "open_join": is_open_join(permissions_from_json(row["permissions"])),
         "created_at": row["created_at"],
         "server_hash": row["server_hash"] if "server_hash" in keys else None,
     }
@@ -679,9 +676,6 @@ def create_app(backend: Backend, *, token: str | None = None,
     def _on_member_list_updated(channel_hash_hex):
         bus.emit("member_list_updated", channel_hash=channel_hash_hex)
 
-    def _on_channel_discovered(channel_hash_hex, channel_name):
-        bus.emit("channel_discovered", channel_hash=channel_hash_hex, channel_name=channel_name)
-
     def _on_presence_changed(peer_hash_hex: str, is_online: bool):
         bus.emit("presence", identity_hash=peer_hash_hex, is_online=is_online)
 
@@ -748,7 +742,6 @@ def create_app(backend: Backend, *, token: str | None = None,
     backend.invite_mgr.add_channel_joined_callback(_on_channel_joined)
     backend.invite_mgr.add_server_joined_callback(_on_server_joined)
     backend.invite_mgr.add_member_list_callback(_on_member_list_updated)
-    backend.channel_mgr.add_channel_discovered_callback(_on_channel_discovered)
     backend.presence_mgr.add_presence_callback(_on_presence_changed)
     backend.avatar_mgr.add_avatar_callback(_on_avatar_changed)
     backend.friends_mgr.add_friends_callback(_on_friend_updated)
@@ -1177,7 +1170,7 @@ def create_app(backend: Backend, *, token: str | None = None,
         try:
             raw = base64.b64decode(req.image_data_b64)
             jpeg = compress_avatar(raw)
-            backend.avatar_mgr.set_avatar(jpeg, backend.subscription_mgr.get_subscribers)
+            backend.avatar_mgr.set_avatar(jpeg)
         except ValueError as e:
             return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
         except RuntimeError as e:
@@ -1187,7 +1180,7 @@ def create_app(backend: Backend, *, token: str | None = None,
     @app.delete("/me/avatar")
     def remove_avatar():
         try:
-            backend.avatar_mgr.remove_avatar(backend.subscription_mgr.get_subscribers)
+            backend.avatar_mgr.remove_avatar()
         except RuntimeError as e:
             return JSONResponse({"ok": False, "error": str(e)}, status_code=429)
         return {"ok": True}
@@ -1609,8 +1602,8 @@ def create_app(backend: Backend, *, token: str | None = None,
             # this set is dropped by the core on read and on write, so a
             # client offering it would show a control that does nothing.
             "grantable": {
-                ROLE_ADMIN: list(offered_permissions(perms, ROLE_ADMIN)),
-                ROLE_MEMBER: list(offered_permissions(perms, ROLE_MEMBER)),
+                ROLE_ADMIN: list(grantable_to(ROLE_ADMIN)),
+                ROLE_MEMBER: list(grantable_to(ROLE_MEMBER)),
             },
             "admin": perms.get(ROLE_ADMIN, []),
             "member": perms.get(ROLE_MEMBER, []),
@@ -1647,7 +1640,7 @@ def create_app(backend: Backend, *, token: str | None = None,
     @app.post("/servers/{server_hash}/leave")
     def leave_server(server_hash: str):
         return {"ok": actions.leave_server(
-            backend.storage, backend.subscription_mgr, server_hash,
+            backend.storage, server_hash,
             backend.identity.hash_hex)}
 
     # --- channels ---
@@ -1663,17 +1656,6 @@ def create_app(backend: Backend, *, token: str | None = None,
         return [_channel_to_dict(c) for c in backend.storage.get_standalone_channels()
                if backend.storage.is_subscribed(c["hash"])]
 
-    @app.get("/channels/discovered")
-    def list_discovered_channels():
-        # Channels heard via a real-time announce (see
-        # ChannelAnnounceHandler / channel_mgr._on_channel_discovered) but
-        # never joined. Only ever open-join channels in practice --
-        # announce_channel() refuses to announce anything invite-only
-        # regardless of the discoverable flag, so they never reach local
-        # storage this way.
-        return [_channel_to_dict(c) for c in backend.storage.get_standalone_channels()
-               if not backend.storage.is_subscribed(c["hash"])]
-
     @app.get("/channels/unread")
     def channel_unread_counts():
         # Per-channel unread, the channel counterpart of /dms' unread field.
@@ -1687,7 +1669,7 @@ def create_app(backend: Backend, *, token: str | None = None,
 
     @app.post("/channels")
     def create_channel(req: CreateChannelRequest):
-        permissions = PRESET_OPEN if req.access == "public" else PRESET_PRIVATE
+        permissions = dict(PRESET_PRIVATE)
         try:
             ch_hash = actions.create_channel(
                 backend.channel_mgr, backend.invite_mgr,
@@ -1697,27 +1679,13 @@ def create_app(backend: Backend, *, token: str | None = None,
             return JSONResponse({"ok": False, "error": str(e)}, status_code=409)
         return {"hash": ch_hash}
 
-    @app.post("/channels/{channel_hash}/join")
-    def join_channel(channel_hash: str):
-        ok = actions.join_public_channel(backend.storage, backend.subscription_mgr, channel_hash)
-        return {"ok": ok}
-
     @app.post("/channels/{channel_hash}/leave")
     def leave_channel(channel_hash: str):
-        ok = actions.leave_channel(backend.storage, backend.subscription_mgr, channel_hash)
-        return {"ok": ok}
+        return {"ok": actions.leave_channel(backend.storage, channel_hash)}
 
     @app.get("/channels/{channel_hash}/members")
     def list_members(channel_hash: str):
         return [dict(row) for row in backend.storage.get_members(channel_hash)]
-
-    @app.get("/channels/{channel_hash}/subscribers")
-    def list_subscribers(channel_hash: str):
-        # Who this tester believes is on an open-join channel, which is what
-        # compute_channel_recipients() addresses a send to. The owner builds
-        # this from inbound MT_SUBSCRIBE; everyone else holds whatever the
-        # owner last broadcast, so the two views can legitimately differ.
-        return sorted(backend.subscription_mgr.get_subscribers(channel_hash))
 
     def _peer_link_quality(peer_hex: str) -> tuple[LinkQuality, int | None]:
         """This peer's link quality and the hop count it was scored from."""
@@ -1750,7 +1718,7 @@ def create_app(backend: Backend, *, token: str | None = None,
                 "last_seen": backend.presence_mgr.last_seen_at(peer_hex),
             }
             for peer_hex in actions.channel_roster_hexes(
-                backend.storage, backend.subscription_mgr, channel_hash)
+                backend.storage, channel_hash)
         ]
 
     @app.get("/channels/{channel_hash}/link_quality")
@@ -1763,7 +1731,7 @@ def create_app(backend: Backend, *, token: str | None = None,
         """
         entries = []
         for peer_hex in actions.channel_roster_hexes(
-                backend.storage, backend.subscription_mgr, channel_hash):
+                backend.storage, channel_hash):
             if peer_hex == backend.identity.hash_hex:
                 continue
             quality, hops = _peer_link_quality(peer_hex)
@@ -1797,19 +1765,12 @@ def create_app(backend: Backend, *, token: str | None = None,
         # regardless.
         my_hex = backend.identity.hash_hex
         # send_message mirrors messaging._on_lxmf_message: open-join channels
-        # accept anyone, so it is effectively true; otherwise it is the role
-        # check the delivery path applies.
-        channel = backend.storage.get_channel(channel_hash)
-        perms = permissions_from_json(channel["permissions"]) if channel else {}
-        send_message = True
-        # share_files is the other way round: a file is offered only where a
-        # member list can authorise a serve, so an open-join channel refuses
-        # a manifest whatever the roles say (actions.file_share_refusal).
-        share_files = False
-        if channel and not is_open_join(perms):
-            send_message = backend.storage.has_permission(channel_hash, my_hex, SEND_MESSAGE)
-            share_files = send_message and backend.storage.has_permission(
-                channel_hash, my_hex, SHARE_FILES)
+        # The role check the delivery path applies, so the client hides a
+        # control it would be refused on rather than offering it.
+        send_message = backend.storage.has_permission(
+            channel_hash, my_hex, SEND_MESSAGE)
+        share_files = send_message and backend.storage.has_permission(
+            channel_hash, my_hex, SHARE_FILES)
         return {
             "send_message": send_message,
             "share_files": share_files,
@@ -1829,8 +1790,8 @@ def create_app(backend: Backend, *, token: str | None = None,
             # this set is dropped by the core on read and on write, so a
             # client offering it would show a control that does nothing.
             "grantable": {
-                ROLE_ADMIN: list(offered_permissions(perms, ROLE_ADMIN)),
-                ROLE_MEMBER: list(offered_permissions(perms, ROLE_MEMBER)),
+                ROLE_ADMIN: list(grantable_to(ROLE_ADMIN)),
+                ROLE_MEMBER: list(grantable_to(ROLE_MEMBER)),
             },
             "admin": perms.get(ROLE_ADMIN, []),
             "member": perms.get(ROLE_MEMBER, []),
@@ -2011,7 +1972,7 @@ def create_app(backend: Backend, *, token: str | None = None,
         """
         before = backend.storage.get_latest_message_id(channel_hash)
         result = actions.share_file(
-            backend.file_mgr, backend.storage, backend.subscription_mgr,
+            backend.file_mgr, backend.storage,
             backend.messaging, channel_hash, backend.identity.hash_hex,
             req.file_name, file_data, req.content,
         )
@@ -2050,7 +2011,7 @@ def create_app(backend: Backend, *, token: str | None = None,
         # which must not be reported to the client as a successful send.
         before = backend.storage.get_latest_message_id(channel_hash)
         sent = actions.send_message(
-            backend.storage, backend.subscription_mgr, backend.messaging,
+            backend.storage, backend.messaging,
             channel_hash, backend.identity.hash_hex, req.content,
             reply_to=req.reply_to, image_data=image_data,
         )
@@ -2214,7 +2175,7 @@ def create_app(backend: Backend, *, token: str | None = None,
         # trenchchat_only: a reaction is a TrenchChat control message, and a
         # conversation's other end may be running something else entirely.
         return actions.conversation_recipients(
-            backend.storage, backend.subscription_mgr, backend.direct_mgr,
+            backend.storage, backend.direct_mgr,
             channel_hash, backend.identity.hash_hex, trenchchat_only=True,
         )
 

@@ -20,7 +20,7 @@ from trenchchat.core import actions
 from trenchchat.core.naming import NameInUseError, server_hash_for
 from trenchchat.core.permissions import (
     CREATE_CHANNEL, INVITE, PRESET_PRIVATE, PRESET_SERVER, ROLE_ADMIN,
-    ROLE_MEMBER, ROLE_OWNER, SEND_MESSAGE, is_open_join, permissions_from_json,
+    ROLE_MEMBER, ROLE_OWNER, SEND_MESSAGE, permissions_from_json,
 )
 
 
@@ -68,7 +68,6 @@ class TestServerCreation:
     def test_server_is_never_open_join(self, peer_factory):
         alice = peer_factory("alice")
         h = alice.server_mgr.create_server("S")
-        assert is_open_join(alice.storage.get_server_permissions(h)) is False
 
     def test_server_does_not_appear_in_channel_list(self, peer_factory):
         alice = peer_factory("alice")
@@ -88,7 +87,6 @@ class TestChannelsInServer:
         assert alice.storage.get_channel(ch)["server_hash"] == s
         assert alice.storage.scope_for(ch) == s
         perms = permissions_from_json(alice.storage.get_channel(ch)["permissions"])
-        assert is_open_join(perms) is False
 
     def test_channel_in_server_has_no_member_rows_of_its_own(self, peer_factory):
         alice = peer_factory("alice")
@@ -181,7 +179,7 @@ class TestOneInviteGrantsEveryChannel:
         assert wait_for(lambda: bob.storage.get_channel(ch) is not None, timeout=5)
 
         assert actions.send_message(
-            alice.storage, alice.subscription_mgr, alice.messaging,
+            alice.storage, alice.messaging,
             ch, alice.identity.hash_hex, "hello server",
         ) is True
         assert wait_for(
@@ -199,8 +197,7 @@ class TestOneInviteGrantsEveryChannel:
             s, alice.identity.hash_hex, "general")
         _invite_and_join(alice, bob, s)
 
-        recipients = actions.compute_channel_recipients(
-            alice.storage, alice.subscription_mgr, ch, alice.identity.hash_hex)
+        recipients = actions.compute_channel_recipients(alice.storage, ch)
         assert set(recipients) == {alice.identity.hash_hex, bob.identity.hash_hex}
 
 
@@ -283,7 +280,7 @@ class TestLeaveServer:
         ), "bob never saw the server in his listing"
 
         assert actions.leave_server(
-            bob.storage, bob.subscription_mgr, s, bob.identity.hash_hex) is True
+            bob.storage, s, bob.identity.hash_hex) is True
 
         assert s not in [row["hash"] for row in bob.server_mgr.list_servers()], \
             "the left server still appears in the listing"
@@ -293,7 +290,7 @@ class TestLeaveServer:
     def test_leaving_an_unknown_server_returns_false(self, peer_factory):
         alice = peer_factory("alice")
         assert actions.leave_server(
-            alice.storage, alice.subscription_mgr, "ff" * 16,
+            alice.storage, "ff" * 16,
             alice.identity.hash_hex) is False
 
 
@@ -320,7 +317,6 @@ class TestServerPermissionScope:
         assert alice.storage.get_server_permissions(s)[ROLE_MEMBER] == [SEND_MESSAGE, INVITE]
         mirrored = permissions_from_json(alice.storage.get_channel(ch)["permissions"])
         assert mirrored[ROLE_MEMBER] == [SEND_MESSAGE, INVITE]
-        assert is_open_join(mirrored) is False
 
 
 class TestInvitingToAChannelInvitesToItsServer:

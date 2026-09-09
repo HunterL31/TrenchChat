@@ -198,56 +198,28 @@ class PresenceManager:
                 if now - ts < self._timeout
             }
 
-    def get_online_for_channel(
-        self,
-        channel_hash_hex: str,
-        storage,
-        subscription_mgr,
-    ) -> list[dict]:
+    def get_online_for_channel(self, channel_hash_hex: str,
+                               storage) -> list[dict]:
+        """Every member of a channel with their online status.
+
+        Each dict has keys: identity_hash, display_name, is_online. Offline
+        members are listed too, which is what makes this a roster rather than
+        a presence list.
         """
-        Return a list of dicts describing members/subscribers for a channel,
-        with their online status.
-
-        Each dict has keys: identity_hash, display_name, is_online.
-
-        For invite-only channels: all members are listed (online + offline).
-        For public channels: only currently-online subscribers are listed
-        (the full subscriber list is only available to the channel owner).
-        """
-        from trenchchat.core.permissions import is_open_join, permissions_from_json
-
-        channel = storage.get_channel(channel_hash_hex)
-        if channel is None:
+        if storage.get_channel(channel_hash_hex) is None:
             return []
 
-        perms = permissions_from_json(channel["permissions"])
         results: list[dict] = []
-
-        if is_open_join(perms):
-            online = self.get_online_peers()
-            all_peers = set(online)
-            all_peers.add(self._self_hex)
-            subs = subscription_mgr.get_subscribers(channel_hash_hex)
-            for peer_hex in all_peers:
-                if peer_hex not in subs and peer_hex != self._self_hex:
-                    continue
-                results.append({
-                    "identity_hash": peer_hex,
-                    "display_name": self._resolve_display_name(peer_hex, storage),
-                    "is_online": self.is_online(peer_hex),
-                })
-        else:
-            members = storage.get_members(channel_hash_hex)
-            for row in members:
-                peer_hex = row["identity_hash"]
-                # Prefer the stored member name; fall back to announce app_data
-                display = (row["display_name"]
-                           or self._resolve_display_name(peer_hex, storage))
-                results.append({
-                    "identity_hash": peer_hex,
-                    "display_name": display,
-                    "is_online": self.is_online(peer_hex),
-                })
+        for row in storage.get_members(channel_hash_hex):
+            peer_hex = row["identity_hash"]
+            # Prefer the stored member name; fall back to announce app_data
+            display = (row["display_name"]
+                       or self._resolve_display_name(peer_hex, storage))
+            results.append({
+                "identity_hash": peer_hex,
+                "display_name": display,
+                "is_online": self.is_online(peer_hex),
+            })
 
         results.sort(key=lambda r: (not r["is_online"], r["display_name"].lower()))
         return results
@@ -318,13 +290,12 @@ class PresenceBeacon:
     never make a peer appear online).
     """
 
-    def __init__(self, identity, storage, router, subscription_mgr, presence_mgr,
+    def __init__(self, identity, storage, router, presence_mgr,
                 beacon_after_secs: float = PRESENCE_BEACON_AFTER_SECS,
                 jitter_fraction: float = PRESENCE_BEACON_JITTER_FRACTION):
         self._identity = identity
         self._storage = storage
         self._router = router
-        self._subscription_mgr = subscription_mgr
         self._presence_mgr = presence_mgr
         self._beacon_after = beacon_after_secs
         self._jitter_fraction = jitter_fraction
@@ -401,9 +372,7 @@ class PresenceBeacon:
         peers: set[str] = set()
         for sub in self._storage.get_subscriptions():
             peers.update(compute_channel_recipients(
-                self._storage, self._subscription_mgr, sub["channel_hash"],
-                self._identity.hash_hex,
-            ))
+                self._storage, sub["channel_hash"]))
         peers.discard(self._identity.hash_hex)
         return peers
 
@@ -451,10 +420,7 @@ class PresenceBeacon:
         entries: list = []
         for sub in self._storage.get_subscriptions():
             channel_hash = sub["channel_hash"]
-            recipients = compute_channel_recipients(
-                self._storage, self._subscription_mgr, channel_hash,
-                self._identity.hash_hex,
-            )
+            recipients = compute_channel_recipients(self._storage, channel_hash)
             if peer_hex not in recipients:
                 continue
             rows = sync_ranges.signed_rows(

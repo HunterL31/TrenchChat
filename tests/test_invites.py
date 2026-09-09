@@ -15,6 +15,8 @@ import msgpack
 import pytest
 
 from tests.helpers import (
+    know_channel,
+    mirror_members,
     wait_for,
     wait_for_member,
 )
@@ -34,7 +36,7 @@ class TestInviteTokens:
         alice = peer_factory("alice")
         bob = peer_factory("bob")
 
-        ch_hash = alice.channel_mgr.create_channel("token-test", "", "invite")
+        ch_hash = alice.channel_mgr.create_channel("token-test", "")
 
         token, expiry = alice.invite_mgr.generate_invite_token(
             ch_hash, bob.identity.hash, ttl=3600
@@ -56,7 +58,7 @@ class TestInviteTokens:
         alice = peer_factory("alice")
         bob = peer_factory("bob")
 
-        ch_hash = alice.channel_mgr.create_channel("expire-test", "", "invite")
+        ch_hash = alice.channel_mgr.create_channel("expire-test", "")
 
         token, expiry = alice.invite_mgr.generate_invite_token(
             ch_hash, bob.identity.hash, ttl=-1
@@ -91,7 +93,7 @@ class TestInviteTokens:
         alice = peer_factory("alice")
         bob = peer_factory("bob")
 
-        ch_hash = alice.channel_mgr.create_channel("self-admin-test", "", "invite")
+        ch_hash = alice.channel_mgr.create_channel("self-admin-test", "")
 
         token, expiry = alice.invite_mgr.generate_invite_token(
             ch_hash, bob.identity.hash, ttl=3600
@@ -133,7 +135,7 @@ class TestInviteFlow:
         alice = peer_factory("alice")
         bob = peer_factory("bob")
 
-        ch_hash = alice.channel_mgr.create_channel("private", "Invite only", "invite")
+        ch_hash = alice.channel_mgr.create_channel("private", "Invite only")
 
         def on_invite(channel_hash_hex, channel_name, token, expiry, admin_hex):
             bob.invite_mgr.send_join_request(channel_hash_hex, token, expiry, admin_hex)
@@ -155,7 +157,7 @@ class TestInviteFlow:
         alice = peer_factory("alice")
         bob = peer_factory("bob")
 
-        ch_hash = alice.channel_mgr.create_channel("callback-invite", "", "invite")
+        ch_hash = alice.channel_mgr.create_channel("callback-invite", "")
 
         invites_received = []
         bob.invite_mgr.add_invite_callback(
@@ -178,7 +180,7 @@ class TestInviteFlow:
         alice = peer_factory("alice")
         bob = peer_factory("bob")
 
-        ch_hash = alice.channel_mgr.create_channel("top-secret-channel", "", "invite")
+        ch_hash = alice.channel_mgr.create_channel("top-secret-channel", "")
         assert bob.storage.get_channel(ch_hash) is None, \
             "test premise broken: Bob should have no local record of this channel yet"
 
@@ -202,7 +204,7 @@ class TestInviteFlow:
         alice = peer_factory("alice")
         bob = peer_factory("bob")
 
-        ch_hash = alice.channel_mgr.create_channel("joined-cb", "", "invite")
+        ch_hash = alice.channel_mgr.create_channel("joined-cb", "")
 
         joined = []
         bob.invite_mgr.add_channel_joined_callback(
@@ -226,19 +228,15 @@ class TestInviteFlow:
         bob = peer_factory("bob")
         carol = peer_factory("carol")
 
-        ch_hash = alice.channel_mgr.create_channel("members-only", "", "invite")
+        ch_hash = alice.channel_mgr.create_channel("members-only", "")
 
         # Bob is a member, Carol is not
         alice.storage.upsert_member(ch_hash, bob.identity.hash_hex, "Bob", False)
-        bob.storage.upsert_channel(ch_hash, "members-only", "", alice.identity.hash_hex,
-                                   "invite", time.time())
-        bob.storage.subscribe(ch_hash)
+        mirror_members(ch_hash, alice, bob)
         bob.storage.upsert_member(ch_hash, bob.identity.hash_hex, "Bob", False)
         bob.storage.upsert_member(ch_hash, alice.identity.hash_hex, "Alice", True)
 
-        carol.storage.upsert_channel(ch_hash, "members-only", "", alice.identity.hash_hex,
-                                     "invite", time.time())
-        carol.storage.subscribe(ch_hash)
+        know_channel(carol, ch_hash, alice)
 
         carol.messaging.send_message(
             channel_hash_hex=ch_hash,
@@ -259,7 +257,7 @@ class TestMemberListVersioning:
         alice = peer_factory("alice")
         bob = peer_factory("bob")
 
-        ch_hash = alice.channel_mgr.create_channel("versioning", "", "invite")
+        ch_hash = alice.channel_mgr.create_channel("versioning", "")
 
         alice.invite_mgr.publish_member_list(ch_hash)
         v1 = alice.storage.get_member_list_version(ch_hash)
@@ -277,7 +275,7 @@ class TestMemberListVersioning:
         alice = peer_factory("alice")
         bob = peer_factory("bob")
 
-        ch_hash = alice.channel_mgr.create_channel("reject-old", "", "invite")
+        ch_hash = alice.channel_mgr.create_channel("reject-old", "")
 
         alice.invite_mgr.publish_member_list(ch_hash)
         alice.invite_mgr.publish_member_list(ch_hash, add_members=[bob.identity.hash])
@@ -298,16 +296,14 @@ class TestMemberListVersioning:
         bob = peer_factory("bob")
         carol = peer_factory("carol")
 
-        ch_hash = alice.channel_mgr.create_channel("broadcast-ml", "", "invite")
+        ch_hash = alice.channel_mgr.create_channel("broadcast-ml", "")
 
         # Add Bob as a member
         alice.invite_mgr.publish_member_list(ch_hash, add_members=[bob.identity.hash])
         assert wait_for_member(alice.storage, ch_hash, bob.identity.hash_hex, timeout=5)
 
         # Set up Bob's storage so he can receive the member list
-        bob.storage.upsert_channel(ch_hash, "broadcast-ml", "", alice.identity.hash_hex,
-                                   "invite", time.time())
-        bob.storage.subscribe(ch_hash)
+        mirror_members(ch_hash, alice, bob)
 
         # Now add Carol: Bob should receive the updated list
         alice.invite_mgr.publish_member_list(ch_hash, add_members=[carol.identity.hash])
@@ -410,7 +406,7 @@ class TestPendingInvitePersistence:
         alice = peer_factory("alice")
         bob = peer_factory("bob")
 
-        ch_hash = alice.channel_mgr.create_channel("persist-invite", "", "invite")
+        ch_hash = alice.channel_mgr.create_channel("persist-invite", "")
         alice.invite_mgr.send_invite(ch_hash, bob.identity.hash_hex)
 
         assert wait_for(
@@ -438,7 +434,7 @@ class TestPendingInvitePersistence:
         alice = peer_factory("alice")
         bob = peer_factory("bob")
 
-        ch_hash = alice.channel_mgr.create_channel("persist-invite-expired", "", "invite")
+        ch_hash = alice.channel_mgr.create_channel("persist-invite-expired", "")
         alice.invite_mgr.send_invite(ch_hash, bob.identity.hash_hex, ttl=2.0)
 
         assert wait_for(
@@ -456,7 +452,7 @@ class TestPendingInvitePersistence:
         alice = peer_factory("alice")
         bob = peer_factory("bob")
 
-        ch_hash = alice.channel_mgr.create_channel("persist-invite-accept", "", "invite")
+        ch_hash = alice.channel_mgr.create_channel("persist-invite-accept", "")
         alice.invite_mgr.send_invite(ch_hash, bob.identity.hash_hex)
 
         assert wait_for(
@@ -479,7 +475,7 @@ class TestPendingInvitePersistence:
         alice = peer_factory("alice")
         bob = peer_factory("bob")
 
-        ch_hash = alice.channel_mgr.create_channel("persist-invite-decline", "", "invite")
+        ch_hash = alice.channel_mgr.create_channel("persist-invite-decline", "")
         alice.invite_mgr.send_invite(ch_hash, bob.identity.hash_hex)
 
         assert wait_for(
@@ -514,7 +510,7 @@ class TestInviteSurvivesAnUnresolvedPath:
         alice = peer_factory("alice")
         bob = peer_factory("bob")
 
-        ch_hash = alice.channel_mgr.create_channel("cold-invite", "", "invite")
+        ch_hash = alice.channel_mgr.create_channel("cold-invite", "")
 
         monkeypatch.setattr(RNS.Identity, "recall", staticmethod(lambda *a, **k: None))
         alice.invite_mgr.send_invite(ch_hash, bob.identity.hash_hex)
@@ -551,7 +547,7 @@ class TestInviteeSidebarState:
     def test_accepted_invite_leaves_a_visible_channel(self, peer_factory):
         alice = peer_factory("alice")
         bob = peer_factory("bob")
-        ch = alice.channel_mgr.create_channel("private", "Invite only", "invite")
+        ch = alice.channel_mgr.create_channel("private", "Invite only")
 
         self._invite_and_join(alice, bob, ch)
 
@@ -569,7 +565,7 @@ class TestInviteeSidebarState:
         back into their own sidebar."""
         alice = peer_factory("alice")
         bob = peer_factory("bob")
-        ch = alice.channel_mgr.create_channel("private", "Invite only", "invite")
+        ch = alice.channel_mgr.create_channel("private", "Invite only")
 
         self._invite_and_join(alice, bob, ch)
         assert wait_for(lambda: bob.storage.is_subscribed(ch), timeout=5)
@@ -590,7 +586,7 @@ class TestInviteeSidebarState:
         between used to leave a member of a channel that does not exist."""
         alice = peer_factory("alice")
         bob = peer_factory("bob")
-        ch = alice.channel_mgr.create_channel("private", "Invite only", "invite")
+        ch = alice.channel_mgr.create_channel("private", "Invite only")
         bob.storage.record_accepted_invite(
             ch, alice.identity.hash_hex, time.time() + 3600)
         alice.invite_mgr.publish_member_list(ch, add_members=[bob.identity.hash])
@@ -614,7 +610,7 @@ class TestMembershipResync:
     def test_a_peer_that_missed_the_document_converges_on_announce(self, peer_factory):
         alice = peer_factory("alice")
         bob = peer_factory("bob")
-        ch = alice.channel_mgr.create_channel("private", "Invite only", "invite")
+        ch = alice.channel_mgr.create_channel("private", "Invite only")
         bob.storage.record_accepted_invite(
             ch, alice.identity.hash_hex, time.time() + 3600)
 
@@ -635,7 +631,7 @@ class TestMembershipResync:
     def test_the_cooldown_holds_a_second_resync(self, peer_factory):
         alice = peer_factory("alice")
         bob = peer_factory("bob")
-        ch = alice.channel_mgr.create_channel("private", "Invite only", "invite")
+        ch = alice.channel_mgr.create_channel("private", "Invite only")
         alice.invite_mgr.publish_member_list(ch, add_members=[bob.identity.hash])
 
         assert alice.invite_mgr.resync_membership(bob.identity.hash_hex) == 1
@@ -645,7 +641,7 @@ class TestMembershipResync:
     def test_a_non_member_is_never_sent_a_roster(self, peer_factory):
         alice = peer_factory("alice")
         bob = peer_factory("bob")
-        alice.channel_mgr.create_channel("private", "Invite only", "invite")
+        alice.channel_mgr.create_channel("private", "Invite only")
 
         assert alice.invite_mgr.resync_membership(bob.identity.hash_hex) == 0
 
@@ -660,7 +656,7 @@ class TestEqualVersionTiebreak:
     def test_a_resent_document_is_not_re_applied(self, peer_factory):
         alice = peer_factory("alice")
         bob = peer_factory("bob")
-        ch = alice.channel_mgr.create_channel("private", "Invite only", "invite")
+        ch = alice.channel_mgr.create_channel("private", "Invite only")
         bob.storage.record_accepted_invite(
             ch, alice.identity.hash_hex, time.time() + 3600)
         alice.invite_mgr.publish_member_list(ch, add_members=[bob.identity.hash])

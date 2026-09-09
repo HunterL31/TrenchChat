@@ -78,7 +78,7 @@ from trenchchat.core.messaging import (
 )
 from trenchchat.core.presence import PRESENCE_TIMEOUT_SECS
 from trenchchat.core.permissions import (
-    FULL_SYNC, has_permission, is_open_join, permissions_from_json,
+    FULL_SYNC, has_permission, permissions_from_json,
 )
 from trenchchat.core.protocol import (
     F_AUTHOR_KEYS, F_CHANNEL_HASH, F_MSG_TYPE,
@@ -300,13 +300,12 @@ def _truncate_at_group_boundary(rows: list) -> tuple[list, bool]:
 
 class SyncManager:
     def __init__(self, identity: Identity, storage: Storage, router: Router,
-                 messaging: Messaging, subscription_mgr, invite_mgr,
+                 messaging: Messaging, invite_mgr,
                  reaction_mgr=None):
         self._identity = identity
         self._storage = storage
         self._router = router
         self._messaging = messaging
-        self._subscription_mgr = subscription_mgr
         self._invite_mgr = invite_mgr
         self._reaction_mgr = reaction_mgr
 
@@ -801,8 +800,6 @@ class SyncManager:
         channel = self._storage.get_channel(channel_hash_hex)
         if channel is None:
             return False
-        if is_open_join(permissions_from_json(channel["permissions"])):
-            return True
         return self._storage.is_member(channel_hash_hex, peer_hex)
 
     def _handle_missed_delivery(self, fields: dict, channel_hash_hex: str,
@@ -1679,12 +1676,6 @@ class SyncManager:
     def _get_channel_peers(self, channel_hash_hex: str) -> set[str]:
         """Return identity hashes of all known peers on this channel (excl. self)."""
         peers: set[str] = set()
-
-        # Public channels: subscribers tracked by SubscriptionManager
-        subs = self._subscription_mgr.get_subscribers(channel_hash_hex)
-        peers.update(subs)
-
-        # Invite-only channels: from members table
         for row in self._storage.get_members(channel_hash_hex):
             peers.add(row["identity_hash"])
 

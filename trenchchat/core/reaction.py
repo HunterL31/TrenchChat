@@ -31,7 +31,7 @@ import LXMF
 from trenchchat.core.identity import Identity
 from trenchchat.core.image import inbound_image_is_sane
 from trenchchat.core.permissions import (
-    SEND_MESSAGE, is_open_join, permissions_from_json,
+    SEND_MESSAGE,
 )
 from trenchchat.core.protocol import (
     F_MSG_TYPE, F_CHANNEL_HASH,
@@ -392,8 +392,6 @@ class ReactionManager:
         channel = self._storage.get_channel(channel_hash_hex)
         if channel is None:
             return False
-        if is_open_join(permissions_from_json(channel["permissions"])):
-            return True
         if not self._storage.is_member(channel_hash_hex, sender_hex):
             return False
         return self._storage.has_permission(channel_hash_hex, sender_hex, SEND_MESSAGE)

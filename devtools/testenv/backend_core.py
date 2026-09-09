@@ -31,7 +31,6 @@ from trenchchat.core.channel import ChannelManager
 from trenchchat.core.server import ServerManager
 from trenchchat.core.messaging import Messaging
 from trenchchat.core.network_map import NetworkMapMonitor
-from trenchchat.core.subscription import SubscriptionManager
 from trenchchat.core.invite import InviteManager
 from trenchchat.core.sync import SyncManager
 from trenchchat.core.presence import (
@@ -247,11 +246,10 @@ class Backend:
         self.channel_mgr = ChannelManager(self.identity, self.storage)
         self.server_mgr = ServerManager(self.identity, self.storage)
         self.messaging = Messaging(self.identity, self.storage, self.router)
-        self.subscription_mgr = SubscriptionManager(self.identity, self.storage, self.router)
         self.invite_mgr = InviteManager(self.identity, self.storage, self.router)
         self.reaction_mgr = ReactionManager(self.identity, self.storage, self.router)
         self.sync_mgr = SyncManager(self.identity, self.storage, self.router,
-                                    self.messaging, self.subscription_mgr, self.invite_mgr,
+                                    self.messaging, self.invite_mgr,
                                     reaction_mgr=self.reaction_mgr)
         presence_kwargs = {}
         if presence_timeout_secs is not None:
@@ -262,7 +260,7 @@ class Backend:
         if presence_beacon_after_secs is not None:
             beacon_kwargs["beacon_after_secs"] = presence_beacon_after_secs
         self.presence_beacon = PresenceBeacon(
-            self.identity, self.storage, self.router, self.subscription_mgr,
+            self.identity, self.storage, self.router,
             self.presence_mgr, **beacon_kwargs,
         )
         self.router.add_outbound_callback(self.presence_beacon.record_sent)
@@ -296,7 +294,7 @@ class Backend:
         # hours apart, and until they have heard us they cannot verify
         # anything we send -- it is quarantined at their end and dropped.
         self.first_contact = FirstContactAnnouncer(
-            self.router, self.channel_mgr, self.identity.hash_hex,
+            self.router, self.identity.hash_hex,
         )
         self.propagation_nodes = PropagationNodes(self.config, self.router)
         self.propagation_collector = PropagationCollector(
@@ -330,7 +328,7 @@ class Backend:
             voice_kwargs["audio_factory"] = make_tone_pipeline
         self.voice_transport = RNSVoiceTransport(self.identity)
         self.voice_mgr = VoiceManager(
-            self.identity, self.storage, self.router, self.subscription_mgr,
+            self.identity, self.storage, self.router,
             self.config, transport=self.voice_transport, **voice_kwargs,
         )
 
@@ -389,7 +387,6 @@ class Backend:
             self._seed_user_directory(peer_hex)
             self.avatar_mgr.flush_avatar(peer_hex)
             self.reaction_mgr.flush_pending_emoji(peer_hex)
-            self.subscription_mgr.flush_pending(peer_hex)
             self.invite_mgr.flush_pending(peer_hex)
             self.invite_mgr.resync_membership(peer_hex)
             self.friends_mgr.flush_pending(peer_hex)
@@ -496,7 +493,6 @@ class Backend:
     def announce(self, attached_interface=None):
         self.router.announce(attached_interface=attached_interface)
         self.router.announce_user(attached_interface=attached_interface)
-        self.channel_mgr.announce_all_owned(attached_interface=attached_interface)
 
     def start_heartbeat(self, interval: float = 1.5) -> None:
         """Re-announce on a timer for the life of the process, mirroring the

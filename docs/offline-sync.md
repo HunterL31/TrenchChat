@@ -352,7 +352,7 @@ Auto-joining a channel via an accepted invite fires an additional sync trigger, 
 
 ## Access control
 
-- **Public channels**: sync requests are honored for any peer who is subscribed (`storage.is_subscribed()`). No tenure tracking applies, membership there is a simple subscribe/unsubscribe flag, not a timestamped interval.
+
 - **Invite-only channels**: access control is timestamp-based, not just membership-based, via the `membership_tenure` table (`channel_hash, identity_hash, joined_at, left_at`) and `storage.was_member_at(channel_hash, identity_hash, timestamp)`. Two independent checks apply to each candidate message in a sync response:
   1. **Sender tenure**: was the message's claimed author actually a member of the channel *at the message's timestamp*? Rejects messages from someone who has since been kicked, or whose claimed authorship predates them ever joining.
   2. **Requester tenure**: was the peer *asking* for sync actually a member at that timestamp? Off by default (see `full_sync` below); this is what stops a newly-invited member from using the sync protocol to backfill history from before they joined, the same way an invite-only channel's `members` table stops them from reading a live channel dump.

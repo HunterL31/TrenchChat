@@ -35,7 +35,6 @@ from asserts import set_timeout_scale, ScenarioFailure  # noqa: E402
 from peer import Orchestrator, Peer  # noqa: E402
 from scenario import PROBE, REGISTRY, Result  # noqa: E402
 
-import scen_public  # noqa: F401,E402  (registers family public)
 import scen_sync    # noqa: F401,E402  (registers family sync)
 import scen_invite  # noqa: F401,E402  (registers family invite)
 import scen_links   # noqa: F401,E402  (registers family links)

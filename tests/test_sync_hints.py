@@ -20,7 +20,7 @@ import time
 
 import pytest
 
-from tests.helpers import sign_as, wait_for, wait_for_message
+from tests.helpers import mirror_members, sign_as, wait_for, wait_for_message
 from trenchchat.core.messaging import _compute_message_id
 from trenchchat.core.protocol import (
     F_CHANNEL_HASH, F_MSG_TYPE, F_SYNC_MESSAGES, F_SYNC_WINDOW_START,
@@ -34,12 +34,6 @@ from trenchchat.core.sync_status import SyncState
 # Helpers (duplicated from tests/test_sync.py -- established pattern)
 # ---------------------------------------------------------------------------
 
-def _seed_channel_on_peer(peer, ch_hash, channel_name, creator_hash,
-                           access_mode="public"):
-    """Give a peer knowledge of a channel and subscribe them to it."""
-    peer.storage.upsert_channel(ch_hash, channel_name, "", creator_hash,
-                                access_mode, time.time())
-    peer.storage.subscribe(ch_hash)
 
 
 def _insert_message(storage, ch_hash, sender_hex, content, ts=None):
@@ -65,6 +59,11 @@ def _insert_message(storage, ch_hash, sender_hex, content, ts=None):
 # B1 -- the motivating scenario, end to end
 # ---------------------------------------------------------------------------
 
+# These suites backdate history, so tenure starts well before it: they
+# simulate a member who has been in the channel all along, which is what
+# the real invite flow would have recorded.
+_ANCIENT_SECS = 30 * 86400
+
 class TestSenderOnlyHintRecovery:
     def test_message_survives_when_the_broadcast_reaches_nobody(self, peer_factory):
         """
@@ -81,9 +80,9 @@ class TestSenderOnlyHintRecovery:
         carol = peer_factory("carol")
         dave = peer_factory("dave")
 
-        ch_hash = alice.channel_mgr.create_channel("b1-motivating", "", "public")
-        for peer in (bob, carol, dave):
-            _seed_channel_on_peer(peer, ch_hash, "b1-motivating", alice.identity.hash_hex)
+        ch_hash = alice.channel_mgr.create_channel("b1-motivating", "")
+        mirror_members(ch_hash, alice, bob, carol, dave,
+                       joined_at=time.time() - _ANCIENT_SECS)
 
         ts = time.time()
         msg_id = _insert_message(carol.storage, ch_hash, carol.identity.hash_hex,
@@ -143,9 +142,8 @@ class TestHintDurabilityAcrossRestart:
         bob = peer_factory("bob")
         carol = peer_factory("carol")
 
-        ch_hash = alice.channel_mgr.create_channel("b2-restart", "", "public")
-        _seed_channel_on_peer(bob, ch_hash, "b2-restart", alice.identity.hash_hex)
-        _seed_channel_on_peer(carol, ch_hash, "b2-restart", alice.identity.hash_hex)
+        ch_hash = alice.channel_mgr.create_channel("b2-restart", "")
+        mirror_members(ch_hash, alice, bob, carol, joined_at=time.time() - _ANCIENT_SECS)
 
         ts = time.time()
         msg_id = _insert_message(carol.storage, ch_hash, alice.identity.hash_hex,
@@ -179,9 +177,8 @@ class TestHintDurabilityAcrossRestart:
         bob = peer_factory("bob")
         carol = peer_factory("carol")
 
-        ch_hash = alice.channel_mgr.create_channel("b4-old-hint", "", "public")
-        _seed_channel_on_peer(bob, ch_hash, "b4-old-hint", alice.identity.hash_hex)
-        _seed_channel_on_peer(carol, ch_hash, "b4-old-hint", alice.identity.hash_hex)
+        ch_hash = alice.channel_mgr.create_channel("b4-old-hint", "")
+        mirror_members(ch_hash, alice, bob, carol, joined_at=time.time() - _ANCIENT_SECS)
 
         ts = time.time()
         msg_id = _insert_message(carol.storage, ch_hash, alice.identity.hash_hex,
@@ -233,9 +230,8 @@ class TestHintHolderDataLoss:
         bob = peer_factory("bob")
         carol = peer_factory("carol")
 
-        ch_hash = alice.channel_mgr.create_channel("b3-wiped", "", "public")
-        _seed_channel_on_peer(bob, ch_hash, "b3-wiped", alice.identity.hash_hex)
-        _seed_channel_on_peer(carol, ch_hash, "b3-wiped", alice.identity.hash_hex)
+        ch_hash = alice.channel_mgr.create_channel("b3-wiped", "")
+        mirror_members(ch_hash, alice, bob, carol, joined_at=time.time() - _ANCIENT_SECS)
 
         ts = time.time()
         msg_id = _insert_message(carol.storage, ch_hash, carol.identity.hash_hex,
@@ -275,9 +271,9 @@ class TestRelayChain:
         carol = peer_factory("carol")
         dave = peer_factory("dave")
 
-        ch_hash = alice.channel_mgr.create_channel("b5-relay", "", "public")
-        for peer in (bob, carol, dave):
-            _seed_channel_on_peer(peer, ch_hash, "b5-relay", alice.identity.hash_hex)
+        ch_hash = alice.channel_mgr.create_channel("b5-relay", "")
+        mirror_members(ch_hash, alice, bob, carol, dave,
+                       joined_at=time.time() - _ANCIENT_SECS)
 
         ts = time.time()
         content = "delivered to Carol and Dave, missed by Bob"
@@ -343,9 +339,9 @@ class TestUnresolvableHintAtFourPeerScale:
         carol = peer_factory("carol")
         dave = peer_factory("dave")
 
-        ch_hash = alice.channel_mgr.create_channel("b6-unresolvable", "", "public")
-        for peer in (bob, carol, dave):
-            _seed_channel_on_peer(peer, ch_hash, "b6-unresolvable", alice.identity.hash_hex)
+        ch_hash = alice.channel_mgr.create_channel("b6-unresolvable", "")
+        mirror_members(ch_hash, alice, bob, carol, dave,
+                       joined_at=time.time() - _ANCIENT_SECS)
 
         ts = time.time()
         carol.storage.record_missed_delivery(ch_hash, bob.identity.hash_hex, "de" * 32)
@@ -397,9 +393,8 @@ class TestResponderSideHintClearedOnceServed:
         bob = peer_factory("bob")
         carol = peer_factory("carol")
 
-        ch_hash = alice.channel_mgr.create_channel("b7-repeat-hint", "", "public")
-        _seed_channel_on_peer(bob, ch_hash, "b7-repeat-hint", alice.identity.hash_hex)
-        _seed_channel_on_peer(carol, ch_hash, "b7-repeat-hint", alice.identity.hash_hex)
+        ch_hash = alice.channel_mgr.create_channel("b7-repeat-hint", "")
+        mirror_members(ch_hash, alice, bob, carol, joined_at=time.time() - _ANCIENT_SECS)
 
         ts = time.time()
         hinted_id = _insert_message(carol.storage, ch_hash, alice.identity.hash_hex,

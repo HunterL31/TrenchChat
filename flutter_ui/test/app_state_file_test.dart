@@ -281,8 +281,6 @@ void main() {
       expect(sendRefusalMessage('no_share_permission'),
           'You do not have permission to share files in this channel.');
       expect(sendRefusalMessage('storage'), 'Not enough file storage on this node.');
-      expect(sendRefusalMessage('open_join_channel'),
-          'Files are shared in invite-only channels only.');
       expect(sendRefusalMessage('file_and_image'),
           'A message carries an image or a file, not both.');
       expect(sendRefusalMessage('empty_file'), 'That file is empty.');

@@ -354,24 +354,16 @@ class _FakeStorage:
                  is_open: bool = False):
         self._channel_hash = channel_hash
         self._members = members
-        self._is_open = is_open
 
     def get_channel(self, hash: str):
         if hash != self._channel_hash:
             return None
-        perm = '{"open_join": true}' if self._is_open else '{"open_join": false}'
-        return {"hash": hash, "permissions": perm}
+        return {"hash": hash, "permissions": "{}"}
 
     def get_members(self, hash: str):
         return self._members
 
 
-class _FakeSubscriptionMgr:
-    def __init__(self, subs: set[str]):
-        self._subs = subs
-
-    def get_subscribers(self, channel_hash: str) -> set[str]:
-        return self._subs
 
 
 def test_get_online_for_channel_invite_only_shows_all_members():
@@ -381,13 +373,12 @@ def test_get_online_for_channel_invite_only_shows_all_members():
         {"identity_hash": PEER_A, "display_name": "Alice"},
         {"identity_hash": PEER_B, "display_name": "Bob"},
     ]
-    storage = _FakeStorage(channel_hash, members, is_open=False)
-    sub_mgr = _FakeSubscriptionMgr(set())
+    storage = _FakeStorage(channel_hash, members)
 
     mgr = make_mgr()
     mgr.record_seen(PEER_A)
 
-    entries = mgr.get_online_for_channel(channel_hash, storage, sub_mgr)
+    entries = mgr.get_online_for_channel(channel_hash, storage)
     by_hash = {e["identity_hash"]: e for e in entries}
 
     assert PEER_A in by_hash
@@ -396,28 +387,11 @@ def test_get_online_for_channel_invite_only_shows_all_members():
     assert by_hash[PEER_B]["is_online"] is False
 
 
-def test_get_online_for_channel_public_shows_only_online_subscribers():
-    """For public channels only online subscribers are shown."""
-    channel_hash = "ee" * 16
-    storage = _FakeStorage(channel_hash, [], is_open=True)
-    sub_mgr = _FakeSubscriptionMgr({PEER_A, PEER_B})
-
-    mgr = make_mgr()
-    mgr.record_seen(PEER_A)
-    # PEER_B is not online
-
-    entries = mgr.get_online_for_channel(channel_hash, storage, sub_mgr)
-    hashes = {e["identity_hash"] for e in entries}
-
-    assert PEER_A in hashes
-    assert PEER_B not in hashes
-
 
 def test_get_online_for_channel_unknown_channel_returns_empty():
     storage = _FakeStorage("00" * 16, [])
-    sub_mgr = _FakeSubscriptionMgr(set())
     mgr = make_mgr()
-    assert mgr.get_online_for_channel("11" * 16, storage, sub_mgr) == []
+    assert mgr.get_online_for_channel("11" * 16, storage) == []
 
 
 def test_get_online_for_channel_results_sorted_online_first():
@@ -427,12 +401,11 @@ def test_get_online_for_channel_results_sorted_online_first():
         {"identity_hash": PEER_A, "display_name": "Zara"},   # offline
         {"identity_hash": PEER_B, "display_name": "Alice"},  # online
     ]
-    storage = _FakeStorage(channel_hash, members, is_open=False)
-    sub_mgr = _FakeSubscriptionMgr(set())
+    storage = _FakeStorage(channel_hash, members)
 
     mgr = make_mgr()
     mgr.record_seen(PEER_B)
 
-    entries = mgr.get_online_for_channel(channel_hash, storage, sub_mgr)
+    entries = mgr.get_online_for_channel(channel_hash, storage)
     assert entries[0]["identity_hash"] == PEER_B
     assert entries[1]["identity_hash"] == PEER_A

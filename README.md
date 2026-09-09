@@ -6,7 +6,8 @@ A decentralized, encrypted group chat application built on the [Reticulum Networ
 
 - **Serverless**: every client is a peer; no accounts, no servers, no phone numbers
 - **End-to-end encrypted**: all messages are encrypted by Reticulum using X25519 + AES-256
-- **Public and invite-only channels**: open channels anyone can join; invite-only channels with cryptographically-signed member lists
+- **Invite-only channels**: cryptographically-signed member lists, with no server and no central roster
+- **Public chat over [RRC](https://rrc.kc1awv.net/)**: rooms on any rrcd-compatible hub, and this node can be a hub itself
 - **Offline sync**: messages sent while you were offline are delivered when you reconnect; see [Offline Sync](docs/offline-sync.md)
 - **Propagation node support**: optionally designate a node as a store-and-forward relay
 - **Terminal-styled Flutter client**: runs as a desktop app or in the browser
@@ -116,8 +117,8 @@ TrenchChat assigns every user a stable cryptographic identity derived from an Ed
 
 | Type | Discovery | Membership |
 |------|-----------|------------|
-| Public | Announced on the mesh; anyone can join | Subscriber list maintained by channel owner |
-| Invite-only | Not announced publicly | Versioned, signed member-list document circulated among members |
+| Invite-only channel | Never announced; joined by invite | Versioned, signed member-list document circulated among members |
+| RRC room | Joined on a hub heard from an `rrc.hub` announce | Held by the hub for as long as the session lasts, and nowhere else |
 
 ### Propagation Nodes
 

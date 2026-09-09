@@ -127,14 +127,11 @@ class AvatarManager:
 
     # --- public API: own avatar ---
 
-    def set_avatar(self, jpeg_bytes: bytes,
-                   subscriber_lookup: "callable[[str], set[str]]") -> None:
+    def set_avatar(self, jpeg_bytes: bytes) -> None:
         """Set our own avatar, increment the version, and push to all reachable peers.
 
         jpeg_bytes must already be compressed to <= MAX_AVATAR_BYTES (use
-        compress_avatar() before calling).  subscriber_lookup is a callable
-        that accepts a channel_hash_hex and returns the set of subscriber
-        identity hashes for that channel; it is used to collect all peers to notify.
+        compress_avatar() before calling).
 
         Raises ValueError if the bytes are too large.
         Raises RuntimeError if the send rate limit has not elapsed.
@@ -159,7 +156,7 @@ class AvatarManager:
 
         self._storage.clear_avatar_deliveries()
 
-        peers = self._collect_all_peers(subscriber_lookup)
+        peers = self._collect_all_peers()
         for peer_hex in peers:
             self._send_avatar_to(peer_hex, jpeg_bytes, new_version)
 
@@ -170,7 +167,7 @@ class AvatarManager:
         )
         self._fire_avatar_callbacks(self._identity.hash_hex)
 
-    def remove_avatar(self, subscriber_lookup: "callable[[str], set[str]]") -> None:
+    def remove_avatar(self) -> None:
         """Clear our own avatar and notify all reachable peers.
 
         Sends an MT_AVATAR_UPDATE with empty avatar_data so peers know to
@@ -191,7 +188,7 @@ class AvatarManager:
 
         self._storage.clear_avatar_deliveries()
 
-        peers = self._collect_all_peers(subscriber_lookup)
+        peers = self._collect_all_peers()
         for peer_hex in peers:
             self._send_avatar_to(peer_hex, b"", new_version)
 
@@ -372,27 +369,14 @@ class AvatarManager:
 
     # --- private helpers ---
 
-    def _collect_all_peers(
-        self, subscriber_lookup: "callable[[str], set[str]]"
-    ) -> set[str]:
-        """Return the union of all known peers across all subscribed channels."""
+    def _collect_all_peers(self) -> set[str]:
+        """Every known peer across every subscribed channel, excluding self."""
         own_hex = self._identity.hash_hex
         peers: set[str] = set()
         for sub in self._storage.get_subscriptions():
-            channel_hash = sub["channel_hash"]
-            # Invite-only: use member list
-            members = self._storage.get_members(channel_hash)
-            for row in members:
-                ih = row["identity_hash"]
-                if ih != own_hex:
-                    peers.add(ih)
-            # Public channels: also check subscriber list from subscription manager
-            try:
-                for ih in subscriber_lookup(channel_hash):
-                    if ih != own_hex:
-                        peers.add(ih)
-            except Exception:
-                pass
+            for row in self._storage.get_members(sub["channel_hash"]):
+                if row["identity_hash"] != own_hex:
+                    peers.add(row["identity_hash"])
         return peers
 
     def _send_avatar_to(self, peer_hex: str, avatar_data: bytes,

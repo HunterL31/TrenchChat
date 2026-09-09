@@ -42,7 +42,6 @@ String sendRefusalMessage(String? reason) => switch (reason) {
       'no_send_permission' => "You don't have permission to send in this channel.",
       'no_share_permission' =>
         'You do not have permission to share files in this channel.',
-      'open_join_channel' => 'Files are shared in invite-only channels only.',
       'no_channel' => 'That channel is not known here.',
       'no_recipients' =>
         'Not sent: no known subscribers to deliver to yet. Try again once peers are online.',
@@ -85,7 +84,6 @@ class AppState extends ChangeNotifier {
 
   List<Server> servers = [];
   List<Channel> standaloneChannels = [];
-  List<Channel> discoveredChannels = [];
   List<PendingInvite> pendingInvites = [];
   final Map<String, List<Channel>> channelsByServer = {};
   final Map<String, int> serverMemberCounts = {};
@@ -673,27 +671,7 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Standalone channels announced on the mesh but not yet joined. Refreshed
-  /// on demand (join dialog open) and live on [ChannelDiscoveredEvent].
-  Future<void> refreshDiscoveredChannels() async {
-    try {
-      discoveredChannels = await api.getDiscoveredChannels();
-      notifyListeners();
-    } catch (e) {
-      _reportActionError(e);
-    }
-  }
 
-  /// Discovered channels the Join dialog can actually offer: open-join and not
-  /// already joined. Invite-only channels need an invite, so listing one here
-  /// is a dead end -- a channel the user already left surfaces in discovery as
-  /// an invite-only local row and can never be re-joined this way.
-  List<Channel> get joinableDiscoveredChannels {
-    final joined = standaloneChannels.map((c) => c.hash).toSet();
-    return discoveredChannels
-        .where((c) => c.openJoin && !joined.contains(c.hash))
-        .toList();
-  }
 
   /// Returns the new server's hash, or null (with [actionError] set) on failure.
   Future<String?> createServer(String name, String description) async {
@@ -728,12 +706,12 @@ class AppState extends ChangeNotifier {
     }
   }
 
-  /// Creates a standalone channel with [access] `"public"` or `"invite"`.
+  /// Creates a standalone channel.
   /// Returns the new channel's hash, or null (with [actionError] set) on failure.
   Future<String?> createStandaloneChannel(
-      String name, String description, String access) async {
+      String name, String description) async {
     try {
-      final hash = await api.createChannel(name, description, access);
+      final hash = await api.createChannel(name, description);
       standaloneChannels = await api.getChannels();
       notifyListeners();
       await selectChannel(hash);
@@ -744,22 +722,6 @@ class AppState extends ChangeNotifier {
     }
   }
 
-  /// Joins a previously-discovered standalone public channel.
-  Future<bool> joinChannel(String channelHashHex) async {
-    try {
-      final ok = await api.joinChannel(channelHashHex);
-      if (ok) {
-        standaloneChannels = await api.getChannels();
-        discoveredChannels = discoveredChannels.where((c) => c.hash != channelHashHex).toList();
-        notifyListeners();
-        await selectChannel(channelHashHex);
-      }
-      return ok;
-    } catch (e) {
-      _reportActionError(e);
-      return false;
-    }
-  }
 
   /// Leaves a standalone channel: unsubscribes and drops it from the list,
   /// selecting whatever is left when it was the open one. Stored history is
@@ -1894,8 +1856,6 @@ class AppState extends ChangeNotifier {
         unawaited(_applyChannelJoined());
       case ServerJoinedEvent():
         unawaited(_applyChannelJoined());
-      case ChannelDiscoveredEvent():
-        unawaited(refreshDiscoveredChannels());
       case InviteReceivedEvent():
         unawaited(refreshInvites());
       case SyncStatusEvent(:final channelHash, :final state):

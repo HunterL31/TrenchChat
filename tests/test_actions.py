@@ -12,11 +12,11 @@ import LXMF
 import pytest
 import RNS
 
-from tests.helpers import wait_for_member
+from tests.helpers import mirror_members, wait_for_member
 from trenchchat.config import Config
 from trenchchat.core import actions
 from trenchchat.core.permissions import (
-    FLAG_DISCOVERABLE, FLAG_OPEN_JOIN, PRESET_OPEN, PRESET_PRIVATE, ROLE_MEMBER,
+    PRESET_PRIVATE, ROLE_MEMBER,
     ROLE_OWNER, SEND_MESSAGE, SHARE_FILES, VOICE_CHAT,
 )
 from trenchchat.core.protocol import (
@@ -37,9 +37,7 @@ def _setup_channel_with_member(peer_factory, *, member_perms=None):
     alice.invite_mgr.publish_member_list(ch_hash, add_members=[bob.identity.hash])
     assert wait_for_member(alice.storage, ch_hash, bob.identity.hash_hex)
 
-    bob.storage.upsert_channel(ch_hash, "test-ch", "", alice.identity.hash_hex,
-                               perms, time.time())
-    bob.storage.subscribe(ch_hash)
+    mirror_members(ch_hash, alice, bob)
     bob.storage.upsert_member(ch_hash, bob.identity.hash_hex, "Bob", role=ROLE_MEMBER)
     bob.storage.upsert_member(ch_hash, alice.identity.hash_hex, "Alice", role=ROLE_OWNER)
     bob.storage.set_channel_permissions(ch_hash, perms)
@@ -73,7 +71,7 @@ class TestFileManifestSend:
         manifest = actions.build_file_manifest("survey.csv", _FILE_BYTES)
 
         assert actions.send_message(
-            alice.storage, alice.subscription_mgr, alice.messaging, ch_hash,
+            alice.storage, alice.messaging, ch_hash,
             alice.identity.hash_hex, "the survey", manifest=manifest,
         )
 
@@ -81,35 +79,15 @@ class TestFileManifestSend:
         assert row["file_name"] == "survey.csv"
         assert row["file_hash"] == manifest["hash"].hex()
 
-    def test_open_join_channel_refuses_a_manifest(self, peer_factory):
-        alice = peer_factory("alice")
-        ch_hash = alice.channel_mgr.create_channel("open-ch", "",
-                                                   permissions=dict(PRESET_OPEN))
-        manifest = actions.build_file_manifest("survey.csv", _FILE_BYTES)
 
-        assert not actions.send_message(
-            alice.storage, alice.subscription_mgr, alice.messaging, ch_hash,
-            alice.identity.hash_hex, "the survey", manifest=manifest,
-        )
-        assert alice.storage.get_messages(ch_hash) == []
 
-    def test_open_join_channel_still_takes_plain_text(self, peer_factory):
-        """Control: only the manifest is refused there, not the message."""
-        alice = peer_factory("alice")
-        ch_hash = alice.channel_mgr.create_channel("open-ch2", "",
-                                                   permissions=dict(PRESET_OPEN))
 
-        assert actions.send_message(
-            alice.storage, alice.subscription_mgr, alice.messaging, ch_hash,
-            alice.identity.hash_hex, "just text",
-        )
-        assert len(alice.storage.get_messages(ch_hash)) == 1
 
     def test_a_manifest_that_is_not_one_is_refused(self, peer_factory):
         alice, bob, ch_hash = _setup_channel_with_member(peer_factory)
 
         assert not actions.send_message(
-            alice.storage, alice.subscription_mgr, alice.messaging, ch_hash,
+            alice.storage, alice.messaging, ch_hash,
             alice.identity.hash_hex, "the survey",
             manifest={"name": "survey.csv", "size": MAX_SHARED_FILE_BYTES + 1,
                       "hash": b"\x11" * 32, "chunk_root": b"\x22" * 32},
@@ -121,7 +99,7 @@ class TestFileManifestSend:
         manifest = actions.build_file_manifest("survey.csv", _FILE_BYTES)
 
         assert not actions.send_message(
-            alice.storage, alice.subscription_mgr, alice.messaging, "ab" * 16,
+            alice.storage, alice.messaging, "ab" * 16,
             alice.identity.hash_hex, "the survey", manifest=manifest,
         )
 
@@ -140,7 +118,7 @@ class TestSendRefusalReasons:
         manifest = actions.build_file_manifest("survey.csv", _FILE_BYTES)
 
         result = actions.send_message_result(
-            bob.storage, bob.subscription_mgr, bob.messaging, ch_hash,
+            bob.storage, bob.messaging, ch_hash,
             bob.identity.hash_hex, "the survey", manifest=manifest)
 
         assert result == {"sent": False,
@@ -151,7 +129,7 @@ class TestSendRefusalReasons:
             peer_factory, member_perms=[SEND_MESSAGE, VOICE_CHAT])
 
         assert actions.send_message_result(
-            bob.storage, bob.subscription_mgr, bob.messaging, ch_hash,
+            bob.storage, bob.messaging, ch_hash,
             bob.identity.hash_hex, "just text") == {"sent": True, "reason": None}
 
     def test_a_member_without_send_message_keeps_its_own_reason(self, peer_factory):
@@ -160,30 +138,24 @@ class TestSendRefusalReasons:
         manifest = actions.build_file_manifest("survey.csv", _FILE_BYTES)
 
         assert actions.send_message_result(
-            bob.storage, bob.subscription_mgr, bob.messaging, ch_hash,
+            bob.storage, bob.messaging, ch_hash,
             bob.identity.hash_hex, "the survey", manifest=manifest,
         )["reason"] == actions.REASON_NO_SEND_PERMISSION
         assert actions.send_message_result(
-            bob.storage, bob.subscription_mgr, bob.messaging, ch_hash,
+            bob.storage, bob.messaging, ch_hash,
             bob.identity.hash_hex, "just text",
         )["reason"] == actions.REASON_NO_SEND_PERMISSION
 
     def test_the_other_manifest_refusals_each_name_themselves(self, peer_factory):
         alice, bob, ch_hash = _setup_channel_with_member(peer_factory)
         manifest = actions.build_file_manifest("survey.csv", _FILE_BYTES)
-        open_hash = alice.channel_mgr.create_channel(
-            "open-ch3", "", permissions=dict(PRESET_OPEN))
 
         assert actions.send_message_result(
-            alice.storage, alice.subscription_mgr, alice.messaging, open_hash,
-            alice.identity.hash_hex, "the survey", manifest=manifest,
-        )["reason"] == actions.REASON_OPEN_JOIN
-        assert actions.send_message_result(
-            alice.storage, alice.subscription_mgr, alice.messaging, "ab" * 16,
+            alice.storage, alice.messaging, "ab" * 16,
             alice.identity.hash_hex, "the survey", manifest=manifest,
         )["reason"] == actions.REASON_NO_CHANNEL
         assert actions.send_message_result(
-            alice.storage, alice.subscription_mgr, alice.messaging, ch_hash,
+            alice.storage, alice.messaging, ch_hash,
             alice.identity.hash_hex, "the survey",
             manifest={"name": "survey.csv", "size": MAX_SHARED_FILE_BYTES + 1,
                       "hash": b"\x11" * 32, "chunk_root": b"\x22" * 32},
@@ -205,7 +177,7 @@ class TestShareFileAction:
         alice, bob, ch_hash = _setup_channel_with_member(peer_factory)
 
         result = actions.share_file(
-            alice.file_mgr, alice.storage, alice.subscription_mgr,
+            alice.file_mgr, alice.storage,
             alice.messaging, ch_hash, alice.identity.hash_hex, "survey.csv",
             _FILE_BYTES, "the survey")
 
@@ -218,7 +190,7 @@ class TestShareFileAction:
             peer_factory, member_perms=[SEND_MESSAGE, VOICE_CHAT])
 
         result = actions.share_file(
-            bob.file_mgr, bob.storage, bob.subscription_mgr, bob.messaging,
+            bob.file_mgr, bob.storage, bob.messaging,
             ch_hash, bob.identity.hash_hex, "survey.csv", _FILE_BYTES,
             "the survey")
 
@@ -274,56 +246,6 @@ class TestUpdateMembership:
         )
 
         assert applied is False
-
-
-class TestJoinPublicChannel:
-    def test_open_join_channel_can_be_joined(self, peer_factory):
-        """Sanity check: subscribing to a genuinely open-join channel works."""
-        alice = peer_factory("alice")
-        bob = peer_factory("bob")
-
-        ch_hash = alice.channel_mgr.create_channel("public-room", "", permissions=PRESET_OPEN)
-        bob.storage.upsert_channel(ch_hash, "public-room", "", alice.identity.hash_hex,
-                                   PRESET_OPEN, time.time())
-
-        joined = actions.join_public_channel(bob.storage, bob.subscription_mgr, ch_hash)
-
-        assert joined is True
-        assert bob.storage.is_subscribed(ch_hash)
-
-    def test_invite_only_channel_cannot_be_self_joined(self, peer_factory):
-        """
-        A locally-known invite-only channel must never be joinable via a bare
-        subscribe, even if a row for it somehow exists in local storage --
-        membership there is only ever granted through a signed member-list
-        document from an admin/owner.
-
-        Regression test for a real bug: ChannelPermissionsDialog lets
-        discoverable and open_join be toggled independently, so an
-        invite-only channel could be marked discoverable, get announced
-        (see the announce_channel fix for that half), and a peer who merely
-        *heard* about it that way -- never invited -- could then call this
-        and self-admit. join_public_channel must refuse regardless of how
-        the row got into local storage.
-        """
-        alice = peer_factory("alice")
-        bob = peer_factory("bob")
-
-        # Simulates Bob having discovered an invite-only channel's metadata
-        # (e.g. via a leaked announce) without ever being invited.
-        leaked_perms = dict(PRESET_PRIVATE)
-        leaked_perms[FLAG_DISCOVERABLE] = True
-        assert leaked_perms[FLAG_OPEN_JOIN] is False
-
-        ch_hash = alice.channel_mgr.create_channel("secret-room", "", permissions=leaked_perms)
-        bob.storage.upsert_channel(ch_hash, "secret-room", "", alice.identity.hash_hex,
-                                   leaked_perms, time.time())
-
-        joined = actions.join_public_channel(bob.storage, bob.subscription_mgr, ch_hash)
-
-        assert joined is False
-        assert not bob.storage.is_subscribed(ch_hash), \
-            "Bob self-joined an invite-only channel via a bare subscribe"
 
 
 class TestSettings:
@@ -842,7 +764,7 @@ class TestSharedChannelPeers:
 
     SELF = "aa" * 16
     MEMBER = "bb" * 16
-    SUBSCRIBER = "cc" * 16
+    OTHER = "cc" * 16
     STRANGER = "dd" * 16
 
     def _channel(self, db, hash_hex, perms=PRESET_PRIVATE, subscribe=True):
@@ -850,15 +772,15 @@ class TestSharedChannelPeers:
         if subscribe:
             db.subscribe(hash_hex)
 
-    def test_unions_members_and_durable_subscribers(self, db):
+    def test_collects_members_across_subscribed_channels(self, db):
         self._channel(db, "11" * 16)
-        self._channel(db, "22" * 16, perms=PRESET_OPEN)
+        self._channel(db, "22" * 16)
         db.upsert_member("11" * 16, self.MEMBER, "Bob")
         db.upsert_member("11" * 16, self.SELF, "Me")
-        db.add_channel_subscriber("22" * 16, self.SUBSCRIBER)
+        db.upsert_member("22" * 16, self.OTHER, "Carol")
 
         assert actions.shared_channel_peers(db, self.SELF) == {
-            self.MEMBER, self.SUBSCRIBER,
+            self.MEMBER, self.OTHER,
         }
 
     def test_excludes_self_and_unshared_channels(self, db):
@@ -866,7 +788,6 @@ class TestSharedChannelPeers:
         db.upsert_member("11" * 16, self.SELF, "Me")
         self._channel(db, "33" * 16, subscribe=False)
         db.upsert_member("33" * 16, self.STRANGER, "Nope")
-        db.add_channel_subscriber("33" * 16, self.STRANGER)
 
         assert actions.shared_channel_peers(db, self.SELF) == set()
 

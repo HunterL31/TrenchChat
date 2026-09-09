@@ -15,7 +15,7 @@ import time
 import LXMF
 import RNS
 
-from tests.helpers import wait_for
+from tests.helpers import mirror_members, wait_for
 from trenchchat.core.naming import dm_hash_for
 from trenchchat.core.protocol import (
     ENVELOPE_TYPE, F_CHANNEL_HASH, F_MSG_TYPE, LXMF_FIELD_CUSTOM_DATA,
@@ -99,10 +99,8 @@ def test_a_channel_message_claims_no_reserved_field_numbers(
         peer_factory, monkeypatch):
     alice = peer_factory("alice")
     bob = peer_factory("bob")
-    ch_hash = alice.channel_mgr.create_channel("wire", "", "public")
-    bob.storage.upsert_channel(ch_hash, "wire", "", alice.identity.hash_hex,
-                               "public", time.time())
-    bob.storage.subscribe(ch_hash)
+    ch_hash = alice.channel_mgr.create_channel("wire", "")
+    mirror_members(ch_hash, alice, bob)
     captured = sent_fields(alice, monkeypatch)
 
     alice.messaging.send_message(
@@ -118,16 +116,15 @@ def test_a_channel_message_claims_no_reserved_field_numbers(
 
 def test_control_messages_claim_no_reserved_field_numbers(
         peer_factory, monkeypatch):
-    """Subscribe is representative: every control sender routes through the
-    same pack_fields envelope."""
+    """A sync request is representative: every control sender routes through
+    the same pack_fields envelope."""
     alice = peer_factory("alice")
     bob = peer_factory("bob")
-    ch_hash = alice.channel_mgr.create_channel("wire-ctl", "", "public")
-    bob.storage.upsert_channel(ch_hash, "wire-ctl", "", alice.identity.hash_hex,
-                               "public", time.time())
+    ch_hash = alice.channel_mgr.create_channel("wire-ctl", "")
+    mirror_members(ch_hash, alice, bob)
     captured = sent_fields(bob, monkeypatch)
 
-    bob.subscription_mgr.subscribe(ch_hash, alice.identity.hash_hex)
+    bob.sync_mgr._send_sync_request(alice.identity.hash_hex, ch_hash, time.time())
 
     assert captured, "nothing was sent"
     for fields in captured:
@@ -143,10 +140,8 @@ def test_an_enveloped_channel_message_is_delivered(peer_factory):
     """End to end through the real send path and the Router's unwrap."""
     alice = peer_factory("alice")
     bob = peer_factory("bob")
-    ch_hash = alice.channel_mgr.create_channel("e2e", "", "public")
-    bob.storage.upsert_channel(ch_hash, "e2e", "", alice.identity.hash_hex,
-                               "public", time.time())
-    bob.storage.subscribe(ch_hash)
+    ch_hash = alice.channel_mgr.create_channel("e2e", "")
+    mirror_members(ch_hash, alice, bob)
 
     alice.messaging.send_message(
         channel_hash_hex=ch_hash, content="through the envelope",

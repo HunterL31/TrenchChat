@@ -47,8 +47,8 @@ which is the only layer that holds against a peer calling in directly. See
 - The client gate is **convenience only**; never rely on it as the sole check.
 - The core enforcement layer must work correctly even if called directly
   (e.g. from tests, sync, or a malicious peer).
-- For invite-only channels, `SEND_MESSAGE` is only enforced when the sender
-  has a known role. Open-join channels have no member table to check against.
+- `SEND_MESSAGE` is enforced against the sender's role in the channel's member
+  list. Every channel has one.
 
 ```python
 # ✅ Core enforcement — publish_member_list

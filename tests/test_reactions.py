@@ -30,7 +30,7 @@ from trenchchat.core.protocol import (
     MT_REACTION, MT_EMOJI_REQUEST, MT_EMOJI_RESPONSE,
     unpack_fields,
 )
-from trenchchat.core.permissions import PRESET_OPEN, PRESET_PRIVATE, ROLE_MEMBER
+from trenchchat.core.permissions import PRESET_PRIVATE, ROLE_MEMBER
 from trenchchat.core.reaction import (
     EMOJI_FLUSH_BATCH, EMOJI_FLUSH_COOLDOWN_SECS, EMOJI_REQUEST_RETRY_SECS,
     MAX_EMOJI_BYTES, MAX_EMOJI_NAME_LEN, MAX_EMOJI_REFS_PER_MESSAGE,
@@ -871,12 +871,11 @@ class TestAdversarialReactions:
         assert not storage.emoji_exists(emoji_hash), \
             "An emoji response we never requested was stored"
 
-    def test_emoji_request_from_unrelated_peer_on_open_channel_is_refused(
-            self, reaction_mgr):
-        """Being in a public channel must not make us an open emoji server.
+    def test_emoji_request_from_an_unrelated_peer_is_refused(self, reaction_mgr):
+        """Being in a channel must not make us an open emoji server.
 
-        The open-join branch of the shared-channel check has to name the
-        requester; otherwise any node can enumerate the library.
+        The shared-channel check has to name the requester; otherwise any
+        node can enumerate the library.
         """
         mgr, storage, identity, router = reaction_mgr
         img = _make_png()
@@ -885,14 +884,14 @@ class TestAdversarialReactions:
 
         channel_hex = "dd" * 16
         storage.upsert_channel(
-            hash=channel_hex, name="open", description="",
-            creator_hash="aa" * 16, permissions=PRESET_OPEN, created_at=0.0,
+            hash=channel_hex, name="shared", description="",
+            creator_hash="aa" * 16, permissions=PRESET_PRIVATE, created_at=0.0,
         )
         storage.subscribe(channel_hex)
 
         stranger_hex = "cc" * 16
         assert not mgr._shares_any_channel(stranger_hex), \
-            "An unrelated peer was treated as sharing an open-join channel"
+            "An unrelated peer was treated as sharing a channel"
 
         stranger_identity = MagicMock()
         stranger_identity.hash = bytes.fromhex(stranger_hex)

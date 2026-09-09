@@ -20,7 +20,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from trenchchat.core.naming import NameInUseError
-from trenchchat.core.permissions import PRESET_OPEN, PRESET_PRIVATE
+from trenchchat.core.permissions import PRESET_PRIVATE
 
 _TESTENV_DIR = Path(__file__).resolve().parents[1] / "devtools" / "testenv"
 if str(_TESTENV_DIR) not in sys.path:
@@ -122,17 +122,7 @@ class TestCreateServerConflict:
 
 @needs_backend
 class TestMyPermissionsSendMessage:
-    def test_open_join_channel_reports_send_message_true(self, client, backend):
-        backend.storage.get_channel.return_value = {
-            "permissions": json.dumps(dict(PRESET_OPEN))
-        }
-        # Even with the role check denied, an open-join channel accepts anyone.
-        backend.storage.has_permission.return_value = False
 
-        res = client.get("/channels/deadbeef/my_permissions", headers=AUTH)
-
-        assert res.status_code == 200
-        assert res.json()["send_message"] is True
 
     def test_member_with_permission_reports_send_message_true(self, client, backend):
         backend.storage.get_channel.return_value = {
@@ -154,17 +144,7 @@ class TestMyPermissionsSendMessage:
 
         assert res.json()["send_message"] is False
 
-    def test_open_join_channel_reports_share_files_false(self, client, backend):
-        """Files need a member list to authorise a serve, so an open-join
-        channel refuses a manifest whatever the roles say."""
-        backend.storage.get_channel.return_value = {
-            "permissions": json.dumps(dict(PRESET_OPEN))
-        }
-        backend.storage.has_permission.return_value = True
 
-        res = client.get("/channels/deadbeef/my_permissions", headers=AUTH)
-
-        assert res.json()["share_files"] is False
 
     def test_private_channel_reports_the_role_check(self, client, backend):
         backend.storage.get_channel.return_value = {

@@ -24,7 +24,6 @@ import '../dialogs/confirm_dialog.dart';
 import '../dialogs/emoji_picker_dialog.dart';
 import '../dialogs/incoming_invite_dialog.dart';
 import '../dialogs/invite_dialog.dart';
-import '../dialogs/join_channel_dialog.dart';
 import '../dialogs/members_dialog.dart';
 import '../dialogs/new_channel_dialog.dart';
 import '../dialogs/new_server_dialog.dart';
@@ -350,7 +349,7 @@ class _MainWindowState extends State<MainWindow> {
         final canJoinVoice = channel != null &&
             channelHash != null &&
             !inVoice &&
-            (channel.openJoin || (permissions?.voiceChat ?? false));
+            (permissions?.voiceChat ?? false);
 
         final compact = MediaQuery.of(context).size.width < compactBreakpoint;
 
@@ -425,7 +424,6 @@ class _MainWindowState extends State<MainWindow> {
           },
           onDeleteDm: (dm) => state.deleteDm(dm.hash),
           onStartDm: () => showStartDmDialog(context, state),
-          onJoinChannel: () => showJoinChannelDialog(context, state),
           voiceParticipants: voiceRoster,
           onJoinVoice: canJoinVoice ? () => state.joinVoice(channelHash) : null,
           voiceSessionPanel: voicePanel,

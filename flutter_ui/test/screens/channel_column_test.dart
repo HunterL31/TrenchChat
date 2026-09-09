@@ -13,7 +13,6 @@ Channel _channel(String name) => Channel.fromJson({
       'name': name,
       'description': '',
       'creator_hash': 'creator',
-      'open_join': true,
       'created_at': 0,
     });
 
@@ -33,7 +32,6 @@ void main() {
           onSelectChannel: (_) {},
           onCreateChannel: () => serverCreates++,
           onCreateDirectChannel: () => directCreates++,
-          onJoinChannel: () {},
         ),
       ),
     ));
@@ -54,7 +52,6 @@ void main() {
   testWidgets('the footer ADD menu consolidates every add action', (tester) async {
     var serverCreates = 0;
     var directCreates = 0;
-    var joins = 0;
     var dmStarts = 0;
     await tester.pumpWidget(MaterialApp(
       home: Scaffold(
@@ -67,7 +64,6 @@ void main() {
           onSelectChannel: (_) {},
           onCreateChannel: () => serverCreates++,
           onCreateDirectChannel: () => directCreates++,
-          onJoinChannel: () => joins++,
           onStartDm: () => dmStarts++,
         ),
       ),
@@ -83,12 +79,13 @@ void main() {
     expect(find.text('New direct channel'), findsOneWidget);
     expect(find.text('Message a friend…'), findsOneWidget);
 
-    await tester.tap(find.text('Join channel…'));
+    expect(find.text('Join channel…'), findsNothing);
+
+    await tester.tap(find.text('Message a friend…'));
     await tester.pumpAndSettle();
-    expect(joins, 1);
+    expect(dmStarts, 1);
     expect(serverCreates, 0);
     expect(directCreates, 0);
-    expect(dmStarts, 0);
   });
 
   testWidgets('without a server the ADD menu offers a plain new channel',
@@ -104,7 +101,6 @@ void main() {
           onSelectChannel: (_) {},
           onCreateChannel: () {},
           onCreateDirectChannel: () {},
-          onJoinChannel: () {},
         ),
       ),
     ));

@@ -33,7 +33,6 @@ from trenchchat.core.direct import DirectMessageManager
 from trenchchat.core.files import FileManager
 from trenchchat.core.friends import FriendsManager
 from trenchchat.core.messaging import Messaging
-from trenchchat.core.subscription import SubscriptionManager
 from trenchchat.core.invite import InviteManager
 from trenchchat.core.reaction import ReactionManager
 from trenchchat.core.presence import PresenceManager
@@ -160,7 +159,6 @@ class TestPeer:
     channel_mgr: ChannelManager
     server_mgr: ServerManager
     messaging: Messaging
-    subscription_mgr: SubscriptionManager
     invite_mgr: InviteManager
     reaction_mgr: ReactionManager
     sync_mgr: SyncManager
@@ -174,9 +172,8 @@ class TestPeer:
     _teardown_callbacks: list = field(default_factory=list, repr=False)
 
     def announce(self):
-        """Announce delivery destination and all owned channels."""
+        """Announce this peer's delivery destination."""
         self.router.announce()
-        self.channel_mgr.announce_all_owned()
 
     def teardown(self):
         for cb in self._teardown_callbacks:
@@ -272,12 +269,10 @@ def peer_factory(rns_instance, tmp_path):
         channel_mgr = ChannelManager(identity, storage)
         server_mgr = ServerManager(identity, storage)
         messaging = Messaging(identity, storage, router)
-        subscription_mgr = SubscriptionManager(identity, storage, router)
         invite_mgr = InviteManager(identity, storage, router)
         reaction_mgr = ReactionManager(identity, storage, router)
         sync_mgr = SyncManager(identity, storage, router, messaging,
-                               subscription_mgr, invite_mgr,
-                               reaction_mgr=reaction_mgr)
+                               invite_mgr, reaction_mgr=reaction_mgr)
         presence_mgr = PresenceManager(identity.hash_hex, config)
         friends_mgr = FriendsManager(storage, identity.hash_hex, presence_mgr,
                                      identity=identity, router=router)
@@ -292,7 +287,7 @@ def peer_factory(rns_instance, tmp_path):
         reaction_mgr.set_direct_manager(direct_mgr)
 
         voice_transport = FakeVoiceTransport(identity.hash_hex, voice_registry)
-        voice_mgr = VoiceManager(identity, storage, router, subscription_mgr,
+        voice_mgr = VoiceManager(identity, storage, router,
                                  config, transport=voice_transport,
                                  state_refresh_secs=0.5, roster_ttl_secs=2.0)
 
@@ -313,7 +308,6 @@ def peer_factory(rns_instance, tmp_path):
             channel_mgr=channel_mgr,
             server_mgr=server_mgr,
             messaging=messaging,
-            subscription_mgr=subscription_mgr,
             invite_mgr=invite_mgr,
             reaction_mgr=reaction_mgr,
             sync_mgr=sync_mgr,

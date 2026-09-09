@@ -33,7 +33,7 @@ tester's API (8801+) or one orchestrator call (8800).
 | **Identity** | set display name, set avatar, remove avatar, search directory |
 | **Friends** | add friend (nickname/note), update friend, remove friend, send friend request, accept request, decline request |
 | **Direct messages** | open conversation, send direct message, list conversations, enable propagation node, pin/unpin outbound node, collect held mail |
-| **Channel** | create public, create invite-only, list discovered, join discovered, leave |
+| **Channel** | create, invite, accept, leave |
 | **Server** | create server, create channel in server, invite to server, leave server |
 | **Membership** | send invite, accept invite, decline invite, kick, promote to admin, demote |
 | **Permissions** | edit channel perms (`send_message`, `invite`, `kick`, `manage_roles`, `manage_channel`, `create_channel`, `full_sync`), edit server perms |
@@ -95,15 +95,6 @@ Getting these wrong produces phantom failures.
   and `messaging.py` drops a chat message if the receiver isn't marked
   subscribed/member yet. Scenarios wait for the roster to converge before
   sending.
-- **On a public channel, joining is not the same as being registered.**
-  `join_public_channel` sets the joiner's own state and sends `MT_SUBSCRIBE`;
-  the owner only adds them on receipt, and other subscribers only learn of them
-  from the owner's next broadcast. Three distinct moments, in order: the joiner
-  is subscribed → the owner has them in `get_subscribers` → every subscriber
-  does. A send addressed before the relevant one has passed goes to a set the
-  target isn't in, and no retry fixes it because the message was never
-  addressed to them. `_join_all(..., owner)` waits for the second;
-  `subscribers_converged()` waits for the third.
 - **A sync backfill is a chain, not an exchange.** Wait for sync state to leave
   `syncing` rather than sampling after a fixed sleep.
 - **Shaping a link can fail silently, so read it back.** An unknown profile name
@@ -118,21 +109,6 @@ Getting these wrong produces phantom failures.
 ⚠ marks a row probing a suspected gap; the expected result is what the code
 currently implies, and the scenario exists to confirm it.
 
-### `public`: Public (open-join) channels
-
-| ID | Peers | Actions | Expected result |
-|---|---|---|---|
-| public1 | A,B,C,D | A creates public channel | B, C, D each list it under discovered, none subscribed |
-| public2 | A,B | A creates; B joins | A's subscriber set = {B}; B receives the signed subscriber list; B's roster view includes A |
-| public3 | A,B,C,D | A creates; B, C join; A sends 3 | B and C hold all 3; D holds none |
-| public4 | A,B,C,D | B (subscriber, not owner) sends 1 | A and C hold it; D does not, recipients are the subscriber set plus self |
-| public5 | A,B,C,D | A creates; B, C join; A sends 5; **then** D joins | ⚠ **Confirmed.** D holds 0 at the instant it joins, public join calls `subscription_mgr.subscribe()` only, no `channel_joined` callback, so nothing requests sync. Backfill lands on A's next peer announce: measured 1.0s and 9.1s on two runs, tracking the 10s heartbeat phase. Scales to a 60s worst case in the real app |
-| public6 | A,B,C,D | A6a: A creates public, grants `full_sync` to member, sends 5, D joins. A6b: identical without `full_sync` | ⚠ **Confirmed.** Both channels backfilled all 5 to D, with and without the grant. Public channels never open tenure, so `has_any_tenure` is false and tenure filtering (the only thing `full_sync` gates) never engages |
-| public7 | A,B,C | B leaves; A sends 2 | A removes B from subscribers; C holds both; B holds neither |
-| public8 | A,B,C,D | All 4 joined and the subscriber set has converged; each sends 2 in turn | All four converge on 9 messages (a seed plus 8). Roster settle measured at 0.5–4.0s |
-| public9 | A,B,C,D | A (owner) leaves its own channel, then C sends | C's message still reaches B and D; the subscriber lists they already hold are unaffected by the owner leaving. The departed owner does not receive it and stays unsubscribed |
-| public10 | A,B,C,D | B, C join; C goes offline; D joins (C misses the broadcast); C returns | C learns about D and its next send reaches D. Recovery measured at 0.5s, 1.0s and 18.1s across runs, LXMF's own retry backoff, not an application-level repair |
-| public11 | A,B,C | B leaves; A sends; B rejoins; A sends again | ✅ The round trip public7 stops halfway through: the post-return send reaches B again, and the message B missed while away followed by backfill on every run (2.0–8.1s). 4/4 runs |
 
 ### `invite`: Invite-only channels and membership
 
@@ -140,7 +116,7 @@ currently implies, and the scenario exists to confirm it.
 |---|---|---|---|
 | invite1 | A,B,C,D | A creates invite-only | Nobody sees it in discovered, `announce_channel` refuses invite-only regardless of the discoverable flag |
 | invite2 | A,B | A invites B; B accepts | B's pending invite clears; member-list doc lands; A and B rosters identical (2 members, owner+member); B's tenure opens |
-| invite3 | A,B | A sends 3; **then** invites B; B accepts. B3a: member role lacks `full_sync`. B3b: A grants `full_sync` to member first | B3a: B holds 0 backlog; tenure filtering drops rows from before B's join. B3b: B holds all 3. This is the real `full_sync` test (public channels can't show it; see public6) |
+| invite3 | A,B | A sends 3; **then** invites B; B accepts. B3a: member role lacks `full_sync`. B3b: A grants `full_sync` to member first | B3a: B holds 0 backlog; tenure filtering drops rows from before B's join. B3b: B holds all 3. This is the `full_sync` test |
 | invite4 | A,B,C,D | A invites B, C, D; all accept | All four rosters identical: 4 members, A owner, rest member |
 | invite5 | A,B,C | A invites C; C declines | C is not a member; A, B rosters unchanged; nothing sent on decline |
 | invite6 | A,B,C,D | All 4 members; A kicks C | B, D, A rosters drop to 3; C's local membership clears and its pending outbound for the channel is cancelled; a message C sends after is dropped by A, B, D |
@@ -434,7 +410,7 @@ three- and four-peer cases, and the states `docs/voice.md` is explicit about.
 
 | ID | Peers | Actions | Expected result |
 |---|---|---|---|
-| voice1 | A,B,C | All three join voice on a public channel | ✅ Full mesh in 2.0–3.0s; every peer `streaming` to every other |
+| voice1 | A,B,C | All three join voice on an invite-only channel | ✅ Full mesh in 2.0–3.0s; every peer `streaming` to every other |
 | voice2 | A,B,C,D | Three in voice, then D joins | ✅ D learns all three occupants and they learn D, roster in 0.0s, mesh in 3.0s. Exercises the unicast `voice_state` reply path three times over |
 | voice3 | A,B,C | C leaves voice cleanly | ✅ Dropped from every roster in 0.0s; C reports no session |
 | voice4 | A,B,C | C is **killed** mid-call, sending no `voice_leave` | ⚠️ Expires only on the roster TTL: **27.6s** here, and the testenv shortens that TTL to 30s from the production **180s**. A crashed participant lingers up to 3 minutes in the real client |
@@ -759,7 +735,7 @@ environment's announce cadence.
 
 | ID | Peers | Actions | Measured |
 |---|---|---|---|
-| bw1 | A,B,C,D | One public channel, five seed messages, then: 600s idle; each peer sends one message; B away for 60s across four messages, then back | Run on the pre-reconciliation commit (`a804c0d`) and on the current head, same harness, same day. Idle (all four peers, rx and tx, 600s): 175 KB before, 203 KB after, of which 8 KB after was the tail of the restart burst. Beacons in the window: 116 and 117. Four messages to three peers each: 14.9 KB and 14.5 KB. B's recovery above idle: about 14 KB either way, 1.5s. Details below |
+| bw1 | A,B,C,D | One invite-only channel, five seed messages, then: 600s idle; each peer sends one message; B away for 60s across four messages, then back | Run on the pre-reconciliation commit (`a804c0d`) and on the current head, same harness, same day. Idle (all four peers, rx and tx, 600s): 175 KB before, 203 KB after, of which 8 KB after was the tail of the restart burst. Beacons in the window: 116 and 117. Four messages to three peers each: 14.9 KB and 14.5 KB. B's recovery above idle: about 14 KB either way, 1.5s. Details below |
 
 #### What the wire carries
 
@@ -1255,7 +1231,6 @@ five scenarios that pass on broadband fail on a radio.
 
 | Family | Broadband | LoRa SF7 | New on LoRa |
 |---|---|---|---|
-| `public` | 6/6 | 6/6 | public5 probe returns **nothing at all** |
 | `invite` | 11/12 | 10/12 | **invite7** |
 | `sync` | 8/9 | 7/9 | **sync8**, **sync11** |
 | `links` | 5/5 | n/a (already shaped) |, |
@@ -1266,7 +1241,8 @@ five scenarios that pass on broadband fail on a radio.
 Servers and restart/persistence are unaffected. Everything that breaks is a
 *propagation* path: sync, member-list documents, avatars, directory entries.
 What the radio changes is the size of the gap, not usually its nature, the
-exception being public5, which escalates from a latency footnote to an outright
+exception being public5, since retired with its family, which escalated from a
+latency footnote to an outright
 failure.
 
 - **public5**: a late joiner received nothing in **723s** with
@@ -1303,6 +1279,8 @@ That is a bandwidth floor, not a defect, shape to SF7 for behaviour, and treat
 SF10 as a question about payload sizes instead.
 
 ## Findings
+
+**The `public` family is retired.** Public channels were removed when public chat moved to RRC (see `docs/rrc.md`), and the eleven `public` scenarios went with them. Their findings are kept below as the record of what that feature cost, not as open leads: public5, public6 and public10 describe behaviour nothing in the tree has any more.
 
 Everything the matrix turned up, across all ten families.
 
@@ -1417,7 +1395,6 @@ All fifteen families built and run: **127 scenarios, 99 strict and 28 probes**, 
 
 | Family | Scenarios | Result |
 |---|---|---|
-| `public`: public channels | 11 (7 strict, 4 probes) | All passing, three consecutive clean runs |
 | `invite`: invite-only and membership | 20 (17 strict, 3 probes) | All passing; invite11 rewritten to the narrowed `kick` rule; invite16 and invite17 (probes) record the ineffective member `invite` grant and the invisible leave; invite19 and invite20 each found a real defect, 5/5 after the fix |
 | `sync`: offline and sync | 11 (10 strict, 1 probe) | Whole family green in one run (10/10 strict). sync2 fixed, 12/12. sync11 reconciles 4/5 to 5/5 on broadband since requests describe what they hold, up from 1 in 5, and 0/3 on `lora_fast`; sync12 added for the two-peer shape, 5/5 and 3/3 on `lora_fast`; sync13 added for a long absence, 3/3 |
 | `links`: degraded links | 10 (5 strict, 5 probes) | All passing, on genuinely shaped links |

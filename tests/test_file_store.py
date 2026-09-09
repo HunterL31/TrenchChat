@@ -61,7 +61,7 @@ def _store(db: Storage, marker: str, size: int, *,
 
 
 def _channel(db: Storage, channel_hash: str = CHANNEL) -> None:
-    db.upsert_channel(channel_hash, "Test", "", SENDER, "public", 1.0)
+    db.upsert_channel(channel_hash, "Test", "", SENDER, 1.0)
 
 
 # ---------------------------------------------------------------------------

@@ -27,7 +27,7 @@ from asserts import (
     wait_until, ScenarioFailure,
 )
 from flows import (
-    go_offline, go_online, invite_only_channel, public_channel, set_link_profile,
+    go_offline, go_online, invite_only_channel, invite_only_channel, set_link_profile,
     BROADBAND, LORA_FAST, DISCOVERY_TIMEOUT, NEGATIVE_HOLD_SECS,
 )
 from scenario import PROBE, scenario
@@ -112,7 +112,7 @@ def _playout(peer, sender) -> dict:
 @scenario("voice1", "Three participants form a full voice mesh")
 def h1(env):
     a, b, c = env.peers("A", "B", "C")
-    ch = public_channel(a, [b, c], "h1-voice")
+    ch = invite_only_channel(a, [b, c], "h1-voice")
 
     _join_voice_all([a, b, c], ch)
     voice_rosters_agree([a, b, c], ch, [a, b, c], timeout=MESH_TIMEOUT)
@@ -126,7 +126,7 @@ def h2(env):
     there only because each occupant unicasts one voice_state back. With three
     peers already in, that reply path has to work three times over."""
     a, b, c, d = env.peers("A", "B", "C", "D")
-    ch = public_channel(a, [b, c, d], "h2-voice")
+    ch = invite_only_channel(a, [b, c, d], "h2-voice")
 
     _join_voice_all([a, b, c], ch)
     _await_mesh([a, b, c], ch)
@@ -142,7 +142,7 @@ def h2(env):
 @scenario("voice3", "Leaving voice drops the peer from every roster")
 def h3(env):
     a, b, c = env.peers("A", "B", "C")
-    ch = public_channel(a, [b, c], "h3-voice")
+    ch = invite_only_channel(a, [b, c], "h3-voice")
 
     _join_voice_all([a, b, c], ch)
     voice_rosters_agree([a, b, c], ch, [a, b, c], timeout=MESH_TIMEOUT)
@@ -162,7 +162,7 @@ def h4(env):
     only thing that removes it is the roster TTL. Measures how long the other
     participants keep showing someone who is gone."""
     a, b, c = env.peers("A", "B", "C")
-    ch = public_channel(a, [b, c], "h4-voice")
+    ch = invite_only_channel(a, [b, c], "h4-voice")
 
     _join_voice_all([a, b, c], ch)
     _await_mesh([a, b, c], ch)
@@ -190,7 +190,7 @@ def h5(env):
     state to surface rather than hide, so the roster must keep the entry and
     downgrade its link_state."""
     a, b, c = env.peers("A", "B", "C")
-    ch = public_channel(a, [b, c], "h5-voice")
+    ch = invite_only_channel(a, [b, c], "h5-voice")
 
     _join_voice_all([a, b, c], ch)
     _await_mesh([a, b, c], ch)
@@ -299,7 +299,7 @@ def h9(env):
     case the bandwidth budget in docs/voice.md is actually about: each speaker
     uploads to N-1 peers at once."""
     a, b, c = env.peers("A", "B", "C")
-    ch = public_channel(a, [b, c], "h9-voice")
+    ch = invite_only_channel(a, [b, c], "h9-voice")
 
     _join_voice_all([a, b, c], ch)
     _await_mesh([a, b, c], ch)
@@ -339,7 +339,7 @@ def h10(env):
     chat should be unaffected while a mesh is streaming. Worth pinning: they
     share the same interface and the same bandwidth."""
     a, b, c = env.peers("A", "B", "C")
-    ch = public_channel(a, [b, c], "h10-voice")
+    ch = invite_only_channel(a, [b, c], "h10-voice")
 
     _join_voice_all([a, b, c], ch)
     _await_mesh([a, b, c], ch)
@@ -364,7 +364,7 @@ def h11(env):
     happens rather than asserting a number: the useful outcome is an honest
     link_state, not a working call."""
     a, b = env.peers("A", "B")
-    ch = public_channel(a, [b], "h11-voice")
+    ch = invite_only_channel(a, [b], "h11-voice")
     profile = set_link_profile(env, b, LORA_FAST)
 
     joined_a = a.join_voice(ch)
@@ -442,7 +442,7 @@ def v12(env):
     set_muted() advertises coalesced with the periodic voice_state refresh,
     so the flip is eventually consistent rather than immediate."""
     a, b, c = env.peers("A", "B", "C")
-    ch = public_channel(a, [b, c], "v12-voice")
+    ch = invite_only_channel(a, [b, c], "v12-voice")
     _join_voice_all([a, b, c], ch)
     voice_rosters_agree([a, b, c], ch, [a, b, c], MESH_TIMEOUT)
 
@@ -476,7 +476,7 @@ def v13(env):
     jitter/decode/playout path, so rate_fps and starved playout ticks are what
     a person on the other end would have heard."""
     a, b, c = env.peers("A", "B", "C")
-    ch = public_channel(a, [b, c], "v13-voice")
+    ch = invite_only_channel(a, [b, c], "v13-voice")
 
     _join_voice_all([a, b, c], ch)
     _await_mesh([a, b, c], ch)

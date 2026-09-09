@@ -5,13 +5,11 @@ These tests use real Reticulum + LXMF peers communicating over the
 shared AutoInterface transport.
 """
 
-import json
 
 import pytest
 
 from trenchchat.core.channel import ChannelManager
 from trenchchat.core.naming import NameInUseError
-from trenchchat.core.permissions import FLAG_DISCOVERABLE, PRESET_PRIVATE, is_open_join, permissions_from_json
 from tests.helpers import (
     announce_and_wait,
     wait_for_channel,
@@ -22,13 +20,12 @@ class TestChannelCreation:
     def test_create_public_channel(self, peer_factory):
         """Creating a channel stores it with correct metadata and subscribes the creator."""
         alice = peer_factory("alice")
-        ch_hash = alice.channel_mgr.create_channel("general", "A public channel", "public")
+        ch_hash = alice.channel_mgr.create_channel("general", "A channel")
 
         ch = alice.storage.get_channel(ch_hash)
         assert ch is not None
         assert ch["name"] == "general"
-        assert ch["description"] == "A public channel"
-        assert is_open_join(permissions_from_json(ch["permissions"]))
+        assert ch["description"] == "A channel"
         assert ch["creator_hash"] == alice.identity.hash_hex
 
         # Creator is automatically subscribed
@@ -40,11 +37,10 @@ class TestChannelCreation:
     def test_create_invite_only_channel(self, peer_factory):
         """Invite-only channel is stored with the private permissions preset."""
         alice = peer_factory("alice")
-        ch_hash = alice.channel_mgr.create_channel("secret", "Private channel", "invite")
+        ch_hash = alice.channel_mgr.create_channel("secret", "Private channel")
 
         ch = alice.storage.get_channel(ch_hash)
         assert ch is not None
-        assert not is_open_join(permissions_from_json(ch["permissions"]))
         assert alice.storage.is_admin(ch_hash, alice.identity.hash_hex)
 
     def test_channel_hash_is_deterministic(self, peer_factory):
@@ -54,7 +50,7 @@ class TestChannelCreation:
         what is stored in the DB (no re-registration needed).
         """
         alice = peer_factory("alice")
-        ch_hash1 = alice.channel_mgr.create_channel("myroom", "", "public")
+        ch_hash1 = alice.channel_mgr.create_channel("myroom", "")
 
         # The hash must be present in storage and alice must be the owner
         assert alice.channel_mgr.is_owner(ch_hash1)
@@ -67,15 +63,15 @@ class TestChannelCreation:
         alice = peer_factory("alice")
         bob = peer_factory("bob")
 
-        ch_hash = alice.channel_mgr.create_channel("alicechan", "", "public")
+        ch_hash = alice.channel_mgr.create_channel("alicechan", "")
         assert alice.channel_mgr.is_owner(ch_hash)
         assert not bob.channel_mgr.is_owner(ch_hash)
 
     def test_create_multiple_channels(self, peer_factory):
         """A single peer can own multiple channels with distinct hashes."""
         alice = peer_factory("alice")
-        h1 = alice.channel_mgr.create_channel("chan-one", "", "public")
-        h2 = alice.channel_mgr.create_channel("chan-two", "", "public")
+        h1 = alice.channel_mgr.create_channel("chan-one", "")
+        h2 = alice.channel_mgr.create_channel("chan-two", "")
         assert h1 != h2
         assert len(alice.storage.get_all_channels()) == 2
 
@@ -91,7 +87,7 @@ class TestChannelCreation:
         restore_owned_channels() is called at construction time.
         """
         alice = peer_factory("alice")
-        ch_hash = alice.channel_mgr.create_channel("restore-test", "", "public")
+        ch_hash = alice.channel_mgr.create_channel("restore-test", "")
         assert alice.channel_mgr.is_owner(ch_hash)
 
         # A second peer_factory call with the same name would reuse the same
@@ -105,10 +101,10 @@ class TestChannelCreation:
         refused instead of re-registering the destination (a hard RNS error)
         and overwriting the first channel's row."""
         alice = peer_factory("alice")
-        alice.channel_mgr.create_channel("general", "", "public")
+        alice.channel_mgr.create_channel("general", "")
 
         with pytest.raises(NameInUseError) as excinfo:
-            alice.channel_mgr.create_channel("general", "again", "public")
+            alice.channel_mgr.create_channel("general", "again")
 
         assert "general" in str(excinfo.value)
         assert len(alice.storage.get_all_channels()) == 1
@@ -117,199 +113,18 @@ class TestChannelCreation:
         """The stored row is authoritative too: a fresh manager over the same
         database refuses the name before touching RNS."""
         alice = peer_factory("alice")
-        alice.channel_mgr.create_channel("general", "", "public")
+        alice.channel_mgr.create_channel("general", "")
 
         fresh = ChannelManager(alice.identity, alice.storage)
         with pytest.raises(NameInUseError):
-            fresh.create_channel("general", "", "public")
+            fresh.create_channel("general", "")
 
     def test_duplicate_name_differing_only_in_punctuation_is_refused(self, peer_factory):
         """Names are sanitised into the aspect, so two that sanitise alike
         collide on the same address."""
         alice = peer_factory("alice")
-        alice.channel_mgr.create_channel("Trench Chat", "", "public")
+        alice.channel_mgr.create_channel("Trench Chat", "")
 
         with pytest.raises(NameInUseError):
-            alice.channel_mgr.create_channel("trench chat", "", "public")
+            alice.channel_mgr.create_channel("trench chat", "")
 
-
-class TestChannelDiscovery:
-    def test_channel_discovered_callback_via_direct_call(self, peer_factory):
-        """
-        The ChannelAnnounceHandler's _on_channel_discovered callback correctly
-        stores a discovered channel in the database and fires the discovered callback.
-
-        This calls the handler directly rather than going through a real announce:
-        the test fixtures' AutoInterface relies on UDP multicast, which is not
-        reliable on every machine (this is also why TestTransport exists for LXMF
-        message delivery), so announce-dependent tests target dest.announce()
-        directly instead of asserting on cross-peer delivery -- see
-        test_invite_only_channel_never_announced / test_public_channel_is_announced
-        below.
-        """
-        alice = peer_factory("alice")
-        bob = peer_factory("bob")
-
-        ch_hash = alice.channel_mgr.create_channel("discoverable", "Find me", "public")
-
-        discovered = []
-        bob.channel_mgr.add_channel_discovered_callback(
-            lambda h, n: discovered.append((h, n))
-        )
-
-        # Simulate the announce being received by Bob's handler
-        import RNS as _RNS
-        channel_hash_bytes = bytes.fromhex(ch_hash)
-        import msgpack
-        app_data = msgpack.packb({
-            "name": "discoverable",
-            "description": "Find me",
-            "access": "public",
-            "creator": alice.identity.hash_hex,
-        }, use_bin_type=True)
-
-        bob.channel_mgr._on_channel_discovered(
-            destination_hash=channel_hash_bytes,
-            announced_identity=alice.identity.rns_identity,
-            metadata={
-                "name": "discoverable",
-                "description": "Find me",
-                "access": "public",
-                "creator": alice.identity.hash_hex,
-            },
-        )
-
-        ch = bob.storage.get_channel(ch_hash)
-        assert ch is not None
-        assert ch["name"] == "discoverable"
-        assert ch["creator_hash"] == alice.identity.hash_hex
-        assert is_open_join(permissions_from_json(ch["permissions"]))
-
-        assert any(h == ch_hash for h, _ in discovered), \
-            "channel_discovered callback was not fired"
-
-    def test_channel_discovered_callback_not_fired_for_known_channel(self, peer_factory):
-        """
-        The channel_discovered callback is NOT fired for channels already in storage.
-        """
-        alice = peer_factory("alice")
-        bob = peer_factory("bob")
-
-        ch_hash = alice.channel_mgr.create_channel("known", "", "public")
-
-        # Pre-populate Bob's storage with the channel
-        import time as _time
-        bob.storage.upsert_channel(ch_hash, "known", "", alice.identity.hash_hex,
-                                   "public", _time.time())
-
-        discovered = []
-        bob.channel_mgr.add_channel_discovered_callback(
-            lambda h, n: discovered.append((h, n))
-        )
-
-        # Simulate receiving the announce again
-        bob.channel_mgr._on_channel_discovered(
-            destination_hash=bytes.fromhex(ch_hash),
-            announced_identity=alice.identity.rns_identity,
-            metadata={
-                "name": "known",
-                "description": "",
-                "access": "public",
-                "creator": alice.identity.hash_hex,
-            },
-        )
-
-        # Callback should NOT fire since channel was already known
-        assert len(discovered) == 0, \
-            "channel_discovered callback fired for an already-known channel"
-
-    def test_invite_channel_permissions_preserved(self, peer_factory):
-        """
-        When an invite-only channel announce is processed, it is stored
-        with the private permissions preset (open_join=False).
-        """
-        alice = peer_factory("alice")
-        bob = peer_factory("bob")
-
-        ch_hash = alice.channel_mgr.create_channel("private-room", "", "invite")
-
-        bob.channel_mgr._on_channel_discovered(
-            destination_hash=bytes.fromhex(ch_hash),
-            announced_identity=alice.identity.rns_identity,
-            metadata={
-                "name": "private-room",
-                "description": "",
-                "access": "invite",
-                "creator": alice.identity.hash_hex,
-            },
-        )
-
-        ch = bob.storage.get_channel(ch_hash)
-        assert ch is not None
-        assert not is_open_join(permissions_from_json(ch["permissions"]))
-
-    def test_invite_only_channel_never_announced(self, peer_factory):
-        """
-        Invite-only channels must never be broadcast on the mesh -- they rely on
-        the signed member-list document instead, precisely so their existence,
-        name, and description aren't visible to peers who were never invited.
-        announce_channel() must skip the actual dest.announce() call for them.
-
-        Regression test for a real bug: announce_channel() previously called
-        dest.announce() unconditionally for every owned channel, leaking
-        invite-only channel metadata to any peer listening for
-        trenchchat.channel announces.
-        """
-        alice = peer_factory("alice")
-        ch_hash = alice.channel_mgr.create_channel("secret-room", "", "invite")
-
-        dest = alice.channel_mgr._owned_destinations[ch_hash]
-        calls = []
-        dest.announce = lambda *a, **kw: calls.append((a, kw))
-
-        alice.channel_mgr.announce_channel(ch_hash)
-
-        assert calls == [], "invite-only channel's destination.announce() was called"
-
-    def test_invite_only_channel_never_announced_even_if_marked_discoverable(self, peer_factory):
-        """
-        discoverable and open_join are independent flags -- the real GUI's
-        ChannelPermissionsDialog lets an admin check "Discoverable" while
-        leaving "Open join" off. announce_channel() must still refuse to
-        announce, or an invite-only channel's name/description/creator gets
-        broadcast to every peer on the mesh, none of whom were ever invited.
-
-        Regression test for a real bug: announce_channel() only checked
-        is_discoverable(), trusting it wasn't set independently of
-        open_join. It was -- confirmed live via the devtools two-tester
-        environment, where a channel with open_join=False, discoverable=True
-        showed up in a never-invited tester's Discovered panel.
-        """
-        alice = peer_factory("alice")
-
-        leaked_perms = dict(PRESET_PRIVATE)
-        leaked_perms[FLAG_DISCOVERABLE] = True
-        ch_hash = alice.channel_mgr.create_channel("secret-room", "", permissions=leaked_perms)
-
-        dest = alice.channel_mgr._owned_destinations[ch_hash]
-        calls = []
-        dest.announce = lambda *a, **kw: calls.append((a, kw))
-
-        alice.channel_mgr.announce_channel(ch_hash)
-
-        assert calls == [], \
-            "invite-only channel was announced despite open_join=False, just because discoverable=True"
-
-    def test_public_channel_is_announced(self, peer_factory):
-        """Public channels are the intended case for dest.announce() -- the guard
-        added for invite-only channels must not also swallow this one."""
-        alice = peer_factory("alice")
-        ch_hash = alice.channel_mgr.create_channel("open-room", "", "public")
-
-        dest = alice.channel_mgr._owned_destinations[ch_hash]
-        calls = []
-        dest.announce = lambda *a, **kw: calls.append((a, kw))
-
-        alice.channel_mgr.announce_channel(ch_hash)
-
-        assert len(calls) == 1, "public channel's destination.announce() was not called"

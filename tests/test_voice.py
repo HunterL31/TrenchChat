@@ -13,13 +13,15 @@ import RNS
 import pytest
 
 from tests.helpers import (
-    wait_for, wait_for_roster, wait_for_subscriber,
+    mirror_members,
+    seed_channel,
+    wait_for, wait_for_roster,
 )
 from trenchchat.core import actions
 from trenchchat.core.voice import MAX_VOICE_PARTICIPANTS, VOICE_SIGNAL_MAX_AGE_SECS
 from trenchchat.network.voice_transport import PEER_STREAMING
 from trenchchat.core.permissions import (
-    PRESET_OPEN, PRESET_PRIVATE, ROLE_MEMBER, ROLE_OWNER, SEND_MESSAGE,
+    PRESET_PRIVATE, ROLE_MEMBER, ROLE_OWNER, SEND_MESSAGE,
 )
 from trenchchat.core.protocol import (
     F_CHANNEL_HASH, F_MSG_TYPE, F_TIMESTAMP,
@@ -51,9 +53,7 @@ def _setup_invite_channel(peer_factory, *, member_perms=None):
 
 def _mirror_membership(peer, owner, ch_hash, perms):
     """Give a peer the local channel/member rows its receiver checks against."""
-    peer.storage.upsert_channel(ch_hash, "voice-ch", "",
-                                owner.identity.hash_hex, perms, time.time())
-    peer.storage.subscribe(ch_hash)
+    mirror_members(ch_hash, owner, peer)
     peer.storage.upsert_member(ch_hash, peer.identity.hash_hex,
                                peer.name.capitalize(), role=ROLE_MEMBER)
     peer.storage.upsert_member(ch_hash, owner.identity.hash_hex, "Alice",
@@ -62,19 +62,10 @@ def _mirror_membership(peer, owner, ch_hash, perms):
 
 
 def _setup_open_channel(peer_factory, names=("alice", "bob")):
-    """An open-join channel every named peer is subscribed to."""
+    """A channel every named peer is a member of, with voice granted."""
     peers = [peer_factory(name) for name in names]
     owner = peers[0]
-    perms = dict(PRESET_OPEN)
-    ch_hash = owner.channel_mgr.create_channel("open-voice", "",
-                                               permissions=perms)
-    for peer in peers[1:]:
-        peer.storage.upsert_channel(ch_hash, "open-voice", "",
-                                    owner.identity.hash_hex, perms, time.time())
-        peer.subscription_mgr.subscribe(ch_hash, owner.identity.hash_hex)
-    owner.storage.subscribe(ch_hash)
-    for peer in peers[1:]:
-        assert wait_for_subscriber(peer, ch_hash, owner.identity.hash_hex)
+    ch_hash = seed_channel(owner, peers[1:], name="open-voice")
     return peers, ch_hash
 
 
@@ -263,7 +254,7 @@ class TestVoiceJoinGuards:
     def test_second_join_while_active_returns_false(self, peer_factory):
         alice, bob, ch_hash = _setup_invite_channel(peer_factory)
         other = alice.channel_mgr.create_channel(
-            "other", "", permissions=dict(PRESET_OPEN))
+            "other", "", permissions=dict(PRESET_PRIVATE))
         alice.storage.subscribe(other)
 
         assert alice.voice_mgr.join_voice(ch_hash) is True

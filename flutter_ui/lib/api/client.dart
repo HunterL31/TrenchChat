@@ -178,28 +178,16 @@ class ApiClient {
     return (_decode(res) as Map<String, dynamic>)['ok'] as bool? ?? false;
   }
 
-  /// Standalone channels announced on the mesh but not yet joined.
-  Future<List<Channel>> getDiscoveredChannels() async {
-    final res = await _http.get(_u('/channels/discovered'));
-    return (_decode(res) as List<dynamic>)
-        .map((e) => Channel.fromJson(e as Map<String, dynamic>))
-        .toList();
-  }
 
-  /// [access] is `"public"` or `"invite"`.
-  Future<String> createChannel(String name, String description, String access) async {
+  Future<String> createChannel(String name, String description) async {
     final res = await _http.post(
       _u('/channels'),
       headers: _jsonHeaders,
-      body: jsonEncode({'name': name, 'description': description, 'access': access}),
+      body: jsonEncode({'name': name, 'description': description}),
     );
     return (_decode(res) as Map<String, dynamic>)['hash'] as String;
   }
 
-  Future<bool> joinChannel(String channelHashHex) async {
-    final res = await _http.post(_u('/channels/$channelHashHex/join'));
-    return (_decode(res) as Map<String, dynamic>)['ok'] as bool? ?? false;
-  }
 
   /// Unsubscribes from a standalone channel. Stored history is kept; ok=false
   /// means the backend has no such channel.

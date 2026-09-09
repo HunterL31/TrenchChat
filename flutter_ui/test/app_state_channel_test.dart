@@ -182,19 +182,6 @@ void main() {
     expect(state.selectedChannelHash, 'hash-team');
   });
 
-  test('joinableDiscoveredChannels omits invite-only and already-joined channels', () {
-    state.standaloneChannels = [Channel.fromJson(_channelJson('alpha'))];
-    state.discoveredChannels = [
-      Channel.fromJson(_channelJson('alpha')),
-      Channel.fromJson(_channelJson('secret', openJoin: false)),
-      Channel.fromJson(_channelJson('public2')),
-    ];
-
-    expect(
-      state.joinableDiscoveredChannels.map((c) => c.name),
-      ['public2'],
-    );
-  });
 
   test('ensureChannelMeta loads permissions and sync state for an unvisited channel',
       () async {

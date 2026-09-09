@@ -12,7 +12,7 @@ dropped link, a restart and a full store.
 import random
 import time
 
-from tests.helpers import wait_for, wait_for_member
+from tests.helpers import mirror_members, wait_for, wait_for_member
 from trenchchat.core import actions
 from trenchchat.core import storage as storage_module
 from trenchchat.core.files import (
@@ -53,9 +53,7 @@ def file_channel(peer_factory, *names):
         assert wait_for_member(owner.storage, ch_hash, member.identity.hash_hex)
 
     for peer in peers[1:]:
-        peer.storage.upsert_channel(ch_hash, "files-ch", "",
-                                    owner.identity.hash_hex, perms, time.time())
-        peer.storage.subscribe(ch_hash)
+        mirror_members(ch_hash, owner, peer)
         peer.storage.set_channel_permissions(ch_hash, perms)
         for other in peers:
             peer.storage.upsert_member(
@@ -76,8 +74,7 @@ def mark_online(peers) -> None:
 
 def share(sender, ch_hash: str, name: str, data: bytes,
           content: str = "here") -> dict:
-    result = actions.share_file(sender.file_mgr, sender.storage,
-                                sender.subscription_mgr, sender.messaging,
+    result = actions.share_file(sender.file_mgr, sender.storage, sender.messaging,
                                 ch_hash, sender.identity.hash_hex, name, data,
                                 content)
     assert result["shared"] and result["sent"], result
@@ -197,7 +194,7 @@ def test_a_download_of_an_unknown_message_is_refused(peer_factory):
 
 def test_a_message_with_no_file_has_nothing_to_download(peer_factory):
     (alice, bob), ch_hash = file_channel(peer_factory, "alice", "bob")
-    actions.send_message(alice.storage, alice.subscription_mgr, alice.messaging,
+    actions.send_message(alice.storage, alice.messaging,
                          ch_hash, alice.identity.hash_hex, "just words")
     assert wait_for(lambda: len(bob.storage.get_messages(ch_hash)) == 1)
     msg_id = bob.storage.get_messages(ch_hash)[0]["message_id"]
