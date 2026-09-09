@@ -1410,7 +1410,7 @@ All fifteen families built and run: **127 scenarios, 99 strict and 28 probes**, 
 | `bw`: bytes on the wire | 1 (probe) | Measured before and after reconciliation; see the family's section |
 | `interop`: direct messages with other LXMF clients | 4 (4 strict) | All passing against a real bare RNS+LXMF client; interop4 found a real gap, 5/5 after the fix |
 | `files`: shared files in invite-only channels | 11 (7 strict, 4 probes) | All strict rows passing; files1 alone found three defects, files8 a fourth, the two radio probes two more and files9 a seventh, all fixed. files5, files8 and files10 record what a slow link, a lossy one and a shared one each cost, and files11 moves the 5 MB ceiling itself over SF7 in 5h 14m |
-| `rrc`: public chat over Reticulum Relay Chat | 5 (5 strict) | All passing on broadband and on `lora_fast`; rrc3 found the delivery-receipt overhead and rrc5 the destination re-registration, both fixed |
+| `rrc`: public chat over Reticulum Relay Chat | 5 (5 strict) | **25/25 over five repeats on broadband, 5/5 on `lora_fast`**; rrc3 found the delivery-receipt overhead and rrc5 the destination re-registration, both fixed. rrc5 costs 224s on a radio, against 72s for the next slowest, because a hub going away is only observable by waiting |
 
 **All strict scenarios pass**, sync11 included: 6/6 on broadband and 3/3 on
 `lora_fast` since beacons carry a sync probe, from 1/5 and 0/3 when this
