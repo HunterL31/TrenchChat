@@ -386,6 +386,7 @@ class Backend:
             self.presence_mgr.record_seen(peer_hex)
             self._seed_user_directory(peer_hex)
             self.avatar_mgr.flush_avatar(peer_hex)
+            self.reaction_mgr.flush_pending(peer_hex)
             self.reaction_mgr.flush_pending_emoji(peer_hex)
             self.invite_mgr.flush_pending(peer_hex)
             self.invite_mgr.resync_membership(peer_hex)
@@ -400,9 +401,15 @@ class Backend:
         # A peer's identity can also arrive as a path response, which is how a
         # first message from someone we have never heard becomes verifiable.
         # Releasing the quarantine is what actually delivers it.
+        # A held reaction flushes here rather than on the next announce: a
+        # real client announces every few hours, and the path response to our
+        # own request is the first news that the peer is addressable. The
+        # queue answers in a dict lookup when it holds nothing, so this stays
+        # cheap enough for a handler that fires on every path response.
         def _on_identity_resolved(peer_hex: str) -> None:
             self.router.release_quarantined(peer_hex)
             self.presence_mgr.record_seen(peer_hex)
+            self.reaction_mgr.flush_pending(peer_hex)
 
         RNS.Transport.register_announce_handler(
             PathResponseHandler(_on_identity_resolved)

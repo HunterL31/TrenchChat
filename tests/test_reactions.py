@@ -1441,3 +1441,122 @@ class TestEmojiNameIsConstrained:
         stored = storage.get_emoji(emoji_hash)
         assert len(stored["name"]) <= MAX_EMOJI_NAME_LEN
         assert all(c.isalnum() or c in "_-" for c in stored["name"])
+
+
+# ---------------------------------------------------------------------------
+# Reaction retry (regression: a reaction to a peer with no path was dropped)
+# ---------------------------------------------------------------------------
+
+class TestReactionRetryQueue:
+    """Two members of an invite-only channel meet in a member-list document,
+    not in traffic, so the first reaction one sends the other is regularly
+    addressed before Reticulum has resolved a path. A reaction has no sync
+    fallback, so one dropped there was lost for good: scenario social10 lost
+    it in four runs out of five."""
+
+    def _broadcast(self, mgr, router, peers, *, path_known: bool,
+                   remove: bool = False):
+        """Drive one reaction broadcast, returning what actually went out."""
+        sent = []
+        recall = MagicMock() if path_known else None
+        with patch(_REACTION_RECALL, return_value=recall), \
+             patch(_REACTION_DEST_HASH, return_value=b"\xde" * 32), \
+             patch(_REACTION_DEST) as MockDest, \
+             patch(_REACTION_TRANSPORT), \
+             patch("trenchchat.core.reaction.LXMF.LXMessage") as MockLXM:
+            MockDest.OUT = "OUT"
+            MockDest.SINGLE = "SINGLE"
+            lxm_instance = MagicMock()
+            MockLXM.return_value = lxm_instance
+            router.send = lambda lxm: sent.append(_wire(lxm_instance.fields))
+            call = mgr.remove_reaction if remove else mgr.add_reaction
+            call("ab" * 16, "msg1", compute_emoji_hash(_make_png()), peers)
+        return sent
+
+    def _flush(self, mgr, router, peer_hex: str):
+        sent = []
+        with patch(_REACTION_RECALL, return_value=MagicMock()), \
+             patch(_REACTION_DEST_HASH, return_value=b"\xde" * 32), \
+             patch(_REACTION_DEST) as MockDest, \
+             patch("trenchchat.core.reaction.LXMF.LXMessage") as MockLXM:
+            MockDest.OUT = "OUT"
+            MockDest.SINGLE = "SINGLE"
+            lxm_instance = MagicMock()
+            MockLXM.return_value = lxm_instance
+            router.send = lambda lxm: sent.append(_wire(lxm_instance.fields))
+            mgr.flush_pending(peer_hex)
+        return sent
+
+    def test_a_reaction_to_an_unreachable_peer_is_held_not_dropped(self, reaction_mgr):
+        mgr, storage, identity, router = reaction_mgr
+        peer_hex = "bb" * 16
+
+        assert self._broadcast(mgr, router, [peer_hex], path_known=False) == []
+
+        delivered = self._flush(mgr, router, peer_hex)
+        assert len(delivered) == 1
+        assert delivered[0][F_MSG_TYPE] == MT_REACTION
+        assert delivered[0][F_CHANNEL_HASH] == bytes.fromhex("ab" * 16)
+        assert delivered[0][F_REACTION_REMOVE] is False
+
+    def test_an_unresolved_path_is_requested(self, reaction_mgr):
+        mgr, storage, identity, router = reaction_mgr
+        with patch(_REACTION_RECALL, return_value=None), \
+             patch(_REACTION_DEST_HASH, return_value=b"\xde" * 32), \
+             patch(_REACTION_TRANSPORT) as mock_path:
+            router.send = lambda lxm: None
+            mgr.add_reaction("ab" * 16, "msg1",
+                             compute_emoji_hash(_make_png()), ["bb" * 16])
+        mock_path.assert_called_once_with(b"\xde" * 32)
+
+    def test_a_reachable_peer_is_never_queued(self, reaction_mgr):
+        mgr, storage, identity, router = reaction_mgr
+        peer_hex = "bb" * 16
+
+        assert len(self._broadcast(mgr, router, [peer_hex], path_known=True)) == 1
+        assert self._flush(mgr, router, peer_hex) == []
+
+    def test_a_removal_is_held_and_replayed_in_order(self, reaction_mgr):
+        """A user who reacts then unreacts while the peer is unreachable must
+        leave that peer agreeing with them, not one edit behind."""
+        mgr, storage, identity, router = reaction_mgr
+        peer_hex = "bb" * 16
+
+        self._broadcast(mgr, router, [peer_hex], path_known=False)
+        self._broadcast(mgr, router, [peer_hex], path_known=False, remove=True)
+
+        delivered = self._flush(mgr, router, peer_hex)
+        assert [f[F_REACTION_REMOVE] for f in delivered] == [False, True]
+
+    def test_only_the_unreachable_peer_is_held(self, reaction_mgr):
+        """One cold path must not cost the peers that were addressable."""
+        mgr, storage, identity, router = reaction_mgr
+        reachable, cold = "bb" * 16, "cc" * 16
+
+        def recall_for(dest_hash):
+            return None if dest_hash == b"\xcc" * 32 else MagicMock()
+
+        sent = []
+        with patch(_REACTION_RECALL, side_effect=recall_for), \
+             patch(_REACTION_DEST) as MockDest, \
+             patch(_REACTION_TRANSPORT), \
+             patch("trenchchat.core.reaction.LXMF.LXMessage") as MockLXM:
+            MockDest.OUT = "OUT"
+            MockDest.SINGLE = "SINGLE"
+            # Patching RNS.Destination replaces the whole class, so the per-peer
+            # hash has to be set on the mock rather than patched separately.
+            MockDest.hash.side_effect = lambda h, *a: bytes.fromhex(h.hex()[:2] * 32)
+            MockLXM.return_value = MagicMock()
+            router.send = lambda lxm: sent.append(lxm)
+            mgr.add_reaction("ab" * 16, "msg1",
+                             compute_emoji_hash(_make_png()), [reachable, cold])
+
+        assert len(sent) == 1
+        assert len(self._flush(mgr, router, cold)) == 1
+
+    def test_our_own_reaction_is_never_queued_for_ourselves(self, reaction_mgr):
+        mgr, storage, identity, router = reaction_mgr
+
+        assert self._broadcast(mgr, router, [identity.hash_hex],
+                               path_known=False) == []
+        assert self._flush(mgr, router, identity.hash_hex) == []

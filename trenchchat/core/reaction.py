@@ -28,6 +28,7 @@ import time
 import RNS
 import LXMF
 
+from trenchchat.core.control_retry import ControlRetryQueue
 from trenchchat.core.identity import Identity
 from trenchchat.core.image import inbound_image_is_sane
 from trenchchat.core.permissions import (
@@ -147,6 +148,8 @@ class ReactionManager:
         # peer identity hex -> time we last swept their unresolved emoji, so
         # the periodic retry doesn't re-query on every tick.
         self._last_flush_by_peer: dict[str, float] = {}
+
+        self._retry = ControlRetryQueue("reaction")
 
         # Set by the frontend wiring; without it a conversation is simply not
         # a place reactions can happen.
@@ -277,6 +280,10 @@ class ReactionManager:
                 break
             requested += 1
             self._request_emoji(sender_hex, emoji_hash, name=m.group(1))
+
+    def flush_pending(self, peer_hex: str) -> int:
+        """Re-send reactions held for a peer whose path is now known."""
+        return self._retry.flush(peer_hex, self._send_raw)
 
     def flush_pending_emoji(self, peer_hex: str) -> None:
         """Re-request emoji this peer reacted with that we still don't hold.
@@ -600,8 +607,7 @@ class ReactionManager:
     def _broadcast_reaction(self, channel_hash_hex: str, message_id: str,
                             emoji_hash: str, subscriber_hashes: list[str],
                             remove: bool) -> None:
-        """Send MT_REACTION to all reachable channel subscribers."""
-        channel_hash_bytes = bytes.fromhex(channel_hash_hex)
+        """Send MT_REACTION to every other member, queueing what cannot go yet."""
         own_hex = self._identity.hash_hex
 
         if is_custom_emoji_hash(emoji_hash):
@@ -609,43 +615,73 @@ class ReactionManager:
         else:
             emoji_field = {F_REACTION_UNICODE: emoji_hash}
 
+        fields = {
+            F_MSG_TYPE:          MT_REACTION,
+            F_CHANNEL_HASH:      bytes.fromhex(channel_hash_hex),
+            F_REACTION_MSG_ID:   message_id_to_wire(message_id),
+            F_REACTION_REMOVE:   remove,
+            **emoji_field,
+        }
+
+        addressed = 0
+        queued = 0
         for peer_hex in subscriber_hashes:
             if peer_hex == own_hex:
                 continue
-            try:
-                identity_hash = bytes.fromhex(peer_hex)
-                delivery_dest_hash = RNS.Destination.hash(identity_hash, "lxmf", "delivery")
-                dest_identity = RNS.Identity.recall(delivery_dest_hash)
-                if dest_identity is None:
-                    RNS.Transport.request_path(delivery_dest_hash)
-                    continue
+            if self._send_raw(peer_hex, fields):
+                addressed += 1
+            else:
+                queued += 1
 
-                dest = RNS.Destination(
-                    dest_identity,
-                    RNS.Destination.OUT,
-                    RNS.Destination.SINGLE,
-                    "lxmf",
-                    "delivery",
-                )
-                lxm = LXMF.LXMessage(
-                    dest,
-                    self._router.delivery_destination,
-                    "",
-                    desired_method=LXMF.LXMessage.DIRECT,
-                )
-                lxm.fields = pack_fields({
-                    F_MSG_TYPE:          MT_REACTION,
-                    F_CHANNEL_HASH:      channel_hash_bytes,
-                    F_REACTION_MSG_ID:   message_id_to_wire(message_id),
-                    F_REACTION_REMOVE:   remove,
-                    **emoji_field,
-                })
-                self._router.send(lxm)
-            except Exception as e:
-                RNS.log(
-                    f"TrenchChat [reaction]: send error to {peer_hex[:12]}…: {e}",
-                    RNS.LOG_WARNING,
-                )
+        RNS.log(
+            f"TrenchChat [reaction]: {'removed' if remove else 'added'} on "
+            f"{channel_hash_hex[:12]}… addressed {addressed} peer(s), "
+            f"{queued} queued",
+            RNS.LOG_DEBUG,
+        )
+
+    def _send_raw(self, dest_hex: str, fields: dict) -> bool:
+        """Send one MT_REACTION. False if it had to be queued instead.
+
+        Two members of an invite-only channel learn of each other from a
+        member-list document rather than from traffic, so the first thing one
+        sends the other is often addressed before Reticulum has resolved a
+        path. A reaction has no sync fallback, so one dropped there is lost
+        for good; queueing it is the only path back.
+        """
+        if self._router is None:
+            return False
+        try:
+            identity_hash = bytes.fromhex(dest_hex)
+            delivery_dest_hash = RNS.Destination.hash(identity_hash, "lxmf", "delivery")
+            dest_identity = RNS.Identity.recall(delivery_dest_hash)
+            if dest_identity is None:
+                RNS.Transport.request_path(delivery_dest_hash)
+                self._retry.queue(dest_hex, fields)
+                return False
+
+            dest = RNS.Destination(
+                dest_identity,
+                RNS.Destination.OUT,
+                RNS.Destination.SINGLE,
+                "lxmf",
+                "delivery",
+            )
+            lxm = LXMF.LXMessage(
+                dest,
+                self._router.delivery_destination,
+                "",
+                desired_method=LXMF.LXMessage.DIRECT,
+            )
+            lxm.fields = pack_fields(fields)
+            self._router.send(lxm)
+            return True
+        except Exception as e:
+            RNS.log(
+                f"TrenchChat [reaction]: send error to {dest_hex[:12]}…: {e}",
+                RNS.LOG_WARNING,
+            )
+            return False
 
     def _prune_pending_requests_locked(self, now: float) -> None:
         """Drop expired in-flight markers, then the oldest past the cap."""
