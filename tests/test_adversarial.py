@@ -88,7 +88,8 @@ from trenchchat.core.protocol import (
     MT_SYNC_RESPONSE, F_SYNC_MESSAGES,
 )
 from trenchchat.core.protocol import (
-    F_SYNC_NEED, F_SYNC_RANGES, F_SYNC_CONTINUES, MT_SYNC_REQUEST, RANGE_FINGERPRINT, RANGE_IDLIST,
+    F_SYNC_NEED, F_SYNC_RANGES, F_SYNC_CONTINUES, F_SYNC_TRUNCATED,
+    MT_SYNC_REQUEST, RANGE_FINGERPRINT, RANGE_IDLIST,
     SYNC_FINGERPRINT_BYTES, message_id_from_wire, unpack_wire,
 )
 from trenchchat.core import sync_ranges
@@ -1668,6 +1669,45 @@ class TestAdversarialSyncRanges:
                   for m in unpack_wire(answers[0][F_SYNC_MESSAGES])]
         assert served == [], \
             "a need reached history the requester's tenure withholds"
+
+    def test_a_responder_claiming_truncation_forever_hits_the_budget(
+            self, peer_factory):
+        """Saying "I have more" is free, and it earns a request every time.
+
+        A capped answer is acted on whether or not it moved anything, so
+        the continuation budget is the only thing standing between a peer
+        that always sets the flag and an unbounded run of requests.
+        """
+        alice, bob, ch_hash = _setup_channel_with_member(
+            peer_factory, member_perms=[SEND_MESSAGE]
+        )
+        requests = 0
+
+        def counting_send_raw(dest_hex, fields):
+            nonlocal requests
+            if fields.get(F_MSG_TYPE) == MT_SYNC_REQUEST:
+                requests += 1
+            return True
+
+        bob.sync_mgr._send_raw = counting_send_raw
+
+        base = time.time() - 10000
+        bob.sync_mgr._send_sync_request(alice.identity.hash_hex, ch_hash, base)
+        for _ in range(MAX_SYNC_CONTINUATIONS + 5):
+            bob.sync_mgr._handle_sync_response(
+                {
+                    F_MSG_TYPE:       MT_SYNC_RESPONSE,
+                    F_CHANNEL_HASH:   bytes.fromhex(ch_hash),
+                    F_SYNC_MESSAGES:  msgpack.packb([], use_bin_type=True),
+                    F_SYNC_TRUNCATED: True,
+                },
+                ch_hash, alice.identity.hash_hex,
+            )
+
+        assert requests - 1 == MAX_SYNC_CONTINUATIONS, (
+            f"a peer claiming truncation forever drove {requests - 1} "
+            f"continuations against a budget of {MAX_SYNC_CONTINUATIONS}"
+        )
 
     def test_a_responder_describing_ranges_forever_hits_the_budget(self, peer_factory):
         """A description that never matches is still bounded.
