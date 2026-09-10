@@ -110,6 +110,41 @@ List<MapNode> mapOrderGroupForQuery(List<MapNode> hidden, String query) {
   return [...match, ...rest];
 }
 
+/// The nodes Enter walks through for a search, in visit order: nearest ring
+/// first, then by label, then by id, so the walk is the same on every refresh
+/// that changes nothing. A crowded parent's overflow node stands in for every
+/// match it hides, so a hit inside a group is visited once, as the group, and
+/// selecting it opens the group's list rather than pointing at a node nothing
+/// on the canvas draws.
+List<String> mapSearchMatches(
+  NetworkMapData shown,
+  Map<String, List<MapNode>> hidden,
+  String query,
+) {
+  if (query.trim().isEmpty) return const [];
+  final matches = shown.nodes
+      .where((n) =>
+          mapNodeMatchesQuery(n, query) || mapGroupMatchesQuery(hidden[n.id], query))
+      .toList()
+    ..sort((a, b) {
+      final byRing = a.hops.compareTo(b.hops);
+      if (byRing != 0) return byRing;
+      final byLabel = a.label.toLowerCase().compareTo(b.label.toLowerCase());
+      return byLabel != 0 ? byLabel : a.id.compareTo(b.id);
+    });
+  return [for (final n in matches) n.id];
+}
+
+/// The viewer transform that puts [childPoint], a point in the map child's own
+/// coordinates, in the middle of a [viewport] of that same size at [scale].
+Matrix4 mapFocusTransform(Offset childPoint, Size viewport, {double scale = 1.0}) {
+  final translation =
+      Offset(viewport.width / 2, viewport.height / 2) - childPoint * scale;
+  return Matrix4.identity()
+    ..translateByDouble(translation.dx, translation.dy, 0, 1)
+    ..scaleByDouble(scale, scale, scale, 1);
+}
+
 /// What everything that does not match the search fades to.
 const double mapDimOpacity = 0.25;
 
@@ -868,6 +903,21 @@ class _MapTabState extends State<MapTab> with SingleTickerProviderStateMixin {
 
   late final AnimationController _transition;
   final TextEditingController _search = TextEditingController();
+  final FocusNode _searchFocus = FocusNode();
+
+  /// The viewer's transform, so Enter can walk the search hits by moving the
+  /// map under the user rather than asking them to find the next one.
+  final TransformationController _viewer = TransformationController();
+
+  /// Where the last Enter landed in [mapSearchMatches], and the query it was
+  /// counted against: a new term starts the walk over.
+  int _matchIndex = -1;
+  String _walkedQuery = '';
+
+  /// The size the viewer last laid its child out at, which is the size the
+  /// child's own coordinates are in. Null until the map has been laid out.
+  Size? _viewport;
+
   Timer? _poll;
   int _seenRevision = 0;
   bool _fetching = false;
@@ -878,7 +928,7 @@ class _MapTabState extends State<MapTab> with SingleTickerProviderStateMixin {
     _transition = AnimationController(vsync: this, duration: _mapTransition, value: 1);
     _seenRevision = widget.state.networkMapRevision;
     widget.state.addListener(_onStateChanged);
-    _search.addListener(() => setState(() {}));
+    _search.addListener(_onQueryChanged);
     _poll = Timer.periodic(mapFallbackRefresh, (_) => _refresh());
     _refresh();
   }
@@ -888,8 +938,53 @@ class _MapTabState extends State<MapTab> with SingleTickerProviderStateMixin {
     widget.state.removeListener(_onStateChanged);
     _poll?.cancel();
     _search.dispose();
+    _searchFocus.dispose();
+    _viewer.dispose();
     _transition.dispose();
     super.dispose();
+  }
+
+  void _onQueryChanged() {
+    final query = _search.text.trim();
+    if (query != _walkedQuery) {
+      _walkedQuery = query;
+      _matchIndex = -1;
+    }
+    setState(() {});
+  }
+
+  /// Selects the next node the query matches and centers the map on it, from
+  /// the top once the walk runs off the end. An overflow node is selected like
+  /// any other, which opens the list of what it groups.
+  void _focusNextMatch() {
+    final layout = _shownLayout;
+    final shown = _shown;
+    final query = _search.text.trim();
+    if (layout == null || shown == null || query.isEmpty) return;
+    final matches = mapSearchMatches(shown, _hidden, query);
+    if (matches.isEmpty) {
+      setState(() => _matchIndex = -1);
+      return;
+    }
+    final next = (_matchIndex + 1) % matches.length;
+    setState(() {
+      _matchIndex = next;
+      _selectedId = matches[next];
+      _pickedFrom = null;
+    });
+    _centerOn(matches[next], layout);
+    // onSubmitted drops focus on a single-line field, and the walk is meant to
+    // run off repeated Enter presses.
+    _searchFocus.requestFocus();
+  }
+
+  void _centerOn(String id, MapLayout layout) {
+    final viewport = _viewport;
+    final pos = layout.positions[id];
+    if (pos == null || viewport == null || viewport.isEmpty) return;
+    final fit = mapFitFor(viewport, layout.size);
+    _viewer.value = mapFocusTransform(fit.toCanvas(pos), viewport,
+        scale: _viewer.value.getMaxScaleOnAxis());
   }
 
   void _onStateChanged() {
@@ -1014,7 +1109,9 @@ class _MapTabState extends State<MapTab> with SingleTickerProviderStateMixin {
                 child: TcTextField(
                   label: 'FIND',
                   controller: _search,
+                  focusNode: _searchFocus,
                   hintText: 'name or hash…',
+                  onSubmitted: (_) => _focusNextMatch(),
                 ),
               ),
               const SizedBox(width: 12),
@@ -1166,34 +1263,38 @@ class _MapTabState extends State<MapTab> with SingleTickerProviderStateMixin {
             Positioned.fill(
               child: InteractiveViewer(
                 constrained: true,
+                transformationController: _viewer,
                 minScale: 0.4,
                 maxScale: mapMaxScale(outer.biggest, _shownLayout!.size),
                 boundaryMargin: const EdgeInsets.all(600),
                 child: LayoutBuilder(
-                  builder: (context, inner) => GestureDetector(
-                    behavior: HitTestBehavior.opaque,
-                    onTapUp: (d) => _handleTap(d.localPosition, inner.biggest),
-                    child: AnimatedBuilder(
-                      animation: _transition,
-                      builder: (context, _) => CustomPaint(
-                        painter: _NetworkMapPainter(
-                          data: _shown!,
-                          layout: _shownLayout!,
-                          hidden: _hidden,
-                          previous: _previous,
-                          previousLayout: _previousLayout,
-                          t: _transition.value,
-                          // A peer picked out of a group has no marker of its
-                          // own, so the group keeps the selection ring.
-                          selectedId: _pickedFrom ?? _selectedId,
-                          query: query,
-                          colors: tc,
-                          glow: tcTextGlow(context),
+                  builder: (context, inner) {
+                    _viewport = inner.biggest;
+                    return GestureDetector(
+                      behavior: HitTestBehavior.opaque,
+                      onTapUp: (d) => _handleTap(d.localPosition, inner.biggest),
+                      child: AnimatedBuilder(
+                        animation: _transition,
+                        builder: (context, _) => CustomPaint(
+                          painter: _NetworkMapPainter(
+                            data: _shown!,
+                            layout: _shownLayout!,
+                            hidden: _hidden,
+                            previous: _previous,
+                            previousLayout: _previousLayout,
+                            t: _transition.value,
+                            // A peer picked out of a group has no marker of
+                            // its own, so the group keeps the selection ring.
+                            selectedId: _pickedFrom ?? _selectedId,
+                            query: query,
+                            colors: tc,
+                            glow: tcTextGlow(context),
+                          ),
+                          child: const SizedBox.expand(),
                         ),
-                        child: const SizedBox.expand(),
                       ),
-                    ),
-                  ),
+                    );
+                  },
                 ),
               ),
             ),
