@@ -9,13 +9,14 @@ sets themselves closes that gap.
 
 import time
 
+import msgpack
 import pytest
 
 from tests.helpers import sign_as, wait_for, wait_for_member, wait_for_message
 from trenchchat.core import sync_ranges
 from trenchchat.core.messaging import _compute_message_id
 from trenchchat.core.protocol import (
-    F_SYNC_CONTINUES,
+    F_SYNC_CONTINUES, F_SYNC_TRUNCATED,
     MT_PRESENCE,
     F_SYNC_PROBE,
     F_CHANNEL_HASH, F_MSG_TYPE, F_SYNC_MESSAGES, F_SYNC_NEED, F_SYNC_RANGES,
@@ -930,3 +931,66 @@ class TestRoutineReCheckWindow:
         from trenchchat.core.sync import PROBE_AGREE_SECS
         assert PROBE_AGREE_SECS > PRESENCE_BEACON_AFTER_SECS, \
             "an agreement would go stale before the next beacon could renew it"
+
+
+class TestTruncatedAnswerAlwaysEarnsAnother:
+    """A capped answer says the peer holds more than it could fit, and that
+    claim has to be acted on even when the rows it did fit are ones we
+    already had.
+
+    Regression for a stall that lost history: two peers reconciling each
+    other at once both finished SYNCED with a run of messages missing on
+    each side. The debt a truncated answer records was only paid by a
+    *later* answer that moved something, and in a two-peer channel there is
+    no third party to send one, so both sides waited on each other forever.
+    """
+
+    def _pair(self, peer_factory):
+        a = peer_factory("a")
+        b = peer_factory("b")
+        ch_hash = a.channel_mgr.create_channel("capped", "", "public")
+        _seed_channel_on_peer(b, ch_hash, "capped", a.identity.hash_hex)
+        a.subscription_mgr._subscribers[ch_hash] = {b.identity.hash_hex}
+        return a, b, ch_hash
+
+    def _answer(self, peer, ch_hash, responder_hex, truncated: bool):
+        """An answer carrying nothing: no rows, no description, no resume."""
+        peer.sync_mgr._handle_sync_response(
+            {
+                F_MSG_TYPE:       MT_SYNC_RESPONSE,
+                F_CHANNEL_HASH:   bytes.fromhex(ch_hash),
+                F_SYNC_MESSAGES:  msgpack.packb([], use_bin_type=True),
+                F_SYNC_TRUNCATED: truncated,
+            },
+            ch_hash, responder_hex,
+        )
+
+    def test_a_capped_answer_that_moved_nothing_still_asks_again(
+            self, peer_factory):
+        a, b, ch_hash = self._pair(peer_factory)
+        a_sent = _capture(a)
+        a.sync_mgr._send_sync_request(b.identity.hash_hex, ch_hash,
+                                      time.time() - 600)
+
+        self._answer(a, ch_hash, b.identity.hash_hex, truncated=True)
+
+        assert len(_requests(a_sent)) == 2, (
+            "a peer said it was holding more than it could fit and was never "
+            "asked again, so its history is lost until something else "
+            "provokes a sync"
+        )
+        assert _requests(a_sent)[1].get(F_SYNC_CONTINUES) is True
+
+    def test_an_uncapped_answer_that_moved_nothing_ends_the_exchange(
+            self, peer_factory):
+        """The other half of the contract: an answer claiming nothing more
+        remains earns no follow-up, so a silent peer cannot be re-asked into
+        a loop."""
+        a, b, ch_hash = self._pair(peer_factory)
+        a_sent = _capture(a)
+        a.sync_mgr._send_sync_request(b.identity.hash_hex, ch_hash,
+                                      time.time() - 600)
+
+        self._answer(a, ch_hash, b.identity.hash_hex, truncated=False)
+
+        assert len(_requests(a_sent)) == 1

@@ -1548,6 +1548,7 @@ class SyncManager:
         # it never feeds the persisted watermark above, so a withheld run
         # is re-scanned (bounded, indexed) rather than ever being skipped.
         resume_ts = newest_ts
+        scan_cursor = None
         scan_cursor_raw = fields.get(F_SYNC_SCAN_CURSOR)
         if scan_cursor_raw is not None:
             try:
@@ -1583,24 +1584,31 @@ class SyncManager:
         # rather than acted on at once, because the narrowing this answer
         # also asked for has to run its course first; once it has, asking
         # again from what we now hold is a different question (a reconciled
-        # request describes holdings, not a resume point). It is asked when
-        # an answer has moved something: a row we did not hold, a difference
-        # of our own, something the responder described, or a resume point
-        # that advanced. An answer that moved nothing leaves it owed for the
-        # next one that does (two peers reconciling each other at once fill
-        # ranges out from under a step in flight, so a step can honestly
-        # bring nothing while the wider difference remains), and a responder
-        # repeating itself with nothing new never earns another request.
+        # request describes holdings, not a resume point).
+        #
+        # The one answer that ends the exchange instead is a responder
+        # naming a scan cursor it has already given us: that says outright
+        # that it swept no further than last time, so the same question
+        # would return the same batch. Anything else owed is asked again,
+        # and MAX_SYNC_CONTINUATIONS is what bounds a peer that reports
+        # truncation forever.
+        #
+        # It is deliberately not gated on this answer having moved
+        # something. Two peers reconciling each other at once fill each
+        # other's ranges, so the last answer of an exchange routinely
+        # carries nothing new while a run of history is still missing from
+        # both sides; leaving the debt for a later answer to pay strands it,
+        # because in a two-peer channel there is nobody else to send one.
         key = (channel_hash_hex, peer_hex)
         if truncated or deferred:
             with self._deferred_lock:
                 self._deferred.add(key)
         if not self._continue_reconcile(channel_hash_hex, peer_hex,
                                         cont_ranges, cont_needs):
-            progress = (inserted_count or deferred or peer_ranges or peer_needs
-                        or resume_ts > requested_since)
+            swept_no_further = (scan_cursor is not None
+                                and scan_cursor <= requested_since)
             with self._deferred_lock:
-                owed = key in self._deferred and bool(progress)
+                owed = key in self._deferred and not swept_no_further
                 if owed:
                     self._deferred.discard(key)
             if owed:
