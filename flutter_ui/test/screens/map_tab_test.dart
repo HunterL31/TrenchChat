@@ -11,7 +11,9 @@ import 'package:flutter_ui/widgets/emoji_text.dart' show nomadUrlRe;
 
 import '../fake_backend.dart';
 
-NetworkMapData _data() => NetworkMapData.fromJson({
+NetworkMapData _data() => NetworkMapData.fromJson(_simpleTopology());
+
+Map<String, dynamic> _simpleTopology() => {
       'nodes': [
         {'id': 'self', 'label': 'This device', 'kind': 'self', 'hops': 0},
         {'id': '__iface__Hub', 'label': 'Hub', 'kind': 'interface', 'hops': 0},
@@ -29,7 +31,7 @@ NetworkMapData _data() => NetworkMapData.fromJson({
         {'name': 'Hub', 'type': 'TCPClientInterface', 'status': true, 'rxb': 1, 'txb': 2},
       ],
       'stats': {'node_count': 6, 'path_count': 4, 'interface_count': 1},
-    });
+    };
 
 void main() {
   test('a node page URL is one the NET tab recognises', () {
@@ -322,6 +324,31 @@ void main() {
     expect(mapDimOpacity, lessThan(1.0));
   });
 
+  test('the search walk visits every hit once, nearest ring first', () {
+    final data = _data();
+
+    expect(mapSearchMatches(data, const {}, 'peer'),
+        ['peer-a', 'peer-b', 'far-peer']);
+    expect(mapSearchMatches(data, const {}, 'PEER-B'), ['peer-b']);
+    expect(mapSearchMatches(data, const {}, 'nobody'), isEmpty);
+    // An empty box matches everything for dimming, and nothing for the walk.
+    expect(mapSearchMatches(data, const {}, ''), isEmpty);
+    expect(mapSearchMatches(data, const {}, '  '), isEmpty);
+  });
+
+  test('focusing a point puts it in the middle of the viewport', () {
+    const viewport = Size(400, 300);
+    const point = Offset(500, 100);
+
+    final centered = mapFocusTransform(point, viewport);
+    expect(MatrixUtils.transformPoint(centered, point), const Offset(200, 150));
+
+    // The user's zoom is kept: the point still lands in the middle.
+    final zoomed = mapFocusTransform(point, viewport, scale: 2);
+    expect(MatrixUtils.transformPoint(zoomed, point), const Offset(200, 150));
+    expect(zoomed.getMaxScaleOnAxis(), 2);
+  });
+
   test('a via hex resolves to the node it names, or a short hex', () {
     final data = NetworkMapData.fromJson(_richTopology());
 
@@ -437,6 +464,14 @@ void main() {
       }
     });
 
+    test('the walk visits an overflow node once, not once per hit it hides', () {
+      final collapse = collapseOf(_plainKids(12));
+
+      expect(mapSearchMatches(collapse.data, collapse.hidden, 'kid-1'),
+          [overflowId()]);
+      expect(mapSearchMatches(collapse.data, collapse.hidden, 'kid-00'), ['kid-00']);
+    });
+
     test('an overflow node matches a search any child it hides matches', () {
       final hidden = collapseOf(_plainKids(12)).hidden[overflowId()];
 
@@ -445,6 +480,125 @@ void main() {
       expect(mapGroupMatchesQuery(hidden, 'kid-00'), isFalse);
       expect(mapGroupMatchesQuery(hidden, '  '), isFalse);
       expect(mapGroupMatchesQuery(null, 'kid'), isFalse);
+    });
+  });
+
+  group('search walk', () {
+    late FakeBackend backend;
+    late AppState state;
+
+    setUp(() {
+      backend = FakeBackend();
+      backend.routes['GET /network/map'] = _simpleTopology();
+      state = AppState(baseUrl: backend.baseUrl, httpClient: backend.client());
+    });
+
+    tearDown(() => state.dispose());
+
+    Widget harness() => MaterialApp(home: Scaffold(body: MapTab(state: state)));
+
+    Finder viewer() => find.byType(InteractiveViewer);
+
+    Matrix4 transform(WidgetTester tester) =>
+        tester.widget<InteractiveViewer>(viewer()).transformationController!.value;
+
+    Future<void> search(WidgetTester tester, String query) async {
+      await tester.enterText(find.byType(TextField), query);
+      await settle(tester);
+    }
+
+    // Repeated presses only reach the field while it keeps focus, which a
+    // single-line field drops on submit unless the tab asks for it back.
+    Future<void> pressEnter(WidgetTester tester) async {
+      await tester.testTextInput.receiveAction(TextInputAction.done);
+      await settle(tester);
+    }
+
+    // The details panel names the selected node, and nothing else on screen
+    // does, so what it holds is which node the walk landed on.
+    void expectSelected(String label) {
+      for (final peer in const ['peer-a', 'peer-b', 'far-peer']) {
+        expect(find.text(peer), peer == label ? findsWidgets : findsNothing);
+      }
+    }
+
+    testWidgets('enter walks the matches in order and wraps around',
+        (tester) async {
+      await tester.pumpWidget(harness());
+      await settle(tester);
+      await search(tester, 'peer');
+      expect(find.text('peer-a'), findsNothing);
+
+      for (final expected in const ['peer-a', 'peer-b', 'far-peer', 'peer-a']) {
+        await pressEnter(tester);
+        expectSelected(expected);
+      }
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('enter centers the map on the match it selects', (tester) async {
+      await tester.pumpWidget(harness());
+      await settle(tester);
+      await search(tester, 'far-peer');
+      expect(transform(tester), Matrix4.identity());
+
+      await pressEnter(tester);
+      final size = tester.getSize(viewer());
+      final layout = layoutMapNodes(collapseMapData(_data()).data);
+      final fit = mapFitFor(size, layout.size);
+      final landed = MatrixUtils.transformPoint(
+          transform(tester), fit.toCanvas(layout.positions['far-peer']!));
+
+      expect(landed.dx, closeTo(size.width / 2, 0.5));
+      expect(landed.dy, closeTo(size.height / 2, 0.5));
+    });
+
+    testWidgets('a new search term starts the walk over', (tester) async {
+      await tester.pumpWidget(harness());
+      await settle(tester);
+      await search(tester, 'peer');
+      await pressEnter(tester);
+      await pressEnter(tester);
+      expectSelected('peer-b');
+
+      await search(tester, 'peer-');
+      await pressEnter(tester);
+      expectSelected('peer-a');
+    });
+
+    testWidgets('enter on a query nothing matches changes nothing',
+        (tester) async {
+      await tester.pumpWidget(harness());
+      await settle(tester);
+      await search(tester, 'nobody');
+      await pressEnter(tester);
+
+      expect(transform(tester), Matrix4.identity());
+      expect(find.text('CLOSE'), findsNothing);
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('a hit inside a group selects the group, not the map behind it',
+        (tester) async {
+      backend.routes['GET /network/map'] = _hubTopology(_plainKids(12));
+      await tester.pumpWidget(harness());
+      await settle(tester);
+      await search(tester, 'kid-11');
+      await pressEnter(tester);
+
+      expect(find.text('2 MORE VIA hub'), findsOneWidget);
+      expect(find.text('lbl-kid-11'), findsOneWidget);
+
+      final size = tester.getSize(viewer());
+      final collapse =
+          collapseMapData(NetworkMapData.fromJson(_hubTopology(_plainKids(12))));
+      final layout = layoutMapNodes(collapse.data);
+      final fit = mapFitFor(size, layout.size);
+      final landed = MatrixUtils.transformPoint(transform(tester),
+          fit.toCanvas(layout.positions[mapOverflowIdFor('hub')]!));
+
+      expect(landed.dx, closeTo(size.width / 2, 0.5));
+      expect(landed.dy, closeTo(size.height / 2, 0.5));
     });
   });
 

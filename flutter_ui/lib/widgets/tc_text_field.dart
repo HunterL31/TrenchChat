@@ -14,6 +14,7 @@ class TcTextField extends StatefulWidget {
     super.key,
     required this.label,
     required this.controller,
+    this.focusNode,
     this.hintText,
     this.autofocus = false,
     this.onSubmitted,
@@ -23,6 +24,11 @@ class TcTextField extends StatefulWidget {
 
   final String label;
   final TextEditingController controller;
+
+  /// Supplied by a caller that needs to move focus itself, e.g. to put it back
+  /// after a submit. The field owns one when this is null.
+  final FocusNode? focusNode;
+
   final String? hintText;
   final bool autofocus;
   final ValueChanged<String>? onSubmitted;
@@ -39,7 +45,9 @@ class TcTextField extends StatefulWidget {
 }
 
 class _TcTextFieldState extends State<TcTextField> {
-  final FocusNode _focusNode = FocusNode();
+  FocusNode? _owned;
+
+  FocusNode get _focusNode => widget.focusNode ?? (_owned ??= FocusNode());
 
   @override
   void initState() {
@@ -57,7 +65,7 @@ class _TcTextFieldState extends State<TcTextField> {
 
   @override
   void dispose() {
-    _focusNode.dispose();
+    _owned?.dispose();
     super.dispose();
   }
 
