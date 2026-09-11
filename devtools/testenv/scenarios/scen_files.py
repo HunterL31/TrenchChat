@@ -37,9 +37,16 @@ from flows import (
 )
 from scenario import PROBE, scenario
 from trenchchat.core.files import DL_DONE, DL_UNAVAILABLE
-from trenchchat.core.protocol import FILE_CHUNK_BYTES, MAX_SHARED_FILE_BYTES
+from trenchchat.core.protocol import FILE_CHUNK_BYTES
 
-SIZE_5MB = MAX_SHARED_FILE_BYTES
+# What the ceiling was when it was decided against LoRa, and what files11
+# measured over a radio. The ceiling itself is now two hundred megabytes,
+# forty times this, and was decided against the direct path rather than against
+# a radio: a mesh member pulls a file that size at its own pace or never asks
+# for it, and nothing here should try to move one over SF7. So this row keeps
+# the size it measured rather than following a constant past what it can say
+# anything about.
+SIZE_5MB = 5 * 1024 * 1024
 SIZE_2MB = 2 * 1024 * 1024
 SIZE_512KB = 512 * 1024
 SIZE_200KB = 200 * 1024
@@ -1001,11 +1008,13 @@ def _lora_fan_in(env, peers) -> dict:
 @scenario("files11", "The 5 MB ceiling over a LoRa SF7 link", peers="AB",
           kind=PROBE)
 def h11(env):
-    """The largest file the protocol allows, on the slowest medium it claims.
+    """Five megabytes, on the slowest medium the project claims.
 
-    `MAX_SHARED_FILE_BYTES` was decided against LoRa and then only ever read
-    against files5's 200 KB, and nothing above that had moved over a radio here
-    at all. This row moves it, once, and records what it cost: five hours and
+    The ceiling this measured was `MAX_SHARED_FILE_BYTES` when it was decided
+    against LoRa; it has since moved to two hundred megabytes against the
+    direct path, and this row stays where the measurement is. It was only ever
+    read against files5's 200 KB, and nothing above that had moved over a
+    radio here at all. This row moves it, once, and records what it cost: five hours and
     fourteen minutes, byte for byte, a quarter of it spent on requests that
     died after the bytes had crossed.
 

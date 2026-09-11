@@ -533,7 +533,7 @@ class FriendsManager:
             self._fire_callbacks(sender_hex)
             RNS.log(
                 f"TrenchChat [friends]: {sender_hex[:12]}… asked while we were "
-                f"asking them — now friends",
+                f"asking them, so now they are friends",
                 RNS.LOG_NOTICE,
             )
             return

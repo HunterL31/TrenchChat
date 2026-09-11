@@ -1206,10 +1206,19 @@ only a public channel is never offered one, however long it waits.
 | upgrade2 | A,B,C | A and B private, C on a public channel with both | ✅ **5/5, 34-36s.** C holds no session with anybody across a 15s hold, is never offered one, and still receives every public message. A records C as `ineligible` on all five runs, so the refusal is a decision rather than a silence |
 | upgrade3 | A,B | Drop the session mid-conversation through `POST /upgrade/close/{peer}` | ✅ **5/5, 17-19s.** The path flips back to `reticulum` on all five, the message sent while it is down arrives anyway, and the pair is direct again in **3.0-6.5s** without anyone asking. No message is lost across the drop |
 | upgrade4 | A,B | Kick B while the session is up | ✅ **5/5, 26-30s.** The session is gone **0.50-1.01s** after the kick, which is the sweep's own cadence, B is off A's roster, B loses its side too, and it stays closed across a 15s hold. A records `ineligible` |
+| upgrade5 | A,B,C | A voice session of three, with C's direct connections switched off | ✅ **5/5, 36-41s.** A and B stream over their session while both stream to C over the mesh; every roster names the path of each pair (`direct` for A-B, `reticulum` for everything C is in, `null` for the reader itself), all six pair directions carry **426-428 frames** in an 8s window, and the session encodes at the configured 16 kbps because a mesh pair is in it. Full mesh in **2.5-7.6s** |
+| upgrade6 | A,B,C | A shares 20 MB; B has a session, C has direct connections off | ✅ **5/5, 21-23s.** B pulls it over the session in **1.5-2.0s** and C over the mesh in **3.5-6.5s**, a ratio of **2.0-4.3**. Both hold it byte for byte |
 
-**All four passing 5/5**, measured on one host where every candidate is a
+**All six passing 5/5**, measured on one host where every candidate is a
 local address. What the family cannot show is address translation, which is
 what the NAT harness below is for.
+
+What upgrade6 does not show is the size of the gap. Both paths are loopback
+here, so what differs is the number of exchanges (256 chunks a request against
+16) and not the link under them; the ratio on a real link is whatever the link
+is. What it does show is the thing worth showing at 20 MB: the mesh member is
+never made to pay for the file, it asks at its own pace, and nobody waits for
+it.
 
 Two measurements worth keeping. The upgrade costs **one offer and one answer**,
 and the session is up in single-digit seconds because the punch itself is under
@@ -1233,6 +1242,7 @@ address and the punch barely punches.
 |---|---|---|
 | `one_nat` | A behind a NAT, B on the hub's segment | ✅ The session comes up **4.5s** after the invite lands, across real masquerading, and the message crosses it. The pair that punches is the one neither candidate list named: A's translated address, which B learned from the probe that arrived |
 | `cone` | Both behind port-restricted NATs | ⚠ **Recorded.** No session in **540s**, and the conversation carries on over Reticulum throughout. Neither side can name the other: every probe goes to an unroutable lan candidate, so no probe arrives and no observation can start. See the finding below |
+| `cone_helper` | Both behind port-restricted NATs, with a third member C on the hub's segment | ⚠ **Recorded, 5 runs.** A and B each come up direct with C in **5.5-10.6s**, and C's hello tells them their own translated address: both learned one in 3 runs of 5, one of them in a fourth, neither in the fifth. A and B still never punched **in 225s of trying**, all five runs, recorded as `punch_failed`, and the conversation carried on over Reticulum throughout. See the finding below |
 | `symmetric` | Both behind `fully-random` NATs | ✅ No session in **180s**, recorded as `punch_failed` with a next attempt to show for it, and the conversation carries on over Reticulum. The case the plan calls a deliberate non-fix, failing cleanly rather than hanging |
 
 **The finding.** A node knows its own addresses and nothing about the address
@@ -1247,6 +1257,31 @@ design's answers for the two-NAT case are a router mapping (UPnP-IGD or
 NAT-PMP, which no namespace here speaks) and an address a peer observed in an
 earlier exchange; with neither, the pair stays on Reticulum and the diagnostics
 panel says `punch_failed` rather than leaving it mysterious.
+
+**What the helper variant adds, and where it still stops.** `cone_helper` is
+the observation working and still not being enough. A member both NATed peers
+can reach does teach each of them its own translated address, in seconds, with
+no service and nothing asked of anyone outside the channel: that half of the
+plan's answer holds. The pair still does not punch, for two reasons worth
+naming separately.
+
+The first is which side is told. Only the dialer learns anything from a
+session's hello, because only the accepting side can see an address the other
+cannot, and the dialer is the smaller identity hash. With one helper that is a
+coin flip per peer, which is why two of five runs had one side or neither
+knowing its own address.
+
+The second is which socket the address names, and it is the one that matters.
+An attempt punches from a socket of its own, so what the helper observed is the
+mapping for the socket carrying the session *with the helper*. A
+port-restricted NAT forwards to that mapping only from the helper, so the other
+peer's probe at it is dropped, and the probes this peer sends go out from a
+third socket the other peer was never told about. For the pair to complete,
+each side would have to probe *from* the socket it advertised, which here is
+the listening socket, and then carry the session on it: the accepting side
+already can, and the dialing side cannot, because its listening socket belongs
+to a QUIC server that cannot also dial. That is the change this case needs, and
+it is a change to how a session is opened rather than to what is observed.
 
 ## The LoRa pass
 

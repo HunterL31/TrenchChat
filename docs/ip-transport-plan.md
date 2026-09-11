@@ -354,8 +354,8 @@ called done.
 | Chunks per request (`FILE_REQUEST_MAX_CHUNKS`) | 16 (512 KB) | 256 (8 MB) |
 | Sync response (`sync.MAX_RESPONSE_MESSAGES`, `MAX_RESPONSE_BYTES`) | 50 messages, 1 MB | 500 messages, 8 MB |
 | Sync description (`sync_ranges.SYNC_DESCRIPTION_BUDGET_BYTES`) | 512 bytes | 64 KB |
-| Sync window (`SYNC_WINDOW_DAYS`) | 7 days | 7 days until Phase 4: the fingerprinting that makes full history cheap does not exist yet, and today's day-window code handed a longer one turns every routine re-check into a full-history ask (`tests/test_sync_reconcile.py`) |
-| Voice (`voice_wire`, `config.voice.bitrate`) | 16 or 24 kbps Opus, 2 frames per packet, 400-byte packets under the 431-byte MDU | 32 to 64 kbps Opus, 1 frame per packet, 1200-byte datagrams; the participant ceiling stays 8 until Phase 6 measures a mixed session, since one mesh-path participant in a large session is exactly the case check 3 is about |
+| Sync window (`SYNC_WINDOW_DAYS`) | 7 days | full history, and it is how far back a description *reaches* rather than where a request *starts*: a re-check begins at the recent window on either path, because one that began at the start of history would be a deep ask every time (`tests/test_sync_reconcile.py`). Behind that start, a node offers what it holds as one fingerprint per calendar year and then per month (`sync_ranges.history_ranges`), empty buckets left out, so a peer whose history is all recent describes exactly what it described before |
+| Voice (`voice_wire`, `config.voice.bitrate`) | 16 or 24 kbps Opus, 2 frames per packet, 400-byte packets under the 431-byte MDU | up to 64 kbps Opus, 1 frame per packet, 1200-byte datagrams. One encoder feeds every pair, so the session runs at the least any of its pairs affords (`VoiceManager.session_bitrate`), which is the configured bitrate whenever a mesh pair is in it; the participant ceiling stays 8, and upgrade5 measures a mixed session of three |
 | Ephemeral control (typing, read receipts, presence detail) | never sent | sent |
 | Control messages per sender (`router.CONTROL_RATE_BURST`) | 60 per minute | 600 per minute |
 | Sessions | n/a | 128 per node, 16 pending handshakes, 32 candidate probes in flight |
@@ -506,6 +506,24 @@ voice suites pass with the direct transports substituted; the voice quality
 tests hold at `home_wifi` and `mobile_lte`; a mixed voice session (two
 direct pairs, one mesh pair) holds; `--repeat 5` on each scenario.
 
+**Phase 4 results.** Built as designed, with five things worth recording. The
+file bytes moved out of the database and onto disk (`core/filestore.py`), one
+sparse file each, sealed per chunk with AES-256-GCM under the lockbox key when
+the profile has a PIN: that is what makes a 200 MB share a seek and an unlink
+rather than a journal write and a vacuum nobody runs. Both planes run at once
+under `FileManager` and `VoiceManager`, chosen per request and per pair rather
+than per download or per session, so a session that comes up or goes away costs
+a range or a pair rather than the transfer. The sync window widened as the
+table now reads, which is narrower than the first draft: `_resume_point` stays
+at the recent window on both paths, because `tests/test_sync_reconcile.py`
+holds that a re-check reaching back to the start of history is a defect
+whatever the path, and a responder now offers its own coarse ranges in the
+answer, since a member who joined late holds nothing old and therefore cannot
+ask about it. The per-pair voice bitrate turned out to be a ceiling rather than
+a target: one encoder feeds every pair, so a mixed session runs at the mesh's
+number. And the observed address in the HELLO works and is not enough on its
+own; the measurement and the reasoning are with the punch-rate risk below.
+
 **Phase 5: client (1 to 2 weeks).** The member and voice roster badges,
 `path_changed`, the diagnostics panel, the Settings switch and port, the
 firewall note in the installers. Check: `flutter analyze && flutter test`,
@@ -564,8 +582,15 @@ reason for doing it.
   member (a public host, a router mapping, a shared LAN) teaches every peer
   it talks to its own translated address, and that peer can then be named to
   the rest. Any member can be that observer, none is special, and nothing is
-  asked of anyone outside the channel. Phase 4 adds it, with a NAT harness
-  variant of two cone NATs and one reachable third member to prove it.
+  asked of anyone outside the channel. Phase 4 added it and the harness
+  measured it: the teaching works (`cone_helper`, five runs, both peers told
+  their own address in seconds by a member they could reach) and the pair still
+  does not punch, because what a peer is told is the address of the socket
+  carrying the session it was told over, and a port-restricted NAT forwards to
+  that mapping from that peer alone. Completing such a pair needs each side to
+  probe from the socket it advertised and then carry the session on it, which
+  the accepting side can already do and the dialing side cannot while its
+  listening socket belongs to a QUIC server. Recorded rather than built.
   Symmetric NAT and most CGNAT do not punch either, and both sides symmetric
   never will; those pairs stay on Reticulum, recorded as a deliberate
   non-fix. The diagnostics panel says which case a pair is in rather than

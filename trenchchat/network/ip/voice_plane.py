@@ -235,13 +235,19 @@ class IPVoiceTransport(VoiceTransportBase):
     # --- inbound ---
 
     def _on_datagram(self, peer_hex: str, payload: bytes) -> None:
-        """One datagram off a session. Runs on the transport's loop."""
+        """One datagram off a session. Runs on the transport's loop.
+
+        A frame is pushed from here, because a jitter buffer must not wait on
+        a worker to get one. A greeting is handed off instead: authorising it
+        is three database queries, and the loop carries every session this
+        node holds.
+        """
         try:
             kind = packet_type(payload)
         except ValueError:
             return
         if kind == VP_HELLO:
-            self._handle_hello(peer_hex, payload)
+            self._transport.dispatch(self._handle_hello, peer_hex, payload)
             return
         with self._lock:
             peer = self._peers.get(peer_hex)

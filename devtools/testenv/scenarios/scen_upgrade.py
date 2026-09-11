@@ -40,6 +40,10 @@ RECOVERY_TIMEOUT = 90.0
 # What "gone within a second" is measured against.
 TEARDOWN_TIMEOUT = 2.0
 
+# A pull over a session that is already up has no dial and no path to resolve,
+# so this is a ceiling on the transfer itself and nothing else.
+FETCH_OVER_A_SESSION = 300.0
+
 
 def _session_with(peer, other) -> dict | None:
     """One peer's own record of its session with another, if it holds one."""
@@ -194,3 +198,127 @@ def u4(env):
             f"{a.tag} recorded {refusal.get('reason', 'nothing')} rather than "
             f"{REASON_INELIGIBLE}")
     return {"closed_in_secs": closed_in, "reason": refusal["reason"]}
+
+
+# What upgrade5 and upgrade6 need from the other families, imported rather
+# than copied so a change to how a file is shared or a voice mesh is waited on
+# reaches these rows too.
+from scen_files import (                                          # noqa: E402
+    _await_manifest, _await_done, _payload, _share, _verify, BIG_BODY_TIMEOUT,
+)
+from scen_voice import (                                          # noqa: E402
+    _await_mesh, _join_voice_all, _rx_quality, MESH_TIMEOUT, TONE_WINDOW_SECS,
+)
+
+# Tens of megabytes: large enough that the two paths are telling different
+# stories about the same file, small enough to be a scenario and not an
+# afternoon. 640 chunks.
+SIZE_20MB = 20 * 1024 * 1024
+
+# The mesh plane asks sixteen chunks at a time where the direct plane asks two
+# hundred and fifty six, so the mesh side of upgrade6 is the long one.
+MESH_FETCH_TIMEOUT = 1800.0
+
+
+@scenario("upgrade5", "A voice session with a direct pair and a mesh pair in it",
+          peers="ABC")
+def u5(env):
+    """One encoder, two planes, and a roster that says which is which.
+
+    C has direct connections switched off, which is the client gate: it never
+    offers one and never answers one, so its pairs stay on the mesh while A and
+    B upgrade between themselves. Every pair still has to stream, because a
+    session that carried only its fast half would be worse than one that had
+    never upgraded at all.
+    """
+    a, b, c = env.peers("A", "B", "C")
+    c.set_direct_connections(False)
+    channel = invite_only_channel(a, [b, c], "upgrade5-room")
+
+    await_upgrade(a, b)
+    hold_for(lambda: not _upgraded(a, c) and not _upgraded(b, c),
+             f"{c.tag} to hold no session with the switch off", 10.0)
+
+    _join_voice_all([a, b, c], channel)
+    mesh_secs = _await_mesh([a, b, c], channel)
+
+    paths = {peer.tag: peer.voice_paths(channel) for peer in (a, b, c)}
+    if paths["A"].get(b.hash) != PATH_DIRECT:
+        raise ScenarioFailure(
+            f"{a.tag}'s voice roster puts {b.tag} on {paths['A'].get(b.hash)}")
+    if paths["A"].get(c.hash) != PATH_RETICULUM:
+        raise ScenarioFailure(
+            f"{a.tag}'s voice roster puts {c.tag} on {paths['A'].get(c.hash)}")
+    if paths["C"].get(a.hash) != PATH_RETICULUM or \
+            paths["C"].get(b.hash) != PATH_RETICULUM:
+        raise ScenarioFailure(f"{c.tag} reads a direct pair it cannot have: "
+                              f"{paths['C']}")
+    if paths["A"].get(a.hash) is not None:
+        raise ScenarioFailure(f"{a.tag} gave itself a path: {paths['A']}")
+
+    for peer in (a, b, c):
+        status, body = peer.set_test_tone(True)
+        if status != 200:
+            raise ScenarioFailure(f"{peer.tag} has no tone pipeline: {status} {body}")
+        peer.set_voice_muted(False)
+
+    pairs = [(listener, sender) for listener in (a, b, c)
+             for sender in (a, b, c) if listener is not sender]
+    wait_until(lambda: all(_rx_quality(listener, sender).get("received", 0) > 0
+                           for listener, sender in pairs),
+               "every pair to carry frames, on whichever plane it is on",
+               MESH_TIMEOUT)
+    time.sleep(TONE_WINDOW_SECS)
+
+    received = {f"{listener.tag}<-{sender.tag}":
+                _rx_quality(listener, sender).get("received", 0)
+                for listener, sender in pairs}
+    silent = [pair for pair, frames in received.items() if frames < 100]
+    for peer in (a, b, c):
+        peer.leave_voice()
+    if silent:
+        raise ScenarioFailure(f"pairs that carried almost nothing: {silent}")
+    return {"mesh_secs": round(mesh_secs, 1), "received": received,
+            "bitrate_bps": a.voice_status()["stats"].get("bitrate_bps"),
+            "paths": {tag: sorted(set(p for p in row.values() if p))
+                      for tag, row in paths.items()}}
+
+
+@scenario("upgrade6", "Twenty megabytes in seconds on one path and at the "
+                      "mesh's pace on the other", peers="ABC")
+def u6(env):
+    """The size the direct path is for, and the cost of it on the other one.
+
+    Nobody pays for a file they did not ask for: that is what lets a share be
+    two hundred megabytes at all. C, with direct connections off, pulls the
+    same file over the mesh plane sixteen chunks at a time, and the ratio
+    between the two numbers is what this row is for.
+    """
+    a, b, c = env.peers("A", "B", "C")
+    c.set_direct_connections(False)
+    channel = invite_only_channel(a, [b, c], "upgrade6-room")
+    await_upgrade(a, b)
+
+    data = _payload(SIZE_20MB, 6)
+    a.set_http_timeout(BIG_BODY_TIMEOUT)
+    message_id, file_hash = _share(a, channel, "upgrade6-20mb.bin", data,
+                                   "upgrade6-file")
+    a.set_http_timeout()
+
+    secs = {}
+    for peer, timeout in ((b, FETCH_OVER_A_SESSION), (c, MESH_FETCH_TIMEOUT)):
+        _await_manifest(peer, channel, "upgrade6-file", message_id)
+        started = peer.start_file_fetch(channel, file_hash, message_id)
+        if not started.get("ok"):
+            raise ScenarioFailure(f"{peer.tag} was refused the download: {started}")
+        secs[peer.tag] = round(_await_done(peer, channel, file_hash, timeout), 1)
+        peer.set_http_timeout(BIG_BODY_TIMEOUT)
+        _verify(peer, channel, file_hash, data)
+        peer.set_http_timeout()
+
+    if secs["B"] >= secs["C"]:
+        raise ScenarioFailure(
+            f"the direct pull took {secs['B']}s against the mesh's {secs['C']}s")
+    return {"file_bytes": len(data), "direct_secs": secs["B"],
+            "mesh_secs": secs["C"],
+            "ratio": round(secs["C"] / secs["B"], 1) if secs["B"] else None}

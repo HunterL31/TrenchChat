@@ -22,7 +22,7 @@
 # routes between the two LANs, so a peer's lan candidate is genuinely
 # unreachable from the other side and the punch has to do the work.
 #
-# Three variants, and only the first is a pass or a fail:
+# Four variants, and only two of them are a pass or a fail:
 #
 #   one_nat    A is behind a masquerading NAT and B is on the segment with the
 #              hub, which is the shape of every pair where one side is
@@ -31,6 +31,12 @@
 #              translation.
 #   cone       Both sides behind their own masquerading NAT, both port
 #              restricted. Recorded rather than judged: see the finding below.
+#   cone_helper  The cone pair again, with a third member on the hub's segment
+#              that both can reach. A and B each come up direct with C first,
+#              and C's hello tells each of them the address it arrived from, so
+#              a peer that could name nothing now has something to name.
+#              Recorded rather than judged: what it measures is how far that
+#              gets a pair whose NATs still filter by source.
 #   symmetric  Both sides behind `fully-random` masquerading, so no candidate
 #              can predict the external port. The pair must stay on Reticulum,
 #              which is the deliberate non-fix the plan records.
@@ -64,6 +70,7 @@ NS_A=tcn-a
 NS_NAT_A=tcn-nat-a
 NS_NAT_B=tcn-nat-b
 NS_B=tcn-b
+NS_C=tcn-c
 BRIDGE=tcn-br0
 LAN_A=10.1.0
 LAN_B=10.2.0
@@ -72,12 +79,14 @@ HUB_IP="$WAN.254"
 HUB_PORT=41101
 API_A=8901
 API_B=8902
+API_C=8903
 # Where B is, which the one_nat variant moves onto the segment with the hub.
 HOST_B="$LAN_B.2"
 
 hub_pid=""
 worker_a_pid=""
 worker_b_pid=""
+worker_c_pid=""
 
 fail() { echo "nat_harness.sh: $*" >&2; exit 1; }
 
@@ -95,19 +104,19 @@ preflight() {
 }
 
 stop_processes() {
-    for pid in "$worker_a_pid" "$worker_b_pid" "$hub_pid"; do
+    for pid in "$worker_a_pid" "$worker_b_pid" "$worker_c_pid" "$hub_pid"; do
         [ -n "$pid" ] && kill "$pid" 2>/dev/null
     done
     wait 2>/dev/null || true
-    worker_a_pid=""; worker_b_pid=""; hub_pid=""
+    worker_a_pid=""; worker_b_pid=""; worker_c_pid=""; hub_pid=""
 }
 
 teardown() {
     stop_processes
-    for ns in "$NS_A" "$NS_NAT_A" "$NS_NAT_B" "$NS_B"; do
+    for ns in "$NS_A" "$NS_NAT_A" "$NS_NAT_B" "$NS_B" "$NS_C"; do
         ip netns del "$ns" 2>/dev/null || true
     done
-    for leg in tcn-wa-br tcn-wb-br tcn-b-br; do
+    for leg in tcn-wa-br tcn-wb-br tcn-b-br tcn-c-br; do
         ip link del "$leg" 2>/dev/null || true
     done
     ip link del "$BRIDGE" 2>/dev/null || true
@@ -142,10 +151,16 @@ nat_in_front_of_b() {
     [ "$1" != "one_nat" ]
 }
 
+# Whether this variant runs a third member on the hub's segment, reachable by
+# both NATed peers and therefore able to tell each of them its own address.
+has_helper() {
+    [ "$1" = "cone_helper" ]
+}
+
 setup() {
     local mode="$1"
     teardown
-    for ns in "$NS_A" "$NS_NAT_A" "$NS_NAT_B" "$NS_B"; do
+    for ns in "$NS_A" "$NS_NAT_A" "$NS_NAT_B" "$NS_B" "$NS_C"; do
         ip netns add "$ns"
         ip netns exec "$ns" ip link set lo up
     done
@@ -209,6 +224,17 @@ setup() {
         ip link set tcn-b-br up
         ip netns exec "$NS_B" ip addr add "$WAN.3/24" dev tcn-b0
         ip netns exec "$NS_B" ip link set tcn-b0 up
+    fi
+
+    if has_helper "$mode"; then
+        # C is the member both NATed peers can reach, which is all the design
+        # asks of an observer: no service, no address of ours, just a member.
+        ip link add tcn-c0 type veth peer name tcn-c-br
+        ip link set tcn-c0 netns "$NS_C"
+        ip link set tcn-c-br master "$BRIDGE"
+        ip link set tcn-c-br up
+        ip netns exec "$NS_C" ip addr add "$WAN.4/24" dev tcn-c0
+        ip netns exec "$NS_C" ip link set tcn-c0 up
     fi
 }
 
@@ -296,6 +322,92 @@ raise SystemExit(0 if result["upgraded"] else 1)
 PYTHON
 }
 
+# The three-member case: A and B behind their own NATs, C where both can reach
+# it. What it measures is how far one reachable member gets a pair that could
+# name nothing before: each of them learns its own translated address from C's
+# hello, offers it to the other, and the punch either completes or says where
+# it stopped.
+drive_helper() {
+    "$PYTHON" - "$WORK" "$REPO_ROOT" "$LAN_A.2" "$LAN_B.2" "$WAN.4" <<'PYTHON'
+import sys
+import time
+from pathlib import Path
+
+WORK, REPO_ROOT, HOST_A, HOST_B, HOST_C = sys.argv[1:6]
+sys.path.insert(0, f"{REPO_ROOT}/devtools/testenv/scenarios")
+sys.path.insert(0, f"{REPO_ROOT}/devtools/testenv")
+sys.path.insert(0, REPO_ROOT)
+
+from asserts import ScenarioFailure, set_timeout_scale, wait_until  # noqa: E402
+from flows import invite_only_channel  # noqa: E402
+from peer import Peer  # noqa: E402
+from scen_upgrade import _upgraded  # noqa: E402
+from trenchchat.core.storage import Storage  # noqa: E402
+
+set_timeout_scale(1.5)
+a = Peer("A", 8901, "nat-harness-token", host=HOST_A)
+b = Peer("B", 8902, "nat-harness-token", host=HOST_B)
+c = Peer("C", 8903, "nat-harness-token", host=HOST_C)
+for peer in (a, b, c):
+    deadline = time.time() + 120
+    while time.time() < deadline and not peer.alive():
+        time.sleep(1.0)
+    if not peer.alive():
+        raise SystemExit(f"{peer.tag}'s API never came up")
+
+
+def observed_self(data_dir: str) -> list:
+    """What a tester has been told about its own address, read from its store."""
+    store = Storage(db_path=Path(data_dir) / "storage.db")
+    try:
+        return store.get_upgrade_addresses("self")
+    finally:
+        store.close()
+
+
+channel = invite_only_channel(c, [a, b], "nat-helper-room")
+result = {"mode": "cone_helper", "channel": channel[:12]}
+started = time.time()
+try:
+    wait_until(lambda: _upgraded(a, c), "A to come up direct with C", 150.0)
+    wait_until(lambda: _upgraded(b, c), "B to come up direct with C", 150.0)
+    result["helper_secs"] = round(time.time() - started, 1)
+except (ScenarioFailure, TimeoutError) as e:
+    result["helper_secs"] = round(time.time() - started, 1)
+    result["helper_detail"] = str(e)[:200]
+
+# What each of them was told about itself, which is the whole point of C.
+time.sleep(5.0)
+result["a_observed_self"] = observed_self(f"{WORK}/a")
+result["b_observed_self"] = observed_self(f"{WORK}/b")
+
+started = time.time()
+try:
+    wait_until(lambda: _upgraded(a, b), "A to come up direct with B", 150.0)
+    wait_until(lambda: _upgraded(b, a), "B to hold the far side", 60.0)
+    result["upgraded"] = True
+    result["seconds"] = round(time.time() - started, 1)
+except (ScenarioFailure, TimeoutError) as e:
+    result["upgraded"] = False
+    result["seconds"] = round(time.time() - started, 1)
+    result["detail"] = str(e)[:200]
+    result["a_failure"] = a.upgrade_failure(b.hash)
+    result["b_failure"] = b.upgrade_failure(a.hash)
+
+a.send(channel, "nat-helper-message")
+carried = False
+for _ in range(60):
+    if "nat-helper-message" in b.contents(channel):
+        carried = True
+        break
+    time.sleep(1.0)
+result["message_carried"] = carried
+Path(WORK, "cone_helper.result.json").write_text(repr(result))
+print(f"  {result}")
+raise SystemExit(0 if result["upgraded"] else 1)
+PYTHON
+}
+
 run_variant() {
     local mode="$1" expect="$2"
     echo "=== $mode, upgrade expected to $expect ==="
@@ -306,8 +418,16 @@ run_variant() {
     worker_a_pid=$!
     start_worker "$NS_B" B "$WORK/b" "$API_B" "$HOST_B" trenchchat_nat_b
     worker_b_pid=$!
+    if has_helper "$mode"; then
+        start_worker "$NS_C" C "$WORK/c" "$API_C" "$WAN.4" trenchchat_nat_c
+        worker_c_pid=$!
+    fi
 
-    drive "$mode"
+    if has_helper "$mode"; then
+        drive_helper
+    else
+        drive "$mode"
+    fi
     local rc=$?
     stop_processes
     teardown
@@ -333,15 +453,18 @@ main() {
     trap teardown EXIT
     local failures=0
     case "$which" in
-        one_nat)   run_variant one_nat succeed || failures=1 ;;
-        cone)      run_variant cone record ;;
-        symmetric) run_variant symmetric fail || failures=1 ;;
+        one_nat)     run_variant one_nat succeed || failures=1 ;;
+        cone)        run_variant cone record ;;
+        cone_helper) run_variant cone_helper record ;;
+        symmetric)   run_variant symmetric fail || failures=1 ;;
         all|both)
             run_variant one_nat succeed || failures=1
             run_variant cone record
+            run_variant cone_helper record
             run_variant symmetric fail || failures=1
             ;;
-        *) fail "unknown variant '$which', expected one_nat, cone, symmetric or all" ;;
+        *) fail "unknown variant '$which', expected one_nat, cone, cone_helper, "\
+                "symmetric or all" ;;
     esac
     [ "$failures" = "0" ] && echo "every variant behaved as expected"
     return "$failures"

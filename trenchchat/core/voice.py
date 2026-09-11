@@ -22,6 +22,7 @@ import time
 
 import RNS
 
+from trenchchat.config import VOICE_MIN_BITRATE
 from trenchchat.core.actions import compute_channel_recipients
 from trenchchat.core.identity import Identity
 from trenchchat.core.permissions import (
@@ -34,7 +35,6 @@ from trenchchat.core.protocol import (
 )
 from trenchchat.core.storage import Storage
 from trenchchat.core.subscription import SubscriptionManager
-from trenchchat.config import VOICE_MIN_BITRATE
 from trenchchat.network.base import (
     InboundMessage, PATH_DIRECT, PATH_RETICULUM, SendState,
 )

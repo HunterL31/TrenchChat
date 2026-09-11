@@ -650,13 +650,23 @@ class IPTransport(Transport):
             request_id = self._next_request_id
             self._requests[(id(peer_session), request_id)] = on_result
         try:
-            self._loop.call_soon_threadsafe(peer_session.open_request,
+            self._loop.call_soon_threadsafe(self._open_request, peer_session,
                                             request_id, op, payload)
         except RuntimeError:
             with self._request_lock:
                 self._requests.pop((id(peer_session), request_id), None)
             return None
         return request_id
+
+    def _open_request(self, peer_session: DirectSession, request_id: int,
+                      op: str, payload: dict) -> None:
+        """Write one request, answering it here if it could not go.
+
+        A request nobody wrote would otherwise wait out the asking plane's own
+        timeout for an answer that was never coming.
+        """
+        if not peer_session.open_request(request_id, op, payload):
+            self._on_response(peer_session, request_id, False, {})
 
     def _on_request(self, peer_session: DirectSession, stream_id: int,
                     request_id: int, op: str, payload: dict) -> None:
@@ -733,9 +743,18 @@ class IPTransport(Transport):
 
         callback(peer_hex, payload), called on the transport's loop: the voice
         plane's frames arrive here and a jitter buffer push must not wait on a
-        worker.
+        worker. Anything that is not a frame is the plane's to hand back to
+        dispatch, because the loop carries every session on this node.
         """
         self._datagram_callback = callback
+
+    def dispatch(self, fn, *args) -> None:
+        """Run one piece of a plane's work off the loop, on the worker pool.
+
+        The loop carries every session, so anything that touches storage or
+        waits on a lock belongs here rather than on it.
+        """
+        self._dispatch(fn, *args)
 
     def send_datagram(self, peer_hex: str, payload: bytes) -> bool:
         """Send one unreliable datagram to a peer. False without a session."""
