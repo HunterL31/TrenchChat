@@ -5,12 +5,14 @@ The database layer only: no networking, no manager. Budgets are monkeypatched
 down to a few kilobytes so a full store is cheap to build.
 """
 
+import errno
 import sqlite3
 import time
 
 import pytest
 
 from trenchchat.core import storage as storage_module
+from trenchchat.core.protocol import FILE_CHUNK_BYTES
 from trenchchat.core.storage import Storage
 
 CHANNEL = "aa" * 16
@@ -213,7 +215,7 @@ class TestChunkStore:
 
     def test_chunk_count_covers_the_whole_file(self, db):
         hash_hex = _hash("a")
-        db.begin_file(hash_hex, storage_module.FILE_CHUNK_BYTES + 1)
+        db.begin_file(hash_hex, FILE_CHUNK_BYTES + 1)
         assert db.get_file(hash_hex)["chunk_count"] == 2
 
     def test_delete_removes_the_row_and_the_chunks(self, db):
@@ -363,31 +365,58 @@ class TestFileBudgets:
 # A full disk
 # ---------------------------------------------------------------------------
 
-class TestDiskFull:
-    def test_chunk_write_fails_cleanly_when_the_database_is_full(self, db):
-        """A full disk answers False and keeps the chunks already held.
+class _FullDatabase:
+    """A connection whose every write answers the way a full database does."""
 
-        max_page_count is SQLite's own way of running out of room, so this is
-        the real "database or disk is full" error, not a stand-in for it.
-        """
+    def __init__(self, real):
+        self._real = real
+
+    def execute(self, *_args, **_kwargs):
+        raise sqlite3.OperationalError("database or disk is full")
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+class TestNoRoomLeft:
+    """The claim the database-full tests made, under the store on disk.
+
+    The bytes are a file now, so running out of room is the filesystem
+    refusing a write rather than SQLite refusing a page. Either way a chunk
+    write answers False and keeps what is already held, and anything that is
+    not a full disk still raises.
+    """
+
+    def test_chunk_write_fails_cleanly_when_the_disk_is_full(self, db,
+                                                             monkeypatch):
         hash_hex = _hash("a")
         db.begin_file(hash_hex, 3 * 4096)
         assert db.put_file_chunk(hash_hex, 0, b"x" * 4096)
         held = db.get_file(hash_hex)["held_bytes"]
 
-        pages = db._conn.execute("PRAGMA page_count").fetchone()[0]
-        db._conn.execute(f"PRAGMA max_page_count = {pages}")
+        def _no_room(*_args, **_kwargs):
+            raise OSError(errno.ENOSPC, "No space left on device")
+
+        monkeypatch.setattr(db._files, "put", _no_room)
 
         assert db.put_file_chunk(hash_hex, 1, b"y" * 4096) is False
         assert db.put_file_chunk(hash_hex, 2, b"z" * 4096) is False
 
-        db._conn.execute("PRAGMA max_page_count = 1073741823")
+        monkeypatch.undo()
         assert db.file_chunk_indices(hash_hex) == [0]
         assert db.get_file(hash_hex)["held_bytes"] == held
         assert db.get_file_bytes(hash_hex) is None
 
-    def test_other_database_errors_still_raise(self, db):
+    def test_a_full_database_is_answered_the_same_way(self, db, monkeypatch):
+        """The bookkeeping still lives in the database, and can still fill it."""
+        hash_hex = _hash("a")
+        db.begin_file(hash_hex, 4096)
+        monkeypatch.setattr(db, "_conn", _FullDatabase(db._conn))
+
+        assert db.put_file_chunk(hash_hex, 0, b"x" * 4096) is False
+
+    def test_other_errors_still_raise(self, db):
         hash_hex = _hash("a")
         db.begin_file(hash_hex, 10)
-        with pytest.raises(sqlite3.ProgrammingError):
+        with pytest.raises(TypeError):
             db.put_file_chunk(hash_hex, 0, object())

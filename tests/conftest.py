@@ -449,6 +449,7 @@ class TestPeer:
     voice_transport: FakeVoiceTransport
     file_mgr: FileManager
     file_transport: FakeFileTransport
+    direct_file_transport: FakeFileTransport
     lxmf_transport: "LXMFTransport | None" = None
     ip_transport: "DirectTestTransport | None" = None
     _teardown_callbacks: list = field(default_factory=list, repr=False)
@@ -608,8 +609,14 @@ def peer_factory(request, rns_instance, tmp_path):
                                  state_refresh_secs=0.5, roster_ttl_secs=2.0)
 
         file_transport = FakeFileTransport(identity.hash_hex, file_registry)
+        # Wired for every peer and reaching nobody until a test opens a
+        # session on it, so a test that is not about the direct path sees the
+        # mesh plane exactly as it always did.
+        direct_file_transport = FakeFileTransport(identity.hash_hex,
+                                                  file_registry, direct=True)
         file_mgr = FileManager(identity, storage, presence_mgr,
-                               transport=file_transport, router=router)
+                               transport=file_transport,
+                               direct_transport=direct_file_transport)
 
         channel_mgr.restore_owned_channels()
 
@@ -635,6 +642,7 @@ def peer_factory(request, rns_instance, tmp_path):
             voice_transport=voice_transport,
             file_mgr=file_mgr,
             file_transport=file_transport,
+            direct_file_transport=direct_file_transport,
             ip_transport=ip_transport,
         )
 
@@ -662,6 +670,7 @@ def peer_factory(request, rns_instance, tmp_path):
         def _stop_files():
             file_mgr.stop()
             file_transport.join_threads()
+            direct_file_transport.join_threads()
 
         def _leave_network(t=transport):
             _LIVE_PEERS.discard(t.self_hex)

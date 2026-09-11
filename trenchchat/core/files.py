@@ -45,7 +45,8 @@ import RNS
 from trenchchat.core.fileutils import clean_filename
 from trenchchat.core.permissions import is_open_join, permissions_from_json
 from trenchchat.core.protocol import (
-    FILE_CHUNK_BYTES, chunk_hashes, chunk_root, file_manifest,
+    FILE_CHUNK_BYTES, chunk_count_for, chunk_hashes, chunk_root, chunk_size_at,
+    file_manifest,
 )
 from trenchchat.network.file_transport import (
     CHUNK_HASH_BYTES, FETCH_REFUSED, FILE_REQUEST_MAX_CHUNKS,
@@ -101,19 +102,6 @@ def build_manifest(name: str, data: bytes) -> dict | None:
         return None
     return file_manifest(cleaned, len(data), hashlib.sha256(data).digest(),
                          chunk_root(chunk_hashes(data)))
-
-
-def chunk_count_for(size: int) -> int:
-    """How many chunks a file of this size is stored and served as."""
-    return (size + FILE_CHUNK_BYTES - 1) // FILE_CHUNK_BYTES
-
-
-def chunk_size_at(size: int, idx: int) -> int:
-    """The length of one chunk of a file, the last one being the short one."""
-    count = chunk_count_for(size)
-    if idx < count - 1:
-        return FILE_CHUNK_BYTES
-    return size - (count - 1) * FILE_CHUNK_BYTES
 
 
 class _Download:
@@ -197,15 +185,18 @@ class FileManager:
 
     def __init__(self, identity, storage, presence_mgr,
                  transport: FileTransportBase | None = None,
-                 router=None):
+                 direct_transport: FileTransportBase | None = None):
+        """
+        transport: the mesh plane, which can reach any member with a path.
+        direct_transport: the plane carried by direct sessions, used for a
+        holder this node has one with and for nobody else.
+        """
         self._identity = identity
         self._storage = storage
         self._presence = presence_mgr
-        # Read per holder at request time, so a faster path to one member can
-        # raise the window without raising it for everyone.
-        self._router = router
         self._transport = transport if transport is not None \
             else FileTransportBase()
+        self._direct = direct_transport
         # The base class does no link work, so a node built without a
         # transport neither serves nor fetches; nothing to start or tick.
         self._has_transport = transport is not None
@@ -220,12 +211,31 @@ class FileManager:
         self._last_prune = time.time()
         self._last_announce = 0.0
 
-        self._transport.set_serve_callback(self._serve)
-        self._transport.set_result_callback(self._on_result)
-        self._transport.set_progress_callback(self._on_progress)
+        for plane in self._planes():
+            plane.set_serve_callback(self._serve)
+            plane.set_result_callback(self._on_result)
+            plane.set_progress_callback(self._on_progress)
         if self._has_transport:
-            self._transport.start_serving()
+            for plane in self._planes():
+                plane.start_serving()
         self._restore_downloads()
+
+    def _planes(self) -> list[FileTransportBase]:
+        """Every plane this node can pull over, mesh first."""
+        return [self._transport] + ([self._direct] if self._direct is not None
+                                    else [])
+
+    def _plane_for(self, holder_hex: str) -> FileTransportBase:
+        """The plane to ask this holder over, chosen when the request is issued.
+
+        A direct session is preferred and the mesh serves everyone else. It is
+        decided per request rather than per download, so a transfer that loses
+        its session carries on over the mesh from the chunk it had reached, and
+        one that gains a session speeds up at the next range.
+        """
+        if self._direct is not None and self._direct.can_reach(holder_hex):
+            return self._direct
+        return self._transport
 
     # --- callbacks ---
 
@@ -448,15 +458,19 @@ class FileManager:
 
     def _served_chunk_list(self, file_hash_hex: str,
                            chunk_count: int) -> bytes | None:
-        """The concatenated chunk hashes, computed once per file and kept."""
+        """The concatenated chunk hashes, computed once per file and kept.
+
+        Streamed a chunk at a time by the store, so naming the chunks of the
+        largest share costs one chunk of memory rather than the whole file.
+        """
         with self._lock:
             cached = self._chunk_lists.get(file_hash_hex)
         if cached is not None:
             return cached
-        chunks = self._storage.get_file_chunks(file_hash_hex, 0, chunk_count)
-        if len(chunks) != chunk_count:
+        digests = self._storage.file_chunk_digests(file_hash_hex)
+        if len(digests) != chunk_count:
             return None
-        payload = b"".join(hashlib.sha256(c).digest() for c in chunks)
+        payload = b"".join(digests)
         with self._lock:
             self._chunk_lists[file_hash_hex] = payload
         return payload
@@ -494,11 +508,13 @@ class FileManager:
             return
         with self._lock:
             self._last_announce = now
-        self._transport.announce()
+        for plane in self._planes():
+            plane.announce()
 
     def tick(self, now: float | None = None) -> None:
         if self._has_transport:
-            self._transport.tick()
+            for plane in self._planes():
+                plane.tick()
         self.announce()
         now = time.time() if now is None else now
         events: list[dict] = []
@@ -523,7 +539,8 @@ class FileManager:
     def stop(self) -> None:
         """Stop serving. Held files stay held; a download resumes on restart."""
         if self._has_transport:
-            self._transport.stop_serving()
+            for plane in self._planes():
+                plane.stop_serving()
 
     # --- internals ---
 
@@ -668,25 +685,33 @@ class FileManager:
     def _next_holder(self, dl: _Download) -> str | None:
         """Caller holds the lock. The holder to ask next, or None this round.
 
-        Reachability and presence order the candidates rather than gating
-        them. A member we have not heard from lately is not a member we know
-        to be gone: a transport node damps repeat announces, and the liveness
-        beacon is evidence for whoever receives it and not for whoever sends
-        it, so a peer one link away can read as offline here for minutes at a
-        time. A member whose file plane we have no path to is the weaker
+        A holder this node holds a direct session with comes first: the
+        session is already up, so there is no dial and no path to resolve, and
+        the range it will answer is sixteen times the one the mesh carries.
+
+        After that, reachability and presence order the candidates rather than
+        gating them. A member we have not heard from lately is not a member we
+        know to be gone: a transport node damps repeat announces, and the
+        liveness beacon is evidence for whoever receives it and not for whoever
+        sends it, so a peer one link away can read as offline here for minutes
+        at a time. A member whose file plane we have no path to is the weaker
         candidate of the two, because a node announces on that aspect only
         while it holds something: asking it costs the whole dial ladder and
         ends as unreachable. Both are still asked, last.
         """
         if dl.attempts >= MAX_HOLDER_ATTEMPTS:
             return None
-        # Reachable and heard from, reachable, heard from, neither.
-        tiers: list[str | None] = [None, None, None, None]
+        # Direct, then: reachable and heard from, reachable, heard from,
+        # neither.
+        tiers: list[str | None] = [None, None, None, None, None]
         for peer in self._candidates(dl):
             if peer in dl.suspect or peer in dl.skipped:
                 continue
-            tier = (0 if self._transport.can_reach(peer) else 2) + (
-                0 if self._presence.is_online(peer) else 1)
+            if self._direct is not None and self._direct.can_reach(peer):
+                tier = 0
+            else:
+                tier = 1 + (0 if self._transport.can_reach(peer) else 2) + (
+                    0 if self._presence.is_online(peer) else 1)
             if tiers[tier] is None:
                 tiers[tier] = peer
                 if tier == 0:
@@ -713,11 +738,11 @@ class FileManager:
         if issue is None:
             return
         fetch_id, holder, hash_hex, first, count, want_list = issue
+        plane = self._plane_for(holder)
         if want_list:
-            self._transport.fetch_chunk_list(fetch_id, holder, hash_hex)
+            plane.fetch_chunk_list(fetch_id, holder, hash_hex)
         else:
-            self._transport.fetch_chunks(fetch_id, holder, hash_hex, first,
-                                         count)
+            plane.fetch_chunks(fetch_id, holder, hash_hex, first, count)
 
     def _prepare(self, events: list[dict]) -> tuple | None:
         """Caller holds the lock. The one request to issue now, or None."""
@@ -746,8 +771,9 @@ class FileManager:
             if dl.wants_list:
                 return fetch_id, holder, dl.file_hash_hex, 0, 0, True
             first = dl.next_index()
+            window = min(dl.window, self._chunks_per_request(holder))
             count = 1
-            while (count < dl.window and first + count < dl.chunk_count
+            while (count < window and first + count < dl.chunk_count
                    and (first + count) not in dl.held):
                 count += 1
             return fetch_id, holder, dl.file_hash_hex, first, count, False
@@ -897,10 +923,14 @@ class FileManager:
             self._complete(dl, events)
 
     def _chunks_per_request(self, holder: str) -> int:
-        """How many chunks one request to this holder may ask for."""
-        if self._router is None:
-            return FILE_REQUEST_MAX_CHUNKS
-        return self._router.limits_for(holder).file_request_max_chunks
+        """How many chunks one request to this holder may ask for.
+
+        The plane the request will take is what answers: a window grown over a
+        direct session is sixteen times what the mesh will accept, and a
+        session that goes away has to leave the next range askable rather than
+        refused.
+        """
+        return self._plane_for(holder).max_request_chunks
 
     def _round_reset(self, dl: _Download, holder: str) -> None:
         """Caller holds the lock. A holder answered, so the round starts over.
@@ -923,11 +953,7 @@ class FileManager:
         The chunks are dropped, everyone who served one is suspect, and the
         download starts again on a holder that has not been asked yet.
         """
-        chunks = self._storage.get_file_chunks(dl.file_hash_hex, 0,
-                                               dl.chunk_count)
-        data = b"".join(chunks)
-        if len(chunks) == dl.chunk_count and \
-                hashlib.sha256(data).digest() == dl.manifest["hash"]:
+        if self._storage.file_digest(dl.file_hash_hex) == dl.manifest["hash"]:
             self._storage.mark_file_complete(dl.file_hash_hex)
             self._storage.touch_file(dl.file_hash_hex)
             self._finish(dl, DL_DONE, None, events)

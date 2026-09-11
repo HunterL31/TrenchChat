@@ -712,6 +712,26 @@ damps repeat announces and the liveness beacon informs only its receiver. Asking
 a quiet member costs one dial that fails; not asking cost the whole download, and
 did, until the scenario suite found it.
 
+**Where the bytes live, and what protects them.** On disk under the profile,
+one sparse file per shared file (`core/filestore.py`), with the database
+keeping only the bookkeeping: which files exist, which chunks of each arrived,
+what each costs against the budgets. A chunk is a seek and a read of exactly
+that chunk, so serving one costs the same whatever the file's size, and
+dropping a file is an unlink rather than a freelist entry.
+
+A profile with no PIN keeps its database in the clear, so its file bytes are in
+the clear beside it. A profile with a PIN keeps its database under SQLCipher,
+so every chunk is sealed with AES-256-GCM under a key derived from the same
+lockbox key, with the file hash and the chunk index as associated data: a
+sealed chunk cannot be moved to another index or another file, and a store
+carried off without the PIN is noise. Setting or removing the PIN re-seals the
+store the way it re-encrypts the identity file and re-keys the database
+(`Storage.rekey_file_store`), so the store never protects less than the
+database it sits beside. The one thing a store makes visible that a database
+did not is *how many* files this node holds and how large each is, from the
+directory listing alone; what is in them, which channel they came from and who
+asked for them stay in the database.
+
 **Bounds.** Inbound: manifest field caps, `max_response_size` derived from the
 chunk count so an oversized answer is refused before it is buffered, a stall
 timeout per request, one request in flight per download and one download per
@@ -739,29 +759,32 @@ evicts before a fetch rather than pruning after it.
   (see "3-bis" above). `SEND_MESSAGE` already had this gap and `SHARE_FILES`
   now shares it.
 
-### Database growth, which the code cannot state
+### What the store may grow to
 
-Three budgets bound the file tables: complete received files
-(`FILE_STORE_MAX_BYTES`), unfinished downloads (`PARTIAL_STORE_MAX_BYTES`) and
-this node's own uploads (`OWN_FILE_STORE_MAX_BYTES`, never auto-pruned because
-the sender has to stay a holder). Worst case is about 530 MB of file rows plus
-overhead. What the budgets do not bound is the file on disk:
+Three budgets bound it, because the three kinds of stored file answer to
+different rules: complete received files (`FILE_STORE_MAX_BYTES`, 4 GB, evicted
+least recently used), unfinished downloads (`PARTIAL_STORE_MAX_BYTES`, 500 MB,
+the first thing dropped since a partial is worth nothing on its own) and this
+node's own uploads (`OWN_FILE_STORE_MAX_BYTES`, 4 GB, never auto-pruned because
+the sender has to stay a holder, so a share past the ceiling is refused rather
+than paid for with somebody else's file). Worst case is about 8.5 GB of disk.
 
-- **Deleting rows never shrinks the database.** Freed pages go on the freelist
-  and later writes reuse them, so the file stays at the largest size the budgets
-  ever reached. Only `VACUUM` returns the space, and it rewrites the whole
-  database, needs free disk equal to its size, and re-encrypts every page under
-  SQLCipher. It is not run automatically. `auto_vacuum=INCREMENTAL` can only be
-  set before a database has tables, so it would apply to new profiles only; a
-  "compact database" action is the honest fix and is not built.
-- **Setting or removing the PIN copies the whole database.** `encrypt_to` and
-  `export_to_plaintext` build a second copy through `sqlcipher_export`, so both
-  need free disk equal to the database, files included; `rekey` is in place and
-  does not. This gap predates file sharing, which makes it larger.
-- **Message images are still unbounded.** Up to 900 KB each, stored in
-  `messages`, with no prune at all: only deleting a conversation removes them.
-  File sharing arrives bounded where images are not. Putting images under the
-  same LRU is the follow-up.
+One share is at most `MAX_SHARED_FILE_BYTES`, 200 MB, the same number on both
+paths. Raising it from 5 MB is safe because the bytes are pulled and never
+pushed: a member with a direct session takes a large file in seconds, a member
+on the mesh takes it at the mesh's pace or never asks at all, and nobody pays
+for a file they did not ask for. What the mesh costs is still what it costs;
+5 MB took 5h 14m at SF7 with both ends on the radio (files11 in
+docs/testenv-scenarios.md), and 200 MB over that link is not a thing anyone
+should start.
+
+The budgets are disk rather than database, which removes the three costs the
+old shape had: deleted files return their space on the unlink instead of
+waiting for a `VACUUM` nothing runs, a re-key rewrites the files rather than
+copying the whole database, and a chunk write is a seek rather than a journal
+entry. What remains unbounded is elsewhere: **message images**, up to 900 KB
+each in `messages`, with no prune at all, so only deleting a conversation
+removes them. Putting them under the same LRU is the follow-up.
 
 ### Alternatives rejected, and why
 
@@ -779,9 +802,13 @@ overhead. What the budgets do not bound is the file on disk:
 - **"I hold this" announcements.** One control message to every member per
   download, to save the requester one failed handshake. Presence order plus
   remembering the last holder gets most of it for nothing.
-- **Files on disk under `~/.trenchchat/`.** Faster for large files and outside
-  both the SQLCipher lockbox and the one prune policy. Revisit only if the 5 MB
-  ceiling grows past what a blob column is happy with.
+- **Files as database blobs.** How this started, and right while a share was
+  5 MB: one prune policy, one thing the PIN lock encrypted, and a chunk range
+  that was a primary-key read. At 200 MB it stops paying: every chunk written
+  goes through the journal, a prune leaves the space on a freelist until a
+  `VACUUM` that nothing runs, and setting a PIN copies every byte. The bytes
+  moved to disk (`core/filestore.py`) and took their own sealing with them, so
+  what the lockbox protected it still protects.
 - **Whole-file requests, resume by restarting.** An RNS response resource does
   not survive a link change, so every drop restarts a transfer that takes hours
   on LoRa.

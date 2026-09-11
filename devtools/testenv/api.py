@@ -408,8 +408,11 @@ TOKEN_QUERY_PARAM = "token"
 # Largest request body accepted. Every upload endpoint takes base64 in JSON and
 # the limits below it are per-attachment, so without this a token holder can
 # hand the process an arbitrarily large string to decode. It sits above
-# MAX_SHARED_FILE_BYTES with room for base64's third and the rest of the body.
-MAX_REQUEST_BYTES = 8 * 1024 * 1024
+# MAX_SHARED_FILE_BYTES with room for base64's third and the rest of the body,
+# which is what lets the largest share a channel allows be shared through this
+# API at all. A share that size arrives as one body and is decoded whole; a
+# streaming upload is what would fix that, and belongs with the client.
+MAX_REQUEST_BYTES = 280 * 1024 * 1024
 
 # Why an attachment was refused before anything was stored or sent.
 REASON_FILE_AND_IMAGE = "file_and_image"

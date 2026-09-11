@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import re
@@ -11,6 +12,7 @@ from contextlib import contextmanager
 import RNS
 
 from trenchchat.config import DATA_DIR
+from trenchchat.core.filestore import FileStore
 from trenchchat.core.fileutils import secure_file
 from trenchchat.core.lockbox import sqlcipher_hex_key
 from trenchchat.core.permissions import (
@@ -19,7 +21,7 @@ from trenchchat.core.permissions import (
     permissions_from_json, permissions_to_json,
 )
 from trenchchat.core.protocol import (
-    FILE_CHUNK_BYTES, SYNC_WINDOW_SECS, mention_token, mentions_identity,
+    SYNC_WINDOW_SECS, chunk_count_for, mention_token, mentions_identity,
 )
 
 DB_PATH = DATA_DIR / "storage.db"
@@ -41,9 +43,19 @@ FRIEND_PENDING_IN  = "pending_in"
 # worth nothing on its own. The user's own uploads are never evicted, because
 # the sender has to stay a holder, so a share past their ceiling is refused
 # instead of costing someone else their file.
-FILE_STORE_MAX_BYTES = 256 * 1024 * 1024
-OWN_FILE_STORE_MAX_BYTES = 256 * 1024 * 1024
-PARTIAL_STORE_MAX_BYTES = 20 * 1024 * 1024
+#
+# The numbers are what they are because the bytes live on disk rather than in
+# the database (core/filestore.py): a file costs a sparse file and an unlink,
+# not database pages and a vacuum, so the budget can be a fraction of a disk
+# instead of a fraction of a database. The partial budget holds a few of the
+# largest share MAX_SHARED_FILE_BYTES allows, which is what a download resuming
+# across a restart needs.
+FILE_STORE_MAX_BYTES = 4 * 1024 * 1024 * 1024
+OWN_FILE_STORE_MAX_BYTES = 4 * 1024 * 1024 * 1024
+PARTIAL_STORE_MAX_BYTES = 500 * 1024 * 1024
+
+# Where a profile's file bytes live, beside its database.
+FILE_STORE_DIRNAME = "files"
 
 # A download nobody has resumed within the sync window is dropped: past it the
 # channel history the file was shared in has stopped being backfilled too.
@@ -456,17 +468,16 @@ CREATE TABLE IF NOT EXISTS upgrade_addresses (
     PRIMARY KEY (peer_hash, kind)
 );
 
--- The bytes, one row per FILE_CHUNK_BYTES chunk, kept in that shape for the
--- life of the file: a download in progress and a complete file are the same
--- rows with complete flipped, there is no assembly step and no second copy,
--- and serving a chunk range is a primary-key read of exactly those rows
--- (0.03 ms, against 0.5 to 2.5 ms for a substr slice of one 5 MB blob under
--- SQLCipher). They live in the database rather than on disk because the
--- database is what the PIN lock encrypts and what one prune policy bounds.
-CREATE TABLE IF NOT EXISTS file_chunks (
-    hash    TEXT NOT NULL,
-    idx     INTEGER NOT NULL,
-    content BLOB NOT NULL,
+-- Which chunks of a file are held. The bytes themselves are on disk under the
+-- profile (core/filestore.py), one sparse file each, because a share is now
+-- large enough that carrying it as database rows costs a journal write per
+-- chunk and a vacuum to give the space back. A hole in a sparse file reads as
+-- zeros and is indistinguishable from data, so which chunks arrived is the one
+-- thing the bookkeeping has to keep.
+CREATE TABLE IF NOT EXISTS file_chunk_index (
+    hash   TEXT NOT NULL,
+    idx    INTEGER NOT NULL,
+    length INTEGER NOT NULL,
     PRIMARY KEY (hash, idx)
 );
 """
@@ -511,7 +522,11 @@ class Storage:
         # A full disk is reported once per run: a stalled download retries, and
         # a line per chunk would bury everything else in the log.
         self._disk_full_logged = False
+        self._files = FileStore(db_path.parent / FILE_STORE_DIRNAME,
+                                encryption_key)
         self._migrate_permissions()
+        self._migrate_file_chunks_to_disk()
+        self._collect_orphan_files()
         self._secure_db_files()
 
     # ------------------------------------------------------------------
@@ -805,6 +820,71 @@ class Storage:
         )
         self._conn.commit()
 
+    def _migrate_file_chunks_to_disk(self):
+        """Move the chunks an older database holds into the file store.
+
+        The bytes were rows once. They are read out a chunk at a time, written
+        to disk where they now live, and the table is dropped, so the space
+        goes back to the filesystem rather than to a database free list.
+        """
+        if not self._table_exists("file_chunks"):
+            return
+        rows = self._conn.execute(
+            "SELECT hash, idx FROM file_chunks ORDER BY hash, idx").fetchall()
+        moved = 0
+        for row in rows:
+            blob = self._conn.execute(
+                "SELECT content FROM file_chunks WHERE hash = ? AND idx = ?",
+                (row["hash"], row["idx"])).fetchone()
+            if blob is None:
+                continue
+            try:
+                self._files.put(row["hash"], row["idx"], bytes(blob["content"]))
+            except OSError as e:
+                RNS.log(f"TrenchChat [storage]: could not move chunk "
+                        f"{row['idx']} of {row['hash'][:12]}… to disk: {e}",
+                        RNS.LOG_ERROR)
+                return
+            self._conn.execute(
+                "INSERT OR IGNORE INTO file_chunk_index (hash, idx, length) "
+                "VALUES (?, ?, ?)",
+                (row["hash"], row["idx"], len(bytes(blob["content"]))))
+            moved += 1
+        self._conn.execute("DROP TABLE file_chunks")
+        self._conn.commit()
+        if moved:
+            RNS.log(f"TrenchChat [storage]: moved {moved} file chunk(s) out of "
+                    f"the database and onto disk", RNS.LOG_NOTICE)
+
+    def _collect_orphan_files(self):
+        """Drop stored bytes no row accounts for, and rows whose bytes are gone.
+
+        A crash between writing a chunk and committing its row leaves bytes
+        nothing will ever read or evict; a profile restored without its file
+        directory leaves rows claiming bytes that are not there.
+        """
+        known = {row["hash"] for row in
+                 self._conn.execute("SELECT hash FROM channel_files").fetchall()}
+        self._files.purge_except(known)
+        missing = [hash_hex for hash_hex in known
+                   if not self._files.path_for(hash_hex).exists()]
+        for hash_hex in missing:
+            self._conn.execute("DELETE FROM file_chunk_index WHERE hash = ?",
+                               (hash_hex,))
+            self._conn.execute("DELETE FROM channel_files WHERE hash = ?",
+                               (hash_hex,))
+        if missing:
+            self._conn.commit()
+            RNS.log(f"TrenchChat [storage]: forgot {len(missing)} file(s) whose "
+                    f"bytes are no longer on disk", RNS.LOG_WARNING)
+
+    def _table_exists(self, name: str) -> bool:
+        """Whether a table is in this database's schema."""
+        row = self._conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (name,)).fetchone()
+        return row is not None
+
     def _migrate_image_stripped(self):
         """Add image_stripped to messages for existing databases."""
         if not self._has_column("messages", "image_stripped"):
@@ -973,6 +1053,22 @@ class Storage:
         secure_file(db_path)
         _remove_wal_sidecars(db_path)
         RNS.log("TrenchChat [storage]: database decrypted (PIN removed)", RNS.LOG_NOTICE)
+
+    def rekey_file_store(self, new_key: bytes | None) -> None:
+        """Re-seal the file store when the PIN changes, is set or is removed.
+
+        The database's own three helpers move it between plaintext and
+        SQLCipher with the connection closed; this one runs on the open
+        instance instead, because what it needs is the bookkeeping (which
+        chunks of which file, and how long each is) rather than the database
+        file. Call it before closing to re-key the database, so the bytes
+        beside it never protect less than it does.
+        """
+        entries = [(row["hash"], sorted(self._held_chunks(row["hash"]).items()))
+                   for row in self.list_files()]
+        self._files.rekey(new_key, entries)
+        RNS.log(f"TrenchChat [storage]: file store re-keyed over "
+                f"{len(entries)} file(s)", RNS.LOG_NOTICE)
 
     def rekey_database(self, old_key: bytes, new_key: bytes,
                        db_path: Path = DB_PATH) -> None:
@@ -1211,7 +1307,7 @@ class Storage:
         *manifest* is a file manifest in protocol.file_manifest shape (name,
         size, hash, chunk_root); its two digests are stored as hex text. The
         message carries only the manifest, never the file: the bytes live in
-        channel_files and file_chunks, and only once someone asks for them.
+        the file store on disk, and only once someone asks for them.
         """
         file_name = manifest["name"] if manifest else None
         file_size = manifest["size"] if manifest else None
@@ -2891,7 +2987,7 @@ class Storage:
         node later shares becomes own, never the reverse.
         """
         now = time.time()
-        chunk_count = (size + FILE_CHUNK_BYTES - 1) // FILE_CHUNK_BYTES
+        chunk_count = chunk_count_for(size)
         with self._tx():
             self._conn.execute("""
                 INSERT INTO channel_files
@@ -2904,63 +3000,145 @@ class Storage:
             """, (hash_hex, size, chunk_count, 1 if own else 0, now, now))
 
     def put_file_chunk(self, hash_hex: str, idx: int, content: bytes) -> bool:
-        """Store one verified chunk. False when the database has no room left.
+        """Store one verified chunk. False when there is no room left.
 
-        Its own small transaction, so a download is a sequence of chunk-sized
-        appends rather than one multi-megabyte write and every chunk that
-        lands is kept whatever happens to the rest. A full disk is the one
-        failure answered rather than raised: the caller stops the download and
-        keeps what it already holds.
+        The bytes go to the store in their own slot and the row records that
+        they are there and how long they are, so a download is a sequence of
+        chunk-sized writes and every chunk that lands is kept whatever happens
+        to the rest. A chunk already held is left as it is, bytes included.
+        No room is the one failure answered rather than raised: the caller
+        stops the download and keeps what it already holds.
         """
         try:
+            if self._chunk_length(hash_hex, idx) is not None:
+                return True
+            self._files.put(hash_hex, idx, content)
             with self._tx():
                 cursor = self._conn.execute(
-                    "INSERT OR IGNORE INTO file_chunks (hash, idx, content) "
-                    "VALUES (?, ?, ?)", (hash_hex, idx, content))
+                    "INSERT OR IGNORE INTO file_chunk_index (hash, idx, length) "
+                    "VALUES (?, ?, ?)", (hash_hex, idx, len(content)))
                 if cursor.rowcount:
                     self._conn.execute(
                         "UPDATE channel_files SET held_bytes = held_bytes + ?, "
                         "last_used = ? WHERE hash = ?",
                         (len(content), time.time(), hash_hex))
+        except OSError as e:
+            self._note_disk_full(e, hash_hex, idx)
+            return False
         except Exception as e:
             if not _is_disk_full(e):
                 raise
-            if not self._disk_full_logged:
-                self._disk_full_logged = True
-                RNS.log(f"TrenchChat [storage]: {DISK_FULL_MESSAGE}; "
-                        f"chunk {idx} of {hash_hex} not stored", RNS.LOG_ERROR)
+            self._note_disk_full(e, hash_hex, idx)
             return False
         return True
+
+    def _chunk_length(self, hash_hex: str, idx: int) -> int | None:
+        """How long one held chunk is, or None if it is not held."""
+        row = self._fetchone(
+            "SELECT length FROM file_chunk_index WHERE hash = ? AND idx = ?",
+            (hash_hex, idx))
+        return row["length"] if row is not None else None
+
+    def _held_chunks(self, hash_hex: str) -> dict[int, int]:
+        """Every held chunk of a file as index -> length."""
+        return {row["idx"]: row["length"] for row in self._fetchall(
+            "SELECT idx, length FROM file_chunk_index WHERE hash = ? "
+            "ORDER BY idx ASC", (hash_hex,))}
+
+    def _note_disk_full(self, error: Exception, hash_hex: str, idx: int) -> None:
+        """Say once per run that there is no room left, and for which chunk."""
+        if self._disk_full_logged:
+            return
+        self._disk_full_logged = True
+        RNS.log(f"TrenchChat [storage]: no room for chunk {idx} of "
+                f"{hash_hex}: {error}", RNS.LOG_ERROR)
 
     def file_chunk_indices(self, hash_hex: str) -> list[int]:
         """Which chunks of a file are held, in order."""
         rows = self._fetchall(
-            "SELECT idx FROM file_chunks WHERE hash = ? ORDER BY idx ASC", (hash_hex,))
+            "SELECT idx FROM file_chunk_index WHERE hash = ? ORDER BY idx ASC",
+            (hash_hex,))
         return [r["idx"] for r in rows]
 
     def get_file_chunks(self, hash_hex: str, first_idx: int, count: int) -> list[bytes]:
-        """The chunks from first_idx, in order, at most *count* of them.
+        """The chunks from first_idx, in order, stopping at the first one missing.
 
-        A primary-key read of exactly those rows, so what a serve costs does
-        not grow with the size of the file it comes from.
+        One seek and one read of exactly that chunk, so what a serve costs does
+        not grow with the size of the file it comes from. Contiguous by
+        construction: the caller concatenates what comes back, so a chunk that
+        has not arrived ends the run rather than closing a gap in it.
         """
-        rows = self._fetchall(
-            "SELECT content FROM file_chunks WHERE hash = ? AND idx >= ? AND idx < ? "
-            "ORDER BY idx ASC", (hash_hex, first_idx, first_idx + count))
-        return [bytes(r["content"]) for r in rows]
+        held = self._held_chunks(hash_hex)
+        chunks: list[bytes] = []
+        for idx in range(first_idx, first_idx + count):
+            length = held.get(idx)
+            if length is None:
+                break
+            chunk = self._files.get(hash_hex, idx, length)
+            if chunk is None:
+                break
+            chunks.append(chunk)
+        return chunks
+
+    def file_chunk_digests(self, hash_hex: str) -> list[bytes]:
+        """The SHA-256 of every chunk of a file, or [] unless all are held.
+
+        Read a chunk at a time, so naming the chunks of the largest share costs
+        one chunk of memory rather than the whole file.
+        """
+        row = self.get_file(hash_hex)
+        if row is None:
+            return []
+        held = self._held_chunks(hash_hex)
+        digests: list[bytes] = []
+        for idx in range(row["chunk_count"]):
+            chunk = self._chunk_at(hash_hex, idx, held)
+            if chunk is None:
+                return []
+            digests.append(hashlib.sha256(chunk).digest())
+        return digests
+
+    def _chunk_at(self, hash_hex: str, idx: int, held: dict[int, int]
+                  ) -> bytes | None:
+        """One chunk of a file, given what the bookkeeping says is held."""
+        length = held.get(idx)
+        if length is None:
+            return None
+        return self._files.get(hash_hex, idx, length)
+
+    def file_digest(self, hash_hex: str) -> bytes | None:
+        """The SHA-256 of the whole file, or None while it is not all here.
+
+        Streamed for the same reason the chunk digests are: this runs on a file
+        that may be two hundred megabytes, and the answer is 32 bytes.
+        """
+        row = self.get_file(hash_hex)
+        if row is None:
+            return None
+        held = self._held_chunks(hash_hex)
+        digest = hashlib.sha256()
+        for idx in range(row["chunk_count"]):
+            chunk = self._chunk_at(hash_hex, idx, held)
+            if chunk is None:
+                return None
+            digest.update(chunk)
+        return digest.digest()
 
     def get_file_bytes(self, hash_hex: str) -> bytes | None:
         """A complete file assembled in memory, None while it is not all here.
 
-        The share ceiling is what makes assembling cheap; the stored shape
-        stays one row per chunk either way.
+        The one caller that needs every byte at once is handing the file to the
+        user; everything on the wire reads a chunk at a time.
         """
         row = self.get_file(hash_hex)
         if row is None or not row["complete"]:
             return None
-        rows = self._fetchall(
-            "SELECT content FROM file_chunks WHERE hash = ? ORDER BY idx ASC", (hash_hex,))
-        return b"".join(bytes(r["content"]) for r in rows)
+        held = self._held_chunks(hash_hex)
+        chunks = [self._files.get(hash_hex, idx, length)
+                  for idx, length in sorted(held.items())]
+        if any(chunk is None for chunk in chunks):
+            return None
+        return b"".join(chunks)
 
     def mark_file_complete(self, hash_hex: str) -> None:
         """Flip a file from downloading to held. The chunk rows do not move."""
@@ -2981,10 +3159,12 @@ class Storage:
         return self._fetchone("SELECT * FROM channel_files WHERE hash = ?", (hash_hex,))
 
     def delete_file(self, hash_hex: str) -> None:
-        """Remove a file and every chunk of it."""
+        """Remove a file, its bytes and every record of which chunks were held."""
         with self._tx():
-            self._conn.execute("DELETE FROM file_chunks WHERE hash = ?", (hash_hex,))
+            self._conn.execute("DELETE FROM file_chunk_index WHERE hash = ?",
+                               (hash_hex,))
             self._conn.execute("DELETE FROM channel_files WHERE hash = ?", (hash_hex,))
+        self._files.delete(hash_hex)
 
     def file_channels(self, hash_hex: str) -> list[str]:
         """The channels a message carrying this file was stored in.

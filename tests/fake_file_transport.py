@@ -12,11 +12,18 @@ Failure modes are injectable per transport: holders that cannot be reached,
 (holder, chunk index) pairs that stall, a per-holder delay, and drop_link,
 which fails whatever that holder is serving right now the way a dropped link
 does.
+
+A transport built with direct=True stands in for the plane a direct session
+carries: it reaches only the peers that also have one (registry.sessions), and
+its requests are the direct path's size rather than the mesh's. A peer wired
+with both runs the same download over whichever of them can reach the holder,
+which is what FileManager chooses between.
 """
 
 import threading
 import time
 
+from trenchchat.network.base import DIRECT_FILE_REQUEST_MAX_CHUNKS
 from trenchchat.network.file_transport import (
     FETCH_REFUSED, FETCH_STALLED, FILE_FETCH_TIMEOUT_SECS,
     FILE_REQUEST_MAX_CHUNKS, FileTransportBase, max_response_for,
@@ -33,6 +40,8 @@ class FakeFileRegistry:
 
     def __init__(self):
         self.holders: dict[str, "FakeFileTransport"] = {}
+        # Peers that hold a direct session, as the direct plane sees them.
+        self.sessions: set[str] = set()
         # (requester, holder, file_hash, first, count, want_list)
         self.fetch_log: list[tuple[str, str, str, int, int, bool]] = []
         self.lock = threading.RLock()
@@ -43,10 +52,12 @@ class FakeFileTransport(FileTransportBase):
                  delivery_delay: float = FAKE_DELIVERY_DELAY,
                  unreachable: set[str] | None = None,
                  stall_chunks: set[tuple[str, int]] | None = None,
-                 holder_delays: dict[str, float] | None = None):
+                 holder_delays: dict[str, float] | None = None,
+                 direct: bool = False):
         super().__init__()
         self.self_hex = self_hex
         self.registry = registry
+        self.direct = direct
         self._delay = delivery_delay
         self.unreachable: set[str] = set(unreachable or ())
         self.stall_chunks: set[tuple[str, int]] = set(stall_chunks or ())
@@ -60,6 +71,12 @@ class FakeFileTransport(FileTransportBase):
         self._dropped: set[str] = set()
         self._lock = threading.RLock()
         self._threads: list[threading.Thread] = []
+
+    @property
+    def max_request_chunks(self) -> int:
+        """The direct plane's range is the direct path's, not the mesh's."""
+        return (DIRECT_FILE_REQUEST_MAX_CHUNKS if self.direct
+                else FILE_REQUEST_MAX_CHUNKS)
 
     # --- fetching ---
 
@@ -146,8 +163,18 @@ class FakeFileTransport(FileTransportBase):
     # --- links ---
 
     def can_reach(self, holder_hex: str) -> bool:
-        """A holder marked unreachable is one no path leads to."""
-        return holder_hex not in self.unreachable
+        """A holder marked unreachable is one no path leads to.
+
+        The direct plane reaches only a peer that has a session, which is what
+        makes it a preference rather than a replacement.
+        """
+        if holder_hex in self.unreachable:
+            return False
+        if not self.direct:
+            return True
+        with self.registry.lock:
+            return (holder_hex in self.registry.sessions
+                    and self.self_hex in self.registry.sessions)
 
     def drop_link(self, holder_hex: str) -> bool:
         """Drop the link to a holder, failing whatever it carries right now."""
@@ -170,7 +197,7 @@ class FakeFileTransport(FileTransportBase):
     def start_serving(self) -> None:
         self.serving = True
         with self.registry.lock:
-            self.registry.holders[self.self_hex] = self
+            self.registry.holders.setdefault(self.self_hex, self)
 
     def announce(self) -> None:
         """Record it. A fetch here needs no path, so only the count matters."""
@@ -181,6 +208,17 @@ class FakeFileTransport(FileTransportBase):
         with self.registry.lock:
             if self.registry.holders.get(self.self_hex) is self:
                 del self.registry.holders[self.self_hex]
+
+    def open_session(self, *peers: str) -> None:
+        """Give this peer a direct session with every named peer."""
+        with self.registry.lock:
+            self.registry.sessions.add(self.self_hex)
+            self.registry.sessions.update(peers)
+
+    def close_session(self) -> None:
+        """Lose this peer's session, so its downloads fall back to the mesh."""
+        with self.registry.lock:
+            self.registry.sessions.discard(self.self_hex)
 
     def tick(self) -> None:
         pass

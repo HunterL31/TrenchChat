@@ -5,6 +5,7 @@ These tests exercise the database layer directly with no networking.
 Each test gets its own in-memory SQLite database via a tmp_path fixture.
 """
 
+import hashlib
 import os
 import stat
 import time
@@ -12,11 +13,15 @@ from pathlib import Path
 
 import pytest
 
+from trenchchat.core.filestore import SEAL_OVERHEAD, FileStoreError
 from trenchchat.core.fileutils import OWNER_RW_MODE
 from trenchchat.core.permissions import (
     CREATE_CHANNEL, INVITE, PRESET_PRIVATE, PRESET_SERVER, ROLE_ADMIN,
     ROLE_MEMBER, ROLE_OWNER, SEND_MESSAGE,
     is_discoverable, is_open_join, permissions_from_json,
+)
+from trenchchat.core.protocol import (
+    FILE_CHUNK_BYTES, chunk_count_for, chunk_hashes,
 )
 from trenchchat.core.storage import Storage
 from trenchchat.core.lockbox import sqlcipher_hex_key
@@ -1521,3 +1526,191 @@ class TestTenureRepairEvidence:
 
         assert db.was_member_at(CHAN, ID_A, joined_at - 4000), \
             "the repair no longer widens tenure for genuinely old history"
+
+
+# ---------------------------------------------------------------------------
+# The file store on disk
+# ---------------------------------------------------------------------------
+
+class TestFileStoreOnDisk:
+    """A share's bytes live beside the database, not in it."""
+
+    HASH = "ab" * 32
+
+    def _fill(self, db, size: int, own: bool = False) -> bytes:
+        data = os.urandom(size)
+        db.begin_file(self.HASH, size, own=own)
+        for idx in range(chunk_count_for(size)):
+            assert db.put_file_chunk(
+                self.HASH, idx,
+                data[idx * FILE_CHUNK_BYTES:(idx + 1) * FILE_CHUNK_BYTES])
+        db.mark_file_complete(self.HASH)
+        return data
+
+    def test_the_bytes_are_a_file_and_the_database_holds_none(self, db, tmp_path):
+        data = self._fill(db, FILE_CHUNK_BYTES * 2 + 11)
+        stored = tmp_path / "files" / "ab" / self.HASH
+
+        assert stored.exists()
+        assert stored.stat().st_size == len(data)
+        assert db.get_file_bytes(self.HASH) == data
+        tables = {row[0] for row in db._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'")}
+        assert "file_chunks" not in tables
+
+    def test_one_chunk_is_read_without_the_rest(self, db):
+        data = self._fill(db, FILE_CHUNK_BYTES * 4 + 5)
+
+        assert db.get_file_chunks(self.HASH, 2, 1) == \
+            [data[2 * FILE_CHUNK_BYTES:3 * FILE_CHUNK_BYTES]]
+        assert db.get_file_chunks(self.HASH, 4, 4) == [data[4 * FILE_CHUNK_BYTES:]]
+
+    def test_a_run_stops_at_the_first_chunk_missing(self, db):
+        size = FILE_CHUNK_BYTES * 3
+        data = os.urandom(size)
+        db.begin_file(self.HASH, size)
+        for idx in (0, 2):
+            db.put_file_chunk(
+                self.HASH, idx,
+                data[idx * FILE_CHUNK_BYTES:(idx + 1) * FILE_CHUNK_BYTES])
+
+        assert db.file_chunk_indices(self.HASH) == [0, 2]
+        assert db.get_file_chunks(self.HASH, 0, 3) == [data[:FILE_CHUNK_BYTES]]
+        assert db.get_file_bytes(self.HASH) is None
+        assert db.file_digest(self.HASH) is None
+
+    def test_the_digests_name_every_chunk(self, db):
+        data = self._fill(db, FILE_CHUNK_BYTES * 2 + 7)
+
+        assert db.file_chunk_digests(self.HASH) == chunk_hashes(data)
+        assert db.file_digest(self.HASH) == hashlib.sha256(data).digest()
+
+    def test_deleting_a_file_takes_its_bytes_with_it(self, db, tmp_path):
+        self._fill(db, FILE_CHUNK_BYTES)
+        db.delete_file(self.HASH)
+
+        assert not (tmp_path / "files" / "ab" / self.HASH).exists()
+        assert db.file_chunk_indices(self.HASH) == []
+
+    def test_bytes_nothing_accounts_for_are_collected_on_open(self, tmp_path):
+        db = Storage(db_path=tmp_path / "test.db")
+        self._fill(db, FILE_CHUNK_BYTES)
+        db.close()
+        orphan = tmp_path / "files" / "cd" / ("cd" * 32)
+        orphan.parent.mkdir(parents=True, exist_ok=True)
+        orphan.write_bytes(b"nobody asked for this")
+
+        db = Storage(db_path=tmp_path / "test.db")
+        try:
+            assert not orphan.exists()
+            assert db.get_file(self.HASH) is not None
+        finally:
+            db.close()
+
+    def test_a_file_whose_bytes_are_gone_is_forgotten_on_open(self, tmp_path):
+        db = Storage(db_path=tmp_path / "test.db")
+        self._fill(db, FILE_CHUNK_BYTES)
+        db.close()
+        (tmp_path / "files" / "ab" / self.HASH).unlink()
+
+        db = Storage(db_path=tmp_path / "test.db")
+        try:
+            assert db.get_file(self.HASH) is None
+            assert db.file_chunk_indices(self.HASH) == []
+        finally:
+            db.close()
+
+    def test_chunks_in_an_older_database_move_to_disk_on_open(self, tmp_path):
+        """The bytes were rows once; opening the profile moves them out."""
+        db_path = tmp_path / "test.db"
+        db = Storage(db_path=db_path)
+        size = FILE_CHUNK_BYTES + 9
+        data = os.urandom(size)
+        db.begin_file(self.HASH, size)
+        db._conn.executescript(
+            "CREATE TABLE file_chunks (hash TEXT NOT NULL, idx INTEGER NOT NULL,"
+            " content BLOB NOT NULL, PRIMARY KEY (hash, idx));")
+        for idx in range(chunk_count_for(size)):
+            db._conn.execute(
+                "INSERT INTO file_chunks (hash, idx, content) VALUES (?, ?, ?)",
+                (self.HASH, idx,
+                 data[idx * FILE_CHUNK_BYTES:(idx + 1) * FILE_CHUNK_BYTES]))
+        db._conn.execute(
+            "UPDATE channel_files SET held_bytes = ?, complete = 1 WHERE hash = ?",
+            (size, self.HASH))
+        db._conn.execute("DELETE FROM file_chunk_index WHERE hash = ?",
+                         (self.HASH,))
+        db._conn.commit()
+        db.close()
+
+        db = Storage(db_path=db_path)
+        try:
+            assert db.get_file_bytes(self.HASH) == data
+            tables = {row[0] for row in db._conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'")}
+            assert "file_chunks" not in tables
+        finally:
+            db.close()
+
+
+class TestFileStoreUnderAPin:
+    """A store never protects less than the database beside it."""
+
+    HASH = "ef" * 32
+
+    def test_chunks_are_sealed_at_rest(self, tmp_path):
+        key = os.urandom(32)
+        db = Storage(db_path=tmp_path / "enc.db", encryption_key=key)
+        data = os.urandom(FILE_CHUNK_BYTES + 40)
+        db.begin_file(self.HASH, len(data))
+        db.put_file_chunk(self.HASH, 0, data[:FILE_CHUNK_BYTES])
+        db.put_file_chunk(self.HASH, 1, data[FILE_CHUNK_BYTES:])
+        db.mark_file_complete(self.HASH)
+        try:
+            raw = (tmp_path / "files" / "ef" / self.HASH).read_bytes()
+            assert data[:200] not in raw, "a sealed store held plaintext"
+            assert len(raw) == len(data) + 2 * SEAL_OVERHEAD
+            assert db.get_file_bytes(self.HASH) == data
+        finally:
+            db.close()
+
+    def test_a_chunk_cannot_be_moved_within_its_file(self, tmp_path):
+        """The seal binds a chunk to its index, so a swap does not decrypt."""
+        key = os.urandom(32)
+        db = Storage(db_path=tmp_path / "enc.db", encryption_key=key)
+        db.begin_file(self.HASH, FILE_CHUNK_BYTES * 2)
+        db.put_file_chunk(self.HASH, 0, b"a" * FILE_CHUNK_BYTES)
+        db.put_file_chunk(self.HASH, 1, b"b" * FILE_CHUNK_BYTES)
+        db.close()
+
+        path = tmp_path / "files" / "ef" / self.HASH
+        raw = bytearray(path.read_bytes())
+        stride = FILE_CHUNK_BYTES + SEAL_OVERHEAD
+        raw[:stride], raw[stride:stride * 2] = raw[stride:stride * 2], raw[:stride]
+        path.write_bytes(bytes(raw))
+
+        db = Storage(db_path=tmp_path / "enc.db", encryption_key=key)
+        try:
+            with pytest.raises(FileStoreError):
+                db.get_file_chunks(self.HASH, 0, 1)
+        finally:
+            db.close()
+
+    def test_setting_and_removing_a_pin_re_seals_the_store(self, tmp_path):
+        key = os.urandom(32)
+        db = Storage(db_path=tmp_path / "test.db")
+        data = os.urandom(FILE_CHUNK_BYTES + 3)
+        db.begin_file(self.HASH, len(data))
+        db.put_file_chunk(self.HASH, 0, data[:FILE_CHUNK_BYTES])
+        db.put_file_chunk(self.HASH, 1, data[FILE_CHUNK_BYTES:])
+        db.mark_file_complete(self.HASH)
+
+        db.rekey_file_store(key)
+        raw = (tmp_path / "files" / "ef" / self.HASH).read_bytes()
+        assert data[:200] not in raw
+        assert db.get_file_bytes(self.HASH) == data
+
+        db.rekey_file_store(None)
+        assert (tmp_path / "files" / "ef" / self.HASH).read_bytes() == data
+        assert db.get_file_bytes(self.HASH) == data
+        db.close()

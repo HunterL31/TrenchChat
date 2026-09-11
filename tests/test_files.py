@@ -703,3 +703,86 @@ def test_a_parked_download_waits_out_its_backoff(peer_factory):
     assert wait_for(
         lambda: bob.file_mgr.download_status(file_hash)["state"] == DL_DONE,
         timeout=2.0) is False
+
+
+# ---------------------------------------------------------------------------
+# Two planes
+#
+# A holder with a direct session is preferred and the mesh serves everyone
+# else, decided per request so a session lost or gained mid-download costs a
+# range rather than the transfer.
+# ---------------------------------------------------------------------------
+
+def session_between(*peers) -> None:
+    """Give every named peer a direct session with every other."""
+    hashes = [peer.identity.hash_hex for peer in peers]
+    for peer in peers:
+        peer.direct_file_transport.open_session(*hashes)
+
+
+def plane_of(registry, requester_hex: str, file_hash_hex: str) -> set[bool]:
+    """Whether each request for this file went over the direct plane."""
+    with registry.lock:
+        entries = list(registry.fetch_log)
+    return {who == requester_hex for who, _h, f, _i, _c, _l in entries
+            if f == file_hash_hex}
+
+
+def test_a_holder_with_a_session_is_pulled_from_over_it(peer_factory):
+    """The direct plane carries the whole download, in ranges the mesh could
+    not have asked for."""
+    (alice, bob), ch_hash = file_channel(peer_factory, "alice", "bob")
+    session_between(alice, bob)
+    # Large enough for the window rule to climb past what the mesh accepts:
+    # it doubles on every second range, so the ceiling only bites late.
+    data = blob(80)
+    manifest = share(alice, ch_hash, "survey.bin", data)
+    file_hash = manifest["hash"].hex()
+
+    mark = len(bob.file_transport.registry.fetch_log)
+    download(bob, ch_hash, file_hash)
+    assert bob.file_mgr.file_bytes(file_hash) == data
+
+    ranges = chunk_fetches(bob.file_transport.registry, bob.identity.hash_hex,
+                           file_hash, since=mark)
+    assert max(count for _holder, _first, count in ranges) > \
+        bob.file_transport.max_request_chunks, \
+        "the direct plane asked for no more than the mesh would have"
+
+
+def test_a_download_that_loses_its_session_finishes_over_the_mesh(peer_factory):
+    """A session is an upgrade, never a replacement: the next range goes over
+    the mesh, from the chunk the direct plane had reached."""
+    (alice, bob), ch_hash = file_channel(peer_factory, "alice", "bob")
+    session_between(alice, bob)
+    data = blob(40)
+    manifest = share(alice, ch_hash, "survey.bin", data)
+    file_hash = manifest["hash"].hex()
+    msg_id = wait_for_file_message(bob, ch_hash, file_hash)
+
+    bob.file_mgr.request_download(ch_hash, msg_id)
+    assert wait_for(
+        lambda: (bob.file_mgr.download_status(file_hash) or {})
+        .get("chunks_held", 0) > 0, timeout=10.0)
+    bob.direct_file_transport.close_session()
+
+    wait_for_state(bob, file_hash, DL_DONE)
+    assert bob.file_mgr.file_bytes(file_hash) == data
+
+
+def test_a_mesh_only_member_pulls_from_the_same_holder(peer_factory):
+    """One holder, two members, one of them with a session: both get the file
+    and neither is asked to do anything for the other."""
+    (alice, bob, carol), ch_hash = file_channel(peer_factory, "alice", "bob",
+                                                "carol")
+    session_between(alice, bob)
+    data = blob(6)
+    manifest = share(alice, ch_hash, "survey.bin", data)
+    file_hash = manifest["hash"].hex()
+
+    download(bob, ch_hash, file_hash)
+    download(carol, ch_hash, file_hash)
+    assert bob.file_mgr.file_bytes(file_hash) == data
+    assert carol.file_mgr.file_bytes(file_hash) == data
+    assert carol.direct_file_transport.can_reach(alice.identity.hash_hex) \
+        is False, "a member with no session read as reachable on the direct plane"

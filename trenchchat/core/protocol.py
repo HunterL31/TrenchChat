@@ -159,12 +159,14 @@ F_FILE_CHUNK_ROOT   = 0x93   # bytes[32]: SHA-256 over the concatenated SHA-256s
 # link pays per request rather than per byte, and prefers the larger chunk.
 FILE_CHUNK_BYTES = 32 * 1024
 
-# Largest file a share may carry. Chosen against the slowest link the project
-# targets, and matched to what node file serving already runs under. Measured
-# there once, end to end: 5h 14m at SF7 with both ends on the radio, arriving
-# byte for byte, a quarter of it spent on requests that died after the bytes had
-# crossed (docs/testenv-scenarios.md, files11).
-MAX_SHARED_FILE_BYTES = 5 * 1024 * 1024
+# Largest file a share may carry. The same number on both paths, because the
+# bytes are pulled and never pushed: a member with a direct session takes a
+# large one in seconds, and a member on the mesh takes it at the mesh's pace or
+# never asks at all. Nobody pays for a file they did not ask for, which is what
+# makes the sender's choice of size not a cost imposed on anyone else. The
+# slow-link measurement still stands for what the mesh costs: 5 MB took 5h 14m
+# at SF7 with both ends on the radio (docs/testenv-scenarios.md, files11).
+MAX_SHARED_FILE_BYTES = 200 * 1024 * 1024
 
 # Matches fileutils.MAX_FILENAME_CHARS: a manifest name is what clean_filename
 # produces, so the two ceilings are the same number.
@@ -525,6 +527,19 @@ def _length_prefixed(*parts: bytes) -> bytes:
     a colliding digest.
     """
     return b"".join(struct.pack(">I", len(p)) + p for p in parts)
+
+
+def chunk_count_for(size: int) -> int:
+    """How many chunks a file of this size is stored and served as."""
+    return (size + FILE_CHUNK_BYTES - 1) // FILE_CHUNK_BYTES
+
+
+def chunk_size_at(size: int, idx: int) -> int:
+    """The length of one chunk of a file, the last one being the short one."""
+    count = chunk_count_for(size)
+    if idx < count - 1:
+        return FILE_CHUNK_BYTES
+    return size - (count - 1) * FILE_CHUNK_BYTES
 
 
 def chunk_hashes(data: bytes) -> list[bytes]:

@@ -94,11 +94,11 @@ MAX_INBOUND_FILE_LINKS = MAX_INBOUND_LINKS
 # over loopback a 2 MB file asks eight times in well under one. The shared
 # 8-per-second ceiling refused that mid-download, and a refusal is silence, so
 # it cost the asker a whole stall sweep. This plane sets its own above what a
-# download can cost: the largest file allowed is 160 chunks, which the window
-# rule covers in 18 ranges. What bounds the work is the concurrent-serve cap
+# download can cost: the largest file allowed is 6400 chunks, which the window
+# rule covers in 408 ranges. What bounds the work is the concurrent-serve cap
 # and the response ceiling; this only bounds a peer that is not waiting for
 # answers at all.
-FILE_SERVE_RATE_LIMIT = 64
+FILE_SERVE_RATE_LIMIT = 512
 # Airtime is shared: two downloads out at once, and the third requester is
 # told nothing and comes back later. The slot is held per link rather than
 # per request, because a download issues one request at a time: the next
@@ -131,11 +131,14 @@ def _is_index(value) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value >= 0
 
 
-def parse_file_request(data) -> tuple[str, int, int, bool] | None:
+def parse_file_request(data, max_chunks: int = FILE_REQUEST_MAX_CHUNKS
+                       ) -> tuple[str, int, int, bool] | None:
     """An inbound request as (file_hash_hex, first, count, want_list).
 
     None for anything that is not exactly the shape this plane speaks. The
     sender is a peer, so every field is bounded here rather than downstream.
+    max_chunks is the asking side's ceiling on this path, which is the one
+    thing the two planes do not share.
     """
     if not isinstance(data, dict):
         return None
@@ -153,7 +156,7 @@ def parse_file_request(data) -> tuple[str, int, int, bool] | None:
         return None
     if first > MAX_CHUNK_INDEX:
         return None
-    if count < 1 or count > FILE_REQUEST_MAX_CHUNKS:
+    if count < 1 or count > max_chunks:
         return None
     return file_hash_hex, first, count, False
 
@@ -171,6 +174,11 @@ class FileTransportBase(LinkClientBase):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self._serve_cb = None
+
+    @property
+    def max_request_chunks(self) -> int:
+        """How many chunks one request on this path may ask for."""
+        return FILE_REQUEST_MAX_CHUNKS
 
     def set_result_callback(self, cb) -> None:
         """cb(fetch_id, ok, payload: bytes | None, reason)"""
@@ -264,7 +272,7 @@ class FileTransportBase(LinkClientBase):
             return None
         if not _is_index(first) or first > MAX_CHUNK_INDEX \
                 or not _is_index(count) or count < 1 \
-                or count > FILE_REQUEST_MAX_CHUNKS:
+                or count > self.max_request_chunks:
             RNS.log(f"TrenchChat [files]: refusing to fetch chunks "
                     f"{first}+{count} of {file_hash_hex[:12]}…",
                     RNS.LOG_WARNING)
