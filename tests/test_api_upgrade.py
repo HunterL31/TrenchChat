@@ -228,3 +228,30 @@ class TestPathChangedEvent:
         assert event["type"] == "path_changed"
         assert event["path"] == PATH_RETICULUM
         assert event["since"] > 0
+
+
+@needs_backend
+class TestTheDirectConnectionsSwitch:
+    """The client gate, which is a user saying nobody may hold their address."""
+
+    def test_turning_it_off_reaches_the_manager(self, client, backend):
+        backend.upgrade_mgr.set_enabled.return_value = False
+
+        res = client.post("/upgrade/enabled", headers=AUTH,
+                          json={"enabled": False})
+
+        assert res.status_code == 200
+        assert res.json() == {"ok": True, "enabled": False}
+        backend.upgrade_mgr.set_enabled.assert_called_once_with(False)
+
+    def test_the_switch_and_the_port_can_be_read_back(self, client, backend):
+        backend.config.upgrade_enabled = True
+        backend.config.upgrade_listen_port = 42424
+
+        body = client.get("/upgrade/enabled", headers=AUTH).json()
+
+        assert body == {"enabled": True, "listen_port": 42424}
+
+    def test_it_needs_the_token_like_everything_else(self, client):
+        assert client.post("/upgrade/enabled",
+                           json={"enabled": False}).status_code == 401

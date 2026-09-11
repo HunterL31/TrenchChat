@@ -58,7 +58,11 @@ class IPNode:
         self.inbox: list = []
         self.paths: list = []
         self.appeared: list = []
+        self.observed: list = []
         transport.set_inbound_callback(self.inbox.append)
+        transport.set_observed_callback(
+            lambda peer_hex, host, port: self.observed.append(
+                (peer_hex, host, port)))
         transport.set_peer_event_callbacks(
             peer_appeared=lambda peer_hex, _iface: self.appeared.append(peer_hex),
             path_changed=lambda peer_hex, path: self.paths.append((peer_hex, path)),
@@ -405,6 +409,24 @@ class TestSession:
         assert (alice.hash_hex, PATH_DIRECT) in bob.paths
         assert bob.hash_hex in alice.appeared
         assert alice.hash_hex in bob.appeared
+
+    def test_the_accepting_side_says_where_the_caller_arrived_from(self, ip_node):
+        """The one thing a node behind a NAT cannot work out for itself.
+
+        Nothing inside its own network can see its translated address, and
+        asking a service for it would be a center. The peer that answered saw
+        it, and says so in the hello that authenticates the session.
+        """
+        alice, bob = ip_node("alice"), ip_node("bob")
+        assert alice.open_to(bob)
+
+        assert wait_for(lambda: alice.observed, msg="the observed address")
+        peer_hex, host, port = alice.observed[0]
+        assert peer_hex == bob.hash_hex
+        assert host == "127.0.0.1"
+        assert 1 <= port <= 65535
+        assert bob.observed == [], \
+            "the calling side reported an address it could not have seen"
 
     def test_a_session_going_down_puts_the_peer_back_on_the_mesh(self, ip_node):
         alice, bob = ip_node("alice"), ip_node("bob")

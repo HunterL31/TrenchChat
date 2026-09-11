@@ -219,6 +219,10 @@ class SettingsUpdateRequest(BaseModel):
     propagation_storage_limit_mb: int | None = None
 
 
+class UpgradeEnabledRequest(BaseModel):
+    enabled: bool
+
+
 class SetUiThemeRequest(BaseModel):
     theme: dict
 
@@ -1671,6 +1675,30 @@ def create_app(backend: Backend, *, token: str | None = None,
             })
         return {"sessions": sessions,
                 "last_failure": backend.upgrade_mgr.failures()}
+
+    @app.get("/upgrade/enabled")
+    def get_upgrade_enabled():
+        """Whether this node holds direct sessions at all, and where it listens.
+
+        Its own endpoint rather than a field on the sessions listing or on
+        /settings: both of those are somebody else's shape, and a client
+        polling a diagnostics panel should not have to read a listing to find
+        out whether the switch is on.
+        """
+        return {"enabled": backend.config.upgrade_enabled,
+                "listen_port": backend.config.upgrade_listen_port}
+
+    @app.post("/upgrade/enabled")
+    def set_upgrade_enabled(req: UpgradeEnabledRequest):
+        """The "Direct connections" switch: the client gate over the whole path.
+
+        Off means this node offers nobody a session, answers nobody's offer,
+        and closes the ones it holds, so nobody is left holding an address it
+        no longer wants them to have.
+        """
+        enabled = actions.set_direct_connections(backend.upgrade_mgr,
+                                                 req.enabled)
+        return {"ok": True, "enabled": enabled}
 
     @app.post("/upgrade/try/{peer_hash}")
     def upgrade_try(peer_hash: str):

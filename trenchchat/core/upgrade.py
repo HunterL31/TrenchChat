@@ -180,6 +180,7 @@ class UpgradeManager:
             router.add_delivery_callback(self._on_message)
         if transport is not None:
             transport.set_probe_responder(self._answer_probe)
+            transport.set_observed_callback(self._note_observed)
 
     # --- the gate ---
 
@@ -187,6 +188,24 @@ class UpgradeManager:
     def enabled(self) -> bool:
         """Whether this node holds direct sessions at all."""
         return bool(self._config.upgrade_enabled) and self._transport is not None
+
+    def set_enabled(self, enabled: bool) -> bool:
+        """Turn this node's direct sessions on or off. Returns the new state.
+
+        The client gate: off means no offer leaves and no offer is answered,
+        and every session this node already holds is closed, because a switch
+        that left them up would be a switch about nothing.
+        """
+        self._config.upgrade_enabled = bool(enabled)
+        if not enabled and self._transport is not None:
+            for entry in self._transport.sessions():
+                peer_hex = entry.get("peer") or ""
+                if peer_hex:
+                    self._transport.close_session(
+                        peer_hex, "direct connections turned off")
+        RNS.log(f"TrenchChat [upgrade]: direct sessions are now "
+                f"{'on' if enabled else 'off'}", RNS.LOG_NOTICE)
+        return self.enabled
 
     def is_eligible(self, peer_hex: str) -> bool:
         """Whether a peer is one this node may hold a session with."""
@@ -591,6 +610,19 @@ class UpgradeManager:
         seen = self._storage.get_upgrade_address(peer_hex, ADDRESS_PEER)
         if seen is not None:
             fields[F_UPGRADE_OBSERVED] = [seen[0], seen[1]]
+
+    def _note_observed(self, peer_hex: str, host: str, port: int) -> None:
+        """Record where a peer's session saw this node arrive from.
+
+        The accepting side of every session says so in its hello, so one member
+        this node can already reach teaches it its own translated address, and
+        that address is then a candidate to offer anybody else. Nothing about
+        it is trusted: it is a place to aim a probe, and a session still
+        authenticates from nothing.
+        """
+        self._storage.record_upgrade_address(peer_hex, ADDRESS_SELF, host, port)
+        RNS.log(f"TrenchChat [upgrade]: {peer_hex[:12]}… saw this node at "
+                f"{host}:{port}", RNS.LOG_DEBUG)
 
     def _remember_self_address(self, peer_hex: str, fields: dict) -> None:
         """Record where a peer says it saw this node, as a candidate for later."""

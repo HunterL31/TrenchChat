@@ -658,6 +658,17 @@ def read_settings(config) -> dict:
     }
 
 
+def set_direct_connections(upgrade_mgr, enabled: bool) -> bool:
+    """Turn direct sessions on or off, and say what they now are.
+
+    The client gate over core/upgrade.is_eligible: a user who wants nobody
+    holding their address turns it off here, and nothing is offered, answered
+    or held from then on. It sits with the rest of the direct path's own
+    surface rather than in read_settings, which is the propagation node's.
+    """
+    return upgrade_mgr.set_enabled(enabled)
+
+
 def apply_settings(config, router, updates: dict) -> None:
     """
     Apply a partial settings update, same order as the Settings dialog's

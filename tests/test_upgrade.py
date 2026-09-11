@@ -625,6 +625,31 @@ class TestObservedAddresses:
             larger.hash_hex, {F_UPGRADE_OBSERVED: ["nowhere", 33445]})
         assert smaller.peer.storage.get_upgrade_addresses("self") == []
 
+    def test_what_a_session_taught_us_is_offered_as_a_candidate(self,
+                                                                upgrade_pair):
+        """A pair that came up once leaves the dialer an address to offer.
+
+        A node behind a NAT has no other way to learn its translated address:
+        nothing inside its own network can see it, and asking a service for it
+        would be a center. Both the probe exchange and the session's hello say
+        so, and what either learns is a candidate for the next attempt.
+        """
+        smaller, larger = _smaller_first(upgrade_pair)
+        smaller.manager.on_peer_appeared(larger.hash_hex)
+        assert wait_for(lambda: smaller.has_session_with(larger), timeout=30.0,
+                        msg="the session")
+
+        assert wait_for(
+            lambda: smaller.peer.storage.get_upgrade_addresses("self"),
+            timeout=10.0, msg="the address the far side saw")
+        learned = smaller.peer.storage.get_upgrade_addresses("self")
+        host, port = learned[0]
+        assert candidates.is_reachable_address(host)
+        assert 1 <= port <= 65535
+        offered = candidates.gather(45678, observed=learned)
+        assert (host, port, UPGRADE_KIND_OBSERVED) in offered, \
+            "an observed address never reached the candidate list"
+
 
 class TestEligibilitySweep:
     """The once-a-second re-check, which is what a kick reaches."""
@@ -722,3 +747,41 @@ class TestPunchFromOneSideOnly:
         finally:
             knows.close()
             unknown.close()
+
+
+class TestTheClientGate:
+    """The switch a user turns off, and what it is a switch about."""
+
+    def test_turning_it_off_closes_the_sessions_this_node_holds(self,
+                                                               upgrade_pair):
+        smaller, larger = _smaller_first(upgrade_pair)
+        smaller.manager.on_peer_appeared(larger.hash_hex)
+        assert wait_for(lambda: smaller.has_session_with(larger), timeout=30.0,
+                        msg="the session")
+
+        assert smaller.manager.set_enabled(False) is False
+
+        assert wait_for(lambda: not smaller.has_session_with(larger),
+                        timeout=10.0, msg="the session to close")
+        assert smaller.manager.consider(larger.hash_hex) == REASON_DISABLED
+
+    def test_an_offer_arriving_while_it_is_off_is_ignored(self, upgrade_pair):
+        smaller, larger = _smaller_first(upgrade_pair)
+        larger.manager.set_enabled(False)
+
+        smaller.manager.on_peer_appeared(larger.hash_hex)
+
+        assert not wait_for(lambda: smaller.has_session_with(larger),
+                            timeout=8.0), \
+            "a node with direct connections off answered an offer"
+        assert larger.peer.config.upgrade_enabled is False
+
+    def test_turning_it_back_on_lets_a_session_come_up(self, upgrade_pair):
+        smaller, larger = _smaller_first(upgrade_pair)
+        smaller.manager.set_enabled(False)
+        assert smaller.manager.set_enabled(True) is True
+
+        smaller.manager.on_peer_appeared(larger.hash_hex)
+
+        assert wait_for(lambda: smaller.has_session_with(larger), timeout=30.0,
+                        msg="the session after the switch came back")

@@ -621,6 +621,15 @@ class Peer:
         return {e["identity_hash"]: e["link_state"]
                 for e in self.voice_roster(channel_hash)}
 
+    def voice_paths(self, channel_hash: str) -> dict[str, str]:
+        """{identity_hash: path} for a channel's voice roster.
+
+        Which plane each pair's frames take, as this node knows it: never
+        anything about pairs this node is not half of.
+        """
+        return {e["identity_hash"]: e.get("path")
+                for e in self.voice_roster(channel_hash)}
+
     # --- nomad page browsing ---
 
     def nomad_nodes(self) -> list[dict]:
@@ -689,6 +698,14 @@ class Peer:
     def upgrade_failure(self, peer_hash: str) -> dict | None:
         """The last reason this node has no session with a peer, if there is one."""
         return self.upgrade_sessions()["last_failure"].get(peer_hash)
+
+    def direct_connections(self) -> dict:
+        """Whether this tester holds direct sessions, and where it listens."""
+        return self._get("/upgrade/enabled")
+
+    def set_direct_connections(self, enabled: bool) -> bool:
+        """Turn this tester's direct sessions on or off: the client gate."""
+        return self._post("/upgrade/enabled", {"enabled": enabled})["enabled"]
 
     def upgrade_try(self, peer_hash: str) -> dict:
         """Ask for a direct session with one peer now."""
