@@ -103,11 +103,15 @@ class Peer:
     hands it out through its own /config.
     """
 
-    def __init__(self, tag: str, api_port: int, token: str = ""):
+    def __init__(self, tag: str, api_port: int, token: str = "",
+                 host: str = "127.0.0.1"):
+        """*host* is where this tester's API is, which is the loopback for
+        everything the runner starts and a namespace address under
+        nat_harness.sh."""
         self.tag = tag
         self.api_port = api_port
         self.token = token
-        self._base = f"http://127.0.0.1:{api_port}"
+        self._base = f"http://{host}:{api_port}"
         self._client = httpx.Client(timeout=_TIMEOUT, headers=_auth_headers(token))
         self._hash: str | None = None
 
@@ -670,6 +674,35 @@ class Peer:
         for node in self.network_map()["nodes"]:
             if node.get("identity_hex") == identity_hash:
                 return node
+        return None
+
+    # --- direct sessions ---
+
+    def upgrade_sessions(self) -> dict:
+        """This node's own direct sessions, and why each pair without one has none."""
+        return self._get("/upgrade/sessions")
+
+    def direct_peers(self) -> set[str]:
+        """Every peer this node currently holds a direct session with."""
+        return {entry["peer"] for entry in self.upgrade_sessions()["sessions"]}
+
+    def upgrade_failure(self, peer_hash: str) -> dict | None:
+        """The last reason this node has no session with a peer, if there is one."""
+        return self.upgrade_sessions()["last_failure"].get(peer_hash)
+
+    def upgrade_try(self, peer_hash: str) -> dict:
+        """Ask for a direct session with one peer now."""
+        return self._post(f"/upgrade/try/{peer_hash}")
+
+    def upgrade_close(self, peer_hash: str) -> dict:
+        """Drop the direct session with one peer, as only a harness can."""
+        return self._post(f"/upgrade/close/{peer_hash}")
+
+    def member_path(self, channel_hash: str, peer_hash: str) -> str | None:
+        """The path this node reaches one member over, as the roster shows it."""
+        for row in self.members(channel_hash):
+            if row["identity_hash"] == peer_hash:
+                return row.get("path")
         return None
 
     # --- link control ---

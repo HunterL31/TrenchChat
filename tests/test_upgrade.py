@@ -8,6 +8,7 @@ about what is refused on the way in; the last drives the whole flow between
 two peers on loopback, with real probes and a real session at the end.
 """
 
+import sys
 import threading
 import time
 
@@ -525,15 +526,41 @@ class TestBackoff:
         peer_hex = larger.hash_hex
 
         waits = []
+        now = time.time()
         for _ in range(20):
-            manager._record_failure(peer_hex, REASON_PUNCH_FAILED)
+            manager._record_failure(peer_hex, REASON_PUNCH_FAILED, now=now)
             entry = manager.failures()[peer_hex]
             waits.append(round(entry["next_attempt"] - entry["at"]))
+            now = entry["next_attempt"] + 1
         assert waits[0] == BACKOFF_START_SECS
         assert waits[1] == BACKOFF_START_SECS * 2
         assert waits[2] == BACKOFF_START_SECS * 4
         assert waits[-1] == BACKOFF_MAX_SECS
         assert max(waits) == BACKOFF_MAX_SECS
+
+    def test_the_same_reason_inside_the_wait_does_not_push_it_out(self,
+                                                                  upgrade_pair):
+        smaller, larger = _smaller_first(upgrade_pair)
+        manager = smaller.manager
+        peer_hex = larger.hash_hex
+        now = time.time()
+
+        manager._record_failure(peer_hex, REASON_PUNCH_FAILED, now=now)
+        first = manager.failures()[peer_hex]["next_attempt"]
+        for _ in range(5):
+            manager._record_failure(peer_hex, REASON_PUNCH_FAILED, now=now + 1)
+        assert manager.failures()[peer_hex]["next_attempt"] == first
+
+    def test_a_peer_refused_as_ineligible_is_re_checked_on_the_next_sighting(
+            self, upgrade_pair):
+        smaller, larger = _smaller_first(upgrade_pair)
+        manager = smaller.manager
+        peer_hex = larger.hash_hex
+
+        manager._record_failure(peer_hex, REASON_INELIGIBLE)
+        assert manager.failures()[peer_hex]["next_attempt"] > time.time()
+        assert manager.consider(peer_hex) is None
+        assert manager.failures() == {}
 
     def test_a_failure_names_when_the_next_attempt_is(self, upgrade_pair):
         smaller, larger = _smaller_first(upgrade_pair)
@@ -628,3 +655,70 @@ class TestEligibilitySweep:
             smaller.manager.tick()
             time.sleep(0.2)
         assert smaller.has_session_with(larger)
+
+
+class TestNoAddressToName:
+    """A node that can name no address of its own says nothing rather than
+    offering a peer an empty list to refuse."""
+
+    def test_an_offer_is_not_sent_without_a_candidate(self, upgrade_pair,
+                                                      monkeypatch):
+        smaller, larger = _smaller_first(upgrade_pair)
+        monkeypatch.setattr(candidates, "local_addresses", lambda: [])
+
+        smaller.manager.on_peer_appeared(larger.hash_hex)
+        assert wait_for(
+            lambda: smaller.manager.failures().get(larger.hash_hex, {})
+            .get("reason") == REASON_PUNCH_FAILED,
+            msg="the attempt to end for want of an address")
+        assert not larger.has_session_with(smaller)
+
+
+class TestInterfaceEnumeration:
+    """The addresses a route probe cannot find, on the platform that will say."""
+
+    def test_an_interface_address_is_found_without_a_route_towards_it(self):
+        if sys.platform.startswith("linux"):
+            found = candidates._interface_addresses()
+            assert found, "no interface answered the address ioctl"
+            assert "127.0.0.1" in found, "loopback was not enumerated"
+        else:
+            assert candidates._interface_addresses() == []
+
+    def test_what_it_finds_still_goes_through_the_reachability_filter(self):
+        assert "127.0.0.1" not in candidates.local_addresses()
+
+
+class TestPunchFromOneSideOnly:
+    """The case the namespace harness found: only one side can name the other.
+
+    A peer behind a NAT has an address its own candidate list cannot carry, so
+    the side that can be reached first has to probe back at wherever the probe
+    came from. Modelled here by giving one side no candidate at all.
+    """
+
+    def test_a_probe_teaches_the_receiver_where_to_probe_back(self):
+        nonce = b"\x39" * UPGRADE_NONCE_BYTES
+        knows = punch.bind_socket("127.0.0.1", 0)
+        unknown = punch.bind_socket("127.0.0.1", 0)
+        try:
+            results = {}
+
+            def _run(name, sock, targets):
+                results[name] = punch.punch(sock, targets, nonce, seconds=4.0)
+
+            threads = [
+                threading.Thread(target=_run,
+                                 args=("knows", knows, [unknown.getsockname()])),
+                threading.Thread(target=_run, args=("blind", unknown, [])),
+            ]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=10.0)
+
+            assert results["knows"].remote == unknown.getsockname()
+            assert results["blind"].remote == knows.getsockname()
+        finally:
+            knows.close()
+            unknown.close()

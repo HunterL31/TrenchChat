@@ -210,11 +210,19 @@ class UpgradeManager:
         with self._lock:
             if peer_hex in self._attempts:
                 return REASON_BACKOFF
-            if now < self._next_attempt_at.get(peer_hex, 0.0):
-                return REASON_BACKOFF
+            waiting = now < self._next_attempt_at.get(peer_hex, 0.0)
+            was_ineligible = (self._failures.get(peer_hex, {}).get("reason")
+                              == REASON_INELIGIBLE)
             first_seen = self._first_seen.get(peer_hex)
+        # A peer refused as ineligible is re-checked on every sighting rather
+        # than waiting out a backoff: the answer changes the moment an admin
+        # admits them, and the check is two reads of a table already in memory.
+        if waiting and not was_ineligible:
+            return REASON_BACKOFF
         if not self.is_eligible(peer_hex):
             return REASON_INELIGIBLE
+        if was_ineligible:
+            self._clear_failure(peer_hex)
         if self._self_hex > peer_hex:
             # The larger hash waits, so two peers do not both offer; the wait
             # ends anyway, so a peer that never offers is still upgraded.
@@ -325,9 +333,15 @@ class UpgradeManager:
                               offered=True)
         if attempt is None:
             return
+        own = self._own_candidates(attempt)
+        if not own:
+            RNS.log(f"TrenchChat [upgrade]: not offering {peer_hex[:12]}… a "
+                    f"session: this node has no address to name", RNS.LOG_DEBUG)
+            self._finish(attempt, REASON_PUNCH_FAILED)
+            return
         fields = {
             F_MSG_TYPE: MT_UPGRADE_OFFER,
-            F_UPGRADE_CANDIDATES: self._own_candidates(attempt),
+            F_UPGRADE_CANDIDATES: own,
             F_UPGRADE_NONCE: attempt.nonce,
             F_UPGRADE_CERT: self._transport.certificate_der,
             F_UPGRADE_PUNCH_AT: attempt.punch_at,
@@ -376,7 +390,14 @@ class UpgradeManager:
         if self._transport.can_reach(peer_hex):
             return
         with self._lock:
-            if peer_hex in self._attempts:
+            mine = self._attempts.get(peer_hex)
+        if mine is not None:
+            # Both sides offered at once, which the tie-break makes rare rather
+            # than impossible. The smaller hash's offer wins, so the two never
+            # sit waiting for answers neither will send.
+            if peer_hex < self._self_hex and mine.offered and not mine.answered:
+                self._finish(mine, None)
+            else:
                 RNS.log(f"TrenchChat [upgrade]: ignoring an offer from "
                         f"{peer_hex[:12]}…: one is already in flight",
                         RNS.LOG_DEBUG)
@@ -419,9 +440,15 @@ class UpgradeManager:
         attempt.peer_candidates = peer_candidates
         attempt.peer_cert = peer_cert
         attempt.punch_at = punch_at
+        own = self._own_candidates(attempt)
+        if not own:
+            RNS.log(f"TrenchChat [upgrade]: not answering {peer_hex[:12]}…: "
+                    f"this node has no address to name", RNS.LOG_DEBUG)
+            self._finish(attempt, REASON_PUNCH_FAILED)
+            return
         fields = {
             F_MSG_TYPE: MT_UPGRADE_ANSWER,
-            F_UPGRADE_CANDIDATES: self._own_candidates(attempt),
+            F_UPGRADE_CANDIDATES: own,
             F_UPGRADE_NONCE: nonce,
             F_UPGRADE_CERT: self._transport.certificate_der,
             F_UPGRADE_PUNCH_AT: time.time(),
@@ -602,9 +629,21 @@ class UpgradeManager:
 
     # --- failures ---
 
-    def _record_failure(self, peer_hex: str, reason: str) -> None:
-        now = time.time()
+    def _record_failure(self, peer_hex: str, reason: str,
+                        now: float | None = None) -> None:
+        """Record why a pair has no session, and when to try again.
+
+        The wait doubles per attempt, not per ask: the same reason recorded
+        again while the pair is still waiting it out changes nothing, so a peer
+        that announces every ten seconds cannot push its own next attempt into
+        next week.
+        """
+        now = time.time() if now is None else now
         with self._lock:
+            standing = self._failures.get(peer_hex)
+            if (standing is not None and standing["reason"] == reason
+                    and now < standing["next_attempt"]):
+                return
             previous = self._backoff.get(peer_hex, 0.0)
             wait = min(previous * 2 if previous else BACKOFF_START_SECS,
                        BACKOFF_MAX_SECS)

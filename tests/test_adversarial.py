@@ -4728,6 +4728,23 @@ def _upgrade_manager_for(peer):
     return manager
 
 
+def _drop_direct_sessions(*peers) -> None:
+    """Take away any session the --direct fixture opened between these peers.
+
+    An offer is never answered to a peer this node already has a session with,
+    so a test about what an offer does has to start without one in either mode.
+    """
+    live = [peer for peer in peers if peer.ip_transport is not None]
+    for peer in live:
+        for other in live:
+            if other is not peer:
+                peer.ip_transport.close_session(other.identity.hash_hex)
+    assert wait_for(
+        lambda: not any(peer.ip_transport.can_reach(other.identity.hash_hex)
+                        for peer in live for other in live if other is not peer),
+        msg="the fixture's sessions to go")
+
+
 def _offer(*, nonce=None, candidates=None, punch_at=None,
            msg_type=MT_UPGRADE_OFFER) -> dict:
     """One well-formed offer, with whatever a test wants wrong about it."""
@@ -4815,6 +4832,7 @@ class TestUpgradeOfferGate:
 
     def test_an_offer_reusing_a_nonce_is_dropped(self, peer_factory):
         alice, bob, _ch_hash = _setup_channel_with_member(peer_factory)
+        _drop_direct_sessions(alice, bob)
         manager = _upgrade_manager_for(alice)
         nonce = os.urandom(16)
 

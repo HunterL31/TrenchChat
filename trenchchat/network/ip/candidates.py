@@ -19,6 +19,8 @@ public address, it learned from a peer that already had a reason to talk to it.
 
 import ipaddress
 import socket
+import struct
+import sys
 
 from trenchchat.core.protocol import (
     MAX_UPGRADE_CANDIDATES, UPGRADE_KIND_LAN, UPGRADE_KIND_MAPPED,
@@ -77,22 +79,59 @@ def _hostname_addresses() -> list[str]:
     return [info[4][0] for info in infos]
 
 
+# Linux's ioctl for "the IPv4 address of this interface", and the buffer it
+# writes back into. Nothing else answers this from the standard library.
+_SIOCGIFADDR = 0x8915
+_IFNAME_BYTES = 16
+_IFREQ_BYTES = 256
+
+
+def _interface_addresses() -> list[str]:
+    """Every interface's IPv4 address, where the platform will say.
+
+    The route probes miss an interface with no route towards any of them, and a
+    node on a segment like that has an address peers can reach and no way for a
+    connect() to point at it. Linux answers this through an ioctl; every other
+    platform gets the probes alone, which is what they had.
+    """
+    if not sys.platform.startswith("linux"):
+        return []
+    try:
+        import fcntl
+    except ImportError:
+        return []
+    found: list[str] = []
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        for _index, name in socket.if_nameindex():
+            request = struct.pack(f"{_IFREQ_BYTES}s",
+                                  name[:_IFNAME_BYTES - 1].encode())
+            try:
+                answer = fcntl.ioctl(sock.fileno(), _SIOCGIFADDR, request)
+            except OSError:
+                continue
+            found.append(socket.inet_ntoa(answer[20:24]))
+    return found
+
+
 def local_addresses() -> list[str]:
     """Every local interface address a peer could reach this node at.
 
-    Discovered by asking the routing table rather than by enumerating
-    interfaces, which the standard library cannot do portably. An address with
-    no route towards any probe and no entry under this machine's own name is
-    not gathered, and a peer can still learn it as an observed address.
+    Three sources, because no one of them is enough: the routing table answers
+    for every interface a probe target routes through, the interface list
+    answers for the rest where the platform allows it, and this machine's own
+    name answers for whatever a resolver knows. An address none of the three
+    finds is not gathered, and a peer can still learn it as an observed
+    address.
     """
     found: list[str] = []
     for family, target in ROUTE_PROBES:
         address = _route_address(family, target)
         if address is not None and address not in found:
             found.append(address)
-    for address in _hostname_addresses():
-        if address not in found:
-            found.append(address)
+    for source in (_interface_addresses(), _hostname_addresses()):
+        for address in source:
+            if address not in found:
+                found.append(address)
     return [address for address in found if is_reachable_address(address)]
 
 

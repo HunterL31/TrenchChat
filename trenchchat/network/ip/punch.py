@@ -114,10 +114,12 @@ def punch(sock: socket.socket, peer_candidates, nonce: bytes, *,
     """Probe every candidate until one answers both ways or the time is up.
 
     *peer_candidates* are (host, port) pairs, whatever kind they were offered
-    as. *start_at* holds the first probe until the time the peer was told, so
-    the side that answered has already opened its own mapping. *on_probe* is
-    called with each address a probe arrived from, which is what a peer is
-    later told about itself.
+    as, and an address a probe arrives from joins them: a NAT names an address
+    the node behind it cannot know, so the pair that works is often one neither
+    side could name. *start_at* holds the first probe until the time the peer
+    was told, so the side that answered has already opened its own mapping.
+    *on_probe* is called with each address a probe arrived from, which is what
+    a peer is later told about itself.
     """
     started = time.monotonic()
     if start_at is not None:
@@ -154,6 +156,12 @@ def punch(sock: socket.socket, peer_candidates, nonce: bytes, *,
                 if kind == KIND_PROBE:
                     if source not in probes_from:
                         probes_from.add(source)
+                        # Where the peer actually is, which its own candidate
+                        # list could not say: a NAT names the address, not the
+                        # node behind it. Probing back is what makes a pair
+                        # work when only one side could be reached first.
+                        if source not in targets:
+                            targets.append(source)
                         if on_probe is not None:
                             on_probe(source)
                     try:

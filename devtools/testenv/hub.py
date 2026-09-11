@@ -34,30 +34,40 @@ loglevel = 3
   [[Hub]]
     type = TCPServerInterface
     interface_enabled = true
-    listen_ip = 127.0.0.1
+    listen_ip = {listen_ip}
     listen_port = {listen_port}
 """
 
 
-def _write_hub_config(rns_dir: Path, listen_port: int, instance_name: str) -> None:
-    """Write a minimal transport-only Reticulum config for the hub."""
+def _write_hub_config(rns_dir: Path, listen_port: int, instance_name: str,
+                      listen_ip: str = "127.0.0.1") -> None:
+    """Write a minimal transport-only Reticulum config for the hub.
+
+    listen_ip is the loopback for everything the orchestrator runs, and the
+    namespace-facing address under nat_harness.sh, where the two testers reach
+    the hub through their own NATs rather than over the loopback.
+    """
     rns_dir.mkdir(parents=True, exist_ok=True)
     config_text = _HUB_CONFIG_TEMPLATE.format(
         instance_name=instance_name, listen_port=listen_port,
+        listen_ip=listen_ip,
     )
     (rns_dir / "config").write_text(config_text)
 
 
-def run(data_dir: Path, listen_port: int, instance_name: str) -> None:
+def run(data_dir: Path, listen_port: int, instance_name: str,
+        listen_ip: str = "127.0.0.1") -> None:
     """Start the hub's Reticulum instance and block forever."""
     rns_dir = data_dir / "reticulum"
-    _write_hub_config(rns_dir, listen_port, instance_name)
+    _write_hub_config(rns_dir, listen_port, instance_name, listen_ip)
     RNS.Reticulum(configdir=str(rns_dir), loglevel=RNS.LOG_NOTICE)
-    RNS.log(f"TrenchChat [hub]: listening on 127.0.0.1:{listen_port}", RNS.LOG_NOTICE)
+    RNS.log(f"TrenchChat [hub]: listening on {listen_ip}:{listen_port}",
+            RNS.LOG_NOTICE)
     while True:
         time.sleep(3600)
 
 
 if __name__ == "__main__":
-    _, data_dir, listen_port, instance_name = sys.argv
-    run(Path(data_dir), int(listen_port), instance_name)
+    _, data_dir, listen_port, instance_name, *rest = sys.argv
+    run(Path(data_dir), int(listen_port), instance_name,
+        rest[0] if rest else "127.0.0.1")
