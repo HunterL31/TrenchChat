@@ -1187,6 +1187,67 @@ should size a device against. The 82 MB the holder gained while serving about
 7 MB of ranges is one sample with debug logging on, and it is
 [recorded as open](#open) rather than chased here.
 
+### `upgrade`: direct IP sessions between members
+
+Two members of an invite-only channel that can also reach each other over IP
+trade one offer and one answer over Reticulum, punch a UDP path between the
+candidates they name, and open a QUIC session over it. None of that is
+reachable from pytest: the offer and the answer travel over real LXMF, the
+probes are real datagrams aimed at real addresses, and the session that comes
+up authenticates against the same identity keys the member list holds.
+
+The gate is what the family is really about. A session hands the peer this
+node's addresses, so upgrade2 is the row that matters most: a peer who shares
+only a public channel is never offered one, however long it waits.
+
+| ID | Peers | Actions | Expected result |
+|---|---|---|---|
+| upgrade1 | A,B | Invite B to a private channel and wait for a direct session | ✅ **5/5, 8-14s.** The session is up **3.0-8.1s** after the invite lands, both rosters show `direct`, and a message crosses it. Round trip 3.0-5.4 ms, measured from acknowledgements |
+| upgrade2 | A,B,C | A and B private, C on a public channel with both | ✅ **5/5, 34-36s.** C holds no session with anybody across a 15s hold, is never offered one, and still receives every public message. A records C as `ineligible` on all five runs, so the refusal is a decision rather than a silence |
+| upgrade3 | A,B | Drop the session mid-conversation through `POST /upgrade/close/{peer}` | ✅ **5/5, 17-19s.** The path flips back to `reticulum` on all five, the message sent while it is down arrives anyway, and the pair is direct again in **3.0-6.5s** without anyone asking. No message is lost across the drop |
+| upgrade4 | A,B | Kick B while the session is up | ✅ **5/5, 26-30s.** The session is gone **0.50-1.01s** after the kick, which is the sweep's own cadence, B is off A's roster, B loses its side too, and it stays closed across a 15s hold. A records `ineligible` |
+
+**All four passing 5/5**, measured on one host where every candidate is a
+local address. What the family cannot show is address translation, which is
+what the NAT harness below is for.
+
+Two measurements worth keeping. The upgrade costs **one offer and one answer**,
+and the session is up in single-digit seconds because the punch itself is under
+a second here: nearly all of upgrade1's time is waiting to be noticed, since an
+offer follows a sighting and a sighting follows the ten-second announce
+heartbeat. And the teardown in upgrade4 lands between 0.50 and 1.01 seconds,
+which is exactly the once-a-second sweep doing it rather than the peer
+noticing: membership is what the session is held on, so losing it closes the
+session whether or not the far end agrees yet.
+
+### The NAT harness
+
+`devtools/testenv/nat_harness.sh` runs two real backends in Linux network
+namespaces behind their own masquerading NATs, with the hub in the root
+namespace where both can reach it outbound and neither can be reached at. It
+is the only place the punch faces real address translation; the scenario
+family above runs every tester on one host, where a candidate is a local
+address and the punch barely punches.
+
+| Variant | Topology | Result |
+|---|---|---|
+| `one_nat` | A behind a NAT, B on the hub's segment | ✅ The session comes up **4.5s** after the invite lands, across real masquerading, and the message crosses it. The pair that punches is the one neither candidate list named: A's translated address, which B learned from the probe that arrived |
+| `cone` | Both behind port-restricted NATs | ⚠ **Recorded.** No session in **540s**, and the conversation carries on over Reticulum throughout. Neither side can name the other: every probe goes to an unroutable lan candidate, so no probe arrives and no observation can start. See the finding below |
+| `symmetric` | Both behind `fully-random` NATs | ✅ No session in **180s**, recorded as `punch_failed` with a next attempt to show for it, and the conversation carries on over Reticulum. The case the plan calls a deliberate non-fix, failing cleanly rather than hanging |
+
+**The finding.** A node knows its own addresses and nothing about the address
+translation in front of them, so two peers both behind a NAT with no router
+mapping have nothing to aim at. Phase 0's spike punched this case because the
+harness told each side the other's public address; nothing tells a real node
+that, and asking a service for it would be a center. What the harness did
+change is the other direction: a probe carries the sender's translated address
+with it, so the side that can be reached now probes back at wherever the probe
+came from, which is what makes `one_nat` complete in both directions. The
+design's answers for the two-NAT case are a router mapping (UPnP-IGD or
+NAT-PMP, which no namespace here speaks) and an address a peer observed in an
+earlier exchange; with neither, the pair stays on Reticulum and the diagnostics
+panel says `punch_failed` rather than leaving it mysterious.
+
 ## The LoRa pass
 
 Every family re-run with `--link-profile lora_fast` (SF7, 5.5 kbps, 60±20ms, 1%
@@ -1353,7 +1414,7 @@ How to run it, when a scenario is the right tool, and how to add one live in
 
 ## Status
 
-All fifteen families built and run: **128 scenarios, 100 strict and 28 probes**, counted from the registry rather than by hand.
+All sixteen families built and run: **132 scenarios, 104 strict and 28 probes**, counted from the registry rather than by hand.
 
 | Family | Scenarios | Result |
 |---|---|---|
@@ -1371,6 +1432,7 @@ All fifteen families built and run: **128 scenarios, 100 strict and 28 probes**,
 | `bw`: bytes on the wire | 1 (probe) | Measured before and after reconciliation; see the family's section |
 | `interop`: direct messages with other LXMF clients | 5 (5 strict) | All passing against a real bare RNS+LXMF client; interop4 found a real gap, 5/5 after the fix; interop3 and interop5 race on live delivery when run alone |
 | `files`: shared files in invite-only channels | 11 (7 strict, 4 probes) | All strict rows passing; files1 alone found three defects, files8 a fourth, the two radio probes two more and files9 a seventh, all fixed. files5, files8 and files10 record what a slow link, a lossy one and a shared one each cost, and files11 moves the 5 MB ceiling itself over SF7 in 5h 14m |
+| `upgrade`: direct IP sessions between members | 4 (4 strict) | All passing, **20/20 at `--repeat 5`**; the NAT harness beside them upgrades across real address translation and records the two-NAT case it cannot |
 
 **All strict scenarios pass**, sync11 included: 6/6 on broadband and 3/3 on
 `lora_fast` since beacons carry a sync probe, from 1/5 and 0/3 when this

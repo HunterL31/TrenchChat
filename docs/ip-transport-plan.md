@@ -207,11 +207,15 @@ is the smaller.
 
 1. Alice sees Bob is online (an announce, or any inbound message from him),
    has no direct session with him, and her backoff for him has expired.
-2. She gathers candidates: each local interface address with her listen
-   port (a Tailscale or WireGuard interface shows up here on its own, which
-   is all the overlay support this design needs), a router-mapped port if
-   UPnP-IGD, NAT-PMP or PCP gave her one, and the public address a peer last
-   observed her at. At most eight.
+2. She gathers candidates: each local interface address with the port she
+   will punch from (a Tailscale or WireGuard interface shows up here on its
+   own, which is all the overlay support this design needs), a router-mapped
+   port if UPnP-IGD, NAT-PMP or PCP gave her one, and the public address a
+   peer last observed her at. At most eight. The mapped and observed
+   candidates name the listening port rather than the attempt's, because both
+   are addresses somebody else chose, so the listening socket answers probes
+   too (`network/ip/session.py`'s `ProbeAwareQuicServer`); without that a
+   mapped candidate could never be punched and would be dead weight.
 3. She sends `MT_UPGRADE_OFFER` to Bob over LXMF: candidates, a 16-byte
    nonce, her session certificate (DER, a few hundred bytes), and the time
    she will start punching. It is authenticated like every control message
@@ -220,12 +224,15 @@ is the smaller.
    the nonce and his certificate, and starts sending small probe datagrams
    (the nonce) to each of Alice's candidates at once: the outbound probes
    open his NAT mappings.
-5. Alice, on the answer, probes each of Bob's candidates. The first
-   candidate pair with a probe seen both ways wins; Bob notes the address
-   Alice's probes arrived from and reports it in the next exchange as her
-   observed address.
-6. Over the winning pair, Alice opens a QUIC connection with Bob's
-   certificate as the only trust root and hers presented, then both send
+5. Alice, on the answer, probes each of Bob's candidates, no earlier than
+   the time she named. The first candidate pair with a probe seen both ways
+   wins; each side notes the address the other's probes arrived from and
+   reports it in the next exchange as that peer's observed address, on the
+   offer as readily as on the answer.
+6. Over the winning pair, Alice opens a QUIC connection on the socket she
+   punched with, and Bob takes it on his (`IPTransport.accept_on`, the other
+   half of `open_session`, which Phase 2 did not have). Bob's certificate is
+   the connection's only trust root and hers is presented, then both send
    `HELLO {pub64, ts, sig}` with `sig` over both certificate fingerprints
    and `ts`. The certificates already arrived over an authenticated message;
    the HELLO binds them to the identity keys anyway, so a session that
@@ -473,6 +480,25 @@ shares only a public channel is never offered one, and a session dropped
 mid-conversation loses no message; the namespace NAT harness from Phase 0
 run against the real handshake.
 
+**Phase 3 results.** Built as designed, with five things worth recording. The
+`lan` candidate names the port an attempt punches from rather than the listen
+port, because the session has to run on the socket whose mapping the punch
+opened; the `mapped` and `observed` candidates still name the listen port, and
+the listener answers probes so they are reachable. A peer refused as ineligible
+is re-checked on its next sighting instead of waiting out a backoff, so an
+admin's invite is followed by a session in seconds rather than in half a
+minute. `last_failure` carries every reason except `backoff`, which is deliberate:
+recording "waiting" as a failure would overwrite the reason the pair is
+actually waiting on and double the wait for asking. And the wait doubles per
+attempt rather than per ask, so a peer announcing every ten seconds cannot push
+its own next attempt into next week. And the namespace harness found the one
+thing the design was missing: a probe carries the sender's translated address
+with it, so a node that receives one probes back at wherever it came from, which
+is what completes a pair the candidate lists could not have named. The two open
+items from Phase 0 are still
+open: UPnP-IGD and NAT-PMP have never met a real router, and the punch's success
+rate on real NATs and CGNAT is a question only a deployment answers.
+
 **Phase 4: planes over the direct path (3 weeks).** `IPFileTransport` with
 per-path chunk limits and the on-disk file store; `IPVoiceTransport` over
 datagrams with per-pair bitrate; sync limits by path. Check: the file and
@@ -521,12 +547,22 @@ reason for doing it.
 - **Should accepted friends qualify?** A mutual friendship is a stronger tie
   than shared membership, and direct messages with large attachments would
   benefit. Left out of the first cut so the gate is one rule; extending it
-  is a one-line change to `UpgradeManager.eligible` plus its tests.
-- **Punch success rate.** Cone NATs punch; symmetric NAT and most CGNAT do
-  not, and both sides symmetric never will. Those pairs stay on Reticulum,
-  which is recorded as a deliberate non-fix: the alternative is a relay, and
-  a relay of ours is a center. The diagnostics panel says which case a pair
-  is in rather than leaving it mysterious.
+  is a one-line change to `core/upgrade.is_eligible` plus its tests.
+- **Punch success rate.** A pair punches when at least one side can be named:
+  an address on a shared LAN or tailnet, a public host, a router mapping, or an
+  address a peer observed in an earlier exchange. The first probe that arrives
+  carries the sender's translated address with it, so the side that could be
+  reached probes back at where the probe came from and the pair completes in
+  both directions; `devtools/testenv/nat_harness.sh`'s `one_nat` variant is
+  that case, and it comes up in about four seconds across a real masquerading
+  NAT. What does not punch is a pair where **neither** side can be named: two
+  cone NATs with no router mapping and no prior observation have nothing to
+  aim at, every probe goes to an unroutable address, and no observation can
+  start. Symmetric NAT and most CGNAT do not punch either, and both sides
+  symmetric never will. Those pairs stay on Reticulum, which is recorded as a
+  deliberate non-fix: the alternative is asking a third party where we are,
+  and a service that answers that is a center. The diagnostics panel says
+  which case a pair is in rather than leaving it mysterious.
 - **`aioquic` as a dependency.** Settled: `aioquic==1.3.0`, BSD-3-Clause,
   every wheel `cp310-abi3`, so one wheel per platform covers CPython 3.10
   through 3.13 on win_amd64, macOS x86_64 and arm64, and manylinux x86_64 and
