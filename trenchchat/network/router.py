@@ -12,13 +12,15 @@ managers. What is Reticulum's own lives in network/lxmf_transport.py.
 """
 
 import threading
+import time
 
 import RNS
 
 from trenchchat.config import Config
 from trenchchat.core.protocol import F_MSG_TYPE, is_protocol_envelope, unpack_fields
 from trenchchat.network.base import (
-    InboundMessage, SendState, Transport, TransportLimits,
+    InboundMessage, PATH_DIRECT, PATH_RETICULUM, SendState, Transport,
+    TransportLimits,
 )
 from trenchchat.network.lxmf_transport import (
     LXMFTransport, REANNOUNCE_INTERVAL_SECS, allow_rate,
@@ -34,12 +36,15 @@ class Router:
     """Routes messages between the managers and the path that carries them."""
 
     def __init__(self, config: Config, identity, storagepath: str | None = None,
-                 transport: Transport | None = None):
+                 transport: Transport | None = None,
+                 direct_transport: Transport | None = None):
         """
         identity: trenchchat.core.identity.Identity instance
         (passed in to avoid circular imports)
         storagepath: override for the LXMF message store directory
         transport: the path to use instead of building the Reticulum one
+        direct_transport: the per-pair upgrade, used for a peer it has a
+        session with and never for anyone else
         """
         self._config = config
         self._delivery_callbacks: list = []
@@ -58,8 +63,15 @@ class Router:
         self._path_changed_callbacks: list = []
 
         self._transport = transport or LXMFTransport(config, identity, storagepath)
-        self._transport.set_inbound_callback(self._on_inbound)
-        self._transport.set_peer_event_callbacks(
+        self._wire(self._transport)
+        self._direct = direct_transport
+        if self._direct is not None:
+            self._wire(self._direct)
+
+    def _wire(self, transport: Transport) -> None:
+        """Take a path's inbound messages and everything it learns about peers."""
+        transport.set_inbound_callback(self._on_inbound)
+        transport.set_peer_event_callbacks(
             peer_appeared=self._fire_peer_appeared,
             identity_resolved=self._fire_identity_resolved,
             channel_discovered=self._fire_channel_discovered,
@@ -118,7 +130,8 @@ class Router:
         if not sender:
             return True
 
-        burst = self._transport.limits_for(sender).control_messages_per_minute
+        burst = self._limits_for_path(
+            message.path, sender).control_messages_per_minute
         if not allow_rate(self._control_rate, self._control_rate_lock, sender,
                           CONTROL_RATE_WINDOW_SECS, burst,
                           CONTROL_RATE_MAX_SENDERS):
@@ -168,6 +181,16 @@ class Router:
         NO_PATH means the peer could not be addressed: the caller queues for
         retry, hints a missed delivery, or falls back to a propagation node.
         """
+        if self._direct_is_up(dest_hex) and not propagated:
+            state = self._direct.send(
+                dest_hex, fields, content, on_delivered=on_delivered,
+                on_failed=self._reticulum_fallback(
+                    dest_hex, fields, content, on_delivered, on_failed, envelope),
+                envelope=envelope,
+            )
+            if state is not SendState.NO_PATH:
+                self._notify_outbound(dest_hex)
+                return state
         state = self._transport.send(
             dest_hex, fields, content, on_delivered=on_delivered,
             on_failed=on_failed, propagated=propagated, envelope=envelope,
@@ -176,9 +199,48 @@ class Router:
             self._notify_outbound(dest_hex)
         return state
 
+    def _direct_is_up(self, dest_hex: str) -> bool:
+        """Whether a direct session with this peer is carrying traffic."""
+        return self._direct is not None and self._direct.can_reach(dest_hex)
+
+    def _reticulum_fallback(self, dest_hex: str, fields: dict, content: str,
+                            on_delivered, on_failed, envelope: bool):
+        """Send once over Reticulum when a direct send lost its acknowledgement.
+
+        A session that drops mid-message leaves the sender unable to tell a
+        message that arrived from one that did not, so it goes again over the
+        path that is always there. The receiver's message-id dedupe absorbs
+        the duplicate in the case where the first copy did arrive.
+        """
+        retried = threading.Event()
+
+        def _failed(peer_hex: str) -> None:
+            if retried.is_set():
+                if on_failed is not None:
+                    on_failed(peer_hex)
+                return
+            retried.set()
+            RNS.log(
+                f"TrenchChat: direct send to {peer_hex[:12]}… was not "
+                f"acknowledged; sending it over Reticulum",
+                RNS.LOG_WARNING,
+            )
+            state = self._transport.send(
+                dest_hex, fields, content, on_delivered=on_delivered,
+                on_failed=on_failed, envelope=envelope,
+            )
+            if state is SendState.NO_PATH and on_failed is not None:
+                on_failed(peer_hex)
+
+        return _failed
+
     def can_reach(self, dest_hex: str) -> bool:
-        """Whether a send to this peer can be addressed right now."""
-        return self._transport.can_reach(dest_hex)
+        """Whether a send to this peer can be addressed right now, on any path."""
+        return self._direct_is_up(dest_hex) or self._transport.can_reach(dest_hex)
+
+    def path_for(self, dest_hex: str) -> str:
+        """The path a message to this peer would take right now."""
+        return PATH_DIRECT if self._direct_is_up(dest_hex) else PATH_RETICULUM
 
     def request_path(self, dest_hex: str) -> None:
         """Ask the network where a peer is. Never blocks, never waits."""
@@ -186,11 +248,23 @@ class Router:
 
     def limits_for(self, dest_hex: str) -> TransportLimits:
         """The budgets a message to this peer travels under."""
+        if self._direct_is_up(dest_hex):
+            return self._direct.limits_for(dest_hex)
         return self._transport.limits_for(dest_hex)
+
+    def _limits_for_path(self, path: str, peer_hex: str) -> TransportLimits:
+        """The budgets of the path a message actually came in on."""
+        if path == PATH_DIRECT and self._direct is not None:
+            return self._direct.limits_for(peer_hex)
+        return self._transport.limits_for(peer_hex)
 
     def drain(self, timeout: float) -> int:
         """Wait for outbound messages to stop moving. Returns how many settled."""
-        return self._transport.drain(timeout)
+        settled = 0
+        deadline = time.time() + timeout
+        if self._direct is not None:
+            settled += self._direct.drain(timeout)
+        return settled + self._transport.drain(max(deadline - time.time(), 0.0))
 
     def _notify_outbound(self, dest_hex: str) -> None:
         for cb in self._outbound_callbacks:
@@ -203,6 +277,10 @@ class Router:
 
     def public_key_for(self, peer_hex: str) -> bytes | None:
         """A peer's public key, if any path knows it."""
+        if self._direct is not None:
+            key = self._direct.public_key_for(peer_hex)
+            if key:
+                return key
         return self._transport.public_key_for(peer_hex)
 
     def resolve_address(self, address_hex: str) -> str | None:
@@ -248,8 +326,8 @@ class Router:
     def add_path_changed_callback(self, callback) -> None:
         """callback(peer_hex, path): the path to a peer changed.
 
-        Registered now and fired by nothing: every peer is on the Reticulum
-        path until there is a second one to move to.
+        Fired when a direct session comes up and when it goes away; a peer
+        with no direct session is on the Reticulum path.
         """
         if callback not in self._path_changed_callbacks:
             self._path_changed_callbacks.append(callback)
@@ -380,10 +458,17 @@ class Router:
     # --- lifecycle ---
 
     def stop(self) -> None:
-        """Persist state and tear the path down. Safe to call twice."""
+        """Persist state and tear every path down. Safe to call twice."""
+        if self._direct is not None:
+            self._direct.stop()
         self._transport.stop()
 
     @property
     def transport(self) -> Transport:
-        """The path this router sends over. For wiring and teardown only."""
+        """The Reticulum path. For wiring and teardown only."""
         return self._transport
+
+    @property
+    def direct_transport(self) -> Transport | None:
+        """The direct path, if this node has one. For wiring and teardown only."""
+        return self._direct
