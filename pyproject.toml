@@ -28,6 +28,7 @@ dependencies = [
     "fastapi>=0.141",
     "uvicorn>=0.52",
     "websockets>=16.1",
+    "aioquic>=1.3",
 ]
 
 [project.gui-scripts]

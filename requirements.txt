@@ -37,6 +37,13 @@ opuslib==3.0.1
 fastapi==0.141.1
 uvicorn==0.52.4
 websockets==17.1
+# The direct IP session between two peers (docs/ip-transport-plan.md): QUIC gives one
+# socket for reliable streams and unreliable voice datagrams, and certificate pinning
+# through its public configuration. It carries a compiled extension, with OpenSSL linked
+# statically into it, so the release bundles it with no system library to find. It pulls
+# pyopenssl and service-identity, whose current releases demand a newer cryptography than
+# the pin above; pip backtracks to versions that fit, so bump these three together.
+aioquic==1.3.0
 # The tray icon the app drops to when its window closes (trenchchat/tray.py).
 # Backends: win32 and AppKit natively, AppIndicator/GTK/XEmbed on Linux, where
 # a desktop with no notification area leaves the launcher without a tray.

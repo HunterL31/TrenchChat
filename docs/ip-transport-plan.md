@@ -243,16 +243,28 @@ has seen the smaller one online for ten seconds without an offer, which
 covers a peer running an older build, the same fallback the voice plane
 uses for one-way reachability.
 
-**Session.** QUIC via `aioquic`, one connection per peer pair over the
-punched UDP path: reliable streams for messages, acks and file chunks,
-unreliable datagrams for voice, one socket for everything, and connection
-migration so a peer that moves from Wi-Fi to LTE keeps its session. Pinning
-uses the public API (the peer's own certificate as the connection's sole
-trust root) plus the HELLO signature. Phase 0 confirms this, bundling under
-PyInstaller on all three platforms, and the punch success rate; if `aioquic`
-fails either check, the fallback is TCP with TLS 1.3 from the stdlib for the
-reliable plane and AEAD datagrams for voice, at the cost of two sockets and
-no migration.
+**Session.** QUIC via `aioquic`, confirmed by the Phase 0 spike: one
+connection per peer pair over the punched UDP path, reliable streams for
+messages, acks and file chunks, unreliable datagrams for voice, one socket for
+everything, and connection migration so a peer that moves from Wi-Fi to LTE
+keeps its session. Pinning is `QuicConfiguration.cadata` set to the peer's own
+certificate, which makes it the connection's sole trust root, with
+`server_name` left unset so no hostname is checked; `cadata` takes PEM, so the
+DER in `F_UPGRADE_CERT` is re-encoded on the way in.
+
+`aioquic` will not request or expose a client certificate through public API,
+so the listener never sees one and step 6's "hers presented" happens inside
+the HELLO rather than in the TLS handshake. The listener sends a fresh
+sixteen-byte nonce first and both signatures cover
+`own_cert_fingerprint || peer_cert_fingerprint || nonce || ts`. Because the
+connecting side pinned the listener's certificate, the nonce never leaves the
+true pair, so a signature over it proves the identity is live on this
+connection and cannot be replayed onto another. The certificate a connecting
+node asserts in its HELLO is not proven by anything at the TLS layer: it is a
+claim, useful only as the pin for a later connection in the other direction,
+and it is stored as a claim. The fallback, TCP with TLS 1.3 from the stdlib
+plus AEAD datagrams for voice, is not taken; the measurements behind that are
+in `devtools/spikes/upgrade/README.md`.
 
 Frames are the same on either session type: `MSG` carries an envelope
 `{src, dst, ts, content, fields, sig}` where `fields` is exactly the dict
@@ -389,6 +401,26 @@ symmetric NAT; UPnP-IGD and NAT-PMP mapping is read from Python against a
 home router. Output: the QUIC decision confirmed or the TCP fallback chosen,
 and this file amended.
 
+**Phase 0 results.** QUIC via `aioquic` 1.3.0 is confirmed, and the spike that
+proves it is `devtools/spikes/upgrade/`. Pinning works through the public
+`cadata`, a relaying third process is refused at the TLS handshake before any
+application byte, and that relay can neither replay a captured HELLO nor forge
+one. The one gap is that `aioquic` cannot request or expose a client
+certificate through public API, so the connecting node's certificate rides
+inside its HELLO against a nonce the listener sends first, which proves the
+identity live on the connection and leaves the certificate itself an asserted
+claim. On loopback the handshake took about 16 ms and 50 MB moved at 9.8 to 14.5
+MB/s for about 3.2 CPU seconds, against 700 to 1040 MB/s for stdlib TCP with
+TLS 1.3: fifty times slower, still far above any home uplink, and the reason the
+fallback stays designed but unbuilt. The namespace harness punched in 200 ms
+through port-restricted cone NATs and failed as intended through symmetric
+ones, five runs of five, and turned up one thing Phase 3 needs: an unsolicited
+probe reaching a NAT first can poison the port its own mapping wanted, which
+makes the observed-address exchange a recovery path rather than a nicety. Two
+checks did not happen here and stay open: UPnP-IGD and NAT-PMP are written and
+unit-tested but have never seen a real router, and the PyInstaller bundle is
+proven on Linux only.
+
 **Phase 1: the seam (3 to 4 weeks).** `network/base.py`, `InboundMessage`,
 `Router.send` and the peer-event callbacks; `LXMFTransport` split out of
 `Router`; every manager stops importing `LXMF` and stops calling `RNS`
@@ -479,9 +511,18 @@ reason for doing it.
   which is recorded as a deliberate non-fix: the alternative is a relay, and
   a relay of ours is a center. The diagnostics panel says which case a pair
   is in rather than leaving it mysterious.
-- **`aioquic` as a dependency.** A C extension to pin and bundle on three
-  platforms. Phase 0 decides; the TCP plus TLS fallback is designed and
-  costs two sockets and connection migration.
+- **`aioquic` as a dependency.** Settled: `aioquic==1.3.0`, BSD-3-Clause,
+  every wheel `cp310-abi3`, so one wheel per platform covers CPython 3.10
+  through 3.13 on win_amd64, macOS x86_64 and arm64, and manylinux x86_64 and
+  aarch64. Its compiled extension links OpenSSL statically and bundles under
+  PyInstaller on Linux with no hook and no hidden import, for about 6.8 MiB on
+  top of what the release already ships; the macOS and Windows one-file builds
+  are still unbuilt and are the residual risk. It pulls `pyopenssl` and
+  `service-identity`, both of which float ahead of the pinned `cryptography`,
+  so those three versions now move together. The cost that remains is speed:
+  50 MB moved at 9.8 to 14.5 MB/s on loopback for one saturated core, against
+  700 to 1040 MB/s for stdlib TCP with TLS 1.3, which is worth re-measuring on
+  a laptop in Phase 4.
 - **The seam refactor's blast radius.** Nine send sites, a dozen inbound
   handlers, the two most sensitive modules. Mitigation: no test edited, the
   adversarial suite on every commit, one manager per commit.
