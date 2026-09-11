@@ -254,7 +254,15 @@ DER in `F_UPGRADE_CERT` is re-encoded on the way in.
 
 `aioquic` will not request or expose a client certificate through public API,
 so the listener never sees one and step 6's "hers presented" happens inside
-the HELLO rather than in the TLS handshake. The listener sends a fresh
+the HELLO rather than in the TLS handshake. Phase 2 found one more thing its
+public API will not do: `QuicConnectionProtocol.wait_connected()` records the
+handshake only if a waiter is already registered, so a connection that
+completes before the handshake task first awaits it is never woken and the
+dial hangs to its timeout. `network/ip/session.py` sets its own event from the
+`HandshakeCompleted` event instead, which is what the Phase 0 spike did.
+`IPTransport.open_session(peer_hex, host, port, cert_der, sock=...)` is how a
+session is opened, and it takes the socket rather than making one when Phase 3
+hands it a punched one. The listener sends a fresh
 sixteen-byte nonce first and both signatures cover
 `own_cert_fingerprint || peer_cert_fingerprint || nonce || ts`. Because the
 connecting side pinned the listener's certificate, the nonce never leaves the
@@ -267,12 +275,17 @@ plus AEAD datagrams for voice, is not taken; the measurements behind that are
 in `devtools/spikes/upgrade/README.md`.
 
 Frames are the same on either session type: `MSG` carries an envelope
-`{src, dst, ts, content, fields, sig}` where `fields` is exactly the dict
-`pack_fields` carries today and `sig` is the sender's Ed25519 signature over
-the packed envelope, so a message received directly is verifiable when any
-member serves it later over sync. `ACK {hash}` gives `delivered` its honest
-meaning. `REQ`/`RESP` carry the file plane's exchanges on their own streams,
-so a chat message never waits behind a chunk.
+`{src, dst, ts, content, fields, proto, sig}` where `fields` is exactly the
+dict `pack_fields` carries today and `sig` is the sender's Ed25519 signature
+over a domain tag and the packed envelope, so a message received directly is
+verifiable when any member serves it later over sync, and the signature can
+never be read as one of the other structures the same key signs. `proto` says
+whether those fields are TrenchChat's own registry or another client's keys,
+which is what a direct message carries; the receiver marks the message the
+same way either path did. `ACK {hash}`, naming the SHA-256 of the packed
+envelope, gives `delivered` its honest meaning. `REQ`/`RESP` carry the file
+plane's exchanges on their own streams, so a chat message never waits behind
+a chunk.
 
 The transport runs an asyncio loop on one background thread and fires
 manager callbacks from a small worker pool, so the contract every manager
@@ -334,7 +347,7 @@ called done.
 | Chunks per request (`FILE_REQUEST_MAX_CHUNKS`) | 16 (512 KB) | 256 (8 MB) |
 | Sync response (`sync.MAX_RESPONSE_MESSAGES`, `MAX_RESPONSE_BYTES`) | 50 messages, 1 MB | 500 messages, 8 MB |
 | Sync description (`sync_ranges.SYNC_DESCRIPTION_BUDGET_BYTES`) | 512 bytes | 64 KB |
-| Sync window (`SYNC_WINDOW_DAYS`) | 7 days | full history, fingerprinted by year, then month |
+| Sync window (`SYNC_WINDOW_DAYS`) | 7 days | 7 days until Phase 4: the fingerprinting that makes full history cheap does not exist yet, and today's day-window code handed a longer one turns every routine re-check into a full-history ask (`tests/test_sync_reconcile.py`) |
 | Voice (`voice_wire`, `config.voice.bitrate`) | 16 or 24 kbps Opus, 2 frames per packet, 400-byte packets under the 431-byte MDU | 32 to 64 kbps Opus, 1 frame per packet, 1200-byte datagrams; the participant ceiling stays 8 until Phase 6 measures a mixed session, since one mesh-path participant in a large session is exactly the case check 3 is about |
 | Ephemeral control (typing, read receipts, presence detail) | never sent | sent |
 | Control messages per sender (`router.CONTROL_RATE_BURST`) | 60 per minute | 600 per minute |
@@ -354,7 +367,10 @@ Additive only; nothing existing moves or hides.
   diagnostics panel: peer, since, which candidate kind won (`lan`,
   `mapped`, `observed`), round trip, bytes each way, and the last failure
   reason per eligible peer with no session. This is where a user learns
-  that a pair is stuck behind symmetric NAT.
+  that a pair is stuck behind symmetric NAT. As built in Phase 2 it answers
+  `{sessions, last_failure}` with the round trip measured from
+  acknowledgements, since aioquic exposes none of its own, and an empty
+  `last_failure`: what a pair failed at is Phase 3's to know.
 - Settings gains the "Direct connections" switch, the listen port, and a
   "Try now" per peer for the diagnostics panel. Config keys under
   `"upgrade"` in `config.json`: `enabled`, `listen_port`.
