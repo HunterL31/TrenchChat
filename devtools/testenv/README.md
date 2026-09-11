@@ -172,6 +172,29 @@ frames is the only way to exercise them without killing a process outright.
 | `orchestrator.py` | Spawns the hub and every tester, serves the UI, handles `/reset` and per-tester/hub lifecycle |
 | `static/index.html` | N-pane vanilla JS/HTML UI, laid out as a CSS grid so every pane stays visible at once |
 | `smoke_test.py` | Headless proof that two real processes can invite/join/message over a real TCP link |
+| `nat_harness.sh` | Two real backends in Linux network namespaces behind their own masquerading NATs, upgrading to a direct IP session across them. Linux and root only; see below |
+
+## The NAT harness
+
+```bash
+sudo PYTHON=$PWD/.venv/bin/python devtools/testenv/nat_harness.sh          # every variant
+sudo PYTHON=$PWD/.venv/bin/python devtools/testenv/nat_harness.sh one_nat
+```
+
+Everything else here runs every tester on one host, where a direct session's
+candidate is a local address and the punch barely punches. `nat_harness.sh`
+puts two real backends behind real address translation instead, with the hub in
+the root namespace where both reach it outbound and neither can be reached at.
+
+Three variants. `one_nat` has A behind a NAT and B on the hub's segment, which
+is the shape of every pair where one side is reachable, and it must come up
+direct. `cone` has both sides behind port-restricted NATs and is recorded
+rather than judged: with no router mapping and no address a peer observed
+earlier, neither side can name the other and no probe arrives anywhere.
+`symmetric` must fail, and the pair must stay on Reticulum without drama.
+
+Needs root with CAP_NET_ADMIN, iproute2 and nftables, and it is Linux only. The
+results are in `docs/testenv-scenarios.md`.
 
 ## Adding a new feature
 

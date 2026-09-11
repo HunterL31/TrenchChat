@@ -23,6 +23,7 @@ first, from the moment it answers, and the offering side waits for that answer
 and for the punch time it named.
 """
 
+import errno
 import socket
 import time
 from dataclasses import dataclass, field
@@ -133,22 +134,32 @@ def punch(sock: socket.socket, peer_candidates, nonce: bytes, *,
     acks_from: set = set()
     targets = [(host, port) for host, port, *_rest in peer_candidates]
 
+    abandoned = False
     sock.settimeout(interval)
     try:
-        while time.monotonic() < deadline:
+        while time.monotonic() < deadline and not abandoned:
             for target in targets:
                 try:
                     sock.sendto(probe, target)
                     result.probes_sent += 1
-                except OSError:
-                    pass
+                except OSError as e:
+                    # The socket goes out from under an attempt this node has
+                    # given up on, which is an ending rather than an error.
+                    if e.errno == errno.EBADF:
+                        abandoned = True
+                        break
+                if abandoned:
+                    break
             window = time.monotonic() + interval
             while time.monotonic() < window:
                 try:
                     data, source = sock.recvfrom(RECV_BYTES)
                 except (socket.timeout, TimeoutError):
                     break
-                except OSError:
+                except OSError as e:
+                    if e.errno == errno.EBADF:
+                        abandoned = True
+                        break
                     continue
                 kind = read_datagram(data, nonce)
                 if kind is None:
@@ -177,7 +188,10 @@ def punch(sock: socket.socket, peer_candidates, nonce: bytes, *,
             if result.remote is not None:
                 break
     finally:
-        sock.settimeout(None)
+        try:
+            sock.settimeout(None)
+        except OSError:
+            pass
     result.probes_from = sorted(probes_from)
     result.acks_from = sorted(acks_from)
     result.seconds = round(time.monotonic() - started, 3)
