@@ -19,9 +19,14 @@ from enum import Enum
 from functools import lru_cache
 
 # The path a message travelled or will travel. Reticulum is every peer's first
-# path; "direct" is the per-pair upgrade, and nothing produces it yet.
+# path; "direct" is the per-pair upgrade, opened over IP when two peers can
+# reach each other there.
 PATH_RETICULUM = "reticulum"
 PATH_DIRECT = "direct"
+
+# Not a path a message travels: what a client shows for a member this node
+# has neither a session with nor any sign of life from.
+PATH_OFFLINE = "offline"
 
 
 class SendState(Enum):
@@ -118,6 +123,58 @@ def reticulum_limits() -> TransportLimits:
         voice_packet_bytes=VOICE_MAX_PACKET_PAYLOAD,
         ephemeral_control=False,
         control_messages_per_minute=CONTROL_RATE_BURST,
+    )
+
+
+# --- the direct path's budgets ---
+#
+# The Reticulum column of the plan's limits table is every constant's own
+# module; this is the direct column, which no other module owns yet. A message
+# is the same size on either path, because any member must be able to serve it
+# over either one; what the direct path raises is how much moves per exchange.
+DIRECT_SHARED_FILE_BYTES = 200 * 1024 * 1024
+DIRECT_FILE_REQUEST_MAX_CHUNKS = 256
+DIRECT_SYNC_RESPONSE_MESSAGES = 500
+DIRECT_SYNC_RESPONSE_BYTES = 8 * 1024 * 1024
+DIRECT_SYNC_DESCRIPTION_BUDGET_BYTES = 64 * 1024
+
+DIRECT_VOICE_BITRATE_BPS = 64000
+DIRECT_VOICE_FRAMES_PER_PACKET = 1
+DIRECT_VOICE_PACKET_BYTES = 1200
+DIRECT_CONTROL_MESSAGES_PER_MINUTE = 600
+
+
+@lru_cache(maxsize=1)
+def direct_limits() -> TransportLimits:
+    """The direct path's budgets, as the plan's limits table sets them.
+
+    The sync window is the one column the table does not get yet: it reads
+    "full history, fingerprinted by year then month", and that fingerprinting
+    is Phase 4. Handing today's day-window code a hundred-year window turns
+    every routine re-check into a full-history ask, which
+    tests/test_sync_reconcile.py holds to be a defect, so the window stays at
+    the Reticulum value until the machinery that makes it cheap exists.
+
+    Imported inside the call for the same reason reticulum_limits is: the
+    modules owning the unchanged values import the transport.
+    """
+    from trenchchat.core.image import MAX_IMAGE_BYTES
+    from trenchchat.core.protocol import FILE_CHUNK_BYTES, SYNC_WINDOW_DAYS
+
+    return TransportLimits(
+        inline_payload_bytes=MAX_IMAGE_BYTES,
+        shared_file_bytes=DIRECT_SHARED_FILE_BYTES,
+        file_chunk_bytes=FILE_CHUNK_BYTES,
+        file_request_max_chunks=DIRECT_FILE_REQUEST_MAX_CHUNKS,
+        sync_response_messages=DIRECT_SYNC_RESPONSE_MESSAGES,
+        sync_response_bytes=DIRECT_SYNC_RESPONSE_BYTES,
+        sync_description_budget_bytes=DIRECT_SYNC_DESCRIPTION_BUDGET_BYTES,
+        sync_window_days=SYNC_WINDOW_DAYS,
+        voice_bitrate_bps=DIRECT_VOICE_BITRATE_BPS,
+        voice_frames_per_packet=DIRECT_VOICE_FRAMES_PER_PACKET,
+        voice_packet_bytes=DIRECT_VOICE_PACKET_BYTES,
+        ephemeral_control=True,
+        control_messages_per_minute=DIRECT_CONTROL_MESSAGES_PER_MINUTE,
     )
 
 
