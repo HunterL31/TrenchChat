@@ -28,8 +28,10 @@ anything indexable by "message_id" and "timestamp", which is what
 Storage.get_message_index returns.
 """
 
+import calendar
 import hashlib
 import math
+import time
 
 import msgpack
 
@@ -66,6 +68,17 @@ SYNC_DESCRIPTION_BUDGET_BYTES = 512
 # resolution goes; a responder that receives ids sends the missing rows at
 # once, where a fingerprint could only be described back.
 SYNC_SUMMARY_LADDER = (8, 16, 32, 64, 128)
+
+# How a description reaches behind the recent window, when the path it travels
+# affords one: whole calendar years, then the months of the year the window
+# starts in, then the day ladder above. Calendar boundaries are what make this
+# work without a negotiation: two peers cut the same spans because a year is a
+# year, where a ladder counted from the newest row cuts wherever each side's
+# own rows happen to fall. A bucket holding nothing is left out rather than
+# sent as an empty one, so a node with no old history describes exactly what it
+# describes today and a routine re-check costs nothing extra.
+MAX_HISTORY_RANGES = 16
+
 
 # A probe is a channel's count and fingerprint carried on a presence beacon,
 # so two peers learn whether they differ without either sending a request.
@@ -238,6 +251,75 @@ def _ladder_bounds(rows: list, lo: float, hi: float) -> list[tuple[float, float]
         start = boundary
     bounds.append((start, float(hi)))
     return bounds
+
+
+def _year_start(year: int) -> float:
+    """The unix time a calendar year begins, in UTC."""
+    return float(calendar.timegm((year, 1, 1, 0, 0, 0, 0, 1, 0)))
+
+
+def _month_start(year: int, month: int) -> float:
+    """The unix time a calendar month begins, in UTC."""
+    return float(calendar.timegm((year, month, 1, 0, 0, 0, 0, 1, 0)))
+
+
+def _history_bounds(lo: float, hi: float) -> list[tuple[float, float]]:
+    """[lo, hi) cut on calendar boundaries: years, then the last year's months.
+
+    The years before the one hi falls in go whole, because a difference that
+    old is rare and one fingerprint is the cheapest way to say there is none.
+    The year hi falls in goes by month, because that is where a peer that has
+    been away for a season differs. Both ends are clipped to lo and hi.
+    """
+    if hi <= lo:
+        return []
+    first = time.gmtime(lo).tm_year
+    last = time.gmtime(hi).tm_year
+    bounds: list[tuple[float, float]] = []
+    for year in range(first, last):
+        start = max(lo, _year_start(year))
+        end = min(hi, _year_start(year + 1))
+        if end > start:
+            bounds.append((start, end))
+    for month in range(1, 13):
+        start = max(lo, _month_start(last, month))
+        end = min(hi, _month_start(last + 1, 1) if month == 12
+                  else _month_start(last, month + 1))
+        if end > start:
+            bounds.append((start, end))
+    return bounds
+
+
+def history_ranges(rows, lo: float, hi: float,
+                   limit: int = MAX_HISTORY_RANGES) -> list[list]:
+    """What this node holds in [lo, hi), coarsely: what reaches behind a window.
+
+    One fingerprint per calendar bucket that holds anything, oldest merged
+    together once there are more than *limit* of them, so a description of a
+    decade costs a handful of ranges and a routine re-check that finds no
+    difference costs one round trip whatever the history behind it.
+
+    Empty buckets are left out: this span is being offered for comparison, not
+    asked about, and saying "I hold nothing here" about a year nobody has rows
+    in is bytes for nothing. A peer that wants a span it holds nothing in asks
+    for it outright, which is what a fresh join already does.
+    """
+    rows = sort_rows(rows_in(rows, lo, hi))
+    if not rows:
+        return []
+    buckets = [(bucket_lo, bucket_hi)
+               for bucket_lo, bucket_hi in _history_bounds(lo, hi)
+               if rows_in(rows, bucket_lo, bucket_hi)]
+    if not buckets:
+        return []
+    if len(buckets) > limit:
+        # The oldest become one bucket reaching back to lo, so nothing this
+        # node holds falls outside every range it describes.
+        merged_hi = buckets[-limit][1]
+        buckets = [(float(lo), merged_hi)] + buckets[-limit + 1:]
+    return [fingerprint_range(bucket_lo, bucket_hi,
+                              rows_in(rows, bucket_lo, bucket_hi))
+            for bucket_lo, bucket_hi in buckets]
 
 
 def describe(rows, lo: float, hi: float,

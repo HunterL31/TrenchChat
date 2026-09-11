@@ -473,10 +473,18 @@ class SyncManager:
         progress = self._storage.get_peer_sync_progress(channel_hash_hex, peer_hex)
         if progress > 0.0:
             return progress
-        return max(time.time() - self._sync_window_secs(peer_hex), 0.0)
+        return max(time.time() - SYNC_WINDOW_SECS, 0.0)
 
-    def _sync_window_secs(self, peer_hex: str) -> float:
-        """How far back a request to this peer reaches, by the path it takes."""
+    def _history_window_secs(self, peer_hex: str) -> float:
+        """How far back a description to this peer reaches, by its path.
+
+        Not where a request starts: that is the recent window on every path,
+        because a re-check that asked from the beginning of history would be a
+        deep ask every time and be paced as one. This is how far behind that
+        start the description still offers what it holds for comparison, which
+        a path with room can afford to make the whole transcript and the mesh
+        keeps at the window.
+        """
         return self._router.limits_for(peer_hex).sync_window_days * 86400
 
     def _on_message_stored(self, channel_hash_hex: str, message_id: str):
@@ -841,7 +849,7 @@ class SyncManager:
         try:
             window_start = float(window_start_raw)
         except (TypeError, ValueError):
-            window_start = time.time() - self._sync_window_secs(requester_hex)
+            window_start = time.time() - SYNC_WINDOW_SECS
         window_start = max(window_start, 0.0)
 
         # How far we have actually served this peer. Read from sync_served,
@@ -1054,6 +1062,18 @@ class SyncManager:
                         reply_ranges, sync_ranges.describe(serving, lo, hi),
                         budget=limits.sync_description_budget_bytes):
                     deferred = True
+
+        if ranges:
+            # What we hold behind where they asked from, offered for
+            # comparison: they cannot ask about a span they hold nothing in,
+            # so on a path that reaches back this is the only way a member
+            # who joined late ever hears that the history exists.
+            oldest = min(lo for lo, _hi, _mode, _payload in ranges)
+            sync_ranges.append_ranges(
+                reply_ranges,
+                self._history_before(channel_hash_hex, oldest, requester_hex,
+                                     channel),
+                budget=limits.sync_description_budget_bytes)
 
         rows = self._get_messages_by_ids(channel_hash_hex, send_ids)
         if needs:
@@ -1864,7 +1884,7 @@ class SyncManager:
         return min(max(since_ts, 0.0), floor), now + SYNC_CLOCK_SKEW_SECS
 
     def _describe_local(self, channel_hash_hex: str, lo: float, hi: float,
-                        ladder: bool = False) -> list:
+                        ladder: bool = False, peer_hex: str = "") -> list:
         """How we describe our own rows in [lo, hi) to a peer.
 
         A blind re-check, where nothing yet says the peer differs, is one
@@ -1875,12 +1895,47 @@ class SyncManager:
         of a single range is built where the answer is read
         (_reconcile_from_response), never here.
 
+        Behind lo, where the path affords it, the description reaches on:
+        whatever this node holds older than the window, one fingerprint per
+        calendar year and then per month (sync_ranges.history_ranges). A peer
+        that agrees pays a handful of fingerprints for a whole transcript; one
+        that differs has the difference localised to a month in the answer.
+        Buckets holding nothing are left out, so a node whose history is all
+        recent describes what it always did.
+
         Only signed rows: an unsigned one cannot be relayed to anybody, so
         claiming it here would have peers withhold their own verifiable copy.
         """
         index = [r for r in self._storage.get_message_index(channel_hash_hex, lo, hi)
                  if _row_is_signed(r)]
-        return sync_ranges.summarise(index, lo, hi, ladder=ladder)
+        described = sync_ranges.summarise(index, lo, hi, ladder=ladder)
+        return self._history_before(channel_hash_hex, lo, peer_hex) + described
+
+    def _history_before(self, channel_hash_hex: str, lo: float, peer_hex: str,
+                        channel=None) -> list:
+        """The coarse ranges that reach behind lo, or none on a path that
+        cannot afford them.
+
+        With *channel* the offer is the serving view: only what this peer's
+        tenure entitles it to, because claiming a row here that would then be
+        withheld leaves the two sides disagreeing about that bucket forever.
+        """
+        if not peer_hex:
+            return []
+        limits = self._router.limits_for(peer_hex)
+        floor = max(time.time() - self._history_window_secs(peer_hex), 0.0)
+        if floor >= lo:
+            return []
+        older = [r for r in self._storage.get_message_index(
+            channel_hash_hex, floor, lo) if _row_is_signed(r)]
+        if channel is not None:
+            older = self._filter_rows_by_tenure(channel, channel_hash_hex,
+                                                peer_hex, older)
+        ranges = sync_ranges.history_ranges(older, floor, lo)
+        while ranges and sync_ranges.packed_size(ranges) > \
+                limits.sync_description_budget_bytes:
+            ranges = ranges[1:]
+        return ranges
 
     def _record_asked(self, channel_hash_hex: str, dest_hex: str,
                       ranges: list | None, needs: list | None) -> None:
@@ -1901,7 +1956,8 @@ class SyncManager:
         """
         if ranges is None and needs is None:
             lo, hi = self._reconcile_window(since_ts)
-            ranges = self._describe_local(channel_hash_hex, lo, hi, ladder=ladder)
+            ranges = self._describe_local(channel_hash_hex, lo, hi,
+                                          ladder=ladder, peer_hex=dest_hex)
 
         if not continuation:
             with self._continuations_lock:

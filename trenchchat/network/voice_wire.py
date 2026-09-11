@@ -38,6 +38,11 @@ VOICE_MAX_FRAMES_PER_PACKET = 8
 # rather than exceed it, since high-bitrate VBR peaks can make even two
 # frames too big for one packet.
 VOICE_MAX_PACKET_PAYLOAD = 400
+# What a bundle at the mesh's packet budget affords: two 20 ms frames inside
+# 400 bytes is 80 kbps of wire, and Opus at this rate leaves room for the VBR
+# peaks that would otherwise flush a bundle early. A path that can carry more
+# says so in its own TransportLimits.
+VOICE_MESH_MAX_BITRATE = 24000
 CHANNEL_HASH_LEN = 16
 
 SEQ_MODULUS = 1 << 16
@@ -77,7 +82,14 @@ def pack_bye() -> bytes:
     return struct.pack("!B", VP_BYE)
 
 
-def pack_audio(seq: int, frames: list[bytes]) -> bytes:
+def pack_audio(seq: int, frames: list[bytes],
+               budget: int = VOICE_MAX_PACKET_PAYLOAD) -> bytes:
+    """One audio packet. *budget* is the carrying path's, not the wire's.
+
+    The layout is the same on every path; what differs is how much of it one
+    packet may be, which is a property of the link under it: a link MDU on the
+    mesh, a datagram on a direct session.
+    """
     if not frames or len(frames) > VOICE_MAX_FRAMES_PER_PACKET:
         raise ValueError("frame count out of range")
     parts = [struct.pack("!BHB", VP_AUDIO, seq % SEQ_MODULUS, len(frames))]
@@ -88,19 +100,20 @@ def pack_audio(seq: int, frames: list[bytes]) -> bytes:
         size += 1 + len(frame)
         parts.append(struct.pack("!B", len(frame)))
         parts.append(frame)
-    if size > VOICE_MAX_PACKET_PAYLOAD:
+    if size > budget:
         raise ValueError("audio packet over the payload budget")
     return b"".join(parts)
 
 
-def bundle_frames(frames: list[bytes]) -> list[list[bytes]]:
+def bundle_frames(frames: list[bytes],
+                  budget: int = VOICE_MAX_PACKET_PAYLOAD) -> list[list[bytes]]:
     """Split encoded frames into bundles that each fit one audio packet."""
     bundles: list[list[bytes]] = []
     current: list[bytes] = []
     size = 4
     for frame in frames:
         need = 1 + len(frame)
-        if current and (size + need > VOICE_MAX_PACKET_PAYLOAD
+        if current and (size + need > budget
                         or len(current) >= VOICE_MAX_FRAMES_PER_PACKET):
             bundles.append(current)
             current = []

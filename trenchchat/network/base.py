@@ -97,7 +97,6 @@ def reticulum_limits() -> TransportLimits:
     cycle. Nothing here is a second copy of a value; a constant changed in its
     own module changes the limit.
     """
-    from trenchchat.config import VOICE_MAX_BITRATE
     from trenchchat.core import sync, sync_ranges
     from trenchchat.core.image import MAX_IMAGE_BYTES
     from trenchchat.core.protocol import (
@@ -107,6 +106,7 @@ def reticulum_limits() -> TransportLimits:
     from trenchchat.network.router import CONTROL_RATE_BURST
     from trenchchat.network.voice_wire import (
         VOICE_FRAMES_PER_PACKET, VOICE_MAX_PACKET_PAYLOAD,
+        VOICE_MESH_MAX_BITRATE,
     )
 
     return TransportLimits(
@@ -118,7 +118,7 @@ def reticulum_limits() -> TransportLimits:
         sync_response_bytes=sync.MAX_RESPONSE_BYTES,
         sync_description_budget_bytes=sync_ranges.SYNC_DESCRIPTION_BUDGET_BYTES,
         sync_window_days=SYNC_WINDOW_DAYS,
-        voice_bitrate_bps=VOICE_MAX_BITRATE,
+        voice_bitrate_bps=VOICE_MESH_MAX_BITRATE,
         voice_frames_per_packet=VOICE_FRAMES_PER_PACKET,
         voice_packet_bytes=VOICE_MAX_PACKET_PAYLOAD,
         ephemeral_control=False,
@@ -137,6 +137,13 @@ DIRECT_FILE_REQUEST_MAX_CHUNKS = 256
 DIRECT_SYNC_RESPONSE_MESSAGES = 500
 DIRECT_SYNC_RESPONSE_BYTES = 8 * 1024 * 1024
 DIRECT_SYNC_DESCRIPTION_BUDGET_BYTES = 64 * 1024
+# Full history. A description on this path reaches behind the recent window
+# with one fingerprint per calendar year and then per month
+# (core/sync_ranges.history_ranges), so a whole transcript costs a re-check a
+# handful of ranges and nothing at all when the two sides agree. Expressed as
+# days because that is what the limit is counted in; a century is "all of it"
+# for any node that will ever run this.
+DIRECT_SYNC_WINDOW_DAYS = 365 * 100
 
 DIRECT_VOICE_BITRATE_BPS = 64000
 DIRECT_VOICE_FRAMES_PER_PACKET = 1
@@ -148,18 +155,18 @@ DIRECT_CONTROL_MESSAGES_PER_MINUTE = 600
 def direct_limits() -> TransportLimits:
     """The direct path's budgets, as the plan's limits table sets them.
 
-    The sync window is the one column the table does not get yet: it reads
-    "full history, fingerprinted by year then month", and that fingerprinting
-    is Phase 4. Handing today's day-window code a hundred-year window turns
-    every routine re-check into a full-history ask, which
-    tests/test_sync_reconcile.py holds to be a defect, so the window stays at
-    the Reticulum value until the machinery that makes it cheap exists.
+    The sync window is how far back a description reaches, not where a request
+    starts: a routine re-check begins at the recent window on every path,
+    because one that began at the start of history would be a deep ask every
+    time and be paced as one (tests/test_sync_reconcile.py). What this widens
+    is the span a node offers for comparison behind that start, which the
+    calendar ladder makes cheap.
 
     Imported inside the call for the same reason reticulum_limits is: the
     modules owning the unchanged values import the transport.
     """
     from trenchchat.core.image import MAX_IMAGE_BYTES
-    from trenchchat.core.protocol import FILE_CHUNK_BYTES, SYNC_WINDOW_DAYS
+    from trenchchat.core.protocol import FILE_CHUNK_BYTES
 
     return TransportLimits(
         inline_payload_bytes=MAX_IMAGE_BYTES,
@@ -169,7 +176,7 @@ def direct_limits() -> TransportLimits:
         sync_response_messages=DIRECT_SYNC_RESPONSE_MESSAGES,
         sync_response_bytes=DIRECT_SYNC_RESPONSE_BYTES,
         sync_description_budget_bytes=DIRECT_SYNC_DESCRIPTION_BUDGET_BYTES,
-        sync_window_days=SYNC_WINDOW_DAYS,
+        sync_window_days=DIRECT_SYNC_WINDOW_DAYS,
         voice_bitrate_bps=DIRECT_VOICE_BITRATE_BPS,
         voice_frames_per_packet=DIRECT_VOICE_FRAMES_PER_PACKET,
         voice_packet_bytes=DIRECT_VOICE_PACKET_BYTES,

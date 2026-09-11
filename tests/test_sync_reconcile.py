@@ -994,3 +994,137 @@ class TestTruncatedAnswerAlwaysEarnsAnother:
         self._answer(a, ch_hash, b.identity.hash_hex, truncated=False)
 
         assert len(_requests(a_sent)) == 1
+
+
+class TestTheCalendarLadder:
+    """How a description reaches behind the recent window.
+
+    Whole years, then the months of the year the window starts in, and only
+    the buckets that hold anything. Both sides cut the same spans because a
+    year is a year, which is what lets two peers compare a decade without
+    agreeing on anything first.
+    """
+
+    def _rows(self, days: list[float]) -> list[dict]:
+        now = time.time()
+        return [{"message_id": f"{i:064x}", "timestamp": now - day * 86400,
+                 "has_sig": True} for i, day in enumerate(days)]
+
+    def test_old_rows_go_by_year_and_recent_ones_by_month(self):
+        now = time.time()
+        rows = self._rows([900, 400, 40, 20])
+
+        ranges = sync_ranges.history_ranges(rows, 0.0, now - SYNC_WINDOW_SECS)
+
+        assert all(mode == RANGE_FINGERPRINT
+                   for _lo, _hi, mode, _payload in ranges)
+        assert sum(payload[0] for _lo, _hi, _mode, payload in ranges) == 4
+        spans = [hi - lo for lo, hi, _mode, _payload in ranges]
+        assert max(spans) > 200 * 86400, "no bucket covered a year"
+        assert min(spans) < 40 * 86400, "the recent year was not cut by month"
+
+    def test_a_bucket_holding_nothing_is_not_described(self):
+        now = time.time()
+        rows = self._rows([900, 20])
+
+        ranges = sync_ranges.history_ranges(rows, 0.0, now - SYNC_WINDOW_SECS)
+
+        assert len(ranges) == 2
+        assert [payload[0] for _lo, _hi, _mode, payload in ranges] == [1, 1]
+
+    def test_a_node_with_no_old_history_describes_none_of_it(self):
+        now = time.time()
+
+        assert sync_ranges.history_ranges(self._rows([2, 3]), 0.0,
+                                          now - SYNC_WINDOW_SECS) == []
+        assert sync_ranges.history_ranges([], 0.0, now) == []
+
+    def test_the_oldest_buckets_merge_once_there_are_too_many(self):
+        now = time.time()
+        rows = self._rows([365 * n + 30 for n in range(1, 25)])
+
+        ranges = sync_ranges.history_ranges(rows, 0.0, now - SYNC_WINDOW_SECS)
+
+        assert len(ranges) <= sync_ranges.MAX_HISTORY_RANGES
+        assert sum(payload[0] for _lo, _hi, _mode, payload in ranges) == len(rows)
+        assert ranges[0][0] == 0.0, "the merged bucket lost the oldest rows"
+
+    def test_a_decade_costs_under_a_kilobyte(self):
+        now = time.time()
+        rows = self._rows([n * 30 for n in range(1, 120)])
+
+        ranges = sync_ranges.history_ranges(rows, 0.0, now - SYNC_WINDOW_SECS)
+
+        assert len(ranges) <= sync_ranges.MAX_HISTORY_RANGES
+        assert sync_ranges.packed_size(ranges) < 1024, \
+            "ten years of history did not fit in a kilobyte"
+
+
+class TestHistoryOverADirectSession:
+    """The window a path affords, which is where the two differ.
+
+    On the mesh a description stops at the recent window and a member who
+    joined later never hears that anything older exists. Over a direct session
+    it reaches the whole transcript, because the calendar ladder makes saying
+    so cost a fingerprint a year.
+    """
+
+    def _channel_with_old_history(self, peer_factory, **kwargs):
+        alice = peer_factory("alice", **kwargs)
+        bob = peer_factory("bob", **kwargs)
+        ch_hash = alice.channel_mgr.create_channel("history", "", "public")
+        _seed_channel_on_peer(bob, ch_hash, "history", alice.identity.hash_hex)
+        alice.subscription_mgr._subscribers[ch_hash] = {bob.identity.hash_hex}
+        bob.subscription_mgr._subscribers[ch_hash] = {alice.identity.hash_hex}
+        ancient = _insert_message(alice.storage, ch_hash,
+                                  alice.identity.hash_hex, "ancient history",
+                                  time.time() - SYNC_WINDOW_SECS - 30 * 86400)
+        recent = _insert_message(alice.storage, ch_hash,
+                                 alice.identity.hash_hex, "yesterday",
+                                 time.time() - 86400)
+        return alice, bob, ch_hash, ancient, recent
+
+    def test_a_late_joiner_is_offered_what_it_cannot_ask_about(self, peer_factory):
+        """Bob holds nothing old, so he cannot describe that span; the answer
+        to his ordinary re-check is what tells him it is there."""
+        alice, bob, ch_hash, ancient, recent = self._channel_with_old_history(
+            peer_factory, direct=True)
+
+        bob.sync_mgr.on_peer_appeared(alice.identity.hash_hex)
+
+        assert wait_for_message(bob.storage, ch_hash, recent, timeout=10), \
+            "the recent message never arrived"
+        assert wait_for_message(bob.storage, ch_hash, ancient, timeout=20), \
+            "the history behind the window was never offered"
+
+    @pytest.mark.reticulum_path
+    def test_the_mesh_never_asks_about_it(self, peer_factory):
+        alice, bob, ch_hash, ancient, recent = self._channel_with_old_history(
+            peer_factory)
+
+        bob.sync_mgr.on_peer_appeared(alice.identity.hash_hex)
+
+        assert wait_for_message(bob.storage, ch_hash, recent, timeout=10)
+        assert not wait_for(
+            lambda: bob.storage.has_message(ch_hash, ancient), timeout=3.0), \
+            "the mesh reached behind its own window"
+
+    def test_a_routine_re_check_still_starts_at_the_recent_window(self,
+                                                                 peer_factory):
+        """The claim TestRoutineReCheckWindow makes, on the path that reaches
+        furthest: what widens is what the description offers behind the start,
+        never where the request starts."""
+        alice, bob, ch_hash, _ancient, _recent = self._channel_with_old_history(
+            peer_factory, direct=True)
+        for i in range(20):
+            _insert_message(bob.storage, ch_hash, alice.identity.hash_hex,
+                            f"row {i}", time.time() - 100 + i)
+
+        sent = _capture(bob)
+        bob.sync_mgr.on_peer_appeared(alice.identity.hash_hex)
+
+        request = _requests(sent)[0]
+        assert request[F_SYNC_WINDOW_START] >= time.time() - SYNC_WINDOW_SECS - 5
+        ranges = sync_ranges.unpack_ranges(request[F_SYNC_RANGES])
+        assert ranges[0][0] >= time.time() - SYNC_WINDOW_SECS - 5, \
+            "a node holding nothing old still described a span behind it"
