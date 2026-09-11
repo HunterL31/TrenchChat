@@ -95,6 +95,11 @@ class VoiceManager:
         self._joined_at = 0.0
         self._muted = False
         self._last_state_sent = 0.0
+        # Whether this node's own join has gone out yet. Until it has, this
+        # node says nothing about itself: a peer that hears a state first
+        # records a discovered occupant, and the join it sends a moment later
+        # is then read as a refresh and never announces the arrival.
+        self._join_announced = False
         self._state_dirty = False
         self._audio_pipeline = None
         self._audio_error = ""
@@ -163,6 +168,10 @@ class VoiceManager:
                 return False
             self._session_channel = channel_hash_hex
             self._joined_at = now
+            self._join_announced = False
+            # Set here rather than after the broadcast below, so a tick
+            # between the two does not find the refresh overdue.
+            self._last_state_sent = now
             self._upsert_entry(channel_hash_hex, self._identity.hash_hex,
                                muted=self._muted, joined_at=now, now=now)
             peers = [p for p in roster if p != self._identity.hash_hex]
@@ -172,7 +181,7 @@ class VoiceManager:
         self._start_audio()
         self._play_cue(join=True)
         self._broadcast(MT_VOICE_JOIN, channel_hash_hex)
-        self._last_state_sent = now
+        self._join_announced = True
         if self._transport is not None:
             for peer_hex in peers:
                 self._transport.connect(peer_hex)
@@ -187,6 +196,7 @@ class VoiceManager:
         if channel_hash_hex is None:
             return
         self._broadcast(MT_VOICE_LEAVE, channel_hash_hex)
+        self._join_announced = False
         # Cleared before the transport stops: _authorize_link compares against
         # it, so a VP_HELLO arriving in between would be authorised against
         # the session we are leaving and repopulate the connection table after
@@ -567,8 +577,12 @@ class VoiceManager:
                                codec=codec)
 
         if channel_hash_hex == self._session_channel:
+            # Answering before our own join has gone out would reach them
+            # first and make this node a discovered occupant instead of a
+            # joiner; the join already on its way tells them the same thing.
             if msg_type == MT_VOICE_JOIN:
-                self._send_state_to(sender_hex, channel_hash_hex)
+                if self._join_announced:
+                    self._send_state_to(sender_hex, channel_hash_hex)
                 if newcomer:
                     self._play_cue(join=True)
             if self._transport is not None:

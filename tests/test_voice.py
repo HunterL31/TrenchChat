@@ -555,6 +555,49 @@ class TestUnavailableAudioReason:
         assert status["reason"] == "opus codec unavailable: libopus not found"
 
 
+class TestJoinAnnouncedFirst:
+    """A node says nothing about itself until its own join has gone out.
+
+    A JOIN arriving while this node is still joining used to be answered
+    with a STATE describing us, which reached the newcomer before our own
+    JOIN did: they recorded a discovered occupant and never heard us arrive.
+    The window is the time audio takes to start, which is long enough to
+    lose the race on a direct session.
+    """
+
+    def test_a_join_arriving_mid_join_is_not_answered_before_our_own(
+            self, peer_factory):
+        (alice, bob), ch_hash = _setup_open_channel(peer_factory)
+        sent: list[str] = []
+        original_send = bob.router.send
+
+        def record(dest_hex, fields, content="", **kwargs):
+            sent.append((fields or {}).get(F_MSG_TYPE))
+            return original_send(dest_hex, fields, content, **kwargs)
+
+        bob.router.send = record
+        original_start = bob.voice_mgr._start_audio
+
+        def start_audio_with_a_join_arriving():
+            _craft_voice_message(alice, bob, {
+                F_MSG_TYPE:         MT_VOICE_JOIN,
+                F_CHANNEL_HASH:     bytes.fromhex(ch_hash),
+                F_TIMESTAMP:        time.time(),
+                F_VOICE_MUTED:      False,
+                F_VOICE_JOINED_AT:  time.time(),
+            })
+            assert wait_for(
+                lambda: any(e["identity_hash"] == alice.identity.hash_hex
+                            for e in bob.voice_mgr.get_roster(ch_hash)),
+                msg="alice's join to land while bob is still joining")
+            original_start()
+
+        bob.voice_mgr._start_audio = start_audio_with_a_join_arriving
+        assert bob.voice_mgr.join_voice(ch_hash)
+        assert sent[0] == MT_VOICE_JOIN, \
+            "this node described itself before announcing its join"
+
+
 class TestVoiceEventCues:
     """Join/leave blips: once per genuine roster transition, never for
     refreshes or discovered occupants, and off when configured off."""
