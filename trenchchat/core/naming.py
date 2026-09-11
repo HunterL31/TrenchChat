@@ -22,6 +22,10 @@ import RNS
 
 from trenchchat import APP_NAME, APP_ASPECT_CHANNEL, APP_ASPECT_SERVER
 
+# Nomad Network's own aspect path, which TrenchChat hosts a node under.
+NOMAD_APP_NAME = "nomadnetwork"
+NOMAD_ASPECT_NODE = "node"
+
 
 class NameInUseError(ValueError):
     """Raised when a name derives to an address this identity already owns.
@@ -50,6 +54,14 @@ def server_hash_for(creator_identity_hash: bytes, name: str) -> str:
     """The server hash a given creator would mint for *name*."""
     return RNS.Destination.hash(
         creator_identity_hash, APP_NAME, APP_ASPECT_SERVER, sanitise_name(name)
+    ).hex()
+
+
+def nomad_node_hash_for_identity(identity_hash_hex: str) -> str:
+    """The nomadnetwork.node destination hash a peer's node would announce
+    under, derived purely from their identity hash."""
+    return RNS.Destination.hash(
+        bytes.fromhex(identity_hash_hex), NOMAD_APP_NAME, NOMAD_ASPECT_NODE
     ).hex()
 
 

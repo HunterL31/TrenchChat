@@ -28,6 +28,7 @@ from trenchchat.core.fileutils import clean_filename as _clean_filename
 # The fetch reasons, states and connection classes are the shared link
 # client's; they are imported here so callers of the node plane keep one
 # import site, as they had before the two planes shared an engine.
+from trenchchat.core.naming import NOMAD_APP_NAME, NOMAD_ASPECT_NODE  # noqa: F401
 from trenchchat.network.link_client import (
     FETCH_BAD_PATH, FETCH_BAD_RESPONSE, FETCH_BUSY, FETCH_IDENTITY_MISMATCH,
     FETCH_LINK_CLOSED, FETCH_NOT_FOUND, FETCH_SEND_FAILED, FETCH_TIMEOUT,
@@ -36,10 +37,6 @@ from trenchchat.network.link_client import (
     SERVE_RATE_LIMIT, SERVE_RATE_WINDOW, LinkClient, LinkClientBase,
     LinkConn as _NodeConn, LinkFetch as _Fetch, _IDLE, _LINKED,
 )
-
-NOMAD_APP_NAME = "nomadnetwork"
-NOMAD_ASPECT_NODE = "node"
-
 NODE_REDIAL_BACKOFF = LINK_REDIAL_BACKOFF
 # A link is kept for the whole time a node is being read, not just between
 # back-to-back requests: nomadnet holds one open until you browse elsewhere,
