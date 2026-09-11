@@ -23,6 +23,7 @@ import asyncio
 import base64
 import json
 import secrets
+import time
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -63,6 +64,7 @@ from trenchchat.core.link_quality import (
 from trenchchat.core.reticulum_config import (
     load_reticulum_config, write_reticulum_config,
 )
+from trenchchat.network.base import PATH_DIRECT, PATH_OFFLINE, PATH_RETICULUM
 from trenchchat.network.file_transport import (
     FILE_FETCH_TIMEOUT_SECS, RNSFileTransport,
 )
@@ -714,6 +716,14 @@ def create_app(backend: Backend, *, token: str | None = None,
     def _on_voice_session(state: str):
         bus.emit("voice_session", state=state)
 
+    def _on_path_changed(peer_hex: str, path: str):
+        # The member roster renders this per row; "since" is when the session
+        # came up, so a client can show how long a pair has been direct.
+        direct = backend.router.direct_transport
+        session = direct.session_for(peer_hex) if direct is not None else None
+        bus.emit("path_changed", peer=peer_hex, path=path,
+                 since=session.opened_at if session is not None else time.time())
+
     backend.messaging.add_message_callback(_on_message)
     backend.messaging.add_delivery_status_callback(_on_delivery_status)
     backend.invite_mgr.add_invite_callback(_on_invite)
@@ -757,6 +767,7 @@ def create_app(backend: Backend, *, token: str | None = None,
     backend.voice_mgr.add_roster_callback(_on_voice_roster)
     backend.voice_mgr.add_speaking_callback(_on_voice_speaking)
     backend.voice_mgr.add_session_callback(_on_voice_session)
+    backend.router.add_path_changed_callback(_on_path_changed)
     backend.node_browser.add_node_callback(_on_nomad_node)
     backend.node_browser.add_fetch_callback(_on_nomad_fetch)
 
@@ -1609,9 +1620,51 @@ def create_app(backend: Backend, *, token: str | None = None,
         ok = actions.leave_channel(backend.storage, backend.subscription_mgr, channel_hash)
         return {"ok": ok}
 
+    def _member_path(peer_hex: str) -> str:
+        """Which path this node reaches a member over, as the roster shows it.
+
+        Local knowledge only: this node's own sessions, never a claim about
+        who else is directly connected to whom. This node is not a peer of
+        itself, so its own row is simply on the mesh like everyone it has no
+        session with.
+        """
+        if peer_hex == backend.identity.hash_hex:
+            return PATH_RETICULUM
+        if backend.router.path_for(peer_hex) == PATH_DIRECT:
+            return PATH_DIRECT
+        return (PATH_RETICULUM if backend.presence_mgr.is_online(peer_hex)
+                else PATH_OFFLINE)
+
     @app.get("/channels/{channel_hash}/members")
     def list_members(channel_hash: str):
-        return [dict(row) for row in backend.storage.get_members(channel_hash)]
+        rows = []
+        for row in backend.storage.get_members(channel_hash):
+            member = dict(row)
+            member["path"] = _member_path(member["identity_hash"])
+            rows.append(member)
+        return rows
+
+    @app.get("/upgrade/sessions")
+    def upgrade_sessions():
+        """This node's direct sessions, for the Settings diagnostics panel.
+
+        last_failure is empty until Phase 3, which is what knows why an
+        eligible peer has no session.
+        """
+        direct = backend.router.direct_transport
+        sessions = []
+        for entry in (direct.sessions() if direct is not None else []):
+            sessions.append({
+                "peer": entry["peer"],
+                "display_name": resolve_display_name(
+                    entry["peer"], backend.identity.hash_hex, backend.storage,
+                    backend.config),
+                "since": entry["since"],
+                "round_trip_secs": entry["round_trip_secs"],
+                "bytes_in": entry["bytes_in"],
+                "bytes_out": entry["bytes_out"],
+            })
+        return {"sessions": sessions, "last_failure": {}}
 
     @app.get("/channels/{channel_hash}/subscribers")
     def list_subscribers(channel_hash: str):

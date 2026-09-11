@@ -20,7 +20,7 @@ from pathlib import Path
 import RNS
 
 from trenchchat.config import DATA_DIR, Config
-from trenchchat.core import actions, lockbox
+from trenchchat.core import actions, lockbox, upgrade
 from trenchchat.core.bandwidth import SAMPLE_INTERVAL_SECS, BandwidthMonitor
 from trenchchat.core.connectivity import LinkWatcher
 from trenchchat.core.sync import SYNC_RETRY_SECS
@@ -48,6 +48,7 @@ from trenchchat.core.voice import VoiceManager
 from trenchchat.core.audio.engine import make_tone_pipeline
 from trenchchat.core.files import FileManager
 from trenchchat.core.node_browser import NodeBrowserManager
+from trenchchat.network.ip.transport import IPTransport
 from trenchchat.network.lxmf_transport import REANNOUNCE_INTERVAL_SECS
 from trenchchat.network.router import Router
 from trenchchat.network.file_transport import RNSFileTransport
@@ -179,8 +180,13 @@ class Backend:
 
         self.identity = Identity(self.config, identity_path=data_dir / "identity")
         self.storage = Storage(db_path=data_dir / "storage.db")
+        # Testers share a host, so the kernel picks the port rather than four
+        # of them contending for the configured one.
+        self.config.upgrade_listen_port = 0
+        self.direct_transport = self._build_direct_transport()
         self.router = Router(self.config, self.identity,
-                             storagepath=str(data_dir / "messagestore"))
+                             storagepath=str(data_dir / "messagestore"),
+                             direct_transport=self.direct_transport)
         self._wire_managers(
             presence_timeout_secs=_PRESENCE_TIMEOUT_SECS,
             presence_beacon_after_secs=_PRESENCE_BEACON_AFTER_SECS,
@@ -217,9 +223,31 @@ class Backend:
         self.rns_config_path = str(Path(RNS.Reticulum.configdir) / "config")
         self.identity = Identity(self.config)
         self.storage = Storage()
-        self.router = Router(self.config, self.identity)
+        self.direct_transport = self._build_direct_transport()
+        self.router = Router(self.config, self.identity,
+                             direct_transport=self.direct_transport)
         self._wire_managers(use_tone_audio=False)
         return self
+
+    def _build_direct_transport(self) -> IPTransport | None:
+        """The direct IP path, when this node is set to hold sessions.
+
+        The gate is core/upgrade.is_eligible, consulted on every inbound
+        HELLO before a frame is read: a peer holds a session only while it
+        shares an invite-only channel or a server with this node. A port that
+        cannot be bound is logged and the node carries on without a listener.
+        """
+        if not self.config.upgrade_enabled:
+            return None
+        try:
+            return IPTransport(
+                self.config, self.identity,
+                authorize=lambda peer_hex: upgrade.is_eligible(
+                    self.storage, self.identity.hash_hex, peer_hex),
+            )
+        except Exception as e:
+            RNS.log(f"TrenchChat: direct sessions are off: {e}", RNS.LOG_ERROR)
+            return None
 
     def _wire_managers(self, presence_timeout_secs: float | None = None,
                        presence_beacon_after_secs: float | None = None,
@@ -385,7 +413,6 @@ class Backend:
         )
 
         self.channel_mgr.restore_owned_channels()
-        self.server_mgr.restore_owned_servers()
 
     def _on_link_restored(self) -> None:
         """Catch up after our own link returns.
