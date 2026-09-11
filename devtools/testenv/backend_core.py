@@ -48,6 +48,7 @@ from trenchchat.core.voice import VoiceManager
 from trenchchat.core.audio.engine import make_tone_pipeline
 from trenchchat.core.files import FileManager
 from trenchchat.core.node_browser import NodeBrowserManager
+from trenchchat.network.ip.file_plane import IPFileTransport
 from trenchchat.network.ip.transport import IPTransport
 from trenchchat.network.lxmf_transport import REANNOUNCE_INTERVAL_SECS
 from trenchchat.network.router import Router
@@ -295,10 +296,13 @@ class Backend:
             self.config, transport=self.direct_transport,
         )
         self.file_transport = RNSFileTransport(self.identity)
+        self.direct_file_transport = (
+            IPFileTransport(self.direct_transport)
+            if self.direct_transport is not None else None)
         self.file_mgr = FileManager(self.identity, self.storage,
                                     self.presence_mgr,
                                     transport=self.file_transport,
-                                    router=self.router)
+                                    direct_transport=self.direct_file_transport)
         self.user_directory = UserDirectory(self.identity.hash_hex)
         trenchchat_gate = actions.trenchchat_peer_gate(self.storage, self.user_directory)
         self.avatar_mgr = AvatarManager(

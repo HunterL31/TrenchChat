@@ -192,6 +192,9 @@ class SessionHooks:
     on_closed: Callable[["DirectSession", str], None]
     dispatch: Callable[..., None]
     on_datagram: Callable[["DirectSession", bytes], None] | None = None
+    on_request: Callable[["DirectSession", int, int, str, dict], None] | None = None
+    on_response: Callable[["DirectSession", int, bool, dict], None] | None = None
+    on_observed: Callable[["DirectSession", str, int], None] | None = None
 
 
 @dataclass
@@ -245,6 +248,7 @@ class DirectSession(QuicConnectionProtocol):
         self._pending: dict[bytes, _Pending] = {}
         self._datagram_transport = None
         self._handshake_task: asyncio.Task | None = None
+        self._peer_address: tuple | None = None
         self._verifier: RNS.Identity | None = None
         self._ready = asyncio.Event()
         # aioquic's own wait_connected() only records the handshake when a
@@ -253,6 +257,16 @@ class DirectSession(QuicConnectionProtocol):
         self._tls_done = asyncio.Event()
 
     # --- lifecycle ---
+
+    def datagram_received(self, data: bytes, addr) -> None:
+        """Keep where the peer's packets arrive from, then carry on as usual.
+
+        The accepting side is the only party that can see a caller's
+        translated address, and telling the caller is what lets a node behind a
+        NAT name itself to anybody else.
+        """
+        self._peer_address = addr
+        super().datagram_received(data, addr)
 
     def connection_made(self, transport) -> None:
         """Start the listening side's handshake as soon as there is a socket."""
@@ -462,6 +476,7 @@ class DirectSession(QuicConnectionProtocol):
             peer_hash, public_key = verify_hello(
                 payload, own_fingerprint, peer_fingerprint, nonce, expected)
             self._authenticate(peer_hash.hex(), public_key)
+            self._note_observed(frames.read_observed(payload))
         except (HelloRejected, frames.FrameError, asyncio.TimeoutError,
                 ValueError) as e:
             self.fail(str(e) or type(e).__name__)
@@ -494,11 +509,28 @@ class DirectSession(QuicConnectionProtocol):
                 own_fingerprint, peer_fingerprint, self._nonce, timestamp))
             self._write(frames.hello_frame(
                 self._identity.rns_identity.get_public_key(), timestamp,
-                signature))
+                signature, seen=self._observed_peer_address()))
             self._authenticate(peer_hex, public_key)
         except (HelloRejected, frames.FrameError, asyncio.TimeoutError,
                 ValueError) as e:
             self.fail(str(e) or type(e).__name__)
+
+    def _observed_peer_address(self) -> tuple[str, int] | None:
+        """Where this session's packets arrive from, as a HELLO names it."""
+        address = self._peer_address
+        if not isinstance(address, tuple) or len(address) < 2:
+            return None
+        host, port = address[0], address[1]
+        if not isinstance(host, str) or not isinstance(port, int):
+            return None
+        return host, port
+
+    def _note_observed(self, observed: tuple[str, int] | None) -> None:
+        """Hand up the address the peer says it saw this node arrive from."""
+        if observed is None or self._hooks.on_observed is None:
+            return
+        self._hooks.dispatch(self._hooks.on_observed, self, observed[0],
+                             observed[1])
 
     def _authenticate(self, peer_hex: str, public_key: bytes) -> None:
         """Mark the session proven, hand it up, and let everything held through.
@@ -542,9 +574,14 @@ class DirectSession(QuicConnectionProtocol):
                 self._hooks.on_message(self, envelope, signature)
             elif kind == frames.KIND_ACK:
                 self._on_ack(frames.read_ack(payload))
-            elif kind in (frames.KIND_REQ, frames.KIND_RESP):
-                RNS.log(f"TrenchChat [ip]: ignoring a request frame on stream "
-                        f"{stream_id} from {self.peer_hex[:12]}…", RNS.LOG_DEBUG)
+            elif kind == frames.KIND_REQ:
+                request_id, op, body = frames.read_request(payload)
+                if self._hooks.on_request is not None:
+                    self._hooks.on_request(self, stream_id, request_id, op, body)
+            elif kind == frames.KIND_RESP:
+                request_id, ok, body = frames.read_response(payload)
+                if self._hooks.on_response is not None:
+                    self._hooks.on_response(self, request_id, ok, body)
             elif kind in frames.HANDSHAKE_KINDS:
                 self.fail("a second hello on an authenticated session")
             else:
@@ -588,6 +625,39 @@ class DirectSession(QuicConnectionProtocol):
             self._write(frame)
         except Exception as e:
             self.fail(f"could not write a message: {e}")
+            return False
+        return True
+
+    def open_request(self, request_id: int, op: str, payload: dict) -> bool:
+        """Put one request on a stream of its own. False if it could not go.
+
+        A stream each is what keeps a chat message from waiting behind eight
+        megabytes of file chunks: QUIC orders within a stream and not across
+        them.
+        """
+        if not self._authenticated or self._closed_fired:
+            return False
+        try:
+            stream_id = self._quic.get_next_available_stream_id(
+                is_unidirectional=False)
+            self._decoders[stream_id] = frames.FrameDecoder(frames.MAX_FRAME_BYTES)
+            self._write(frames.req_frame(request_id, op, payload), stream_id)
+        except Exception as e:
+            RNS.log(f"TrenchChat [ip]: could not send a request to "
+                    f"{self.peer_hex[:12]}…: {e}", RNS.LOG_WARNING)
+            return False
+        return True
+
+    def send_response(self, stream_id: int, request_id: int, ok: bool,
+                      payload: dict) -> bool:
+        """Answer one request on the stream it arrived on."""
+        if not self._authenticated or self._closed_fired:
+            return False
+        try:
+            self._write(frames.resp_frame(request_id, ok, payload), stream_id)
+        except Exception as e:
+            RNS.log(f"TrenchChat [ip]: could not answer {self.peer_hex[:12]}…: "
+                    f"{e}", RNS.LOG_WARNING)
             return False
         return True
 

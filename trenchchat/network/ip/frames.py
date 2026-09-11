@@ -7,8 +7,7 @@ three are the handshake, and nothing else is read until it passes. MSG carries
 one message envelope with the author's signature over it, and ACK names an
 envelope the receiver has taken, which is what lets "delivered" mean
 acknowledged on this path. REQ and RESP carry the file plane's exchanges on
-their own streams, so a chat message never waits behind a chunk; they are
-defined and tested here and consumed in Phase 4.
+their own streams, so a chat message never waits behind a chunk.
 
 Every decode states its limits rather than trusting the payload, the way
 protocol.unpack_wire does: the peer on the other end is assumed hostile, and a
@@ -49,6 +48,9 @@ MAX_WIRE_BIN = MAX_FRAME_BYTES
 # Domain tag, so an envelope signature can never be replayed as one of the
 # other structures the same Ed25519 key signs.
 ENVELOPE_DOMAIN = b"trenchchat-session-v1"
+
+# The longest address text a HELLO may name: an IPv6 literal with a zone.
+MAX_HOST_CHARS = 64
 
 IDENTITY_HASH_BYTES = 16
 ENVELOPE_HASH_BYTES = 32
@@ -190,15 +192,21 @@ def challenge_frame(nonce: bytes) -> bytes:
 
 
 def hello_frame(public_key: bytes, timestamp: int, signature: bytes,
-                certificate: bytes | None = None) -> bytes:
+                certificate: bytes | None = None,
+                seen: tuple[str, int] | None = None) -> bytes:
     """This node's identity, bound to this connection by the signature.
 
     certificate is set by the connecting side only: the listener's own
-    certificate is already pinned by whoever dialled it.
+    certificate is already pinned by whoever dialled it. seen is set by the
+    accepting side only: it is where this node saw the caller arrive from,
+    which is the caller's own translated address and the one thing it cannot
+    learn from inside its own network.
     """
     payload = {"pub": public_key, "ts": int(timestamp), "sig": signature}
     if certificate is not None:
         payload["cert"] = certificate
+    if seen is not None:
+        payload["seen"] = [str(seen[0]), int(seen[1])]
     return encode_frame(KIND_HELLO, payload)
 
 
@@ -225,6 +233,23 @@ def resp_frame(request_id: int, ok: bool, payload: dict) -> bytes:
 
 
 # --- frame readers ---
+
+
+def read_observed(payload: dict) -> tuple[str, int] | None:
+    """The address a HELLO says it saw us at, or None for anything else.
+
+    Every field is bounded here: it is a claim by the peer on the other end,
+    useful only as a candidate to try next time and never trusted for anything.
+    """
+    seen = payload.get("seen")
+    if not isinstance(seen, (list, tuple)) or len(seen) != 2:
+        return None
+    host, port = seen
+    if not isinstance(host, str) or not 1 <= len(host) <= MAX_HOST_CHARS:
+        return None
+    if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
+        return None
+    return host, port
 
 
 def read_msg(payload: dict) -> tuple[bytes, bytes]:

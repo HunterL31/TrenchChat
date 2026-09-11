@@ -49,6 +49,12 @@ SWEEP_INTERVAL_SECS = 1.0
 # here; how often they may send a control message is Router's business.
 MAX_QUEUED_INBOUND = 256
 
+# Requests one session may have being answered at once. A plane bounds its own
+# work on top of this (the file plane counts concurrent serves); this is the
+# floor under every plane, so a peer cannot make this node queue work simply by
+# opening streams faster than it answers them.
+MAX_INFLIGHT_REQUESTS = 8
+
 CALLBACK_WORKERS = 4
 
 OPEN_TIMEOUT_SECS = 20.0
@@ -126,6 +132,14 @@ class IPTransport(Transport):
         self._inbound_callback = None
         self._peer_appeared = None
         self._path_changed = None
+        self._observed_callback = None
+        self._datagram_callback = None
+        self._request_handlers: dict = {}
+        # (session id, request id) -> what to call with the answer.
+        self._requests: dict[tuple[int, int], object] = {}
+        self._inflight_requests: dict[int, int] = {}
+        self._request_lock = threading.Lock()
+        self._next_request_id = 0
 
         self._sessions: dict[str, DirectSession] = {}
         self._queues: dict[int, _SerialQueue] = {}
@@ -477,6 +491,10 @@ class IPTransport(Transport):
             on_message=self._on_message,
             on_closed=self._on_closed,
             dispatch=self._dispatch,
+            on_datagram=self._on_datagram,
+            on_request=self._on_request,
+            on_response=self._on_response,
+            on_observed=self._on_observed,
         )
 
     def _on_ready(self, peer_session: DirectSession) -> None:
@@ -496,6 +514,7 @@ class IPTransport(Transport):
     def _on_closed(self, peer_session: DirectSession, reason: str) -> None:
         """A session ended: the peer is back on whatever path is left."""
         self._pending_handshakes.discard(peer_session)
+        self._fail_requests(peer_session)
         peer_hex = peer_session.peer_hex
         with self._sessions_lock:
             self._queues.pop(id(peer_session), None)
@@ -601,6 +620,155 @@ class IPTransport(Transport):
     def set_inbound_callback(self, callback) -> None:
         """Register the single callback every authenticated message arrives on."""
         self._inbound_callback = callback
+
+    # --- requests ---
+
+    def set_request_handler(self, op: str, handler) -> None:
+        """Register what answers one operation, or None to stop answering it.
+
+        handler(peer_hex, payload) -> (ok, payload), called on a worker thread
+        with the identity the session proved. A plane registers one of these
+        rather than reaching into a session.
+        """
+        if handler is None:
+            self._request_handlers.pop(op, None)
+        else:
+            self._request_handlers[op] = handler
+
+    def send_request(self, peer_hex: str, op: str, payload: dict,
+                     on_result) -> int | None:
+        """Put one request on a peer's session. None when there is no session.
+
+        on_result(ok, payload) is called on a worker thread with the answer, or
+        with (False, {}) if the session ends before one arrives.
+        """
+        peer_session = self.session_for(peer_hex)
+        if peer_session is None or not peer_session.authenticated:
+            return None
+        with self._request_lock:
+            self._next_request_id += 1
+            request_id = self._next_request_id
+            self._requests[(id(peer_session), request_id)] = on_result
+        try:
+            self._loop.call_soon_threadsafe(peer_session.open_request,
+                                            request_id, op, payload)
+        except RuntimeError:
+            with self._request_lock:
+                self._requests.pop((id(peer_session), request_id), None)
+            return None
+        return request_id
+
+    def _on_request(self, peer_session: DirectSession, stream_id: int,
+                    request_id: int, op: str, payload: dict) -> None:
+        """One inbound request, answered off the loop or refused outright."""
+        handler = self._request_handlers.get(op)
+        key = id(peer_session)
+        if handler is None:
+            peer_session.send_response(stream_id, request_id, False, {})
+            return
+        with self._request_lock:
+            live = self._inflight_requests.get(key, 0)
+            if live >= MAX_INFLIGHT_REQUESTS:
+                RNS.log(f"TrenchChat [ip]: refusing a request from "
+                        f"{peer_session.peer_hex[:12]}…: {MAX_INFLIGHT_REQUESTS} "
+                        f"already in flight", RNS.LOG_WARNING)
+                peer_session.send_response(stream_id, request_id, False, {})
+                return
+            self._inflight_requests[key] = live + 1
+        if not self._submit(self._answer_request, peer_session, stream_id,
+                            request_id, handler, payload):
+            self._release_request(key)
+
+    def _answer_request(self, peer_session: DirectSession, stream_id: int,
+                        request_id: int, handler, payload: dict) -> None:
+        """Run one request handler and write its answer back. On a worker thread."""
+        ok, body = False, {}
+        try:
+            ok, body = handler(peer_session.peer_hex, payload)
+        except Exception as e:
+            RNS.log(f"TrenchChat [ip]: request handler error for "
+                    f"{peer_session.peer_hex[:12]}…: {e}", RNS.LOG_ERROR)
+        finally:
+            self._release_request(id(peer_session))
+        try:
+            self._loop.call_soon_threadsafe(peer_session.send_response,
+                                            stream_id, request_id, bool(ok),
+                                            body or {})
+        except RuntimeError:
+            pass
+
+    def _release_request(self, key: int) -> None:
+        """Give one of a session's in-flight request slots back."""
+        with self._request_lock:
+            live = self._inflight_requests.get(key, 0) - 1
+            if live > 0:
+                self._inflight_requests[key] = live
+            else:
+                self._inflight_requests.pop(key, None)
+
+    def _on_response(self, peer_session: DirectSession, request_id: int,
+                     ok: bool, payload: dict) -> None:
+        """One answer, handed to whoever asked."""
+        with self._request_lock:
+            on_result = self._requests.pop((id(peer_session), request_id), None)
+        if on_result is not None:
+            self._dispatch(on_result, ok, payload)
+
+    def _fail_requests(self, peer_session: DirectSession) -> None:
+        """Answer everything outstanding on a session that has ended."""
+        key = id(peer_session)
+        with self._request_lock:
+            stranded = [(request_key, cb) for request_key, cb
+                        in self._requests.items() if request_key[0] == key]
+            for request_key, _cb in stranded:
+                del self._requests[request_key]
+            self._inflight_requests.pop(key, None)
+        for _request_key, on_result in stranded:
+            self._dispatch(on_result, False, {})
+
+    # --- datagrams ---
+
+    def set_datagram_callback(self, callback) -> None:
+        """Register what receives a session's unreliable datagrams.
+
+        callback(peer_hex, payload), called on the transport's loop: the voice
+        plane's frames arrive here and a jitter buffer push must not wait on a
+        worker.
+        """
+        self._datagram_callback = callback
+
+    def send_datagram(self, peer_hex: str, payload: bytes) -> bool:
+        """Send one unreliable datagram to a peer. False without a session."""
+        peer_session = self.session_for(peer_hex)
+        if peer_session is None:
+            return False
+        try:
+            self._loop.call_soon_threadsafe(peer_session.send_datagram, payload)
+        except RuntimeError:
+            return False
+        return True
+
+    def _on_datagram(self, peer_session: DirectSession, payload: bytes) -> None:
+        callback = self._datagram_callback
+        if callback is not None:
+            callback(peer_session.peer_hex, payload)
+
+    # --- observed addresses ---
+
+    def set_observed_callback(self, callback) -> None:
+        """Register what learns this node's own translated address.
+
+        callback(peer_hex, host, port): where that peer saw this node arrive
+        from, which is the one thing a node behind a NAT cannot work out for
+        itself.
+        """
+        self._observed_callback = callback
+
+    def _on_observed(self, peer_session: DirectSession, host: str,
+                     port: int) -> None:
+        callback = self._observed_callback
+        if callback is not None:
+            callback(peer_session.peer_hex, host, port)
 
     # --- send ---
 
