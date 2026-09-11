@@ -1,13 +1,12 @@
 """
 Integration tests for message send/receive between peers.
 
-Uses TestTransport (from conftest) for in-process delivery.
+Uses FakeTransport (from conftest) for in-process delivery.
 """
 
 import time
 
 import pytest
-import RNS
 
 from tests.helpers import (
     wait_for,
@@ -25,7 +24,7 @@ class TestSendReceive:
     def test_send_receive_message(self, peer_factory):
         """
         Alice creates a public channel, Bob subscribes, Alice sends a message;
-        Bob's storage receives it via TestTransport.
+        Bob's storage receives it via FakeTransport.
         """
         alice = peer_factory("alice")
         bob = peer_factory("bob")
@@ -47,7 +46,7 @@ class TestSendReceive:
         assert len(alice_msgs) == 1
         msg_id = alice_msgs[0]["message_id"]
 
-        # Bob receives it via TestTransport
+        # Bob receives it via FakeTransport
         assert wait_for_message(bob.storage, ch_hash, msg_id, timeout=5), \
             "Bob did not receive Alice's message"
 
@@ -510,7 +509,7 @@ class TestDeliveryState:
         bob.storage.subscribe(ch_hash)
 
         # Force the path to be unknown at send time so the message is queued.
-        monkeypatch.setattr(RNS.Identity, "recall", staticmethod(lambda *a, **k: None))
+        alice.transport.unreachable.add(bob.identity.hash_hex)
         alice.messaging.send_message(
             channel_hash_hex=ch_hash,
             content="Reaches Bob later",
@@ -520,7 +519,7 @@ class TestDeliveryState:
         assert alice.messaging.get_delivery_state(msg_id) == DELIVERY_PENDING
 
         # Path resolves; flushing hands the message to the transport.
-        monkeypatch.undo()
+        alice.transport.unreachable.clear()
         alice.messaging.flush_pending(bob.identity.hash_hex)
 
         assert wait_for(
@@ -656,9 +655,9 @@ class TestMessageIdWireEncoding:
         captured = []
         original = peer.router.send
 
-        def spy(lxm):
-            captured.append(dict(getattr(lxm, "fields", None) or {}))
-            return original(lxm)
+        def spy(dest_hex, fields, content="", **kwargs):
+            captured.append(dict(fields))
+            return original(dest_hex, fields, content, **kwargs)
 
         monkeypatch.setattr(peer.router, "send", spy)
         return captured
@@ -678,7 +677,7 @@ class TestMessageIdWireEncoding:
 
     def test_channel_message_carries_binary_ids(self, peer_factory, monkeypatch):
         from trenchchat.core.protocol import (
-            F_LAST_SEEN_ID, F_MESSAGE_ID, F_REPLY_TO, unpack_fields,
+            F_LAST_SEEN_ID, F_MESSAGE_ID, F_REPLY_TO,
         )
 
         alice = peer_factory("alice")
@@ -695,7 +694,7 @@ class TestMessageIdWireEncoding:
                                      subscriber_hashes=recipients)
         second = alice.storage.get_latest_message_id(ch_hash)
 
-        fields = unpack_fields(captured[0])
+        fields = captured[0]
         assert fields[F_MESSAGE_ID] == bytes.fromhex(second)
         assert fields[F_REPLY_TO] == bytes.fromhex(first)
         assert fields[F_LAST_SEEN_ID] == bytes.fromhex(first)
@@ -723,8 +722,8 @@ class TestMessageIdWireEncoding:
                                      subscriber_hashes=recipients)
         second = alice.storage.get_latest_message_id(ch_hash)
 
-        from trenchchat.core.protocol import F_REPLY_TO, unpack_fields
-        assert unpack_fields(captured[0])[F_REPLY_TO] == first
+        from trenchchat.core.protocol import F_REPLY_TO
+        assert captured[0][F_REPLY_TO] == first
 
         assert wait_for_message(bob.storage, ch_hash, second)
         row = bob.storage.get_message(ch_hash, second)

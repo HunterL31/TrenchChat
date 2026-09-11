@@ -12,8 +12,9 @@ import msgpack
 import pytest
 import RNS
 
+from tests.conftest import lxmf_transport_for
 from trenchchat.network.announce import UserAnnounceHandler, lxmf_display_name
-from trenchchat.network.router import REANNOUNCE_INTERVAL_SECS
+from trenchchat.network.lxmf_transport import REANNOUNCE_INTERVAL_SECS
 
 # recall_app_data touches the running Reticulum instance.
 pytestmark = pytest.mark.usefixtures("rns_instance")
@@ -85,13 +86,14 @@ def test_unreadable_delivery_app_data_is_no_name():
 
 def test_user_announce_carries_no_payload(peer_factory, monkeypatch):
     peer = peer_factory("beacon")
+    transport = lxmf_transport_for(peer)
     announced = []
 
     def _record(self, app_data=None, **kwargs):
         announced.append((self.hash, app_data))
 
     monkeypatch.setattr(RNS.Destination, "announce", _record)
-    peer.router.announce_user()
+    transport.announce_user()
 
     assert len(announced) == 1
     assert announced[0][1] is None

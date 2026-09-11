@@ -21,15 +21,14 @@ import time
 import threading
 
 import RNS
-import LXMF
-import msgpack
 
 from trenchchat.core.actions import compute_channel_recipients
 from trenchchat.core import sync_ranges
 from trenchchat.core.protocol import (
-    F_MSG_TYPE, F_SYNC_PROBE, MT_GOODBYE, MT_PRESENCE, pack_fields,
+    F_MSG_TYPE, F_SYNC_PROBE, MT_GOODBYE, MT_PRESENCE,
 )
 from trenchchat.network.announce import lxmf_display_name
+from trenchchat.network.base import InboundMessage, SendState
 
 PRESENCE_TIMEOUT_SECS = 300
 
@@ -43,20 +42,9 @@ PRESENCE_BEACON_AFTER_SECS = 180
 PRESENCE_BEACON_JITTER_FRACTION = 0.2
 
 # How long announce_offline waits for its goodbyes to leave the process before
-# giving up on the stragglers. LXMF sends are asynchronous, so quitting straight
+# giving up on the stragglers. Sends are asynchronous, so quitting straight
 # after handing them over would kill the process before anything went out.
 GOODBYE_DRAIN_SECS = 2.0
-GOODBYE_DRAIN_POLL_SECS = 0.05
-
-# An LXMessage in any of these has stopped moving -- nothing more will happen to
-# it without another send.
-_TERMINAL_SEND_STATES = (
-    LXMF.LXMessage.SENT,
-    LXMF.LXMessage.DELIVERED,
-    LXMF.LXMessage.FAILED,
-    LXMF.LXMessage.REJECTED,
-    LXMF.LXMessage.CANCELLED,
-)
 
 
 def resolve_display_name(identity_hex: str, self_hex: str, storage, config=None) -> str:
@@ -145,7 +133,7 @@ class PresenceManager:
             RNS.log(f"TrenchChat [presence]: peer signed off {peer_hex[:12]}…", RNS.LOG_DEBUG)
             self._fire_callbacks(peer_hex, False)
 
-    def record_inbound(self, message: LXMF.LXMessage) -> str | None:
+    def record_inbound(self, message: InboundMessage) -> str | None:
         """Record what an inbound message says about its sender's presence, and
         return their identity hash hex.
 
@@ -153,15 +141,11 @@ class PresenceManager:
         alive. Both verdicts are decided here so the two never race: every
         inbound message reaches presence through this one call.
 
-        Returns None if the sender's identity can't be resolved, since
-        _last_seen is keyed by identity hash and source_hash is a delivery hash.
+        Returns None for a message with no named sender.
         """
-        if not message.source_hash:
+        sender_hex = message.source_hex
+        if not sender_hex:
             return None
-        sender_identity = RNS.Identity.recall(message.source_hash)
-        if sender_identity is None:
-            return None
-        sender_hex = sender_identity.hash.hex()
 
         fields = message.fields or {}
         msg_type = fields.get(F_MSG_TYPE)
@@ -355,31 +339,19 @@ class PresenceBeacon:
         how many left the process. Best-effort: a peer whose path we don't hold,
         or whose link doesn't come up in time, simply times us out as before.
         """
-        sent = [
-            lxm for lxm in (
-                self._send_presence(peer_hex, MT_GOODBYE)
-                for peer_hex in self._channel_peers()
-            )
-            if lxm is not None
-        ]
+        sent = sum(
+            1 for peer_hex in self._channel_peers()
+            if self._send_presence(peer_hex, MT_GOODBYE) is SendState.SENT
+        )
         if not sent:
             return 0
 
-        deadline = time.time() + drain_secs
-        while time.time() < deadline:
-            if all(getattr(lxm, "state", None) in _TERMINAL_SEND_STATES for lxm in sent):
-                break
-            time.sleep(GOODBYE_DRAIN_POLL_SECS)
-
-        delivered = sum(
-            1 for lxm in sent if getattr(lxm, "state", None) in _TERMINAL_SEND_STATES
-        )
+        self._router.drain(drain_secs)
         RNS.log(
-            f"TrenchChat [presence]: sent going-offline notice to "
-            f"{delivered}/{len(sent)} peers",
+            f"TrenchChat [presence]: sent going-offline notice to {sent} peers",
             RNS.LOG_NOTICE,
         )
-        return delivered
+        return sent
 
     # --- private helpers ---
 
@@ -408,42 +380,27 @@ class PresenceBeacon:
         return peers
 
     def _send_beacon(self, peer_hex: str) -> None:
-        if self._send_presence(peer_hex, MT_PRESENCE) is None:
+        if self._send_presence(peer_hex, MT_PRESENCE) is not SendState.SENT:
             return
         RNS.log(f"TrenchChat [presence]: beacon sent to {peer_hex[:12]}…", RNS.LOG_DEBUG)
 
-    def _send_presence(self, peer_hex: str, msg_type: str) -> "LXMF.LXMessage | None":
-        """Send a one-field presence control message. Returns the message, or
-        None if the peer's path isn't known yet."""
-        identity_hash = bytes.fromhex(peer_hex)
-        delivery_dest_hash = RNS.Destination.hash(identity_hash, "lxmf", "delivery")
-        dest_identity = RNS.Identity.recall(delivery_dest_hash)
-        if dest_identity is None:
-            RNS.Transport.request_path(delivery_dest_hash)
-            return None
+    def _send_presence(self, peer_hex: str, msg_type: str) -> SendState:
+        """Send a one-field presence control message.
 
-        dest = RNS.Destination(
-            dest_identity,
-            RNS.Destination.OUT,
-            RNS.Destination.SINGLE,
-            "lxmf",
-            "delivery",
-        )
-        lxm = LXMF.LXMessage(
-            dest,
-            self._router.delivery_destination,
-            "",
-            desired_method=LXMF.LXMessage.DIRECT,
-        )
+        NO_PATH when the peer cannot be addressed yet; the path is asked for
+        so the next beacon can go.
+        """
         fields = {F_MSG_TYPE: msg_type}
         if msg_type == MT_PRESENCE:
             probes = self._probes_for(peer_hex)
             if probes is not None:
                 fields[F_SYNC_PROBE] = probes
-        lxm.fields = pack_fields(fields)
-        self._router.send(lxm)
+        state = self._router.send(peer_hex, fields)
+        if state is SendState.NO_PATH:
+            self._router.request_path(peer_hex)
+            return state
         self.record_sent(peer_hex)
-        return lxm
+        return state
 
     def _probes_for(self, peer_hex: str) -> bytes | None:
         """Packed probes for every channel this peer shares with us, or None."""

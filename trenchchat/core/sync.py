@@ -64,7 +64,6 @@ import threading
 import time
 
 import RNS
-import LXMF
 import msgpack
 
 from trenchchat.core.control_retry import ControlRetryQueue
@@ -87,13 +86,14 @@ from trenchchat.core.protocol import (
     F_MISSED_MSG_ID, MT_PRESENCE,
     MAX_CLOCK_SKEW_SECS, MT_MISSED_DELIVERY, MT_SYNC_REQUEST, MT_SYNC_RESPONSE,
     RANGE_IDLIST, SYNC_WINDOW_SECS,
-    manifest_from_wire, message_id_from_wire, message_id_to_wire, pack_fields,
+    manifest_from_wire, message_id_from_wire, message_id_to_wire,
     unpack_wire, wire_timestamp,
 )
 from trenchchat.core.reaction import is_custom_emoji_hash
 from trenchchat.core.storage import Storage
 from trenchchat.core import sync_ranges
 from trenchchat.core.sync_status import SyncStatusTracker
+from trenchchat.network.base import InboundMessage, SendState
 from trenchchat.network.router import Router
 
 # Maximum messages returned in a single sync response (LXMF size budget)
@@ -265,17 +265,19 @@ def row_wire_size(row) -> int:
     return len(image or b"") + len(content.encode(errors="replace")) + 256
 
 
-def _cut_index(rows: list) -> int:
+def _cut_index(rows: list, max_rows: int, max_bytes: int) -> int:
     """First index past the rows that fit both the row and byte budgets."""
     used = 0
     for i, row in enumerate(rows):
         used += row_wire_size(row)
-        if i >= MAX_RESPONSE_MESSAGES or (i > 0 and used > MAX_RESPONSE_BYTES):
+        if i >= max_rows or (i > 0 and used > max_bytes):
             return i
     return len(rows)
 
 
-def _truncate_at_group_boundary(rows: list) -> tuple[list, bool]:
+def _truncate_at_group_boundary(rows: list, max_rows: int = MAX_RESPONSE_MESSAGES,
+                                max_bytes: int = MAX_RESPONSE_BYTES
+                                ) -> tuple[list, bool]:
     """Cut a batch to the response caps without splitting a timestamp group.
 
     Returns (rows, dropped_any). F_SYNC_WINDOW_START is a bare float and
@@ -285,7 +287,7 @@ def _truncate_at_group_boundary(rows: list) -> tuple[list, bool]:
     group over either budget ships whole rather than stalling forever --
     the same rule _collect_permitted_rows applies while sweeping.
     """
-    cut = _cut_index(rows)
+    cut = _cut_index(rows, max_rows, max_bytes)
     if cut >= len(rows):
         return rows, False
 
@@ -315,9 +317,7 @@ class SyncManager:
         # outstanding request at once (e.g. a startup sync and an
         # announce-driven request racing each other), so this is a FIFO
         # queue per key rather than a single slot -- each legitimate
-        # response claims and removes exactly one entry.  The same entry is
-        # recorded under both key forms a peer may be identified by (see
-        # _peer_key_forms); claiming it under either form removes both.
+        # response claims and removes exactly one entry.
         self._pending_requests: dict[tuple[str, str], list[tuple]] = {}
         self._pending_requests_lock = threading.Lock()
         self._pending_request_seq = 0
@@ -381,7 +381,7 @@ class SyncManager:
 
         messaging.set_missed_delivery_callback(self._on_missed_delivery_event)
         messaging.add_message_callback(self._on_message_stored)
-        router.add_delivery_callback(self._on_lxmf_message)
+        router.add_delivery_callback(self._on_message)
         invite_mgr.add_member_list_callback(self._on_member_list_updated)
         invite_mgr.add_channel_joined_callback(self._on_channel_joined)
 
@@ -473,7 +473,11 @@ class SyncManager:
         progress = self._storage.get_peer_sync_progress(channel_hash_hex, peer_hex)
         if progress > 0.0:
             return progress
-        return max(time.time() - SYNC_WINDOW_SECS, 0.0)
+        return max(time.time() - self._sync_window_secs(peer_hex), 0.0)
+
+    def _sync_window_secs(self, peer_hex: str) -> float:
+        """How far back a request to this peer reaches, by the path it takes."""
+        return self._router.limits_for(peer_hex).sync_window_days * 86400
 
     def _on_message_stored(self, channel_hash_hex: str, message_id: str):
         """Clear a hinted gap once the messages it named have all arrived,
@@ -633,16 +637,7 @@ class SyncManager:
         once _send_raw fails, so without this it is lost even after the
         target peer becomes reachable again.
         """
-        try:
-            identity_hash = bytes.fromhex(dest_hex)
-            delivery_dest_hash = RNS.Destination.hash(identity_hash, "lxmf", "delivery")
-            RNS.Transport.request_path(delivery_dest_hash)
-        except (ValueError, TypeError) as e:
-            RNS.log(
-                f"TrenchChat [sync]: could not request path for {dest_hex[:12]}…: {e}",
-                RNS.LOG_WARNING,
-            )
-            return
+        self._router.request_path(dest_hex)
         with self._pending_hints_lock:
             queued = self._pending_hints.setdefault(dest_hex, [])
             queued.append(fields)
@@ -659,7 +654,7 @@ class SyncManager:
 
     # --- inbound message handler ---
 
-    def _on_lxmf_message(self, message: LXMF.LXMessage):
+    def _on_message(self, message: InboundMessage):
         fields = message.fields or {}
         msg_type = fields.get(F_MSG_TYPE)
         if msg_type is None:
@@ -668,7 +663,7 @@ class SyncManager:
             msg_type = msg_type.decode(errors="replace")
         if msg_type == MT_PRESENCE:
             if F_SYNC_PROBE in fields:
-                self._handle_probes(fields, self._sender_hex(message))
+                self._handle_probes(fields, message.source_hex)
             return
         if msg_type not in (MT_MISSED_DELIVERY, MT_SYNC_REQUEST, MT_SYNC_RESPONSE):
             return
@@ -679,7 +674,7 @@ class SyncManager:
         channel_hash_hex = (channel_hash_bytes.hex()
                             if isinstance(channel_hash_bytes, bytes)
                             else str(channel_hash_bytes))
-        sender_hex = self._sender_hex(message)
+        sender_hex = message.source_hex
 
         if msg_type == MT_MISSED_DELIVERY:
             self._handle_missed_delivery(fields, channel_hash_hex, sender_hex)
@@ -687,15 +682,6 @@ class SyncManager:
             self._handle_sync_request(fields, channel_hash_hex, sender_hex)
         elif msg_type == MT_SYNC_RESPONSE:
             self._handle_sync_response(fields, channel_hash_hex, sender_hex)
-
-    @staticmethod
-    def _sender_hex(message: LXMF.LXMessage) -> str:
-        """The sender's identity hex, falling back to its delivery hash."""
-        sender_identity = (RNS.Identity.recall(message.source_hash)
-                           if message.source_hash else None)
-        if sender_identity:
-            return sender_identity.hash.hex()
-        return message.source_hash.hex() if message.source_hash else ""
 
     # --- probes ---
 
@@ -849,12 +835,13 @@ class SyncManager:
             )
             return
         channel = self._storage.get_channel(channel_hash_hex)
+        limits = self._router.limits_for(requester_hex)
 
         window_start_raw = fields.get(F_SYNC_WINDOW_START, 0.0)
         try:
             window_start = float(window_start_raw)
         except (TypeError, ValueError):
-            window_start = time.time() - SYNC_WINDOW_SECS
+            window_start = time.time() - self._sync_window_secs(requester_hex)
         window_start = max(window_start, 0.0)
 
         # How far we have actually served this peer. Read from sync_served,
@@ -933,7 +920,8 @@ class SyncManager:
                               window_start - PEER_TRUST_HORIZON_SECS, 0.0)
             sweep_start = min(window_start, trust_floor)
             swept_rows, truncated, scan_cursor = self._collect_permitted_rows(
-                channel, channel_hash_hex, requester_hex, sweep_start
+                channel, channel_hash_hex, requester_hex, sweep_start,
+                limits.sync_response_messages, limits.sync_response_bytes,
             )
 
             # A hinted message newer than the sweep reached has to wait for the
@@ -944,7 +932,8 @@ class SyncManager:
             rows = self._merge_rows(
                 [r for r in hinted_rows if r["timestamp"] <= frontier], swept_rows
             )
-        rows, capped = _truncate_at_group_boundary(rows)
+        rows, capped = _truncate_at_group_boundary(
+            rows, limits.sync_response_messages, limits.sync_response_bytes)
         truncated = truncated or capped
 
         packed = msgpack.packb(
@@ -1043,6 +1032,7 @@ class SyncManager:
         description we produce. What we ask for is measured against everything
         we hold, so a row we withhold is never requested back.
         """
+        limits = self._router.limits_for(requester_hex)
         send_ids: list[str] = []
         reply_ranges: list = []
         my_needs: list = []
@@ -1061,7 +1051,8 @@ class SyncManager:
                         my_needs.append([lo, hi, prefix])
             elif not sync_ranges.matches_fingerprint(serving, payload[0], payload[1]):
                 if not sync_ranges.append_ranges(
-                        reply_ranges, sync_ranges.describe(serving, lo, hi)):
+                        reply_ranges, sync_ranges.describe(serving, lo, hi),
+                        budget=limits.sync_description_budget_bytes):
                     deferred = True
 
         rows = self._get_messages_by_ids(channel_hash_hex, send_ids)
@@ -1101,8 +1092,10 @@ class SyncManager:
         return sorted(by_id.values(), key=lambda r: r["timestamp"])
 
     def _collect_permitted_rows(self, channel, channel_hash_hex: str,
-                                requester_hex: str,
-                                window_start: float) -> tuple[list, bool, float]:
+                                requester_hex: str, window_start: float,
+                                max_rows: int = MAX_RESPONSE_MESSAGES,
+                                max_bytes: int = MAX_RESPONSE_BYTES
+                                ) -> tuple[list, bool, float]:
         """Sweep forward from window_start for rows this requester may see.
 
         Scanning past withheld rows here, instead of returning a batch that
@@ -1150,8 +1143,8 @@ class SyncManager:
                 channel, channel_hash_hex, requester_hex, run_rows
             )
             group_bytes = sum(row_wire_size(r) for r in filtered)
-            over_rows = len(permitted) + len(filtered) > MAX_RESPONSE_MESSAGES
-            over_bytes = permitted and permitted_bytes + group_bytes > MAX_RESPONSE_BYTES
+            over_rows = len(permitted) + len(filtered) > max_rows
+            over_bytes = permitted and permitted_bytes + group_bytes > max_bytes
             if over_rows or over_bytes:
                 truncated = True
                 return False
@@ -1162,7 +1155,7 @@ class SyncManager:
 
         while True:
             page = self._storage.get_messages_after(
-                channel_hash_hex, cursor_ts, MAX_RESPONSE_MESSAGES, after_id=cursor_id
+                channel_hash_hex, cursor_ts, max_rows, after_id=cursor_id
             )
             if not page:
                 try_flush_run()
@@ -1189,7 +1182,7 @@ class SyncManager:
 
             if stop:
                 break
-            if len(page) < MAX_RESPONSE_MESSAGES:
+            if len(page) < max_rows:
                 try_flush_run()
                 break
 
@@ -1430,7 +1423,8 @@ class SyncManager:
                 if not verify_message(
                         self._storage, sender_hash, author_sig,
                         channel_hash_hex, msg_id, msg_ts,
-                        content, reply_to, last_seen_id, image_data, manifest):
+                        content, reply_to, last_seen_id, image_data, manifest,
+                        router=self._router):
                     RNS.log(
                         f"TrenchChat [sync]: dropping synced message "
                         f"{msg_id[:12]}… — author "
@@ -1577,7 +1571,7 @@ class SyncManager:
         # somewhere new to resume from; a responder that repeats itself can't
         # induce a loop.
         cont_ranges, cont_needs, deferred = self._reconcile_from_response(
-            channel_hash_hex, peer_ranges or []
+            channel_hash_hex, peer_ranges or [], peer_hex
         )
         # More remains when an answer was capped, or when either side left a
         # difference undescribed for the budget. That is remembered per peer
@@ -1616,8 +1610,9 @@ class SyncManager:
 
     # --- helpers ---
 
-    def _reconcile_from_response(self, channel_hash_hex: str,
-                                 ranges: list) -> tuple[list, list, bool]:
+    def _reconcile_from_response(self, channel_hash_hex: str, ranges: list,
+                                 responder_hex: str = ""
+                                 ) -> tuple[list, list, bool]:
         """What to ask a responder next, given how it described its own rows.
 
         An id list resolves outright: what it names and we lack becomes a
@@ -1630,6 +1625,7 @@ class SyncManager:
         budget, so the caller knows to ask again rather than treat the
         responder's next answer as the end of the exchange.
         """
+        limits = self._router.limits_for(responder_hex)
         cont_ranges: list = []
         cont_needs: list = []
         deferred = False
@@ -1648,7 +1644,8 @@ class SyncManager:
             elif sync_ranges.matches_fingerprint(signed, payload[0], payload[1]):
                 continue
             if not sync_ranges.append_ranges(
-                    cont_ranges, sync_ranges.describe(signed, lo, hi)):
+                    cont_ranges, sync_ranges.describe(signed, lo, hi),
+                    budget=limits.sync_description_budget_bytes):
                 deferred = True
         return cont_ranges, cont_needs, deferred
 
@@ -1663,8 +1660,10 @@ class SyncManager:
             )
             return
         channel = self._storage.get_channel(channel_hash_hex)
+        limits = self._router.limits_for(peer_hex)
         rows = self._rows_for_needs(channel, channel_hash_hex, peer_hex, needs)
-        rows, capped = _truncate_at_group_boundary(rows)
+        rows, capped = _truncate_at_group_boundary(
+            rows, limits.sync_response_messages, limits.sync_response_bytes)
 
         response_fields = {
             F_MSG_TYPE:       MT_SYNC_RESPONSE,
@@ -1782,7 +1781,7 @@ class SyncManager:
             author = row["sender_hash"]
             if not author or author in keys:
                 continue
-            key = public_key_for(self._storage, author)
+            key = public_key_for(self._storage, author, router=self._router)
             if key:
                 keys[author] = key
         return keys
@@ -1996,21 +1995,6 @@ class SyncManager:
 
     # --- outstanding sync request tracking ---
 
-    def _peer_key_forms(self, peer_hex: str) -> list[str]:
-        """Return every hex form an inbound message may identify this peer by.
-
-        Handlers resolve the sender via RNS.Identity.recall() but fall back to
-        the raw source_hash, which is the delivery destination hash; these are
-        different values for the same peer.
-        """
-        forms = [peer_hex]
-        try:
-            delivery = RNS.Destination.hash(bytes.fromhex(peer_hex), "lxmf", "delivery")
-            forms.append(delivery.hex())
-        except (ValueError, TypeError):
-            pass
-        return forms
-
     def tick(self) -> None:
         """Re-ask peers whose answer never came, act on probes the cooldown
         held back, and ask about gaps that messages have revealed.
@@ -2064,32 +2048,32 @@ class SyncManager:
     def _expire_pending_requests(self, channel_hash_hex: str, dest_hex: str,
                                  now: float) -> None:
         """Drop this peer's timed-out entries, so a retry is not itself stale."""
+        key = (channel_hash_hex, dest_hex)
         with self._pending_requests_lock:
-            for form in self._peer_key_forms(dest_hex):
-                entries = self._pending_requests.get((channel_hash_hex, form))
-                if not entries:
-                    continue
-                entries[:] = [e for e in entries if now - e[0] < SYNC_RETRY_SECS]
-                if not entries:
-                    del self._pending_requests[(channel_hash_hex, form)]
+            entries = self._pending_requests.get(key)
+            if not entries:
+                return
+            entries[:] = [e for e in entries if now - e[0] < SYNC_RETRY_SECS]
+            if not entries:
+                del self._pending_requests[key]
 
     def _record_pending_request(self, channel_hash_hex: str, dest_hex: str,
                                 since_ts: float = 0.0) -> int:
         """Remember that we asked dest_hex for history on this channel.
 
         A peer may have more than one request outstanding at once, so this
-        appends to a per-(channel, peer-key-form) queue rather than replacing
-        a single slot -- otherwise a second trigger racing an earlier one
-        (e.g. startup sync and an announce-driven request) would overwrite
-        the first request's entry before either could be claimed. Returns a
-        request id so a failed send can retract exactly this entry.
+        appends to a per-(channel, peer) queue rather than replacing a single
+        slot -- otherwise a second trigger racing an earlier one (e.g. startup
+        sync and an announce-driven request) would overwrite the first
+        request's entry before either could be claimed. Returns a request id
+        so a failed send can retract exactly this entry.
         """
         with self._pending_requests_lock:
             self._pending_request_seq += 1
             req_id = self._pending_request_seq
             entry = (time.time(), since_ts, dest_hex, req_id)
-            for form in self._peer_key_forms(dest_hex):
-                self._pending_requests.setdefault((channel_hash_hex, form), []).append(entry)
+            self._pending_requests.setdefault(
+                (channel_hash_hex, dest_hex), []).append(entry)
         return req_id
 
     def _drop_pending_request(self, channel_hash_hex: str, dest_hex: str,
@@ -2099,18 +2083,17 @@ class SyncManager:
         Drops exactly req_id when given; otherwise drops the most recently
         recorded entry for dest_hex on this channel.
         """
+        key = (channel_hash_hex, dest_hex)
         with self._pending_requests_lock:
-            for form in self._peer_key_forms(dest_hex):
-                key = (channel_hash_hex, form)
-                entries = self._pending_requests.get(key)
-                if not entries:
-                    continue
-                if req_id is not None:
-                    entries[:] = [e for e in entries if e[3] != req_id]
-                else:
-                    entries.pop()
-                if not entries:
-                    del self._pending_requests[key]
+            entries = self._pending_requests.get(key)
+            if not entries:
+                return
+            if req_id is not None:
+                entries[:] = [e for e in entries if e[3] != req_id]
+            else:
+                entries.pop()
+            if not entries:
+                del self._pending_requests[key]
 
     def _clear_retry_budget(self, channel_hash_hex: str, peer_hex: str) -> None:
         """An answer means the peer is talking to us; start the count over."""
@@ -2121,12 +2104,10 @@ class SyncManager:
         """Consume the oldest outstanding request this response could answer.
 
         Returns the window start we asked for and the identity hex we addressed
-        the request to, or None if nothing was outstanding.  A response may
-        identify its sender by either the identity or the delivery destination
-        hash, so the recorded form is what the rest of the exchange keys on.
-        Consuming the entry makes a single request answerable only once; a
-        second, independently outstanding request to the same peer remains
-        queued for a later response to claim.
+        the request to, or None if nothing was outstanding. Consuming the entry
+        makes a single request answerable only once; a second, independently
+        outstanding request to the same peer remains queued for a later
+        response to claim.
         """
         now = time.time()
         with self._pending_requests_lock:
@@ -2137,29 +2118,14 @@ class SyncManager:
                 else:
                     del self._pending_requests[stale_key]
 
-            claimed = None
-            claimed_req_id = None
-            for form in self._peer_key_forms(responder_hex):
-                key = (channel_hash_hex, form)
-                entries = self._pending_requests.get(key)
-                if entries:
-                    _issued, since, peer, claimed_req_id = entries.pop(0)
-                    claimed = (since, peer)
-                    if not entries:
-                        del self._pending_requests[key]
-                    break
-            if claimed is not None:
-                # The same request was recorded under the peer's other key
-                # form too; remove that twin copy so it can't be claimed again.
-                for form in self._peer_key_forms(claimed[1]):
-                    key = (channel_hash_hex, form)
-                    entries = self._pending_requests.get(key)
-                    if not entries:
-                        continue
-                    entries[:] = [e for e in entries if e[3] != claimed_req_id]
-                    if not entries:
-                        del self._pending_requests[key]
-            return claimed
+            key = (channel_hash_hex, responder_hex)
+            entries = self._pending_requests.get(key)
+            if not entries:
+                return None
+            _issued, since, peer, _req_id = entries.pop(0)
+            if not entries:
+                del self._pending_requests[key]
+            return (since, peer)
 
     def _deep_sync_allowed(self, channel_hash_hex: str, requester_hex: str,
                            continues: bool = False) -> bool:
@@ -2228,34 +2194,16 @@ class SyncManager:
     def _send_raw(self, dest_hex: str, fields: dict) -> bool:
         """Send a control message to a peer. Returns False if it couldn't go out."""
         try:
-            identity_hash = bytes.fromhex(dest_hex)
-            delivery_dest_hash = RNS.Destination.hash(identity_hash, "lxmf", "delivery")
-            dest_identity = RNS.Identity.recall(delivery_dest_hash)
-            if dest_identity is None:
+            if self._router.send(dest_hex, fields) is SendState.NO_PATH:
                 # A peer that just came back asks everyone for what it missed,
                 # and the answer dies here: the responder can read the request
                 # but cannot yet address a reply. The requester sees only
                 # silence, which it cannot tell from a refusal, and nothing
                 # ever re-sends the answer (sync2 in docs/testenv-scenarios.md).
-                RNS.Transport.request_path(delivery_dest_hash)
+                self._router.request_path(dest_hex)
                 if fields.get(F_MSG_TYPE) not in self._RETRY_EXEMPT_TYPES:
                     self._retry.queue(dest_hex, fields)
                 return False
-            dest = RNS.Destination(
-                dest_identity,
-                RNS.Destination.OUT,
-                RNS.Destination.SINGLE,
-                "lxmf",
-                "delivery",
-            )
-            lxm = LXMF.LXMessage(
-                dest,
-                self._router.delivery_destination,
-                "",
-                desired_method=LXMF.LXMessage.DIRECT,
-            )
-            lxm.fields = pack_fields(fields)
-            self._router.send(lxm)
             return True
         except Exception as e:
             RNS.log(f"TrenchChat: sync send error to {dest_hex}: {e}", RNS.LOG_WARNING)

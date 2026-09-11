@@ -10,11 +10,11 @@ The contract under test:
 """
 
 import time
-from types import SimpleNamespace
 
 import msgpack
 import pytest
 
+from tests.conftest import deliver
 from tests.helpers import wait_for, wait_for_member
 from trenchchat.core import actions
 from trenchchat.core.naming import NameInUseError, server_hash_for
@@ -436,8 +436,7 @@ class TestNonCreatorAdminInvites:
         }
         fields = alice.invite_mgr._member_list_fields(
             s, msgpack.packb(forged, use_bin_type=True))
-        bob.invite_mgr._on_lxmf_message(SimpleNamespace(fields=fields,
-                                                        source_hash=None))
+        deliver(alice, bob, fields)
 
         assert bob.storage.get_server(s) is None, \
             "a server row survived a document whose signature did not validate"

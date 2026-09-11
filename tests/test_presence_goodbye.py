@@ -6,7 +6,7 @@ away instead of waiting out PRESENCE_TIMEOUT_SECS -- and must let her back
 online the moment he hears from her again, so a shutdown the user cancels
 costs nothing.
 
-Uses the real TestTransport-backed peer_factory (see conftest.py) so the
+Uses the real FakeTransport-backed peer_factory (see conftest.py) so the
 notice actually travels between two routers, same as test_presence_beacon.py.
 """
 
@@ -104,7 +104,7 @@ def test_goodbye_message_carries_right_type_and_empty_content(peer_factory):
     assert wait_for(lambda: len(received) >= 1, timeout=5)
     msg = received[0]
     assert msg.fields.get(F_MSG_TYPE) == MT_GOODBYE
-    assert msg.content == b""
+    assert msg.content == ""
     # No "who is going offline" field: the notice can only ever apply to its own
     # authenticated sender, which is what makes it unspoofable.
     assert set(msg.fields.keys()) == {F_MSG_TYPE}

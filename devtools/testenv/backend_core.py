@@ -48,14 +48,11 @@ from trenchchat.core.voice import VoiceManager
 from trenchchat.core.audio.engine import make_tone_pipeline
 from trenchchat.core.files import FileManager
 from trenchchat.core.node_browser import NodeBrowserManager
+from trenchchat.network.lxmf_transport import REANNOUNCE_INTERVAL_SECS
 from trenchchat.network.router import Router
 from trenchchat.network.file_transport import RNSFileTransport
 from trenchchat.network.node_transport import RNSNodeTransport
 from trenchchat.network.voice_transport import RNSVoiceTransport
-from trenchchat.network.announce import (
-    FirstContactAnnouncer, NodeAnnounceHandler, PathResponseHandler,
-    PeerAnnounceHandler, PropagationAnnounceHandler, UserAnnounceHandler,
-)
 from trenchchat.version import record_launch
 
 _LINK_INTERFACE_NAME = "TesterLink"
@@ -240,7 +237,7 @@ class Backend:
         # Every announce, presence change and link change moves the network
         # map; this collapses those bursts into one change event.
         self.network_monitor = NetworkMapMonitor()
-        self.channel_mgr = ChannelManager(self.identity, self.storage)
+        self.channel_mgr = ChannelManager(self.identity, self.storage, self.router)
         self.server_mgr = ServerManager(self.identity, self.storage)
         self.messaging = Messaging(self.identity, self.storage, self.router)
         self.subscription_mgr = SubscriptionManager(self.identity, self.storage, self.router)
@@ -265,7 +262,8 @@ class Backend:
         self.file_transport = RNSFileTransport(self.identity)
         self.file_mgr = FileManager(self.identity, self.storage,
                                     self.presence_mgr,
-                                    transport=self.file_transport)
+                                    transport=self.file_transport,
+                                    router=self.router)
         self.user_directory = UserDirectory(self.identity.hash_hex)
         trenchchat_gate = actions.trenchchat_peer_gate(self.storage, self.user_directory)
         self.avatar_mgr = AvatarManager(
@@ -291,15 +289,9 @@ class Backend:
         self.reaction_mgr.set_direct_manager(self.direct_mgr)
         self.messaging.set_trenchchat_gate(trenchchat_gate)
         self.reaction_mgr.set_trenchchat_gate(trenchchat_gate)
-        # Answers a peer the first time we hear them: our own re-announce is
-        # hours apart, and until they have heard us they cannot verify
-        # anything we send -- it is quarantined at their end and dropped.
-        self.first_contact = FirstContactAnnouncer(
-            self.router, self.channel_mgr, self.identity.hash_hex,
-        )
         self.propagation_nodes = PropagationNodes(self.config, self.router)
         self.propagation_collector = PropagationCollector(
-            self.router, self.identity, self.propagation_nodes,
+            self.router, self.propagation_nodes,
         )
         # Held mail is pulled, so a node being chosen is the first moment
         # there is anywhere to ask. A node restored from the last run is
@@ -313,9 +305,7 @@ class Backend:
             self.propagation_nodes.record_node(node_hash_hex, hops)
             self.network_monitor.note_change()
 
-        RNS.Transport.register_announce_handler(
-            PropagationAnnounceHandler(_on_propagation_heard)
-        )
+        self.router.add_propagation_node_heard_callback(_on_propagation_heard)
         # Headless testers have no sound devices; the tone pipeline feeds the
         # real encode/transmit path with a generated signal instead. A real
         # profile uses no factory, so VoiceManager builds the real
@@ -343,9 +333,7 @@ class Backend:
             self.node_browser.record_node_announce(node_hex, display_name, iface)
             self.network_monitor.note_change()
 
-        RNS.Transport.register_announce_handler(
-            NodeAnnounceHandler(_on_node_discovered)
-        )
+        self.router.add_node_discovered_callback(_on_node_discovered)
 
         # A trenchchat.user announce is
         # the strongest signal a peer is a TrenchChat client (not just any
@@ -353,18 +341,13 @@ class Backend:
         def _on_user_announced(peer_hex: str, display_name: str, iface) -> None:
             self.user_directory.record_user(peer_hex, display_name)
             self.presence_mgr.record_seen(peer_hex)
-            self.first_contact.note_peer(peer_hex, iface)
             self.network_monitor.note_change()
 
-        RNS.Transport.register_announce_handler(
-            UserAnnounceHandler(_on_user_announced)
-        )
+        self.router.add_user_discovered_callback(_on_user_announced)
 
-        # One combined peer-appeared handler: one
-        # PeerAnnounceHandler registration drives both the sync manager's
-        # gap-fill request and presence tracking, so a peer's LXMF delivery
-        # announce is the single trigger for both. Without this, SyncManager
-        # .on_peer_appeared() is never called at all in this harness.
+        # One combined peer-appeared handler, so a peer's announce is the
+        # single trigger for the sync manager's gap-fill request and for
+        # presence tracking alike.
         def _on_peer_appeared(peer_hex: str, iface) -> None:
             self.sync_mgr.on_peer_appeared(peer_hex)
             self.file_mgr.on_peer_appeared(peer_hex)
@@ -376,23 +359,14 @@ class Backend:
             self.invite_mgr.flush_pending(peer_hex)
             self.invite_mgr.resync_membership(peer_hex)
             self.friends_mgr.flush_pending(peer_hex)
-            self.first_contact.note_peer(peer_hex, iface)
             self.network_monitor.note_change()
 
-        RNS.Transport.register_announce_handler(
-            PeerAnnounceHandler(_on_peer_appeared)
-        )
+        self.router.add_peer_appeared_callback(_on_peer_appeared)
 
         # A peer's identity can also arrive as a path response, which is how a
-        # first message from someone we have never heard becomes verifiable.
-        # Releasing the quarantine is what actually delivers it.
-        def _on_identity_resolved(peer_hex: str) -> None:
-            self.router.release_quarantined(peer_hex)
-            self.presence_mgr.record_seen(peer_hex)
-
-        RNS.Transport.register_announce_handler(
-            PathResponseHandler(_on_identity_resolved)
-        )
+        # first message from someone we have never heard becomes verifiable:
+        # the transport releases the quarantine, and presence notes them here.
+        self.router.add_identity_resolved_callback(self.presence_mgr.record_seen)
 
         # Also update presence and the user directory from any inbound LXMF
         # message, covering peers reached via a backchannel link without a
@@ -477,24 +451,13 @@ class Backend:
         self.invite_mgr.send_join_request(channel_hash_hex, token, expiry, admin_hex)
 
     def announce(self, attached_interface=None):
-        self.router.announce(attached_interface=attached_interface)
-        self.router.announce_user(attached_interface=attached_interface)
-        self.channel_mgr.announce_all_owned(attached_interface=attached_interface)
+        """Announce this node, its TrenchChat aspect and every owned channel."""
+        self.router.announce_all(attached_interface=attached_interface)
 
-    def start_heartbeat(self, interval: float = 1.5) -> None:
-        """Re-announce on a timer for the life of the process, mirroring the
-        real app's periodic reannounce QTimer. Runs as a daemon thread so it
-        never blocks process exit."""
-        def _loop():
-            while True:
-                try:
-                    self.announce()
-                except Exception as e:
-                    RNS.log(f"TesterBackend: heartbeat announce failed: {e}", RNS.LOG_WARNING)
-                time.sleep(interval)
-
-        t = threading.Thread(target=_loop, daemon=True, name="heartbeat")
-        t.start()
+    def start_heartbeat(self, interval: float = REANNOUNCE_INTERVAL_SECS) -> None:
+        """Re-announce on a timer for the life of the process, and answer peers
+        met since the last tick. The transport owns both."""
+        self.router.start_reannounce(interval)
 
     def start_voice_ticker(self, interval: float = 1.0) -> None:
         """Drive VoiceManager.tick on a background thread.
@@ -539,12 +502,6 @@ class Backend:
                 except Exception as e:
                     RNS.log(f"TesterBackend: propagation collect failed: {e}",
                             RNS.LOG_WARNING)
-                try:
-                    self.first_contact.tick(now)
-                except Exception as e:
-                    RNS.log(f"TesterBackend: first-contact announce failed: {e}",
-                            RNS.LOG_WARNING)
-
         t = threading.Thread(target=_loop, daemon=True, name="voice-ticker")
         t.start()
 
@@ -608,10 +565,7 @@ class Backend:
         identity -- i.e. whether a send to them would go through instead
         of being dropped (invite.py's _send_raw has no retry queue, unlike
         chat messages, so callers must confirm the path first)."""
-        delivery_dest_hash = RNS.Destination.hash(
-            bytes.fromhex(peer_hash_hex), "lxmf", "delivery"
-        )
-        return RNS.Identity.recall(delivery_dest_hash) is not None
+        return self.router.can_reach(peer_hash_hex)
 
     def warm_up(self, peer_hash_hex: str | None = None, timeout: float = 20.0,
                interval: float = 1.0) -> bool:

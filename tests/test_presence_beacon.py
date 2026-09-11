@@ -1,7 +1,7 @@
 """
 Integration tests for PresenceBeacon.
 
-Uses the real TestTransport-backed peer_factory (see conftest.py) so beacon
+Uses the real FakeTransport-backed peer_factory (see conftest.py) so beacon
 messages actually travel from one peer's router to another's, plus the
 time-patching pattern from test_presence.py to make the silence threshold
 deterministic without sleeping.
@@ -10,14 +10,12 @@ deterministic without sleeping.
 import time
 from unittest.mock import patch
 
-import LXMF
 import RNS
 
 from tests.helpers import wait_for, wait_for_subscriber
 from trenchchat.core.presence import PresenceBeacon, PresenceManager
 from trenchchat.core import sync_ranges
 from trenchchat.core.protocol import F_SYNC_PROBE, F_MSG_TYPE, MT_PRESENCE
-from trenchchat.network.router import Router
 
 
 def _beacons(received):
@@ -146,7 +144,7 @@ def test_beacon_message_carries_type_and_a_probe_per_shared_channel(peer_factory
     assert wait_for(lambda: len(_beacons(received)) >= 1, timeout=5)
     msg = _beacons(received)[0]
     assert msg.fields.get(F_MSG_TYPE) == MT_PRESENCE
-    assert msg.content == b""
+    assert msg.content == ""
     assert set(msg.fields.keys()) == {F_MSG_TYPE, F_SYNC_PROBE}
     probes = sync_ranges.unpack_probes(msg.fields[F_SYNC_PROBE])
     assert probes is not None, "the beacon's probes did not validate"
@@ -186,10 +184,6 @@ def test_router_add_outbound_callback_fires_with_dest_identity_hex(peer_factory)
     """Router.add_outbound_callback (what backend_core.py wires to
     beacon.record_sent) must fire on every send with the recipient's raw
     identity hex -- the same value PresenceBeacon keys last_sent by.
-
-    TestTransport replaces Router.send() on the instance to deliver
-    in-process (see conftest.py), so it cannot exercise Router's own
-    _notify_outbound path -- this test drives it directly instead.
     """
     alice = peer_factory("alice")
     bob = peer_factory("bob")
@@ -197,18 +191,6 @@ def test_router_add_outbound_callback_fires_with_dest_identity_hex(peer_factory)
     seen: list[str] = []
     alice.router.add_outbound_callback(seen.append)
 
-    identity_hash = bytes.fromhex(bob.identity.hash_hex)
-    delivery_dest_hash = RNS.Destination.hash(identity_hash, "lxmf", "delivery")
-    dest_identity = RNS.Identity.recall(delivery_dest_hash)
-    assert dest_identity is not None, "Bob's identity must be locally known in-process"
-
-    dest = RNS.Destination(
-        dest_identity, RNS.Destination.OUT, RNS.Destination.SINGLE, "lxmf", "delivery",
-    )
-    lxm = LXMF.LXMessage(
-        dest, alice.router.delivery_destination, "", desired_method=LXMF.LXMessage.DIRECT,
-    )
-
-    Router.send(alice.router, lxm)  # bypass the TestTransport instance patch
+    alice.router.send(bob.identity.hash_hex, {F_MSG_TYPE: MT_PRESENCE})
 
     assert seen == [bob.identity.hash_hex]

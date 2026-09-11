@@ -3,7 +3,7 @@ Family sync -- offline behaviour and sync.
 
 The reason this environment exists. All three offline mechanisms only run on
 an interrupted link, and none of them is reachable from the pytest suite,
-whose TestTransport delivers in-process, instantly and in order:
+whose FakeTransport delivers in-process, instantly and in order:
 
   1. pending retry        -- sender re-sends when the peer reappears
   2. missed-delivery hint -- a third party serves what the sender never could

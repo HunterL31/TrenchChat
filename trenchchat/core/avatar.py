@@ -3,7 +3,7 @@ Avatar management for TrenchChat user profile pictures.
 
 Profile pictures are:
   - Stored locally as 128x128 JPEG blobs (own avatar in Config, peers in SQLite)
-  - Transmitted as a dedicated LXMF control message (MT_AVATAR_UPDATE)
+  - Transmitted as a dedicated control message (MT_AVATAR_UPDATE)
   - Sent once per peer per avatar version -- not attached to every chat message
   - Sent only to peers known to run TrenchChat; every LXMF client announces on
     lxmf.delivery, and an unasked avatar reaches the others as raw binary
@@ -27,7 +27,6 @@ import time
 from collections.abc import Callable
 
 import RNS
-import LXMF
 from PIL import Image
 
 from trenchchat.config import Config
@@ -36,9 +35,9 @@ from trenchchat.core.image import inbound_image_is_sane
 from trenchchat.core.protocol import (
     F_MSG_TYPE, F_AVATAR_DATA, F_AVATAR_VERSION,
     MT_AVATAR_UPDATE,
-    pack_fields,
 )
 from trenchchat.core.storage import Storage
+from trenchchat.network.base import InboundMessage, SendState
 from trenchchat.network.router import Router
 
 AVATAR_SIZE_PX = 128
@@ -123,7 +122,7 @@ class AvatarManager:
         # track our own last change time for send rate limiting
         self._last_changed: float = 0.0
 
-        router.add_delivery_callback(self._on_lxmf_message)
+        router.add_delivery_callback(self._on_message)
 
     # --- public API: own avatar ---
 
@@ -255,8 +254,8 @@ class AvatarManager:
 
     # --- inbound ---
 
-    def _on_lxmf_message(self, message: LXMF.LXMessage) -> None:
-        """LXMF delivery callback -- handle MT_AVATAR_UPDATE control messages."""
+    def _on_message(self, message: InboundMessage) -> None:
+        """Delivery callback -- handle MT_AVATAR_UPDATE control messages."""
         fields = message.fields or {}
         msg_type = fields.get(F_MSG_TYPE)
         if msg_type is None:
@@ -266,14 +265,7 @@ class AvatarManager:
         if msg_type != MT_AVATAR_UPDATE:
             return
 
-        sender_identity = (
-            RNS.Identity.recall(message.source_hash)
-            if message.source_hash else None
-        )
-        sender_hex = (
-            sender_identity.hash.hex() if sender_identity
-            else (message.source_hash.hex() if message.source_hash else "")
-        )
+        sender_hex = message.source_hex
         if not sender_hex:
             RNS.log("TrenchChat [avatar]: received avatar update with unknown sender",
                     RNS.LOG_WARNING)
@@ -417,37 +409,20 @@ class AvatarManager:
             return
 
         try:
-            identity_hash = bytes.fromhex(peer_hex)
-            delivery_dest_hash = RNS.Destination.hash(identity_hash, "lxmf", "delivery")
-            dest_identity = RNS.Identity.recall(delivery_dest_hash)
-            if dest_identity is None:
-                RNS.Transport.request_path(delivery_dest_hash)
+            state = self._router.send(
+                peer_hex,
+                {
+                    F_MSG_TYPE:       MT_AVATAR_UPDATE,
+                    F_AVATAR_DATA:    avatar_data,
+                    F_AVATAR_VERSION: avatar_version,
+                },
+                on_failed=lambda p, v=avatar_version:
+                    self._on_delivery_failed(p, v),
+            )
+            if state is SendState.NO_PATH:
+                self._router.request_path(peer_hex)
                 self._queue_pending(peer_hex, avatar_version)
                 return
-
-            dest = RNS.Destination(
-                dest_identity,
-                RNS.Destination.OUT,
-                RNS.Destination.SINGLE,
-                "lxmf",
-                "delivery",
-            )
-            lxm = LXMF.LXMessage(
-                dest,
-                self._router.delivery_destination,
-                "",
-                desired_method=LXMF.LXMessage.DIRECT,
-            )
-            lxm.fields = pack_fields({
-                F_MSG_TYPE:      MT_AVATAR_UPDATE,
-                F_AVATAR_DATA:   avatar_data,
-                F_AVATAR_VERSION: avatar_version,
-            })
-            lxm.register_failed_callback(
-                lambda m, p=peer_hex, v=avatar_version:
-                    self._on_delivery_failed(p, v)
-            )
-            self._router.send(lxm)
             self._storage.upsert_avatar_delivery(peer_hex, avatar_version)
             with self._lock:
                 self._pending.pop(peer_hex, None)
@@ -480,20 +455,11 @@ class AvatarManager:
                 del self._pending[next(iter(self._pending))]
 
     def _on_delivery_failed(self, peer_hex: str, avatar_version: int) -> None:
-        """LXMF failed-delivery callback: undo the optimistic delivery record
+        """Failed-delivery callback: undo the optimistic delivery record
         and hold the peer for retry when its path returns."""
         self._storage.delete_avatar_delivery(peer_hex)
         self._queue_pending(peer_hex, avatar_version)
-        try:
-            identity_hash = bytes.fromhex(peer_hex)
-            delivery_dest_hash = RNS.Destination.hash(identity_hash, "lxmf", "delivery")
-            RNS.Transport.request_path(delivery_dest_hash)
-        except Exception as e:
-            RNS.log(
-                f"TrenchChat [avatar]: path request after failed delivery to "
-                f"{peer_hex[:12]}… errored: {e}",
-                RNS.LOG_DEBUG,
-            )
+        self._router.request_path(peer_hex)
         RNS.log(
             f"TrenchChat [avatar]: delivery to {peer_hex[:12]}… failed, "
             f"queued for retry",

@@ -13,9 +13,7 @@ Covers:
 
 import io
 import time
-from dataclasses import dataclass, field
-from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 from PIL import Image
@@ -34,6 +32,7 @@ from trenchchat.core.protocol import F_MSG_TYPE, F_AVATAR_DATA, F_AVATAR_VERSION
 from trenchchat.core.permissions import PRESET_PRIVATE, ROLE_MEMBER
 from trenchchat.core.storage import Storage
 from trenchchat.core.user_directory import UserDirectory
+from trenchchat.network.base import InboundMessage, SendState, reticulum_limits
 
 
 # ---------------------------------------------------------------------------
@@ -57,15 +56,33 @@ def _make_identity_mock(hex_str: str):
     return m
 
 
-def _make_lxm(fields: dict, source_hash_hex: str | None = None):
-    """Return a minimal mock LXMessage."""
-    lxm = MagicMock()
-    lxm.fields = fields
-    if source_hash_hex:
-        lxm.source_hash = bytes.fromhex(source_hash_hex)
-    else:
-        lxm.source_hash = None
-    return lxm
+def _make_message(fields: dict, source_hex: str = ""):
+    """An inbound message as the Router hands one to a manager."""
+    return InboundMessage(source_hex=source_hex, fields=fields)
+
+
+class _RecordingRouter:
+    """A router that records what would have been sent, and sends nothing."""
+
+    def __init__(self):
+        self.sent: list[tuple[str, dict]] = []
+        self.paths_requested: list[str] = []
+        self.reachable = True
+
+    def add_delivery_callback(self, cb) -> None:
+        """Registered and never fired: these tests deliver by hand."""
+
+    def send(self, dest_hex, fields, content="", **kwargs):
+        if not self.reachable:
+            return SendState.NO_PATH
+        self.sent.append((dest_hex, dict(fields)))
+        return SendState.SENT
+
+    def request_path(self, dest_hex) -> None:
+        self.paths_requested.append(dest_hex)
+
+    def limits_for(self, dest_hex):
+        return reticulum_limits()
 
 
 @pytest.fixture
@@ -96,8 +113,7 @@ def avatar_mgr(tmp_path, config):
     """AvatarManager with mocked identity and router."""
     identity = _make_identity_mock("aa" * 16)
     storage = Storage(db_path=tmp_path / "av.db")
-    router = MagicMock()
-    router.delivery_destination = MagicMock()
+    router = _RecordingRouter()
     mgr = AvatarManager(identity, config, storage, router)
     yield mgr
     storage.close()
@@ -113,8 +129,7 @@ def gated_avatar_mgr(tmp_path, config):
     identity = _make_identity_mock("aa" * 16)
     storage = Storage(db_path=tmp_path / "gated.db")
     directory = UserDirectory(identity.hash_hex)
-    router = MagicMock()
-    router.delivery_destination = MagicMock()
+    router = _RecordingRouter()
     mgr = AvatarManager(
         identity, config, storage, router,
         is_trenchchat=actions.trenchchat_peer_gate(storage, directory),
@@ -261,20 +276,14 @@ class TestReceiveRateLimit:
         """
         if share:
             self._share_channel(mgr, sender_hex)
-        lxm = _make_lxm(
+        mgr._on_message(_make_message(
             {
                 F_MSG_TYPE: MT_AVATAR_UPDATE,
                 F_AVATAR_DATA: avatar_data,
                 F_AVATAR_VERSION: version,
             },
-            source_hash_hex=None,
-        )
-        # Patch RNS.Identity.recall to return a mock identity
-        mock_identity = MagicMock()
-        mock_identity.hash = bytes.fromhex(sender_hex)
-        lxm.source_hash = bytes.fromhex(sender_hex)
-        with patch("trenchchat.core.avatar.RNS.Identity.recall", return_value=mock_identity):
-            mgr._on_lxmf_message(lxm)
+            sender_hex,
+        ))
 
     def test_first_avatar_accepted(self, avatar_mgr):
         jpeg = compress_avatar(_make_test_jpeg())
@@ -323,18 +332,14 @@ class TestReceiveRateLimit:
     def test_oversized_avatar_rejected(self, avatar_mgr):
         sender = "dd" * 16
         oversized = b"x" * (MAX_AVATAR_BYTES + 1)
-        lxm = _make_lxm(
+        avatar_mgr._on_message(_make_message(
             {
                 F_MSG_TYPE: MT_AVATAR_UPDATE,
                 F_AVATAR_DATA: oversized,
                 F_AVATAR_VERSION: 1,
-            }
-        )
-        mock_identity = MagicMock()
-        mock_identity.hash = bytes.fromhex(sender)
-        lxm.source_hash = bytes.fromhex(sender)
-        with patch("trenchchat.core.avatar.RNS.Identity.recall", return_value=mock_identity):
-            avatar_mgr._on_lxmf_message(lxm)
+            },
+            sender,
+        ))
         assert avatar_mgr._storage.get_peer_avatar(sender) is None
 
     def test_older_avatar_version_cannot_overwrite_newer(self, avatar_mgr):
@@ -346,15 +351,10 @@ class TestReceiveRateLimit:
         jpeg = compress_avatar(_make_test_jpeg())
         sender = "ef" * 16
         self._share_channel(avatar_mgr, sender)
-        mock_identity = MagicMock()
-        mock_identity.hash = bytes.fromhex(sender)
-
-        lxm1 = _make_lxm(
-            {F_MSG_TYPE: MT_AVATAR_UPDATE, F_AVATAR_DATA: jpeg, F_AVATAR_VERSION: 7}
-        )
-        lxm1.source_hash = bytes.fromhex(sender)
-        with patch("trenchchat.core.avatar.RNS.Identity.recall", return_value=mock_identity):
-            avatar_mgr._on_lxmf_message(lxm1)
+        avatar_mgr._on_message(_make_message(
+            {F_MSG_TYPE: MT_AVATAR_UPDATE, F_AVATAR_DATA: jpeg, F_AVATAR_VERSION: 7},
+            sender,
+        ))
         assert avatar_mgr._storage.get_peer_avatar(sender)["avatar_version"] == 7
 
         with avatar_mgr._lock:
@@ -364,12 +364,10 @@ class TestReceiveRateLimit:
 
         # A rollback to an earlier version, and a removal at that version,
         # must both be ignored.
-        lxm2 = _make_lxm(
-            {F_MSG_TYPE: MT_AVATAR_UPDATE, F_AVATAR_DATA: b"", F_AVATAR_VERSION: 3}
-        )
-        lxm2.source_hash = bytes.fromhex(sender)
-        with patch("trenchchat.core.avatar.RNS.Identity.recall", return_value=mock_identity):
-            avatar_mgr._on_lxmf_message(lxm2)
+        avatar_mgr._on_message(_make_message(
+            {F_MSG_TYPE: MT_AVATAR_UPDATE, F_AVATAR_DATA: b"", F_AVATAR_VERSION: 3},
+            sender,
+        ))
 
         row = avatar_mgr._storage.get_peer_avatar(sender)
         assert row is not None and row["avatar_version"] == 7, \
@@ -382,14 +380,10 @@ class TestReceiveRateLimit:
         self._share_channel(avatar_mgr, sender)
 
         # Store initial avatar
-        lxm1 = _make_lxm(
-            {F_MSG_TYPE: MT_AVATAR_UPDATE, F_AVATAR_DATA: jpeg, F_AVATAR_VERSION: 1}
-        )
-        mock_identity = MagicMock()
-        mock_identity.hash = bytes.fromhex(sender)
-        lxm1.source_hash = bytes.fromhex(sender)
-        with patch("trenchchat.core.avatar.RNS.Identity.recall", return_value=mock_identity):
-            avatar_mgr._on_lxmf_message(lxm1)
+        avatar_mgr._on_message(_make_message(
+            {F_MSG_TYPE: MT_AVATAR_UPDATE, F_AVATAR_DATA: jpeg, F_AVATAR_VERSION: 1},
+            sender,
+        ))
         assert avatar_mgr._storage.get_peer_avatar(sender) is not None
 
         # Backdate so rate limit doesn't block
@@ -399,12 +393,10 @@ class TestReceiveRateLimit:
             )
 
         # Remove avatar (empty bytes)
-        lxm2 = _make_lxm(
-            {F_MSG_TYPE: MT_AVATAR_UPDATE, F_AVATAR_DATA: b"", F_AVATAR_VERSION: 2}
-        )
-        lxm2.source_hash = bytes.fromhex(sender)
-        with patch("trenchchat.core.avatar.RNS.Identity.recall", return_value=mock_identity):
-            avatar_mgr._on_lxmf_message(lxm2)
+        avatar_mgr._on_message(_make_message(
+            {F_MSG_TYPE: MT_AVATAR_UPDATE, F_AVATAR_DATA: b"", F_AVATAR_VERSION: 2},
+            sender,
+        ))
         assert avatar_mgr._storage.get_peer_avatar(sender) is None
 
 
@@ -491,14 +483,11 @@ class TestDeliveryTracking:
         received: list[str] = []
         avatar_mgr.add_avatar_callback(received.append)
 
-        lxm = _make_lxm(
-            {F_MSG_TYPE: MT_AVATAR_UPDATE, F_AVATAR_DATA: jpeg, F_AVATAR_VERSION: 1}
-        )
-        mock_identity = MagicMock()
-        mock_identity.hash = bytes.fromhex(sender)
-        lxm.source_hash = bytes.fromhex(sender)
-        with patch("trenchchat.core.avatar.RNS.Identity.recall", return_value=mock_identity):
-            avatar_mgr._on_lxmf_message(lxm)
+        avatar_mgr._on_message(_make_message(
+            {F_MSG_TYPE: MT_AVATAR_UPDATE, F_AVATAR_DATA: jpeg,
+             F_AVATAR_VERSION: 1},
+            sender,
+        ))
 
         assert received == [sender]
 
@@ -513,8 +502,7 @@ class TestDeliveryRetry:
         peer_hex = "77" * 16
         avatar_mgr._storage.upsert_avatar_delivery(peer_hex, 2)
 
-        with patch("trenchchat.core.avatar.RNS.Transport.request_path"):
-            avatar_mgr._on_delivery_failed(peer_hex, 2)
+        avatar_mgr._on_delivery_failed(peer_hex, 2)
 
         assert avatar_mgr._storage.get_avatar_delivery_version(peer_hex) is None
         assert peer_hex in avatar_mgr._pending
@@ -524,8 +512,7 @@ class TestDeliveryRetry:
         config.avatar_version = 2
         peer_hex = "88" * 16
 
-        with patch("trenchchat.core.avatar.RNS.Transport.request_path"):
-            avatar_mgr._on_delivery_failed(peer_hex, 2)
+        avatar_mgr._on_delivery_failed(peer_hex, 2)
 
         sent = []
         avatar_mgr._send_avatar_to = lambda h, d, v: sent.append((h, v))
@@ -548,26 +535,21 @@ class TestDeliveryRetry:
 
     def test_unknown_path_queues_pending_and_requests_path(self, avatar_mgr):
         peer_hex = "aa" * 16
-        with patch("trenchchat.core.avatar.RNS.Identity.recall", return_value=None), \
-                patch("trenchchat.core.avatar.RNS.Transport.request_path") as req:
-            avatar_mgr._send_avatar_to(peer_hex, b"data", 1)
+        avatar_mgr._router.reachable = False
+        avatar_mgr._send_avatar_to(peer_hex, b"data", 1)
         assert peer_hex in avatar_mgr._pending
         assert avatar_mgr._storage.get_avatar_delivery_version(peer_hex) is None
-        req.assert_called_once()
+        assert avatar_mgr._router.paths_requested == [peer_hex]
 
     def test_successful_send_clears_pending(self, avatar_mgr):
         peer_hex = "bc" * 16
         avatar_mgr._queue_pending(peer_hex, 1)
 
-        mock_identity = MagicMock()
-        with patch("trenchchat.core.avatar.RNS.Identity.recall", return_value=mock_identity), \
-                patch("trenchchat.core.avatar.RNS.Destination"), \
-                patch("trenchchat.core.avatar.LXMF.LXMessage"):
-            avatar_mgr._send_avatar_to(peer_hex, b"data", 1)
+        avatar_mgr._send_avatar_to(peer_hex, b"data", 1)
 
         assert peer_hex not in avatar_mgr._pending
         assert avatar_mgr._storage.get_avatar_delivery_version(peer_hex) == 1
-        avatar_mgr._router.send.assert_called_once()
+        assert len(avatar_mgr._router.sent) == 1
 
 
 class TestOnlyTrenchChatPeersArePushedAvatars:
@@ -580,13 +562,8 @@ class TestOnlyTrenchChatPeersArePushedAvatars:
         config.avatar_version = 4
 
     def _flush(self, mgr: AvatarManager, peer_hex: str) -> None:
-        """flush_avatar through the real send path, with RNS stubbed out."""
-        with patch("trenchchat.core.avatar.RNS.Identity.recall",
-                   return_value=MagicMock()), \
-                patch("trenchchat.core.avatar.RNS.Transport.request_path"), \
-                patch("trenchchat.core.avatar.RNS.Destination"), \
-                patch("trenchchat.core.avatar.LXMF.LXMessage"):
-            mgr.flush_avatar(peer_hex)
+        """flush_avatar through the real send path."""
+        mgr.flush_avatar(peer_hex)
 
     def test_foreign_lxmf_client_is_neither_sent_to_nor_queued(
             self, gated_avatar_mgr, config):
@@ -596,7 +573,7 @@ class TestOnlyTrenchChatPeersArePushedAvatars:
 
         self._flush(mgr, peer_hex)
 
-        mgr._router.send.assert_not_called()
+        assert mgr._router.sent == []
         assert peer_hex not in mgr._pending, \
             "a foreign client's announce queued an avatar blob to fire later"
         assert mgr._storage.get_avatar_delivery_version(peer_hex) is None
@@ -609,7 +586,7 @@ class TestOnlyTrenchChatPeersArePushedAvatars:
 
         self._flush(mgr, peer_hex)
 
-        mgr._router.send.assert_called_once()
+        assert len(mgr._router.sent) == 1
         assert mgr._storage.get_avatar_delivery_version(peer_hex) == 4
 
     def test_channel_member_is_sent_the_avatar(self, gated_avatar_mgr, config):
@@ -620,7 +597,7 @@ class TestOnlyTrenchChatPeersArePushedAvatars:
 
         self._flush(mgr, peer_hex)
 
-        mgr._router.send.assert_called_once()
+        assert len(mgr._router.sent) == 1
 
     def test_channel_subscriber_is_sent_the_avatar(self, gated_avatar_mgr, config):
         mgr, _directory = gated_avatar_mgr
@@ -635,7 +612,7 @@ class TestOnlyTrenchChatPeersArePushedAvatars:
 
         self._flush(mgr, peer_hex)
 
-        mgr._router.send.assert_called_once()
+        assert len(mgr._router.sent) == 1
 
     def test_fanout_skips_a_foreign_peer(self, gated_avatar_mgr, config):
         """set_avatar()'s fan-out goes through the same gate: a peer a lookup
@@ -645,15 +622,10 @@ class TestOnlyTrenchChatPeersArePushedAvatars:
         _share_channel_with(mgr, member_hex)
         stranger_hex = "db" * 16
 
-        with patch("trenchchat.core.avatar.RNS.Identity.recall",
-                   return_value=MagicMock()), \
-                patch("trenchchat.core.avatar.RNS.Transport.request_path"), \
-                patch("trenchchat.core.avatar.RNS.Destination"), \
-                patch("trenchchat.core.avatar.LXMF.LXMessage"):
-            mgr.set_avatar(compress_avatar(_make_test_jpeg()),
-                           lambda _ch: {stranger_hex})
+        mgr.set_avatar(compress_avatar(_make_test_jpeg()),
+                       lambda _ch: {stranger_hex})
 
-        assert mgr._router.send.call_count == 1
+        assert len(mgr._router.sent) == 1
         assert mgr._storage.get_avatar_delivery_version(member_hex) is not None
         assert mgr._storage.get_avatar_delivery_version(stranger_hex) is None
         assert stranger_hex not in mgr._pending
@@ -667,14 +639,11 @@ class TestAvatarStorageIsBounded:
         jpeg = compress_avatar(_make_test_jpeg())
         sender = "ab" * 16
 
-        mock_identity = MagicMock()
-        mock_identity.hash = bytes.fromhex(sender)
-        lxm = _make_lxm(
-            {F_MSG_TYPE: MT_AVATAR_UPDATE, F_AVATAR_DATA: jpeg, F_AVATAR_VERSION: 1}
-        )
-        lxm.source_hash = bytes.fromhex(sender)
-        with patch("trenchchat.core.avatar.RNS.Identity.recall", return_value=mock_identity):
-            avatar_mgr._on_lxmf_message(lxm)
+        avatar_mgr._on_message(_make_message(
+            {F_MSG_TYPE: MT_AVATAR_UPDATE, F_AVATAR_DATA: jpeg,
+             F_AVATAR_VERSION: 1},
+            sender,
+        ))
 
         assert avatar_mgr._storage.get_peer_avatar(sender) is None
 

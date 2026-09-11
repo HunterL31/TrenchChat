@@ -50,9 +50,9 @@ import pytest
 import LXMF
 import RNS
 
-from tests.conftest import forge
+from tests.conftest import deliver, forge, lxmf_transport_for
 from tests.helpers import sign_as, wait_for, wait_for_member
-from trenchchat.network.router import (
+from trenchchat.network.lxmf_transport import (
     PATH_REQUEST_GLOBAL_BURST, PATH_REQUEST_MAX_SOURCES, QUARANTINE_MAX_PER_SENDER,
 )
 from trenchchat.core import actions
@@ -1178,13 +1178,21 @@ class TestAdversarialUnauthenticatedDelivery:
     at the router's real entry point.
     """
 
+    @staticmethod
+    def _unverified(lxm, reason):
+        """Model LXMF's verdict on a message it could not check."""
+        lxm.signature_validated = False
+        lxm.unverified_reason = reason
+        return lxm
+
     def _chat_lxm(self, sender, recipient, ch_hash, content, msg_id, ts=None):
         dest = RNS.Destination(
             recipient.identity.rns_identity, RNS.Destination.OUT,
             RNS.Destination.SINGLE, "lxmf", "delivery",
         )
-        lxm = LXMF.LXMessage(dest, sender.router.delivery_destination, content,
-                             desired_method=LXMF.LXMessage.DIRECT)
+        lxm = LXMF.LXMessage(dest,
+                             lxmf_transport_for(sender).delivery_destination,
+                             content, desired_method=LXMF.LXMessage.DIRECT)
         ts = time.time() if ts is None else ts
         lxm.fields = pack_fields({
             F_CHANNEL_HASH: bytes.fromhex(ch_hash),
@@ -1211,7 +1219,8 @@ class TestAdversarialUnauthenticatedDelivery:
         )
         lxm = self._chat_lxm(alice, bob, ch_hash, "spoofed", "forged-msg-1")
 
-        bob.router._on_message_received(forge(lxm))
+        lxmf_transport_for(bob, inbound=True)._on_message_received(
+            self._unverified(lxm, LXMF.LXMessage.SIGNATURE_INVALID))
         time.sleep(0.3)
 
         ids = [m["message_id"] for m in bob.storage.get_messages(ch_hash)]
@@ -1232,7 +1241,7 @@ class TestAdversarialUnauthenticatedDelivery:
         lxm = self._chat_lxm(alice, bob, ch_hash, "genuine", msg_id, ts=ts)
         lxm.signature_validated = True
 
-        bob.router._on_message_received(lxm)
+        lxmf_transport_for(bob, inbound=True)._on_message_received(lxm)
         time.sleep(0.3)
 
         ids = [m["message_id"] for m in bob.storage.get_messages(ch_hash)]
@@ -1255,19 +1264,11 @@ class TestAdversarialUnauthenticatedDelivery:
         seen: list = []
         bob.invite_mgr.add_member_list_callback(lambda ch: seen.append(ch))
 
-        dest = RNS.Destination(
-            bob.identity.rns_identity, RNS.Destination.OUT,
-            RNS.Destination.SINGLE, "lxmf", "delivery",
-        )
-        lxm = LXMF.LXMessage(dest, alice.router.delivery_destination, "",
-                             desired_method=LXMF.LXMessage.DIRECT)
-        lxm.fields = {
+        forge(alice, bob, {
             F_MSG_TYPE:        MT_MEMBER_LIST_UPDATE,
             F_CHANNEL_HASH:    bytes.fromhex(ch_hash),
             F_MEMBER_LIST_DOC: msgpack.packb({"version": 99}, use_bin_type=True),
-        }
-
-        bob.router._on_message_received(forge(lxm))
+        })
         time.sleep(0.3)
 
         assert not seen, "An unauthenticated member list update was processed"
@@ -1281,18 +1282,18 @@ class TestAdversarialUnauthenticatedDelivery:
         alice, bob, ch_hash = _setup_channel_with_member(
             peer_factory, member_perms=[SEND_MESSAGE]
         )
+        transport = lxmf_transport_for(bob, inbound=True)
         lxm = self._chat_lxm(alice, bob, ch_hash, "unknown source", "unknown-src-1")
-        lxm.signature_validated = False
-        lxm.unverified_reason = LXMF.LXMessage.SOURCE_UNKNOWN
+        self._unverified(lxm, LXMF.LXMessage.SOURCE_UNKNOWN)
         lxm.packed = b"\x00" * 32  # non-empty so it is held rather than discarded
 
-        bob.router._on_message_received(lxm)
+        transport._on_message_received(lxm)
         time.sleep(0.3)
 
         ids = [m["message_id"] for m in bob.storage.get_messages(ch_hash)]
         assert "unknown-src-1" not in ids, \
             "A message with an unverifiable source was delivered"
-        held = sum(len(v) for v in bob.router._quarantine.values())
+        held = sum(len(v) for v in transport._quarantine.values())
         assert held == 1, f"Expected the message to be quarantined, found {held}"
 
     def test_quarantine_release_rejects_still_invalid_signature(self, peer_factory):
@@ -1304,15 +1305,15 @@ class TestAdversarialUnauthenticatedDelivery:
         alice, bob, ch_hash = _setup_channel_with_member(
             peer_factory, member_perms=[SEND_MESSAGE]
         )
+        transport = lxmf_transport_for(bob, inbound=True)
         lxm = self._chat_lxm(alice, bob, ch_hash, "still bad", "release-bad-1")
-        lxm.signature_validated = False
-        lxm.unverified_reason = LXMF.LXMessage.SOURCE_UNKNOWN
+        self._unverified(lxm, LXMF.LXMessage.SOURCE_UNKNOWN)
         lxm.packed = b"\x01" * 64  # garbage: re-unpack fails or does not validate
 
-        bob.router._on_message_received(lxm)
-        assert sum(len(v) for v in bob.router._quarantine.values()) == 1
+        transport._on_message_received(lxm)
+        assert sum(len(v) for v in transport._quarantine.values()) == 1
 
-        bob.router.release_quarantined(alice.identity.hash_hex)
+        transport.release_quarantined(alice.identity.hash_hex)
         time.sleep(0.3)
 
         ids = [m["message_id"] for m in bob.storage.get_messages(ch_hash)]
@@ -1340,14 +1341,14 @@ class TestAdversarialUnauthenticatedDelivery:
         # Real packed bytes, so the release path has something it can genuinely
         # re-validate -- the other quarantine tests deliberately use garbage.
         lxm.pack()
-        lxm.signature_validated = False
-        lxm.unverified_reason = LXMF.LXMessage.SOURCE_UNKNOWN
+        self._unverified(lxm, LXMF.LXMessage.SOURCE_UNKNOWN)
 
-        bob.router._on_message_received(lxm)
-        assert sum(len(v) for v in bob.router._quarantine.values()) == 1
+        transport = lxmf_transport_for(bob, inbound=True)
+        transport._on_message_received(lxm)
+        assert sum(len(v) for v in transport._quarantine.values()) == 1
         assert not bob.storage.message_exists(msg_id)
 
-        bob.router.release_quarantined(alice.identity.hash_hex)
+        transport.release_quarantined(alice.identity.hash_hex)
 
         assert wait_for(lambda: bob.storage.message_exists(msg_id)), \
             "A held message was never delivered after its sender became known"
@@ -1360,14 +1361,14 @@ class TestAdversarialUnauthenticatedDelivery:
         alice, bob, ch_hash = _setup_channel_with_member(
             peer_factory, member_perms=[SEND_MESSAGE]
         )
+        transport = lxmf_transport_for(bob, inbound=True)
         for i in range(QUARANTINE_MAX_PER_SENDER * 3):
             lxm = self._chat_lxm(alice, bob, ch_hash, f"flood {i}", f"flood-{i}")
-            lxm.signature_validated = False
-            lxm.unverified_reason = LXMF.LXMessage.SOURCE_UNKNOWN
+            self._unverified(lxm, LXMF.LXMessage.SOURCE_UNKNOWN)
             lxm.packed = b"\x02" * 32
-            bob.router._on_message_received(lxm)
+            transport._on_message_received(lxm)
 
-        held = sum(len(v) for v in bob.router._quarantine.values())
+        held = sum(len(v) for v in transport._quarantine.values())
         assert held <= QUARANTINE_MAX_PER_SENDER, \
             f"Quarantine grew to {held}, above the per-sender cap"
 
@@ -1915,21 +1916,13 @@ class TestAdversarialReactions:
     """
 
     def _react(self, peer, target, ch_hash, msg_id, emoji_hash, remove=False):
-        dest = RNS.Destination(
-            target.identity.rns_identity, RNS.Destination.OUT,
-            RNS.Destination.SINGLE, "lxmf", "delivery",
-        )
-        lxm = LXMF.LXMessage(dest, peer.router.delivery_destination, "",
-                             desired_method=LXMF.LXMessage.DIRECT)
-        lxm.fields = {
+        deliver(peer, target, {
             F_MSG_TYPE:         MT_REACTION,
             F_CHANNEL_HASH:     bytes.fromhex(ch_hash),
             F_REACTION_MSG_ID:  msg_id,
             F_EMOJI_HASH:       bytes.fromhex(emoji_hash),
             F_REACTION_REMOVE:  remove,
-        }
-        lxm.signature_validated = True
-        target.router._on_message_received(lxm)
+        })
         time.sleep(0.2)
 
     def test_non_member_reaction_is_rejected(self, peer_factory):
@@ -1961,21 +1954,13 @@ class TestAdversarialReactions:
 
     def _react_unicode(self, peer, target, ch_hash, msg_id, emoji):
         """Same as _react, but over the unicode reaction field."""
-        dest = RNS.Destination(
-            target.identity.rns_identity, RNS.Destination.OUT,
-            RNS.Destination.SINGLE, "lxmf", "delivery",
-        )
-        lxm = LXMF.LXMessage(dest, peer.router.delivery_destination, "",
-                             desired_method=LXMF.LXMessage.DIRECT)
-        lxm.fields = {
+        deliver(peer, target, {
             F_MSG_TYPE:          MT_REACTION,
             F_CHANNEL_HASH:      bytes.fromhex(ch_hash),
             F_REACTION_MSG_ID:   msg_id,
             F_REACTION_UNICODE:  emoji,
             F_REACTION_REMOVE:   False,
-        }
-        lxm.signature_validated = True
-        target.router._on_message_received(lxm)
+        })
         time.sleep(0.2)
 
     def test_non_member_unicode_reaction_is_rejected(self, peer_factory):
@@ -2017,16 +2002,10 @@ class TestAdversarialPayloadLimits:
         alice, bob, ch_hash = _setup_channel_with_member(
             peer_factory, member_perms=[SEND_MESSAGE]
         )
-        dest = RNS.Destination(
-            bob.identity.rns_identity, RNS.Destination.OUT,
-            RNS.Destination.SINGLE, "lxmf", "delivery",
-        )
-        lxm = LXMF.LXMessage(dest, alice.router.delivery_destination, "huge",
-                             desired_method=LXMF.LXMessage.DIRECT)
         ts = time.time()
         oversized = b"\x00" * (MAX_IMAGE_BYTES + 1)
         msg_id = _compute_message_id("huge", alice.identity.hash_hex, ts)
-        lxm.fields = pack_fields({
+        deliver(alice, bob, {
             F_CHANNEL_HASH: bytes.fromhex(ch_hash),
             F_DISPLAY_NAME: "Alice",
             F_TIMESTAMP:    ts,
@@ -2035,10 +2014,7 @@ class TestAdversarialPayloadLimits:
             F_AUTHOR_SIG:   sign_as(alice.identity.hash_hex, ch_hash,
                                     msg_id, ts, "huge",
                                     image_data=oversized),
-        })
-        lxm.signature_validated = True
-
-        bob.router._on_message_received(lxm)
+        }, "huge")
         time.sleep(0.3)
 
         rows = [m for m in bob.storage.get_messages(ch_hash)
@@ -2059,17 +2035,11 @@ class TestAdversarialFileManifest:
 
     _FILE_BYTES = b"survey data\n" * 500
 
-    def _file_lxm(self, sender, recipient, ch_hash, content, ts, manifest,
-                  sign_over_manifest: bool = True):
-        dest = RNS.Destination(
-            recipient.identity.rns_identity, RNS.Destination.OUT,
-            RNS.Destination.SINGLE, "lxmf", "delivery",
-        )
-        lxm = LXMF.LXMessage(dest, sender.router.delivery_destination, content,
-                             desired_method=LXMF.LXMessage.DIRECT)
+    def _send_file_message(self, sender, recipient, ch_hash, content, ts,
+                           manifest, sign_over_manifest: bool = True):
         msg_id = _compute_message_id(content, sender.identity.hash_hex, ts)
         signed = manifest if sign_over_manifest else None
-        lxm.fields = pack_fields({
+        deliver(sender, recipient, {
             F_CHANNEL_HASH:    bytes.fromhex(ch_hash),
             F_DISPLAY_NAME:    "Alice",
             F_TIMESTAMP:       ts,
@@ -2080,9 +2050,8 @@ class TestAdversarialFileManifest:
             F_FILE_CHUNK_ROOT: manifest["chunk_root"],
             F_AUTHOR_SIG:      sign_as(sender.identity.hash_hex, ch_hash, msg_id,
                                        ts, content, manifest=signed),
-        })
-        lxm.signature_validated = True
-        return lxm, msg_id
+        }, content)
+        return msg_id
 
     def test_a_manifest_naming_a_path_is_stripped(self, peer_factory):
         """A name that needed cleaning is refused, not repaired."""
@@ -2091,10 +2060,8 @@ class TestAdversarialFileManifest:
         )
         manifest = {"name": "../../etc/passwd", "size": 12,
                     "hash": b"\x11" * 32, "chunk_root": b"\x22" * 32}
-        lxm, msg_id = self._file_lxm(alice, bob, ch_hash, "here", time.time(),
-                                     manifest)
-
-        bob.router._on_message_received(lxm)
+        msg_id = self._send_file_message(alice, bob, ch_hash, "here",
+                                         time.time(), manifest)
         time.sleep(0.3)
 
         rows = [m for m in bob.storage.get_messages(ch_hash)
@@ -2112,10 +2079,8 @@ class TestAdversarialFileManifest:
         )
         manifest = {"name": "huge.bin", "size": MAX_SHARED_FILE_BYTES + 1,
                     "hash": b"\x11" * 32, "chunk_root": b"\x22" * 32}
-        lxm, msg_id = self._file_lxm(alice, bob, ch_hash, "huge", time.time(),
-                                     manifest)
-
-        bob.router._on_message_received(lxm)
+        msg_id = self._send_file_message(alice, bob, ch_hash, "huge",
+                                         time.time(), manifest)
         time.sleep(0.3)
 
         rows = [m for m in bob.storage.get_messages(ch_hash)
@@ -2130,10 +2095,9 @@ class TestAdversarialFileManifest:
             peer_factory, member_perms=[SEND_MESSAGE]
         )
         manifest = build_file_manifest("survey.csv", self._FILE_BYTES)
-        lxm, msg_id = self._file_lxm(alice, bob, ch_hash, "here", time.time(),
-                                     manifest, sign_over_manifest=False)
-
-        bob.router._on_message_received(lxm)
+        msg_id = self._send_file_message(alice, bob, ch_hash, "here",
+                                         time.time(), manifest,
+                                         sign_over_manifest=False)
         time.sleep(0.3)
 
         ids = [m["message_id"] for m in bob.storage.get_messages(ch_hash)]
@@ -2146,10 +2110,8 @@ class TestAdversarialFileManifest:
             peer_factory, member_perms=[SEND_MESSAGE]
         )
         manifest = build_file_manifest("survey.csv", self._FILE_BYTES)
-        lxm, msg_id = self._file_lxm(alice, bob, ch_hash, "here", time.time(),
-                                     manifest)
-
-        bob.router._on_message_received(lxm)
+        msg_id = self._send_file_message(alice, bob, ch_hash, "here",
+                                         time.time(), manifest)
         time.sleep(0.3)
 
         rows = [m for m in bob.storage.get_messages(ch_hash)
@@ -3401,16 +3363,8 @@ class TestGoodbyeSpoofing:
         presence = self._presence_wired(bob)
         presence.record_seen(alice.identity.hash_hex)
 
-        dest = RNS.Destination(
-            bob.identity.rns_identity, RNS.Destination.OUT,
-            RNS.Destination.SINGLE, "lxmf", "delivery",
-        )
-        lxm = LXMF.LXMessage(dest, carol.router.delivery_destination, "",
-                             desired_method=LXMF.LXMessage.DIRECT)
-        lxm.fields = {F_MSG_TYPE: MT_GOODBYE}
-        lxm.source_hash = alice.router.delivery_destination.hash
-
-        bob.router._on_message_received(forge(lxm))
+        forge(carol, bob, {F_MSG_TYPE: MT_GOODBYE},
+              claimed_source_hex=alice.identity.hash_hex)
         time.sleep(0.3)
 
         assert presence.is_online(alice.identity.hash_hex), \
@@ -3427,16 +3381,9 @@ class TestGoodbyeSpoofing:
         presence.record_seen(alice.identity.hash_hex)
         presence.record_seen(victim_hex)
 
-        dest = RNS.Destination(
-            bob.identity.rns_identity, RNS.Destination.OUT,
-            RNS.Destination.SINGLE, "lxmf", "delivery",
-        )
-        lxm = LXMF.LXMessage(dest, alice.router.delivery_destination, "",
-                             desired_method=LXMF.LXMessage.DIRECT)
         # A hostile client bolting a victim onto the notice.
-        lxm.fields = {F_MSG_TYPE: MT_GOODBYE, F_MISSED_FOR: victim_hex}
-
-        alice.router.send(lxm)
+        alice.router.send(bob.identity.hash_hex,
+                          {F_MSG_TYPE: MT_GOODBYE, F_MISSED_FOR: victim_hex})
         assert wait_for(lambda: not presence.is_online(alice.identity.hash_hex),
                         timeout=3), "the sender's own goodbye was not honoured"
         assert presence.is_online(victim_hex), \
@@ -3451,20 +3398,11 @@ class TestGoodbyeSpoofing:
         presence = self._presence_wired(bob)
         presence.record_seen(alice.identity.hash_hex)
 
-        dest = RNS.Destination(
-            bob.identity.rns_identity, RNS.Destination.OUT,
-            RNS.Destination.SINGLE, "lxmf", "delivery",
-        )
-        goodbye = LXMF.LXMessage(dest, alice.router.delivery_destination, "",
-                                 desired_method=LXMF.LXMessage.DIRECT)
-        goodbye.fields = {F_MSG_TYPE: MT_GOODBYE}
-        alice.router.send(goodbye)
+        alice.router.send(bob.identity.hash_hex, {F_MSG_TYPE: MT_GOODBYE})
         assert wait_for(lambda: not presence.is_online(alice.identity.hash_hex),
                         timeout=3)
 
-        back = LXMF.LXMessage(dest, alice.router.delivery_destination, "hi",
-                              desired_method=LXMF.LXMessage.DIRECT)
-        alice.router.send(back)
+        alice.router.send(bob.identity.hash_hex, {}, "hi")
 
         assert wait_for(lambda: presence.is_online(alice.identity.hash_hex),
                         timeout=3), "a goodbye left the sender stuck offline"
@@ -3537,17 +3475,7 @@ class TestAdversarialVoice:
         """A join whose LXMF signature fails validation dies at the router."""
         alice, bob, ch_hash = _setup_invite_channel(peer_factory)
 
-        delivery_hash = RNS.Destination.hash(
-            bytes.fromhex(alice.identity.hash_hex), "lxmf", "delivery")
-        dest = RNS.Destination(
-            RNS.Identity.recall(delivery_hash),
-            RNS.Destination.OUT, RNS.Destination.SINGLE, "lxmf", "delivery",
-        )
-        lxm = LXMF.LXMessage(dest, bob.router.delivery_destination, "",
-                             desired_method=LXMF.LXMessage.DIRECT)
-        lxm.fields = _voice_join_fields(ch_hash)
-        forge(lxm)
-        bob.router.send(lxm)
+        forge(bob, alice, _voice_join_fields(ch_hash))
 
         time.sleep(0.3)
         assert alice.voice_mgr.get_roster(ch_hash) == [], \
@@ -3783,8 +3711,8 @@ class TestAdversarialChannelAnnounce:
 
     def _announce(self, peer, channel_hash_hex, announcer, **metadata):
         peer.channel_mgr._on_channel_discovered(
-            bytes.fromhex(channel_hash_hex),
-            announcer.identity.rns_identity,
+            channel_hash_hex,
+            announcer.identity.hash_hex,
             metadata,
         )
 
@@ -4013,23 +3941,15 @@ class TestAdversarialMessageIdSquatting:
     silently, and no future sweep would offer it again.
     """
 
-    def _chat_lxm(self, sender, recipient, ch_hash, content, msg_id, ts):
-        dest = RNS.Destination(
-            recipient.identity.rns_identity, RNS.Destination.OUT,
-            RNS.Destination.SINGLE, "lxmf", "delivery",
-        )
-        lxm = LXMF.LXMessage(dest, sender.router.delivery_destination, content,
-                             desired_method=LXMF.LXMessage.DIRECT)
-        lxm.fields = pack_fields({
+    def _send_chat(self, sender, recipient, ch_hash, content, msg_id, ts):
+        deliver(sender, recipient, {
             F_CHANNEL_HASH: bytes.fromhex(ch_hash),
             F_DISPLAY_NAME: "Peer",
             F_TIMESTAMP:    ts,
             F_MESSAGE_ID:   msg_id,
             F_AUTHOR_SIG:   sign_as(sender.identity.hash_hex, ch_hash, msg_id,
                                     ts, content),
-        })
-        lxm.signature_validated = True
-        return lxm
+        }, content)
 
     def test_a_member_cannot_claim_another_messages_id(self, peer_factory):
         alice, bob, ch_hash = _setup_channel_with_member(
@@ -4040,17 +3960,15 @@ class TestAdversarialMessageIdSquatting:
                                         victim_ts)
 
         squat_ts = time.time()
-        squat = self._chat_lxm(alice, bob, ch_hash, "not the real thing",
-                               victim_id, squat_ts)
-        bob.router._on_message_received(squat)
+        self._send_chat(alice, bob, ch_hash, "not the real thing",
+                        victim_id, squat_ts)
         time.sleep(0.3)
 
         ids = [m["message_id"] for m in bob.storage.get_messages(ch_hash)]
         assert victim_id not in ids, "a squatted message_id was accepted"
 
-        genuine = self._chat_lxm(alice, bob, ch_hash, "the real thing",
-                                 victim_id, victim_ts)
-        bob.router._on_message_received(genuine)
+        self._send_chat(alice, bob, ch_hash, "the real thing",
+                        victim_id, victim_ts)
         time.sleep(0.3)
 
         rows = [m for m in bob.storage.get_messages(ch_hash)
@@ -4165,12 +4083,13 @@ class TestAdversarialQuarantinePathRequests:
 
     def test_rotating_the_claimed_source_cannot_evade_the_throttle(self, peer_factory):
         bob = peer_factory("bob")
+        transport = lxmf_transport_for(bob, inbound=True)
         requested = []
 
-        with patch("trenchchat.network.router.RNS.Transport.request_path",
+        with patch("trenchchat.network.lxmf_transport.RNS.Transport.request_path",
                    side_effect=lambda h: requested.append(h)):
             for i in range(PATH_REQUEST_GLOBAL_BURST * 3):
-                bob.router._on_message_received(
+                transport._on_message_received(
                     self._unknown_source_lxm(bob, i.to_bytes(16, "big")))
 
         assert len(requested) <= PATH_REQUEST_GLOBAL_BURST, (
@@ -4180,12 +4099,13 @@ class TestAdversarialQuarantinePathRequests:
 
     def test_the_source_table_stays_bounded_under_rotation(self, peer_factory):
         bob = peer_factory("bob")
-        with patch("trenchchat.network.router.RNS.Transport.request_path"):
+        transport = lxmf_transport_for(bob, inbound=True)
+        with patch("trenchchat.network.lxmf_transport.RNS.Transport.request_path"):
             for i in range(PATH_REQUEST_MAX_SOURCES * 2):
-                bob.router._on_message_received(
+                transport._on_message_received(
                     self._unknown_source_lxm(bob, i.to_bytes(16, "big")))
 
-        assert len(bob.router._path_request_rate) <= PATH_REQUEST_MAX_SOURCES
+        assert len(transport._path_request_rate) <= PATH_REQUEST_MAX_SOURCES
 
 
 class TestDirectMessageGate:
@@ -4197,7 +4117,7 @@ class TestDirectMessageGate:
     """
 
     @staticmethod
-    def _dm_lxm(sender, recipient, conversation_hash, content, ts=None):
+    def _dm_fields(sender, conversation_hash, content, ts=None):
         """A direct message in the form a real TrenchChat client sends.
 
         No conversation address on the wire -- the receiver derives it from the
@@ -4205,15 +4125,9 @@ class TestDirectMessageGate:
         LXMF custom-payload envelope. conversation_hash is only what the author
         signature is computed over.
         """
-        dest = RNS.Destination(
-            recipient.identity.rns_identity, RNS.Destination.OUT,
-            RNS.Destination.SINGLE, "lxmf", "delivery",
-        )
-        lxm = LXMF.LXMessage(dest, sender.router.delivery_destination, content,
-                             desired_method=LXMF.LXMessage.DIRECT)
         ts = time.time() if ts is None else ts
         msg_id = _compute_message_id(content, sender.identity.hash_hex, ts)
-        lxm.fields = {
+        return {
             LXMF_FIELD_CUSTOM_TYPE: DM_ENVELOPE_TYPE,
             LXMF_FIELD_CUSTOM_DATA: pack_dm_envelope(
                 message_id=msg_id, timestamp=ts, display_name="Mallory",
@@ -4221,19 +4135,21 @@ class TestDirectMessageGate:
                 author_sig=sign_as(sender.identity.hash_hex, conversation_hash,
                                    msg_id, ts, content),
             ),
-        }
-        return lxm, msg_id
+        }, msg_id
 
     @staticmethod
-    def _control_lxm(sender, recipient, msg_type):
-        dest = RNS.Destination(
-            recipient.identity.rns_identity, RNS.Destination.OUT,
-            RNS.Destination.SINGLE, "lxmf", "delivery",
-        )
-        lxm = LXMF.LXMessage(dest, sender.router.delivery_destination, "",
-                             desired_method=LXMF.LXMessage.DIRECT)
-        lxm.fields = {F_MSG_TYPE: msg_type, F_DISPLAY_NAME: "Mallory"}
-        return lxm
+    def _send_dm(sender, recipient, conversation_hash, content, ts=None):
+        """Send one, and return its message id."""
+        fields, msg_id = TestDirectMessageGate._dm_fields(
+            sender, conversation_hash, content, ts)
+        sender.router.send(recipient.identity.hash_hex, fields, content,
+                           envelope=False)
+        return msg_id
+
+    @staticmethod
+    def _send_control(sender, recipient, msg_type):
+        sender.router.send(recipient.identity.hash_hex,
+                           {F_MSG_TYPE: msg_type, F_DISPLAY_NAME: "Mallory"})
 
     def test_direct_message_from_a_stranger_is_dropped(self, peer_factory):
         """No friendship at all: the message must not be stored."""
@@ -4241,8 +4157,7 @@ class TestDirectMessageGate:
         bob = peer_factory("bob")
 
         conversation = dm_hash_for(mallory.identity.hash_hex, bob.identity.hash_hex)
-        lxm, msg_id = self._dm_lxm(mallory, bob, conversation, "let me in")
-        mallory.router.send(lxm)
+        msg_id = self._send_dm(mallory, bob, conversation, "let me in")
 
         time.sleep(0.4)
         assert not bob.storage.message_exists(msg_id)
@@ -4258,8 +4173,8 @@ class TestDirectMessageGate:
         mallory.friends_mgr.add_friend(bob.identity.hash_hex)
 
         conversation = dm_hash_for(mallory.identity.hash_hex, bob.identity.hash_hex)
-        lxm, msg_id = self._dm_lxm(mallory, bob, conversation, "we are friends, right")
-        mallory.router.send(lxm)
+        msg_id = self._send_dm(mallory, bob, conversation,
+                               "we are friends, right")
 
         time.sleep(0.4)
         assert not bob.storage.message_exists(msg_id)
@@ -4274,8 +4189,7 @@ class TestDirectMessageGate:
             mallory.identity.hash_hex) == FRIEND_PENDING_IN)
 
         conversation = dm_hash_for(mallory.identity.hash_hex, bob.identity.hash_hex)
-        lxm, msg_id = self._dm_lxm(mallory, bob, conversation, "jumping the queue")
-        mallory.router.send(lxm)
+        msg_id = self._send_dm(mallory, bob, conversation, "jumping the queue")
 
         time.sleep(0.4)
         assert not bob.storage.message_exists(msg_id)
@@ -4301,17 +4215,17 @@ class TestDirectMessageGate:
 
         foreign = dm_hash_for(bob.identity.hash_hex, carol.identity.hash_hex)
         # Signed as though for Bob and Carol's conversation, and sent anyway.
-        lxm, _ = self._dm_lxm(mallory, bob, foreign, "signed, Carol")
-        mallory.router.send(lxm)
+        self._send_dm(mallory, bob, foreign, "signed, Carol")
 
         time.sleep(0.4)
         assert bob.storage.get_messages(foreign) == [], \
             "a message reached a conversation its sender is not half of"
 
         # Naming it as a channel instead reaches nothing either.
-        channel_style, _ = self._dm_lxm(mallory, bob, foreign, "as a channel")
-        channel_style.fields[F_CHANNEL_HASH] = bytes.fromhex(foreign)
-        mallory.router.send(channel_style)
+        channel_style, _ = self._dm_fields(mallory, foreign, "as a channel")
+        channel_style[F_CHANNEL_HASH] = bytes.fromhex(foreign)
+        mallory.router.send(bob.identity.hash_hex, channel_style,
+                            "as a channel", envelope=False)
 
         time.sleep(0.4)
         assert bob.storage.get_messages(foreign) == []
@@ -4329,9 +4243,9 @@ class TestDirectMessageGate:
         bob.friends_mgr.add_friend(alice.identity.hash_hex)
 
         conversation = dm_hash_for(alice.identity.hash_hex, bob.identity.hash_hex)
-        lxm, msg_id = self._dm_lxm(alice, bob, conversation, "trust me")
-        lxm.source_hash = alice.router.delivery_destination.hash
-        mallory.router.send(forge(lxm))
+        fields, msg_id = self._dm_fields(alice, conversation, "trust me")
+        forge(mallory, bob, fields, "trust me",
+              claimed_source_hex=alice.identity.hash_hex, envelope=False)
 
         time.sleep(0.4)
         assert not bob.storage.message_exists(msg_id)
@@ -4344,7 +4258,7 @@ class TestDirectMessageGate:
         mallory = peer_factory("mallory")
         bob = peer_factory("bob")
 
-        mallory.router.send(self._control_lxm(mallory, bob, MT_FRIEND_ACCEPT))
+        self._send_control(mallory, bob, MT_FRIEND_ACCEPT)
 
         time.sleep(0.4)
         assert bob.friends_mgr.is_friend(mallory.identity.hash_hex) is False
@@ -4362,7 +4276,7 @@ class TestDirectMessageGate:
         assert wait_for(lambda: bob.storage.get_friend_state(
             mallory.identity.hash_hex) == FRIEND_PENDING_IN)
 
-        mallory.router.send(self._control_lxm(mallory, bob, MT_FRIEND_ACCEPT))
+        self._send_control(mallory, bob, MT_FRIEND_ACCEPT)
 
         time.sleep(0.4)
         assert bob.storage.get_friend_state(
@@ -4387,19 +4301,12 @@ class TestDirectMessageGate:
         assert wait_for(lambda: bob.storage.message_exists(sent))
         conversation = dm_hash_for(bob.identity.hash_hex, carol.identity.hash_hex)
 
-        dest = RNS.Destination(
-            bob.identity.rns_identity, RNS.Destination.OUT,
-            RNS.Destination.SINGLE, "lxmf", "delivery",
-        )
-        lxm = LXMF.LXMessage(dest, mallory.router.delivery_destination, "",
-                             desired_method=LXMF.LXMessage.DIRECT)
-        lxm.fields = {
+        mallory.router.send(bob.identity.hash_hex, {
             F_MSG_TYPE:         MT_REACTION,
             F_CHANNEL_HASH:     bytes.fromhex(conversation),
             F_REACTION_MSG_ID:  sent,
             F_REACTION_UNICODE: "👎",
-        }
-        mallory.router.send(lxm)
+        })
 
         time.sleep(0.4)
         assert bob.storage.get_reactions(sent) == []

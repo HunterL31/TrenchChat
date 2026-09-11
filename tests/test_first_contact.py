@@ -24,49 +24,33 @@ PEER_A = "bb" * 16
 PEER_B = "cc" * 16
 
 
-class StubRouter:
-    def __init__(self):
-        self.announces: list = []
-        self.user_announces: list = []
+class StubAnnouncer:
+    """Records the interface each answer was aimed at, or None for all."""
 
-    def announce(self, attached_interface=None):
-        self.announces.append(attached_interface)
-
-    def announce_user(self, attached_interface=None):
-        self.user_announces.append(attached_interface)
-
-
-class StubChannels:
     def __init__(self):
         self.announces: list = []
 
-    def announce_all_owned(self, attached_interface=None):
+    def __call__(self, attached_interface=None):
         self.announces.append(attached_interface)
 
 
 @pytest.fixture
-def router() -> StubRouter:
-    return StubRouter()
+def router() -> StubAnnouncer:
+    return StubAnnouncer()
 
 
 @pytest.fixture
-def channels() -> StubChannels:
-    return StubChannels()
+def announcer(router) -> FirstContactAnnouncer:
+    return FirstContactAnnouncer(router, SELF_HEX)
 
 
-@pytest.fixture
-def announcer(router, channels) -> FirstContactAnnouncer:
-    return FirstContactAnnouncer(router, channels, SELF_HEX)
-
-
-def test_a_new_peer_is_answered(announcer, router, channels):
+def test_a_new_peer_is_answered(announcer, router):
     assert announcer.note_peer(PEER_A, iface="eth", now=100.0) is True
     assert announcer.tick(now=100.0) is False  # still coalescing
 
     assert announcer.tick(now=100.0 + FIRST_CONTACT_COALESCE_SECS) is True
+    # One answer, which announces everything this node owns on that interface.
     assert router.announces == ["eth"]
-    assert router.user_announces == ["eth"]
-    assert channels.announces == ["eth"]
 
 
 def test_the_same_peer_is_answered_only_once(announcer, router):
@@ -122,12 +106,12 @@ def test_nothing_is_sent_without_a_peer(announcer, router):
     assert router.announces == []
 
 
-def test_the_answered_set_is_bounded(router, channels):
+def test_the_answered_set_is_bounded(router):
     """Identities are free to mint, so remembering every one is not an option.
 
     Answering an evicted peer a second time is the accepted cost.
     """
-    announcer = FirstContactAnnouncer(router, channels, SELF_HEX, max_answered=4)
+    announcer = FirstContactAnnouncer(router, SELF_HEX, max_answered=4)
     for i in range(10):
         announcer.note_peer(f"{i:032x}", now=100.0 + i)
         announcer.tick(now=200.0 + i)
@@ -136,16 +120,12 @@ def test_the_answered_set_is_bounded(router, channels):
     assert announcer.note_peer(f"{0:032x}", now=300.0) is True
 
 
-def test_an_announce_failure_does_not_kill_the_ticker(channels):
+def test_an_announce_failure_does_not_kill_the_ticker():
     """A send that raises must not take the loop driving it down with it."""
-    class Broken:
-        def announce(self, attached_interface=None):
-            raise RuntimeError("interface went away")
+    def broken(attached_interface=None):
+        raise RuntimeError("interface went away")
 
-        def announce_user(self, attached_interface=None):
-            raise AssertionError("should not be reached")
-
-    announcer = FirstContactAnnouncer(Broken(), channels, SELF_HEX)
+    announcer = FirstContactAnnouncer(broken, SELF_HEX)
     announcer.note_peer(PEER_A, now=100.0)
 
     assert announcer.tick(now=110.0) is True

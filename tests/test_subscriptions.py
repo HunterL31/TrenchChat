@@ -241,8 +241,6 @@ class TestSubscribeSurvivesAnUnresolvedPath:
         from every send, and only joining a second time recovered (restart3 in
         docs/testenv-scenarios.md).
         """
-        import RNS
-
         alice = peer_factory("alice")
         bob = peer_factory("bob")
 
@@ -250,7 +248,7 @@ class TestSubscribeSurvivesAnUnresolvedPath:
         bob.storage.upsert_channel(ch_hash, "cold-path", "",
                                    alice.identity.hash_hex, "public", time.time())
 
-        monkeypatch.setattr(RNS.Identity, "recall", staticmethod(lambda *a, **k: None))
+        bob.transport.unreachable.add(alice.identity.hash_hex)
         bob.subscription_mgr.subscribe(ch_hash, owner_hash_hex=alice.identity.hash_hex)
 
         assert bob.subscription_mgr._retry.pending_for(alice.identity.hash_hex) == 1, (
@@ -261,7 +259,7 @@ class TestSubscribeSurvivesAnUnresolvedPath:
             timeout=1,
         ), "the owner registered a subscriber whose message could not be sent"
 
-        monkeypatch.undo()
+        bob.transport.unreachable.clear()
         assert bob.subscription_mgr.flush_pending(alice.identity.hash_hex) == 1
 
         assert wait_for_subscriber(alice, ch_hash, bob.identity.hash_hex, timeout=5), (

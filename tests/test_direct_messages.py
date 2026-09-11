@@ -393,6 +393,7 @@ def test_a_contact_added_by_lxmf_address_can_be_messaged_and_answered(
     bot_address = RNS.Destination.hash(
         bytes.fromhex(bot.identity.hash_hex), "lxmf", "delivery").hex()
     assert bot_address != bot.identity.hash_hex
+    me.transport.addresses[bot_address] = bot.identity.hash_hex
 
     result = me.friends_mgr.add_lxmf_address(bot_address, "the bot")
     assert result == {"state": "added",

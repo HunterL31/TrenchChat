@@ -9,10 +9,10 @@ creator's identity + the aspect path.
 """
 
 import time
+
 import RNS
 import msgpack
 
-from trenchchat import APP_NAME, APP_ASPECT_CHANNEL
 from trenchchat.core.identity import Identity
 from trenchchat.core.naming import NameInUseError, channel_hash_for, sanitise_name
 from trenchchat.core.permissions import (
@@ -20,19 +20,27 @@ from trenchchat.core.permissions import (
     is_discoverable, is_open_join, permissions_from_json,
 )
 from trenchchat.core.storage import Storage
-from trenchchat.network.announce import ChannelAnnounceHandler
+from trenchchat.network.router import Router
 
 _sanitise_name = sanitise_name
 
 
 class ChannelManager:
-    def __init__(self, identity: Identity, storage: Storage):
+    """Creates, announces and discovers channels.
+
+    The address a channel is announced under belongs to the transport; this
+    manager owns which channels exist, what their metadata says, and whether
+    any of it may be broadcast at all.
+    """
+
+    def __init__(self, identity: Identity, storage: Storage, router: Router):
         self._identity = identity
         self._storage = storage
-        self._owned_destinations: dict[str, RNS.Destination] = {}
+        self._router = router
+        self._owned: set[str] = set()
         self._discovered_callbacks: list = []
-        self._announce_handler = ChannelAnnounceHandler(self._on_channel_discovered)
-        RNS.Transport.register_announce_handler(self._announce_handler)
+        router.add_channel_discovered_callback(self._on_channel_discovered)
+        router.add_announce_callback(self.announce_all_owned)
 
     def add_channel_discovered_callback(self, callback):
         """callback(channel_hash_hex, channel_name): fired when a new public channel is heard."""
@@ -72,21 +80,13 @@ class ChannelManager:
 
         aspect = _sanitise_name(name)
         hash_hex = channel_hash_for(self._identity.hash, name)
-        if hash_hex in self._owned_destinations or \
+        if hash_hex in self._owned or \
                 self._storage.get_channel(hash_hex) is not None:
             raise NameInUseError(f"you already have a channel named '{name}'")
 
-        dest = RNS.Destination(
-            self._identity.rns_identity,
-            RNS.Destination.IN,
-            RNS.Destination.SINGLE,
-            APP_NAME,
-            APP_ASPECT_CHANNEL,
-            aspect,
-        )
-
         created_at = time.time()
-        self._owned_destinations[hash_hex] = dest
+        self._owned.add(hash_hex)
+        self._router.register_channel(hash_hex, aspect)
         self._storage.upsert_channel(
             hash=hash_hex,
             name=name,
@@ -144,8 +144,7 @@ class ChannelManager:
         dialog broadcasts an invite-only channel's existence to the whole
         mesh even though open_join stays off.
         """
-        dest = self._owned_destinations.get(channel_hash_hex)
-        if dest is None:
+        if channel_hash_hex not in self._owned:
             return
         channel = self._storage.get_channel(channel_hash_hex)
         if channel is None:
@@ -160,7 +159,8 @@ class ChannelManager:
             "access": access,
             "creator": self._identity.hash_hex,
         }, use_bin_type=True)
-        dest.announce(app_data=app_data, attached_interface=attached_interface)
+        self._router.announce_channel(channel_hash_hex, app_data,
+                                      attached_interface=attached_interface)
 
     def announce_all_owned(self, attached_interface=None) -> None:
         """Announce all owned channels.
@@ -168,24 +168,24 @@ class ChannelManager:
         If attached_interface is given the announce is sent only on that
         interface; otherwise it is broadcast on all interfaces.
         """
-        for hash_hex in self._owned_destinations:
+        for hash_hex in list(self._owned):
             self.announce_channel(hash_hex, attached_interface=attached_interface)
 
     # --- discover ---
 
-    def _on_channel_discovered(self, destination_hash: bytes,
-                                announced_identity: RNS.Identity,
-                                metadata: dict,
-                                iface=None):
-        hash_hex = destination_hash.hex()
+    def _on_channel_discovered(self, hash_hex: str, creator_hash: str,
+                               metadata: dict, iface=None):
+        """Record a channel heard on the mesh.
+
+        creator_hash comes from the announcing identity, never from the
+        payload: the destination hash is bound to that identity, while
+        "creator" in the metadata is unsigned text -- and creator_hash goes on
+        to serve as a trusted-signer fallback when validating member list
+        documents.
+        """
         name = metadata.get("name", hash_hex[:8])
         description = metadata.get("description", "")
         access_mode = metadata.get("access", "public")
-        # Taken from the announcing identity, never from the payload: the
-        # destination hash is bound to that identity by RNS, while "creator"
-        # is unsigned text -- and creator_hash goes on to serve as a
-        # trusted-signer fallback when validating member list documents.
-        creator_hash = announced_identity.hash.hex() if announced_identity else ""
 
         already_known = self._storage.get_channel(hash_hex) is not None
         if already_known:
@@ -216,28 +216,19 @@ class ChannelManager:
                     RNS.log(f"TrenchChat: channel discovered callback error: {e}",
                             RNS.LOG_ERROR)
 
-    # --- owned channel destination lookup ---
-
-    def get_owned_destination(self, channel_hash_hex: str) -> RNS.Destination | None:
-        return self._owned_destinations.get(channel_hash_hex)
+    # --- owned channels ---
 
     def is_owner(self, channel_hash_hex: str) -> bool:
-        return channel_hash_hex in self._owned_destinations
+        """Whether this node created the channel and holds its address."""
+        return channel_hash_hex in self._owned
 
     def restore_owned_channels(self):
-        """Re-create RNS destinations for channels we created (called on startup)."""
+        """Re-claim the addresses of channels we created (called on startup)."""
         for row in self._storage.get_all_channels():
             if row["creator_hash"] == self._identity.hash_hex:
                 aspect = _sanitise_name(row["name"])
-                dest = RNS.Destination(
-                    self._identity.rns_identity,
-                    RNS.Destination.IN,
-                    RNS.Destination.SINGLE,
-                    APP_NAME,
-                    APP_ASPECT_CHANNEL,
-                    aspect,
-                )
-                self._owned_destinations[row["hash"]] = dest
+                self._owned.add(row["hash"])
+                self._router.register_channel(row["hash"], aspect)
                 # A channel inside a server has no member rows of its own --
                 # the server owns them, and writing one here would be invisible
                 # to every resolving read anyway.

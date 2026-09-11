@@ -12,9 +12,6 @@ and the Router unwraps it once so handlers only ever see the inner dict.
 
 import time
 
-import LXMF
-import RNS
-
 from tests.helpers import wait_for
 from trenchchat.core.naming import dm_hash_for
 from trenchchat.core.protocol import (
@@ -28,28 +25,15 @@ def befriend(a, b):
     b.friends_mgr.add_friend(a.identity.hash_hex)
 
 
-def sent_fields(peer, monkeypatch) -> list[dict]:
-    """Capture what actually goes on the wire from this peer."""
-    captured = []
-    original = peer.router.send
-
-    def spy(lxm):
-        captured.append(dict(getattr(lxm, "fields", None) or {}))
-        return original(lxm)
-
-    monkeypatch.setattr(peer.router, "send", spy)
-    return captured
+def wire_fields(peer) -> list[dict]:
+    """The fields this peer actually put on the wire, envelope and all."""
+    return [message.fields for message in peer.transport.outbox]
 
 
-def crafted_lxm(sender, recipient, content: str, fields: dict):
-    dest = RNS.Destination(
-        recipient.identity.rns_identity, RNS.Destination.OUT,
-        RNS.Destination.SINGLE, "lxmf", "delivery",
-    )
-    lxm = LXMF.LXMessage(dest, sender.router.delivery_destination, content,
-                         desired_method=LXMF.LXMessage.DIRECT)
-    lxm.fields = fields
-    return lxm
+def send_crafted(sender, recipient, content: str, fields: dict):
+    """Send LXMF field keys exactly as given, with no envelope of ours."""
+    return sender.router.send(recipient.identity.hash_hex, fields, content,
+                              envelope=False)
 
 
 # ---------------------------------------------------------------------------
@@ -95,29 +79,27 @@ def _reserved_keys(fields: dict) -> set:
     return {k for k in fields if isinstance(k, int) and k <= 0x80}
 
 
-def test_a_channel_message_claims_no_reserved_field_numbers(
-        peer_factory, monkeypatch):
+def test_a_channel_message_claims_no_reserved_field_numbers(peer_factory):
     alice = peer_factory("alice")
     bob = peer_factory("bob")
     ch_hash = alice.channel_mgr.create_channel("wire", "", "public")
     bob.storage.upsert_channel(ch_hash, "wire", "", alice.identity.hash_hex,
                                "public", time.time())
     bob.storage.subscribe(ch_hash)
-    captured = sent_fields(alice, monkeypatch)
 
     alice.messaging.send_message(
         channel_hash_hex=ch_hash, content="enveloped",
         subscriber_hashes=[bob.identity.hash_hex],
     )
 
+    captured = wire_fields(alice)
     assert captured, "nothing was sent"
     for fields in captured:
         assert _reserved_keys(fields) == set()
         assert fields[LXMF_FIELD_CUSTOM_TYPE] == ENVELOPE_TYPE
 
 
-def test_control_messages_claim_no_reserved_field_numbers(
-        peer_factory, monkeypatch):
+def test_control_messages_claim_no_reserved_field_numbers(peer_factory):
     """Subscribe is representative: every control sender routes through the
     same pack_fields envelope."""
     alice = peer_factory("alice")
@@ -125,10 +107,10 @@ def test_control_messages_claim_no_reserved_field_numbers(
     ch_hash = alice.channel_mgr.create_channel("wire-ctl", "", "public")
     bob.storage.upsert_channel(ch_hash, "wire-ctl", "", alice.identity.hash_hex,
                                "public", time.time())
-    captured = sent_fields(bob, monkeypatch)
 
     bob.subscription_mgr.subscribe(ch_hash, alice.identity.hash_hex)
 
+    captured = wire_fields(bob)
     assert captured, "nothing was sent"
     for fields in captured:
         assert _reserved_keys(fields) == set()
@@ -164,10 +146,10 @@ def test_a_corrupt_envelope_is_dropped_at_the_router(peer_factory):
     bob = peer_factory("bob")
     befriend(alice, bob)
 
-    alice.router.send(crafted_lxm(alice, bob, "corrupt", {
+    send_crafted(alice, bob, "corrupt", {
         LXMF_FIELD_CUSTOM_TYPE: ENVELOPE_TYPE,
         LXMF_FIELD_CUSTOM_DATA: b"\xc1 not msgpack",
-    }))
+    })
 
     time.sleep(0.5)
     conversation = dm_hash_for(alice.identity.hash_hex, bob.identity.hash_hex)
@@ -187,8 +169,8 @@ def test_bare_reserved_keys_from_another_client_are_not_a_channel_message(
                                alice.identity.hash_hex, "public", time.time())
     bob.storage.subscribe(fake_channel.hex())
 
-    alice.router.send(crafted_lxm(alice, bob, "not a channel message",
-                                  {F_CHANNEL_HASH: fake_channel}))
+    send_crafted(alice, bob, "not a channel message",
+                 {F_CHANNEL_HASH: fake_channel})
 
     conversation = dm_hash_for(alice.identity.hash_hex, bob.identity.hash_hex)
     assert wait_for(lambda: bob.storage.get_messages(conversation))

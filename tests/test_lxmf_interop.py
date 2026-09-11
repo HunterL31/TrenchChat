@@ -13,8 +13,6 @@ fields at all -- which is precisely what one of them sends.
 
 import time
 
-import LXMF
-import RNS
 import pytest
 
 from tests.helpers import wait_for
@@ -24,7 +22,7 @@ from trenchchat.core.naming import dm_hash_for
 from trenchchat.core.protocol import (
     DM_ENVELOPE_TYPE, F_CHANNEL_HASH, F_MSG_TYPE, LXMF_FIELD_CUSTOM_DATA,
     LXMF_FIELD_CUSTOM_TYPE, LXMF_FIELD_IMAGE, MT_EMOJI_REQUEST,
-    unpack_dm_envelope, unpack_fields,
+    unpack_dm_envelope,
 )
 
 # Stands in for a custom emoji nobody holds the image for.
@@ -36,16 +34,10 @@ def befriend(a, b):
     b.friends_mgr.add_friend(a.identity.hash_hex)
 
 
-def plain_lxm(sender, recipient, content: str, fields: dict | None = None):
-    """A message as any other LXMF client would send it."""
-    dest = RNS.Destination(
-        recipient.identity.rns_identity, RNS.Destination.OUT,
-        RNS.Destination.SINGLE, "lxmf", "delivery",
-    )
-    lxm = LXMF.LXMessage(dest, sender.router.delivery_destination, content,
-                         desired_method=LXMF.LXMessage.DIRECT)
-    lxm.fields = fields or {}
-    return lxm
+def send_plain(sender, recipient, content: str, fields: dict | None = None):
+    """Send a message as any other LXMF client would: LXMF's own fields only."""
+    return sender.router.send(recipient.identity.hash_hex, fields or {},
+                              content, envelope=False)
 
 
 def sent_fields(peer, monkeypatch) -> list[dict]:
@@ -53,9 +45,9 @@ def sent_fields(peer, monkeypatch) -> list[dict]:
     captured = []
     original = peer.router.send
 
-    def spy(lxm):
-        captured.append(dict(getattr(lxm, "fields", None) or {}))
-        return original(lxm)
+    def spy(dest_hex, fields, content="", **kwargs):
+        captured.append(dict(fields))
+        return original(dest_hex, fields, content, **kwargs)
 
     monkeypatch.setattr(peer.router, "send", spy)
     return captured
@@ -63,7 +55,7 @@ def sent_fields(peer, monkeypatch) -> list[dict]:
 
 def control_messages(sent: list[dict]) -> list[dict]:
     """The TrenchChat control messages among captured outbound fields."""
-    return [f for f in (unpack_fields(raw) for raw in sent) if f]
+    return [f for f in sent if F_MSG_TYPE in f]
 
 
 def sent_content(peer, monkeypatch) -> list[str]:
@@ -71,12 +63,9 @@ def sent_content(peer, monkeypatch) -> list[str]:
     captured = []
     original = peer.router.send
 
-    def spy(lxm):
-        content = lxm.content or b""
-        if isinstance(content, bytes):
-            content = content.decode(errors="replace")
+    def spy(dest_hex, fields, content="", **kwargs):
         captured.append(content)
-        return original(lxm)
+        return original(dest_hex, fields, content, **kwargs)
 
     monkeypatch.setattr(peer.router, "send", spy)
     return captured
@@ -151,7 +140,7 @@ def test_a_plain_lxmf_message_from_a_friend_is_a_direct_message(peer_factory):
     b = peer_factory("bob")
     befriend(a, b)
 
-    a.router.send(plain_lxm(a, b, "sent from another client"))
+    send_plain(a, b, "sent from another client")
 
     conversation = dm_hash_for(a.identity.hash_hex, b.identity.hash_hex)
     assert wait_for(lambda: b.storage.get_messages(conversation))
@@ -165,7 +154,7 @@ def test_a_plain_message_starts_a_conversation_that_is_listed(peer_factory):
     b = peer_factory("bob")
     befriend(a, b)
 
-    a.router.send(plain_lxm(a, b, "hello there"))
+    send_plain(a, b, "hello there")
 
     assert wait_for(lambda: b.direct_mgr.conversations())
     conversation = b.direct_mgr.conversations()[0]
@@ -186,7 +175,7 @@ def test_a_plain_message_from_a_stranger_is_still_refused(peer_factory):
     mallory = peer_factory("mallory")
     bob = peer_factory("bob")
 
-    mallory.router.send(plain_lxm(mallory, bob, "let me in"))
+    send_plain(mallory, bob, "let me in")
 
     time.sleep(0.5)
     conversation = dm_hash_for(mallory.identity.hash_hex, bob.identity.hash_hex)
@@ -202,8 +191,7 @@ def test_an_attachment_from_another_client_is_kept(peer_factory, monkeypatch):
                         lambda data: True)
 
     payload = b"\xff\xd8\xff\xe0 from sideband"
-    a.router.send(plain_lxm(a, b, "a picture",
-                            {LXMF_FIELD_IMAGE: ["jpg", payload]}))
+    send_plain(a, b, "a picture", {LXMF_FIELD_IMAGE: ["jpg", payload]})
 
     conversation = dm_hash_for(a.identity.hash_hex, b.identity.hash_hex)
     assert wait_for(lambda: b.storage.get_messages(conversation))
@@ -219,7 +207,7 @@ def test_a_bare_image_payload_is_tolerated(peer_factory, monkeypatch):
                         lambda data: True)
 
     payload = b"\xff\xd8\xff\xe0 bare"
-    a.router.send(plain_lxm(a, b, "bare bytes", {LXMF_FIELD_IMAGE: payload}))
+    send_plain(a, b, "bare bytes", {LXMF_FIELD_IMAGE: payload})
 
     conversation = dm_hash_for(a.identity.hash_hex, b.identity.hash_hex)
     assert wait_for(lambda: b.storage.get_messages(conversation))
@@ -233,8 +221,7 @@ def test_an_oversized_image_from_another_client_is_stripped_not_trusted(
     befriend(a, b)
     monkeypatch.setattr("trenchchat.core.messaging.MAX_IMAGE_BYTES", 8)
 
-    a.router.send(plain_lxm(a, b, "too big",
-                            {LXMF_FIELD_IMAGE: ["jpg", b"x" * 64]}))
+    send_plain(a, b, "too big", {LXMF_FIELD_IMAGE: ["jpg", b"x" * 64]})
 
     conversation = dm_hash_for(a.identity.hash_hex, b.identity.hash_hex)
     assert wait_for(lambda: b.storage.get_messages(conversation))
@@ -249,10 +236,10 @@ def test_a_foreign_custom_envelope_is_read_as_a_plain_message(peer_factory):
     b = peer_factory("bob")
     befriend(a, b)
 
-    a.router.send(plain_lxm(a, b, "someone else's protocol", {
+    send_plain(a, b, "someone else's protocol", {
         LXMF_FIELD_CUSTOM_TYPE: "someoneelse/v1",
         LXMF_FIELD_CUSTOM_DATA: b"\x00 not ours",
-    }))
+    })
 
     conversation = dm_hash_for(a.identity.hash_hex, b.identity.hash_hex)
     assert wait_for(lambda: b.storage.get_messages(conversation))
@@ -282,14 +269,14 @@ def test_a_trenchchat_sender_must_still_sign(peer_factory):
     ts = time.time()
     content = "unsigned but claiming to be one of us"
     from trenchchat.core.protocol import pack_dm_envelope
-    a.router.send(plain_lxm(a, b, content, {
+    send_plain(a, b, content, {
         LXMF_FIELD_CUSTOM_TYPE: DM_ENVELOPE_TYPE,
         LXMF_FIELD_CUSTOM_DATA: pack_dm_envelope(
             message_id=_compute_message_id(content, a.identity.hash_hex, ts),
             timestamp=ts, display_name="Alice", reply_to=None,
             last_seen_id=None, author_sig=None,
         ),
-    }))
+    })
 
     time.sleep(0.5)
     conversation = dm_hash_for(a.identity.hash_hex, b.identity.hash_hex)
@@ -309,7 +296,7 @@ def test_reactions_are_not_sent_to_another_lxmf_client(peer_factory):
     b = peer_factory("bob")
     befriend(a, b)
 
-    a.router.send(plain_lxm(a, b, "reactable"))
+    send_plain(a, b, "reactable")
     conversation = dm_hash_for(a.identity.hash_hex, b.identity.hash_hex)
     assert wait_for(lambda: b.storage.get_messages(conversation))
     msg_id = b.storage.get_messages(conversation)[0]["message_id"]
@@ -332,7 +319,7 @@ def test_an_emoji_request_is_not_sent_to_another_lxmf_client(peer_factory, monke
     befriend(a, b)
 
     asked = sent_fields(b, monkeypatch)
-    a.router.send(plain_lxm(a, b, f"look :wave@{EMOJI_HASH}:"))
+    send_plain(a, b, f"look :wave@{EMOJI_HASH}:")
     conversation = dm_hash_for(a.identity.hash_hex, b.identity.hash_hex)
     assert wait_for(lambda: b.storage.get_messages(conversation))
 

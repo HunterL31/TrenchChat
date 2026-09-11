@@ -201,12 +201,11 @@ class PropagationCollector:
     loses precisely the message that was being sent as we returned.
     """
 
-    def __init__(self, router, identity, nodes,
+    def __init__(self, router, nodes,
                  settling_interval_secs: float = SETTLING_ASK_INTERVAL_SECS,
                  settling_window_secs: float = SETTLING_WINDOW_SECS,
                  steady_interval_secs: float = STEADY_ASK_INTERVAL_SECS) -> None:
         self._router = router
-        self._identity = identity
         self._nodes = nodes
         self._settling_interval = settling_interval_secs
         self._settling_window = settling_window_secs
@@ -246,7 +245,7 @@ class PropagationCollector:
         self._last_ask = now
         if self._nodes.selected is None:
             self._nodes.reselect()
-        started = self._router.request_propagation_sync(self._identity.rns_identity)
+        started = self._router.request_propagation_sync()
         if started:
             RNS.log("TrenchChat [propagation]: asked the node for held messages",
                     RNS.LOG_DEBUG)

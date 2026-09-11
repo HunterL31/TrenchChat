@@ -31,9 +31,9 @@ import struct
 import threading
 import time
 import RNS
-import LXMF
 import msgpack
 
+from trenchchat.core.authorship import resolve_author
 from trenchchat.core.control_retry import ControlRetryQueue
 from trenchchat.core.identity import Identity
 from trenchchat.core.naming import channel_hash_for, server_hash_for
@@ -52,9 +52,10 @@ from trenchchat.core.protocol import (
     F_CHANNEL_PERMISSIONS, F_SCOPE_KIND,
     MT_GOODBYE, MT_JOIN_REQUEST, MT_MEMBER_LIST_UPDATE, MT_INVITE, MT_PRESENCE,
     SYNC_WINDOW_SECS,
-    pack_fields, unpack_wire, wire_timestamp,
+    unpack_wire, wire_timestamp,
 )
 from trenchchat.core.storage import Storage
+from trenchchat.network.base import InboundMessage, SendState
 from trenchchat.network.router import Router
 
 DEFAULT_TOKEN_TTL = 7 * 24 * 3600  # 7 days
@@ -217,7 +218,7 @@ class InviteManager:
         # Presentation only: trust anchoring is the accepted_invites table.
         self._invite_scope_kinds: dict[str, str] = {}
         self._storage.purge_expired_pending_invites()
-        router.add_delivery_callback(self._on_lxmf_message)
+        router.add_delivery_callback(self._on_message)
 
     def invite_scope_kind(self, scope_hash_hex: str) -> str:
         """Whether a pending invite targets a "server" or a "channel"."""
@@ -595,8 +596,8 @@ class InviteManager:
             if signer_hash_bytes == self._identity.hash:
                 signer_identity = self._identity.rns_identity
             else:
-                delivery_hash = RNS.Destination.hash(signer_hash_bytes, "lxmf", "delivery")
-                signer_identity = RNS.Identity.recall(delivery_hash)
+                signer_identity = resolve_author(
+                    self._storage, signer_hash_bytes.hex(), router=self._router)
             if signer_identity is None:
                 unresolved.append(signer_hash_bytes.hex()[:12])
                 continue
@@ -1640,7 +1641,7 @@ class InviteManager:
 
     def send_invite(self, channel_hash_hex: str, invitee_hash_hex: str,
                     ttl: float = DEFAULT_TOKEN_TTL):
-        """Generate a token and send it to the invitee via LXMF.
+        """Generate a token and send it to the invitee.
 
         A channel inside a server normalises to that server, so inviting to one
         of its channels invites to the server. publish_member_list normalises
@@ -1729,8 +1730,8 @@ class InviteManager:
         if admin_hash == self._identity.hash:
             admin_identity = self._identity.rns_identity
         else:
-            admin_delivery_hash = RNS.Destination.hash(admin_hash, "lxmf", "delivery")
-            admin_identity = RNS.Identity.recall(admin_delivery_hash)
+            admin_identity = resolve_author(
+                self._storage, admin_hash.hex(), router=self._router)
         if admin_identity is None:
             RNS.log(f"TrenchChat [invite]: cannot verify token — admin identity "
                     f"{admin_hash.hex()[:12]}… not known", RNS.LOG_WARNING)
@@ -1742,7 +1743,7 @@ class InviteManager:
 
     # --- inbound handler ---
 
-    def _on_lxmf_message(self, message: LXMF.LXMessage):
+    def _on_message(self, message: InboundMessage):
         fields = message.fields or {}
         msg_type = fields.get(F_MSG_TYPE)
         if msg_type is None:
@@ -1770,10 +1771,8 @@ class InviteManager:
         if msg_type == MT_JOIN_REQUEST:
             RNS.log(f"TrenchChat [invite]: join request received for channel {channel_hash_hex[:12]}…",
                     RNS.LOG_NOTICE)
-            sender_identity = (RNS.Identity.recall(message.source_hash)
-                               if message.source_hash else None)
-            sender_hex = sender_identity.hash.hex() if sender_identity else ""
-            self._handle_join_request(fields, channel_hash_hex, sender_hex)
+            self._handle_join_request(fields, channel_hash_hex,
+                                      message.source_hex)
 
         elif msg_type == MT_MEMBER_LIST_UPDATE:
             blob = fields.get(F_MEMBER_LIST_DOC)
@@ -1948,39 +1947,15 @@ class InviteManager:
         """Send a control message. Returns False if it had to be queued instead."""
         msg_type = fields.get(F_MSG_TYPE, "unknown")
         try:
-            identity_hash = bytes.fromhex(dest_hex)
-
-            # Compute the LXMF delivery destination hash from the identity hash.
-            # RNS.Identity.recall() takes a *destination* hash, not an identity hash.
-            delivery_dest_hash = RNS.Destination.hash(identity_hash, "lxmf", "delivery")
-
-            dest_identity = RNS.Identity.recall(delivery_dest_hash)
-
-            if dest_identity is None:
-                RNS.Transport.request_path(delivery_dest_hash)
+            if self._router.send(dest_hex, fields) is SendState.NO_PATH:
+                self._router.request_path(dest_hex)
                 self._retry.queue(dest_hex, fields)
                 RNS.log(f"TrenchChat [invite]: {msg_type!r} to {dest_hex[:12]}… "
                         f"held — identity not known, path requested",
                         RNS.LOG_WARNING)
                 return False
-
-            dest = RNS.Destination(
-                dest_identity,
-                RNS.Destination.OUT,
-                RNS.Destination.SINGLE,
-                "lxmf",
-                "delivery",
-            )
-            lxm = LXMF.LXMessage(
-                dest,
-                self._router.delivery_destination,
-                "",
-                desired_method=LXMF.LXMessage.DIRECT,
-            )
-            lxm.fields = pack_fields(fields)
-            RNS.log(f"TrenchChat [invite]: queuing {msg_type!r} → {dest_hex[:12]}…",
+            RNS.log(f"TrenchChat [invite]: sent {msg_type!r} → {dest_hex[:12]}…",
                     RNS.LOG_NOTICE)
-            self._router.send(lxm)
             return True
         except Exception as e:
             RNS.log(f"TrenchChat: invite send error ({msg_type}): {e}", RNS.LOG_WARNING)

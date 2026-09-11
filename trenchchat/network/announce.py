@@ -9,9 +9,8 @@ import time
 
 import LXMF
 import RNS
-import msgpack
 
-from trenchchat import APP_NAME, APP_ASPECT_CHANNEL, APP_ASPECT_USER
+from trenchchat import APP_NAME, APP_ASPECT_USER
 from trenchchat.core.protocol import unpack_wire
 
 # Path table index for the receiving interface (from RNS.Transport constants).
@@ -316,11 +315,11 @@ class FirstContactAnnouncer:
     two announces: they hear us, we are no longer new to them, and it stops.
     """
 
-    def __init__(self, router, channel_mgr, self_hex: str,
+    def __init__(self, announce, self_hex: str,
                  coalesce_secs: float = FIRST_CONTACT_COALESCE_SECS,
                  max_answered: int = MAX_ANSWERED_PEERS) -> None:
-        self._router = router
-        self._channel_mgr = channel_mgr
+        """announce(attached_interface) sends everything this node announces."""
+        self._announce_all = announce
         self._self_hex = self_hex
         self._coalesce = coalesce_secs
         self._max_answered = max_answered
@@ -379,9 +378,6 @@ class FirstContactAnnouncer:
 
     def _announce(self, iface) -> None:
         try:
-            self._router.announce(attached_interface=iface)
-            self._router.announce_user(attached_interface=iface)
-            if self._channel_mgr is not None:
-                self._channel_mgr.announce_all_owned(attached_interface=iface)
+            self._announce_all(iface)
         except Exception as e:
             RNS.log(f"TrenchChat: first-contact announce failed: {e}", RNS.LOG_WARNING)

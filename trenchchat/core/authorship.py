@@ -11,7 +11,8 @@ relayed it.
 Verification needs the author's public key, not their identity hash -- a hash
 is one-way. Keys are cached locally as they are learned, and every cached key
 is checked to hash back to the identity claiming it, which is what makes a key
-safe to accept from any source at all.
+safe to accept from any source at all. A router, where callers have one, is
+one more source: it asks the path whether it already knows the key.
 """
 
 import RNS
@@ -53,7 +54,8 @@ def remember_identity(storage: Storage, rns_identity) -> None:
     storage.remember_identity_key(identity_hash_hex, public_key)
 
 
-def public_key_for(storage: Storage, author_hex: str) -> bytes | None:
+def public_key_for(storage: Storage, author_hex: str, *,
+                   router=None) -> bytes | None:
     """The author's public key, for relaying alongside their messages.
 
     A relayed message is unverifiable to a receiver who has never met its
@@ -63,7 +65,7 @@ def public_key_for(storage: Storage, author_hex: str) -> bytes | None:
     belongs to the identity claiming it, so passing it through a relay adds
     no trust in the relay.
     """
-    identity = resolve_author(storage, author_hex)
+    identity = resolve_author(storage, author_hex, router=router)
     if identity is None:
         return None
     try:
@@ -92,12 +94,12 @@ def remember_relayed_key(storage: Storage, author_hex: str, public_key) -> bool:
     return True
 
 
-def resolve_author(storage: Storage, author_hex: str):
-    """The verifying identity for an author, from cache or from RNS.
+def resolve_author(storage: Storage, author_hex: str, *, router=None):
+    """The verifying identity for an author, from cache or from the transport.
 
-    Falls back to RNS.Identity.recall() and caches whatever that yields, so a
-    peer only has to be reachable once for their history to stay checkable
-    after they go quiet.
+    Falls back to the key the path already holds for that peer and caches it,
+    so a peer only has to be reachable once for their history to stay
+    checkable after they go quiet. Without a router there is only the cache.
     """
     if not author_hex:
         return None
@@ -108,16 +110,12 @@ def resolve_author(storage: Storage, author_hex: str):
         if identity is not None:
             return identity
 
-    try:
-        delivery_hash = RNS.Destination.hash(
-            bytes.fromhex(author_hex), "lxmf", "delivery"
-        )
-    except (TypeError, ValueError):
+    if router is None:
         return None
-    recalled = RNS.Identity.recall(delivery_hash)
-    if recalled is not None:
-        remember_identity(storage, recalled)
-    return recalled
+    public_key = router.public_key_for(author_hex)
+    if not remember_relayed_key(storage, author_hex, public_key):
+        return None
+    return _identity_from_key(public_key, author_hex)
 
 
 def verify_message(storage: Storage, author_hex: str, signature: bytes,
@@ -125,7 +123,7 @@ def verify_message(storage: Storage, author_hex: str, signature: bytes,
                    content: str, reply_to: str | None,
                    last_seen_id: str | None,
                    image_data: bytes | None,
-                   manifest: dict | None = None) -> bool:
+                   manifest: dict | None = None, *, router=None) -> bool:
     """True if this message really was authored by author_hex as presented.
 
     False also covers "we cannot check yet" -- an author whose key we have
@@ -133,7 +131,7 @@ def verify_message(storage: Storage, author_hex: str, signature: bytes,
     """
     if not signature or not isinstance(signature, bytes):
         return False
-    identity = resolve_author(storage, author_hex)
+    identity = resolve_author(storage, author_hex, router=router)
     if identity is None:
         return False
     digest = author_digest(

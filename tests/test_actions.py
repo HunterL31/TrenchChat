@@ -12,6 +12,7 @@ import LXMF
 import pytest
 import RNS
 
+from tests.conftest import lxmf_transport_for
 from tests.helpers import wait_for_member
 from trenchchat.config import Config
 from trenchchat.core import actions
@@ -591,7 +592,7 @@ def _propagated_wire_bytes(sender, recipient, channel_hash_hex: str) -> bytes:
         RNS.Destination.SINGLE, "lxmf", "delivery",
     )
     lxm = LXMF.LXMessage(
-        dest, sender.router.delivery_destination, "hello",
+        dest, lxmf_transport_for(sender).delivery_destination, "hello",
         desired_method=LXMF.LXMessage.PROPAGATED,
     )
     lxm.fields = {F_CHANNEL_HASH: bytes.fromhex(channel_hash_hex)}
@@ -622,10 +623,11 @@ class TestPropagationRelayCannotBeFiltered:
         for our own mail arriving from an outbound node, and a refusal there
         drops the message while the node still deletes its copy."""
         alice = peer_factory("alice")
+        transport = lxmf_transport_for(alice)
 
-        alice.router.enable_propagation()
+        transport.enable_propagation()
 
-        ingest = alice.router.lxmf_router.lxmf_propagation
+        ingest = transport.lxmf_router.lxmf_propagation
         assert getattr(ingest, "__func__", None) is LXMF.LXMRouter.lxmf_propagation, \
             f"something is wrapping the propagation ingest: {ingest!r}"
 

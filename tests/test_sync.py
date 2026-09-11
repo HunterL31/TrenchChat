@@ -21,6 +21,7 @@ from tests.helpers import (
 from trenchchat.core.actions import build_file_manifest
 from trenchchat.core.messaging import _compute_message_id
 from trenchchat.core.sync import MAX_REACTIONS_PER_MESSAGE
+from trenchchat.network.base import SendState
 
 
 # ---------------------------------------------------------------------------
@@ -824,11 +825,15 @@ class TestFlushPending:
             "subscriber_hashes": [bob.identity.hash_hex, carol.identity.hash_hex],
         }]
 
-        # Intercept router.send to capture the LXMessage and trigger its failed callback
+        # Intercept the send to capture its failed callback and fire it
         captured = []
         original_send = alice.router.send
-        def _intercepting_send(lxm):
-            captured.append(lxm)
+
+        def _intercepting_send(dest_hex, fields, content="", *, on_failed=None,
+                               **kwargs):
+            captured.append(on_failed)
+            return SendState.SENT
+
         alice.router.send = _intercepting_send
 
         alice.messaging.flush_pending(bob.identity.hash_hex)
@@ -836,13 +841,13 @@ class TestFlushPending:
         # Restore send so other operations work normally
         alice.router.send = original_send
 
-        assert captured, "flush_pending did not call router.send"
-        lxm = captured[0]
+        assert captured, "flush_pending did not send anything"
+        on_failed = captured[0]
 
-        # Trigger the failed callback as LXMF would on delivery failure
-        assert hasattr(lxm, "failed_callback") and lxm.failed_callback is not None, \
-            "flush_pending did not register a failed callback on the LXMessage"
-        lxm.failed_callback(lxm)
+        # Trigger the failed callback as the transport would on a failure
+        assert on_failed is not None, \
+            "flush_pending did not register a failed callback on the send"
+        on_failed(bob.identity.hash_hex)
 
         # The missed-delivery hint should now be recorded in Carol's storage
         # (broadcast via _on_missed_delivery_event → _send_raw to Carol)

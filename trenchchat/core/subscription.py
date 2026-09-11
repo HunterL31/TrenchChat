@@ -14,16 +14,16 @@ For invite-only channels:
 Subscriber list sync:
   - The channel owner maintains the authoritative subscriber list.
   - When a new subscriber joins, the owner sends them the current list.
-  - The list is an LXMF message with fields[0x30] = "subscriber_list".
+  - The list is a control message with fields[0x30] = "subscriber_list".
 """
 
 import re
 import threading
 import time
 import RNS
-import LXMF
 import msgpack
 
+from trenchchat.core.authorship import resolve_author
 from trenchchat.core.control_retry import ControlRetryQueue
 from trenchchat.core.identity import Identity
 from trenchchat.core.permissions import is_open_join, permissions_from_json
@@ -31,9 +31,10 @@ from trenchchat.core.protocol import (
     F_CHANNEL_HASH, F_MSG_TYPE, F_SUBSCRIBER_LIST,
     F_SUBSCRIBER_SIG, F_SUBSCRIBER_VERSION,
     MT_SUBSCRIBE, MT_UNSUBSCRIBE, MT_SUBSCRIBER_LIST,
-    pack_fields, unpack_wire,
+    unpack_wire,
 )
 from trenchchat.core.storage import Storage
+from trenchchat.network.base import InboundMessage, SendState
 from trenchchat.network.router import Router
 
 _IDENTITY_HEX_RE = re.compile(r"^[0-9a-f]{32}$")
@@ -90,7 +91,7 @@ class SubscriptionManager:
         # absent from every send until they joined again.
         self._retry = ControlRetryQueue("subscription")
 
-        router.add_delivery_callback(self._on_lxmf_message)
+        router.add_delivery_callback(self._on_message)
 
     # --- subscribe / unsubscribe (local node) ---
 
@@ -178,7 +179,7 @@ class SubscriptionManager:
 
     # --- inbound handler ---
 
-    def _on_lxmf_message(self, message: LXMF.LXMessage):
+    def _on_message(self, message: InboundMessage):
         fields = message.fields or {}
         msg_type = fields.get(F_MSG_TYPE)
         if msg_type is None:
@@ -192,11 +193,7 @@ class SubscriptionManager:
         channel_hash_hex = channel_hash_bytes.hex() \
             if isinstance(channel_hash_bytes, bytes) else str(channel_hash_bytes)
 
-        # message.source_hash is the LXMF delivery destination hash.
-        # Resolve it back to the sender's identity hash for owner comparisons.
-        sender_delivery_hex = message.source_hash.hex() if message.source_hash else ""
-        sender_identity = RNS.Identity.recall(message.source_hash) if message.source_hash else None
-        sender_hex = sender_identity.hash.hex() if sender_identity else sender_delivery_hex
+        sender_hex = message.source_hex
 
         if msg_type == MT_SUBSCRIBE:
             channel = self._storage.get_channel(channel_hash_hex)
@@ -290,15 +287,10 @@ class SubscriptionManager:
             self._storage.replace_channel_subscribers(channel_hash_hex, valid)
 
     def _recall_owner_identity(self, owner_hex: str):
+        """The identity that signs a channel's subscriber list, if it is known."""
         if owner_hex == self._identity.hash_hex:
             return self._identity.rns_identity
-        try:
-            delivery_hash = RNS.Destination.hash(
-                bytes.fromhex(owner_hex), "lxmf", "delivery"
-            )
-        except ValueError:
-            return None
-        return RNS.Identity.recall(delivery_hash)
+        return resolve_author(self._storage, owner_hex, router=self._router)
 
     # --- helpers ---
 
@@ -315,28 +307,10 @@ class SubscriptionManager:
     def _send_raw(self, dest_hex: str, fields: dict) -> bool:
         """Send a control message. Returns False if it had to be queued instead."""
         try:
-            identity_hash = bytes.fromhex(dest_hex)
-            delivery_dest_hash = RNS.Destination.hash(identity_hash, "lxmf", "delivery")
-            dest_identity = RNS.Identity.recall(delivery_dest_hash)
-            if dest_identity is None:
-                RNS.Transport.request_path(delivery_dest_hash)
+            if self._router.send(dest_hex, fields) is SendState.NO_PATH:
+                self._router.request_path(dest_hex)
                 self._retry.queue(dest_hex, fields)
                 return False
-            dest = RNS.Destination(
-                dest_identity,
-                RNS.Destination.OUT,
-                RNS.Destination.SINGLE,
-                "lxmf",
-                "delivery",
-            )
-            lxm = LXMF.LXMessage(
-                dest,
-                self._router.delivery_destination,
-                "",
-                desired_method=LXMF.LXMessage.DIRECT,
-            )
-            lxm.fields = pack_fields(fields)
-            self._router.send(lxm)
             return True
         except Exception as e:
             RNS.log(f"TrenchChat: subscription control send error: {e}", RNS.LOG_WARNING)

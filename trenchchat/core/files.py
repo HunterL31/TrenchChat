@@ -148,12 +148,12 @@ class _Download:
         self.next_retry_at: float = 0.0
         self.retry_backoff: float = DOWNLOAD_RETRY_SECS
 
-    def grow_window(self) -> None:
+    def grow_window(self, ceiling: int = FILE_REQUEST_MAX_CHUNKS) -> None:
         """A range landed. The window doubles on the second success in a row."""
         self.wins += 1
         if self.wins >= WINDOW_GROWTH_STREAK:
             self.wins = 0
-            self.window = min(self.window * 2, FILE_REQUEST_MAX_CHUNKS)
+            self.window = min(self.window * 2, ceiling)
 
     def shrink_window(self) -> None:
         """A request failed. Halve at once and start the count again."""
@@ -196,10 +196,14 @@ class FileManager:
     """Shares files, downloads them from members, and serves what it holds."""
 
     def __init__(self, identity, storage, presence_mgr,
-                 transport: FileTransportBase | None = None):
+                 transport: FileTransportBase | None = None,
+                 router=None):
         self._identity = identity
         self._storage = storage
         self._presence = presence_mgr
+        # Read per holder at request time, so a faster path to one member can
+        # raise the window without raising it for everyone.
+        self._router = router
         self._transport = transport if transport is not None \
             else FileTransportBase()
         # The base class does no link work, so a node built without a
@@ -887,10 +891,16 @@ class FileManager:
         dl.note_progress()
         events.append(dl.snapshot())
         if holder not in dl.suspect:
-            dl.grow_window()
+            dl.grow_window(self._chunks_per_request(holder))
             self._round_reset(dl, holder)
         if len(dl.held) >= dl.chunk_count:
             self._complete(dl, events)
+
+    def _chunks_per_request(self, holder: str) -> int:
+        """How many chunks one request to this holder may ask for."""
+        if self._router is None:
+            return FILE_REQUEST_MAX_CHUNKS
+        return self._router.limits_for(holder).file_request_max_chunks
 
     def _round_reset(self, dl: _Download, holder: str) -> None:
         """Caller holds the lock. A holder answered, so the round starts over.

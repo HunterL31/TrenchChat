@@ -81,14 +81,14 @@ class TestChannelCreation:
 
     def test_restore_owned_channels(self, peer_factory):
         """
-        restore_owned_channels re-populates the in-memory _owned_destinations
-        dict from the database for channels owned by this identity.
+        restore_owned_channels re-claims the addresses of channels owned by
+        this identity, from the database.
 
         Note: We cannot re-create the same RNS.Destination in the same process
         (RNS raises an error for duplicate registrations), so we verify the
         behaviour indirectly: a fresh peer built from the same data_dir and
-        identity file should have the channel in its owned destinations after
-        restore_owned_channels() is called at construction time.
+        identity file should own the channel after restore_owned_channels()
+        is called at construction time.
         """
         alice = peer_factory("alice")
         ch_hash = alice.channel_mgr.create_channel("restore-test", "", "public")
@@ -96,9 +96,8 @@ class TestChannelCreation:
 
         # A second peer_factory call with the same name would reuse the same
         # identity file and DB, so restore_owned_channels would re-register.
-        # Instead, just verify the in-memory dict is populated correctly.
-        owned = alice.channel_mgr._owned_destinations
-        assert ch_hash in owned
+        # Instead, just verify the transport was handed the address.
+        assert ch_hash in alice.transport.registered_channels
 
     def test_duplicate_name_is_refused(self, peer_factory):
         """A second channel of the same name is the same address, so it is
@@ -119,7 +118,7 @@ class TestChannelCreation:
         alice = peer_factory("alice")
         alice.channel_mgr.create_channel("general", "", "public")
 
-        fresh = ChannelManager(alice.identity, alice.storage)
+        fresh = ChannelManager(alice.identity, alice.storage, alice.router)
         with pytest.raises(NameInUseError):
             fresh.create_channel("general", "", "public")
 
@@ -141,9 +140,9 @@ class TestChannelDiscovery:
 
         This calls the handler directly rather than going through a real announce:
         the test fixtures' AutoInterface relies on UDP multicast, which is not
-        reliable on every machine (this is also why TestTransport exists for LXMF
-        message delivery), so announce-dependent tests target dest.announce()
-        directly instead of asserting on cross-peer delivery -- see
+        reliable on every machine (this is also why FakeTransport exists for
+        message delivery), so announce-dependent tests check what reached the
+        transport instead of asserting on cross-peer delivery -- see
         test_invite_only_channel_never_announced / test_public_channel_is_announced
         below.
         """
@@ -158,19 +157,9 @@ class TestChannelDiscovery:
         )
 
         # Simulate the announce being received by Bob's handler
-        import RNS as _RNS
-        channel_hash_bytes = bytes.fromhex(ch_hash)
-        import msgpack
-        app_data = msgpack.packb({
-            "name": "discoverable",
-            "description": "Find me",
-            "access": "public",
-            "creator": alice.identity.hash_hex,
-        }, use_bin_type=True)
-
         bob.channel_mgr._on_channel_discovered(
-            destination_hash=channel_hash_bytes,
-            announced_identity=alice.identity.rns_identity,
+            hash_hex=ch_hash,
+            creator_hash=alice.identity.hash_hex,
             metadata={
                 "name": "discoverable",
                 "description": "Find me",
@@ -209,8 +198,8 @@ class TestChannelDiscovery:
 
         # Simulate receiving the announce again
         bob.channel_mgr._on_channel_discovered(
-            destination_hash=bytes.fromhex(ch_hash),
-            announced_identity=alice.identity.rns_identity,
+            hash_hex=ch_hash,
+            creator_hash=alice.identity.hash_hex,
             metadata={
                 "name": "known",
                 "description": "",
@@ -234,8 +223,8 @@ class TestChannelDiscovery:
         ch_hash = alice.channel_mgr.create_channel("private-room", "", "invite")
 
         bob.channel_mgr._on_channel_discovered(
-            destination_hash=bytes.fromhex(ch_hash),
-            announced_identity=alice.identity.rns_identity,
+            hash_hex=ch_hash,
+            creator_hash=alice.identity.hash_hex,
             metadata={
                 "name": "private-room",
                 "description": "",
@@ -253,23 +242,22 @@ class TestChannelDiscovery:
         Invite-only channels must never be broadcast on the mesh -- they rely on
         the signed member-list document instead, precisely so their existence,
         name, and description aren't visible to peers who were never invited.
-        announce_channel() must skip the actual dest.announce() call for them.
+        announce_channel() must not hand one to the transport at all.
 
-        Regression test for a real bug: announce_channel() previously called
-        dest.announce() unconditionally for every owned channel, leaking
-        invite-only channel metadata to any peer listening for
-        trenchchat.channel announces.
+        Regression test for a real bug: announce_channel() previously
+        announced every owned channel unconditionally, leaking invite-only
+        channel metadata to any peer listening for trenchchat.channel
+        announces.
         """
         alice = peer_factory("alice")
         ch_hash = alice.channel_mgr.create_channel("secret-room", "", "invite")
 
-        dest = alice.channel_mgr._owned_destinations[ch_hash]
-        calls = []
-        dest.announce = lambda *a, **kw: calls.append((a, kw))
+        calls = alice.transport.channel_announces
+        calls.clear()
 
         alice.channel_mgr.announce_channel(ch_hash)
 
-        assert calls == [], "invite-only channel's destination.announce() was called"
+        assert calls == [], "an invite-only channel was announced"
 
     def test_invite_only_channel_never_announced_even_if_marked_discoverable(self, peer_factory):
         """
@@ -291,9 +279,8 @@ class TestChannelDiscovery:
         leaked_perms[FLAG_DISCOVERABLE] = True
         ch_hash = alice.channel_mgr.create_channel("secret-room", "", permissions=leaked_perms)
 
-        dest = alice.channel_mgr._owned_destinations[ch_hash]
-        calls = []
-        dest.announce = lambda *a, **kw: calls.append((a, kw))
+        calls = alice.transport.channel_announces
+        calls.clear()
 
         alice.channel_mgr.announce_channel(ch_hash)
 
@@ -301,15 +288,14 @@ class TestChannelDiscovery:
             "invite-only channel was announced despite open_join=False, just because discoverable=True"
 
     def test_public_channel_is_announced(self, peer_factory):
-        """Public channels are the intended case for dest.announce() -- the guard
+        """Public channels are the intended case for an announce -- the guard
         added for invite-only channels must not also swallow this one."""
         alice = peer_factory("alice")
         ch_hash = alice.channel_mgr.create_channel("open-room", "", "public")
 
-        dest = alice.channel_mgr._owned_destinations[ch_hash]
-        calls = []
-        dest.announce = lambda *a, **kw: calls.append((a, kw))
+        calls = alice.transport.channel_announces
+        calls.clear()
 
         alice.channel_mgr.announce_channel(ch_hash)
 
-        assert len(calls) == 1, "public channel's destination.announce() was not called"
+        assert len(calls) == 1, "a public channel was not announced"

@@ -21,7 +21,6 @@ import threading
 import time
 
 import RNS
-import LXMF
 
 from trenchchat.core.actions import compute_channel_recipients
 from trenchchat.core.identity import Identity
@@ -32,10 +31,10 @@ from trenchchat.core.protocol import (
     F_CHANNEL_HASH, F_MSG_TYPE, F_TIMESTAMP,
     F_VOICE_CODEC, F_VOICE_JOINED_AT, F_VOICE_MUTED, F_VOICE_STATE,
     MT_VOICE_JOIN, MT_VOICE_LEAVE, MT_VOICE_STATE,
-    pack_fields,
 )
 from trenchchat.core.storage import Storage
 from trenchchat.core.subscription import SubscriptionManager
+from trenchchat.network.base import InboundMessage, SendState
 from trenchchat.network.router import Router
 from trenchchat.network.voice_transport import PEER_STREAMING
 from trenchchat.network.voice_wire import (
@@ -117,7 +116,7 @@ class VoiceManager:
             self._transport.set_peer_state_callback(self._on_peer_link_state)
             self._transport.set_authorize_callback(self._authorize_link)
 
-        router.add_delivery_callback(self._on_lxmf_message)
+        router.add_delivery_callback(self._on_message)
 
     # --- public session API ---
 
@@ -478,7 +477,7 @@ class VoiceManager:
 
     # --- inbound signalling ---
 
-    def _on_lxmf_message(self, message: LXMF.LXMessage):
+    def _on_message(self, message: InboundMessage):
         fields = message.fields or {}
         msg_type = fields.get(F_MSG_TYPE)
         if msg_type is None:
@@ -494,10 +493,7 @@ class VoiceManager:
         channel_hash_hex = channel_hash_bytes.hex() \
             if isinstance(channel_hash_bytes, bytes) else str(channel_hash_bytes)
 
-        sender_identity = RNS.Identity.recall(message.source_hash) \
-            if message.source_hash else None
-        sender_hex = sender_identity.hash.hex() if sender_identity else (
-            message.source_hash.hex() if message.source_hash else "")
+        sender_hex = message.source_hex
         if not sender_hex or sender_hex == self._identity.hash_hex:
             return
 
@@ -898,29 +894,10 @@ class VoiceManager:
                        self._voice_fields(MT_VOICE_STATE, channel_hash_hex))
 
     def _send_raw(self, dest_hex: str, fields: dict):
+        """Send one voice signalling message, asking for a path if there is none."""
         try:
-            identity_hash = bytes.fromhex(dest_hex)
-            delivery_dest_hash = RNS.Destination.hash(
-                identity_hash, "lxmf", "delivery")
-            dest_identity = RNS.Identity.recall(delivery_dest_hash)
-            if dest_identity is None:
-                RNS.Transport.request_path(delivery_dest_hash)
-                return
-            dest = RNS.Destination(
-                dest_identity,
-                RNS.Destination.OUT,
-                RNS.Destination.SINGLE,
-                "lxmf",
-                "delivery",
-            )
-            lxm = LXMF.LXMessage(
-                dest,
-                self._router.delivery_destination,
-                "",
-                desired_method=LXMF.LXMessage.DIRECT,
-            )
-            lxm.fields = pack_fields(fields)
-            self._router.send(lxm)
+            if self._router.send(dest_hex, fields) is SendState.NO_PATH:
+                self._router.request_path(dest_hex)
         except Exception as e:
             RNS.log(f"TrenchChat [voice]: signalling send error: {e}",
                     RNS.LOG_WARNING)

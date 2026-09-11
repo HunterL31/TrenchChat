@@ -13,7 +13,7 @@ permission check of its own.
 sync.py's _handle_sync_request/_handle_sync_response now auto-chain a
 follow-up request (_continue_sync) the instant a truncated response lands,
 via SyncManager._continue_sync, bounded by MAX_SYNC_CONTINUATIONS. That
-chain fires within roughly one TestTransport round trip (~0.05-0.1s) of the
+chain fires within roughly one FakeTransport round trip (~0.05-0.1s) of the
 first response being processed -- far faster than a test's own thread can
 observe "batch one landed" (via polling) and then act, so E2 below drives
 SyncManager._handle_sync_request directly (capturing responses through a
@@ -176,7 +176,7 @@ class TestFullSyncRevokedMidBackfill:
 
         Drives _handle_sync_request directly (see module docstring) rather
         than the real send/receive pipeline: the real continuation chain
-        fires within about one TestTransport round trip of the first
+        fires within about one FakeTransport round trip of the first
         response landing, which leaves no reliable window for a test's own
         thread to revoke permissions between the two batches.
         """

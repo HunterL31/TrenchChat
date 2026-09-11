@@ -978,7 +978,7 @@ class TestSyncAnswerSurvivesAnUnresolvedPath:
         _insert_message(alice.storage, ch_hash, alice.identity.hash_hex,
                         "sent while bob was away", ts)
 
-        monkeypatch.setattr(RNS.Identity, "recall", staticmethod(lambda *a, **k: None))
+        alice.transport.unreachable.add(bob.identity.hash_hex)
         alice.sync_mgr._handle_sync_request(
             {
                 F_MSG_TYPE:          MT_SYNC_REQUEST,
@@ -991,7 +991,7 @@ class TestSyncAnswerSurvivesAnUnresolvedPath:
             "the answer was dropped instead of being held until bob is addressable"
         )
 
-        monkeypatch.undo()
+        alice.transport.unreachable.clear()
         bob.sync_mgr._record_pending_request(ch_hash, alice.identity.hash_hex, ts - 60)
         alice.sync_mgr.on_peer_appeared(bob.identity.hash_hex)
 

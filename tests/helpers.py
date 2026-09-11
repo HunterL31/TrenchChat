@@ -5,7 +5,7 @@ Shared test utilities for TrenchChat integration tests.
 import time
 import RNS
 
-from tests.conftest import TestPeer, signing_identity
+from tests.conftest import TestPeer, peer_is_live, signing_identity
 from trenchchat.core.authorship import sign_message
 from trenchchat.core.permissions import is_open_join, permissions_from_json
 from trenchchat.core.storage import Storage
@@ -49,8 +49,7 @@ def wait_for_subscriber(peer: TestPeer, channel_hash: str, subscriber_identity_h
     Wait until a peer's SubscriptionManager has a specific subscriber.
 
     subscriber_identity_hex: the subscriber's identity hash hex.
-    SubscriptionManager stores subscribers as identity hashes (after the
-    source_hash → identity resolution fix in subscription.py).
+    SubscriptionManager stores subscribers as identity hashes.
     """
     return wait_for(
         lambda: subscriber_identity_hex in peer.subscription_mgr.get_subscribers(channel_hash),
@@ -83,10 +82,8 @@ def announce_and_wait(peer: TestPeer, wait: float = 0.1):
     """
     Announce the peer's delivery destination and owned channels.
 
-    With TestTransport, peers are immediately reachable without network
-    path resolution, so the wait is minimal. The announce still fires
-    PeerAnnounceHandler callbacks for any peers that have registered
-    announce handlers.
+    With FakeTransport, peers are immediately reachable without network
+    path resolution, so the wait is minimal.
     """
     peer.announce()
     time.sleep(wait)
@@ -119,20 +116,12 @@ def get_subscriber_hashes(peer: TestPeer, channel_hash: str) -> list[str]:
 
 
 def identity_known(peer_hex: str) -> bool:
-    """
-    Return True if the given identity's LXMF delivery destination is
-    locally known (i.e. the identity has been registered in this process).
+    """Return True if the peer is still on the in-process network.
 
-    With TestTransport, all peers created in the same test are immediately
-    reachable since their identities are registered locally when the
-    LXMFRouter is created.
+    With FakeTransport, every peer built by peer_factory is reachable from
+    the moment it is created until it is torn down.
     """
-    try:
-        identity_hash = bytes.fromhex(peer_hex)
-        delivery_dest_hash = RNS.Destination.hash(identity_hash, "lxmf", "delivery")
-        return RNS.Identity.recall(delivery_dest_hash) is not None
-    except Exception:
-        return False
+    return peer_is_live(peer_hex)
 
 
 def wait_for_roster(peer: TestPeer, channel_hash: str, identity_hex: str,
@@ -160,7 +149,7 @@ def wait_for_path(peer_hex: str, timeout: float = 10.0) -> bool:
     """
     Wait until a peer's identity is locally known.
 
-    With TestTransport, this is immediately true for all peers created
+    With FakeTransport, this is immediately true for all peers created
     in the same test. The function is kept for API compatibility.
     """
     return wait_for(

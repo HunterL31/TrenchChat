@@ -1,15 +1,13 @@
 """
 Voice signalling and roster tests.
 
-These ride the LXMF plane through the standard TestTransport shim; the
+These ride the LXMF plane through the standard FakeTransport shim; the
 frame plane (links, streaming) is covered in test_voice_transport.py.
 """
 
 import time
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
-import LXMF
-import RNS
 import pytest
 
 from tests.helpers import (
@@ -17,6 +15,7 @@ from tests.helpers import (
 )
 from trenchchat.core import actions
 from trenchchat.core.voice import MAX_VOICE_PARTICIPANTS, VOICE_SIGNAL_MAX_AGE_SECS
+from trenchchat.network.base import InboundMessage
 from trenchchat.network.voice_transport import PEER_STREAMING
 from trenchchat.core.permissions import (
     PRESET_OPEN, PRESET_PRIVATE, ROLE_MEMBER, ROLE_OWNER, SEND_MESSAGE,
@@ -79,19 +78,8 @@ def _setup_open_channel(peer_factory, names=("alice", "bob")):
 
 
 def _craft_voice_message(sender, recipient, fields):
-    """Build and send a voice control message exactly as a client would."""
-    delivery_hash = RNS.Destination.hash(
-        bytes.fromhex(recipient.identity.hash_hex), "lxmf", "delivery")
-    dest_identity = RNS.Identity.recall(delivery_hash)
-    dest = RNS.Destination(
-        dest_identity, RNS.Destination.OUT, RNS.Destination.SINGLE,
-        "lxmf", "delivery",
-    )
-    lxm = LXMF.LXMessage(dest, sender.router.delivery_destination, "",
-                         desired_method=LXMF.LXMessage.DIRECT)
-    lxm.fields = fields
-    sender.router.send(lxm)
-    return lxm
+    """Send a voice control message exactly as a client would."""
+    return sender.router.send(recipient.identity.hash_hex, fields)
 
 
 # ---------------------------------------------------------------------------
@@ -194,14 +182,9 @@ class TestStaleSignalDiagnostics:
     drop looks identical to packet loss otherwise."""
 
     def _deliver(self, mgr, sender_hex, fields):
-        lxm = MagicMock()
-        lxm.fields = fields
-        lxm.source_hash = bytes.fromhex(sender_hex)
-        ident = MagicMock()
-        ident.hash = bytes.fromhex(sender_hex)
-        with patch("trenchchat.core.voice.RNS.Identity.recall", return_value=ident), \
-                patch("trenchchat.core.voice.RNS.log") as log:
-            mgr._on_lxmf_message(lxm)
+        message = InboundMessage(source_hex=sender_hex, fields=fields)
+        with patch("trenchchat.core.voice.RNS.log") as log:
+            mgr._on_message(message)
         return log
 
     def test_past_skew_logs_clock_skew_warning(self, peer_factory):

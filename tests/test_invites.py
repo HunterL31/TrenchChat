@@ -7,13 +7,13 @@ flow, expired tokens, and member list versioning/tiebreak rules.
 
 import time
 import struct
-from types import SimpleNamespace
 from unittest.mock import patch
 
 import msgpack
 
 import pytest
 
+from tests.conftest import deliver
 from tests.helpers import (
     wait_for,
     wait_for_member,
@@ -509,14 +509,12 @@ class TestInviteSurvivesAnUnresolvedPath:
         invitee simply never heard -- the sender saw no error either
         (restart3 in docs/testenv-scenarios.md).
         """
-        import RNS
-
         alice = peer_factory("alice")
         bob = peer_factory("bob")
 
         ch_hash = alice.channel_mgr.create_channel("cold-invite", "", "invite")
 
-        monkeypatch.setattr(RNS.Identity, "recall", staticmethod(lambda *a, **k: None))
+        alice.transport.unreachable.add(bob.identity.hash_hex)
         alice.invite_mgr.send_invite(ch_hash, bob.identity.hash_hex)
 
         assert alice.invite_mgr._retry.pending_for(bob.identity.hash_hex) == 1, (
@@ -525,7 +523,7 @@ class TestInviteSurvivesAnUnresolvedPath:
         assert not wait_for(lambda: bool(bob.invite_mgr.list_pending_invites()),
                             timeout=1), "an invite arrived that could not be sent"
 
-        monkeypatch.undo()
+        alice.transport.unreachable.clear()
         assert alice.invite_mgr.flush_pending(bob.identity.hash_hex) == 1
 
         assert wait_for(lambda: any(
@@ -598,8 +596,7 @@ class TestInviteeSidebarState:
         fields = alice.invite_mgr._member_list_fields(
             ch, alice.storage.get_member_list_version(ch)["document_blob"])
         fields.pop(F_CHANNEL_NAME)
-        bob.invite_mgr._on_lxmf_message(
-            SimpleNamespace(fields=fields, source_hash=None))
+        deliver(alice, bob, fields)
 
         assert bob.storage.is_member(ch, bob.identity.hash_hex) is True
         assert bob.storage.get_channel(ch) is None
@@ -620,12 +617,12 @@ class TestMembershipResync:
 
         # Add bob without him ever seeing the document, exactly as a dropped
         # link or an expired quarantine would leave things.
-        bob.router.remove_delivery_callback(bob.invite_mgr._on_lxmf_message)
+        bob.router.remove_delivery_callback(bob.invite_mgr._on_message)
         alice.invite_mgr.publish_member_list(ch, add_members=[bob.identity.hash])
         assert wait_for_member(alice.storage, ch, bob.identity.hash_hex, timeout=5)
         assert not wait_for(lambda: bob.storage.is_member(ch, bob.identity.hash_hex),
                             timeout=1), "bob was never supposed to hear this"
-        bob.router.add_delivery_callback(bob.invite_mgr._on_lxmf_message)
+        bob.router.add_delivery_callback(bob.invite_mgr._on_message)
 
         assert alice.invite_mgr.resync_membership(bob.identity.hash_hex) == 1
 
@@ -672,8 +669,7 @@ class TestEqualVersionTiebreak:
 
         fields = alice.invite_mgr._member_list_fields(
             ch, alice.storage.get_member_list_version(ch)["document_blob"])
-        bob.invite_mgr._on_lxmf_message(
-            SimpleNamespace(fields=fields, source_hash=None))
+        deliver(alice, bob, fields)
 
         assert bob.storage.is_subscribed(ch) is False, \
             "an identical document was re-applied and undid a local leave"

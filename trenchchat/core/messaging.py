@@ -71,8 +71,8 @@ direct; see protocol.pack_dm_envelope.
 
 import hashlib
 import time
+
 import RNS
-import LXMF
 
 from trenchchat.core.identity import Identity
 from trenchchat.core.permissions import (
@@ -87,15 +87,16 @@ from trenchchat.core.protocol import (
     carries_manifest, file_manifest, inbound_image, inbound_manifest,
     manifest_fields,
     message_id_from_wire, message_id_to_wire, pack_dm_envelope,
-    pack_fields, unpack_dm_envelope, wire_timestamp,
+    unpack_dm_envelope, wire_timestamp,
 )
-from trenchchat.core.authorship import resolve_author, sign_message, verify_message
+from trenchchat.core.authorship import sign_message, verify_message
 from trenchchat.core.image import MAX_IMAGE_BYTES, inbound_image_is_sane
 from trenchchat.core.interop import (
     carries_only_trenchchat_markup, peer_reads_trenchchat, plain_lxmf_content,
 )
 from trenchchat.core.naming import dm_hash_for
 from trenchchat.core.storage import Storage
+from trenchchat.network.base import InboundMessage, SendState
 from trenchchat.network.router import Router
 
 # Re-export field constants so existing importers of messaging.py continue to work
@@ -183,7 +184,7 @@ class Messaging:
         # it tracks live sends, not history, and is meaningless after a restart.
         self._delivery: dict[str, dict] = {}
 
-        router.add_delivery_callback(self._on_lxmf_message)
+        router.add_delivery_callback(self._on_message)
 
     def set_direct_manager(self, direct_mgr) -> None:
         """Attach the DirectMessageManager that owns conversations and the gate.
@@ -272,26 +273,14 @@ class Messaging:
             if dest_hex == self._identity.hash_hex:
                 continue
             try:
-                identity_hash = bytes.fromhex(dest_hex)
-                delivery_dest_hash = RNS.Destination.hash(identity_hash, "lxmf", "delivery")
-                dest_identity = RNS.Identity.recall(delivery_dest_hash)
-                if dest_identity is None:
-                    RNS.Transport.request_path(delivery_dest_hash)
+                state = self._send_channel_message(dest_hex, msg_params,
+                                                   subscriber_hashes)
+                if state is SendState.NO_PATH:
+                    self._router.request_path(dest_hex)
                     self._queue_pending(dest_hex, msg_params)
                     self._track_delivery(msg_id, channel_hash_hex, dest_hex, DELIVERY_PENDING)
                     self._notify_missed(channel_hash_hex, dest_hex, msg_id, subscriber_hashes)
                     continue
-
-                lxm = self._build_lxm(dest_identity, msg_params)
-                lxm.register_delivery_callback(
-                    lambda m, d=dest_hex, c=channel_hash_hex, mi=msg_id:
-                        self._track_delivery(mi, c, d, DELIVERY_DELIVERED)
-                )
-                lxm.register_failed_callback(
-                    lambda m, d=dest_hex, c=channel_hash_hex, mi=msg_id, subs=subscriber_hashes:
-                        self._on_delivery_failed(d, c, mi, subs)
-                )
-                self._router.send(lxm)
                 self._track_delivery(msg_id, channel_hash_hex, dest_hex, DELIVERY_DELIVERED)
             except Exception as e:
                 RNS.log(f"TrenchChat: failed to send to {dest_hex}: {e}", RNS.LOG_WARNING)
@@ -404,22 +393,14 @@ class Messaging:
         conversation = params["channel_hash_hex"]
         msg_id = params["msg_id"]
 
-        dest_identity = resolve_author(self._storage, peer_hex)
-        if dest_identity is None:
-            delivery_dest_hash = RNS.Destination.hash(
-                bytes.fromhex(peer_hex), "lxmf", "delivery")
-            RNS.Transport.request_path(delivery_dest_hash)
-            self._queue_pending(peer_hex, params)
-            self._track_delivery(msg_id, conversation, peer_hex, DELIVERY_PENDING)
-            return
-
         if not propagate_only and self._peer_is_reachable(peer_hex):
-            if self._send_direct_lxm(dest_identity, peer_hex, params):
+            if self._send_direct_dm(peer_hex, params):
                 return
 
-        if self._send_propagated_lxm(dest_identity, peer_hex, params):
+        if self._send_propagated_dm(peer_hex, params):
             return
 
+        self._router.request_path(peer_hex)
         self._queue_pending(peer_hex, params)
         self._track_delivery(msg_id, conversation, peer_hex, DELIVERY_PENDING)
 
@@ -442,9 +423,7 @@ class Messaging:
                 return True
             if self._peer_speaks_trenchchat(peer_hex):
                 return False
-        delivery_dest_hash = RNS.Destination.hash(
-            bytes.fromhex(peer_hex), "lxmf", "delivery")
-        return RNS.Identity.recall(delivery_dest_hash) is not None
+        return self._router.can_reach(peer_hex)
 
     def _peer_speaks_trenchchat(self, peer_hex: str) -> bool:
         """Whether this peer has ever identified itself as TrenchChat, and so
@@ -456,62 +435,50 @@ class Messaging:
             return False
         return self._direct_mgr.peer_is_trenchchat(conversation)
 
-    def _send_direct_lxm(self, dest_identity: RNS.Identity, peer_hex: str,
-                         params: dict) -> bool:
+    def _send_direct_dm(self, peer_hex: str, params: dict) -> bool:
+        """Send a conversation message straight to the peer. False if it could not go."""
         conversation = params["channel_hash_hex"]
         msg_id = params["msg_id"]
-        try:
-            lxm = self._build_lxm(dest_identity, params, LXMF.LXMessage.DIRECT)
-            lxm.register_delivery_callback(
-                lambda m, d=peer_hex, c=conversation, mi=msg_id:
-                    self._track_delivery(mi, c, d, DELIVERY_DELIVERED)
-            )
-            lxm.register_failed_callback(
-                lambda m, d=peer_hex, c=conversation, mi=msg_id:
-                    self._on_direct_failed(d, mi)
-            )
-            self._router.send(lxm)
-            self._track_delivery(msg_id, conversation, peer_hex, DELIVERY_DELIVERED)
-            return True
-        except Exception as e:
-            RNS.log(f"TrenchChat [dm]: direct send to {peer_hex[:12]}… failed: {e}",
-                    RNS.LOG_WARNING)
+        content, fields = self._dm_payload(params)
+        state = self._router.send(
+            peer_hex, fields, content, envelope=False,
+            on_delivered=lambda d, c=conversation, mi=msg_id:
+                self._track_delivery(mi, c, d, DELIVERY_DELIVERED),
+            on_failed=lambda d, mi=msg_id: self._on_direct_failed(d, mi),
+        )
+        if state is SendState.NO_PATH:
             return False
+        self._track_delivery(msg_id, conversation, peer_hex, DELIVERY_DELIVERED)
+        return True
 
-    def _send_propagated_lxm(self, dest_identity: RNS.Identity, peer_hex: str,
-                             params: dict) -> bool:
+    def _send_propagated_dm(self, peer_hex: str, params: dict) -> bool:
         """Hand the message to a propagation node. False if there is no node.
 
         The node is checked first rather than caught afterwards: LXMF raises
         from handle_outbound when none is configured, and fails the message on
         the way out.
         """
-        if getattr(self._router, "outbound_propagation_node", None) is None:
+        if self._router.outbound_propagation_node is None:
             return False
         conversation = params["channel_hash_hex"]
         msg_id = params["msg_id"]
-        try:
-            lxm = self._build_lxm(dest_identity, params, LXMF.LXMessage.PROPAGATED)
-            lxm.register_delivery_callback(
-                lambda m, d=peer_hex, c=conversation, mi=msg_id:
-                    self._track_delivery(mi, c, d, DELIVERY_PROPAGATED)
-            )
-            lxm.register_failed_callback(
-                lambda m, d=peer_hex, c=conversation, mi=msg_id:
-                    self._track_delivery(mi, c, d, DELIVERY_FAILED)
-            )
-            self._router.send(lxm)
-            self._track_delivery(msg_id, conversation, peer_hex, DELIVERY_PROPAGATED)
-            RNS.log(
-                f"TrenchChat [dm]: {msg_id[:12]}… handed to a propagation node "
-                f"for {peer_hex[:12]}…",
-                RNS.LOG_NOTICE,
-            )
-            return True
-        except Exception as e:
-            RNS.log(f"TrenchChat [dm]: propagated send to {peer_hex[:12]}… "
-                    f"failed: {e}", RNS.LOG_WARNING)
+        content, fields = self._dm_payload(params)
+        state = self._router.send(
+            peer_hex, fields, content, envelope=False, propagated=True,
+            on_delivered=lambda d, c=conversation, mi=msg_id:
+                self._track_delivery(mi, c, d, DELIVERY_PROPAGATED),
+            on_failed=lambda d, c=conversation, mi=msg_id:
+                self._track_delivery(mi, c, d, DELIVERY_FAILED),
+        )
+        if state is SendState.NO_PATH:
             return False
+        self._track_delivery(msg_id, conversation, peer_hex, DELIVERY_PROPAGATED)
+        RNS.log(
+            f"TrenchChat [dm]: {msg_id[:12]}… handed to a propagation node "
+            f"for {peer_hex[:12]}…",
+            RNS.LOG_NOTICE,
+        )
+        return True
 
     def _on_direct_failed(self, peer_hex: str, msg_id: str) -> None:
         """A direct attempt failed: try propagation, then the pending queue.
@@ -574,62 +541,48 @@ class Messaging:
         queued = self._pending.pop(dest_hex, [])
         if not queued:
             return
-        try:
-            identity_hash = bytes.fromhex(dest_hex)
-            delivery_dest_hash = RNS.Destination.hash(identity_hash, "lxmf", "delivery")
-            dest_identity = RNS.Identity.recall(delivery_dest_hash)
-            if dest_identity is None:
-                # Still unreachable: put back
-                self._pending[dest_hex] = queued
-                return
-            for params in queued:
-                try:
-                    if not self._may_receive(params["channel_hash_hex"], dest_hex):
-                        RNS.log(
-                            f"TrenchChat: dropping queued message for "
-                            f"{dest_hex[:12]}… — no longer a member of "
-                            f"{params['channel_hash_hex'][:12]}…",
-                            RNS.LOG_WARNING,
-                        )
-                        continue
-                    lxm = self._build_lxm(dest_identity, params)
-                    subs = params.get("subscriber_hashes", [])
-                    channel = params["channel_hash_hex"]
-                    mid = params["msg_id"]
-                    lxm.register_delivery_callback(
-                        lambda m, d=dest_hex, c=channel, mi=mid:
-                            self._track_delivery(mi, c, d, DELIVERY_DELIVERED)
+        if not self._router.can_reach(dest_hex):
+            # Still unreachable: put back
+            self._pending[dest_hex] = queued
+            return
+        for params in queued:
+            try:
+                if not self._may_receive(params["channel_hash_hex"], dest_hex):
+                    RNS.log(
+                        f"TrenchChat: dropping queued message for "
+                        f"{dest_hex[:12]}… — no longer a member of "
+                        f"{params['channel_hash_hex'][:12]}…",
+                        RNS.LOG_WARNING,
                     )
-                    lxm.register_failed_callback(
-                        lambda m, d=dest_hex, c=channel, mi=mid, s=subs:
-                            self._on_delivery_failed(d, c, mi, s)
-                    )
-                    self._router.send(lxm)
-                    self._track_delivery(mid, channel, dest_hex, DELIVERY_DELIVERED)
-                except Exception as e:
-                    RNS.log(f"TrenchChat: flush_pending send error to {dest_hex}: {e}",
-                            RNS.LOG_WARNING)
-        except Exception as e:
-            RNS.log(f"TrenchChat: flush_pending error for {dest_hex}: {e}", RNS.LOG_WARNING)
+                    continue
+                subs = params.get("subscriber_hashes", [])
+                channel = params["channel_hash_hex"]
+                mid = params["msg_id"]
+                if self._send_channel_message(dest_hex, params,
+                                              subs) is SendState.NO_PATH:
+                    self._pending.setdefault(dest_hex, []).append(params)
+                    continue
+                self._track_delivery(mid, channel, dest_hex, DELIVERY_DELIVERED)
+            except Exception as e:
+                RNS.log(f"TrenchChat: flush_pending send error to {dest_hex}: {e}",
+                        RNS.LOG_WARNING)
 
-    def _build_lxm(self, dest_identity: RNS.Identity, params: dict,
-                   desired_method: int | None = None) -> LXMF.LXMessage:
-        dest = RNS.Destination(
-            dest_identity,
-            RNS.Destination.OUT,
-            RNS.Destination.SINGLE,
-            "lxmf",
-            "delivery",
+    def _send_channel_message(self, dest_hex: str, params: dict,
+                              subscriber_hashes: list[str]) -> SendState:
+        """Hand one channel message to the transport for one recipient."""
+        channel = params["channel_hash_hex"]
+        msg_id = params["msg_id"]
+        return self._router.send(
+            dest_hex, self._channel_fields(params), params["content"],
+            on_delivered=lambda d, c=channel, mi=msg_id:
+                self._track_delivery(mi, c, d, DELIVERY_DELIVERED),
+            on_failed=lambda d, c=channel, mi=msg_id, s=list(subscriber_hashes):
+                self._on_delivery_failed(d, c, mi, s),
         )
-        lxm = LXMF.LXMessage(
-            dest,
-            self._router.delivery_destination,
-            params["content"],
-            desired_method=desired_method or LXMF.LXMessage.DIRECT,
-        )
-        lxm.fields = (self._dm_fields(params) if params.get("dm_peer_hex")
-                      else pack_fields(self._channel_fields(params)))
-        return lxm
+
+    def _dm_payload(self, params: dict) -> tuple[str, dict]:
+        """A conversation message's content and LXMF fields, as any client reads them."""
+        return params["content"], self._dm_fields(params)
 
     @staticmethod
     def _channel_fields(params: dict) -> dict:
@@ -687,9 +640,7 @@ class Messaging:
                 RNS.LOG_DEBUG,
             )
             # Request the path so flush_pending fires when it resolves
-            identity_hash = bytes.fromhex(dest_hex)
-            delivery_dest_hash = RNS.Destination.hash(identity_hash, "lxmf", "delivery")
-            RNS.Transport.request_path(delivery_dest_hash)
+            self._router.request_path(dest_hex)
             # Only re-queue if not already pending (avoid duplicates)
             pending_ids = {p["msg_id"] for p in self._pending.get(dest_hex, [])}
             if msg_id not in pending_ids:
@@ -777,25 +728,20 @@ class Messaging:
 
     # --- receive ---
 
-    def _on_lxmf_message(self, message: LXMF.LXMessage):
+    def _on_message(self, message: InboundMessage):
         fields = message.fields or {}
 
         # Skip control messages (handled by invite.py)
         if F_MSG_TYPE in fields:
             return
 
-        # Resolve the sender's identity hash from the LXMF delivery destination hash.
-        # message.source_hash is the delivery dest hash, not the raw identity hash.
-        sender_identity = RNS.Identity.recall(message.source_hash) \
-            if message.source_hash else None
-        sender_hex = sender_identity.hash.hex() \
-            if sender_identity else (message.source_hash.hex() if message.source_hash else "")
+        sender_hex = message.source_hex
 
         # Only fields the Router unwrapped from our envelope can name a
         # channel; a foreign message's LXMF field keys (0x01 is embedded
         # messages there) must not be misread as one.
-        channel_hash_bytes = fields.get(F_CHANNEL_HASH) \
-            if getattr(message, "trenchchat_protocol", False) else None
+        channel_hash_bytes = (fields.get(F_CHANNEL_HASH)
+                              if message.trenchchat_protocol else None)
         if not channel_hash_bytes:
             # No channel means a conversation -- including a plain message from
             # a client that is not TrenchChat and sent no fields at all.
@@ -842,7 +788,7 @@ class Messaging:
 
         self._store_chat_message(message, fields, channel_hash_hex, sender_hex)
 
-    def _on_direct_message(self, message: LXMF.LXMessage, fields: dict,
+    def _on_direct_message(self, message: InboundMessage, fields: dict,
                            sender_hex: str) -> None:
         """Store an inbound direct message, if we hold its sender as a friend.
 
@@ -858,10 +804,7 @@ class Messaging:
         if self._direct_mgr is None:
             return
 
-        content = message.content or ""
-        if isinstance(content, bytes):
-            content = content.decode(errors="replace")
-
+        content = message.content
         envelope = unpack_dm_envelope(fields)
 
         if not self._direct_mgr.may_dm(sender_hex):
@@ -874,7 +817,7 @@ class Messaging:
             if envelope is not None:
                 sent_at = wire_timestamp(envelope.get("timestamp"))
             if sent_at is None:
-                sent_at = wire_timestamp(getattr(message, "timestamp", None))
+                sent_at = wire_timestamp(message.timestamp)
             self._direct_mgr.hold_message_request(
                 sender_hex, content, from_trenchchat=envelope is not None,
                 sent_at=sent_at)
@@ -964,7 +907,7 @@ class Messaging:
             require_author_signature=False,
         )
 
-    def _dm_values_from_plain(self, message: LXMF.LXMessage, content: str,
+    def _dm_values_from_plain(self, message: InboundMessage, content: str,
                               sender_hex: str) -> dict:
         """The message as any other LXMF client sent it.
 
@@ -972,7 +915,7 @@ class Messaging:
         timestamp is LXMF's own, and the id is computed the same way it would
         have been at the other end.
         """
-        timestamp = wire_timestamp(getattr(message, "timestamp", None)) or time.time()
+        timestamp = wire_timestamp(message.timestamp) or time.time()
         return {
             "sender_name":  "",
             "timestamp":    timestamp,
@@ -989,7 +932,7 @@ class Messaging:
             return value.decode(errors="replace")
         return value if isinstance(value, str) else ""
 
-    def _store_chat_message(self, message: LXMF.LXMessage, fields: dict,
+    def _store_chat_message(self, message: InboundMessage, fields: dict,
                             channel_hash_hex: str, sender_hex: str) -> None:
         """Read a channel message's own fields, then validate and store it."""
         sender_name = fields.get(F_DISPLAY_NAME, "")
@@ -1011,9 +954,7 @@ class Messaging:
         reply_to = message_id_from_wire(fields.get(F_REPLY_TO)) or None
         last_seen_id = message_id_from_wire(fields.get(F_LAST_SEEN_ID)) or None
 
-        content = message.content or ""
-        if isinstance(content, bytes):
-            content = content.decode(errors="replace")
+        content = message.content
 
         image_data = fields.get(F_IMAGE_DATA)
         if isinstance(image_data, str):
@@ -1074,7 +1015,8 @@ class Messaging:
         image_stripped = False
         if require_author_signature and not verify_message(
                 self._storage, sender_hex, author_sig, channel_hash_hex, msg_id,
-                timestamp, content, reply_to, last_seen_id, image_data, manifest):
+                timestamp, content, reply_to, last_seen_id, image_data, manifest,
+                router=self._router):
             RNS.log(
                 f"TrenchChat: dropping message {msg_id[:12]}… from "
                 f"{sender_hex[:12]}… — author signature missing or invalid",

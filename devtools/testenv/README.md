@@ -222,7 +222,7 @@ knowing before you go looking for a bug in your own changes:
   out of order. `messaging.py` drops a chat message if the receiver
   isn't yet marked subscribed/member locally.
 - **Real network round trips are slow compared to the pytest suite.**
-  `tests/` uses a `TestTransport` shim that delivers LXMF messages
+  `tests/` uses a `FakeTransport` shim that delivers messages
   in-process; this environment goes over real RNS Links. A chain like
   invite → join request → member-list update → sync request → sync
   response is four separate hops, not one -- give it several seconds

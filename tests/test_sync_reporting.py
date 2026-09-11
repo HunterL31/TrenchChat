@@ -14,6 +14,7 @@ import pytest
 import RNS
 import LXMF
 
+from tests.conftest import lxmf_transport_for
 from tests.helpers import sign_as, delivery_dest_hash_hex, wait_for, wait_for_message
 from trenchchat.core import sync_status
 from trenchchat.core.image import MAX_IMAGE_BYTES
@@ -383,11 +384,12 @@ class TestPendingRequestKeyCollision:
             "request's entry before either could be claimed"
         )
 
-    def test_peer_key_forms_both_claim_the_same_pending_request(self, peer_factory):
+    def test_only_the_peer_we_asked_can_claim_its_request(self, peer_factory):
         """
-        A response may identify its sender by identity hash or by the LXMF
-        delivery-destination hash for the same identity; either form must be
-        able to claim the outstanding request recorded under the other.
+        A pending request is keyed on the identity the transport authenticated,
+        and on nothing else. The delivery-destination hash is that identity's
+        alias inside LXMFTransport and never reaches a manager, so it names
+        nobody here and claims nothing.
         """
         alice = peer_factory("alice")
         bob = peer_factory("bob")
@@ -399,10 +401,12 @@ class TestPendingRequestKeyCollision:
         bob.sync_mgr._record_pending_request(ch_hash, carol.identity.hash_hex, time.time())
 
         delivery_hex = delivery_dest_hash_hex(carol.identity.hash_hex)
-        claimed = bob.sync_mgr._claim_pending_request(ch_hash, delivery_hex)
-        assert claimed is not None, (
-            "a response identified by the delivery-destination hash form could not "
-            "claim a request recorded under the identity-hash form"
+        assert bob.sync_mgr._claim_pending_request(ch_hash, delivery_hex) is None, (
+            "an address that is not an identity hash claimed an outstanding request"
+        )
+        assert bob.sync_mgr._claim_pending_request(
+            ch_hash, carol.identity.hash_hex) is not None, (
+            "the peer we actually asked could not claim its own request"
         )
 
 
@@ -412,7 +416,8 @@ class TestQuarantineExpiry:
             recipient.identity.rns_identity, RNS.Destination.OUT,
             RNS.Destination.SINGLE, "lxmf", "delivery",
         )
-        lxm = LXMF.LXMessage(dest, sender.router.delivery_destination, "",
+        lxm = LXMF.LXMessage(dest,
+                             lxmf_transport_for(sender).delivery_destination, "",
                              desired_method=LXMF.LXMessage.DIRECT)
         lxm.fields = {
             F_MSG_TYPE:      MT_MISSED_DELIVERY,
@@ -441,10 +446,11 @@ class TestQuarantineExpiry:
                                  "hint target")
         lxm = self._quarantinable_hint(alice, bob, ch_hash, msg_id)
 
-        bob.router._on_message_received(lxm)
-        assert sum(len(v) for v in bob.router._quarantine.values()) == 1
+        transport = lxmf_transport_for(bob, inbound=True)
+        transport._on_message_received(lxm)
+        assert sum(len(v) for v in transport._quarantine.values()) == 1
 
-        bob.router.release_quarantined(alice.identity.hash_hex)
+        transport.release_quarantined(alice.identity.hash_hex)
 
         assert wait_for(
             lambda: msg_id in bob.storage.get_missed_message_ids(
@@ -463,8 +469,8 @@ class TestQuarantineExpiry:
         gone with no error, no warning log, and no retry anywhere in
         on_peer_appeared.
         """
-        import trenchchat.network.router as router_module
-        monkeypatch.setattr(router_module, "QUARANTINE_TTL_SECS", 0.05)
+        import trenchchat.network.lxmf_transport as lxmf_transport_module
+        monkeypatch.setattr(lxmf_transport_module, "QUARANTINE_TTL_SECS", 0.05)
 
         alice = peer_factory("alice")
         bob = peer_factory("bob")
@@ -476,12 +482,13 @@ class TestQuarantineExpiry:
                                  "hint target 2")
         lxm = self._quarantinable_hint(alice, bob, ch_hash, msg_id)
 
-        bob.router._on_message_received(lxm)
-        assert sum(len(v) for v in bob.router._quarantine.values()) == 1
+        transport = lxmf_transport_for(bob, inbound=True)
+        transport._on_message_received(lxm)
+        assert sum(len(v) for v in transport._quarantine.values()) == 1
 
         time.sleep(0.2)  # comfortably past the monkeypatched TTL
 
-        bob.router.release_quarantined(alice.identity.hash_hex)
+        transport.release_quarantined(alice.identity.hash_hex)
 
         assert not wait_for(
             lambda: msg_id in bob.storage.get_missed_message_ids(
@@ -492,7 +499,7 @@ class TestQuarantineExpiry:
             "(current, confirmed behavior) -- if this now fails, quarantine's TTL "
             "pruning or release path has changed and the finding below is stale"
         )
-        assert sum(len(v) for v in bob.router._quarantine.values()) == 0, \
+        assert sum(len(v) for v in transport._quarantine.values()) == 0, \
             "the expired entry should have been pruned out of the quarantine table"
 
 

@@ -108,7 +108,7 @@ class TestRestartMidBackfill:
 
         # Hold Carol's continuation (second) response so the restart happens
         # deterministically before it lands -- otherwise the async 0.05s
-        # TestTransport delivery races the restart.
+        # FakeTransport delivery races the restart.
         held = []
         responses_sent = 0
         original_send_raw = carol.sync_mgr._send_raw

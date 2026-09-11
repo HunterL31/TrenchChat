@@ -31,18 +31,17 @@ import threading
 import time
 
 import RNS
-import LXMF
 
 from trenchchat.core.control_retry import ControlRetryQueue
 from trenchchat.core.presence import resolve_display_name
 from trenchchat.core.protocol import (
     F_DISPLAY_NAME, F_FRIEND_NOTE, F_MSG_TYPE, MAX_FRIEND_NOTE_CHARS,
     MT_FRIEND_ACCEPT, MT_FRIEND_DECLINE, MT_FRIEND_REQUEST,
-    pack_fields,
 )
 from trenchchat.core.storage import (
     FRIEND_ACCEPTED, FRIEND_PENDING_IN, FRIEND_PENDING_OUT,
 )
+from trenchchat.network.base import InboundMessage, SendState
 
 IDENTITY_HASH_HEX_LEN = 32
 
@@ -100,7 +99,7 @@ class FriendsManager:
         self._message_filer = None
 
         if router is not None:
-            router.add_delivery_callback(self._on_lxmf_message)
+            router.add_delivery_callback(self._on_message)
 
     # --- public API: local contacts ---
 
@@ -183,7 +182,6 @@ class FriendsManager:
         if identity_hex is None:
             with self._lock:
                 self._resolving[lxmf_hex] = {"nickname": nickname, "note": note}
-            RNS.Transport.request_path(bytes.fromhex(lxmf_hex))
             RNS.log(f"TrenchChat [friends]: resolving LXMF address "
                     f"{lxmf_hex[:12]}…", RNS.LOG_NOTICE)
             return {"state": "resolving", "identity_hash": None}
@@ -193,14 +191,10 @@ class FriendsManager:
 
     def _identity_for_address(self, lxmf_hex: str) -> str | None:
         """The identity hash behind an LXMF address, once its announce has
-        been heard. None while it has not."""
-        try:
-            identity = RNS.Identity.recall(bytes.fromhex(lxmf_hex))
-        except Exception as e:
-            RNS.log(f"TrenchChat [friends]: could not recall {lxmf_hex[:12]}…: "
-                    f"{e}", RNS.LOG_WARNING)
+        been heard. None while it has not, and the path is asked for."""
+        if self._router is None:
             return None
-        return identity.hash.hex() if identity is not None else None
+        return self._router.resolve_address(lxmf_hex)
 
     def resolving_addresses(self) -> list[str]:
         """LXMF addresses still waiting on a path."""
@@ -478,15 +472,15 @@ class FriendsManager:
 
     # --- inbound handshake ---
 
-    def _on_lxmf_message(self, message: LXMF.LXMessage) -> None:
-        fields = getattr(message, "fields", None) or {}
+    def _on_message(self, message: InboundMessage) -> None:
+        fields = message.fields or {}
         msg_type = fields.get(F_MSG_TYPE)
         if isinstance(msg_type, bytes):
             msg_type = msg_type.decode(errors="replace")
         if msg_type not in (MT_FRIEND_REQUEST, MT_FRIEND_ACCEPT, MT_FRIEND_DECLINE):
             return
 
-        sender_hex = self._sender_hex(message)
+        sender_hex = message.source_hex
         if not self._is_valid_hash(sender_hex) or sender_hex == self._self_hex:
             return
 
@@ -586,28 +580,10 @@ class FriendsManager:
         if self._router is None:
             return False
         try:
-            identity_hash = bytes.fromhex(dest_hex)
-            delivery_dest_hash = RNS.Destination.hash(identity_hash, "lxmf", "delivery")
-            dest_identity = RNS.Identity.recall(delivery_dest_hash)
-            if dest_identity is None:
-                RNS.Transport.request_path(delivery_dest_hash)
+            if self._router.send(dest_hex, fields) is SendState.NO_PATH:
+                self._router.request_path(dest_hex)
                 self._retry.queue(dest_hex, fields)
                 return False
-            dest = RNS.Destination(
-                dest_identity,
-                RNS.Destination.OUT,
-                RNS.Destination.SINGLE,
-                "lxmf",
-                "delivery",
-            )
-            lxm = LXMF.LXMessage(
-                dest,
-                self._router.delivery_destination,
-                "",
-                desired_method=LXMF.LXMessage.DIRECT,
-            )
-            lxm.fields = pack_fields(fields)
-            self._router.send(lxm)
             return True
         except Exception as e:
             RNS.log(f"TrenchChat [friends]: handshake send error: {e}", RNS.LOG_WARNING)
@@ -637,13 +613,6 @@ class FriendsManager:
             "is_online": is_online,
             "state": row.get("state", FRIEND_ACCEPTED),
         }
-
-    def _sender_hex(self, message: LXMF.LXMessage) -> str:
-        sender_identity = (RNS.Identity.recall(message.source_hash)
-                           if message.source_hash else None)
-        if sender_identity is not None:
-            return sender_identity.hash.hex()
-        return message.source_hash.hex() if message.source_hash else ""
 
     @staticmethod
     def _text(value) -> str:

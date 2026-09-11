@@ -252,10 +252,8 @@ def main():
         sys.exit(f"error: {e}")
 
     # Announce everything, then keep reannouncing.
-    from trenchchat.network.router import REANNOUNCE_INTERVAL_SECS
-
     backend.announce()
-    backend.start_heartbeat(interval=REANNOUNCE_INTERVAL_SECS)
+    backend.start_heartbeat()
     backend.start_presence_pruner()
     backend.start_voice_ticker()
     backend.start_bandwidth_sampler()

@@ -138,7 +138,7 @@ class StubCollectRouter:
         self.asks = 0
         self.started = started
 
-    def request_propagation_sync(self, identity) -> bool:
+    def request_propagation_sync(self) -> bool:
         self.asks += 1
         return self.started
 
@@ -153,17 +153,13 @@ class StubNodes:
         return self.selected
 
 
-class StubIdentity:
-    rns_identity = object()
-
-
 @pytest.fixture
 def collect_router() -> StubCollectRouter:
     return StubCollectRouter()
 
 
 def make_collector(router, nodes, **kwargs) -> PropagationCollector:
-    return PropagationCollector(router, StubIdentity(), nodes, **kwargs)
+    return PropagationCollector(router, nodes, **kwargs)
 
 
 def test_a_fresh_process_asks_straight_away(collect_router):
