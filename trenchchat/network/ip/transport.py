@@ -131,6 +131,10 @@ class IPTransport(Transport):
         self._queues: dict[int, _SerialQueue] = {}
         self._sessions_lock = threading.Lock()
         self._pending_handshakes: set = set()
+        # One-shot listeners on punched sockets, one per peer, closed with the
+        # session they accepted. Closing one closes its socket.
+        self._accept_servers: dict[str, object] = {}
+        self._probe_responder = None
         self._stopped = False
         self._server = None
         self._sweep_task = None
@@ -184,6 +188,7 @@ class IPTransport(Transport):
             sock,
             session_mod.listener_configuration(self._certificate),
             self._accept,
+            probe_handler=self._on_listen_datagram,
         )
         self._sweep_task = asyncio.ensure_future(self._sweep())
         RNS.log(f"TrenchChat [ip]: listening on {self._listen_host}:"
@@ -245,6 +250,8 @@ class IPTransport(Transport):
         for pending in list(self._pending_handshakes):
             pending.shut_down("this node is stopping")
         self._pending_handshakes.clear()
+        for peer_hex in list(self._accept_servers):
+            self._close_accept_server(peer_hex)
         if self._sweep_task is not None:
             self._sweep_task.cancel()
             self._sweep_task = None
@@ -348,6 +355,87 @@ class IPTransport(Transport):
             return False
         return True
 
+    def accept_on(self, sock: socket.socket, peer_hex: str,
+                  peer_cert_der: bytes = b"",
+                  timeout: float = OPEN_TIMEOUT_SECS) -> bool:
+        """Take one inbound session from a peer on a socket that has been punched.
+
+        The other half of open_session: the side that does not dial still has
+        to be listening on the socket whose mapping the punch opened, because
+        the peer's first QUIC packet is addressed to it and to nothing else.
+        Only *peer_hex* is let in, on top of whatever gate this transport
+        already holds an inbound HELLO to, and only asserting the certificate
+        it offered over Reticulum when *peer_cert_der* names one.
+
+        Takes ownership of the socket, which is closed with the session it
+        carried or when this call gives up. Blocks the calling thread, so
+        callers use a thread of their own rather than an RNS one. A session
+        that comes up by some other route in the meantime counts: the point is
+        that this peer is reachable, not which socket carried it.
+        """
+        if self._stopped or peer_hex == self._identity.hash_hex:
+            sock.close()
+            return False
+        if self.can_reach(peer_hex):
+            sock.close()
+            return True
+        try:
+            self._on_loop(self._listen_once(sock, peer_hex, peer_cert_der),
+                          LOOP_START_TIMEOUT_SECS)
+        except Exception as e:
+            RNS.log(f"TrenchChat [ip]: could not listen for {peer_hex[:12]}…: "
+                    f"{e}", RNS.LOG_WARNING)
+            sock.close()
+            return False
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if self.can_reach(peer_hex):
+                return True
+            time.sleep(0.05)
+        try:
+            self._loop.call_soon_threadsafe(self._close_accept_server, peer_hex)
+        except RuntimeError:
+            pass
+        return False
+
+    async def _listen_once(self, sock: socket.socket, peer_hex: str,
+                           peer_cert_der: bytes) -> None:
+        """Put a listener on one punched socket, replacing any it already had."""
+        self._close_accept_server(peer_hex)
+        server = await session_mod.create_listener(
+            sock,
+            session_mod.listener_configuration(self._certificate),
+            lambda connection, stream_handler=None: self._accept(
+                connection, stream_handler, expected_peer_hex=peer_hex,
+                peer_cert_der=peer_cert_der),
+            probe_handler=self._on_listen_datagram,
+        )
+        self._accept_servers[peer_hex] = server
+
+    def _close_accept_server(self, peer_hex: str) -> None:
+        """Drop a one-shot listener and the socket under it."""
+        server = self._accept_servers.pop(peer_hex, None)
+        if server is None:
+            return
+        try:
+            server.close()
+        except Exception as e:
+            RNS.log(f"TrenchChat [ip]: could not close a punched listener: {e}",
+                    RNS.LOG_DEBUG)
+
+    def set_probe_responder(self, responder) -> None:
+        """Register what answers a punch probe arriving on the listening socket.
+
+        responder(data, addr, send) -> bool, called on the transport's loop for
+        every datagram before QUIC sees it, and returning whether it took it.
+        """
+        self._probe_responder = responder
+
+    def _on_listen_datagram(self, data: bytes, addr, send) -> bool:
+        """Hand one datagram to the probe responder, if there is one."""
+        responder = self._probe_responder
+        return bool(responder(data, addr, send)) if responder is not None else False
+
     def session_count(self) -> int:
         """How many sessions are up."""
         with self._sessions_lock:
@@ -357,8 +445,14 @@ class IPTransport(Transport):
         """How many connections are mid-handshake and not yet proven."""
         return len(self._pending_handshakes)
 
-    def _accept(self, connection, stream_handler=None) -> DirectSession:
-        """Build the session for one inbound connection, within the caps."""
+    def _accept(self, connection, stream_handler=None, *,
+                expected_peer_hex: str = "",
+                peer_cert_der: bytes = b"") -> DirectSession:
+        """Build the session for one inbound connection, within the caps.
+
+        expected_peer_hex narrows a punched socket to the one peer it was
+        punched with; the listening socket takes anyone the gate allows.
+        """
         refuse = ""
         if len(self._pending_handshakes) >= MAX_PENDING_HANDSHAKES:
             refuse = (f"at the {MAX_PENDING_HANDSHAKES} pending handshake cap")
@@ -366,16 +460,19 @@ class IPTransport(Transport):
             refuse = f"at the {MAX_SESSIONS} session cap"
         inbound = DirectSession(
             connection, stream_handler=stream_handler, identity=self._identity,
-            certificate=self._certificate, hooks=self._hooks(), is_client=False,
-            refuse=refuse,
+            certificate=self._certificate,
+            hooks=self._hooks(expected_peer_hex), is_client=False,
+            peer_cert_der=peer_cert_der, refuse=refuse,
         )
         if not refuse:
             self._pending_handshakes.add(inbound)
         return inbound
 
-    def _hooks(self) -> SessionHooks:
+    def _hooks(self, expected_peer_hex: str = "") -> SessionHooks:
         return SessionHooks(
-            authorize=self._authorize,
+            authorize=(self._authorize if not expected_peer_hex
+                       else lambda peer_hex: (peer_hex == expected_peer_hex
+                                              and self._authorize(peer_hex))),
             on_ready=self._on_ready,
             on_message=self._on_message,
             on_closed=self._on_closed,
@@ -409,6 +506,7 @@ class IPTransport(Transport):
         if peer_hex:
             RNS.log(f"TrenchChat [ip]: session with {peer_hex[:12]}… ended: "
                     f"{reason}", RNS.LOG_NOTICE)
+            self._close_accept_server(peer_hex)
             self._dispatch(self._fire_path_changed, peer_hex, PATH_RETICULUM)
 
     def _dispatch(self, fn, *args) -> None:

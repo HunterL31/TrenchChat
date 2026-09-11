@@ -8,6 +8,7 @@ about what is refused on the way in; the last drives the whole flow between
 two peers on loopback, with real probes and a real session at the end.
 """
 
+import threading
 import time
 
 from trenchchat.core.protocol import (
@@ -16,7 +17,7 @@ from trenchchat.core.protocol import (
     UPGRADE_NONCE_BYTES, upgrade_address, upgrade_candidates,
     upgrade_certificate, upgrade_nonce, upgrade_punch_at,
 )
-from trenchchat.network.ip import candidates
+from trenchchat.network.ip import candidates, punch
 
 
 def _candidate(host: str = "10.0.0.5", port: int = 42420,
@@ -171,3 +172,147 @@ class TestCandidateGathering:
         gathered = candidates.gather(45678, mapped=("203.0.113.7", 51820))
         wire = [[host, port, kind] for host, port, kind in gathered]
         assert upgrade_candidates(wire) == gathered
+
+
+class TestProbeDatagrams:
+    """What a probe carries, and what it takes for one to count."""
+
+    def test_a_probe_is_a_magic_and_the_nonce_and_nothing_else(self):
+        nonce = b"\x11" * UPGRADE_NONCE_BYTES
+        datagram = punch.probe_datagram(nonce)
+        assert len(datagram) == punch.DATAGRAM_BYTES
+        assert datagram.endswith(nonce)
+        assert punch.read_datagram(datagram, nonce) == punch.KIND_PROBE
+
+    def test_an_acknowledgement_is_told_apart_from_a_probe(self):
+        nonce = b"\x11" * UPGRADE_NONCE_BYTES
+        assert punch.read_datagram(punch.ack_datagram(nonce), nonce) == punch.KIND_ACK
+
+    def test_another_attempts_nonce_is_not_this_attempts_probe(self):
+        assert punch.read_datagram(punch.probe_datagram(b"\x22" * 16),
+                                   b"\x11" * 16) is None
+
+    def test_anything_that_is_not_a_probe_is_nothing(self):
+        nonce = b"\x11" * UPGRADE_NONCE_BYTES
+        assert punch.read_datagram(b"", nonce) is None
+        assert punch.read_datagram(b"GET / HTTP/1.1", nonce) is None
+        assert punch.read_datagram(punch.probe_datagram(nonce) + b"x", nonce) is None
+        assert punch.read_datagram(b"junk" + nonce, nonce) is None
+
+
+class TestPunchExchange:
+    """Two sockets on loopback, probing each other the way two peers do."""
+
+    def test_two_sockets_find_each_other_and_name_the_pair(self):
+        nonce = b"\x33" * UPGRADE_NONCE_BYTES
+        left = punch.bind_socket("127.0.0.1", 0)
+        right = punch.bind_socket("127.0.0.1", 0)
+        try:
+            left_addr = left.getsockname()
+            right_addr = right.getsockname()
+            results = {}
+
+            def _run(name, sock, targets):
+                results[name] = punch.punch(sock, targets, nonce, seconds=4.0)
+
+            threads = [
+                threading.Thread(target=_run, args=("left", left, [right_addr])),
+                threading.Thread(target=_run, args=("right", right, [left_addr])),
+            ]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=10.0)
+
+            assert results["left"].punched and results["right"].punched
+            assert results["left"].remote == right_addr
+            assert results["right"].remote == left_addr
+            assert results["left"].probes_sent >= 1
+        finally:
+            left.close()
+            right.close()
+
+    def test_an_unreachable_candidate_does_not_upset_the_punch(self):
+        nonce = b"\x34" * UPGRADE_NONCE_BYTES
+        left = punch.bind_socket("127.0.0.1", 0)
+        right = punch.bind_socket("127.0.0.1", 0)
+        try:
+            right_addr = right.getsockname()
+            unreachable = ("192.0.2.123", 9)
+            results = {}
+
+            def _run(name, sock, targets):
+                results[name] = punch.punch(sock, targets, nonce, seconds=4.0)
+
+            threads = [
+                threading.Thread(target=_run,
+                                 args=("left", left, [unreachable, right_addr])),
+                threading.Thread(target=_run,
+                                 args=("right", right, [left.getsockname()])),
+            ]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=10.0)
+            assert results["left"].remote == right_addr
+        finally:
+            left.close()
+            right.close()
+
+    def test_a_probe_carrying_the_wrong_nonce_is_ignored(self):
+        ours = b"\x35" * UPGRADE_NONCE_BYTES
+        theirs = b"\x36" * UPGRADE_NONCE_BYTES
+        listener = punch.bind_socket("127.0.0.1", 0)
+        stranger = punch.bind_socket("127.0.0.1", 0)
+        try:
+            listener_addr = listener.getsockname()
+
+            def _shout():
+                deadline = time.time() + 2.5
+                while time.time() < deadline:
+                    stranger.sendto(punch.probe_datagram(theirs), listener_addr)
+                    stranger.sendto(punch.ack_datagram(theirs), listener_addr)
+                    time.sleep(0.1)
+
+            noise = threading.Thread(target=_shout, daemon=True)
+            noise.start()
+            result = punch.punch(listener, [stranger.getsockname()], ours,
+                                 seconds=2.0)
+            noise.join(timeout=5.0)
+            assert not result.punched
+            assert result.probes_from == []
+        finally:
+            listener.close()
+            stranger.close()
+
+    def test_a_probe_arriving_on_another_socket_is_answered_there(self):
+        nonce = b"\x37" * UPGRADE_NONCE_BYTES
+        listening = punch.bind_socket("127.0.0.1", 0)
+        caller = punch.bind_socket("127.0.0.1", 0)
+        try:
+            sent = []
+            taken = punch.answer_probe(punch.probe_datagram(nonce),
+                                       caller.getsockname(),
+                                       lambda data, addr: sent.append((data, addr)),
+                                       nonce)
+            assert taken
+            assert [data for data, _addr in sent] == [punch.ack_datagram(nonce),
+                                                      punch.probe_datagram(nonce)]
+            assert not punch.answer_probe(b"a quic packet, more or less",
+                                          caller.getsockname(),
+                                          lambda *_a: None, nonce)
+        finally:
+            listening.close()
+            caller.close()
+
+    def test_an_attempt_holds_until_the_time_it_named(self):
+        nonce = b"\x38" * UPGRADE_NONCE_BYTES
+        sock = punch.bind_socket("127.0.0.1", 0)
+        try:
+            started = time.monotonic()
+            result = punch.punch(sock, [("127.0.0.1", 9)], nonce, seconds=0.4,
+                                 start_at=time.time() + 0.5)
+            assert not result.punched
+            assert time.monotonic() - started >= 0.5
+        finally:
+            sock.close()

@@ -13,6 +13,7 @@ import asyncio
 import os
 import socket
 import struct
+import threading
 import time
 
 import msgpack
@@ -28,7 +29,7 @@ from tests.helpers import wait_for
 from trenchchat.config import Config
 from trenchchat.core.identity import Identity
 from trenchchat.network.base import PATH_DIRECT, PATH_RETICULUM, SendState
-from trenchchat.network.ip import frames
+from trenchchat.network.ip import frames, punch
 from trenchchat.network.ip.certificate import (
     CERT_FILE_NAME, SessionCertificate, fingerprint_for,
 )
@@ -678,3 +679,118 @@ class TestAuthenticatedMisbehaviour:
 
         asyncio.run(run())
         assert [m.content for m in bob.inbox] == ["honest"]
+
+
+# ---------------------------------------------------------------------------
+# Accepting on a punched socket
+# ---------------------------------------------------------------------------
+
+class TestAcceptOnAPunchedSocket:
+    """The other half of open_session: the side that does not dial.
+
+    A punched socket is the only address the peer's first packet is sent to,
+    so the accepting side has to listen there rather than on the port it
+    ordinarily listens on.
+    """
+
+    def test_a_session_comes_up_between_two_punched_sockets(self, ip_node):
+        alice = ip_node("alice")
+        bob = ip_node("bob")
+        alice_sock = punch.bind_socket("127.0.0.1", 0)
+        bob_sock = punch.bind_socket("127.0.0.1", 0)
+        accepted: list = []
+
+        def _accept():
+            accepted.append(bob.transport.accept_on(
+                bob_sock, alice.hash_hex, alice.transport.certificate_der,
+                timeout=15.0))
+
+        waiter = threading.Thread(target=_accept)
+        waiter.start()
+        try:
+            opened = alice.transport.open_session(
+                bob.hash_hex, "127.0.0.1", bob_sock.getsockname()[1],
+                bob.transport.certificate_der, sock=alice_sock)
+        finally:
+            waiter.join(timeout=20.0)
+
+        assert opened, "the dialer never opened the session"
+        assert accepted == [True]
+        assert alice.transport.can_reach(bob.hash_hex)
+        assert bob.transport.can_reach(alice.hash_hex)
+
+    def test_the_punched_socket_takes_only_the_peer_it_was_punched_with(
+            self, ip_node):
+        bob = ip_node("bob")
+        mallory = ip_node("mallory")
+        expected = "c" * 32
+        bob_sock = punch.bind_socket("127.0.0.1", 0)
+        accepted: list = []
+
+        def _accept():
+            accepted.append(bob.transport.accept_on(bob_sock, expected,
+                                                    timeout=4.0))
+
+        waiter = threading.Thread(target=_accept)
+        waiter.start()
+        try:
+            opened = mallory.transport.open_session(
+                bob.hash_hex, "127.0.0.1", bob_sock.getsockname()[1],
+                bob.transport.certificate_der,
+                sock=punch.bind_socket("127.0.0.1", 0), timeout=6.0)
+        finally:
+            waiter.join(timeout=20.0)
+
+        assert not opened
+        assert accepted == [False]
+        assert bob.transport.session_count() == 0
+
+    def test_a_peer_already_on_a_session_needs_no_second_socket(self, ip_node):
+        alice = ip_node("alice")
+        bob = ip_node("bob")
+        assert alice.open_to(bob)
+        assert wait_for(lambda: bob.transport.can_reach(alice.hash_hex),
+                        msg="bob's side of the session")
+        sock = punch.bind_socket("127.0.0.1", 0)
+        assert bob.transport.accept_on(sock, alice.hash_hex, timeout=1.0)
+        assert sock.fileno() == -1, "the socket was not given back"
+
+    def test_a_caller_asserting_another_certificate_is_refused(self, ip_node):
+        bob = ip_node("bob")
+        alice = ip_node("alice")
+        bob_sock = punch.bind_socket("127.0.0.1", 0)
+        accepted: list = []
+
+        def _accept():
+            accepted.append(bob.transport.accept_on(
+                bob_sock, alice.hash_hex, SessionCertificate.mint().der,
+                timeout=4.0))
+
+        waiter = threading.Thread(target=_accept)
+        waiter.start()
+        try:
+            opened = alice.transport.open_session(
+                bob.hash_hex, "127.0.0.1", bob_sock.getsockname()[1],
+                bob.transport.certificate_der,
+                sock=punch.bind_socket("127.0.0.1", 0), timeout=6.0)
+        finally:
+            waiter.join(timeout=20.0)
+
+        assert not opened
+        assert accepted == [False]
+        assert bob.transport.session_count() == 0
+
+    def test_a_probe_on_the_listening_socket_is_answered_not_dropped(self, ip_node):
+        bob = ip_node("bob")
+        nonce = b"\x44" * 16
+        bob.transport.set_probe_responder(
+            lambda data, addr, send: punch.answer_probe(data, addr, send, nonce))
+        sock = punch.bind_socket("127.0.0.1", 0)
+        try:
+            result = punch.punch(
+                sock, [("127.0.0.1", bob.transport.listen_port)], nonce,
+                seconds=3.0)
+            assert result.punched
+            assert result.remote[1] == bob.transport.listen_port
+        finally:
+            sock.close()

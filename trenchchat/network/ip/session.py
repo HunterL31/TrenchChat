@@ -478,7 +478,11 @@ class DirectSession(QuicConnectionProtocol):
             if kind != frames.KIND_HELLO:
                 raise HelloRejected("the caller sent no hello")
             own_fingerprint = self._certificate.fingerprint
-            self._peer_cert_der = asserted_certificate(payload)
+            asserted = asserted_certificate(payload)
+            if self._peer_cert_der and asserted != self._peer_cert_der:
+                raise HelloRejected("the caller asserted a certificate it did "
+                                    "not offer")
+            self._peer_cert_der = asserted
             peer_fingerprint = fingerprint_for(self._peer_cert_der)
             peer_hash, public_key = verify_hello(
                 payload, own_fingerprint, peer_fingerprint, self._nonce, None)
@@ -688,13 +692,54 @@ def bind_datagram_socket(host: str, port: int) -> socket.socket:
     return sock
 
 
+class ProbeAwareQuicServer(QuicServer):
+    """A listener that hands a punch probe to its owner before QUIC sees it.
+
+    A probe aimed at a mapped or observed candidate arrives here rather than at
+    an attempt's own socket, and QUIC would drop it unread. The handler answers
+    it on this socket, which is the one a router forwards and therefore the one
+    whose mapping is worth punching.
+    """
+
+    def __init__(self, *args, probe_handler=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._probe_handler = probe_handler
+        self._socket_transport = None
+
+    def connection_made(self, transport) -> None:
+        """Keep the socket, so a probe can be answered on it."""
+        super().connection_made(transport)
+        self._socket_transport = transport
+
+    def datagram_received(self, data: bytes, addr) -> None:
+        """Answer a probe here; hand everything else to QUIC unchanged."""
+        if self._probe_handler is not None:
+            try:
+                if self._probe_handler(data, addr, self.send_to):
+                    return
+            except Exception as e:
+                RNS.log(f"TrenchChat [ip]: probe handler error: {e}", RNS.LOG_ERROR)
+        super().datagram_received(data, addr)
+
+    def send_to(self, data: bytes, addr) -> None:
+        """Write one datagram back out of the listening socket."""
+        if self._socket_transport is not None:
+            self._socket_transport.sendto(data, addr)
+
+
 async def create_listener(sock: socket.socket, configuration: QuicConfiguration,
-                          create_protocol) -> QuicServer:
-    """Accept sessions on a socket this node owns."""
+                          create_protocol, probe_handler=None
+                          ) -> QuicServer:
+    """Accept sessions on a socket this node owns.
+
+    probe_handler(data, addr, send) -> bool sees every datagram first and says
+    whether it took it; a punch probe is the only thing it ever takes.
+    """
     loop = asyncio.get_running_loop()
     _transport, server = await loop.create_datagram_endpoint(
-        lambda: QuicServer(configuration=configuration,
-                           create_protocol=create_protocol),
+        lambda: ProbeAwareQuicServer(configuration=configuration,
+                                     create_protocol=create_protocol,
+                                     probe_handler=probe_handler),
         sock=sock,
     )
     return server
