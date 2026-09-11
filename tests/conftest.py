@@ -8,6 +8,13 @@ so the managers run against the same seam they run against in production and
 only the path below it is replaced: delivery goes straight to the recipient's
 Router, on its own thread after a short delay, the way LXMF delivers.
 
+Run the suite with --direct and every peer also gets a real IPTransport
+listening on 127.0.0.1, with a QUIC session opened to every other peer as it
+is built. The same managers then run over real handshakes, real frames and
+real acknowledgements, and Router picks the direct path for every peer that
+has one. A test whose subject is the Reticulum path itself carries the
+reticulum_path marker and stays on FakeTransport in both modes.
+
 A single RNS.Reticulum instance is still stood up for the session, because
 Identity, ServerManager and core/naming.py mint real RNS destinations and
 hashes; nothing in these tests sends over it.
@@ -43,11 +50,29 @@ from trenchchat.network.base import (
     InboundMessage, PATH_RETICULUM, SendState, Transport, TransportLimits,
     reticulum_limits,
 )
+from trenchchat.network.ip.transport import IPTransport
 from trenchchat.network.lxmf_transport import LXMFTransport
 from trenchchat.network.router import Router
 
 from tests.fake_file_transport import FakeFileRegistry, FakeFileTransport
 from tests.fake_voice import FakeVoiceRegistry, FakeVoiceTransport
+
+
+def pytest_addoption(parser):
+    """--direct runs every peer_factory peer over a real direct session."""
+    parser.addoption(
+        "--direct", action="store_true", default=False,
+        help="give every test peer an IPTransport and open sessions between "
+             "them, so the manager suite runs over direct QUIC sessions",
+    )
+
+
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers",
+        "reticulum_path: the test is about the Reticulum path itself, so its "
+        "peers stay on FakeTransport even under --direct",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -297,6 +322,26 @@ class FakeTransport(Transport):
         return False
 
 
+class DirectTestTransport(IPTransport):
+    """A real direct session that honours the fake network's reachability.
+
+    A test makes a peer unreachable by putting it in FakeTransport.unreachable,
+    which stands for a path that has not resolved. A live QUIC session would
+    reach it anyway and the test would be asserting nothing, so this path is
+    unreachable wherever the other one is.
+    """
+
+    def __init__(self, config: Config, identity, fake: FakeTransport):
+        super().__init__(config, identity, authorize=lambda _peer: True,
+                         listen_host="127.0.0.1", listen_port=0)
+        self._fake = fake
+
+    def can_reach(self, dest_hex: str) -> bool:
+        """Whether a session is up and the test has not cut the peer off."""
+        return (dest_hex not in self._fake.unreachable
+                and super().can_reach(dest_hex))
+
+
 def deliver(source, recipient: "TestPeer", fields: dict, content: str = "", *,
             envelope: bool = True) -> None:
     """Hand one authenticated message straight to a peer's Router.
@@ -405,6 +450,7 @@ class TestPeer:
     file_mgr: FileManager
     file_transport: FakeFileTransport
     lxmf_transport: "LXMFTransport | None" = None
+    ip_transport: "DirectTestTransport | None" = None
     _teardown_callbacks: list = field(default_factory=list, repr=False)
 
     def announce(self):
@@ -483,7 +529,7 @@ def peer_is_live(identity_hash_hex: str) -> bool:
 
 
 @pytest.fixture
-def peer_factory(rns_instance, tmp_path):
+def peer_factory(request, rns_instance, tmp_path):
     """
     Returns a factory function make_peer(name) -> TestPeer.
 
@@ -491,14 +537,23 @@ def peer_factory(rns_instance, tmp_path):
     identities, databases, and message stores are fully isolated.
 
     A shared FakeNetwork carries messages between them, so a send reaches the
-    recipient's Router without any Reticulum path resolution.
+    recipient's Router without any Reticulum path resolution. Under --direct
+    each peer also listens for direct sessions on 127.0.0.1 and opens one to
+    every peer already built, so the same test runs over QUIC instead.
     """
+    direct_by_default = (
+        request.config.getoption("--direct")
+        and request.node.get_closest_marker("reticulum_path") is None
+    )
     created_peers: list[TestPeer] = []
     network = FakeNetwork()
     voice_registry = FakeVoiceRegistry()
     file_registry = FakeFileRegistry()
 
-    def make_peer(name: str, display_name: str | None = None) -> TestPeer:
+    def make_peer(name: str, display_name: str | None = None,
+                  direct: bool | None = None) -> TestPeer:
+        """One peer. direct overrides --direct for a test that needs a session."""
+        direct = direct_by_default if direct is None else direct
         peer_dir = tmp_path / name
         peer_dir.mkdir(parents=True, exist_ok=True)
 
@@ -511,7 +566,10 @@ def peer_factory(rns_instance, tmp_path):
         identity = Identity(config, identity_path=identity_path)
         storage = Storage(db_path=db_path)
         transport = FakeTransport(identity.hash_hex, network, config)
-        router = Router(config, identity, transport=transport)
+        ip_transport = (DirectTestTransport(config, identity, transport)
+                        if direct else None)
+        router = Router(config, identity, transport=transport,
+                        direct_transport=ip_transport)
 
         channel_mgr = ChannelManager(identity, storage, router)
         server_mgr = ServerManager(identity, storage)
@@ -548,7 +606,6 @@ def peer_factory(rns_instance, tmp_path):
                                transport=file_transport, router=router)
 
         channel_mgr.restore_owned_channels()
-        server_mgr.restore_owned_servers()
 
         peer = TestPeer(
             name=name,
@@ -572,6 +629,7 @@ def peer_factory(rns_instance, tmp_path):
             voice_transport=voice_transport,
             file_mgr=file_mgr,
             file_transport=file_transport,
+            ip_transport=ip_transport,
         )
 
         # Drive VoiceManager.tick the way the testenv ticker thread would,
@@ -603,21 +661,24 @@ def peer_factory(rns_instance, tmp_path):
             _LIVE_PEERS.discard(t.self_hex)
             network.unregister(t)
 
-        # Identity and ServerManager register real RNS destinations, which
-        # otherwise stay in the global destination table for the life of the
-        # session -- several hundred by the end of a full run, which is what
-        # eventually faults the interpreter on Windows.
-        def _release_destinations(sv=server_mgr, ident=identity):
-            for dest in ([ident.destination]
-                         + list(getattr(sv, "_owned_destinations", {}).values())):
-                if dest is not None:
-                    try:
-                        RNS.Transport.deregister_destination(dest)
-                    except Exception:
-                        pass
+        # Identity registers a real RNS destination, which otherwise stays in
+        # the global destination table for the life of the session -- several
+        # hundred by the end of a full run, which is what eventually faults
+        # the interpreter on Windows.
+        def _release_destinations(ident=identity):
+            if ident.destination is not None:
+                try:
+                    RNS.Transport.deregister_destination(ident.destination)
+                except Exception:
+                    pass
 
         # Order matters: stop the voice ticker and inbound delivery before
         # anything they touch goes away, and close storage last.
+        def _stop_direct(t=ip_transport):
+            if t is not None:
+                t.stop()
+
+        peer._teardown_callbacks.append(_stop_direct)
         peer._teardown_callbacks.append(_stop_voice)
         peer._teardown_callbacks.append(_stop_files)
         peer._teardown_callbacks.append(_leave_network)
@@ -628,6 +689,19 @@ def peer_factory(rns_instance, tmp_path):
         _LIVE_PEERS.add(identity.hash_hex)
 
         network.register(transport)
+        if ip_transport is not None:
+            for other in created_peers:
+                # A peer torn down and rebuilt under the same name (a restart)
+                # leaves its old self in the list, with this peer's identity.
+                if (other.ip_transport is None
+                        or other.identity.hash_hex == identity.hash_hex
+                        or not peer_is_live(other.identity.hash_hex)):
+                    continue
+                assert ip_transport.open_session(
+                    other.identity.hash_hex, "127.0.0.1",
+                    other.ip_transport.listen_port,
+                    other.ip_transport.certificate_der,
+                ), f"no direct session between {name} and {other.name}"
 
         return peer
 

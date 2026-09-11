@@ -1399,13 +1399,20 @@ class TestTenureSyncFiltering:
         assert wait_for_message(bob.storage, ch_hash, before_msg_id, timeout=5), \
             "history withheld before the grant never arrived after it"
 
-    def test_sweep_scans_past_withheld_history(self, peer_factory):
+    def test_sweep_scans_past_withheld_history(self, peer_factory, monkeypatch):
         """
         A new member behind a full batch of history they may not see must
         still reach the messages they may: the responder sweeps past what it
         withholds instead of answering with an empty batch.
+
+        The cooldown is neutralised as in the test above: joining already
+        costs Bob one deep request, and on a fast path its answer lands
+        before the message below exists, so the explicit request here would
+        be paced rather than answered.
         """
         from trenchchat.core.sync import MAX_RESPONSE_MESSAGES
+
+        monkeypatch.setattr("trenchchat.core.sync.DEEP_SYNC_COOLDOWN_SECS", 0)
 
         alice = peer_factory("alice")
         bob = peer_factory("bob")

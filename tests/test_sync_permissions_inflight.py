@@ -25,6 +25,7 @@ near-instant continuation.
 import time
 
 import msgpack
+import pytest
 
 from tests.helpers import sign_as, wait_for_member, wait_for_message
 from trenchchat.core.messaging import _compute_message_id
@@ -163,6 +164,7 @@ class TestAsymmetricPermissionPropagationCooldown:
 # ---------------------------------------------------------------------------
 
 class TestFullSyncRevokedMidBackfill:
+    @pytest.mark.reticulum_path
     def test_revocation_between_chained_batches_serves_first_batch_then_nothing_further(
         self, peer_factory
     ):
@@ -179,6 +181,11 @@ class TestFullSyncRevokedMidBackfill:
         fires within about one FakeTransport round trip of the first
         response landing, which leaves no reliable window for a test's own
         thread to revoke permissions between the two batches.
+
+        Marked reticulum_path because the setup pins that path's batch size:
+        the chain it needs only exists while MAX_RESPONSE_MESSAGES is what
+        truncates the first answer, and the direct path's batch is ten times
+        larger, so the same history fits in one.
         """
         member_perms = [SEND_MESSAGE, FULL_SYNC]
         alice, bob, ch_hash, perms = _setup_tenured_channel(peer_factory,

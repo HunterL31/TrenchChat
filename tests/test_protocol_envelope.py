@@ -12,6 +12,8 @@ and the Router unwraps it once so handlers only ever see the inner dict.
 
 import time
 
+import pytest
+
 from tests.helpers import wait_for
 from trenchchat.core.naming import dm_hash_for
 from trenchchat.core.protocol import (
@@ -26,7 +28,12 @@ def befriend(a, b):
 
 
 def wire_fields(peer) -> list[dict]:
-    """The fields this peer actually put on the wire, envelope and all."""
+    """The fields this peer actually put on the LXMF wire, envelope and all.
+
+    Whoever reads this wants the LXMF form, so the tests that call it are
+    marked reticulum_path: a direct session carries the field dict inside its
+    own envelope and nothing lands in this outbox.
+    """
     return [message.fields for message in peer.transport.outbox]
 
 
@@ -79,6 +86,7 @@ def _reserved_keys(fields: dict) -> set:
     return {k for k in fields if isinstance(k, int) and k <= 0x80}
 
 
+@pytest.mark.reticulum_path
 def test_a_channel_message_claims_no_reserved_field_numbers(peer_factory):
     alice = peer_factory("alice")
     bob = peer_factory("bob")
@@ -99,6 +107,7 @@ def test_a_channel_message_claims_no_reserved_field_numbers(peer_factory):
         assert fields[LXMF_FIELD_CUSTOM_TYPE] == ENVELOPE_TYPE
 
 
+@pytest.mark.reticulum_path
 def test_control_messages_claim_no_reserved_field_numbers(peer_factory):
     """Subscribe is representative: every control sender routes through the
     same pack_fields envelope."""
