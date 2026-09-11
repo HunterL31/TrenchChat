@@ -96,6 +96,11 @@ def _connect_encrypted(path: str, raw_key: bytes) -> sqlite3.Connection:
     conn.execute(f"PRAGMA key = \"x'{hex_key}'\"")
     return conn
 
+
+# How many remembered upgrade addresses the table holds. An address is free to
+# assert, so the oldest are forgotten rather than kept.
+MAX_UPGRADE_ADDRESS_ROWS = 256
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS servers (
     hash         TEXT PRIMARY KEY,
@@ -435,6 +440,20 @@ CREATE TABLE IF NOT EXISTS channel_files (
     own         INTEGER NOT NULL DEFAULT 0,
     stored_at   REAL NOT NULL,
     last_used   REAL NOT NULL
+);
+
+-- Local-only, and never sent onward as a claim about anybody. Two kinds of
+-- address, both of them hints that make the next upgrade attempt cheaper:
+-- 'peer' is where this node last saw that peer's punch probes arrive from, and
+-- 'self' is where that peer last saw this node's. Neither is trusted for
+-- anything; a session still authenticates from nothing.
+CREATE TABLE IF NOT EXISTS upgrade_addresses (
+    peer_hash TEXT NOT NULL,
+    kind      TEXT NOT NULL,
+    host      TEXT NOT NULL,
+    port      INTEGER NOT NULL,
+    seen_at   REAL NOT NULL,
+    PRIMARY KEY (peer_hash, kind)
 );
 
 -- The bytes, one row per FILE_CHUNK_BYTES chunk, kept in that shape for the
@@ -2815,6 +2834,49 @@ class Storage:
                 "DELETE FROM nomad_bookmarks WHERE node_hash = ? AND path = ?",
                 (node_hash, path))
             return cursor.rowcount > 0
+
+    # ------------------------------------------------------------------
+    # Direct session addresses
+    # ------------------------------------------------------------------
+
+    def record_upgrade_address(self, peer_hash: str, kind: str, host: str,
+                               port: int) -> None:
+        """Remember where a peer was seen, or where a peer saw this node.
+
+        Bounded on the way in: addresses are free to assert, so the table holds
+        the most recent MAX_UPGRADE_ADDRESS_ROWS and forgets the rest.
+        """
+        with self._tx():
+            self._conn.execute("""
+                INSERT INTO upgrade_addresses (peer_hash, kind, host, port, seen_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(peer_hash, kind) DO UPDATE SET
+                    host=excluded.host,
+                    port=excluded.port,
+                    seen_at=excluded.seen_at
+            """, (peer_hash, kind, host, int(port), time.time()))
+            self._conn.execute("""
+                DELETE FROM upgrade_addresses WHERE rowid NOT IN (
+                    SELECT rowid FROM upgrade_addresses
+                    ORDER BY seen_at DESC LIMIT ?
+                )
+            """, (MAX_UPGRADE_ADDRESS_ROWS,))
+
+    def get_upgrade_address(self, peer_hash: str,
+                            kind: str) -> tuple[str, int] | None:
+        """One remembered address, or None if there is none of that kind."""
+        row = self._fetchone(
+            "SELECT host, port FROM upgrade_addresses "
+            "WHERE peer_hash = ? AND kind = ?", (peer_hash, kind))
+        return (row["host"], row["port"]) if row is not None else None
+
+    def get_upgrade_addresses(self, kind: str,
+                              limit: int = 4) -> list[tuple[str, int]]:
+        """The most recently seen addresses of one kind, newest first."""
+        rows = self._fetchall(
+            "SELECT DISTINCT host, port FROM upgrade_addresses "
+            "WHERE kind = ? ORDER BY seen_at DESC LIMIT ?", (kind, int(limit)))
+        return [(row["host"], row["port"]) for row in rows]
 
     # ------------------------------------------------------------------
     # Shared file store

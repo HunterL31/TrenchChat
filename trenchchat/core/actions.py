@@ -14,6 +14,7 @@ free of any GUI framework dependency.
 
 from collections.abc import Callable
 
+from trenchchat.core import upgrade
 from trenchchat.core.files import REASON_STORAGE, build_manifest
 from trenchchat.core.node_browser import parse_nomad_url
 from trenchchat.core.permissions import (
@@ -616,6 +617,22 @@ def conversation_recipients(storage, subscription_mgr, direct_mgr,
 # The avatar has its own dedicated entry point (AvatarManager.set_avatar) and
 # isn't part of the apply_settings surface below.
 # ---------------------------------------------------------------------------
+
+
+def offer_upgrade(storage, upgrade_mgr, self_hash_hex: str,
+                  peer_hash_hex: str) -> dict:
+    """Ask for a direct IP session with one peer, re-checking the gate first.
+
+    The outbound guard behind the diagnostics panel's "Try now": the manager
+    holds the same gate and IPTransport holds it again on the way in, but an
+    endpoint calls this so no client can reach the handshake for a peer this
+    node is not allowed to offer an address to. Waiting is skipped, since a
+    person asking is the reason the button exists; the gate is not.
+    """
+    if not upgrade.is_eligible(storage, self_hash_hex, peer_hash_hex):
+        return {"ok": False, "reason": upgrade.REASON_INELIGIBLE}
+    reason = upgrade_mgr.offer(peer_hash_hex, ignore_backoff=True)
+    return {"ok": reason is None, "reason": reason}
 
 
 def set_display_name(router, display_name: str) -> None:

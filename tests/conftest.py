@@ -551,8 +551,14 @@ def peer_factory(request, rns_instance, tmp_path):
     file_registry = FakeFileRegistry()
 
     def make_peer(name: str, display_name: str | None = None,
-                  direct: bool | None = None) -> TestPeer:
-        """One peer. direct overrides --direct for a test that needs a session."""
+                  direct: bool | None = None,
+                  open_sessions: bool = True) -> TestPeer:
+        """One peer. direct overrides --direct for a test that needs a session.
+
+        open_sessions False gives the peer a direct transport wired into its
+        Router and no sessions on it, which is what the upgrade handshake needs
+        in either mode: opening one is the thing under test.
+        """
         direct = direct_by_default if direct is None else direct
         peer_dir = tmp_path / name
         peer_dir.mkdir(parents=True, exist_ok=True)
@@ -689,7 +695,7 @@ def peer_factory(request, rns_instance, tmp_path):
         _LIVE_PEERS.add(identity.hash_hex)
 
         network.register(transport)
-        if ip_transport is not None:
+        if ip_transport is not None and open_sessions:
             for other in created_peers:
                 # A peer torn down and rebuilt under the same name (a restart)
                 # leaves its old self in the list, with this peer's identity.

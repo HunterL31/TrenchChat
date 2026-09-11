@@ -40,6 +40,7 @@ Scenarios covered:
     - Doc for channel A delivered as if it were for channel B is rejected
 """
 
+import os
 import struct
 import time
 from types import SimpleNamespace
@@ -53,6 +54,7 @@ import RNS
 from tests.conftest import deliver, forge, lxmf_transport_for
 from tests.helpers import sign_as, wait_for, wait_for_member
 from trenchchat.network.base import PATH_DIRECT
+from trenchchat.network.ip.certificate import SessionCertificate
 from trenchchat.network.ip.transport import IPTransport
 from trenchchat.network.lxmf_transport import (
     PATH_REQUEST_GLOBAL_BURST, PATH_REQUEST_MAX_SOURCES, QUARANTINE_MAX_PER_SENDER,
@@ -62,10 +64,11 @@ from trenchchat.core.invite import _sign, _signed_payload
 from trenchchat.core.messaging import _compute_message_id
 from trenchchat.core.naming import dm_hash_for
 from trenchchat.core.protocol import (
-    MT_PRESENCE,
-    F_SYNC_PROBE,
+    MT_PRESENCE, MT_UPGRADE_ANSWER, MT_UPGRADE_OFFER,
+    F_SYNC_PROBE, F_UPGRADE_CANDIDATES, F_UPGRADE_CERT, F_UPGRADE_NONCE,
+    F_UPGRADE_PUNCH_AT,
     DM_ENVELOPE_TYPE, LXMF_FIELD_CUSTOM_DATA, LXMF_FIELD_CUSTOM_TYPE,
-    pack_dm_envelope, pack_fields,
+    pack_dm_envelope, pack_fields, unpack_fields,
 )
 from trenchchat.core.friends import (
     MAX_HELD_MESSAGES, MAX_HELD_PER_SENDER, MAX_PENDING_FRIEND_REQUESTS,
@@ -4706,3 +4709,167 @@ def _open_channel_on_both(peer_factory):
         bob.subscription_mgr.get_subscribers(ch_hash),
         msg="bob subscribed")
     return alice, bob, ch_hash
+
+
+# ---------------------------------------------------------------------------
+# The upgrade handshake: what an offer has to be before it is answered
+# ---------------------------------------------------------------------------
+
+def _upgrade_manager_for(peer):
+    """An UpgradeManager beside a peer, holding the real eligibility gate."""
+    transport = _direct_transport_for(peer)
+    transport.set_authorize(
+        lambda peer_hex: upgrade.is_eligible(peer.storage,
+                                             peer.identity.hash_hex, peer_hex))
+    manager = upgrade.UpgradeManager(peer.identity, peer.storage, peer.router,
+                                     peer.presence_mgr, peer.config,
+                                     transport=transport)
+    peer._teardown_callbacks.insert(0, manager.stop)
+    return manager
+
+
+def _offer(*, nonce=None, candidates=None, punch_at=None,
+           msg_type=MT_UPGRADE_OFFER) -> dict:
+    """One well-formed offer, with whatever a test wants wrong about it."""
+    return {
+        F_MSG_TYPE: msg_type,
+        F_UPGRADE_CANDIDATES: (candidates if candidates is not None
+                               else [["10.9.9.9", 40000, "lan"]]),
+        F_UPGRADE_NONCE: nonce if nonce is not None else os.urandom(16),
+        F_UPGRADE_CERT: SessionCertificate.mint().der,
+        F_UPGRADE_PUNCH_AT: (punch_at if punch_at is not None
+                             else time.time() + 2),
+    }
+
+
+def _answers_sent(peer) -> list[dict]:
+    """Every upgrade answer this peer put on the wire.
+
+    The recipient's Router unwraps the envelope in place, so a message that has
+    already been delivered is holding its inner dict by the time this reads it.
+    """
+    answers = []
+    for message in peer.transport.outbox:
+        fields = unpack_fields(message.fields) or message.fields or {}
+        if fields.get(F_MSG_TYPE) == MT_UPGRADE_ANSWER:
+            answers.append(fields)
+    return answers
+
+
+class TestUpgradeOfferGate:
+    """An offer discloses this node's addresses, so it is answered only for a
+    member of a shared invite-only channel and only when every bound holds.
+    These deliver straight to the manager, which is where a lying client ends
+    up anyway."""
+
+    def test_an_offer_from_a_non_member_is_dropped_without_a_reply(
+            self, peer_factory):
+        alice = peer_factory("alice")
+        mallory = peer_factory("mallory")
+        manager = _upgrade_manager_for(alice)
+
+        deliver(mallory, alice, _offer())
+        time.sleep(0.3)
+        assert _answers_sent(alice) == []
+        assert manager.attempt_count() == 0
+        assert manager.failures()[mallory.identity.hash_hex]["reason"] == \
+            upgrade.REASON_INELIGIBLE
+
+    def test_an_offer_from_a_public_channel_co_subscriber_is_dropped(
+            self, peer_factory):
+        alice = peer_factory("alice")
+        mallory = peer_factory("mallory")
+        ch_hash = alice.channel_mgr.create_channel("open-house", "",
+                                                   permissions=dict(PRESET_OPEN))
+        alice.storage.upsert_member(ch_hash, alice.identity.hash_hex, "Alice",
+                                    role=ROLE_OWNER)
+        alice.storage.upsert_member(ch_hash, mallory.identity.hash_hex,
+                                    "Mallory", role=ROLE_MEMBER)
+        manager = _upgrade_manager_for(alice)
+
+        deliver(mallory, alice, _offer())
+        time.sleep(0.3)
+        assert _answers_sent(alice) == []
+        assert manager.attempt_count() == 0
+
+    def test_an_offer_naming_nine_candidates_is_dropped(self, peer_factory):
+        alice, bob, _ch_hash = _setup_channel_with_member(peer_factory)
+        manager = _upgrade_manager_for(alice)
+
+        deliver(bob, alice, _offer(candidates=[["10.9.9.9", 40000, "lan"]] * 9))
+        time.sleep(0.3)
+        assert _answers_sent(alice) == []
+        assert manager.attempt_count() == 0
+        assert manager.failures()[bob.identity.hash_hex]["reason"] == \
+            upgrade.REASON_REFUSED
+
+    def test_an_offer_with_a_punch_time_an_hour_out_is_dropped(self,
+                                                               peer_factory):
+        alice, bob, _ch_hash = _setup_channel_with_member(peer_factory)
+        manager = _upgrade_manager_for(alice)
+
+        deliver(bob, alice, _offer(punch_at=time.time() + 3600))
+        time.sleep(0.3)
+        assert _answers_sent(alice) == []
+        assert manager.attempt_count() == 0
+
+    def test_an_offer_reusing_a_nonce_is_dropped(self, peer_factory):
+        alice, bob, _ch_hash = _setup_channel_with_member(peer_factory)
+        manager = _upgrade_manager_for(alice)
+        nonce = os.urandom(16)
+
+        deliver(bob, alice, _offer(nonce=nonce))
+        assert wait_for(lambda: len(_answers_sent(alice)) == 1,
+                        msg="the answer to the first offer")
+        manager.tick(time.time() + upgrade.OFFER_TIMEOUT_SECS + 1)
+        assert wait_for(lambda: manager.attempt_count() == 0,
+                        msg="the first attempt to end")
+
+        deliver(bob, alice, _offer(nonce=nonce))
+        time.sleep(0.5)
+        assert len(_answers_sent(alice)) == 1, "a spent nonce was answered again"
+
+    def test_an_offer_with_a_short_nonce_is_dropped(self, peer_factory):
+        alice, bob, _ch_hash = _setup_channel_with_member(peer_factory)
+        manager = _upgrade_manager_for(alice)
+
+        deliver(bob, alice, _offer(nonce=b"\x01" * 8))
+        time.sleep(0.3)
+        assert _answers_sent(alice) == []
+        assert manager.attempt_count() == 0
+
+    def test_an_answer_matching_no_offer_is_dropped(self, peer_factory):
+        alice, bob, _ch_hash = _setup_channel_with_member(peer_factory)
+        manager = _upgrade_manager_for(alice)
+
+        deliver(bob, alice, _offer(msg_type=MT_UPGRADE_ANSWER))
+        time.sleep(0.3)
+        assert manager.attempt_count() == 0
+        assert manager.failures()[bob.identity.hash_hex]["reason"] == \
+            upgrade.REASON_REFUSED
+
+    def test_a_kicked_members_session_is_torn_down_by_the_sweep(self,
+                                                               peer_factory):
+        alice, bob, ch_hash = _setup_channel_with_member(peer_factory)
+        alice_direct = _direct_transport_for(alice)
+        bob_direct = _direct_transport_for(bob)
+        alice_direct.set_authorize(
+            lambda peer_hex: upgrade.is_eligible(
+                alice.storage, alice.identity.hash_hex, peer_hex))
+        manager = upgrade.UpgradeManager(alice.identity, alice.storage,
+                                         alice.router, alice.presence_mgr,
+                                         alice.config, transport=alice_direct)
+        alice._teardown_callbacks.insert(0, manager.stop)
+        assert bob_direct.open_session(
+            alice.identity.hash_hex, "127.0.0.1", alice_direct.listen_port,
+            alice_direct.certificate_der)
+        assert wait_for(lambda: alice_direct.can_reach(bob.identity.hash_hex),
+                        msg="the session to come up")
+
+        alice.storage.remove_member(ch_hash, bob.identity.hash_hex)
+        started = time.time()
+        manager.tick()
+        assert wait_for(
+            lambda: not alice_direct.can_reach(bob.identity.hash_hex),
+            timeout=1.0, msg="the kicked member's session to be closed")
+        assert time.time() - started < 1.0

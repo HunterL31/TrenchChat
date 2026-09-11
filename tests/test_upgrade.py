@@ -11,12 +11,25 @@ two peers on loopback, with real probes and a real session at the end.
 import threading
 import time
 
+import pytest
+
+from tests.helpers import wait_for
+from trenchchat.core import actions
+from trenchchat.core.permissions import PRESET_PRIVATE, ROLE_MEMBER, ROLE_OWNER
 from trenchchat.core.protocol import (
     MAX_UPGRADE_CANDIDATES, MAX_UPGRADE_CERT_BYTES, MAX_UPGRADE_HOST_CHARS,
     UPGRADE_KIND_LAN, UPGRADE_KIND_MAPPED, UPGRADE_KIND_OBSERVED,
-    UPGRADE_NONCE_BYTES, upgrade_address, upgrade_candidates,
+    F_UPGRADE_OBSERVED, UPGRADE_NONCE_BYTES, upgrade_address, upgrade_candidates,
     upgrade_certificate, upgrade_nonce, upgrade_punch_at,
 )
+from trenchchat.core.storage import Storage
+from trenchchat.core.upgrade import (
+    BACKOFF_MAX_SECS, BACKOFF_START_SECS, FALLBACK_OFFER_SECS, REASON_BACKOFF,
+    REASON_DISABLED, REASON_HANDSHAKE_FAILED, REASON_INELIGIBLE,
+    OFFER_TIMEOUT_SECS, REASON_NO_ANSWER, REASON_PUNCH_FAILED,
+    UpgradeManager, is_eligible,
+)
+from trenchchat.network.base import PATH_DIRECT
 from trenchchat.network.ip import candidates, punch
 
 
@@ -316,3 +329,302 @@ class TestPunchExchange:
             assert time.monotonic() - started >= 0.5
         finally:
             sock.close()
+
+
+# ---------------------------------------------------------------------------
+# The manager, over two peers that can see each other on the mesh
+# ---------------------------------------------------------------------------
+
+def _mirror_channel(owner, member, ch_hash, perms):
+    """Give a member the same channel record and roster the owner published."""
+    member.storage.upsert_channel(ch_hash, "upgrade-room", "",
+                                  owner.identity.hash_hex, perms, time.time())
+    member.storage.subscribe(ch_hash)
+    member.storage.upsert_member(ch_hash, member.identity.hash_hex,
+                                 member.name.capitalize(), role=ROLE_MEMBER)
+    member.storage.upsert_member(ch_hash, owner.identity.hash_hex,
+                                 owner.name.capitalize(), role=ROLE_OWNER)
+    member.storage.set_channel_permissions(ch_hash, perms)
+
+
+def _shared_invite_channel(owner, member) -> str:
+    """One invite-only channel both peers are current members of."""
+    perms = dict(PRESET_PRIVATE)
+    ch_hash = owner.channel_mgr.create_channel("upgrade-room", "",
+                                               permissions=perms)
+    owner.invite_mgr.publish_member_list(ch_hash,
+                                         add_members=[member.identity.hash])
+    assert wait_for(lambda: owner.storage.is_member(ch_hash,
+                                                    member.identity.hash_hex),
+                    msg="the member list to name the member")
+    _mirror_channel(owner, member, ch_hash, perms)
+    return ch_hash
+
+
+class UpgradePeer:
+    """A peer with a direct transport, no session on it, and a manager over it.
+
+    The transport is wired into the peer's Router the way backend_core wires
+    it, so a session that comes up is a session the Router routes over.
+    """
+
+    def __init__(self, peer):
+        self.peer = peer
+        self.transport = peer.ip_transport
+        self.transport.set_authorize(
+            lambda peer_hex: is_eligible(peer.storage, peer.identity.hash_hex,
+                                         peer_hex))
+        self.manager = UpgradeManager(peer.identity, peer.storage, peer.router,
+                                      peer.presence_mgr, peer.config,
+                                      transport=self.transport)
+        self.channel_hash = ""
+        peer._teardown_callbacks.insert(0, self.manager.stop)
+
+    @property
+    def hash_hex(self) -> str:
+        """This peer's identity hash."""
+        return self.peer.identity.hash_hex
+
+    def has_session_with(self, other: "UpgradePeer") -> bool:
+        """Whether a direct session with the other peer is up."""
+        return self.transport.can_reach(other.hash_hex)
+
+
+@pytest.fixture
+def upgrade_pair(peer_factory):
+    """Alice and Bob, members of one invite-only channel, each able to upgrade."""
+    alice = peer_factory("alice", direct=True, open_sessions=False)
+    bob = peer_factory("bob", direct=True, open_sessions=False)
+    channel_hash = _shared_invite_channel(alice, bob)
+    pair = (UpgradePeer(alice), UpgradePeer(bob))
+    for node in pair:
+        node.channel_hash = channel_hash
+    return pair
+
+
+def _smaller_first(pair):
+    """The pair ordered by identity hash, which is what decides who offers."""
+    return tuple(sorted(pair, key=lambda node: node.hash_hex))
+
+
+class TestTheWholeHandshake:
+    """Two peers, one offer, one answer, real probes and a real session."""
+
+    def test_a_sighting_brings_a_direct_session_up_both_ways(self, upgrade_pair):
+        smaller, larger = _smaller_first(upgrade_pair)
+        smaller.manager.on_peer_appeared(larger.hash_hex)
+
+        assert wait_for(lambda: smaller.has_session_with(larger), timeout=30.0,
+                        msg="the session the offer opened")
+        assert wait_for(lambda: larger.has_session_with(smaller), timeout=10.0,
+                        msg="the far side of the session")
+        assert smaller.peer.router.path_for(larger.hash_hex) == PATH_DIRECT
+        assert larger.peer.router.path_for(smaller.hash_hex) == PATH_DIRECT
+        assert smaller.manager.failures() == {}
+
+    def test_a_message_then_travels_over_the_session(self, upgrade_pair):
+        smaller, larger = _smaller_first(upgrade_pair)
+        smaller.manager.on_peer_appeared(larger.hash_hex)
+        assert wait_for(lambda: smaller.has_session_with(larger), timeout=30.0,
+                        msg="the session")
+
+        smaller.peer.messaging.send_message(
+            channel_hash_hex=smaller.channel_hash, content="over the direct path",
+            subscriber_hashes=[larger.hash_hex],
+        )
+        message_id = smaller.peer.storage.get_latest_message_id(
+            smaller.channel_hash)
+        assert wait_for(lambda: larger.peer.storage.message_exists(message_id),
+                        msg="the message over the session")
+
+    def test_the_larger_hash_does_not_offer_until_the_fallback_passes(
+            self, upgrade_pair):
+        smaller, larger = _smaller_first(upgrade_pair)
+        now = time.time()
+        larger.manager.on_peer_appeared(smaller.hash_hex)
+
+        assert larger.manager.consider(smaller.hash_hex, now) == REASON_BACKOFF
+        assert larger.manager.attempt_count() == 0
+        assert larger.manager.consider(
+            smaller.hash_hex, now + FALLBACK_OFFER_SECS + 1) is None
+
+    def test_the_smaller_hash_offers_on_the_first_sighting(self, upgrade_pair):
+        smaller, larger = _smaller_first(upgrade_pair)
+        assert smaller.manager.consider(larger.hash_hex) is None
+
+    def test_the_fallback_offer_upgrades_a_pair_the_smaller_never_offered(
+            self, upgrade_pair):
+        smaller, larger = _smaller_first(upgrade_pair)
+        larger.manager.on_peer_appeared(smaller.hash_hex)
+        larger.peer.presence_mgr.record_seen(smaller.hash_hex)
+        larger.manager.tick(time.time() + FALLBACK_OFFER_SECS + 1)
+
+        assert wait_for(lambda: larger.has_session_with(smaller), timeout=30.0,
+                        msg="the session the fallback offer opened")
+
+
+class TestTheGate:
+    """What the manager refuses, at the layer above the transport's own."""
+
+    def test_a_peer_sharing_no_invite_only_channel_is_never_offered_one(
+            self, peer_factory):
+        alice = peer_factory("alice", direct=True, open_sessions=False)
+        mallory = peer_factory("mallory", direct=False)
+        node = UpgradePeer(alice)
+
+        assert node.manager.consider(mallory.identity.hash_hex) == REASON_INELIGIBLE
+        assert node.manager.offer(mallory.identity.hash_hex) == REASON_INELIGIBLE
+        assert node.manager.attempt_count() == 0
+        assert node.manager.failures()[mallory.identity.hash_hex]["reason"] == \
+            REASON_INELIGIBLE
+
+    def test_a_node_with_direct_sessions_off_neither_offers_nor_answers(
+            self, upgrade_pair):
+        smaller, larger = _smaller_first(upgrade_pair)
+        larger.peer.config.upgrade_enabled = False
+
+        assert larger.manager.consider(smaller.hash_hex) == REASON_DISABLED
+        smaller.manager.on_peer_appeared(larger.hash_hex)
+        assert not wait_for(lambda: smaller.has_session_with(larger),
+                            timeout=5.0), "an offer was answered with sessions off"
+        smaller.manager.tick(time.time() + OFFER_TIMEOUT_SECS + 1)
+        assert smaller.manager.failures()[larger.hash_hex]["reason"] == \
+            REASON_NO_ANSWER
+
+    def test_try_now_re_applies_the_gate_for_an_ineligible_peer(self,
+                                                                peer_factory):
+        alice = peer_factory("alice", direct=True, open_sessions=False)
+        mallory = peer_factory("mallory", direct=False)
+        node = UpgradePeer(alice)
+
+        result = actions.offer_upgrade(alice.storage, node.manager,
+                                       alice.identity.hash_hex,
+                                       mallory.identity.hash_hex)
+        assert result == {"ok": False, "reason": REASON_INELIGIBLE}
+        assert node.manager.attempt_count() == 0
+
+    def test_try_now_starts_an_attempt_a_backoff_would_have_held(
+            self, upgrade_pair):
+        smaller, larger = _smaller_first(upgrade_pair)
+        smaller.manager._record_failure(larger.hash_hex, REASON_PUNCH_FAILED)
+        assert smaller.manager.consider(larger.hash_hex) == REASON_BACKOFF
+
+        result = actions.offer_upgrade(smaller.peer.storage, smaller.manager,
+                                       smaller.hash_hex, larger.hash_hex)
+        assert result == {"ok": True, "reason": None}
+        assert wait_for(lambda: smaller.has_session_with(larger), timeout=30.0,
+                        msg="the session Try now opened")
+
+
+class TestBackoff:
+    """A pair that failed waits, and waits longer each time."""
+
+    def test_it_doubles_from_thirty_seconds_to_a_day(self, upgrade_pair):
+        smaller, larger = _smaller_first(upgrade_pair)
+        manager = smaller.manager
+        peer_hex = larger.hash_hex
+
+        waits = []
+        for _ in range(20):
+            manager._record_failure(peer_hex, REASON_PUNCH_FAILED)
+            entry = manager.failures()[peer_hex]
+            waits.append(round(entry["next_attempt"] - entry["at"]))
+        assert waits[0] == BACKOFF_START_SECS
+        assert waits[1] == BACKOFF_START_SECS * 2
+        assert waits[2] == BACKOFF_START_SECS * 4
+        assert waits[-1] == BACKOFF_MAX_SECS
+        assert max(waits) == BACKOFF_MAX_SECS
+
+    def test_a_failure_names_when_the_next_attempt_is(self, upgrade_pair):
+        smaller, larger = _smaller_first(upgrade_pair)
+        smaller.manager._record_failure(larger.hash_hex, REASON_HANDSHAKE_FAILED)
+        entry = smaller.manager.failures()[larger.hash_hex]
+        assert entry["reason"] == REASON_HANDSHAKE_FAILED
+        assert entry["next_attempt"] > time.time()
+
+    def test_a_changed_candidate_set_clears_the_wait(self, upgrade_pair):
+        smaller, larger = _smaller_first(upgrade_pair)
+        manager = smaller.manager
+        peer_hex = larger.hash_hex
+
+        manager._note_candidate_set(peer_hex, [("10.0.0.1", 4000, "lan")])
+        manager._record_failure(peer_hex, REASON_PUNCH_FAILED)
+        assert manager.consider(peer_hex) == REASON_BACKOFF
+
+        manager._note_candidate_set(peer_hex, [("10.0.0.2", 4000, "lan")])
+        assert manager.failures() == {}
+        assert manager.consider(peer_hex) is None
+
+    def test_the_same_candidate_set_does_not_clear_it(self, upgrade_pair):
+        smaller, larger = _smaller_first(upgrade_pair)
+        manager = smaller.manager
+        peer_hex = larger.hash_hex
+
+        manager._note_candidate_set(peer_hex, [("10.0.0.1", 4000, "lan")])
+        manager._record_failure(peer_hex, REASON_PUNCH_FAILED)
+        manager._note_candidate_set(peer_hex, [("10.0.0.1", 4000, "lan")])
+        assert manager.consider(peer_hex) == REASON_BACKOFF
+
+
+class TestObservedAddresses:
+    """What a peer learns about its own address, and where it is kept."""
+
+    def test_an_observed_address_is_remembered_across_a_restart(self,
+                                                               upgrade_pair):
+        smaller, larger = _smaller_first(upgrade_pair)
+        smaller.manager._remember_self_address(
+            larger.hash_hex, {F_UPGRADE_OBSERVED: ["203.0.113.7", 33445]})
+        assert smaller.peer.storage.get_upgrade_addresses("self") == [
+            ("203.0.113.7", 33445)]
+
+        reopened = Storage(db_path=smaller.peer.data_dir / "storage.db")
+        try:
+            assert reopened.get_upgrade_addresses("self") == [
+                ("203.0.113.7", 33445)]
+        finally:
+            reopened.close()
+
+    def test_an_offer_carries_where_the_peer_was_last_seen(self, upgrade_pair):
+        smaller, larger = _smaller_first(upgrade_pair)
+        smaller.peer.storage.record_upgrade_address(
+            larger.hash_hex, "peer", "198.51.100.9", 41000)
+        fields = {}
+        smaller.manager._add_observed(fields, larger.hash_hex)
+        assert fields[F_UPGRADE_OBSERVED] == ["198.51.100.9", 41000]
+
+    def test_a_nonsense_observation_is_not_stored(self, upgrade_pair):
+        smaller, larger = _smaller_first(upgrade_pair)
+        smaller.manager._remember_self_address(
+            larger.hash_hex, {F_UPGRADE_OBSERVED: ["nowhere", 33445]})
+        assert smaller.peer.storage.get_upgrade_addresses("self") == []
+
+
+class TestEligibilitySweep:
+    """The once-a-second re-check, which is what a kick reaches."""
+
+    def test_a_kicked_members_session_is_closed_within_a_second(self,
+                                                               upgrade_pair):
+        smaller, larger = _smaller_first(upgrade_pair)
+        smaller.manager.on_peer_appeared(larger.hash_hex)
+        assert wait_for(lambda: smaller.has_session_with(larger), timeout=30.0,
+                        msg="the session")
+
+        smaller.peer.storage.remove_member(smaller.channel_hash,
+                                           larger.hash_hex)
+        smaller.manager.tick()
+
+        assert wait_for(lambda: not smaller.has_session_with(larger),
+                        timeout=2.0, msg="the session to be torn down")
+        assert smaller.manager.failures()[larger.hash_hex]["reason"] == \
+            REASON_INELIGIBLE
+
+    def test_a_still_eligible_peer_keeps_its_session(self, upgrade_pair):
+        smaller, larger = _smaller_first(upgrade_pair)
+        smaller.manager.on_peer_appeared(larger.hash_hex)
+        assert wait_for(lambda: smaller.has_session_with(larger), timeout=30.0,
+                        msg="the session")
+
+        for _ in range(3):
+            smaller.manager.tick()
+            time.sleep(0.2)
+        assert smaller.has_session_with(larger)
