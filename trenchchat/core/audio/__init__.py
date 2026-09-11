@@ -24,9 +24,13 @@ def audio_available() -> tuple[bool, str]:
     return True, ""
 
 
-def create_pipeline(config, on_encoded, on_speaking_self):
+def create_pipeline(config, on_encoded, on_speaking_self, codec_factory=None):
     """Build the device pipeline, or None (with a logged reason) if the
-    audio stack isn't available on this machine."""
+    audio stack isn't available on this machine.
+
+    codec_factory is what the caller wants the encoder built as; without one
+    the pipeline builds its own from the configured bitrate, which is what it
+    has always done."""
     import RNS
 
     available, reason = audio_available()
@@ -34,4 +38,5 @@ def create_pipeline(config, on_encoded, on_speaking_self):
         RNS.log(f"TrenchChat [voice]: {reason}", RNS.LOG_WARNING)
         return None
     from trenchchat.core.audio.engine import AudioPipeline
-    return AudioPipeline(config, on_encoded, on_speaking_self)
+    return AudioPipeline(config, on_encoded, on_speaking_self,
+                         codec_factory=codec_factory)

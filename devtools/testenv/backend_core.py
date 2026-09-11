@@ -49,6 +49,7 @@ from trenchchat.core.audio.engine import make_tone_pipeline
 from trenchchat.core.files import FileManager
 from trenchchat.core.node_browser import NodeBrowserManager
 from trenchchat.network.ip.file_plane import IPFileTransport
+from trenchchat.network.ip.voice_plane import IPVoiceTransport
 from trenchchat.network.ip.transport import IPTransport
 from trenchchat.network.lxmf_transport import REANNOUNCE_INTERVAL_SECS
 from trenchchat.network.router import Router
@@ -357,9 +358,13 @@ class Backend:
         if use_tone_audio:
             voice_kwargs["audio_factory"] = make_tone_pipeline
         self.voice_transport = RNSVoiceTransport(self.identity)
+        self.direct_voice_transport = (
+            IPVoiceTransport(self.direct_transport, self.identity)
+            if self.direct_transport is not None else None)
         self.voice_mgr = VoiceManager(
             self.identity, self.storage, self.router, self.subscription_mgr,
-            self.config, transport=self.voice_transport, **voice_kwargs,
+            self.config, transport=self.voice_transport,
+            direct_transport=self.direct_voice_transport, **voice_kwargs,
         )
 
         self.node_transport = RNSNodeTransport(self.identity)

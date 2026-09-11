@@ -7,16 +7,23 @@ runs the target's authorize callback (so core enforcement is exercised
 exactly as a real inbound handshake would), and frames are delivered on a
 short-lived thread after a small delay, matching real link timing closely
 enough for the eventual-consistency helpers.
+
+With direct=True it carries a bundle the way a direct session does instead:
+one frame per datagram at the direct path's packet budget, each timed by the
+shaped path on its own. That is the one thing about the direct plane a shaped
+measurement can see, and it is what tests/test_voice_over_links.py measures
+when it asks whether the sentence survives the same link on the other plane.
 """
 
 import threading
 import time
 
+from trenchchat.network.base import DIRECT_VOICE_PACKET_BYTES
 from trenchchat.network.voice_transport import (
     PEER_CONNECTING, PEER_IDLE, PEER_STREAMING, PEER_UNREACHABLE,
     VoiceTransportBase,
 )
-from trenchchat.network.voice_wire import pack_audio
+from trenchchat.network.voice_wire import VOICE_MAX_PACKET_PAYLOAD, pack_audio
 
 FAKE_DIAL_FALLBACK_SECS = 1.0
 FAKE_GIVE_UP_ATTEMPTS = 4
@@ -41,11 +48,12 @@ class FakeVoiceTransport(VoiceTransportBase):
                  delivery_delay: float = FAKE_DELIVERY_DELAY,
                  drop_every_n: int = 0,
                  fail_connect_to: set[str] | None = None,
-                 path=None):
+                 path=None, direct: bool = False):
         super().__init__()
         self.self_hex = self_hex
         self.registry = registry
         self.path = path
+        self.direct = direct
         self._delay = delivery_delay
         self.drop_every_n = drop_every_n
         self.fail_connect_to: set[str] = set(fail_connect_to or ())
@@ -131,6 +139,14 @@ class FakeVoiceTransport(VoiceTransportBase):
     # --- frames ---
 
     def send_frames(self, seq: int, frames: list[bytes]) -> None:
+        """Deliver a bundle, as one packet or as one datagram per frame."""
+        if self.direct:
+            for offset, frame in enumerate(frames):
+                self._send_packet(seq + offset, [frame])
+            return
+        self._send_packet(seq, frames)
+
+    def _send_packet(self, seq: int, frames: list[bytes]) -> None:
         self._tx_counter += 1
         if self.drop_every_n and self._tx_counter % self.drop_every_n == 0:
             return
@@ -158,7 +174,9 @@ class FakeVoiceTransport(VoiceTransportBase):
         delay, or None when the path dropped the packet."""
         if self.path is None:
             return 0.0
-        return self.path.send_at(len(pack_audio(seq, frames)))
+        budget = (DIRECT_VOICE_PACKET_BYTES if self.direct
+                  else VOICE_MAX_PACKET_PAYLOAD)
+        return self.path.send_at(len(pack_audio(seq, frames, budget)))
 
     # --- state ---
 

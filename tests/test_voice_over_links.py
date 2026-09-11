@@ -34,6 +34,7 @@ from tests.fake_network import (                                 # noqa: E402
     HOME_FIBRE, HOME_WIFI, MOBILE_LTE, ShapedPath,
 )
 from tests.helpers import wait_for_roster                        # noqa: E402
+from trenchchat.network.voice_wire import VOICE_FRAME_MS          # noqa: E402
 from tests.test_voice import _setup_invite_channel               # noqa: E402
 from tests.test_voice_speech import (                            # noqa: E402
     _gaps, _join_with_devices, _wait_for_stream, _wait_until_spoken,
@@ -103,11 +104,17 @@ class Call:
 
 
 def _call_over(peer_factory, monkeypatch, profile: str, *, seed: int,
-               stalls: tuple = ()) -> Call:
-    """Speak the sentence from one peer to another over a shaped path."""
+               stalls: tuple = (), direct: bool = False) -> Call:
+    """Speak the sentence from one peer to another over a shaped path.
+
+    With *direct* the sending plane carries the bundle the way a direct
+    session does: one frame per datagram at the direct path's budget, each
+    timed on its own.
+    """
     alice, bob, ch_hash = _setup_invite_channel(peer_factory)
     path = ShapedPath(profile, seed=seed)
     alice.voice_transport.path = path
+    alice.voice_transport.direct = direct
     spoken = speech.sentence()
 
     microphone, _ = _join_with_devices(alice, ch_hash, monkeypatch, spoken)
@@ -195,3 +202,51 @@ class TestStalledPaths:
             (f"the sentence ran {call.drift_secs:.2f}s late against "
              f"{ACCUMULATED_STALL_SECS:.2f}s of stalls; the buffer is "
              f"holding the delay instead of recovering it")
+
+
+class TestTheDirectPlaneOverTheSameLinks:
+    """One frame per datagram, over the links people actually have.
+
+    What the direct plane changes about a shaped path is the shape of what
+    crosses it: twice as many packets, each a little over half the size, and
+    a lost one costs one frame rather than two. The sentence has to survive
+    the same Wi-Fi and LTE it survives on the mesh plane, which is what these
+    measure; the direct path's own speed is not visible here, because a
+    profile shapes the link and not the transport.
+    """
+
+    def test_wifi_carries_the_sentence_one_frame_at_a_time(self, peer_factory,
+                                                           monkeypatch):
+        call = _call_over(peer_factory, monkeypatch, HOME_WIFI, seed=11,
+                          direct=True)
+
+        assert call.correlation >= WIFI_CORRELATION
+        assert call.words_in_order == list(speech.WORD_PITCHES_HZ)
+        assert abs(call.drift_secs) <= DRIFT_TOLERANCE_SECS
+
+    def test_mobile_carries_the_sentence_one_frame_at_a_time(self,
+                                                             peer_factory,
+                                                             monkeypatch):
+        call = _call_over(peer_factory, monkeypatch, MOBILE_LTE, seed=12,
+                          direct=True)
+
+        assert call.correlation >= MOBILE_CORRELATION
+        assert call.words_in_order == list(speech.WORD_PITCHES_HZ)
+        assert abs(call.drift_secs) <= DRIFT_TOLERANCE_SECS
+
+    def test_a_frame_travels_on_its_own(self, peer_factory, monkeypatch):
+        """The plane's own claim, measured where it shows: on the mesh two
+        frames share a packet and a loss takes both, here neither happens.
+
+        Counted rather than compared against a second call, because the
+        packets the path carried are the direct evidence and a second call
+        would only be the same sentence again.
+        """
+        call = _call_over(peer_factory, monkeypatch, HOME_FIBRE, seed=13,
+                          direct=True)
+        frames = len(speech.sentence()) // (speech.SAMPLE_RATE
+                                            * VOICE_FRAME_MS // 1000 * 2)
+
+        assert call.path.delivered + call.path.dropped >= frames * 0.8, \
+            "a bundle was still going out as one packet"
+        assert call.words_in_order == list(speech.WORD_PITCHES_HZ)

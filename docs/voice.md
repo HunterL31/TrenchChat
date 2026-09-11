@@ -21,7 +21,21 @@ presence *hint*, deliberately low-rate (one refresh per minute plus
 join/leave/mute events) so it stays far under the router's control-message
 rate limit.
 
-**Frame plane (RNS Links).** `trenchchat/network/voice_transport.py`'s
+**Frame plane, two of them.** A pair streams over whichever path it has.
+`trenchchat/network/ip/voice_plane.py`'s `IPVoiceTransport` carries frames as
+unreliable datagrams on the direct session two members already hold, one frame
+per datagram inside 1200 bytes; `RNSVoiceTransport` carries everyone else.
+`VoiceManager` picks per pair by `Router.path_for` and moves a pair when its
+path changes, so a session mixes direct and mesh pairs and the roster says
+which is which (`path` on every roster row, and `paths` in `frame_stats()`).
+The hello and accept, the authorisation over them and the wire format are the
+same on both; what differs is the budget each carries, which each plane reads
+from its own `TransportLimits`. One encoder feeds every pair, so the session
+encodes at what its slowest pair affords (`VoiceManager.session_bitrate`),
+decided when the pipeline starts and not rebuilt for a path that changes
+mid-call.
+
+**The mesh frame plane (RNS Links).** `trenchchat/network/voice_transport.py`'s
 `RNSVoiceTransport` owns a `trenchchat.voice` destination and a full mesh
 of links: for each participant pair, the peer with the lexicographically
 smaller identity hash dials the other's voice destination (the other side
@@ -46,8 +60,9 @@ which drives the same encode/transmit path with a generated 440 Hz tone.
 
 ## Limits and expectations
 
-- `MAX_VOICE_PARTICIPANTS = 8`. Full mesh means each speaker uploads
-  (N−1) × ~20 kbps; at 8 participants that is ~140 kbps up while talking.
+- `MAX_VOICE_PARTICIPANTS = 8`, whatever mix of paths a session is on. Full
+  mesh means each speaker uploads (N−1) × ~20 kbps; at 8 participants that is
+  ~140 kbps up while talking.
 - Voice needs fast links (TCP/IP, Wi-Fi mesh). It is not viable over LoRa
   or packet radio; surface `link_quality.score_path` per peer in the UI
   rather than masking this.
@@ -65,8 +80,10 @@ Construction (already wired in `devtools/testenv/backend_core.py`):
 
 ```python
 voice_transport = RNSVoiceTransport(identity)
+direct_voice = IPVoiceTransport(direct_transport, identity)  # or None
 voice_mgr = VoiceManager(identity, storage, router, subscription_mgr,
-                         config, transport=voice_transport)
+                         config, transport=voice_transport,
+                         direct_transport=direct_voice)
 # plus a 1 s ticker driving voice_mgr.tick()
 ```
 
@@ -80,7 +97,8 @@ voice_mgr.current_channel -> str | None
 voice_mgr.is_muted -> bool
 voice_mgr.get_roster(channel_hash_hex) -> list[dict]
 #   {identity_hash, muted, joined_at, speaking,
-#    link_state: "self" | "streaming" | "connecting" | "unreachable" | "signalled"}
+#    link_state: "self" | "streaming" | "connecting" | "unreachable" | "signalled",
+#    path: "direct" | "reticulum" | null for this node itself}
 voice_mgr.frame_stats() / voice_mgr.audio_status()
 #   frame_stats()["rx_quality"] carries per-sender received/lost/late frame
 #   counts, loss_pct, smoothed inter-arrival jitter_ms, and rate_fps
@@ -175,7 +193,12 @@ stream that dies mid-call is rebuilt by a cooldown-limited watchdog in
   releases it in a burst. What they pin: an ordinary home link is
   untouched, Wi-Fi and LTE cost quality and not words, a stall costs
   continuity and never ordering or sync, and repeated stalls do not
-  accumulate delay across a call.
+  accumulate delay across a call. The same measurements run again with the
+  sending plane carrying a bundle the way a direct session does, one frame
+  per datagram: the sentence has to survive the same Wi-Fi and LTE, and the
+  packet count is what shows the frames travelled singly. What a shaped
+  profile cannot show is the direct path's own speed, since it shapes the
+  link and not the transport.
 - `tests/test_voice_quality.py`: receive-quality metrics (loss, late,
   jitter), and a comparison against Discord's standard voice profile:
   same codec settings (Opus 48 kHz mono, 20 ms frames), the Discord

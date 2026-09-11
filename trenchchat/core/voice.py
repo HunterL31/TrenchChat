@@ -34,7 +34,10 @@ from trenchchat.core.protocol import (
 )
 from trenchchat.core.storage import Storage
 from trenchchat.core.subscription import SubscriptionManager
-from trenchchat.network.base import InboundMessage, SendState
+from trenchchat.config import VOICE_MIN_BITRATE
+from trenchchat.network.base import (
+    InboundMessage, PATH_DIRECT, PATH_RETICULUM, SendState,
+)
 from trenchchat.network.router import Router
 from trenchchat.network.voice_transport import PEER_STREAMING
 from trenchchat.network.voice_wire import (
@@ -76,13 +79,20 @@ class VoiceManager:
                  subscription_mgr: SubscriptionManager, config=None,
                  transport=None, audio_factory=None,
                  state_refresh_secs: float = VOICE_STATE_REFRESH_SECS,
-                 roster_ttl_secs: float = VOICE_ROSTER_TTL_SECS):
+                 roster_ttl_secs: float = VOICE_ROSTER_TTL_SECS,
+                 direct_transport=None):
+        """
+        transport: the mesh frame plane, over RNS Links.
+        direct_transport: the frame plane a direct session carries, used for a
+        pair whose path is direct and for no other.
+        """
         self._identity = identity
         self._storage = storage
         self._router = router
         self._subscription_mgr = subscription_mgr
         self._config = config
         self._transport = transport
+        self._direct = direct_transport
         self._audio_factory = audio_factory
         self._state_refresh_secs = state_refresh_secs
         self._roster_ttl_secs = roster_ttl_secs
@@ -116,12 +126,67 @@ class VoiceManager:
         self._speaking_callbacks: list = []
         self._session_callbacks: list = []
 
-        if self._transport is not None:
-            self._transport.set_frame_callback(self._on_frames)
-            self._transport.set_peer_state_callback(self._on_peer_link_state)
-            self._transport.set_authorize_callback(self._authorize_link)
+        for plane in self._planes():
+            plane.set_frame_callback(self._on_frames)
+            plane.set_peer_state_callback(self._on_peer_link_state)
+            plane.set_authorize_callback(self._authorize_link)
 
         router.add_delivery_callback(self._on_message)
+
+    def _planes(self) -> list:
+        """Every frame plane this node can carry voice over, mesh first."""
+        planes = [] if self._transport is None else [self._transport]
+        if self._direct is not None:
+            planes.append(self._direct)
+        return planes
+
+    def _plane_for(self, peer_hex: str):
+        """The plane this pair streams over, chosen by the path to the peer.
+
+        Asked afresh wherever a pair is acted on, so a session that comes up or
+        goes away moves the pair with it rather than stranding it on a plane
+        that can no longer reach.
+        """
+        if self._direct is not None and \
+                self._router.path_for(peer_hex) == PATH_DIRECT:
+            return self._direct
+        return self._transport if self._transport is not None else self._direct
+
+    def _path_for(self, peer_hex: str) -> str:
+        """Which path a frame to this peer would take."""
+        if self._direct is not None and self._plane_for(peer_hex) is self._direct:
+            return PATH_DIRECT
+        return PATH_RETICULUM
+
+    def _connected_peers(self) -> set[str]:
+        """Every peer streaming on any plane."""
+        peers: set[str] = set()
+        for plane in self._planes():
+            peers |= plane.connected_peers()
+        return peers
+
+    def session_bitrate(self) -> int:
+        """What this session encodes at: the least any of its pairs affords.
+
+        One encoder feeds every pair, so a session with a mesh pair in it may
+        not encode past what the mesh carries, however fast the other pairs
+        are. Decided when the pipeline starts, from the pairs known then: the
+        pipeline is not rebuilt mid-call for a path that changed, because
+        rebuilding it costs the call a gap and the codec conceals a slower
+        pair better than silence conceals a restart.
+        """
+        configured = (self._config.voice_bitrate if self._config is not None
+                      else VOICE_MIN_BITRATE)
+        channel_hash_hex = self._session_channel
+        if channel_hash_hex is None:
+            return configured
+        with self._lock:
+            peers = set(self._live_roster(channel_hash_hex, time.time()))
+        peers |= self._connected_peers()
+        peers.discard(self._identity.hash_hex)
+        budgets = [self._router.limits_for(peer).voice_bitrate_bps
+                   for peer in peers]
+        return max(VOICE_MIN_BITRATE, min([configured] + budgets))
 
     # --- public session API ---
 
@@ -157,8 +222,7 @@ class VoiceManager:
             # otherwise fill the roster and lock every legit member out. Links
             # are what actually drive fan-out, which is why the cap exists;
             # _authorize_link enforces the same cap per inbound link.
-            real_occupancy = (self._transport.connected_peers()
-                              if self._transport is not None else set())
+            real_occupancy = self._connected_peers()
             if len(real_occupancy) >= MAX_VOICE_PARTICIPANTS:
                 RNS.log(
                     f"TrenchChat [voice]: session for "
@@ -176,15 +240,14 @@ class VoiceManager:
                                muted=self._muted, joined_at=now, now=now)
             peers = [p for p in roster if p != self._identity.hash_hex]
 
-        if self._transport is not None:
-            self._transport.start(channel_hash_hex)
+        for plane in self._planes():
+            plane.start(channel_hash_hex)
         self._start_audio()
         self._play_cue(join=True)
         self._broadcast(MT_VOICE_JOIN, channel_hash_hex)
         self._join_announced = True
-        if self._transport is not None:
-            for peer_hex in peers:
-                self._transport.connect(peer_hex)
+        for peer_hex in peers:
+            self._connect_peer(peer_hex)
 
         self._notify_roster(channel_hash_hex)
         self._notify_session(SESSION_JOINED)
@@ -204,8 +267,8 @@ class VoiceManager:
         with self._lock:
             self._session_channel = None
         self._stop_audio()
-        if self._transport is not None:
-            self._transport.stop()
+        for plane in self._planes():
+            plane.stop()
         with self._lock:
             roster = self._rosters.get(channel_hash_hex, {})
             roster.pop(self._identity.hash_hex, None)
@@ -268,9 +331,10 @@ class VoiceManager:
             return []
         return [
             {"identity_hash": peer_hex, "muted": False, "joined_at": 0.0,
-             "link_state": self._transport.peer_state(peer_hex),
+             "link_state": self._plane_for(peer_hex).peer_state(peer_hex),
+             "path": self._path_for(peer_hex),
              "speaking": self._speaking.get(peer_hex, False)}
-            for peer_hex in sorted(self._transport.connected_peers() - known)
+            for peer_hex in sorted(self._connected_peers() - known)
         ]
 
     def get_roster(self, channel_hash_hex: str) -> list[dict]:
@@ -290,6 +354,8 @@ class VoiceManager:
                 "joined_at": entry["joined_at"],
                 "link_state": self._link_state_for(channel_hash_hex,
                                                    peer_hex, now),
+                "path": (None if peer_hex == self._identity.hash_hex
+                         else self._path_for(peer_hex)),
                 "speaking": self._speaking.get(peer_hex, False),
             })
         result.extend(self._link_only_peers(
@@ -323,8 +389,9 @@ class VoiceManager:
                 self._last_state_sent = now
                 self._state_dirty = False
 
-            if self._transport is not None:
-                self._transport.tick()
+            if self._planes():
+                for plane in self._planes():
+                    plane.tick()
                 self._redial_and_reauthorize(channel_hash_hex, now)
             self._check_audio_health(now)
 
@@ -361,7 +428,9 @@ class VoiceManager:
         NOMINAL_FRAME_RATE_FPS is what shows it.
 
         "playout" carries the pipeline's per-peer continuity counters
-        (decoded/plc/starved), or {} for a pipeline that has none.
+        (decoded/plc/starved), or {} for a pipeline that has none, and
+        "paths" the path each pair's frames take, which is what makes one
+        peer's quality comparable to another's in a mixed session.
         """
         with self._lock:
             quality = {}
@@ -385,6 +454,9 @@ class VoiceManager:
                 "rx_quality": quality,
             }
         stats["playout"] = self._playout_stats()
+        stats["paths"] = {peer_hex: self._path_for(peer_hex)
+                          for peer_hex in self._connected_peers()}
+        stats["bitrate_bps"] = self.session_bitrate()
         return stats
 
     def _playout_stats(self) -> dict:
@@ -475,7 +547,7 @@ class VoiceManager:
         now = time.time()
         with self._lock:
             live = self._live_roster(channel_hash_hex, now)
-        occupants = set(live) | self._transport.connected_peers() | {peer_hex}
+        occupants = set(live) | self._connected_peers() | {peer_hex}
         if len(occupants) > MAX_VOICE_PARTICIPANTS:
             RNS.log(
                 f"TrenchChat [voice]: refusing {peer_hex[:12]}… — "
@@ -544,9 +616,9 @@ class VoiceManager:
             if departed is not None and \
                     channel_hash_hex == self._session_channel:
                 self._play_cue(join=False)
-            if self._transport is not None and \
+            if self._planes() and \
                     channel_hash_hex == self._session_channel:
-                self._transport.disconnect(sender_hex)
+                self._disconnect_peer(sender_hex)
                 if self._audio_pipeline is not None:
                     try:
                         self._audio_pipeline.drop_peer(sender_hex)
@@ -585,8 +657,8 @@ class VoiceManager:
                     self._send_state_to(sender_hex, channel_hash_hex)
                 if newcomer:
                     self._play_cue(join=True)
-            if self._transport is not None:
-                self._transport.connect(sender_hex)
+            if self._planes():
+                self._connect_peer(sender_hex)
 
         self._notify_roster(channel_hash_hex)
 
@@ -649,16 +721,22 @@ class VoiceManager:
             q["last_arrival"] = now
 
     def _on_encoded(self, seq: int, frames: list[bytes]):
-        """Encoded audio from the local pipeline, ready to transmit."""
-        if self._transport is None or self._session_channel is None:
+        """Encoded audio from the local pipeline, ready to transmit.
+
+        Every plane is handed the same bundle and sends it to the pairs it
+        carries, so a session mixes paths without the pipeline knowing there
+        is more than one.
+        """
+        if self._session_channel is None:
             return
-        try:
-            self._transport.send_frames(seq, frames)
-            with self._lock:
-                self._tx_packets += 1
-        except Exception as e:
-            RNS.log(f"TrenchChat [voice]: frame send error: {e}",
-                    RNS.LOG_ERROR)
+        for plane in self._planes():
+            try:
+                plane.send_frames(seq, frames)
+            except Exception as e:
+                RNS.log(f"TrenchChat [voice]: frame send error: {e}",
+                        RNS.LOG_ERROR)
+        with self._lock:
+            self._tx_packets += 1
 
     def _on_speaking_self(self, speaking: bool):
         channel_hash_hex = self._session_channel
@@ -719,10 +797,9 @@ class VoiceManager:
                         now: float) -> str:
         if peer_hex == self._identity.hash_hex:
             return LINK_SELF
-        if self._transport is None or \
-                channel_hash_hex != self._session_channel:
+        if not self._planes() or channel_hash_hex != self._session_channel:
             return LINK_SIGNALLED
-        state = self._transport.peer_state(peer_hex)
+        state = self._plane_for(peer_hex).peer_state(peer_hex)
         if state in (LINK_STREAMING, LINK_CONNECTING, LINK_UNREACHABLE):
             return state
         return LINK_SIGNALLED
@@ -733,19 +810,19 @@ class VoiceManager:
         live.discard(self._identity.hash_hex)
 
         for peer_hex in live:
-            if self._transport.peer_state(peer_hex) != LINK_STREAMING:
-                self._transport.connect(peer_hex)
+            if self._plane_for(peer_hex).peer_state(peer_hex) != LINK_STREAMING:
+                self._connect_peer(peer_hex)
 
         # A kick or demotion mid-call must cut the stream, not just the
         # roster: re-check every connected peer against current permissions.
-        for peer_hex in self._transport.connected_peers():
+        for peer_hex in self._connected_peers():
             if not self._peer_may_voice(channel_hash_hex, peer_hex):
                 RNS.log(
                     f"TrenchChat [voice]: disconnecting no-longer-authorized "
                     f"peer {peer_hex[:12]}…",
                     RNS.LOG_WARNING,
                 )
-                self._transport.disconnect(peer_hex)
+                self._disconnect_peer(peer_hex)
                 with self._lock:
                     self._rosters.get(channel_hash_hex, {}).pop(peer_hex, None)
 
@@ -777,7 +854,7 @@ class VoiceManager:
         # of it is another mesh-wide path request.
         for peer_hex in stale_conns:
             try:
-                self._transport.disconnect(peer_hex)
+                self._disconnect_peer(peer_hex)
             except Exception as e:
                 RNS.log(f"TrenchChat [voice]: disconnecting {peer_hex[:12]}… failed: {e}",
                         RNS.LOG_DEBUG)
@@ -785,10 +862,27 @@ class VoiceManager:
             self._notify_roster(channel_hash_hex)
 
     def _has_live_link(self, channel_hash_hex: str, peer_hex: str) -> bool:
-        if self._transport is None or \
-                channel_hash_hex != self._session_channel:
+        if not self._planes() or channel_hash_hex != self._session_channel:
             return False
-        return self._transport.peer_state(peer_hex) == LINK_STREAMING
+        return any(plane.peer_state(peer_hex) == LINK_STREAMING
+                   for plane in self._planes())
+
+    def _connect_peer(self, peer_hex: str) -> None:
+        """Bring one pair up on the plane its path calls for.
+
+        A pair whose path changed is dropped from the plane it was on first:
+        two planes streaming with one peer would double every frame.
+        """
+        plane = self._plane_for(peer_hex)
+        for other in self._planes():
+            if other is not plane and peer_hex in other.connected_peers():
+                other.disconnect(peer_hex)
+        plane.connect(peer_hex)
+
+    def _disconnect_peer(self, peer_hex: str) -> None:
+        """Stop streaming with one peer on whichever plane was carrying it."""
+        for plane in self._planes():
+            plane.disconnect(peer_hex)
 
     def _update_speaking(self, now: float):
         stopped: list[str] = []
@@ -825,17 +919,24 @@ class VoiceManager:
 
     def _start_audio(self):
         factory = self._audio_factory
+        # The encoder the default pipeline is built with, decided here because
+        # only this layer knows what the session's pairs afford. An injected
+        # factory (a headless tester's tone pipeline) brings its own.
+        extra: tuple = ()
         if factory is None:
             try:
                 from trenchchat.core.audio import create_pipeline
+                from trenchchat.core.audio.codec import OpusCodec
                 factory = create_pipeline
+                bitrate = self.session_bitrate()
+                extra = (lambda: OpusCodec(bitrate=bitrate),)
             except Exception as e:
                 self._audio_error = f"audio unavailable: {e}"
                 self._notify_session(SESSION_AUDIO_ERROR)
                 return
         try:
             self._audio_pipeline = factory(
-                self._config, self._on_encoded, self._on_speaking_self)
+                self._config, self._on_encoded, self._on_speaking_self, *extra)
             if self._audio_pipeline is not None:
                 self._audio_pipeline.set_muted(self._muted)
                 self._audio_pipeline.start()
