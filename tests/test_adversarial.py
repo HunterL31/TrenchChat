@@ -1131,6 +1131,12 @@ class TestAdversarialTenure:
         alice, bob, ch_hash = _setup_channel_with_member(
             peer_factory, member_perms=[SEND_MESSAGE]
         )
+        # The member list Alice published is still on its way. Letting it land
+        # first keeps it from re-asserting Bob's membership after the kick
+        # below, which on a fast path it is quick enough to do.
+        assert wait_for(
+            lambda: bob.storage.get_member_list_version(ch_hash) is not None,
+            msg="alice's member list to reach bob")
 
         # Manually queue a pending outbound message on Bob's side
         ts = time.time()

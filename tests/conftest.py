@@ -16,8 +16,8 @@ has one. A test whose subject is the Reticulum path itself carries the
 reticulum_path marker and stays on FakeTransport in both modes.
 
 A single RNS.Reticulum instance is still stood up for the session, because
-Identity, ServerManager and core/naming.py mint real RNS destinations and
-hashes; nothing in these tests sends over it.
+Identity and core/naming.py mint real RNS destinations and hashes; nothing in
+these tests sends over it.
 """
 
 import hashlib
@@ -475,8 +475,8 @@ def rns_instance(tmp_path_factory):
     Initialize a single RNS.Reticulum for the entire test session.
     Uses a temp config dir so it doesn't touch ~/.reticulum.
 
-    Nothing is sent over it: Identity, ServerManager and core/naming.py mint
-    real RNS destinations and hashes, and those need a live stack.
+    Nothing is sent over it: Identity and core/naming.py mint real RNS
+    destinations and hashes, and those need a live stack.
 
     The config declares no interfaces.  Reticulum's default config enables
     AutoInterface, whose multicast discovery is not used by these tests at all

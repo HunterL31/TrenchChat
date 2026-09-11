@@ -591,6 +591,10 @@ class TestInviteeSidebarState:
         ch = alice.channel_mgr.create_channel("private", "Invite only", "invite")
         bob.storage.record_accepted_invite(
             ch, alice.identity.hash_hex, time.time() + 3600)
+        # Bob must see exactly one document, the one crafted below: the real
+        # one carries the channel name and would create the row this test is
+        # about not existing.
+        alice.transport.unreachable.add(bob.identity.hash_hex)
         alice.invite_mgr.publish_member_list(ch, add_members=[bob.identity.hash])
 
         fields = alice.invite_mgr._member_list_fields(
