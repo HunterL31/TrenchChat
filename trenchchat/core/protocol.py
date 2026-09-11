@@ -17,6 +17,7 @@ Field key registry
 0x70–0x7F  Message integrity fields
 0x80–0x8F  Friends / direct message fields
 0x90–0x9F  File manifest fields
+0xA0–0xAF  Direct session upgrade fields
 
 These numbers are TrenchChat's own and never appear as LXMF field keys on the
 wire: LXMF reserves 0x00-0x80 for its standard registry (0x01 is
@@ -171,6 +172,36 @@ MAX_FILE_NAME_CHARS = 128
 
 # Both manifest digests are SHA-256.
 FILE_DIGEST_BYTES = 32
+
+# --- Direct session upgrade fields ---
+#
+# Two eligible peers trade one offer and one answer over LXMF, encrypted end to
+# end like every other message, and punch a UDP path between the candidates
+# they name. Nothing here is ever relayed onward: a transport node carrying the
+# offer sees an opaque envelope, and no third member is told what it held.
+F_UPGRADE_CANDIDATES = 0xA0  # list of [host, port, kind], kind lan|mapped|observed
+F_UPGRADE_NONCE      = 0xA1  # bytes[16]: the probe secret for this attempt
+F_UPGRADE_CERT       = 0xA2  # bytes: the sender's session certificate, DER
+F_UPGRADE_PUNCH_AT   = 0xA3  # float: unix timestamp the sender starts probing
+F_UPGRADE_OBSERVED   = 0xA4  # [host, port]: where this node last saw the peer's
+                             #               probes arrive from
+
+# What an offer or an answer may carry. Every one of these is asserted by a
+# peer, so each is checked on the way in: a list that is too long, a nonce that
+# is the wrong length, a certificate that is too big and a punch time an hour
+# out are all refusals, not values to store.
+MAX_UPGRADE_CANDIDATES = 8
+# An IPv6 address with a zone is at most 45 characters, and a candidate is
+# always a literal address: nothing here is ever resolved by name.
+MAX_UPGRADE_HOST_CHARS = 45
+MAX_UPGRADE_CERT_BYTES = 2 * 1024
+UPGRADE_NONCE_BYTES = 16
+MAX_UPGRADE_PUNCH_AHEAD_SECS = 60.0
+
+UPGRADE_KIND_LAN = "lan"
+UPGRADE_KIND_MAPPED = "mapped"
+UPGRADE_KIND_OBSERVED = "observed"
+UPGRADE_KINDS = (UPGRADE_KIND_LAN, UPGRADE_KIND_MAPPED, UPGRADE_KIND_OBSERVED)
 
 
 # --- Mentions ---
@@ -421,6 +452,8 @@ MT_VOICE_STATE      = "voice_state"     # periodic self-refresh, mute change, or
 MT_FRIEND_REQUEST   = "friend_request"  # ask a peer to add us to their friends list
 MT_FRIEND_ACCEPT    = "friend_accept"   # peer accepted our request, or already had us
 MT_FRIEND_DECLINE   = "friend_decline"  # peer refused our request
+MT_UPGRADE_OFFER    = "upgrade_offer"   # offer a direct IP session: candidates, nonce, cert
+MT_UPGRADE_ANSWER   = "upgrade_answer"  # accept the offer with the answerer's own
 
 
 # --- sync window ---
@@ -693,3 +726,94 @@ def unpack_wire(payload: bytes, *, raw: bool = False, int_keys: bool = False):
         max_str_len=MAX_WIRE_STR,
         max_bin_len=MAX_WIRE_BIN,
     )
+
+
+import ipaddress  # noqa: E402
+
+
+def upgrade_candidate(value) -> tuple[str, int, str] | None:
+    """One [host, port, kind] triple from the wire, or None if it is not one.
+
+    A candidate is always a literal address: nothing here is ever resolved by
+    name, so a host that does not parse as an address is refused rather than
+    looked up.
+    """
+    if not isinstance(value, (list, tuple)) or len(value) != 3:
+        return None
+    host, port, kind = value
+    if isinstance(host, bytes):
+        host = host.decode(errors="replace")
+    if isinstance(kind, bytes):
+        kind = kind.decode(errors="replace")
+    if not isinstance(host, str) or len(host) > MAX_UPGRADE_HOST_CHARS:
+        return None
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        return None
+    if not isinstance(port, int) or isinstance(port, bool):
+        return None
+    if not 1 <= port <= 65535:
+        return None
+    if kind not in UPGRADE_KINDS:
+        return None
+    return host, port, kind
+
+
+def upgrade_candidates(value) -> list[tuple[str, int, str]] | None:
+    """A whole candidate list, or None when the list itself is not acceptable.
+
+    An overlong list is refused entire rather than truncated: a peer that names
+    nine addresses has not sent a list worth guessing at. A single unusable
+    entry inside an acceptable list is dropped, because one malformed address
+    says nothing about the rest.
+    """
+    if not isinstance(value, (list, tuple)):
+        return None
+    if len(value) > MAX_UPGRADE_CANDIDATES:
+        return None
+    parsed = [upgrade_candidate(entry) for entry in value]
+    return [entry for entry in parsed if entry is not None]
+
+
+def upgrade_address(value) -> tuple[str, int] | None:
+    """A [host, port] observation from the wire, or None if it is not one."""
+    if not isinstance(value, (list, tuple)) or len(value) != 2:
+        return None
+    candidate = upgrade_candidate([value[0], value[1], UPGRADE_KIND_OBSERVED])
+    return (candidate[0], candidate[1]) if candidate is not None else None
+
+
+def upgrade_nonce(value) -> bytes | None:
+    """The probe secret, which is exactly UPGRADE_NONCE_BYTES or nothing."""
+    if not isinstance(value, bytes) or len(value) != UPGRADE_NONCE_BYTES:
+        return None
+    return value
+
+
+def upgrade_certificate(value) -> bytes | None:
+    """The peer's session certificate DER, bounded. Parsing it is the transport's."""
+    if not isinstance(value, bytes) or not value:
+        return None
+    if len(value) > MAX_UPGRADE_CERT_BYTES:
+        return None
+    return value
+
+
+def upgrade_punch_at(value, now: float | None = None) -> float | None:
+    """When the sender starts probing, or None if that is not soon.
+
+    A time far ahead would hold an attempt, a socket and a nonce open for as
+    long as the sender liked, so anything past MAX_UPGRADE_PUNCH_AHEAD_SECS is
+    refused. A time already past is fine: it means probe now.
+    """
+    now = time.time() if now is None else now
+    try:
+        punch_at = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(punch_at):
+        return None
+    if punch_at > now + MAX_UPGRADE_PUNCH_AHEAD_SECS:
+        return None
+    return punch_at

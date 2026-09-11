@@ -46,6 +46,7 @@ so overlapping LXMF's own registry is harmless.
 | `0x70–0x7F` | Message integrity | `F_AUTHOR_SIG=0x70`, `F_AUTHOR_KEYS=0x71` |
 | `0x80–0x8F` | Friends / direct messages | `F_FRIEND_NOTE=0x80` |
 | `0x90–0x9F` | File manifest | `F_FILE_NAME=0x90`, `F_FILE_SIZE=0x91`, `F_FILE_HASH=0x92`, `F_FILE_CHUNK_ROOT=0x93` |
+| `0xA0–0xAF` | Direct session upgrade | `F_UPGRADE_CANDIDATES=0xA0`, `F_UPGRADE_NONCE=0xA1`, `F_UPGRADE_CERT=0xA2`, `F_UPGRADE_PUNCH_AT=0xA3`, `F_UPGRADE_OBSERVED=0xA4` |
 
 When adding a new field:
 1. Pick the next unused key in the appropriate range.
@@ -73,6 +74,8 @@ Control messages are identified by `fields[F_MSG_TYPE]`. Defined values:
 | `MT_FRIEND_REQUEST` | `"friend_request"` | `friends.py` |
 | `MT_FRIEND_ACCEPT` | `"friend_accept"` | `friends.py` |
 | `MT_FRIEND_DECLINE` | `"friend_decline"` | `friends.py` |
+| `MT_UPGRADE_OFFER` | `"upgrade_offer"` | `upgrade.py` |
+| `MT_UPGRADE_ANSWER` | `"upgrade_answer"` | `upgrade.py` |
 
 Chat messages have **no** `F_MSG_TYPE` field. Handlers should check `F_MSG_TYPE in fields`
 to distinguish control messages from chat messages.

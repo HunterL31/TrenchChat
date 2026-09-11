@@ -55,6 +55,14 @@ LXMF fields layout:
     0x93  file_chunk_root   bytes[32], SHA-256 over the concatenated SHA-256s
                                           of each 32 KB chunk, so the author's
                                           signature covers every chunk
+    0xA0  upgrade_candidates list of [host, port, kind], kind lan|mapped|observed,
+                                          at most 8 (core/upgrade.py)
+    0xA1  upgrade_nonce     bytes[16], the probe secret for one attempt
+    0xA2  upgrade_cert      bytes, the sender's session certificate, DER, max 2 KB
+    0xA3  upgrade_punch_at  float, when the sender starts probing, at most a
+                                          minute out
+    0xA4  upgrade_observed  [host, port], where this node last saw the peer's
+                                          probes arrive from
 
 A direct message uses none of the fields above. It is a plain LXMF message --
 its text in the ordinary content, its attachment in LXMF's own FIELD_IMAGE --
