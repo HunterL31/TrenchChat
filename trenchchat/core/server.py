@@ -1,13 +1,15 @@
 """
-Server management: create and restore servers.
+Server management: create servers and say which ones this identity owns.
 
 A server is a collection of channels that share one membership and one role
 assignment -- one invite admits a peer to the server and therefore to every
-channel in it. Its RNS.Destination aspect path is:
-    trenchchat.server.<sanitised_name>
+channel in it. Its address is the hash of the aspect path
+``trenchchat.server.<sanitised_name>`` under the creator's identity, derived
+by core/naming.py.
 
-Servers are always invite-only and are never announced, so the destination
-exists only to derive a hash that bakes in the creator's identity.
+Servers are always invite-only and are never announced, so there is no
+destination to own: the hash is all that is needed, and it is computable
+offline by anyone holding the creator's identity hash.
 
 This manager deliberately registers no delivery callback. Server membership
 travels in the same signed member-list document as channel membership, so all
@@ -19,18 +21,18 @@ import time
 
 import RNS
 
-from trenchchat import APP_NAME, APP_ASPECT_SERVER
 from trenchchat.core.identity import Identity
-from trenchchat.core.naming import NameInUseError, sanitise_name, server_hash_for
+from trenchchat.core.naming import NameInUseError, server_hash_for
 from trenchchat.core.permissions import PRESET_SERVER, ROLE_OWNER
 from trenchchat.core.storage import Storage
 
 
 class ServerManager:
+    """Creates servers and answers what this identity owns."""
+
     def __init__(self, identity: Identity, storage: Storage):
         self._identity = identity
         self._storage = storage
-        self._owned_destinations: dict[str, RNS.Destination] = {}
 
     def create_server(self, name: str, description: str = "",
                       permissions: dict | None = None) -> str:
@@ -45,21 +47,10 @@ class ServerManager:
             permissions = dict(PRESET_SERVER)
 
         hash_hex = server_hash_for(self._identity.hash, name)
-        if hash_hex in self._owned_destinations or \
-                self._storage.get_server(hash_hex) is not None:
+        if self._storage.get_server(hash_hex) is not None:
             raise NameInUseError(f"you already have a server named '{name}'")
 
-        dest = RNS.Destination(
-            self._identity.rns_identity,
-            RNS.Destination.IN,
-            RNS.Destination.SINGLE,
-            APP_NAME,
-            APP_ASPECT_SERVER,
-            sanitise_name(name),
-        )
         created_at = time.time()
-        self._owned_destinations[hash_hex] = dest
-
         self._storage.upsert_server(
             hash=hash_hex,
             name=name,
@@ -83,6 +74,7 @@ class ServerManager:
         return hash_hex
 
     def get_server(self, server_hash_hex: str):
+        """The stored record for one server, or None."""
         return self._storage.get_server(server_hash_hex)
 
     def list_servers(self) -> list:
@@ -91,19 +83,6 @@ class ServerManager:
                 if self._storage.is_member(row["hash"], self._identity.hash_hex)]
 
     def is_owner(self, server_hash_hex: str) -> bool:
-        return server_hash_hex in self._owned_destinations
-
-    def restore_owned_servers(self) -> None:
-        """Re-create RNS destinations for servers we created (called on startup)."""
-        for row in self._storage.get_all_servers():
-            if row["creator_hash"] != self._identity.hash_hex:
-                continue
-            dest = RNS.Destination(
-                self._identity.rns_identity,
-                RNS.Destination.IN,
-                RNS.Destination.SINGLE,
-                APP_NAME,
-                APP_ASPECT_SERVER,
-                sanitise_name(row["name"]),
-            )
-            self._owned_destinations[row["hash"]] = dest
+        """Whether this identity created the server, by the stored record."""
+        row = self._storage.get_server(server_hash_hex)
+        return row is not None and row["creator_hash"] == self._identity.hash_hex
