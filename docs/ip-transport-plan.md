@@ -558,11 +558,18 @@ reason for doing it.
   NAT. What does not punch is a pair where **neither** side can be named: two
   cone NATs with no router mapping and no prior observation have nothing to
   aim at, every probe goes to an unroutable address, and no observation can
-  start. Symmetric NAT and most CGNAT do not punch either, and both sides
-  symmetric never will. Those pairs stay on Reticulum, which is recorded as a
-  deliberate non-fix: the alternative is asking a third party where we are,
-  and a service that answers that is a center. The diagnostics panel says
-  which case a pair is in rather than leaving it mysterious.
+  start. The fix that fits the Zen is not a service that answers "where am
+  I" but the members themselves: every direct session's HELLO carries the
+  address the accepting side saw the dialer arrive from, so one reachable
+  member (a public host, a router mapping, a shared LAN) teaches every peer
+  it talks to its own translated address, and that peer can then be named to
+  the rest. Any member can be that observer, none is special, and nothing is
+  asked of anyone outside the channel. Phase 4 adds it, with a NAT harness
+  variant of two cone NATs and one reachable third member to prove it.
+  Symmetric NAT and most CGNAT do not punch either, and both sides symmetric
+  never will; those pairs stay on Reticulum, recorded as a deliberate
+  non-fix. The diagnostics panel says which case a pair is in rather than
+  leaving it mysterious.
 - **`aioquic` as a dependency.** Settled: `aioquic==1.3.0`, BSD-3-Clause,
   every wheel `cp310-abi3`, so one wheel per platform covers CPython 3.10
   through 3.13 on win_amd64, macOS x86_64 and arm64, and manylinux x86_64 and
