@@ -16,6 +16,7 @@ from trenchchat.core.protocol import (
     UPGRADE_NONCE_BYTES, upgrade_address, upgrade_candidates,
     upgrade_certificate, upgrade_nonce, upgrade_punch_at,
 )
+from trenchchat.network.ip import candidates
 
 
 def _candidate(host: str = "10.0.0.5", port: int = 42420,
@@ -115,3 +116,58 @@ class TestPunchTime:
         assert upgrade_punch_at("soon") is None
         assert upgrade_punch_at(float("inf")) is None
         assert upgrade_punch_at(None) is None
+
+
+class TestCandidateGathering:
+    """What this node offers a peer, gathered from the routing table alone."""
+
+    def test_loopback_is_never_a_candidate(self):
+        assert not candidates.is_reachable_address("127.0.0.1")
+        assert not candidates.is_reachable_address("::1")
+        assert all(host != "127.0.0.1"
+                   for host, _port, _kind in candidates.gather(42420))
+
+    def test_link_local_and_multicast_are_never_candidates(self):
+        assert not candidates.is_reachable_address("169.254.3.4")
+        assert not candidates.is_reachable_address("fe80::1")
+        assert not candidates.is_reachable_address("239.255.255.250")
+        assert not candidates.is_reachable_address("0.0.0.0")
+
+    def test_a_local_address_carries_the_port_being_punched(self):
+        gathered = candidates.gather(45678)
+        assert gathered, "no local interface address was gathered"
+        for host, port, kind in gathered:
+            assert kind == UPGRADE_KIND_LAN
+            assert port == 45678
+            assert candidates.is_reachable_address(host)
+
+    def test_a_mapped_and_an_observed_address_carry_their_own_ports(self):
+        gathered = candidates.gather(45678, mapped=("203.0.113.7", 51820),
+                                     observed=[("198.51.100.4", 33445)])
+        assert gathered[0] == ("203.0.113.7", 51820, UPGRADE_KIND_MAPPED)
+        assert gathered[1] == ("198.51.100.4", 33445, UPGRADE_KIND_OBSERVED)
+
+    def test_the_list_never_exceeds_the_protocol_cap(self):
+        observed = [(f"198.51.100.{n}", 30000 + n) for n in range(1, 20)]
+        gathered = candidates.gather(45678, observed=observed)
+        assert len(gathered) == MAX_UPGRADE_CANDIDATES
+
+    def test_a_truncated_list_keeps_what_crosses_a_nat(self):
+        observed = [(f"198.51.100.{n}", 30000 + n)
+                    for n in range(1, MAX_UPGRADE_CANDIDATES + 4)]
+        gathered = candidates.gather(45678, mapped=("203.0.113.7", 51820),
+                                     observed=observed)
+        assert gathered[0][2] == UPGRADE_KIND_MAPPED
+        assert all(kind != UPGRADE_KIND_LAN for _host, _port, kind in gathered)
+
+    def test_the_same_address_is_never_offered_twice(self):
+        local = candidates.local_addresses()
+        if not local:
+            return
+        gathered = candidates.gather(45678, observed=[(local[0], 45678)])
+        assert len(gathered) == len({(h, p) for h, p, _k in gathered})
+
+    def test_what_is_gathered_is_what_the_wire_accepts(self):
+        gathered = candidates.gather(45678, mapped=("203.0.113.7", 51820))
+        wire = [[host, port, kind] for host, port, kind in gathered]
+        assert upgrade_candidates(wire) == gathered
