@@ -1,7 +1,7 @@
 """
 The direct session's wire format: a type byte, a length, and a msgpack body.
 
-Five frame types carry everything. HI opens the control stream, CHALLENGE
+Seven frame types carry everything. HI opens the control stream, CHALLENGE
 carries the listener's nonce and HELLO the proof of identity over it; those
 three are the handshake, and nothing else is read until it passes. MSG carries
 one message envelope with the author's signature over it, and ACK names an

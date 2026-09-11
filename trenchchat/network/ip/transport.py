@@ -287,7 +287,7 @@ class IPTransport(Transport):
             return list(self._sessions.values())
 
     def sessions(self) -> list[dict]:
-        """What this node knows about its own sessions, newest state first."""
+        """What this node knows about each of its own sessions."""
         return [peer_session.stats() for peer_session in self.live_sessions()]
 
     def session_for(self, peer_hex: str) -> DirectSession | None:

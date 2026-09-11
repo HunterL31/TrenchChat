@@ -568,6 +568,37 @@ class TestHandshakeRefusals:
         assert wait_for(lambda: bob.transport.session_count() == 0,
                         msg="both connections gone")
 
+    def test_a_hello_signed_by_another_key_is_refused(self, ip_node):
+        """The key in the HELLO is the key the signature is checked against.
+
+        A relay that claims a member's public key has to sign the nonce with
+        that member's private key, which is the thing it does not have.
+        """
+        bob = ip_node("bob")
+        victim = RNS.Identity()
+
+        async def run():
+            client = await raw_connect(bob)
+            client.protocol.open_stream()
+            client.protocol.write(frames.hi_frame())
+            kind, payload = await client.protocol.next_frame()
+            assert kind == frames.KIND_CHALLENGE
+            stamp = int(time.time())
+            digest = hello_digest(
+                client.certificate.fingerprint,
+                fingerprint_for(bob.transport.certificate_der),
+                payload["nonce"], stamp)
+            # The victim's public key, signed by the caller's own identity.
+            client.protocol.write(frames.hello_frame(
+                victim.get_public_key(), stamp, client.identity.sign(digest),
+                certificate=client.certificate.der))
+            assert await client.protocol.next_frame() is None
+            client.close()
+
+        asyncio.run(run())
+        assert bob.transport.session_count() == 0
+        assert not bob.transport.can_reach(victim.hash.hex())
+
     def test_more_pending_handshakes_than_the_cap_are_refused(self, ip_node):
         bob = ip_node("bob")
 
