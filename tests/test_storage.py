@@ -428,6 +428,20 @@ class TestMembers:
         members = db.get_members("ch01")
         assert len(members) == 1
 
+    def test_member_scopes_names_every_scope_an_identity_is_in(self, db):
+        self._seed_channel(db)
+        db.upsert_channel("ch02", "Other", "", "creator", "invite", time.time())
+        db.upsert_member("ch01", "alice", "Alice", is_admin=False)
+        db.upsert_member("ch02", "alice", "Alice", is_admin=False)
+        db.upsert_member("ch02", "bob", "Bob", is_admin=False)
+
+        assert db.member_scopes("alice") == {"ch01", "ch02"}
+        assert db.member_scopes("bob") == {"ch02"}
+        assert db.member_scopes("carol") == set()
+
+        db.remove_member("ch02", "alice")
+        assert db.member_scopes("alice") == {"ch01"}
+
 
 # ---------------------------------------------------------------------------
 # Member list versions

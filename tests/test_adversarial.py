@@ -52,10 +52,12 @@ import RNS
 
 from tests.conftest import deliver, forge, lxmf_transport_for
 from tests.helpers import sign_as, wait_for, wait_for_member
+from trenchchat.network.base import PATH_DIRECT
+from trenchchat.network.ip.transport import IPTransport
 from trenchchat.network.lxmf_transport import (
     PATH_REQUEST_GLOBAL_BURST, PATH_REQUEST_MAX_SOURCES, QUARANTINE_MAX_PER_SENDER,
 )
-from trenchchat.core import actions
+from trenchchat.core import actions, upgrade
 from trenchchat.core.invite import _sign, _signed_payload
 from trenchchat.core.messaging import _compute_message_id
 from trenchchat.core.naming import dm_hash_for
@@ -4511,3 +4513,190 @@ class TestAdversarialMessageRequests:
 
         held = alice.storage.get_message_requests(mallory_hex)
         assert len(held) <= MAX_HELD_PER_SENDER
+
+
+# ---------------------------------------------------------------------------
+# The direct session gate: who this node will hold an IP session with
+# ---------------------------------------------------------------------------
+
+class TestUpgradeEligibility:
+    """A session discloses this node's addresses, so it is offered to someone
+    an admin vetted and to nobody else. These call core/upgrade.is_eligible
+    directly, which is the layer that holds when a client is lying.
+    """
+
+    def test_a_fellow_member_of_an_invite_only_channel_is_eligible(
+            self, peer_factory):
+        alice, bob, _ch_hash = _setup_channel_with_member(peer_factory)
+        assert upgrade.is_eligible(alice.storage, alice.identity.hash_hex,
+                                   bob.identity.hash_hex)
+        assert upgrade.is_eligible(bob.storage, bob.identity.hash_hex,
+                                   alice.identity.hash_hex)
+
+    def test_a_fellow_member_of_a_server_is_eligible(self, peer_factory):
+        """Servers are always invite-only, so membership is the whole check."""
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+        server_hash = alice.server_mgr.create_server("private-server")
+        alice.storage.upsert_member(server_hash, bob.identity.hash_hex, "Bob",
+                                    role=ROLE_MEMBER)
+        assert upgrade.is_eligible(alice.storage, alice.identity.hash_hex,
+                                   bob.identity.hash_hex)
+
+    def test_a_public_channel_co_subscriber_is_refused(self, peer_factory):
+        """Anyone can join an open channel, so a co-subscriber is anyone."""
+        alice = peer_factory("alice")
+        mallory = peer_factory("mallory")
+        ch_hash = alice.channel_mgr.create_channel("open-house", "",
+                                                   permissions=dict(PRESET_OPEN))
+        alice.storage.upsert_member(ch_hash, alice.identity.hash_hex, "Alice",
+                                    role=ROLE_OWNER)
+        alice.storage.upsert_member(ch_hash, mallory.identity.hash_hex,
+                                    "Mallory", role=ROLE_MEMBER)
+        assert alice.storage.is_member(ch_hash, mallory.identity.hash_hex)
+        assert not upgrade.is_eligible(alice.storage, alice.identity.hash_hex,
+                                       mallory.identity.hash_hex)
+
+    def test_a_former_member_is_refused(self, peer_factory):
+        alice, bob, ch_hash = _setup_channel_with_member(peer_factory)
+        assert upgrade.is_eligible(alice.storage, alice.identity.hash_hex,
+                                   bob.identity.hash_hex)
+
+        alice.invite_mgr.publish_member_list(ch_hash,
+                                             remove_members=[bob.identity.hash])
+        assert not alice.storage.is_member(ch_hash, bob.identity.hash_hex)
+        assert not upgrade.is_eligible(alice.storage, alice.identity.hash_hex,
+                                       bob.identity.hash_hex)
+
+    def test_a_member_of_an_unrelated_invite_only_channel_is_refused(
+            self, peer_factory):
+        """Sharing a channel with a third party is not sharing one with us."""
+        alice, bob, _ch_hash = _setup_channel_with_member(peer_factory)
+        mallory = peer_factory("mallory")
+        other = bob.channel_mgr.create_channel("bobs-room", "",
+                                               permissions=dict(PRESET_PRIVATE))
+        bob.storage.upsert_member(other, mallory.identity.hash_hex, "Mallory",
+                                  role=ROLE_MEMBER)
+        assert not upgrade.is_eligible(alice.storage, alice.identity.hash_hex,
+                                       mallory.identity.hash_hex)
+
+    def test_a_friend_who_shares_no_channel_is_refused(self, peer_factory):
+        """Friendship is a stronger tie than membership and still does not
+        qualify in this first cut; the plan records the open decision."""
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+        alice.friends_mgr.add_friend(bob.identity.hash_hex)
+        bob.friends_mgr.add_friend(alice.identity.hash_hex)
+        assert not upgrade.is_eligible(alice.storage, alice.identity.hash_hex,
+                                       bob.identity.hash_hex)
+
+    def test_this_node_is_not_eligible_with_itself(self, peer_factory):
+        alice, _bob, _ch_hash = _setup_channel_with_member(peer_factory)
+        assert not upgrade.is_eligible(alice.storage, alice.identity.hash_hex,
+                                       alice.identity.hash_hex)
+
+
+class TestIneligibleDirectSession:
+    """The gate as IPTransport applies it: an inbound session is closed on the
+    identity its HELLO proved, before a frame of theirs is read."""
+
+    def test_a_session_from_an_ineligible_identity_is_closed(self, peer_factory):
+        alice = peer_factory("alice", direct=True)
+        mallory = peer_factory("mallory", direct=True)
+        alice.ip_transport.close_session(mallory.identity.hash_hex)
+        mallory.ip_transport.close_session(alice.identity.hash_hex)
+        assert wait_for(
+            lambda: not alice.ip_transport.can_reach(mallory.identity.hash_hex)
+            and not mallory.ip_transport.can_reach(alice.identity.hash_hex),
+            msg="the session the fixture opened to go")
+
+        alice.ip_transport.set_authorize(
+            lambda peer_hex: upgrade.is_eligible(
+                alice.storage, alice.identity.hash_hex, peer_hex))
+        assert not mallory.ip_transport.open_session(
+            alice.identity.hash_hex, "127.0.0.1",
+            alice.ip_transport.listen_port, alice.ip_transport.certificate_der,
+        )
+        assert alice.ip_transport.session_count() == 0
+        assert not mallory.ip_transport.can_reach(alice.identity.hash_hex)
+
+    def test_a_member_of_a_shared_invite_only_channel_is_let_in(
+            self, peer_factory):
+        alice, bob, _ch_hash = _setup_channel_with_member(peer_factory)
+        alice_direct = _direct_transport_for(alice)
+        bob_direct = _direct_transport_for(bob)
+        alice_direct.set_authorize(
+            lambda peer_hex: upgrade.is_eligible(
+                alice.storage, alice.identity.hash_hex, peer_hex))
+        assert bob_direct.open_session(
+            alice.identity.hash_hex, "127.0.0.1", alice_direct.listen_port,
+            alice_direct.certificate_der,
+        )
+        assert alice_direct.can_reach(bob.identity.hash_hex)
+
+
+class TestDirectSessionAuthorship:
+    """A message that arrives over a session is held to the same author
+    signature as one that arrives over the mesh: the session proves who
+    handed it over, and nothing more."""
+
+    def test_a_message_over_a_session_is_stored_when_its_author_signed_it(
+            self, peer_factory):
+        alice, bob, ch_hash = _open_channel_on_both(peer_factory)
+        alice.messaging.send_message(
+            channel_hash_hex=ch_hash, content="signed and sent directly",
+            subscriber_hashes=[bob.identity.hash_hex],
+        )
+        msg_id = alice.storage.get_latest_message_id(ch_hash)
+        assert wait_for(lambda: bob.storage.message_exists(msg_id),
+                        msg="the message over the session")
+
+    def test_a_message_over_a_session_with_a_broken_signature_is_dropped(
+            self, peer_factory):
+        alice, bob, ch_hash = _open_channel_on_both(peer_factory)
+        assert alice.router.path_for(bob.identity.hash_hex) == PATH_DIRECT
+
+        now = time.time()
+        msg_id = _compute_message_id("forged", alice.identity.hash_hex, now)
+        alice.router.send(bob.identity.hash_hex, {
+            F_CHANNEL_HASH: bytes.fromhex(ch_hash),
+            F_DISPLAY_NAME: "Alice",
+            F_TIMESTAMP:    now,
+            F_MESSAGE_ID:   bytes.fromhex(msg_id),
+            F_AUTHOR_SIG:   b"\x00" * 64,
+        }, "forged")
+
+        time.sleep(0.5)
+        assert not bob.storage.message_exists(msg_id), \
+            "a direct session was taken as proof of authorship"
+
+
+def _direct_transport_for(peer):
+    """A direct transport beside a peer, torn down with it.
+
+    For the tests that need one whatever mode the suite is running in; a peer
+    built with direct sessions already has one.
+    """
+    if peer.ip_transport is not None:
+        return peer.ip_transport
+    transport = IPTransport(peer.config, peer.identity,
+                            authorize=lambda _peer: True,
+                            listen_host="127.0.0.1", listen_port=0)
+    peer._teardown_callbacks.insert(0, transport.stop)
+    peer.ip_transport = transport
+    return transport
+
+
+def _open_channel_on_both(peer_factory):
+    """Alice and Bob on one open channel, talking over a direct session."""
+    alice = peer_factory("alice", direct=True)
+    bob = peer_factory("bob", direct=True)
+    ch_hash = alice.channel_mgr.create_channel("direct-room", "", "public")
+    bob.storage.upsert_channel(ch_hash, "direct-room", "",
+                               alice.identity.hash_hex, "public", time.time())
+    bob.subscription_mgr.subscribe(ch_hash, alice.identity.hash_hex)
+    assert wait_for(
+        lambda: alice.identity.hash_hex in
+        bob.subscription_mgr.get_subscribers(ch_hash),
+        msg="bob subscribed")
+    return alice, bob, ch_hash

@@ -1511,6 +1511,19 @@ class Storage:
         )
         return row["display_name"] if row else None
 
+    def member_scopes(self, identity_hash: str) -> set[str]:
+        """Every channel or server this identity is a current member of.
+
+        A channel inside a server keeps its membership under the server hash,
+        so what comes back is the scope a membership lives at, not necessarily
+        a channel.
+        """
+        rows = self._fetchall(
+            "SELECT channel_hash FROM members WHERE identity_hash = ?",
+            (identity_hash,),
+        )
+        return {row["channel_hash"] for row in rows}
+
     def get_trenchchat_peer_identities(self) -> set[str]:
         """Return the set of all identity hashes known to be TrenchChat users.
 
