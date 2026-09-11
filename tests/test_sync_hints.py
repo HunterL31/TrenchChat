@@ -164,6 +164,7 @@ class TestHintDurabilityAcrossRestart:
         assert wait_for_message(bob.storage, ch_hash, msg_id, timeout=5), \
             "the restarted holder did not serve the surviving hint"
 
+    @pytest.mark.reticulum_path
     def test_hint_older_than_the_sync_window_is_purged_on_restart(self, peer_factory):
         """
         A hint's recovery guarantee is bounded at SYNC_WINDOW_SECS: one recorded
@@ -174,6 +175,13 @@ class TestHintDurabilityAcrossRestart:
         genuinely the only route to it: reconciliation describes the window
         and nothing older, and would otherwise recover a message this test is
         about not recovering.
+
+        Marked reticulum_path because that last sentence is the mesh's window
+        and not every path's. A description over a direct session reaches the
+        whole transcript by design (docs/ip-transport-plan.md), so the same
+        message would be recovered there by reconciliation rather than by the
+        hint, which is what TestHistoryOverADirectSession in
+        test_sync_reconcile.py holds it to.
         """
         alice = peer_factory("alice")
         bob = peer_factory("bob")
@@ -217,6 +225,7 @@ class TestHintDurabilityAcrossRestart:
 # ---------------------------------------------------------------------------
 
 class TestHintHolderDataLoss:
+    @pytest.mark.reticulum_path
     def test_message_is_genuinely_unrecoverable_once_the_sole_holder_loses_its_hints(
         self, peer_factory
     ):
@@ -228,6 +237,11 @@ class TestHintHolderDataLoss:
         real horizon: it is not a bug, it is the edge of what the mechanism
         promises. Inside the window, reconciliation would find the message on
         its own; the horizon is the window, not the requester's watermark.
+
+        The window in that sentence is the mesh's, which is why this is marked
+        reticulum_path: a description over a direct session reaches the whole
+        transcript, so the horizon there is the transcript and this message
+        would be recovered by reconciliation rather than lost.
         """
         alice = peer_factory("alice")
         bob = peer_factory("bob")

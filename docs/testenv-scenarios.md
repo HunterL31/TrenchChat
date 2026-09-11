@@ -865,7 +865,7 @@ rather than a behaviour.
 | files2 | A,B,C | C offline through the share; B downloads; A's **process is killed**; C returns | ✅ **6/6 runs, 151-162s.** The check-1 proof on the file plane: C backfills the manifest by sync from B in 1.5-17.2s and pulls 2 MB from a member that never wrote the message. Its own fetch takes 123s, of which 120 are one stall timeout spent on the dead sender before the fallback |
 | files3 | A,B,C | Same shape with a 20 KB file, asserting C holds nothing before it asks | ✅ **6/6 runs, 156-174s.** Manifest in 1.5-10.1s, `GET` 404 and an empty file store held for 15s, then the download completes. 20 KB is small enough that pushing it would have been cheap, and it is still not pushed |
 | files4 | A,B,D | D, in no channel this file was shared in, drives its own file plane at A's with the real hash; B, who is a member, makes the identical request | ✅ **5/5 runs, 249-258s.** B is served the chunk list in 2.5s; D gets nothing twice over, and A's log names it. Almost all the time is D waiting: a refusal is silence, and silence costs the asker the 120s stall timeout |
-| files5 | A,B,C | files1 at `lora_fast` (SF7, 5.5 kbps), 200 KB, B downloading, testers slowed to a 60s announce cadence | ⚠ Probe, and the answer is still two numbers. At 32 KB chunks with holder choice reading the path table, **four of five runs finished, in 495.6-651.0s** (314.6-413.2 B/s, 6 requests, none lost); the fifth stopped at **4 of 7 chunks** after losing 4. The same five runs before that fix were 506.1-1150.0s with 15 lost requests, and at 64 KB chunks 2 of 5 finished, in 609.9 and 686.7s. See below for what that says about the constants |
+| files5 | A,B,C | files1 at `lora_fast` (SF7, 5.5 kbps), 200 KB, B downloading, testers slowed to a 60s announce cadence | ⚠ Probe, and the answer is still two numbers. At 32 KB chunks with holder choice reading the path table, **four of five runs finished, in 495.6-651.0s** (314.6-413.2 B/s, 6 requests, none lost); the fifth stopped at **4 of 7 chunks** after losing 4. The same five runs before that fix were 506.1-1150.0s with 15 lost requests, and at 64 KB chunks 2 of 5 finished, in 609.9 and 686.7s. See below for what that says about the constants. One run after the bytes moved to disk finished in **246.9s** (829.5 B/s), which is one run and not a new range |
 | files6 | A,B,C | C downloads first; B starts; A's process is killed mid-transfer | ✅ **7/7 runs on the assertion it makes now, 82-206s.** B keeps its 7 verified chunks and takes the other 25 with the sender dead, in 21.7s when it notices the dead link at once and 142s when it spends a stall timeout first. Which holder served it is recorded, not asserted: a 0.5s poll saw C in only one run of three |
 | files7 | A,B | B's **process is killed mid-download** and restarted | ✅ **6/6 runs, 50-54s.** Comes back holding exactly the 7 chunks it had verified, resumes 4.0s later with nobody asking it to, and finishes in 27-35s |
 | files8 | A,B | files1 under `lossy` (62.5 kbps, 250±150 ms, **15% loss**), 512 KB | ⚠ Probe. At 32 KB chunks (16 of them), **three of five runs arrived, in 427.8-564.2s**, 8-9 requests and one lost each; the other two held 4 and 1 chunk after losing two. The same five runs before the retry-wait fix arrived **none of five**, and at 64 KB one of four arrived, in 214.2s. This link pays per request, so the chunk that helps files5 costs here. See the entry below |
@@ -1212,6 +1212,15 @@ only a public channel is never offered one, however long it waits.
 **All six passing 5/5**, measured on one host where every candidate is a
 local address. What the family cannot show is address translation, which is
 what the NAT harness below is for.
+
+The `files` family was re-run once behind these two rows, with the bytes now on
+disk rather than in the database: **7 of 7 strict passing**, the two radio
+probes recording (files5 at 246.9s, files8 arriving in 5.0s). files10 and
+files11 were not re-run: they are the SF7 fan-in and the 5 MB ceiling, fifty
+minutes and five hours of radio each, and nothing this phase changed touches
+what they measure. The `voice` family was re-run once whole: **10 of 10 strict
+passing**, three probes recording, including voice11's standing finding that a
+starved link still reads as `streaming`.
 
 What upgrade6 does not show is the size of the gap. Both paths are loopback
 here, so what differs is the number of exchanges (256 chunks a request against
