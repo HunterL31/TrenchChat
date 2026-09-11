@@ -478,7 +478,7 @@ reason for doing it.
 
 ## Testing
 
-- **The seam is proven by the existing suite.** 2,020 tests and 128 scenario
+- **The seam is proven by the existing suite.** 2,125 tests and 128 scenario
   rows already specify the managers; Phase 1 passes them without edits or it
   is wrong.
 - **Every manager test runs on both paths.** `peer_factory` takes a `direct`
