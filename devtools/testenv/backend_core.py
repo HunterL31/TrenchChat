@@ -287,6 +287,13 @@ class Backend:
             self.presence_mgr, **beacon_kwargs,
         )
         self.router.add_outbound_callback(self.presence_beacon.record_sent)
+        # The direct path's own manager: the outbound guard and the client
+        # gate over core/upgrade.is_eligible, which the transport holds again
+        # on every inbound HELLO.
+        self.upgrade_mgr = upgrade.UpgradeManager(
+            self.identity, self.storage, self.router, self.presence_mgr,
+            self.config, transport=self.direct_transport,
+        )
         self.file_transport = RNSFileTransport(self.identity)
         self.file_mgr = FileManager(self.identity, self.storage,
                                     self.presence_mgr,
@@ -378,6 +385,7 @@ class Backend:
         # presence tracking alike.
         def _on_peer_appeared(peer_hex: str, iface) -> None:
             self.sync_mgr.on_peer_appeared(peer_hex)
+            self.upgrade_mgr.on_peer_appeared(peer_hex)
             self.file_mgr.on_peer_appeared(peer_hex)
             self.presence_mgr.record_seen(peer_hex)
             self._seed_user_directory(peer_hex)
@@ -505,6 +513,11 @@ class Backend:
                 except Exception as e:
                     RNS.log(f"TesterBackend: voice tick failed: {e}", RNS.LOG_WARNING)
                 try:
+                    self.upgrade_mgr.tick()
+                except Exception as e:
+                    RNS.log(f"TesterBackend: upgrade tick failed: {e}",
+                            RNS.LOG_WARNING)
+                try:
                     self.node_browser.tick()
                 except Exception as e:
                     RNS.log(f"TesterBackend: node tick failed: {e}", RNS.LOG_WARNING)
@@ -582,6 +595,7 @@ class Backend:
         return self.presence_beacon.announce_offline()
 
     def close(self):
+        self.upgrade_mgr.stop()
         self.file_mgr.stop()
         self.link_watcher.stop()
         self.router.stop()

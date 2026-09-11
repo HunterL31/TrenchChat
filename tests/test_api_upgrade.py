@@ -71,6 +71,8 @@ def backend():
         PATH_DIRECT if peer == DIRECT_PEER else PATH_RETICULUM)
     backend.presence_mgr.is_online.side_effect = lambda peer: peer != GONE_PEER
     backend.router.direct_transport = None
+    backend.upgrade_mgr.failures.return_value = {}
+    backend.upgrade_mgr.offer.return_value = None
     return backend
 
 
@@ -135,6 +137,62 @@ class TestUpgradeSessions:
 
     def test_it_needs_the_token_like_every_other_endpoint(self, client):
         assert client.get("/upgrade/sessions").status_code == 401
+
+
+@needs_backend
+class TestUpgradeFailures:
+    """Why a pair has no session, which is the panel's other half."""
+
+    def test_a_peers_last_failure_reaches_the_client(self, client, backend):
+        backend.upgrade_mgr.failures.return_value = {
+            MESH_PEER: {"reason": "punch_failed", "at": 1700.0,
+                        "next_attempt": 1760.0},
+        }
+        body = client.get("/upgrade/sessions", headers=AUTH).json()
+        assert body["last_failure"][MESH_PEER]["reason"] == "punch_failed"
+        assert body["last_failure"][MESH_PEER]["next_attempt"] == 1760.0
+
+
+@needs_backend
+class TestTryNow:
+    """The diagnostics panel's per-peer button, gate and all."""
+
+    def test_it_asks_the_manager_for_a_session_with_that_peer(self, client,
+                                                              backend):
+        backend.storage.member_scopes.return_value = {"scope"}
+        backend.storage.get_server.return_value = {"hash": "scope"}
+        body = client.post(f"/upgrade/try/{MESH_PEER}", headers=AUTH).json()
+        assert body == {"ok": True, "reason": None}
+        backend.upgrade_mgr.offer.assert_called_once_with(MESH_PEER,
+                                                          ignore_backoff=True)
+
+    def test_an_ineligible_peer_is_refused_before_the_manager_is_asked(
+            self, client, backend):
+        backend.storage.member_scopes.return_value = set()
+        body = client.post(f"/upgrade/try/{MESH_PEER}", headers=AUTH).json()
+        assert body == {"ok": False, "reason": "ineligible"}
+        backend.upgrade_mgr.offer.assert_not_called()
+
+    def test_it_needs_the_token(self, client):
+        assert client.post(f"/upgrade/try/{MESH_PEER}").status_code == 401
+
+
+@needs_backend
+class TestCloseSession:
+    """The harness hook the scenarios drop a session with."""
+
+    def test_it_closes_the_session_with_one_peer(self, client, with_direct):
+        with_direct.close_session.return_value = True
+        body = client.post(f"/upgrade/close/{DIRECT_PEER}", headers=AUTH).json()
+        assert body == {"ok": True}
+        assert with_direct.close_session.call_args.args[0] == DIRECT_PEER
+
+    def test_a_node_with_no_direct_path_closes_nothing(self, client):
+        body = client.post(f"/upgrade/close/{DIRECT_PEER}", headers=AUTH).json()
+        assert body == {"ok": False}
+
+    def test_it_needs_the_token(self, client):
+        assert client.post(f"/upgrade/close/{DIRECT_PEER}").status_code == 401
 
 
 @needs_backend

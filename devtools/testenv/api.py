@@ -1648,8 +1648,10 @@ def create_app(backend: Backend, *, token: str | None = None,
     def upgrade_sessions():
         """This node's direct sessions, for the Settings diagnostics panel.
 
-        last_failure is empty until Phase 3, which is what knows why an
-        eligible peer has no session.
+        last_failure says why each eligible peer with no session has none: a
+        reason from UpgradeManager's fixed set and when the next attempt is
+        due, which is what tells a user a pair is stuck behind symmetric NAT
+        rather than leaving it mysterious.
         """
         direct = backend.router.direct_transport
         sessions = []
@@ -1664,7 +1666,31 @@ def create_app(backend: Backend, *, token: str | None = None,
                 "bytes_in": entry["bytes_in"],
                 "bytes_out": entry["bytes_out"],
             })
-        return {"sessions": sessions, "last_failure": {}}
+        return {"sessions": sessions,
+                "last_failure": backend.upgrade_mgr.failures()}
+
+    @app.post("/upgrade/try/{peer_hash}")
+    def upgrade_try(peer_hash: str):
+        """Ask for a direct session with one peer now, gate and all.
+
+        The gate is re-applied in actions.offer_upgrade rather than here, so
+        this endpoint and the client's button cannot diverge from it.
+        """
+        return actions.offer_upgrade(backend.storage, backend.upgrade_mgr,
+                                     backend.identity.hash_hex, peer_hash)
+
+    @app.post("/upgrade/close/{peer_hash}")
+    def upgrade_close(peer_hash: str):
+        """Drop the direct session with one peer.
+
+        A harness hook: the scenarios take a session away mid-conversation to
+        watch the pair fall back to Reticulum and come back, which nothing a
+        user does can arrange on demand.
+        """
+        direct = backend.router.direct_transport
+        closed = (direct.close_session(peer_hash, "closed from the API")
+                  if direct is not None else False)
+        return {"ok": bool(closed)}
 
     @app.get("/channels/{channel_hash}/subscribers")
     def list_subscribers(channel_hash: str):
