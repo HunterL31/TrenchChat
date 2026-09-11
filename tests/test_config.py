@@ -3,7 +3,8 @@ Tests for trenchchat.config.Config.
 
 Covers defensive on-disk value handling (wrong-typed nested values must fall
 back to defaults rather than crash on property access) and setter validation
-for voice bitrate, propagation storage limit, and UI theme size/count caps.
+for voice bitrate, propagation storage limit, UI theme size/count caps, and
+the direct session's switch and port.
 """
 
 import json
@@ -14,6 +15,7 @@ from trenchchat.config import (
     Config,
     MAX_THEME_BYTES,
     MAX_THEME_LIBRARY_ENTRIES,
+    UPGRADE_DEFAULT_PORT,
     VOICE_MAX_BITRATE,
     VOICE_MIN_BITRATE,
 )
@@ -159,3 +161,34 @@ class TestThemeCaps:
         # Replacing an existing entry must not be blocked by the count cap.
         config.save_ui_theme("theme0", {"accent": "#123456"})
         assert config.ui_theme_library["theme0"] == {"accent": "#123456"}
+
+
+class TestDirectSessionSettings:
+    """The "upgrade" block: whether this node holds direct sessions, and where."""
+
+    def test_defaults_are_on_and_off_the_test_environments_ports(self, tmp_path):
+        config = Config(data_dir=tmp_path)
+        assert config.upgrade_enabled is True
+        assert config.upgrade_listen_port == UPGRADE_DEFAULT_PORT
+        assert not 8800 <= UPGRADE_DEFAULT_PORT <= 8899
+        assert not 41001 <= UPGRADE_DEFAULT_PORT <= 41199
+
+    def test_the_switch_and_the_port_persist(self, tmp_path):
+        config = Config(data_dir=tmp_path)
+        config.upgrade_enabled = False
+        config.upgrade_listen_port = 40000
+        reloaded = Config(data_dir=tmp_path)
+        assert reloaded.upgrade_enabled is False
+        assert reloaded.upgrade_listen_port == 40000
+
+    def test_a_port_outside_the_range_is_refused(self, tmp_path):
+        config = Config(data_dir=tmp_path)
+        for bad in (-1, 65536):
+            with pytest.raises(ValueError):
+                config.upgrade_listen_port = bad
+        assert config.upgrade_listen_port == UPGRADE_DEFAULT_PORT
+
+    def test_zero_asks_the_kernel_for_a_port(self, tmp_path):
+        config = Config(data_dir=tmp_path)
+        config.upgrade_listen_port = 0
+        assert config.upgrade_listen_port == 0

@@ -43,7 +43,20 @@ _DEFAULTS = {
         "enabled": False,
         "node_name": "",
     },
+    "upgrade": {
+        "enabled": True,
+        "listen_port": 42420,
+    },
 }
+
+# The direct session's UDP port. Reticulum's own default is 4242; this is that
+# with room after it, clear of the test environment's port ranges.
+UPGRADE_DEFAULT_PORT = _DEFAULTS["upgrade"]["listen_port"]
+
+# A port number outside this range cannot be bound. Zero is allowed and means
+# "whatever the kernel gives", which is what a test binds.
+MIN_PORT = 0
+MAX_PORT = 65535
 
 # Opus bitrate bounds. The upper bound keeps VBR peaks under the 255-byte
 # voice_wire frame cap (VOICE_MAX_FRAME_BYTES); the lower is Opus's practical
@@ -336,6 +349,34 @@ class Config:
     @nomad_node_name.setter
     def nomad_node_name(self, value: str):
         self._data["nomad_node"]["node_name"] = str(value)
+        self.save()
+
+    # --- direct sessions ---
+
+    @property
+    def upgrade_enabled(self) -> bool:
+        """Whether this node listens for and opens direct IP sessions."""
+        return bool(self._data["upgrade"]["enabled"])
+
+    @upgrade_enabled.setter
+    def upgrade_enabled(self, value: bool):
+        self._data["upgrade"]["enabled"] = bool(value)
+        self.save()
+
+    @property
+    def upgrade_listen_port(self) -> int:
+        """The UDP port direct sessions arrive on."""
+        return int(self._data["upgrade"]["listen_port"])
+
+    @upgrade_listen_port.setter
+    def upgrade_listen_port(self, value: int):
+        port = int(value)
+        if not MIN_PORT <= port <= MAX_PORT:
+            raise ValueError(
+                f"upgrade_listen_port must be between {MIN_PORT} and "
+                f"{MAX_PORT}, got {port}"
+            )
+        self._data["upgrade"]["listen_port"] = port
         self.save()
 
     # --- ui theme ---
