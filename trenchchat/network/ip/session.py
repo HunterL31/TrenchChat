@@ -501,10 +501,13 @@ class DirectSession(QuicConnectionProtocol):
             self.fail(str(e) or type(e).__name__)
 
     def _authenticate(self, peer_hex: str, public_key: bytes) -> None:
-        """Mark the session proven and let everything held through, in order.
+        """Mark the session proven, hand it up, and let everything held through.
 
-        Nothing awaits between the flag and the drain, so a frame that arrives
-        during it cannot overtake one that arrived before.
+        The transport is told the session is ready before the queue is drained:
+        it registers the session's inbound queue there, and a message that
+        arrived with the hello has nowhere to go until it has. Nothing awaits
+        between the flag and the drain, so a frame that arrives during it cannot
+        overtake one that arrived before.
         """
         self.peer_hex = peer_hex
         self.peer_public_key = public_key
@@ -515,12 +518,6 @@ class DirectSession(QuicConnectionProtocol):
             self.opened_at = time.time()
         for decoder in self._decoders.values():
             decoder.limit = frames.MAX_FRAME_BYTES
-        stream_id = self._control_stream_id or 0
-        while not self._preauth.empty():
-            item = self._preauth.get_nowait()
-            if item is None:
-                continue
-            self._dispatch(stream_id, item[0], item[1])
         self._ready.set()
         RNS.log(f"TrenchChat [ip]: session up with {peer_hex[:12]}…",
                 RNS.LOG_NOTICE)
@@ -528,6 +525,12 @@ class DirectSession(QuicConnectionProtocol):
             self._hooks.on_ready(self)
         except Exception as e:
             RNS.log(f"TrenchChat [ip]: session ready hook error: {e}", RNS.LOG_ERROR)
+        stream_id = self._control_stream_id or 0
+        while not self._preauth.empty():
+            item = self._preauth.get_nowait()
+            if item is None:
+                continue
+            self._dispatch(stream_id, item[0], item[1])
 
     # --- frames ---
 
@@ -683,11 +686,16 @@ def bind_datagram_socket(host: str, port: int) -> socket.socket:
     aioquic binds a dual-stack IPv6 socket of its own, which an IPv4-only host
     refuses outright; a session also has to be able to run on the socket a
     punch opened, so the socket is always this side's to make.
+
+    The port is claimed exclusively, and SO_REUSEADDR is deliberately not set:
+    on a UDP socket it lets a second socket bind the same port, after which the
+    kernel decides which of them an arriving datagram reaches, and a second node
+    on the host silently takes this one's sessions. UDP has no TIME_WAIT, so a
+    port is free to bind again the moment it is closed either way.
     """
     info = socket.getaddrinfo(host, port, type=socket.SOCK_DGRAM)[0]
     family, _type, _proto, _canonical, address = info
     sock = socket.socket(family, socket.SOCK_DGRAM)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.bind(address)
     return sock
 

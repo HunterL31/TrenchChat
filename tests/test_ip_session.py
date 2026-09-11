@@ -34,7 +34,7 @@ from trenchchat.network.ip.certificate import (
     CERT_FILE_NAME, SessionCertificate, fingerprint_for,
 )
 from trenchchat.network.ip.session import (
-    MAX_PREAUTH_FRAMES, dialer_configuration, hello_digest,
+    MAX_PREAUTH_FRAMES, bind_datagram_socket, dialer_configuration, hello_digest,
 )
 from trenchchat.network.ip.transport import IPTransport, MAX_PENDING_HANDSHAKES
 
@@ -679,6 +679,68 @@ class TestAuthenticatedMisbehaviour:
 
         asyncio.run(run())
         assert [m.content for m in bob.inbox] == ["honest"]
+
+
+class TestFramesHeldForTheHandshake:
+    """Everything arriving before the hello passes is queued and let through
+    after it, which is only true if the session is registered with its
+    transport before the queue is drained: a message that arrives in the same
+    write as the hello has nowhere to go otherwise, and the sender learns it
+    was lost only when its acknowledgement times out."""
+
+    def test_a_message_written_with_the_hello_is_delivered(self, ip_node):
+        bob = ip_node("bob")
+
+        async def run():
+            client = await raw_connect(bob)
+            client.protocol.open_stream()
+            client.protocol.write(frames.hi_frame())
+            kind, payload = await client.protocol.next_frame()
+            assert kind == frames.KIND_CHALLENGE
+            stamp = int(time.time())
+            digest = hello_digest(client.certificate.fingerprint,
+                                  fingerprint_for(bob.transport.certificate_der),
+                                  payload["nonce"], stamp)
+            hello = frames.hello_frame(client.identity.get_public_key(), stamp,
+                                       client.identity.sign(digest),
+                                       certificate=client.certificate.der)
+            packed, signature = envelope_from(client, bob, content="pipelined")
+
+            client.protocol.write(hello + frames.msg_frame(packed, signature))
+
+            assert (await client.protocol.next_frame())[0] == frames.KIND_HELLO
+            assert (await client.protocol.next_frame())[0] == frames.KIND_ACK
+            client.close()
+
+        asyncio.run(run())
+        assert [m.content for m in bob.inbox] == ["pipelined"]
+
+
+# ---------------------------------------------------------------------------
+# Sockets
+# ---------------------------------------------------------------------------
+
+class TestSocketOwnership:
+    """A UDP port carries one node's sessions and nobody else's.
+
+    SO_REUSEADDR on a UDP socket lets a second socket bind the same port, and
+    the kernel then chooses which of them a datagram reaches. A second node on
+    the host, or a second attempt in the same process, would take sessions
+    meant for this one; on a listening socket that is a dial answered by the
+    wrong certificate, which the caller cannot tell from an impostor."""
+
+    @pytest.mark.parametrize("bind", [bind_datagram_socket, punch.bind_socket],
+                             ids=["listener", "punch"])
+    def test_a_bound_socket_keeps_its_port_to_itself(self, bind):
+        sock = bind("127.0.0.1", 0)
+        other = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        other.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            with pytest.raises(OSError):
+                other.bind(("127.0.0.1", sock.getsockname()[1]))
+        finally:
+            other.close()
+            sock.close()
 
 
 # ---------------------------------------------------------------------------

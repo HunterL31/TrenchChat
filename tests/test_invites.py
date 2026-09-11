@@ -693,3 +693,38 @@ class TestEqualVersionTiebreak:
         assert b"channels" in stored and b"joined_at" in stored
 
         assert alice.invite_mgr._validated_signer(stored, s) == alice.identity.hash
+
+
+class TestAnchoring:
+    """A document is validated against state stored before it arrived. A
+    receiver holding nothing about the channel has nothing to check the signer
+    against, so the document is held for the user to confirm rather than
+    applied, and which of the two happens must never turn on a race: over a
+    direct session a document lands in a millisecond."""
+
+    def test_a_document_for_an_unknown_channel_is_held(self, peer_factory):
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+        ch = alice.channel_mgr.create_channel("private", "Invite only", "invite")
+
+        alice.invite_mgr.publish_member_list(ch, add_members=[bob.identity.hash])
+
+        assert wait_for(lambda: bool(bob.invite_mgr.list_pending_memberships()),
+                        timeout=5), "bob never held the document for confirmation"
+        assert bob.storage.get_member_list_version(ch) is None, \
+            "an unanchored document was applied"
+        assert not bob.storage.is_subscribed(ch)
+
+    def test_a_document_for_a_channel_on_file_is_applied(self, peer_factory):
+        alice = peer_factory("alice")
+        bob = peer_factory("bob")
+        ch = alice.channel_mgr.create_channel("private", "Invite only", "invite")
+        bob.storage.upsert_channel(ch, "private", "Invite only",
+                                   alice.identity.hash_hex, "invite", time.time())
+
+        alice.invite_mgr.publish_member_list(ch, add_members=[bob.identity.hash])
+
+        assert wait_for(
+            lambda: bob.storage.get_member_list_version(ch) is not None,
+            timeout=5), "the stored creator did not anchor the document"
+        assert not bob.invite_mgr.list_pending_memberships()

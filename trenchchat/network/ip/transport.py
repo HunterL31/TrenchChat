@@ -547,6 +547,9 @@ class IPTransport(Transport):
         """Queue one inbound message for this session, in arrival order."""
         queue = self._queues.get(id(peer_session))
         if queue is None:
+            RNS.log(f"TrenchChat [ip]: dropped a message from "
+                    f"{peer_session.peer_hex[:12]}…: its session has no inbound "
+                    f"queue", RNS.LOG_WARNING)
             return
         if not queue.submit(self._accept_message, peer_session, envelope,
                             signature):

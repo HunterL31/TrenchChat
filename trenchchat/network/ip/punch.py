@@ -82,12 +82,12 @@ def bind_socket(host: str = "0.0.0.0", port: int = 0) -> socket.socket:
     """One UDP socket for one attempt, bound where the caller asked.
 
     Its own socket every time: the session runs on it afterwards, and a socket
-    another transport owns cannot be handed over.
+    another transport owns cannot be handed over. The port is claimed
+    exclusively, for the reason bind_datagram_socket gives.
     """
     info = socket.getaddrinfo(host, port, type=socket.SOCK_DGRAM)[0]
     family, _type, _proto, _canonical, address = info
     sock = socket.socket(family, socket.SOCK_DGRAM)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.bind(address)
     return sock
 

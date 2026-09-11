@@ -136,13 +136,17 @@ def _setup_channel_with_member(peer_factory, *, member_perms=None):
         perms[ROLE_MEMBER] = list(member_perms)
 
     ch_hash = alice.channel_mgr.create_channel("test-ch", "", permissions=perms)
+
+    # Mirror the channel and membership on Bob's side so his receiver can
+    # apply the same permission checks. The channel row comes before the
+    # publish: a document for a channel bob has no record of is held for
+    # confirmation rather than applied (tests/test_invites.py::TestAnchoring),
+    # and on a direct session it arrives in a millisecond.
+    bob.storage.upsert_channel(ch_hash, "test-ch", "", alice.identity.hash_hex,
+                               perms, time.time())
     alice.invite_mgr.publish_member_list(ch_hash, add_members=[bob.identity.hash])
     assert wait_for_member(alice.storage, ch_hash, bob.identity.hash_hex)
 
-    # Mirror the channel and membership on Bob's side so his receiver can
-    # apply the same permission checks.
-    bob.storage.upsert_channel(ch_hash, "test-ch", "", alice.identity.hash_hex,
-                               perms, time.time())
     bob.storage.subscribe(ch_hash)
     bob.storage.upsert_member(ch_hash, bob.identity.hash_hex, "Bob", role=ROLE_MEMBER)
     bob.storage.upsert_member(ch_hash, alice.identity.hash_hex, "Alice", role=ROLE_OWNER)

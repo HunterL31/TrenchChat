@@ -112,12 +112,16 @@ def channel(peer_factory):
     member = peer_factory("bob")
     perms = dict(PRESET_PRIVATE)
     ch_hash = owner.channel_mgr.create_channel("files-ch", "", permissions=perms)
+    # The member's own record of the channel comes first: a document for a
+    # channel it has no record of is held for confirmation rather than applied
+    # (tests/test_invites.py::TestAnchoring), and on a direct session it
+    # arrives in a millisecond.
+    member.storage.upsert_channel(ch_hash, "files-ch", "",
+                                  owner.identity.hash_hex, perms, time.time())
     owner.invite_mgr.publish_member_list(ch_hash,
                                          add_members=[member.identity.hash])
     assert wait_for_member(owner.storage, ch_hash, member.identity.hash_hex)
 
-    member.storage.upsert_channel(ch_hash, "files-ch", "",
-                                  owner.identity.hash_hex, perms, time.time())
     # The document the owner published lands on the member's own thread and
     # rewrites the channel's permissions when it does. Everything below has to
     # come after it, or a test that narrows the member's permissions has them
