@@ -311,7 +311,13 @@ def test_offline_transition_ignores_non_friends(mgr, storage, presence_mgr):
 # friends list that leaves the machine.
 # ---------------------------------------------------------------------------
 
+import threading  # noqa: E402
+
+from tests.conftest import deliver  # noqa: E402
 from tests.helpers import wait_for  # noqa: E402
+from trenchchat.core.protocol import (  # noqa: E402
+    F_DISPLAY_NAME, F_MSG_TYPE, MT_FRIEND_REQUEST,
+)
 from trenchchat.core.storage import (  # noqa: E402
     FRIEND_ACCEPTED, FRIEND_PENDING_IN, FRIEND_PENDING_OUT,
 )
@@ -347,6 +353,51 @@ def test_crossed_requests_settle_as_a_friendship(peer_factory):
 
     assert wait_for(lambda: a.friends_mgr.is_friend(b.identity.hash_hex))
     assert wait_for(lambda: b.friends_mgr.is_friend(a.identity.hash_hex))
+
+
+def test_a_crossed_request_landing_mid_transition_still_settles(peer_factory):
+    """The interleaving that made the crossed-request test flaky, forced.
+
+    The inbound handler is released the instant the caller has read the state
+    it is about to write over. With every transition atomic across its read and
+    its write, the handler waits for the caller's write and reads pending_out;
+    without it, the handler writes pending_in, the caller writes over it, and
+    the peer's accept is refused as unsolicited.
+    """
+    a = peer_factory("alice")
+    b = peer_factory("bob")
+    b_hex = b.identity.hash_hex
+
+    read_the_state = threading.Event()
+    handler_done = threading.Event()
+    stored_state = a.storage.get_friend_state
+
+    def watched(peer_hex: str):
+        state = stored_state(peer_hex)
+        if peer_hex == b_hex and not read_the_state.is_set():
+            read_the_state.set()
+            handler_done.wait(0.25)
+        return state
+
+    a.storage.get_friend_state = watched
+
+    def _deliver_crossed_request():
+        read_the_state.wait(2.0)
+        deliver(b, a, {F_MSG_TYPE: MT_FRIEND_REQUEST,
+                       F_DISPLAY_NAME: "Bob"})
+        handler_done.set()
+
+    thread = threading.Thread(target=_deliver_crossed_request, daemon=True)
+    thread.start()
+    try:
+        assert a.friends_mgr.send_friend_request(b_hex) is True
+    finally:
+        a.storage.get_friend_state = stored_state
+        thread.join(timeout=5.0)
+
+    assert a.friends_mgr.is_friend(b_hex), \
+        "a crossed request that landed mid-transition left us still asking"
+    assert state_of(a, b) == FRIEND_ACCEPTED
 
 
 def test_a_repeat_request_from_an_existing_friend_is_answered_quietly(peer_factory):

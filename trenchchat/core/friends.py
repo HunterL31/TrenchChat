@@ -15,6 +15,13 @@ on both the outbound and the inbound side. Because each side enforces it
 independently, a DM only flows when both peers hold the other as accepted --
 one-sided trust delivers nothing.
 
+Every transition reads the current state and writes the next one under the
+same lock that gate reads, because the two run on different threads: a user
+asking a peer to be friends runs on the caller's, that peer's crossed request
+arrives on the network's. Read and write apart, the handler's write can land
+after the caller's, leaving us asking someone who has already agreed and
+refusing their accept as unsolicited.
+
 add_friend() stays what it always was: an immediate local add, for a hash the
 user obtained out of band. send_friend_request() is the wire path, and reaches
 the same state with the peer's agreement rather than without it.
@@ -84,7 +91,10 @@ class FriendsManager:
         self._presence_mgr = presence_mgr
         self._identity = identity
         self._router = router
-        self._lock = threading.Lock()
+        # One lock over every friend-state transition and over the accepted
+        # set the direct-message gate reads. Reentrant because a transition
+        # that settles as an acceptance runs the acceptance inside it.
+        self._lock = threading.RLock()
         self._friend_hashes: set[str] = storage.get_friend_hashes()
         self._last_write: dict[str, float] = {}
         # Unthrottled, so the offline flush records the true last sighting.
@@ -113,11 +123,12 @@ class FriendsManager:
         """
         if not self._is_valid_hash(identity_hash_hex) or identity_hash_hex == self._self_hex:
             return False
-        was_pending_in = (
-            self._storage.get_friend_state(identity_hash_hex) == FRIEND_PENDING_IN
-        )
-        self._storage.upsert_friend(identity_hash_hex, nickname, note, FRIEND_ACCEPTED)
         with self._lock:
+            was_pending_in = (
+                self._storage.get_friend_state(identity_hash_hex) == FRIEND_PENDING_IN
+            )
+            self._storage.upsert_friend(identity_hash_hex, nickname, note,
+                                        FRIEND_ACCEPTED)
             self._friend_hashes.add(identity_hash_hex)
         if was_pending_in and self._asked_us(identity_hash_hex):
             self._send(identity_hash_hex, MT_FRIEND_ACCEPT)
@@ -147,11 +158,11 @@ class FriendsManager:
         Local only: the peer is never told. They find out when their messages
         stop being accepted, which tells them less than a notice would.
         """
-        if self._storage.get_friend(identity_hash_hex) is None:
-            return False
-        self._storage.delete_friend(identity_hash_hex)
-        self._storage.clear_message_requests(identity_hash_hex)
         with self._lock:
+            if self._storage.get_friend(identity_hash_hex) is None:
+                return False
+            self._storage.delete_friend(identity_hash_hex)
+            self._storage.clear_message_requests(identity_hash_hex)
             self._friend_hashes.discard(identity_hash_hex)
             self._last_write.pop(identity_hash_hex, None)
             self._last_seen.pop(identity_hash_hex, None)
@@ -245,14 +256,15 @@ class FriendsManager:
         if not self._is_valid_hash(identity_hash_hex) or identity_hash_hex == self._self_hex:
             return False
 
-        state = self._storage.get_friend_state(identity_hash_hex)
-        if state == FRIEND_ACCEPTED:
-            return True
-        if state == FRIEND_PENDING_IN:
-            return self.accept_friend_request(identity_hash_hex, nickname=nickname)
-
-        self._storage.upsert_friend(identity_hash_hex, nickname, note,
-                                    FRIEND_PENDING_OUT)
+        with self._lock:
+            state = self._storage.get_friend_state(identity_hash_hex)
+            if state == FRIEND_ACCEPTED:
+                return True
+            if state == FRIEND_PENDING_IN:
+                return self.accept_friend_request(identity_hash_hex,
+                                                  nickname=nickname)
+            self._storage.upsert_friend(identity_hash_hex, nickname, note,
+                                        FRIEND_PENDING_OUT)
         self._send(identity_hash_hex, MT_FRIEND_REQUEST, note=note)
         self._fire_callbacks(identity_hash_hex)
         return True
@@ -260,16 +272,16 @@ class FriendsManager:
     def accept_friend_request(self, identity_hash_hex: str,
                               nickname: str = "") -> bool:
         """Accept a request we received. False if there is no request from them."""
-        if self._storage.get_friend_state(identity_hash_hex) != FRIEND_PENDING_IN:
-            return False
-        existing = self._storage.get_friend(identity_hash_hex) or {}
-        self._storage.upsert_friend(
-            identity_hash_hex,
-            nickname or existing.get("nickname", ""),
-            existing.get("note", ""),
-            FRIEND_ACCEPTED,
-        )
         with self._lock:
+            if self._storage.get_friend_state(identity_hash_hex) != FRIEND_PENDING_IN:
+                return False
+            existing = self._storage.get_friend(identity_hash_hex) or {}
+            self._storage.upsert_friend(
+                identity_hash_hex,
+                nickname or existing.get("nickname", ""),
+                existing.get("note", ""),
+                FRIEND_ACCEPTED,
+            )
             self._friend_hashes.add(identity_hash_hex)
         if self._asked_us(identity_hash_hex):
             self._send(identity_hash_hex, MT_FRIEND_ACCEPT)
@@ -302,17 +314,18 @@ class FriendsManager:
         if not self._is_valid_hash(identity_hash_hex) \
                 or identity_hash_hex == self._self_hex:
             return False
-        state = self._storage.get_friend_state(identity_hash_hex)
-        if state == FRIEND_ACCEPTED:
-            return False
-
-        self._storage.prune_message_requests(time.time() - MESSAGE_REQUEST_TTL_SECS)
-        # A peer we have asked keeps its pending_out state: their words are
-        # held for the user to read, but our request is still ours to track.
-        if state not in (FRIEND_PENDING_IN, FRIEND_PENDING_OUT):
-            self._evict_oldest_pending()
-            self._storage.upsert_friend(identity_hash_hex, "", "", FRIEND_PENDING_IN)
-
+        with self._lock:
+            state = self._storage.get_friend_state(identity_hash_hex)
+            if state == FRIEND_ACCEPTED:
+                return False
+            self._storage.prune_message_requests(
+                time.time() - MESSAGE_REQUEST_TTL_SECS)
+            # A peer we have asked keeps its pending_out state: their words are
+            # held for the user to read, but our request is still ours to track.
+            if state not in (FRIEND_PENDING_IN, FRIEND_PENDING_OUT):
+                self._evict_oldest_pending()
+                self._storage.upsert_friend(identity_hash_hex, "", "",
+                                            FRIEND_PENDING_IN)
         self._storage.add_message_request(
             identity_hash_hex, (body or "")[:MAX_REQUEST_BODY_CHARS],
             from_trenchchat,
@@ -369,11 +382,12 @@ class FriendsManager:
 
     def decline_friend_request(self, identity_hash_hex: str) -> bool:
         """Refuse a request we received. False if there is no request from them."""
-        if self._storage.get_friend_state(identity_hash_hex) != FRIEND_PENDING_IN:
-            return False
-        held = self._storage.get_message_requests(identity_hash_hex)
-        self._storage.delete_friend(identity_hash_hex)
-        self._storage.clear_message_requests(identity_hash_hex)
+        with self._lock:
+            if self._storage.get_friend_state(identity_hash_hex) != FRIEND_PENDING_IN:
+                return False
+            held = self._storage.get_message_requests(identity_hash_hex)
+            self._storage.delete_friend(identity_hash_hex)
+            self._storage.clear_message_requests(identity_hash_hex)
         # A peer that only ever sent words has no handshake to decline, and
         # telling it we refused would be the one thing it hears from us.
         if not held or any(h["from_trenchchat"] for h in held):
@@ -383,9 +397,10 @@ class FriendsManager:
 
     def cancel_friend_request(self, identity_hash_hex: str) -> bool:
         """Withdraw a request we sent. Local only, like remove_friend."""
-        if self._storage.get_friend_state(identity_hash_hex) != FRIEND_PENDING_OUT:
-            return False
-        self._storage.delete_friend(identity_hash_hex)
+        with self._lock:
+            if self._storage.get_friend_state(identity_hash_hex) != FRIEND_PENDING_OUT:
+                return False
+            self._storage.delete_friend(identity_hash_hex)
         self._fire_callbacks(identity_hash_hex)
         return True
 
@@ -492,7 +507,20 @@ class FriendsManager:
             self._handle_decline(sender_hex)
 
     def _handle_request(self, sender_hex: str, fields: dict) -> None:
-        state = self._storage.get_friend_state(sender_hex)
+        note = self._text(fields.get(F_FRIEND_NOTE))[:MAX_FRIEND_NOTE_CHARS]
+        display_name = self._text(fields.get(F_DISPLAY_NAME))
+        with self._lock:
+            state = self._storage.get_friend_state(sender_hex)
+            if state == FRIEND_PENDING_IN:
+                return
+            if state == FRIEND_PENDING_OUT:
+                # Crossed requests: both sides asked, so both sides agreed.
+                self._storage.set_friend_state(sender_hex, FRIEND_ACCEPTED)
+                self._friend_hashes.add(sender_hex)
+            elif state != FRIEND_ACCEPTED:
+                self._evict_oldest_pending()
+                self._storage.upsert_friend(sender_hex, "", note,
+                                            FRIEND_PENDING_IN)
 
         if state == FRIEND_ACCEPTED:
             # They asked again -- most likely they lost their contacts. Answer
@@ -501,10 +529,6 @@ class FriendsManager:
             return
 
         if state == FRIEND_PENDING_OUT:
-            # Crossed requests: both sides asked, so both sides have agreed.
-            self._storage.set_friend_state(sender_hex, FRIEND_ACCEPTED)
-            with self._lock:
-                self._friend_hashes.add(sender_hex)
             self._send(sender_hex, MT_FRIEND_ACCEPT)
             self._fire_callbacks(sender_hex)
             RNS.log(
@@ -514,13 +538,6 @@ class FriendsManager:
             )
             return
 
-        if state == FRIEND_PENDING_IN:
-            return
-
-        self._evict_oldest_pending()
-        note = self._text(fields.get(F_FRIEND_NOTE))[:MAX_FRIEND_NOTE_CHARS]
-        display_name = self._text(fields.get(F_DISPLAY_NAME))
-        self._storage.upsert_friend(sender_hex, "", note, FRIEND_PENDING_IN)
         RNS.log(f"TrenchChat [friends]: friend request from {sender_hex[:12]}…",
                 RNS.LOG_NOTICE)
         self._fire_callbacks(sender_hex)
@@ -530,24 +547,25 @@ class FriendsManager:
         # Only an answer to a request we actually sent. An accept from an
         # identity we never asked must never create a friendship, or the gate
         # would be one message away from anyone.
-        if self._storage.get_friend_state(sender_hex) != FRIEND_PENDING_OUT:
-            RNS.log(
-                f"TrenchChat [friends]: ignoring unsolicited accept from "
-                f"{sender_hex[:12]}…",
-                RNS.LOG_WARNING,
-            )
-            return
-        self._storage.set_friend_state(sender_hex, FRIEND_ACCEPTED)
         with self._lock:
+            if self._storage.get_friend_state(sender_hex) != FRIEND_PENDING_OUT:
+                RNS.log(
+                    f"TrenchChat [friends]: ignoring unsolicited accept from "
+                    f"{sender_hex[:12]}…",
+                    RNS.LOG_WARNING,
+                )
+                return
+            self._storage.set_friend_state(sender_hex, FRIEND_ACCEPTED)
             self._friend_hashes.add(sender_hex)
         RNS.log(f"TrenchChat [friends]: {sender_hex[:12]}… accepted our request",
                 RNS.LOG_NOTICE)
         self._fire_callbacks(sender_hex)
 
     def _handle_decline(self, sender_hex: str) -> None:
-        if self._storage.get_friend_state(sender_hex) != FRIEND_PENDING_OUT:
-            return
-        self._storage.delete_friend(sender_hex)
+        with self._lock:
+            if self._storage.get_friend_state(sender_hex) != FRIEND_PENDING_OUT:
+                return
+            self._storage.delete_friend(sender_hex)
         self._fire_callbacks(sender_hex)
 
     def _evict_oldest_pending(self) -> None:
