@@ -17,34 +17,54 @@ Future<String?> showRenameBookmarkDialog(
   AppState state, {
   required String current,
 }) {
-  final controller = TextEditingController(text: current);
   return showTcDialog<String>(
     context: context,
     builder: (context) => SectionTheme(
       spec: state.themeSpec,
       section: TCSection.dialogs,
-      child: Builder(
-        builder: (context) => TcDialogShell(
-          title: 'Rename Bookmark',
-          actions: [
-            TcGhostButton(
-                label: 'CANCEL', onPressed: () => Navigator.pop(context)),
-            TcPrimaryButton(
-              label: 'SAVE',
-              onPressed: () => Navigator.pop(context, controller.text),
-            ),
-          ],
-          children: [
-            TcTextField(
-              label: 'Name',
-              controller: controller,
-              hintText: 'what to call this page',
-              autofocus: true,
-              onSubmitted: (value) => Navigator.pop(context, value),
-            ),
-          ],
-        ),
-      ),
+      child: _RenameBookmarkContent(current: current),
     ),
   );
+}
+
+class _RenameBookmarkContent extends StatefulWidget {
+  const _RenameBookmarkContent({required this.current});
+
+  final String current;
+
+  @override
+  State<_RenameBookmarkContent> createState() => _RenameBookmarkContentState();
+}
+
+class _RenameBookmarkContentState extends State<_RenameBookmarkContent> {
+  late final _controller = TextEditingController(text: widget.current);
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return TcDialogShell(
+      title: 'Rename Bookmark',
+      actions: [
+        TcGhostButton(label: 'CANCEL', onPressed: () => Navigator.pop(context)),
+        TcPrimaryButton(
+          label: 'SAVE',
+          onPressed: () => Navigator.pop(context, _controller.text),
+        ),
+      ],
+      children: [
+        TcTextField(
+          label: 'Name',
+          controller: _controller,
+          hintText: 'what to call this page',
+          autofocus: true,
+          onSubmitted: (value) => Navigator.pop(context, value),
+        ),
+      ],
+    );
+  }
 }

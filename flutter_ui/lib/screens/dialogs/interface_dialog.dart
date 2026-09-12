@@ -249,7 +249,9 @@ class _InterfaceDialogContentState extends State<_InterfaceDialogContent> {
       actions: [
         TcGhostButton(label: 'CANCEL', onPressed: () => Navigator.pop(context)),
         TcPrimaryButton(
-          label: _busy ? 'SAVING…' : 'SAVE',
+          label: 'SAVE',
+          busyLabel: 'SAVING…',
+          busy: _busy,
           onPressed: _busy ? null : _submit,
         ),
       ],
@@ -258,6 +260,7 @@ class _InterfaceDialogContentState extends State<_InterfaceDialogContent> {
           constraints: const BoxConstraints(maxHeight: 420),
           child: ListView(
             shrinkWrap: true,
+            padding: EdgeInsets.only(right: scrollbarInset(context)),
             children: [
               TcTextField(
                 label: 'Interface name',
@@ -269,7 +272,7 @@ class _InterfaceDialogContentState extends State<_InterfaceDialogContent> {
                 readOnly: _editing,
               ),
               const SizedBox(height: 10),
-              _fieldLabel('TYPE'),
+              TcFieldLabel('Type'),
               const SizedBox(height: 6),
               TcChoiceRow(
                 options: {for (final t in kEditableInterfaceTypes) t: t},
@@ -287,12 +290,12 @@ class _InterfaceDialogContentState extends State<_InterfaceDialogContent> {
                 label: 'Enabled',
                 onChanged: (v) => setState(() => _enabled = v),
               ),
-              const SizedBox(height: 12),
-              _fieldLabel('TYPE-SPECIFIC SETTINGS'),
+              const SizedBox(height: TCSpace.space4),
+              TcFieldLabel('Type-specific settings'),
               const SizedBox(height: 8),
               ..._buildFields(_typeFields[_type] ?? []),
-              const SizedBox(height: 12),
-              _fieldLabel('COMMON SETTINGS'),
+              const SizedBox(height: TCSpace.space4),
+              TcFieldLabel('Common settings'),
               const SizedBox(height: 8),
               ..._buildFields(_commonFields),
             ],
@@ -303,37 +306,39 @@ class _InterfaceDialogContentState extends State<_InterfaceDialogContent> {
   }
 
   List<Widget> _buildFields(List<_FieldSpec> specs) => [
-        for (final spec in specs) ...[
-          switch (spec.kind) {
-            _FieldKind.flag => TcCheckbox(
-                value: _flagValues[spec.key] ?? false,
-                label: spec.label,
-                onChanged: (v) => setState(() => _flagValues[spec.key] = v),
+        for (var i = 0; i < specs.length; i++) ...[
+          if (i > 0) const SizedBox(height: 10),
+          switch (specs[i].kind) {
+            _FieldKind.flag => _labelled(
+                specs[i].label,
+                TcCheckbox(
+                  value: _flagValues[specs[i].key] ?? false,
+                  onChanged: (v) => setState(() => _flagValues[specs[i].key] = v),
+                ),
               ),
-            _FieldKind.choice => Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  _fieldLabel(spec.label.toUpperCase()),
-                  const SizedBox(height: 6),
-                  TcChoiceRow(
-                    options: {for (final c in spec.choices) c: c.toUpperCase()},
-                    value: _choiceValues[spec.key] ?? spec.defaultValue,
-                    onSelected: (v) => setState(() => _choiceValues[spec.key] = v),
-                  ),
-                ],
+            _FieldKind.choice => _labelled(
+                specs[i].label,
+                TcChoiceRow(
+                  options: {for (final c in specs[i].choices) c: c.toUpperCase()},
+                  value: _choiceValues[specs[i].key] ?? specs[i].defaultValue,
+                  onSelected: (v) => setState(() => _choiceValues[specs[i].key] = v),
+                ),
               ),
-            _ => TcTextField(label: spec.label, controller: _textValues[spec.key]!),
+            _ => TcTextField(
+                label: specs[i].label, controller: _textValues[specs[i].key]!),
           },
-          const SizedBox(height: 10),
         ],
       ];
 
-  Widget _fieldLabel(String label) => Text(
-        label,
-        style: TextStyle(
-          fontSize: TCType.textCaption,
-          color: SectionTheme.of(context).textSecondary,
-          letterSpacing: TCType.letterSpacingFor(TCType.textCaption, TCType.trackingWide),
-        ),
+  /// A control under the same label a [TcTextField] wears, so a flag and a
+  /// choice sit in the same column shape the text fields do.
+  Widget _labelled(String label, Widget child) => Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          TcFieldLabel(label),
+          const SizedBox(height: 6),
+          child,
+        ],
       );
+
 }

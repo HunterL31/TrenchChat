@@ -174,14 +174,15 @@ class _SettingsDialogContentState extends State<_SettingsDialogContent> {
             ),
           ),
         const SizedBox(height: 8),
-        Row(
+        Wrap(
+          spacing: TCSpace.space2,
+          runSpacing: TCSpace.space2,
           children: [
             if (propagation.pinned.isNotEmpty)
               TcGhostButton(
                 label: 'CHOOSE AUTOMATICALLY',
                 onPressed: () => widget.state.pinPropagationNode(''),
               ),
-            if (propagation.pinned.isNotEmpty) const SizedBox(width: 8),
             TcGhostButton(
               label: 'COLLECT NOW',
               onPressed: selected == null
@@ -214,26 +215,15 @@ class _SettingsDialogContentState extends State<_SettingsDialogContent> {
       actions: [
         TcGhostButton(label: 'CANCEL', onPressed: () => Navigator.pop(context)),
         TcPrimaryButton(
-          label: _busy ? 'SAVING…' : 'SAVE',
+          label: 'SAVE',
+          busyLabel: 'SAVING…',
+          busy: _busy,
           onPressed: _busy || _loading ? null : _submit,
         ),
       ],
       children: _loading
           ? [
-              Padding(
-                padding: const EdgeInsets.symmetric(vertical: 24),
-                child: Center(
-                  child: Text(
-                    'LOADING…',
-                    style: TextStyle(
-                      fontSize: TCType.textCaption,
-                      color: tc.textTertiary,
-                      letterSpacing:
-                          TCType.letterSpacingFor(TCType.textCaption, TCType.trackingWide),
-                    ),
-                  ),
-                ),
-              ),
+              tcDialogPlaceholder(context, 'LOADING…'),
             ]
           : [
               Container(
@@ -323,15 +313,15 @@ class _SettingsDialogContentState extends State<_SettingsDialogContent> {
                           TcGhostButton(label: 'SET PIN…', onPressed: _onSetPin)
                         else ...[
                           TcGhostButton(label: 'CHANGE PIN…', onPressed: _onChangePin),
-                          const SizedBox(width: 6),
+                          const SizedBox(width: TCSpace.space2),
                           TcGhostButton(label: 'LOCK NOW', onPressed: _onLockNow),
                         ],
                       ],
                     ),
-                    const SizedBox(height: 6),
+                    const SizedBox(height: TCSpace.space2),
                     Text(
-                      'The lock screen and PIN dialogs are UI-only in this spike '
-                      '— the lockbox is not reachable over the API yet.',
+                      'The lock screen and PIN dialogs are UI-only in this spike; '
+                      'the lockbox is not reachable over the API yet.',
                       style: TextStyle(
                           fontSize: TCType.textMicro, color: tc.textTertiary),
                     ),
@@ -427,7 +417,7 @@ class _SettingsDialogContentState extends State<_SettingsDialogContent> {
   }
 
   Future<void> _onSetPin() async {
-    final pin = await showSetPinDialog(context);
+    final pin = await showSetPinDialog(context, spec: widget.state.themeSpec);
     if (pin != null && mounted) setState(() => _sessionPin = pin);
   }
 
@@ -435,12 +425,14 @@ class _SettingsDialogContentState extends State<_SettingsDialogContent> {
     final change = await showChangePinDialog(
       context,
       verifyPin: (pin) => pin == _sessionPin,
+      spec: widget.state.themeSpec,
     );
     if (change != null && mounted) setState(() => _sessionPin = change.newPin);
   }
 
   Future<void> _onLockNow() async {
-    await showUnlockDialog(context, verifyPin: (pin) => pin == _sessionPin);
+    await showUnlockDialog(context,
+        verifyPin: (pin) => pin == _sessionPin, spec: widget.state.themeSpec);
   }
 
   static const String _systemDefaultLabel = 'System default';

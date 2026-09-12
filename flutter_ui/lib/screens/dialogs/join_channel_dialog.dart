@@ -10,10 +10,12 @@ import 'package:flutter/material.dart';
 import '../../api/models/server.dart';
 import '../../app_state.dart';
 import '../../theme/section_theme.dart';
+import '../../theme/shape.dart';
 import '../../theme/theme_spec.dart';
 import '../../theme/tokens.dart';
 import '../../widgets/tc_button.dart';
 import '../../widgets/tc_dialog.dart';
+import '../../widgets/tc_icon.dart';
 
 Future<void> showJoinChannelDialog(BuildContext context, AppState state) {
   return showTcDialog<void>(
@@ -85,7 +87,9 @@ class _JoinChannelDialogContentState extends State<_JoinChannelDialogContent> {
           actions: [
             TcGhostButton(label: 'CANCEL', onPressed: () => Navigator.pop(context)),
             TcPrimaryButton(
-              label: _busy ? 'JOINING…' : 'JOIN',
+              label: 'JOIN',
+              busyLabel: 'JOINING…',
+              busy: _busy,
               onPressed: (selectedHash == null || _busy) ? null : _submit,
             ),
           ],
@@ -97,7 +101,11 @@ class _JoinChannelDialogContentState extends State<_JoinChannelDialogContent> {
             const SizedBox(height: 12),
             Container(
               height: 220,
-              decoration: BoxDecoration(border: Border.all(color: tc.borderDefault)),
+              clipBehavior: Clip.antiAlias,
+              decoration: BoxDecoration(
+                border: Border.all(color: tc.borderDefault),
+                borderRadius: tcCorners(context, scale: 0.5),
+              ),
               child: channels.isEmpty
                   ? Center(
                       child: Text(
@@ -106,7 +114,7 @@ class _JoinChannelDialogContentState extends State<_JoinChannelDialogContent> {
                       ),
                     )
                   : ListView(
-                      padding: EdgeInsets.zero,
+                      padding: EdgeInsets.only(right: scrollbarInset(context)),
                       children: [
                         for (final c in channels)
                           _DiscoveredRow(
@@ -117,11 +125,12 @@ class _JoinChannelDialogContentState extends State<_JoinChannelDialogContent> {
                       ],
                     ),
             ),
-            const SizedBox(height: 10),
+            const SizedBox(height: TCSpace.space3),
             Align(
               alignment: Alignment.centerLeft,
               child: TcGhostButton(
-                label: '↻ REFRESH',
+                icon: TcIcons.sync,
+                label: 'REFRESH',
                 onPressed: () => widget.state.refreshDiscoveredChannels(),
               ),
             ),
@@ -150,11 +159,17 @@ class _DiscoveredRow extends StatelessWidget {
           padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
           color: selected ? tc.bgSelected : Colors.transparent,
           child: Row(
+            crossAxisAlignment: CrossAxisAlignment.baseline,
+            textBaseline: TextBaseline.alphabetic,
             children: [
               Text('#',
-                  style: TextStyle(color: selected ? tc.accentPrimary : tc.textTertiary)),
+                  style: TextStyle(
+                    fontSize: TCType.textBodySm,
+                    color: selected ? tc.accentPrimary : tc.textTertiary,
+                  )),
               const SizedBox(width: 4),
               Expanded(
+                flex: 2,
                 child: Text(
                   channel.name,
                   overflow: TextOverflow.ellipsis,
@@ -164,8 +179,9 @@ class _DiscoveredRow extends StatelessWidget {
                   ),
                 ),
               ),
-              if (channel.description.isNotEmpty)
-                Flexible(
+              if (channel.description.isNotEmpty) ...[
+                const SizedBox(width: TCSpace.space2),
+                Expanded(
                   child: Text(
                     channel.description,
                     overflow: TextOverflow.ellipsis,
@@ -173,6 +189,7 @@ class _DiscoveredRow extends StatelessWidget {
                     style: TextStyle(fontSize: TCType.textCaption, color: tc.textTertiary),
                   ),
                 ),
+              ],
             ],
           ),
         ),
