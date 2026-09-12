@@ -113,9 +113,12 @@ asyncio via `EventBus`.
   holds the switch, the listen port and the per-peer diagnostics.
 - Tests: `flutter analyze && flutter test` after any `flutter_ui/` change. Widget tests inject
   `AppState(baseUrl, httpClient: backend.client())` with `test/fake_backend.dart` (MockClient);
-  flutter_test stubs real HTTP. Golden baselines are Windows-rendered: 4 goldens permanently fail
-  on Linux from ~0.1% anti-aliasing drift (primitives ×3 + regions channel_header); leave them
-  unless their content genuinely changed, and regenerate goldens on Windows when possible.
+  flutter_test stubs real HTTP. Golden baselines are Windows-rendered: a fixed set of goldens
+  fails on Linux from rendering drift (ten on the Linux build used in September 2026: the two
+  main-window composites, primitives ×3, regions channel_column, and the settings, invite, iface
+  and map windows). Compare a run against the previous commit's run rather than against zero,
+  leave them unless their content genuinely changed, and regenerate goldens on Windows when
+  possible.
 
 ### Direct messages: mutual friends only, propagation instead of sync
 
