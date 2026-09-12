@@ -9,6 +9,7 @@ test is skipped.
 
 import os
 import stat
+import subprocess
 from pathlib import Path
 from unittest.mock import patch
 
@@ -16,7 +17,7 @@ import pytest
 import RNS
 
 from trenchchat.config import Config
-from trenchchat.core.fileutils import OWNER_RW_MODE, secure_file
+from trenchchat.core.fileutils import NO_CONSOLE_WINDOW, OWNER_RW_MODE, secure_file
 from trenchchat.core.identity import Identity
 from trenchchat.core.lockbox import WrongPinError, decrypt_bytes, encrypt_bytes
 
@@ -83,6 +84,22 @@ class TestSecureIdentityFile:
         with patch("os.chmod", side_effect=OSError("permission denied")):
             # Must not raise.
             secure_file(f)
+
+    def test_windows_icacls_runs_without_a_console_window(self, tmp_path):
+        """The icacls spawn must not open a console window in the windowed build."""
+        f = tmp_path / "identity"
+        f.write_bytes(b"\x00" * 64)
+        completed = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+
+        with patch("trenchchat.core.fileutils.os.name", "nt"), \
+                patch.dict(os.environ, {"USERNAME": "tester", "USERDOMAIN": "PC"}), \
+                patch("trenchchat.core.fileutils.subprocess.run",
+                      return_value=completed) as run:
+            secure_file(f)
+
+        run.assert_called_once()
+        assert run.call_args.args[0][0] == "icacls"
+        assert run.call_args.kwargs["creationflags"] == NO_CONSOLE_WINDOW
 
 
 # ---------------------------------------------------------------------------

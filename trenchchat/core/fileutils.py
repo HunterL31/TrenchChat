@@ -13,6 +13,10 @@ import RNS
 # Owner read+write only: no group or other access.
 OWNER_RW_MODE = 0o600
 
+# The Windows build has no console of its own, so a console process it spawns
+# opens a window that flashes on screen. Windows-only, hence the getattr.
+NO_CONSOLE_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
 # Longest file name kept after cleaning. A name is a label chosen by whoever
 # sent it, so it is bounded like any other inbound string.
 MAX_FILENAME_CHARS = 128
@@ -58,6 +62,7 @@ def _secure_file_windows(path: Path) -> None:
         capture_output=True,
         text=True,
         check=False,
+        creationflags=NO_CONSOLE_WINDOW,
     )
     if result.returncode != 0:
         RNS.log(
