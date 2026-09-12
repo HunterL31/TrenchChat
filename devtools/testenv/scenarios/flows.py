@@ -184,6 +184,22 @@ def set_link_profile(env, peer, profile: str, **overrides) -> str:
     return status["link_summary"]
 
 
+def mesh_only(peers) -> None:
+    """Switch every peer's direct connections off, and check each one is.
+
+    Two members of an invite-only channel open a direct session between
+    themselves without anyone asking, and the environment's shaper cannot
+    reach it: the shaper sits on the Reticulum link, while a session is QUIC
+    between the two worker processes. A row about the mesh plane measures
+    nothing once the bytes take the other path, and it fails in a way that
+    names neither, so a scenario whose subject is the mesh says so here.
+    """
+    for peer in peers:
+        if peer.set_direct_connections(False):
+            raise ScenarioFailure(
+                f"{peer.tag} still holds direct connections open")
+
+
 def go_offline(peer) -> None:
     peer.go_offline()
     wait_until(lambda: not peer.net_status()["online"], f"{peer.tag}'s link to drop")

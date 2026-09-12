@@ -859,6 +859,18 @@ reason and one more: what it measures is how one shared uplink is divided
 between members who all want the same file, and that is a spread of numbers
 rather than a behaviour.
 
+Every row here switches direct connections off before it starts
+(`flows.mesh_only`). Two members of an invite-only channel open a direct
+session on their own, and the environment's shaper cannot reach it: the shaper
+sits on the Reticulum link, while a session is QUIC between the two worker
+processes. Once the bytes take that path a shaped row measures nothing, and
+that is what happened to files6 and files7 when the direct path landed: the
+whole 2 MB crossed between two 0.2s polls, so "part way through the file"
+either never happened (files6, 3 of 3 timing out at 240s with the download
+already `done`) or happened and was over before the kill landed, leaving a
+finished download that is not rebuilt at startup and so reports nothing at all
+(files7, 1 in 3). The direct plane's own file rows are upgrade6 to upgrade8.
+
 | ID | Peers | Actions | Expected result |
 |---|---|---|---|
 | files1 | A,B,C | A shares a 2 MB file in an invite-only channel; B and C both ask for it | ✅ **6/6 runs, 8-19s**, of which 3.5s is the transfer. Both hold it byte for byte and neither holds a byte before asking. Fails at 0 chunks without either of the first two fixes below, which is how both were found |
@@ -866,8 +878,8 @@ rather than a behaviour.
 | files3 | A,B,C | Same shape with a 20 KB file, asserting C holds nothing before it asks | ✅ **6/6 runs, 156-174s.** Manifest in 1.5-10.1s, `GET` 404 and an empty file store held for 15s, then the download completes. 20 KB is small enough that pushing it would have been cheap, and it is still not pushed |
 | files4 | A,B,D | D, in no channel this file was shared in, drives its own file plane at A's with the real hash; B, who is a member, makes the identical request | ✅ **5/5 runs, 249-258s.** B is served the chunk list in 2.5s; D gets nothing twice over, and A's log names it. Almost all the time is D waiting: a refusal is silence, and silence costs the asker the 120s stall timeout |
 | files5 | A,B,C | files1 at `lora_fast` (SF7, 5.5 kbps), 200 KB, B downloading, testers slowed to a 60s announce cadence | ⚠ Probe, and the answer is still two numbers. At 32 KB chunks with holder choice reading the path table, **four of five runs finished, in 495.6-651.0s** (314.6-413.2 B/s, 6 requests, none lost); the fifth stopped at **4 of 7 chunks** after losing 4. The same five runs before that fix were 506.1-1150.0s with 15 lost requests, and at 64 KB chunks 2 of 5 finished, in 609.9 and 686.7s. See below for what that says about the constants. One run after the bytes moved to disk finished in **246.9s** (829.5 B/s), which is one run and not a new range |
-| files6 | A,B,C | C downloads first; B starts; A's process is killed mid-transfer | ✅ **7/7 runs on the assertion it makes now, 82-206s.** B keeps its 7 verified chunks and takes the other 25 with the sender dead, in 21.7s when it notices the dead link at once and 142s when it spends a stall timeout first. Which holder served it is recorded, not asserted: a 0.5s poll saw C in only one run of three |
-| files7 | A,B | B's **process is killed mid-download** and restarted | ✅ **6/6 runs, 50-54s.** Comes back holding exactly the 7 chunks it had verified, resumes 4.0s later with nobody asking it to, and finishes in 27-35s |
+| files6 | A,B,C | C downloads first; B starts; A's process is killed mid-transfer | ✅ **5/5 runs, 102-106s**, every link shaped at 512 kbps. B holds 6 of 64 chunks when the sender's process dies and takes the other 58 from C in **36.7-37.7s**, never re-fetching one it had verified; C is the holder seen after the kill in all five. Shaping only the sender's link passed the row without measuring it in 3 runs of 5: B was handed to the unshaped second holder and finished there before the kill landed |
+| files7 | A,B | B's **process is killed mid-download** and restarted | ✅ **5/5 runs, 51-53s.** Comes back holding the 4-6 chunks whose rows had committed, resumes **1.5-3.5s** later with nobody asking it to, and finishes in 33.2-34.2s |
 | files8 | A,B | files1 under `lossy` (62.5 kbps, 250±150 ms, **15% loss**), 512 KB | ⚠ Probe. At 32 KB chunks (16 of them), **three of five runs arrived, in 427.8-564.2s**, 8-9 requests and one lost each; the other two held 4 and 1 chunk after losing two. The same five runs before the retry-wait fix arrived **none of five**, and at 64 KB one of four arrived, in 214.2s. This link pays per request, so the chunk that helps files5 costs here. See the entry below |
 | files9 | A-H | A shares a 2 MB file in an invite-only channel and **every other tester posts its fetch inside the same second**, seven askers against a concurrent-serve cap of two | ✅ **5/5 runs at `--testers 8`, 136-309s.** All seven finish byte for byte every time. Four of the five never reached either cap and the whole fan-in is queueing: 3-49s each, 44s of spread, 84 requests and none lost. In the fifth all seven first requests landed together, five were refused by the serve cap, and each of those paid exactly 120.0s of silence for a slot that had freed inside a second; one was refused twice and finished at 242s. **0 of 3 finished in 924s before the rate-limit fix below** |
 | files10 | A,B,C,D | files9 at `lora_fast` (SF7, 5.5 kbps), 200 KB, three askers, testers slowed to a 60s announce cadence | ⚠ Probe. **Four runs of five finished all three members, in 1695-2737s**; in the fifth one member finished at 2557s and the other two were still holding 4 and 5 of 7 chunks at the 3000s ceiling. Each downloader takes 671-2672s against files5's 496-651s for a single one, and the three together move 230-377 B/s against that row's 315-413: one uplink divided three ways, not three uplinks. Nobody is starved, and **66 of the 97 lost requests across the five runs were dials at the two members who were themselves still downloading**, at 120s each. Multi-source is real here and not on broadband: four runs in five had a member served in part by an earlier finisher |
@@ -1208,8 +1220,10 @@ only a public channel is never offered one, however long it waits.
 | upgrade4 | A,B | Kick B while the session is up | ✅ **5/5, 26-30s.** The session is gone **0.50-1.01s** after the kick, which is the sweep's own cadence, B is off A's roster, B loses its side too, and it stays closed across a 15s hold. A records `ineligible` |
 | upgrade5 | A,B,C | A voice session of three, with C's direct connections switched off | ✅ **5/5, 36-41s.** A and B stream over their session while both stream to C over the mesh; every roster names the path of each pair (`direct` for A-B, `reticulum` for everything C is in, `null` for the reader itself), all six pair directions carry **426-428 frames** in an 8s window, and the session encodes at the configured 16 kbps because a mesh pair is in it. Full mesh in **2.5-7.6s** |
 | upgrade6 | A,B,C | A shares 20 MB; B has a session, C has direct connections off | ✅ **5/5, 21-23s.** B pulls it over the session in **1.5-2.0s** and C over the mesh in **3.5-6.5s**, a ratio of **2.0-4.3**. Both hold it byte for byte |
+| upgrade7 | A,B,C | files6 on this path: C downloads 20 MB first, B starts over its session, A's process is killed mid-transfer | ✅ **5/5, 27-99s.** B holds 158-222 of 640 chunks when the sender dies, with both holders `direct`, and takes the other 418-482 from C in **1.0s** without re-fetching one. The replacement costs a second rather than a stall timeout because a killed process's socket closes with it, so the session fails at once |
+| upgrade8 | A,B | files7 on this path: B's **process is killed mid-download** over its session and restarted | ✅ **5/5, 13-22s.** Comes back holding 46-94 of the 640 chunks, resumes **0.5-2.5s** later with nobody asking it to, and finishes in 2.5-3.5s. In 2 runs of 5 it finishes over the mesh: the whole transfer is over before the pair has re-offered a session, which costs it speed and nothing else |
 
-**All six passing 5/5**, measured on one host where every candidate is a
+**All eight passing 5/5**, measured on one host where every candidate is a
 local address. What the family cannot show is address translation, which is
 what the NAT harness below is for.
 

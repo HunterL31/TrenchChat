@@ -14,6 +14,10 @@ The gate is the point of the family. A session discloses this node's addresses,
 so upgrade2 is the row that matters most: a peer who shares only a public
 channel is never offered one, however long it waits and whatever it does.
 
+upgrade6 to upgrade8 are the file plane on this path, because the files family
+switches sessions off to stay on the mesh: what a pull costs here, a holder
+that dies with one in flight, and a downloader killed and restarted.
+
 See docs/testenv-scenarios.md for the matrix these implement.
 """
 
@@ -204,7 +208,9 @@ def u4(env):
 # than copied so a change to how a file is shared or a voice mesh is waited on
 # reaches these rows too.
 from scen_files import (                                          # noqa: E402
-    _await_manifest, _await_done, _payload, _share, _verify, BIG_BODY_TIMEOUT,
+    _await_manifest, _await_done, _await_partial, _chunks,
+    _no_download_because_it_finished, _payload, _share, _status, _verify,
+    BIG_BODY_TIMEOUT,
 )
 from scen_voice import (                                          # noqa: E402
     _await_mesh, _join_voice_all, _rx_quality, MESH_TIMEOUT, TONE_WINDOW_SECS,
@@ -218,6 +224,16 @@ SIZE_20MB = 20 * 1024 * 1024
 # The mesh plane asks sixteen chunks at a time where the direct plane asks two
 # hundred and fifty six, so the mesh side of upgrade6 is the long one.
 MESH_FETCH_TIMEOUT = 1800.0
+
+# Twenty megabytes cross a session in about two seconds, so a poll that wants
+# to see the middle of one has to be quicker than the files family's.
+DIRECT_SAMPLE_SECS = 0.05
+
+# What a holder that stops answering costs here. A killed process's socket
+# is closed by its kernel, so the session fails at once and the next member is
+# asked in about a second; this is the ceiling for the case where it is not
+# noticed and a whole stall timeout is spent on the dead holder first.
+HOLDER_REPLACEMENT_TIMEOUT = 420.0
 
 
 @scenario("upgrade5", "A voice session with a direct pair and a mesh pair in it",
@@ -322,3 +338,142 @@ def u6(env):
     return {"file_bytes": len(data), "direct_secs": secs["B"],
             "mesh_secs": secs["C"],
             "ratio": round(secs["C"] / secs["B"], 1) if secs["B"] else None}
+
+
+@scenario("upgrade7", "A holder that dies mid-transfer is replaced over a "
+                      "session", peers="ABC")
+def u7(env):
+    """files6's claim on this path, where the whole transfer is seconds long.
+
+    Both holders are reached over a session, so what B loses when A dies is
+    the request in flight and the session carrying it, and what it keeps is
+    every chunk already verified. Twenty megabytes rather than files6's two,
+    because two would be over before a poll could see the middle of it.
+    """
+    a, b, c = env.peers("A", "B", "C")
+    channel = invite_only_channel(a, [b, c], "upgrade7-room")
+    await_upgrade(a, b)
+    await_upgrade(a, c)
+    await_upgrade(b, c)
+
+    data = _payload(SIZE_20MB, 7)
+    total = _chunks(len(data))
+    a.set_http_timeout(BIG_BODY_TIMEOUT)
+    message_id, file_hash = _share(a, channel, "upgrade7-20mb.bin", data,
+                                   "upgrade7-file")
+    a.set_http_timeout()
+
+    _await_manifest(c, channel, "upgrade7-file", message_id)
+    if not c.start_file_fetch(channel, file_hash, message_id).get("ok"):
+        raise ScenarioFailure(f"{c.tag} was refused the download")
+    _await_done(c, channel, file_hash, FETCH_OVER_A_SESSION)
+
+    _await_manifest(b, channel, "upgrade7-file", message_id)
+    if not b.start_file_fetch(channel, file_hash, message_id).get("ok"):
+        raise ScenarioFailure(f"{b.tag} was refused the download")
+    held_at_kill = _await_partial(b, channel, file_hash, total,
+                                  DIRECT_SAMPLE_SECS)
+    paths = {peer.tag: b.member_path(channel, peer.hash) for peer in (a, c)}
+    if set(paths.values()) != {PATH_DIRECT}:
+        raise ScenarioFailure(
+            f"{b.tag} is not pulling over a session: {paths}")
+
+    env.orch.kill(a.tag)
+    wait_until(lambda: not a.alive(), f"{a.tag}'s process to go away", 60.0)
+
+    held: list[int] = []
+
+    def _finished() -> bool:
+        status = _status(b, channel, file_hash)
+        held.append(status.get("chunks_held", 0))
+        return status.get("state") == "done"
+
+    secs = wait_until(_finished, f"{b.tag} to finish from the other holder",
+                      HOLDER_REPLACEMENT_TIMEOUT, interval=0.5)
+    b.set_http_timeout(BIG_BODY_TIMEOUT)
+    _verify(b, channel, file_hash, data)
+    b.set_http_timeout()
+
+    notes = {"file_bytes": len(data), "chunks": total,
+             "chunks_held_at_the_poll": held_at_kill,
+             "chunks_held_when_the_sender_died": held[0],
+             "chunks_taken_from_the_other_holder": total - held[0],
+             "finish_secs": round(secs, 1),
+             "path_to_the_other_holder": b.member_path(channel, c.hash)}
+    if held[0] >= total:
+        raise ScenarioFailure(
+            f"{b.tag} had the whole file before {a.tag} died, so this run "
+            f"measures nothing: {notes}")
+    dropped = [(held[i], held[i + 1]) for i in range(len(held) - 1)
+               if held[i + 1] < held[i]]
+    if dropped:
+        raise ScenarioFailure(
+            f"{b.tag}'s verified chunk count went backwards {dropped}, so "
+            f"work already paid for was re-fetched: {notes}")
+    if min(held) < held_at_kill:
+        raise ScenarioFailure(
+            f"{b.tag} resumed below the {held_at_kill} chunks it held when "
+            f"the sender died: {notes}")
+    if a.alive():
+        raise ScenarioFailure(f"{a.tag} came back to life before {b.tag} finished")
+    return notes
+
+
+@scenario("upgrade8", "A restarted downloader keeps what its session stored",
+          peers="AB")
+def u8(env):
+    """files7's claim on this path: a process kill mid-transfer, and a resume.
+
+    A verified chunk is a row and a slot on disk whichever plane carried it,
+    so what the restart costs is the request in flight and the session it was
+    on. What this row adds is the trigger afterwards: nothing re-asks, and the
+    pair coming back is a sighting like any other.
+    """
+    a, b = env.peers("A", "B")
+    channel = invite_only_channel(a, [b], "upgrade8-room")
+    await_upgrade(a, b)
+
+    data = _payload(SIZE_20MB, 8)
+    total = _chunks(len(data))
+    a.set_http_timeout(BIG_BODY_TIMEOUT)
+    message_id, file_hash = _share(a, channel, "upgrade8-20mb.bin", data,
+                                   "upgrade8-file")
+    a.set_http_timeout()
+
+    _await_manifest(b, channel, "upgrade8-file", message_id)
+    if not b.start_file_fetch(channel, file_hash, message_id).get("ok"):
+        raise ScenarioFailure(f"{b.tag} was refused the download")
+    held_before = _await_partial(b, channel, file_hash, total,
+                                 DIRECT_SAMPLE_SECS)
+    if b.member_path(channel, a.hash) != PATH_DIRECT:
+        raise ScenarioFailure(f"{b.tag} is not pulling over a session")
+
+    env.orch.kill(b.tag)
+    wait_until(lambda: not b.alive(), f"{b.tag}'s process to die", 60.0)
+    env.orch.start(b.tag)
+    env.wait_alive(b)
+
+    restored = _status(b, channel, file_hash)
+    if not restored and _no_download_because_it_finished(b, channel, file_hash):
+        raise ScenarioFailure(
+            f"{b.tag} finished the file before the kill landed, so this run "
+            f"measures nothing: there was no download left to resume")
+    if restored.get("chunks_held", 0) < held_before:
+        raise ScenarioFailure(
+            f"{b.tag} came back holding {restored.get('chunks_held')} of the "
+            f"{held_before} chunks it had verified: {restored}")
+    restored_held = restored["chunks_held"]
+    resume_secs = wait_until(
+        lambda: _status(b, channel, file_hash).get("chunks_held", 0)
+        > restored_held, f"{b.tag} to resume without being asked again",
+        FETCH_OVER_A_SESSION)
+    secs = _await_done(b, channel, file_hash, FETCH_OVER_A_SESSION)
+    b.set_http_timeout(BIG_BODY_TIMEOUT)
+    _verify(b, channel, file_hash, data)
+    b.set_http_timeout()
+    return {"file_bytes": len(data), "chunks": total,
+            "chunks_held_before_kill": held_before,
+            "chunks_held_after_restart": restored_held,
+            "resume_secs": round(resume_secs, 1),
+            "finish_secs": round(secs, 1),
+            "path_when_it_finished": b.member_path(channel, a.hash)}

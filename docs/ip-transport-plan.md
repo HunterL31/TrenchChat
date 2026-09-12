@@ -584,6 +584,14 @@ reason for doing it.
   direct path can run at `home_wifi` and `mobile_lte`, the direct path's
   equivalent of the `lora_fast` rule.
 
+The shaper's UDP mode was not built, and the consequence landed on the other
+families rather than on this one. `link_shaper.py` proxies the Reticulum link
+and splits it on RNS's HDLC flag; a direct session is QUIC between two worker
+processes and never passes through it, so a shaped row measures nothing once a
+pair upgrades itself mid-scenario. A row whose subject is the mesh therefore
+says so, by switching direct connections off (`flows.mesh_only`), and the
+direct path gets rows of its own instead of a shaped re-run of the mesh ones.
+
 ## Risks and open decisions
 
 - **Should accepted friends qualify?** A mutual friendship is a stronger tie

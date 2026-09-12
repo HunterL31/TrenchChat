@@ -19,6 +19,11 @@ every member at once. The concurrent-serve cap and the per-link rate limit
 exist for that moment, and what they cost the members they turn away is only
 visible with more askers than slots.
 
+Every row here runs mesh_only: the plane it is about is the mesh one, and two
+members of an invite-only channel would otherwise open a direct session and
+pull over that instead, on a path the environment's shaper cannot reach. The
+direct plane's own file rows are upgrade6 to upgrade8.
+
 See docs/testenv-scenarios.md for the matrix these implement.
 """
 
@@ -31,7 +36,7 @@ from pathlib import Path
 
 from asserts import hold_for, settle, wait_until, ScenarioFailure
 from flows import (
-    invite_only_channel, go_offline, go_online, set_link_profile,
+    invite_only_channel, go_offline, go_online, mesh_only, set_link_profile,
     BACKFILL_TIMEOUT, CUSTOM, DISCOVERY_TIMEOUT, LORA_FAST, LOSSY,
     NEGATIVE_HOLD_SECS,
 )
@@ -82,6 +87,11 @@ SLOW_HOLDER = {"bitrate_bps": 512_000, "latency_ms": 10.0, "jitter_ms": 2.0,
 # the first window, so what survives the interruption is several requests'
 # work rather than one.
 PARTIAL_FLOOR = 4
+# How often a download is asked whether it is part way yet. A shaped mesh
+# transfer runs for half a minute, so this is the cheap end of "often enough";
+# the direct path's own rows pass a smaller one, because the whole transfer
+# there is over in about as long as one of these polls.
+PARTIAL_SAMPLE_SECS = 0.2
 
 # A fan-in is bounded by refusals rather than by bytes. A member turned away
 # by the serve cap learns nothing on the wire, so its request ends at the
@@ -168,6 +178,39 @@ def _await_done(peer, channel_hash: str, file_hash: str,
         raise ScenarioFailure(
             f"{e} | {peer.tag} ({peer.hash}) last status: "
             f"{_status(peer, channel_hash, file_hash)}")
+
+
+def _await_partial(peer, channel_hash: str, file_hash: str, total: int,
+                   interval: float = PARTIAL_SAMPLE_SECS) -> int:
+    """Wait for a download to be under way but not finished, and say where.
+
+    The status is reported on the way out, because the two ways this ends are
+    a transfer that never started and one that was over before a poll could
+    land, and the wait alone cannot tell them apart.
+    """
+    try:
+        wait_until(
+            lambda: PARTIAL_FLOOR
+            <= _status(peer, channel_hash, file_hash).get("chunks_held", 0)
+            < total, f"{peer.tag} to be part way through the file",
+            FETCH_TIMEOUT, interval=interval)
+    except ScenarioFailure as e:
+        raise ScenarioFailure(
+            f"{e} | {peer.tag} last status: "
+            f"{_status(peer, channel_hash, file_hash)}")
+    return _status(peer, channel_hash, file_hash)["chunks_held"]
+
+
+def _no_download_because_it_finished(peer, channel_hash: str,
+                                     file_hash: str) -> bool:
+    """Whether a restarted peer tracks no download because it holds the file.
+
+    A finished download is not rebuilt at startup, so it and one whose chunks
+    were lost report the same empty status. Only the bytes tell them apart,
+    and a row that kills a process mid-transfer has to, or it reads a race it
+    lost as a store that dropped what it had verified.
+    """
+    return peer.file_bytes_status(channel_hash, file_hash) == 200
 
 
 def _download(peer, channel_hash: str, file_hash: str, message_id: str,
@@ -505,6 +548,7 @@ def h1(env):
     filled: a third asker would be refused and would come back later.
     """
     a, b, c = env.peers("A", "B", "C")
+    mesh_only((a, b, c))
     ch = invite_only_channel(a, [b, c], "h1-private")
 
     data = _payload(SIZE_2MB, 1)
@@ -544,6 +588,7 @@ def h2(env):
     a link to a member that was never the author.
     """
     a, b, c = env.peers("A", "B", "C")
+    mesh_only((a, b, c))
     ch = invite_only_channel(a, [b, c], "h2-private")
 
     go_offline(c)
@@ -581,6 +626,7 @@ def h3(env):
     the guard for.
     """
     a, b, c = env.peers("A", "B", "C")
+    mesh_only((a, b, c))
     ch = invite_only_channel(a, [b, c], "h3-private")
 
     go_offline(c)
@@ -628,6 +674,7 @@ def h4(env):
     somebody entitled to it.
     """
     a, b, d = env.peers("A", "B", "D")
+    mesh_only((a, b, d))
     ch = invite_only_channel(a, [b], "h4-private")
 
     data = _payload(SIZE_20KB, 4)
@@ -700,6 +747,7 @@ def h5(env):
 
 
 def _lora_transfer(env, a, b, c) -> dict:
+    mesh_only((a, b, c))
     ch = invite_only_channel(a, [b, c], "h5-private")
 
     shaping = {p.tag: set_link_profile(env, p, LORA_FAST) for p in (a, b, c)}
@@ -750,8 +798,11 @@ def h6(env):
     C downloads first, so the file has two holders when A dies with a request
     in flight. What B loses is that one request; what it keeps is every chunk
     already verified, which is why the progress bar never walks backwards.
-    A's link is shaped so the transfer is long enough to interrupt on purpose
-    rather than by luck.
+
+    Every link is shaped, not just the sender's. B moves between the two
+    holders on its own, and with only A slowed it can be handed to C and
+    finish there before the kill lands, which passes the row without
+    interrupting anything.
 
     The claim is that the rest of the file arrives with the sender dead, and
     that is what is asserted: which holder served it is a note, because a
@@ -759,8 +810,10 @@ def h6(env):
     miss the switch entirely on a fast link.
     """
     a, b, c = env.peers("A", "B", "C")
+    mesh_only((a, b, c))
     ch = invite_only_channel(a, [b, c], "h6-private")
-    shaping = set_link_profile(env, a, CUSTOM, **SLOW_HOLDER)
+    shaping = {p.tag: set_link_profile(env, p, CUSTOM, **SLOW_HOLDER)
+               for p in (a, b, c)}
 
     data = _payload(SIZE_2MB, 6)
     total = _chunks(len(data))
@@ -774,11 +827,7 @@ def h6(env):
     started = b.start_file_fetch(ch, file_hash, message_id)
     if not started.get("ok"):
         raise ScenarioFailure(f"B was refused the download: {started}")
-    wait_until(
-        lambda: PARTIAL_FLOOR <= _status(b, ch, file_hash).get("chunks_held", 0)
-        < total, "B to be part way through the file", FETCH_TIMEOUT,
-        interval=0.2)
-    held_at_kill = _status(b, ch, file_hash)["chunks_held"]
+    held_at_kill = _await_partial(b, ch, file_hash, total)
 
     env.orch.kill(a.tag)
     wait_until(lambda: not a.alive(), "A's process to go away", 60.0)
@@ -801,8 +850,9 @@ def h6(env):
     notes = {
         "shaping": shaping,
         "chunks": total,
-        "chunks_held_at_kill": held_at_kill,
-        "chunks_after_the_sender_died": total - held_at_kill,
+        "chunks_held_at_the_poll": held_at_kill,
+        "chunks_held_when_the_sender_died": held[0],
+        "chunks_after_the_sender_died": total - held[0],
         "finish_secs": round(secs, 1),
         # A note rather than an assertion: the holder a download names is
         # whichever one it is asking right now, so the switch is only visible
@@ -818,7 +868,7 @@ def h6(env):
         raise ScenarioFailure(
             f"B resumed below the {held_at_kill} chunks it held when the "
             f"sender died: {notes}")
-    if held_at_kill >= total:
+    if held[0] >= total:
         raise ScenarioFailure(
             f"B had the whole file before the sender died, so nothing was "
             f"served by the second holder: {notes}")
@@ -837,6 +887,7 @@ def h7(env):
     for a holder to announce, the same trigger every other catch-up path uses.
     """
     a, b = env.peers("A", "B")
+    mesh_only((a, b))
     ch = invite_only_channel(a, [b], "h7-private")
     shaping = set_link_profile(env, a, CUSTOM, **SLOW_HOLDER)
 
@@ -848,11 +899,7 @@ def h7(env):
     started = b.start_file_fetch(ch, file_hash, message_id)
     if not started.get("ok"):
         raise ScenarioFailure(f"B was refused the download: {started}")
-    wait_until(
-        lambda: PARTIAL_FLOOR <= _status(b, ch, file_hash).get("chunks_held", 0)
-        < total, "B to be part way through the file", FETCH_TIMEOUT,
-        interval=0.2)
-    held_before = _status(b, ch, file_hash)["chunks_held"]
+    held_before = _await_partial(b, ch, file_hash, total)
 
     env.orch.kill(b.tag)
     wait_until(lambda: not b.alive(), "B's process to die", 60.0)
@@ -860,18 +907,23 @@ def h7(env):
     env.wait_alive(b)
 
     restored = _status(b, ch, file_hash)
+    if not restored and _no_download_because_it_finished(b, ch, file_hash):
+        raise ScenarioFailure(
+            "B finished the file before the kill landed, so this run "
+            "measures nothing: there was no download left to resume")
     if restored.get("chunks_held", 0) < held_before:
         raise ScenarioFailure(
             f"B came back holding {restored.get('chunks_held')} of the "
             f"{held_before} chunks it had verified: {restored}")
+    restored_held = restored["chunks_held"]
     resume_secs = wait_until(
-        lambda: _status(b, ch, file_hash).get("chunks_held", 0) > held_before,
+        lambda: _status(b, ch, file_hash).get("chunks_held", 0) > restored_held,
         "B to resume without being asked again", FETCH_TIMEOUT)
     secs = _await_done(b, ch, file_hash)
     _verify(b, ch, file_hash, data)
     return {"shaping": shaping, "chunks": total,
             "chunks_held_before_kill": held_before,
-            "chunks_held_after_restart": restored.get("chunks_held"),
+            "chunks_held_after_restart": restored_held,
             "resume_secs": round(resume_secs, 1),
             "finish_secs": round(secs, 1)}
 
@@ -887,6 +939,7 @@ def h8(env):
     than files1's 2 MB: at 62.5 kbps the larger file measures the shaper.
     """
     a, b = env.peers("A", "B")
+    mesh_only((a, b))
     ch = invite_only_channel(a, [b], "h8-private")
     shaping = set_link_profile(env, a, LOSSY)
 
@@ -942,6 +995,7 @@ def h9(env):
         raise ScenarioFailure(f"files9 needs a sharer and two askers, not "
                               f"{len(peers)} testers")
     sharer, downloaders = peers[0], peers[1:]
+    mesh_only(peers)
     ch = invite_only_channel(sharer, downloaders, "h9-private")
 
     tail = _log_tail()
@@ -988,6 +1042,7 @@ def h10(env):
 
 def _lora_fan_in(env, peers) -> dict:
     sharer, downloaders = peers[0], peers[1:]
+    mesh_only(peers)
     ch = invite_only_channel(sharer, downloaders, "h10-private")
 
     shaping = {p.tag: set_link_profile(env, p, LORA_FAST) for p in peers}
@@ -1049,6 +1104,7 @@ def h11(env):
 
 
 def _lora_ceiling(env, a, b) -> dict:
+    mesh_only((a, b))
     ch = invite_only_channel(a, [b], "h11-private")
     shaping = {p.tag: set_link_profile(env, p, LORA_FAST) for p in (a, b)}
 
