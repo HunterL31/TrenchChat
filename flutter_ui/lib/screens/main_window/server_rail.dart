@@ -1,4 +1,6 @@
 // 1b: 60px server rail.
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 
 import '../../theme/effects.dart';
@@ -14,6 +16,9 @@ import '../../widgets/tc_tooltip.dart';
 
 /// The square a server tile occupies, and the size its shape is cut to.
 const double _tileSize = 38;
+
+/// The unread marker riding a tile's top-right corner.
+const double _unreadDotSize = 8;
 
 class ServerRailEntry {
   const ServerRailEntry({
@@ -100,7 +105,7 @@ class ServerRail extends StatelessWidget {
         children: [
           const SizedBox(height: 12),
           TcTooltip(
-            message: onHome != null ? 'Home — direct channels' : '',
+            message: onHome != null ? 'Home: direct channels' : '',
             child: MouseRegion(
               cursor: onHome != null ? SystemMouseCursors.click : SystemMouseCursors.basic,
               child: GestureDetector(
@@ -146,6 +151,15 @@ class ServerRail extends StatelessWidget {
       ),
     );
   }
+}
+
+/// Where the unread dot sits so it rides the tile's outline rather than
+/// floating off a rounded or circular corner: the point 45 degrees round the
+/// corner arc, less half the dot.
+double _unreadInset(BuildContext context) {
+  final radius = tcAvatarCorners(context, _tileSize)?.topRight.x ?? 0;
+  if (radius <= 0) return -2;
+  return radius * (1 - math.sqrt1_2) - _unreadDotSize / 2;
 }
 
 class _ServerTile extends StatefulWidget {
@@ -216,11 +230,11 @@ class _ServerTileState extends State<_ServerTile> {
                 ),
                 if (widget.hasUnread && !selected)
                   Positioned(
-                    top: -2,
-                    right: -2,
+                    top: _unreadInset(context),
+                    right: _unreadInset(context),
                     child: Container(
-                      width: 8,
-                      height: 8,
+                      width: _unreadDotSize,
+                      height: _unreadDotSize,
                       decoration: BoxDecoration(
                         color: tc.accentPrimary,
                         shape: BoxShape.circle,

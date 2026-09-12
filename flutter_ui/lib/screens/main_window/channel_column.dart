@@ -260,7 +260,7 @@ class ChannelColumn extends StatelessWidget {
               decoration: BoxDecoration(
                 border: Border(top: BorderSide(color: tc.borderSubtle)),
               ),
-              padding: const EdgeInsets.all(10),
+              padding: const EdgeInsets.fromLTRB(14, 10, 14, 12),
               child: _AddMenuButton(items: _addMenuItems()),
             ),
         ],
@@ -273,6 +273,32 @@ String _shortHash(String hex) {
   if (hex.length <= 8) return hex;
   return '${hex.substring(0, 4)}…${hex.substring(hex.length - 4)}';
 }
+
+/// One height for every section header, with or without its add button, so
+/// the column keeps a single rhythm down its length.
+const double _sectionLabelHeight = 22;
+
+/// Vertical margin a row keeps so neighbouring highlights never touch; a
+/// rounded preset needs more of it than a square one.
+EdgeInsets _rowMargin(BuildContext context) => EdgeInsets.symmetric(
+      horizontal: tcRadius(context, scale: 0.75),
+      vertical: tcIsRounded(context) ? 2 : 1,
+    );
+
+/// Left border a selected row wears in square mode; rounded rows mark
+/// selection with the fill alone, and drop the bar so their text keeps the
+/// same inset the section labels sit on.
+Border? _rowAccentBorder(BuildContext context, bool selected) => tcIsRounded(context)
+    ? null
+    : Border(
+        left: BorderSide(
+          color: selected ? SectionTheme.of(context).accentPrimary : Colors.transparent,
+          width: 2,
+        ),
+      );
+
+EdgeInsets _rowPadding(BuildContext context) =>
+    EdgeInsets.fromLTRB(tcIsRounded(context) ? 14 : 12, 6, 14, 6);
 
 class _SectionLabel extends StatelessWidget {
   const _SectionLabel(this.label, {this.onAdd, this.addTooltip = ''});
@@ -291,21 +317,22 @@ class _SectionLabel extends StatelessWidget {
         letterSpacing: TCType.letterSpacingFor(TCType.textMicro, TCType.trackingWider),
       ),
     );
-    if (onAdd == null) {
-      return Padding(padding: const EdgeInsets.fromLTRB(14, 12, 14, 6), child: text);
-    }
     return Padding(
-      padding: const EdgeInsets.fromLTRB(14, 6, 8, 0),
-      child: Row(
-        children: [
-          Expanded(child: text),
-          TcIconButton(
-            icon: TcIcons.plus,
-            tooltip: addTooltip,
-            size: 22,
-            onPressed: onAdd,
-          ),
-        ],
+      padding: const EdgeInsets.fromLTRB(14, 8, 14, 4),
+      child: SizedBox(
+        height: _sectionLabelHeight,
+        child: Row(
+          children: [
+            Expanded(child: text),
+            if (onAdd != null)
+              TcIconButton(
+                icon: TcIcons.plus,
+                tooltip: addTooltip,
+                size: _sectionLabelHeight,
+                onPressed: onAdd,
+              ),
+          ],
+        ),
       ),
     );
   }
@@ -325,7 +352,8 @@ class _AddMenuButton extends StatelessWidget {
         label: 'ADD',
         onPressed: () {
           final box = buttonContext.findRenderObject() as RenderBox?;
-          final position = box?.localToGlobal(Offset.zero) ?? Offset.zero;
+          final position =
+              box == null ? Offset.zero : box.localToGlobal(Offset(box.size.width, 0));
           showTcContextMenu(
             context: buttonContext,
             position: position,
@@ -404,7 +432,7 @@ class _VoiceSection extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           _SectionLabel(
-            participants.isEmpty ? 'VOICE' : 'VOICE — ${participants.length}',
+            participants.isEmpty ? 'VOICE' : 'VOICE \u00b7 ${participants.length}',
           ),
           for (final p in participants) _VoiceRow(participant: p),
           if (onJoinVoice != null)
@@ -452,6 +480,7 @@ class _VoiceRow extends StatelessWidget {
             StatusDot(
               status: participant.speaking ? PresenceStatus.online : PresenceStatus.offline,
               size: 10,
+              ringColor: tc.bgSurface,
             ),
             const SizedBox(width: 9),
             Expanded(
@@ -495,7 +524,7 @@ class _InviteRowState extends State<_InviteRow> {
         child: AnimatedContainer(
           duration: TCEffects.durationMed,
           curve: TCEffects.easeTerminal,
-          margin: EdgeInsets.symmetric(horizontal: tcRadius(context, scale: 0.75)),
+          margin: _rowMargin(context),
           padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
           decoration: BoxDecoration(
             color: _hover ? tc.bgHover : Colors.transparent,
@@ -564,24 +593,20 @@ class _ChannelRowState extends State<_ChannelRow> {
             curve: TCEffects.easeTerminal,
             // A rounded row cannot run edge to edge and still read as
             // rounded, so the radius pays for its own margin.
-            margin: EdgeInsets.symmetric(horizontal: tcRadius(context, scale: 0.75)),
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+            margin: _rowMargin(context),
+            padding: _rowPadding(context),
             decoration: BoxDecoration(
               color: selected ? tc.bgSelected : (_hover ? tc.bgHover : Colors.transparent),
-              border: Border(
-                left: BorderSide(
-                  color: selected && !tcIsRounded(context)
-                      ? tc.accentPrimary
-                      : Colors.transparent,
-                  width: 2,
-                ),
-              ),
+              border: _rowAccentBorder(context, selected),
               borderRadius: tcCorners(context, scale: 0.75),
             ),
             child: Row(
               children: [
                 Text('#',
-                    style: TextStyle(color: selected ? tc.accentPrimary : tc.textTertiary)),
+                    style: TextStyle(
+                      fontSize: TCType.textBodySm,
+                      color: selected ? tc.accentPrimary : tc.textTertiary,
+                    )),
                 const SizedBox(width: 4),
                 Expanded(
                   child: Text(
@@ -609,16 +634,8 @@ class _ChannelRowState extends State<_ChannelRow> {
                   Tooltip(
                     decoration: tcTooltipDecoration(context),
                     textStyle: tcTooltipTextStyle(context),
-                    message: 'History incomplete \u2014 some messages could not be synced',
-                    child: Text(
-                      'INCOMPLETE',
-                      style: TextStyle(
-                        fontSize: TCType.textMicro,
-                        color: tc.accentSecondary,
-                        letterSpacing:
-                            TCType.letterSpacingFor(TCType.textMicro, TCType.trackingWide),
-                      ),
-                    ),
+                    message: 'History incomplete: some messages could not be synced',
+                    child: TcIcon(TcIcons.sync, size: 12, color: tc.accentSecondary),
                   ),
                   const SizedBox(width: 4),
                 ],
@@ -685,27 +702,20 @@ class _DmRowState extends State<_DmRow> {
           child: AnimatedContainer(
             duration: TCEffects.durationMed,
             curve: TCEffects.easeTerminal,
-            margin: EdgeInsets.symmetric(horizontal: tcRadius(context, scale: 0.75)),
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+            margin: _rowMargin(context),
+            padding: _rowPadding(context),
             decoration: BoxDecoration(
               color: widget.selected
                   ? tc.bgSelected
                   : (_hover ? tc.bgHover : Colors.transparent),
-              border: Border(
-                left: BorderSide(
-                  color: widget.selected && !tcIsRounded(context)
-                      ? tc.accentPrimary
-                      : Colors.transparent,
-                  width: 2,
-                ),
-              ),
+              border: _rowAccentBorder(context, widget.selected),
               borderRadius: tcCorners(context, scale: 0.75),
             ),
             child: Row(
               children: [
                 StatusDot(
                   status: d.isOnline ? PresenceStatus.online : PresenceStatus.offline,
-                  size: 8,
+                  ringColor: tc.bgSurface,
                 ),
                 const SizedBox(width: 9),
                 Expanded(
@@ -736,7 +746,7 @@ class _DmRowState extends State<_DmRow> {
                     Padding(
                       padding: const EdgeInsets.only(left: 6),
                       child: TcTooltip(
-                        message: 'On another LXMF client — messages work, '
+                        message: 'On another LXMF client: messages work, '
                             'reactions and other TrenchChat extras do not',
                         child: Text(
                           'LXMF',

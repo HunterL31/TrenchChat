@@ -51,7 +51,7 @@ class VoicePanel extends StatelessWidget {
         color: tc.bgSurfaceRaised,
         border: Border(top: BorderSide(color: tc.borderSubtle)),
       ),
-      padding: const EdgeInsets.fromLTRB(14, 8, 10, 8),
+      padding: const EdgeInsets.fromLTRB(14, 8, 14, 8),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -79,7 +79,7 @@ class VoicePanel extends StatelessWidget {
               child: Text(
                 audioWarning.isNotEmpty
                     ? audioWarning
-                    : 'NO AUDIO DEVICE — LISTENING ONLY',
+                    : 'NO AUDIO DEVICE \u00b7 LISTENING ONLY',
                 style: TextStyle(
                   fontSize: TCType.textMicro,
                   color: tc.statusWarn,
@@ -111,14 +111,14 @@ class VoicePanel extends StatelessWidget {
               TcIconButton(
                 icon: muted ? TcIcons.micMuted : TcIcons.mic,
                 tooltip: muted ? 'Unmute' : 'Mute',
-                size: 26,
+                size: tcChromeHeight,
                 onPressed: onToggleMute,
               ),
-              const SizedBox(width: 4),
+              const SizedBox(width: 6),
               TcIconButton(
                 icon: TcIcons.close,
                 tooltip: 'Leave voice',
-                size: 26,
+                size: tcChromeHeight,
                 onPressed: onLeave,
               ),
               const Spacer(),

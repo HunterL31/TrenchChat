@@ -8,6 +8,8 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_ui/api/models/server.dart';
 import 'package:flutter_ui/screens/main_window/channel_column.dart';
 
+const _incompleteTip = 'History incomplete: some messages could not be synced';
+
 Channel _channel(String name) => Channel.fromJson({
       'hash': 'hash-$name',
       'name': name,
@@ -228,7 +230,7 @@ void main() {
       ),
     ));
 
-    expect(find.text('INCOMPLETE'), findsOneWidget);
+    expect(find.byTooltip(_incompleteTip), findsOneWidget);
   });
 
   testWidgets('a fully synced column shows no indicator', (tester) async {
@@ -246,6 +248,6 @@ void main() {
       ),
     ));
 
-    expect(find.text('INCOMPLETE'), findsNothing);
+    expect(find.byTooltip(_incompleteTip), findsNothing);
   });
 }

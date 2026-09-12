@@ -38,7 +38,7 @@ void main() {
     ]));
 
     // The local user is filtered out; two peers remain.
-    expect(find.text('ONLINE — 2'), findsOneWidget);
+    expect(find.text('ONLINE \u00b7 2'), findsOneWidget);
     expect(find.text('me'), findsNothing);
     // A named peer renders its name; an unnamed one falls back to a short hash.
     expect(find.text('Alice'), findsOneWidget);
@@ -58,8 +58,8 @@ void main() {
           displayName: 'Bob'),
     ]));
 
-    expect(find.text('ONLINE — 1'), findsOneWidget);
-    expect(find.text('OFFLINE — 1'), findsOneWidget);
+    expect(find.text('ONLINE \u00b7 1'), findsOneWidget);
+    expect(find.text('OFFLINE \u00b7 1'), findsOneWidget);
     expect(find.text('Bob'), findsOneWidget);
 
     await tester.pumpWidget(_harness(const [

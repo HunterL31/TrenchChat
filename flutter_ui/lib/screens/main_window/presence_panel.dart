@@ -55,10 +55,10 @@ class PresencePanel extends StatelessWidget {
       child: ListView(
         padding: const EdgeInsets.symmetric(vertical: 10),
         children: [
-          _SectionLabel('ONLINE — ${online.length}'),
+          _SectionLabel('ONLINE \u00b7 ${online.length}'),
           for (final p in online) _PeerRow(entry: p, panel: this),
           if (offline.isNotEmpty) ...[
-            _SectionLabel('OFFLINE — ${offline.length}'),
+            _SectionLabel('OFFLINE \u00b7 ${offline.length}'),
             for (final p in offline) _PeerRow(entry: p, panel: this),
           ],
         ],
@@ -115,7 +115,7 @@ class _PeerRow extends StatelessWidget {
             children: [
               StatusDot(
                 status: entry.isOnline ? PresenceStatus.online : PresenceStatus.offline,
-                size: 10,
+                ringColor: tc.bgSurface,
               ),
               const SizedBox(width: 9),
               Expanded(

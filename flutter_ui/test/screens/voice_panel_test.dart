@@ -57,7 +57,7 @@ void main() {
 
   testWidgets('audio error surfaces the listening-only warning', (tester) async {
     await tester.pumpWidget(_harness(audioError: true));
-    expect(find.text('NO AUDIO DEVICE — LISTENING ONLY'), findsOneWidget);
+    expect(find.text('NO AUDIO DEVICE \u00b7 LISTENING ONLY'), findsOneWidget);
   });
 
   testWidgets('a specific warning headline replaces the generic one',
@@ -68,7 +68,7 @@ void main() {
     ));
 
     expect(find.text('MIC UNAVAILABLE — LISTENING ONLY'), findsOneWidget);
-    expect(find.text('NO AUDIO DEVICE — LISTENING ONLY'), findsNothing);
+    expect(find.text('NO AUDIO DEVICE \u00b7 LISTENING ONLY'), findsNothing);
   });
 
   testWidgets("the backend's audio failure reason is shown under the warning",
@@ -76,7 +76,7 @@ void main() {
     const reason = 'input device USB Headset failed to open';
     await tester.pumpWidget(_harness(audioError: true, audioReason: reason));
 
-    expect(find.text('NO AUDIO DEVICE — LISTENING ONLY'), findsOneWidget);
+    expect(find.text('NO AUDIO DEVICE \u00b7 LISTENING ONLY'), findsOneWidget);
     expect(find.text(reason), findsOneWidget);
   });
 
