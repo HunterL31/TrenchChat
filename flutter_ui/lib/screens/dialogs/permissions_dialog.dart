@@ -175,37 +175,32 @@ class _PermissionsDialogContentState extends State<_PermissionsDialogContent> {
       actions: [
         TcGhostButton(label: 'CANCEL', onPressed: () => Navigator.pop(context)),
         TcPrimaryButton(
-          label: _busy ? 'SAVING…' : 'SAVE',
+          label: 'SAVE',
+          busyLabel: 'SAVING…',
+          busy: _busy,
           onPressed: _busy || _loading ? null : _submit,
         ),
       ],
       children: [
         if (_loading)
-          Padding(
-            padding: const EdgeInsets.symmetric(vertical: 24),
-            child: Center(
-              child: Text(
-                'LOADING…',
-                style: TextStyle(fontSize: TCType.textCaption, color: tc.textTertiary),
-              ),
-            ),
-          )
+          tcDialogPlaceholder(context, 'LOADING…')
         else
           Container(
             constraints: const BoxConstraints(maxHeight: 420),
             child: ListView(
               shrinkWrap: true,
+              padding: EdgeInsets.only(right: scrollbarInset(context)),
               children: [
                 _roleLabel('OWNER', note: 'always has all permissions'),
-                const SizedBox(height: 6),
+                const SizedBox(height: TCSpace.space2),
                 for (final perm in _visible(_allPermissions))
                   Padding(
                     padding: const EdgeInsets.symmetric(vertical: 3),
                     child: TcCheckbox(value: true, label: _labelFor(perm), onChanged: null),
                   ),
-                const SizedBox(height: 12),
+                const SizedBox(height: TCSpace.space4),
                 _roleLabel('ADMIN'),
-                const SizedBox(height: 6),
+                const SizedBox(height: TCSpace.space2),
                 for (final perm in _visible(_adminGrantable))
                   Padding(
                     padding: const EdgeInsets.symmetric(vertical: 3),
@@ -216,9 +211,9 @@ class _PermissionsDialogContentState extends State<_PermissionsDialogContent> {
                           setState(() => v ? _admin.add(perm) : _admin.remove(perm)),
                     ),
                   ),
-                const SizedBox(height: 12),
+                const SizedBox(height: TCSpace.space4),
                 _roleLabel('MEMBER'),
-                const SizedBox(height: 6),
+                const SizedBox(height: TCSpace.space2),
                 for (final perm in _visible(_memberGrantable))
                   Padding(
                     padding: const EdgeInsets.symmetric(vertical: 3),
@@ -229,11 +224,11 @@ class _PermissionsDialogContentState extends State<_PermissionsDialogContent> {
                           setState(() => v ? _member.add(perm) : _member.remove(perm)),
                     ),
                   ),
-                const SizedBox(height: 10),
+                const SizedBox(height: TCSpace.space2),
                 Text(
                   'Changes take effect immediately for this device and are '
                   'broadcast to other members.',
-                  style: TextStyle(fontSize: TCType.textCaption, color: tc.textTertiary),
+                  style: TextStyle(fontSize: TCType.textMicro, color: tc.textTertiary),
                 ),
               ],
             ),
@@ -243,6 +238,8 @@ class _PermissionsDialogContentState extends State<_PermissionsDialogContent> {
   }
 
   Widget _roleLabel(String role, {String? note}) => Row(
+        crossAxisAlignment: CrossAxisAlignment.baseline,
+        textBaseline: TextBaseline.alphabetic,
         children: [
           Text(
             role,

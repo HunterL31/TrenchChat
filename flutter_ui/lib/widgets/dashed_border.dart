@@ -59,7 +59,7 @@ class _DashedBorderPainter extends CustomPainter {
       ..color = color
       ..style = PaintingStyle.stroke
       ..strokeWidth = strokeWidth;
-    final rect = Rect.fromLTWH(0, 0, size.width, size.height);
+    final rect = Rect.fromLTWH(0, 0, size.width, size.height).deflate(strokeWidth / 2);
     final path = Path();
     if (borderRadius == BorderRadius.zero) {
       path.addRect(rect);

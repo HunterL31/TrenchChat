@@ -17,10 +17,31 @@ import '../../theme/section_theme.dart';
 import '../../theme/theme_spec.dart';
 import '../../theme/tokens.dart';
 import '../../widgets/tc_button.dart';
+import '../../widgets/tc_dialog.dart';
 import '../../widgets/tc_icon.dart';
 import '../dialogs/confirm_dialog.dart';
 import '../dialogs/nomad_hosting_dialog.dart';
 import '../dialogs/rename_bookmark_dialog.dart';
+
+/// The one content inset this tab uses, so its edge lines up with the other
+/// tabs' instead of stepping between four values.
+const double _gutter = TCSpace.space4;
+
+/// Width below which the nav bar pans sideways instead of crushing the
+/// address field to nothing.
+const double _minNavBarWidth = 620;
+
+/// The loading track's height, held in the layout even when idle.
+const double _progressBarHeight = 3;
+
+/// Fixed slots for the two toggles whose labels change width with their
+/// state, so their neighbours never jog sideways.
+const double _bookmarkToggleWidth = 34;
+const double _identifyToggleWidth = 72;
+
+/// Every list row keeps this much height, so a row carrying a button is the
+/// same height as one that does not.
+const double _listRowMinHeight = tcControlHeight;
 
 class BrowserTab extends StatefulWidget {
   const BrowserTab({super.key, required this.state});
@@ -315,12 +336,12 @@ class _BrowserTabState extends State<BrowserTab> {
       message: turningOn
           ? 'This node will see your identity hash '
               '${status.identityHash} on every page you open here, and can '
-              'keep a record of it. Pages that need an account — a forum, '
-              'anything with a login — use it as your account. Nothing '
+              'keep a record of it. Pages that need an account (a forum, '
+              'anything with a login) use it as your account. Nothing '
               'about your Reticulum instance or your other nodes is '
               'revealed, and no other node is affected.'
           : 'This node stops seeing your identity from the next page you '
-              'open — the connection carrying it is dropped. What it '
+              'open: the connection carrying it is dropped. What it '
               'already recorded about this identity stays recorded.',
       confirmLabel: turningOn ? 'IDENTIFY' : 'STOP',
     );
@@ -404,16 +425,19 @@ class _BrowserTabState extends State<BrowserTab> {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           _navBar(tc),
+          // Determinate (an indeterminate bar animates forever), but with a
+          // visible floor: the whole dial phase reports zero progress, and a
+          // bar at exactly zero paints nothing at all. The track stays in the
+          // layout when idle so nothing below it shifts on a load.
           if (_loading)
-            // Determinate (an indeterminate bar animates forever), but with
-            // a visible floor: the whole dial phase reports zero progress,
-            // and a bar at exactly zero paints nothing at all.
             LinearProgressIndicator(
               value: _progress > 0.05 ? _progress : 0.05,
-              minHeight: 3,
+              minHeight: _progressBarHeight,
               backgroundColor: tc.bgInset,
               color: tc.borderAccent,
-            ),
+            )
+          else
+            const SizedBox(height: _progressBarHeight),
           if (_error != null) _errorBanner(tc),
           if (_info != null) _infoBanner(tc),
           Expanded(
@@ -431,86 +455,105 @@ class _BrowserTabState extends State<BrowserTab> {
     final identified = current != null &&
         (widget.state.nomadIdentify[current.nodeHash]?.enabled ?? false);
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
       decoration: BoxDecoration(
         border: Border(bottom: BorderSide(color: tc.borderDefault)),
       ),
-      child: Row(
-        children: [
-          TcGhostButton(
-              label: '<',
-              onPressed: widget.state.nomadHistoryIndex > 0
-                  ? () => _navigateHistory(-1)
-                  : null),
-          const SizedBox(width: 4),
-          TcGhostButton(
-              label: '>',
-              onPressed: widget.state.nomadHistoryIndex <
-                      widget.state.nomadHistory.length - 1
-                  ? () => _navigateHistory(1)
-                  : null),
-          const SizedBox(width: 4),
-          TcGhostButton(
-              icon: TcIcons.sync,
-              label: 'RELOAD',
-              onPressed: current == null ? null : _reload),
-          const SizedBox(width: 4),
-          TcGhostButton(
-              icon: TcIcons.globe,
-              label: 'NODES',
-              onPressed: current == null ? null : _home),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 8),
-              decoration: BoxDecoration(
-                color: tc.bgInset,
-                border: Border.all(color: tc.borderDefault),
-              ),
-              child: TextField(
-                controller: _address,
-                onSubmitted: _go,
-                style: TextStyle(
-                    fontSize: TCType.textBodySm, color: tc.textPrimary),
-                decoration: InputDecoration(
-                  isDense: true,
-                  border: InputBorder.none,
-                  hintText: '<node hash>:/page/index.mu',
-                  hintStyle: TextStyle(
-                      fontSize: TCType.textBodySm, color: tc.textTertiary),
-                ),
+      child: LayoutBuilder(
+        builder: (context, constraints) => SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          child: SizedBox(
+            width: constraints.maxWidth < _minNavBarWidth
+                ? _minNavBarWidth
+                : constraints.maxWidth,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: _gutter, vertical: 6),
+              child: Row(
+                children: [
+                  TcGhostButton(
+                      label: '<',
+                      onPressed: widget.state.nomadHistoryIndex > 0
+                          ? () => _navigateHistory(-1)
+                          : null),
+                  const SizedBox(width: 4),
+                  TcGhostButton(
+                      label: '>',
+                      onPressed: widget.state.nomadHistoryIndex <
+                              widget.state.nomadHistory.length - 1
+                          ? () => _navigateHistory(1)
+                          : null),
+                  const SizedBox(width: 4),
+                  TcGhostButton(
+                      icon: TcIcons.sync,
+                      label: 'RELOAD',
+                      onPressed: current == null ? null : _reload),
+                  const SizedBox(width: 4),
+                  TcGhostButton(
+                      icon: TcIcons.globe,
+                      label: 'NODES',
+                      onPressed: current == null ? null : _home),
+                  const SizedBox(width: TCSpace.space2),
+                  Expanded(
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 8),
+                      decoration: BoxDecoration(
+                        color: tc.bgInset,
+                        border: Border.all(color: tc.borderDefault),
+                      ),
+                      child: TextField(
+                        controller: _address,
+                        onSubmitted: _go,
+                        style: TextStyle(
+                            fontSize: TCType.textBodySm, color: tc.textPrimary),
+                        decoration: InputDecoration(
+                          isDense: true,
+                          contentPadding: EdgeInsets.zero,
+                          border: InputBorder.none,
+                          hintText: '<node hash>:/page/index.mu',
+                          hintStyle: TextStyle(
+                              fontSize: TCType.textBodySm, color: tc.textTertiary),
+                        ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: TCSpace.space2),
+                  TcGhostButton(label: 'GO', onPressed: () => _go(_address.text)),
+                  const SizedBox(width: 4),
+                  SizedBox(
+                    width: _bookmarkToggleWidth,
+                    child: TcGhostButton(
+                      label: bookmarked ? '★' : '☆',
+                      onPressed: current == null ? null : _toggleBookmark,
+                    ),
+                  ),
+                  const SizedBox(width: 4),
+                  SizedBox(
+                    width: _identifyToggleWidth,
+                    child: TcGhostButton(
+                      icon: TcIcons.lock,
+                      label: identified ? 'ID ✓' : 'ID',
+                      onPressed: current == null ? null : _toggleIdentify,
+                    ),
+                  ),
+                  const SizedBox(width: 4),
+                  TcGhostButton(
+                    label: 'HOST',
+                    onPressed: () async {
+                      await showNomadHostingDialog(context, widget.state);
+                      await _loadHosting();
+                    },
+                  ),
+                ],
               ),
             ),
           ),
-          const SizedBox(width: 6),
-          TcGhostButton(label: 'GO', onPressed: () => _go(_address.text)),
-          const SizedBox(width: 4),
-          TcGhostButton(
-            label: bookmarked ? '★' : '☆',
-            onPressed: current == null ? null : _toggleBookmark,
-          ),
-          const SizedBox(width: 4),
-          TcGhostButton(
-            icon: TcIcons.lock,
-            label: identified ? 'ID ✓' : 'ID',
-            onPressed: current == null ? null : _toggleIdentify,
-          ),
-          const SizedBox(width: 4),
-          TcGhostButton(
-            label: 'HOST',
-            onPressed: () async {
-              await showNomadHostingDialog(context, widget.state);
-              await _loadHosting();
-            },
-          ),
-        ],
+        ),
       ),
     );
   }
 
   Widget _errorBanner(TCSectionColors tc) {
     return Container(
-      margin: const EdgeInsets.fromLTRB(12, 10, 12, 0),
+      margin: const EdgeInsets.fromLTRB(_gutter, 10, _gutter, 0),
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
       decoration: BoxDecoration(
         color: tc.bgInset,
@@ -525,6 +568,7 @@ class _BrowserTabState extends State<BrowserTab> {
                   TextStyle(fontSize: TCType.textCaption, color: tc.statusDanger),
             ),
           ),
+          const SizedBox(width: TCSpace.space2),
           TcGhostButton(label: 'RETRY', onPressed: _reload),
         ],
       ),
@@ -533,7 +577,7 @@ class _BrowserTabState extends State<BrowserTab> {
 
   Widget _infoBanner(TCSectionColors tc) {
     return Container(
-      margin: const EdgeInsets.fromLTRB(12, 10, 12, 0),
+      margin: const EdgeInsets.fromLTRB(_gutter, 10, _gutter, 0),
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
       decoration: BoxDecoration(
         color: tc.bgInset,
@@ -548,6 +592,7 @@ class _BrowserTabState extends State<BrowserTab> {
                   fontSize: TCType.textCaption, color: tc.textSecondary),
             ),
           ),
+          const SizedBox(width: TCSpace.space2),
           TcGhostButton(
               label: 'OK', onPressed: () => setState(() => _info = null)),
         ],
@@ -561,7 +606,8 @@ class _BrowserTabState extends State<BrowserTab> {
       ..sort((a, b) => b.lastSeen.compareTo(a.lastSeen));
     final hosting = _hosting;
     return ListView(
-      padding: const EdgeInsets.all(14),
+      padding: EdgeInsets.fromLTRB(
+          _gutter, _gutter, _gutter + scrollbarInset(context), _gutter),
       children: [
         if (hosting != null &&
             hosting.enabled &&
@@ -578,7 +624,7 @@ class _BrowserTabState extends State<BrowserTab> {
         _sectionLabel(tc, 'NODES HEARD ON THE MESH'),
         if (nodes.isEmpty)
           Padding(
-            padding: const EdgeInsets.symmetric(vertical: 18),
+            padding: const EdgeInsets.symmetric(vertical: TCSpace.space3),
             child: Text(
               'No Nomad Network nodes heard yet. Nodes appear here as their '
               'announces arrive over the mesh.',
@@ -592,38 +638,32 @@ class _BrowserTabState extends State<BrowserTab> {
   }
 
   Widget _ownNodeRow(TCSectionColors tc, NomadHosting hosting) {
-    return InkWell(
+    return _ListRow(
       onTap: () => _go(hosting.nodeHash),
-      child: Container(
-        padding: const EdgeInsets.symmetric(vertical: 8),
-        decoration: BoxDecoration(
-          border: Border(bottom: BorderSide(color: tc.borderSubtle)),
-        ),
-        child: Row(
-          children: [
-            TcIcon(TcIcons.globe, size: 14, color: tc.borderAccent),
-            const SizedBox(width: 8),
-            Expanded(
-              child: Text(
-                hosting.nodeName.isNotEmpty ? hosting.nodeName : 'your node',
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(
-                    fontSize: TCType.textBodySm, color: tc.textEmphasis),
-              ),
-            ),
-            Text(
-              _shortHash(hosting.nodeHash),
+      child: Row(
+        children: [
+          TcIcon(TcIcons.globe, size: 14, color: tc.borderAccent),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              hosting.nodeName.isNotEmpty ? hosting.nodeName : 'your node',
+              overflow: TextOverflow.ellipsis,
               style: TextStyle(
-                  fontSize: TCType.textCaption, color: tc.textTertiary),
+                  fontSize: TCType.textBodySm, color: tc.textEmphasis),
             ),
-            const SizedBox(width: 10),
-            Text(
-              'served from disk',
-              style: TextStyle(
-                  fontSize: TCType.textCaption, color: tc.textTertiary),
-            ),
-          ],
-        ),
+          ),
+          Text(
+            _shortHash(hosting.nodeHash),
+            style: TextStyle(
+                fontSize: TCType.textCaption, color: tc.textTertiary),
+          ),
+          const SizedBox(width: 10),
+          Text(
+            'served from disk',
+            style: TextStyle(
+                fontSize: TCType.textCaption, color: tc.textTertiary),
+          ),
+        ],
       ),
     );
   }
@@ -644,37 +684,39 @@ class _BrowserTabState extends State<BrowserTab> {
   }
 
   Widget _bookmarkRow(TCSectionColors tc, NomadBookmark mark) {
-    return InkWell(
+    return _ListRow(
       onTap: () => _go('${mark.nodeHash}:${mark.path}'),
-      child: Container(
-        padding: const EdgeInsets.symmetric(vertical: 8),
-        decoration: BoxDecoration(
-          border: Border(bottom: BorderSide(color: tc.borderSubtle)),
-        ),
-        child: Row(
-          children: [
-            Text('★ ',
-                style: TextStyle(
-                    fontSize: TCType.textBodySm, color: tc.borderAccent)),
-            Expanded(
-              child: Text(
-                mark.label.isNotEmpty ? mark.label : mark.path,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(
-                    fontSize: TCType.textBodySm, color: tc.textEmphasis),
-              ),
+      child: Row(
+        children: [
+          SizedBox(
+            width: 14,
+            child: Center(
+              child: Text('★',
+                  style: TextStyle(
+                      fontSize: TCType.textBodySm, color: tc.borderAccent)),
             ),
-            Text(
+          ),
+          const SizedBox(width: TCSpace.space2),
+          Expanded(
+            child: Text(
+              mark.label.isNotEmpty ? mark.label : mark.path,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                  fontSize: TCType.textBodySm, color: tc.textEmphasis),
+            ),
+          ),
+          Flexible(
+            child: Text(
               '${_shortHash(mark.nodeHash)}:${mark.path}',
               overflow: TextOverflow.ellipsis,
               style: TextStyle(
                   fontSize: TCType.textCaption, color: tc.textTertiary),
             ),
-            const SizedBox(width: 8),
-            TcGhostButton(
-                label: 'RENAME', onPressed: () => _renameBookmark(mark)),
-          ],
-        ),
+          ),
+          const SizedBox(width: TCSpace.space2),
+          TcGhostButton(
+              label: 'RENAME', onPressed: () => _renameBookmark(mark)),
+        ],
       ),
     );
   }
@@ -687,40 +729,34 @@ class _BrowserTabState extends State<BrowserTab> {
   Widget _nodeRow(TCSectionColors tc, NomadNode node) {
     final now = DateTime.now().millisecondsSinceEpoch / 1000.0;
     final stale = now - node.lastSeen > _nodeStaleAfterSecs;
-    return InkWell(
+    return _ListRow(
       onTap: () => _go(node.nodeHash),
-      child: Container(
-        padding: const EdgeInsets.symmetric(vertical: 8),
-        decoration: BoxDecoration(
-          border: Border(bottom: BorderSide(color: tc.borderSubtle)),
-        ),
-        child: Row(
-          children: [
-            TcIcon(TcIcons.globe, size: 14,
-                color: stale ? tc.textDisabled : tc.textSecondary),
-            const SizedBox(width: 8),
-            Expanded(
-              child: Text(
-                node.displayName.isNotEmpty ? node.displayName : 'unnamed node',
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(
-                    fontSize: TCType.textBodySm,
-                    color: stale ? tc.textTertiary : tc.textEmphasis),
-              ),
-            ),
-            Text(
-              _shortHash(node.nodeHash),
+      child: Row(
+        children: [
+          TcIcon(TcIcons.globe, size: 14,
+              color: stale ? tc.textDisabled : tc.textSecondary),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              node.displayName.isNotEmpty ? node.displayName : 'unnamed node',
+              overflow: TextOverflow.ellipsis,
               style: TextStyle(
-                  fontSize: TCType.textCaption, color: tc.textTertiary),
+                  fontSize: TCType.textBodySm,
+                  color: stale ? tc.textTertiary : tc.textEmphasis),
             ),
-            const SizedBox(width: 10),
-            Text(
-              formatRelative(node.lastSeen),
-              style: TextStyle(
-                  fontSize: TCType.textCaption, color: tc.textTertiary),
-            ),
-          ],
-        ),
+          ),
+          Text(
+            _shortHash(node.nodeHash),
+            style: TextStyle(
+                fontSize: TCType.textCaption, color: tc.textTertiary),
+          ),
+          const SizedBox(width: 10),
+          Text(
+            formatRelative(node.lastSeen),
+            style: TextStyle(
+                fontSize: TCType.textCaption, color: tc.textTertiary),
+          ),
+        ],
       ),
     );
   }
@@ -737,7 +773,8 @@ class _BrowserTabState extends State<BrowserTab> {
       color: _pageBackground,
       child: SelectionArea(
         child: SingleChildScrollView(
-          padding: const EdgeInsets.all(16),
+          padding: EdgeInsets.fromLTRB(
+              _gutter, _gutter, _gutter + scrollbarInset(context), _gutter),
           child: MicronView(
             source: page.source,
             onLinkTap: _onMicronLink,
@@ -773,18 +810,18 @@ class _BrowserTabState extends State<BrowserTab> {
                   TCType.textCaption, TCType.trackingWider),
             ),
           ),
-          const SizedBox(height: 8),
+          const SizedBox(height: TCSpace.space2),
           Text(
             '${_shortHash(current.nodeHash)}:${current.path}',
             style:
                 TextStyle(fontSize: TCType.textBodySm, color: tc.textEmphasis),
           ),
-          const SizedBox(height: 10),
+          const SizedBox(height: TCSpace.space3),
           if (_loading)
             ConstrainedBox(
               constraints: const BoxConstraints(maxWidth: 460),
               child: Text(
-                'Pages come back over the mesh — a distant node can take a '
+                'Pages come back over the mesh: a distant node can take a '
                 'while, and one that does not serve this path never answers.',
                 textAlign: TextAlign.center,
                 style: TextStyle(
@@ -891,4 +928,45 @@ class _BrowserTabState extends State<BrowserTab> {
 
   String _shortHash(String hash) =>
       hash.length > 12 ? '${hash.substring(0, 12)}…' : hash;
+}
+
+/// One row of the node list: a hover state this theme actually paints (the
+/// Material ink InkWell would draw is turned off app-wide), and a floor under
+/// its height so rows with a button line up with rows without one.
+class _ListRow extends StatefulWidget {
+  const _ListRow({required this.child, required this.onTap});
+
+  final Widget child;
+  final VoidCallback onTap;
+
+  @override
+  State<_ListRow> createState() => _ListRowState();
+}
+
+class _ListRowState extends State<_ListRow> {
+  bool _hover = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final tc = SectionTheme.of(context);
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() => _hover = false),
+      child: GestureDetector(
+        onTap: widget.onTap,
+        child: Container(
+          color: _hover ? tc.bgHover : Colors.transparent,
+          padding: const EdgeInsets.symmetric(vertical: 8),
+          foregroundDecoration: BoxDecoration(
+            border: Border(bottom: BorderSide(color: tc.borderSubtle)),
+          ),
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(minHeight: _listRowMinHeight),
+            child: widget.child,
+          ),
+        ),
+      ),
+    );
+  }
 }

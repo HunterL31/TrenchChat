@@ -249,13 +249,29 @@ class _MicronViewState extends State<MicronView> {
   /// page that chooses its background needs every glyph to follow.
   TCSectionColors _pageColors(TCSectionColors tc) {
     final fg = _doc.foreground;
-    if (fg == null) return tc;
+    final bg = _doc.background;
+    if (fg == null && bg == null) return tc;
     return tc.copyWithTokens({
-      'textPrimary': fg,
-      'textEmphasis': fg,
-      'textSecondary': fg,
-      'textTertiary': fg,
+      if (fg != null) ...{
+        'textPrimary': fg,
+        'textEmphasis': fg,
+        'textSecondary': fg,
+        'textTertiary': fg,
+      },
+      if (bg != null) ...{
+        'bgSurface': _lift(bg, 0.06),
+        'bgInset': _lift(bg, 0.10),
+        'bgSelected': _lift(bg, 0.16),
+      },
     });
+  }
+
+  /// A surface tint [amount] away from the page's own background, in whichever
+  /// direction leaves it visible: a light page darkens, a dark page lightens.
+  static Color _lift(Color base, double amount) {
+    final hsl = HSLColor.fromColor(base);
+    final delta = hsl.lightness > 0.5 ? -amount : amount;
+    return hsl.withLightness((hsl.lightness + delta).clamp(0.0, 1.0)).toColor();
   }
 
   Widget _lineWidget(TCSectionColors tc, MicronLine line, int index) {
@@ -282,8 +298,8 @@ class _MicronViewState extends State<MicronView> {
       TCSectionColors tc, MicronHeadingLine line, int index, Key? key) {
     final level = line.level.clamp(1, 3);
     final fontSize = switch (level) {
-      1 => TCType.textBodyLg + 4,
-      2 => TCType.textBodyLg + 1,
+      1 => TCType.textDisplaySm,
+      2 => TCType.textBodyLg,
       _ => TCType.textBodyMd,
     };
     // Like nomadnet's inverted heading rows: a band that fades with depth.
@@ -294,8 +310,8 @@ class _MicronViewState extends State<MicronView> {
     };
     return Container(
       key: key,
-      margin: const EdgeInsets.symmetric(vertical: 4),
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      margin: _sectionPadding(line.level, top: 4, bottom: 4),
+      padding: const EdgeInsets.fromLTRB(4, 4, 8, 4),
       decoration: BoxDecoration(
         color: band,
         border: Border(left: BorderSide(color: tc.borderAccent, width: 2)),
@@ -367,7 +383,7 @@ class _MicronViewState extends State<MicronView> {
                       for (var c = 0; c < row.length; c++)
                         Padding(
                           padding: const EdgeInsets.symmetric(
-                              horizontal: 8, vertical: 3),
+                              horizontal: 8, vertical: 4),
                           child: Text.rich(
                             TextSpan(
                                 children: _spans(tc, row[c], index, base: base)),
@@ -479,7 +495,8 @@ class _MicronViewState extends State<MicronView> {
       final field = segment.field;
       if (field != null) {
         spans.add(WidgetSpan(
-          alignment: PlaceholderAlignment.middle,
+          alignment: PlaceholderAlignment.baseline,
+          baseline: TextBaseline.alphabetic,
           child: SelectionContainer.disabled(
               child: _fieldWidget(tc, field, style)),
         ));
@@ -580,8 +597,11 @@ class _MicronViewState extends State<MicronView> {
       child: MouseRegion(
         cursor: SystemMouseCursors.click,
         child: Container(
-          color: fill,
-          padding: const EdgeInsets.symmetric(horizontal: 2),
+          padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 4),
+          decoration: BoxDecoration(
+            color: fill,
+            border: Border.all(color: tc.borderDefault),
+          ),
           child: Text(glyph,
               style: style.copyWith(
                   backgroundColor: null, color: tc.textEmphasis)),

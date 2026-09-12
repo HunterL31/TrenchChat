@@ -67,7 +67,7 @@ void main() {
   testWidgets('shows the inviter, expiry, and accept/decline actions', (tester) async {
     await open(tester);
 
-    expect(find.text('Invite — #ops'), findsOneWidget);
+    expect(find.text('Invite · #ops'), findsOneWidget);
     expect(find.text(_adminHash), findsOneWidget);
     expect(find.textContaining('EXPIRES IN'), findsOneWidget);
     expect(find.text('ACCEPT'), findsOneWidget);
@@ -81,7 +81,7 @@ void main() {
     await settle(tester);
     await tester.pumpAndSettle();
 
-    expect(find.text('Invite — #ops'), findsNothing);
+    expect(find.text('Invite · #ops'), findsNothing);
     expect(state.pendingInvites, isEmpty);
     expect(
       backend.requests.where((r) => r.path.endsWith('/decline')),

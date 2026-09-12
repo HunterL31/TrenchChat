@@ -9,6 +9,26 @@ import '../theme/section_theme.dart';
 import '../theme/shape.dart';
 import '../theme/tokens.dart';
 
+/// The label a field wears above its box. Public so a control that is not a
+/// [TcTextField] can sit in the same column shape without restating the style.
+class TcFieldLabel extends StatelessWidget {
+  const TcFieldLabel(this.label, {super.key});
+
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    return Text(
+      label,
+      style: TextStyle(
+        fontSize: TCType.textCaption,
+        color: SectionTheme.of(context).textSecondary,
+        letterSpacing: TCType.letterSpacingFor(TCType.textCaption, TCType.trackingWide),
+      ),
+    );
+  }
+}
+
 class TcTextField extends StatefulWidget {
   const TcTextField({
     super.key,
@@ -22,7 +42,10 @@ class TcTextField extends StatefulWidget {
     this.inputFormatters,
   });
 
+  /// Names the field above its box. Empty for a field that stands on its
+  /// own in a row of controls and says what it is in its hint instead.
   final String label;
+
   final TextEditingController controller;
 
   /// Supplied by a caller that needs to move focus itself, e.g. to put it back
@@ -75,15 +98,10 @@ class _TcTextFieldState extends State<TcTextField> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(
-          widget.label,
-          style: TextStyle(
-            fontSize: TCType.textCaption,
-            color: tc.textSecondary,
-            letterSpacing: TCType.letterSpacingFor(TCType.textCaption, TCType.trackingWide),
-          ),
-        ),
-        const SizedBox(height: 6),
+        if (widget.label.isNotEmpty) ...[
+          TcFieldLabel(widget.label),
+          const SizedBox(height: 6),
+        ],
         Container(
           decoration: BoxDecoration(
             color: tc.bgInset,
@@ -104,6 +122,7 @@ class _TcTextFieldState extends State<TcTextField> {
             ),
             decoration: InputDecoration(
               isDense: true,
+              contentPadding: EdgeInsets.zero,
               border: InputBorder.none,
               hintText: widget.hintText,
               hintStyle: TextStyle(fontSize: TCType.textBodyMd, color: tc.textTertiary),

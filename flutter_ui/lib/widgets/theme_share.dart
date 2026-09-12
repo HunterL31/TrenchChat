@@ -9,6 +9,7 @@ import 'package:flutter/material.dart';
 
 import '../api/models/emoji.dart';
 import '../theme/section_theme.dart';
+import '../theme/shape.dart';
 import '../theme/theme_code.dart';
 import '../theme/theme_spec.dart';
 import '../theme/tokens.dart';
@@ -19,6 +20,10 @@ import 'tc_tooltip.dart';
 /// A miniature of the main window painted with [spec]'s resolved palettes --
 /// rail, channel column, top bar, and content each in their own section's
 /// colors, so a per-section theme previews where it will actually land.
+/// The action column beside a shared theme: ADD, ADDED and APPLY are three
+/// widths, and a fixed column keeps their left edges from going ragged.
+const double _actionColumnWidth = 68;
+
 class ThemeMiniPreview extends StatelessWidget {
   const ThemeMiniPreview({super.key, required this.spec, this.height = 64});
 
@@ -39,7 +44,10 @@ class ThemeMiniPreview extends StatelessWidget {
 
     return Container(
       height: height,
-      decoration: BoxDecoration(border: Border.all(color: tc.borderStrong)),
+      decoration: BoxDecoration(
+        border: Border.all(color: tc.borderStrong),
+        borderRadius: tcCorners(context, scale: 0.5),
+      ),
       clipBehavior: Clip.hardEdge,
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -69,7 +77,7 @@ class ThemeMiniPreview extends StatelessWidget {
                 const SizedBox(height: 4),
                 Container(
                   width: 22,
-                  padding: const EdgeInsets.all(1.5),
+                  padding: const EdgeInsets.all(2),
                   color: channels.bgSelected,
                   child: _bar(channels.textEmphasis, 12),
                 ),
@@ -217,11 +225,12 @@ class _ThemeCodeChip extends StatelessWidget {
   Widget build(BuildContext context) {
     final tc = SectionTheme.of(context);
     return Container(
-      margin: const EdgeInsets.symmetric(horizontal: 1),
+      margin: const EdgeInsets.symmetric(horizontal: 3),
       padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
       decoration: BoxDecoration(
         color: tc.bgInset,
         border: Border.all(color: tc.borderAccent),
+        borderRadius: tcCorners(context, scale: 0.25),
       ),
       child: Text(
         '[THEME: $name]',
@@ -347,6 +356,7 @@ class _ThemeCodeCardState extends State<ThemeCodeCard> {
         decoration: BoxDecoration(
           color: tc.bgSurfaceRaised,
           border: Border.all(color: tc.borderDefault),
+          borderRadius: tcCorners(context, scale: 0.5),
         ),
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
         child: Row(
@@ -393,23 +403,30 @@ class _ThemeCodeCardState extends State<ThemeCodeCard> {
             const SizedBox(width: 8),
             Column(
               crossAxisAlignment: CrossAxisAlignment.end,
+              mainAxisSize: MainAxisSize.min,
               children: [
-                TcTooltip(
-                  message: _savedAs == null || _savedAs == widget.name
-                      ? 'Save to my themes'
-                      : 'Saved as "$_savedAs"',
-                  child: TcGhostButton(
-                    label: _added ? 'ADDED' : 'ADD',
-                    onPressed: widget.onAdd == null || _busy || _added ? null : _add,
+                SizedBox(
+                  width: _actionColumnWidth,
+                  child: TcTooltip(
+                    message: _savedAs == null || _savedAs == widget.name
+                        ? 'Save to my themes'
+                        : 'Saved as "$_savedAs"',
+                    child: TcGhostButton(
+                      label: _added ? 'ADDED' : 'ADD',
+                      onPressed: widget.onAdd == null || _busy || _added ? null : _add,
+                    ),
                   ),
                 ),
                 if (widget.onApply != null) ...[
                   const SizedBox(height: 4),
-                  TcTooltip(
-                    message: 'Use this theme now',
-                    child: TcGhostButton(
-                      label: 'APPLY',
-                      onPressed: _busy ? null : _apply,
+                  SizedBox(
+                    width: _actionColumnWidth,
+                    child: TcTooltip(
+                      message: 'Use this theme now',
+                      child: TcGhostButton(
+                        label: 'APPLY',
+                        onPressed: _busy ? null : _apply,
+                      ),
                     ),
                   ),
                 ],

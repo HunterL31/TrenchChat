@@ -79,12 +79,16 @@ class _IncomingInviteDialogContentState extends State<_IncomingInviteDialogConte
     final tc = SectionTheme.of(context);
     final scopeLabel = invite.scopeKind == 'server' ? 'server' : 'channel';
     return TcDialogShell(
-      title: 'Invite — ${invite.scopeKind == 'server' ? '' : '#'}${invite.channelName}',
+      title: 'Invite \u00b7 ${invite.scopeKind == 'server' ? '' : '#'}${invite.channelName}',
       width: 400,
       errorText: _error,
       actions: [
         TcGhostButton(label: 'DECLINE', onPressed: _busy ? null : _decline),
-        TcPrimaryButton(label: _busy ? 'JOINING…' : 'ACCEPT', onPressed: _busy ? null : _accept),
+        TcPrimaryButton(
+            label: 'ACCEPT',
+            busyLabel: 'JOINING…',
+            busy: _busy,
+            onPressed: _busy ? null : _accept),
       ],
       children: [
         Text(
@@ -96,14 +100,15 @@ class _IncomingInviteDialogContentState extends State<_IncomingInviteDialogConte
         Text(
           'INVITED BY',
           style: TextStyle(
-            fontSize: TCType.textMicro,
+            fontSize: TCType.textCaption,
             color: tc.textSecondary,
-            letterSpacing: TCType.letterSpacingFor(TCType.textMicro, TCType.trackingWide),
+            letterSpacing: TCType.letterSpacingFor(TCType.textCaption, TCType.trackingWide),
           ),
         ),
-        const SizedBox(height: 4),
-        Text(
+        const SizedBox(height: 6),
+        SelectableText(
           invite.adminHex,
+          maxLines: 1,
           style: TextStyle(fontSize: TCType.textBodySm, color: tc.textTertiary),
         ),
         const SizedBox(height: 8),

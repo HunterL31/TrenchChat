@@ -31,7 +31,7 @@ const double inlineEmojiSize = 18;
 
 /// Sizes for a message that is nothing but emoji: noticeably larger than the
 /// 14px reaction chips, so a sent emoji never reads as a stray reaction.
-const double jumboEmojiSize = 40;
+const double jumboEmojiSize = 34;
 const double jumboEmojiFontSize = 34;
 
 /// Above this many emoji the message renders at normal size again.
@@ -120,10 +120,11 @@ class InlineLinkConfig {
     this.onHover,
   });
 
-  /// The link's resting style (uses linkColor).
+  /// The link's resting style, merged onto the run it sits in rather than
+  /// replacing it: a link inside a jumbo run keeps that run's size.
   final TextStyle style;
 
-  /// The link's style while pointed at (uses linkHoverColor).
+  /// The same delta, for a link under the pointer.
   final TextStyle hoverStyle;
 
   /// Recognizer sink the caller disposes; one is added per tappable link.
@@ -198,7 +199,7 @@ List<InlineSpan> _linkifyRun(String text, TextStyle style, InlineLinkConfig? lin
     }
     spans.add(TextSpan(
       text: url,
-      style: links.hoveredUrl == url ? links.hoverStyle : links.style,
+      style: style.merge(links.hoveredUrl == url ? links.hoverStyle : links.style),
       recognizer: recognizer,
       mouseCursor: SystemMouseCursors.click,
       onEnter: links.onHover == null ? null : (_) => links.onHover!(url),
@@ -240,15 +241,9 @@ List<InlineSpan> emojiSpans(
     }
     spans.add(WidgetSpan(
       alignment: PlaceholderAlignment.middle,
-      // A span has no context of its own; the Builder borrows the one the
-      // surrounding text renders under, so the tip can read the section.
-      child: Builder(
-        builder: (context) => Tooltip(
-          decoration: tcTooltipDecoration(context),
-          textStyle: tcTooltipTextStyle(context),
-          message: ':${emoji.name}:',
-          child: peerImage(emoji.imageBytes, size: emojiSize),
-        ),
+      child: TcTooltip(
+        message: ':${emoji.name}:',
+        child: peerImage(emoji.imageBytes, size: emojiSize),
       ),
     ));
     last = m.end;

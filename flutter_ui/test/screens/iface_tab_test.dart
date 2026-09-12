@@ -162,12 +162,13 @@ void main() {
     await settle(tester);
 
     // Squeezed to 390 the seven columns would ellipsize away; the row keeps
-    // its full width behind a horizontal scroll instead.
+    // its full width behind a horizontal scroll instead. The bandwidth strip
+    // above the table pans the same way, so there are two of them.
     expect(tester.getSize(find.text('NAME').hitTestable()).width, greaterThan(0));
     final scroller = find.byWidgetPredicate(
       (w) => w is SingleChildScrollView && w.scrollDirection == Axis.horizontal,
     );
-    expect(scroller, findsOneWidget);
+    expect(scroller, findsNWidgets(2));
     expect(tester.getSize(find.byType(SizedBox).at(0)).width, isNot(390));
   });
 
@@ -197,7 +198,7 @@ void main() {
 
     expect(find.text('Add Interface'), findsOneWidget);
     expect(find.text('AutoInterface'), findsWidgets);
-    expect(find.text('TYPE-SPECIFIC SETTINGS'), findsOneWidget);
+    expect(find.text('Type-specific settings'), findsOneWidget);
 
     // AutoInterface is the default type; its fields are visible.
     expect(find.text('Group ID'), findsOneWidget);
@@ -233,8 +234,12 @@ void main() {
     }
 
     await scrollDown();
-    final kiss = tester.widget<TcCheckbox>(
-        find.widgetWithText(TcCheckbox, 'KISS framing'));
+    // A flag wears its name as a field label above the box, so the box is the
+    // checkbox sitting under that label rather than one carrying the text.
+    final kiss = tester.widget<TcCheckbox>(find.descendant(
+      of: find.ancestor(of: find.text('KISS framing'), matching: find.byType(Column)).first,
+      matching: find.byType(TcCheckbox),
+    ));
     expect(kiss.value, isTrue);
 
     // A key absent from the config falls back to the type default.

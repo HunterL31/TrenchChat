@@ -187,7 +187,7 @@ class _IfaceTabState extends State<IfaceTab> {
     final interfaces = _interfaces;
     return Container(
       color: tc.bgApp,
-      padding: const EdgeInsets.all(18),
+      padding: const EdgeInsets.all(TCSpace.space4),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
@@ -219,18 +219,18 @@ class _IfaceTabState extends State<IfaceTab> {
             ],
           ),
           if (_restartRequired) ...[
-            const SizedBox(height: 10),
+            const SizedBox(height: TCSpace.space3),
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
               decoration: BoxDecoration(
-                color: TCColors.amber900,
-                border: Border.all(color: TCColors.amber700),
+                color: tc.accentSecondaryMuted,
+                border: Border.all(color: tc.accentSecondary),
               ),
               child: Text(
-                'CONFIG CHANGED — RESTART RETICULUM FOR IT TO TAKE EFFECT',
+                'CONFIG CHANGED: RESTART RETICULUM FOR IT TO TAKE EFFECT',
                 style: TextStyle(
                   fontSize: TCType.textMicro,
-                  color: TCColors.amber300,
+                  color: tc.accentSecondaryHover,
                   letterSpacing:
                       TCType.letterSpacingFor(TCType.textMicro, TCType.trackingWide),
                 ),
@@ -238,7 +238,7 @@ class _IfaceTabState extends State<IfaceTab> {
             ),
           ],
           if (_error != null) ...[
-            const SizedBox(height: 10),
+            const SizedBox(height: TCSpace.space3),
             Text(
               _error!,
               style: TextStyle(fontSize: TCType.textCaption, color: tc.statusDanger),
@@ -277,7 +277,7 @@ class _IfaceTabState extends State<IfaceTab> {
             ),
           ),
           if (_discovery != null) ...[
-            const SizedBox(height: 14),
+            const SizedBox(height: TCSpace.space3),
             _discoveredHeader(tc, _discovery!.settings),
             const SizedBox(height: 6),
             Expanded(flex: 2, child: _discoveredTable(tc, _discovery!)),
@@ -314,7 +314,7 @@ class _IfaceTabState extends State<IfaceTab> {
                 TCType.letterSpacingFor(TCType.textMicro, TCType.trackingWide),
           ),
         ),
-        const SizedBox(width: 8),
+        const SizedBox(width: 6),
         TcGhostButton(
           label: settings.discoverInterfaces ? 'DISABLE' : 'ENABLE',
           onPressed: _toggleDiscovery,
@@ -364,13 +364,16 @@ class _IfaceTabState extends State<IfaceTab> {
   Widget _discoveredHeaderRow(TCSectionColors tc) {
     Widget cell(String label, int flex) => Expanded(
           flex: flex,
-          child: Text(
-            label,
-            style: TextStyle(
-              fontSize: TCType.textMicro,
-              color: tc.textTertiary,
-              letterSpacing:
-                  TCType.letterSpacingFor(TCType.textMicro, TCType.trackingWide),
+          child: Padding(
+            padding: const EdgeInsets.only(right: _cellGutter),
+            child: Text(
+              label,
+              style: TextStyle(
+                fontSize: TCType.textMicro,
+                color: tc.textTertiary,
+                letterSpacing:
+                    TCType.letterSpacingFor(TCType.textMicro, TCType.trackingWide),
+              ),
             ),
           ),
         );
@@ -390,7 +393,13 @@ class _IfaceTabState extends State<IfaceTab> {
   }
 
   Widget _discoveredRow(TCSectionColors tc, DiscoveredInterface iface) {
-    Widget cell(Widget child, int flex) => Expanded(flex: flex, child: child);
+    Widget cell(Widget child, int flex) => Expanded(
+          flex: flex,
+          child: Padding(
+            padding: const EdgeInsets.only(right: _cellGutter),
+            child: child,
+          ),
+        );
     Text text(String s, {Color? color}) => Text(
           s,
           overflow: TextOverflow.ellipsis,
@@ -407,23 +416,26 @@ class _IfaceTabState extends State<IfaceTab> {
       decoration: BoxDecoration(
         border: Border(bottom: BorderSide(color: tc.borderSubtle)),
       ),
-      child: Row(
-        children: [
-          cell(text(iface.name, color: tc.textEmphasis), _flexName),
-          cell(text(iface.type.replaceAll('Interface', '')), _flexType),
-          cell(text(iface.status.toUpperCase(), color: statusColor), _flexStatus),
-          cell(text(iface.hops?.toString() ?? '—'), 1),
-          cell(text(_ago(iface.lastHeard)), _flexStatus),
-          SizedBox(
-            width: _pinWidth,
-            child: iface.pinnable
-                ? Align(
-                    alignment: Alignment.centerRight,
-                    child: TcGhostButton(label: 'PIN', onPressed: () => _pin(iface)),
-                  )
-                : const SizedBox.shrink(),
-          ),
-        ],
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(minHeight: tcControlHeight),
+        child: Row(
+          children: [
+            cell(text(iface.name, color: tc.textEmphasis), _flexName),
+            cell(text(iface.type.replaceAll('Interface', '')), _flexType),
+            cell(text(iface.status.toUpperCase(), color: statusColor), _flexStatus),
+            cell(text(iface.hops?.toString() ?? '—'), 1),
+            cell(text(_ago(iface.lastHeard)), _flexStatus),
+            SizedBox(
+              width: _pinWidth,
+              child: iface.pinnable
+                  ? Align(
+                      alignment: Alignment.centerRight,
+                      child: TcGhostButton(label: 'PIN', onPressed: () => _pin(iface)),
+                    )
+                  : const SizedBox.shrink(),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -439,53 +451,73 @@ class _IfaceTabState extends State<IfaceTab> {
   }
 
   Widget _bandwidthStrip(TCSectionColors tc, BandwidthReport bw) {
+    Widget value(String s) => Text(
+          s,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: TextStyle(fontSize: TCType.textBodySm, color: tc.textSecondary),
+        );
     Widget cell(String label, String rx, String tx) => Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                label,
-                style: TextStyle(
-                  fontSize: TCType.textMicro,
-                  color: tc.textTertiary,
-                  letterSpacing:
-                      TCType.letterSpacingFor(TCType.textMicro, TCType.trackingWide),
+          child: Padding(
+            padding: const EdgeInsets.only(right: _cellGutter),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: TCType.textMicro,
+                    color: tc.textTertiary,
+                    letterSpacing:
+                        TCType.letterSpacingFor(TCType.textMicro, TCType.trackingWide),
+                  ),
                 ),
-              ),
-              const SizedBox(height: 2),
-              Text('RX $rx',
-                  style: TextStyle(
-                      fontSize: TCType.textBodySm, color: tc.textSecondary)),
-              Text('TX $tx',
-                  style: TextStyle(
-                      fontSize: TCType.textBodySm, color: tc.textSecondary)),
-            ],
+                const SizedBox(height: 2),
+                value('RX $rx'),
+                value('TX $tx'),
+              ],
+            ),
           ),
         );
 
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-      decoration: BoxDecoration(
-        border: Border.all(color: tc.borderSubtle),
-      ),
-      child: Row(
-        children: [
-          for (final w in bw.windows)
-            cell('BANDWIDTH ${windowLabel(w.secs)}',
-                formatRate(w.rxPerSec), formatRate(w.txPerSec)),
-          cell('SESSION TOTAL', formatByteCount(bw.totalRx),
-              formatByteCount(bw.totalTx)),
-        ],
+    return LayoutBuilder(
+      builder: (context, constraints) => SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        child: SizedBox(
+          width: constraints.maxWidth < _minTableWidth ? _minTableWidth : constraints.maxWidth,
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            decoration: BoxDecoration(
+              border: Border.all(color: tc.borderSubtle),
+            ),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                for (final w in bw.windows)
+                  cell('BANDWIDTH ${windowLabel(w.secs)}',
+                      formatRate(w.rxPerSec), formatRate(w.txPerSec)),
+                cell('SESSION TOTAL', formatByteCount(bw.totalRx),
+                    formatByteCount(bw.totalTx)),
+              ],
+            ),
+          ),
+        ),
       ),
     );
   }
+
+  /// Room after every table cell, so an ellipsised value never butts against
+  /// the column beside it.
+  static const _cellGutter = 12.0;
 
   static const _flexName = 3;
   static const _flexType = 3;
   static const _flexEnabled = 2;
   static const _flexStatus = 2;
   static const _flexBytes = 2;
-  static const _actionsWidth = 200.0;
+  static const _actionsWidth = 210.0;
   static const _pinWidth = 70.0;
   static const _minTableWidth = 620.0;
 
@@ -512,12 +544,15 @@ class _IfaceTabState extends State<IfaceTab> {
   Widget _headerRow(TCSectionColors tc) {
     Widget cell(String label, int flex) => Expanded(
           flex: flex,
-          child: Text(
-            label,
-            style: TextStyle(
-              fontSize: TCType.textMicro,
-              color: tc.textTertiary,
-              letterSpacing: TCType.letterSpacingFor(TCType.textMicro, TCType.trackingWide),
+          child: Padding(
+            padding: const EdgeInsets.only(right: _cellGutter),
+            child: Text(
+              label,
+              style: TextStyle(
+                fontSize: TCType.textMicro,
+                color: tc.textTertiary,
+                letterSpacing: TCType.letterSpacingFor(TCType.textMicro, TCType.trackingWide),
+              ),
             ),
           ),
         );
@@ -539,7 +574,13 @@ class _IfaceTabState extends State<IfaceTab> {
 
   Widget _interfaceRow(TCSectionColors tc, RetInterface iface) {
     final confirming = _confirmDeleteName == iface.name;
-    Widget cell(Widget child, int flex) => Expanded(flex: flex, child: child);
+    Widget cell(Widget child, int flex) => Expanded(
+          flex: flex,
+          child: Padding(
+            padding: const EdgeInsets.only(right: _cellGutter),
+            child: child,
+          ),
+        );
     Text text(String s, {Color? color}) => Text(
           s,
           overflow: TextOverflow.ellipsis,
@@ -556,9 +597,11 @@ class _IfaceTabState extends State<IfaceTab> {
           cell(text(iface.name, color: tc.textEmphasis), _flexName),
           cell(text(iface.type), _flexType),
           cell(
-            StatusDot(
-              status: iface.enabled ? PresenceStatus.online : PresenceStatus.offline,
-              size: 10,
+            Align(
+              alignment: Alignment.centerLeft,
+              child: StatusDot(
+                status: iface.enabled ? PresenceStatus.online : PresenceStatus.offline,
+              ),
             ),
             _flexEnabled,
           ),
@@ -590,7 +633,7 @@ class _IfaceTabState extends State<IfaceTab> {
                             ),
                             const SizedBox(width: 6),
                             TcGhostButton(label: 'YES', onPressed: () => _delete(iface.name)),
-                            const SizedBox(width: 4),
+                            const SizedBox(width: 6),
                             TcGhostButton(
                               label: 'NO',
                               onPressed: () => setState(() => _confirmDeleteName = null),
@@ -598,7 +641,7 @@ class _IfaceTabState extends State<IfaceTab> {
                           ]
                         : [
                             TcGhostButton(label: 'EDIT', onPressed: () => _edit(iface)),
-                            const SizedBox(width: 4),
+                            const SizedBox(width: 6),
                             TcGhostButton(
                               label: 'DEL',
                               onPressed: () =>

@@ -73,7 +73,7 @@ void main() {
   testWidgets('renders members with role tags and self marker', (tester) async {
     await open(tester);
 
-    expect(find.text('Members — #general'), findsOneWidget);
+    expect(find.text('Members · #general'), findsOneWidget);
     expect(find.text('Alice'), findsOneWidget);
     expect(find.text('OWNER'), findsOneWidget);
     expect(find.text('operator  (you)'), findsOneWidget);

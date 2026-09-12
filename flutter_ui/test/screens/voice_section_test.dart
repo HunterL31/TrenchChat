@@ -97,7 +97,7 @@ void main() {
       ],
     ));
 
-    expect(find.text('VOICE — 2'), findsOneWidget);
+    expect(find.text('VOICE \u00b7 2'), findsOneWidget);
     expect(find.text('Alice'), findsOneWidget);
     expect(find.text('bbbb…bbbb'), findsOneWidget); // short hash fallback
     expect(
