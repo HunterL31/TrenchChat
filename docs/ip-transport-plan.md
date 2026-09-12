@@ -369,7 +369,9 @@ Additive only; nothing existing moves or hides.
   it live. The member list renders a small "direct" badge on `direct` rows,
   with the tooltip "Connected directly over IP; files and voice with this
   member take the fast path". The voice roster shows the same badge per
-  participant.
+  participant. The client keeps one path per peer rather than a field per
+  roster, filled from member rows and moved by the event, because a member
+  row, a voice row and a diagnostics row are the same peer.
 - `GET /upgrade/sessions` lists this node's direct sessions for a Settings
   diagnostics panel: peer, since, which candidate kind won (`lan`,
   `mapped`, `observed`), round trip, bytes each way, and the last failure
@@ -377,11 +379,21 @@ Additive only; nothing existing moves or hides.
   that a pair is stuck behind symmetric NAT. As built in Phase 2 it answers
   `{sessions, last_failure}` with the round trip measured from
   acknowledgements, since aioquic exposes none of its own, and an empty
-  `last_failure`: what a pair failed at is Phase 3's to know.
+  `last_failure`: what a pair failed at is Phase 3's to know. Phase 5 added
+  `listening` and `listen_port`, read from the transport rather than the
+  config, because a port that could not be bound reaches nobody and a user
+  told only about NAT would read a firewall as one.
 - Settings gains the "Direct connections" switch, the listen port, and a
   "Try now" per peer for the diagnostics panel. Config keys under
-  `"upgrade"` in `config.json`: `enabled`, `listen_port`.
+  `"upgrade"` in `config.json`: `enabled`, `listen_port`. The switch is its
+  own endpoint and applies the moment it is flipped, since off closes the
+  sessions this node holds; the port is a stored preference and rides on
+  `GET`/`POST /settings` as `upgrade_listen_port`, bound on the next launch.
 - `delivered` on a message sent over a direct session means acknowledged.
+  It is not distinguishable in the client: a message's `delivery_state` is
+  one aggregate over every recipient and carries no path, and the recipient's
+  path at send time is not stored with the message, so the indicator says
+  "Delivered" on either path. Left as it is rather than guessed at.
 
 Path state is what this node knows about its own sessions. It is never sent
 to another member and never inferred about pairs this node is not part of.
@@ -529,6 +541,18 @@ own; the measurement and the reasoning are with the punch-rate risk below.
 firewall note in the installers. Check: `flutter analyze && flutter test`,
 and a person runs two installs on different home networks and sees the
 badge appear from an invite alone.
+
+**Phase 5 results.** Built as designed, with three things worth recording. The
+badge sits on the presence roster and the members dialog rather than on a
+"member list" (the channel column has none), on every voice roster row, and on
+the voice session panel only when *every* pair in the call is direct, since one
+encoder feeds them all and a mixed session runs at the mesh's number. The
+diagnostics panel leads with whether this node is listening and on which port:
+without it a blocked port and a NAT that will not punch are the same empty list.
+And acknowledged delivery is real on the wire but invisible to the client: the
+message's delivery state is one aggregate over every recipient with no path on
+it, so the indicator is unchanged and saying more would need the path carried
+with the message.
 
 **Phase 6: the list (ongoing).** Items 2 through 8 above, each with its own
 tests and, for anything periodic, a shaped scenario run.

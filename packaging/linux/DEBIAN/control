@@ -14,5 +14,9 @@ Description: Decentralised encrypted mesh chat over Reticulum
  channel-based group messaging, offline message sync, and invite-only
  channels with role-based permissions.
  .
+ It listens on UDP 42420 for direct connections to members of a shared
+ invite-only channel. A firewall that blocks the port leaves every message
+ on the mesh path; only the faster direct path is given up.
+ .
  User data (identity keys, channels, message history) is stored in
  ~/.trenchchat/ and is preserved across upgrades.

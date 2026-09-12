@@ -13,6 +13,13 @@
 #
 # Upgrade path: the user drags TrenchChat.app to /Applications/, replacing the
 # existing .app bundle. ~/.trenchchat/ is never touched.
+#
+# Firewall: on its first run TrenchChat listens on UDP 42420 for direct
+# connections to members of a shared invite-only channel, and macOS asks
+# whether to accept incoming connections. Declining is safe: every message
+# still travels the Reticulum mesh path, and only the faster direct path for
+# files, voice and history is given up. The port is changed under Settings,
+# Direct connections.
 
 set -euo pipefail
 

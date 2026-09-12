@@ -625,8 +625,8 @@ class _SettingsDialogContentState extends State<_SettingsDialogContent> {
                   ],
                 ),
                 Text(
-                  'up ${formatRelativeAgo(session.since)
-                      .replaceAll(' ago', '')}, round trip $roundTrip, '
+                  'up ${formatRelative(session.since)}, '
+                  'round trip $roundTrip, '
                   '${formatByteCount(session.bytesIn)} in / '
                   '${formatByteCount(session.bytesOut)} out',
                   style: TextStyle(

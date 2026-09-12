@@ -10,6 +10,12 @@
 # Produces:
 #   dist/trenchchat-<version>-amd64.deb
 #
+# Firewall: TrenchChat listens on UDP 42420 for direct connections to members
+# of a shared invite-only channel. Nothing here opens it, and no desktop asks:
+# a host firewall that blocks it leaves every message on the Reticulum mesh
+# path, giving up only the faster direct path for files, voice and history.
+# The port is changed under Settings, Direct connections.
+#
 # User data at ~/.trenchchat/ is never referenced or modified.
 # Installing over an existing version replaces /opt/trenchchat/ in-place
 # because the control file declares Replaces: trenchchat.

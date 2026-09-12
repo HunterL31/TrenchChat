@@ -107,6 +107,10 @@ asyncio via `EventBus`.
   backend over the same profile (`trenchchat/single_instance.py` + the launcher's `/ui/open`).
 - Backend URL resolution lives in `lib/main.dart` (`resolveBaseUrl`): dart-define → web `?api=` →
   web page origin → desktop `TC_API_URL` env var → tester-A default `127.0.0.1:8801`.
+- Which path a peer is reached over lives in one map (`AppState.pathByPeer`, filled from member
+  rows and moved by the `path_changed` event), never a field per roster; a `direct` peer wears
+  the `DirectBadge` on member and voice roster rows, and Settings' DIRECT CONNECTIONS section
+  holds the switch, the listen port and the per-peer diagnostics.
 - Tests: `flutter analyze && flutter test` after any `flutter_ui/` change. Widget tests inject
   `AppState(baseUrl, httpClient: backend.client())` with `test/fake_backend.dart` (MockClient);
   flutter_test stubs real HTTP. Golden baselines are Windows-rendered: 4 goldens permanently fail
