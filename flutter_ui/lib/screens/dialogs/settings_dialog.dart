@@ -5,11 +5,14 @@
 import 'package:flutter/material.dart';
 
 import '../../api/models/settings.dart';
+import '../../api/models/upgrade.dart';
 import '../../api/models/voice.dart';
 import '../../app_state.dart';
+import '../../format.dart';
 import '../../theme/section_theme.dart';
 import '../../theme/theme_spec.dart';
 import '../../theme/tokens.dart';
+import '../../widgets/badge.dart';
 import '../../widgets/tc_button.dart';
 import '../../widgets/tc_checkbox.dart';
 import '../../widgets/tc_context_menu.dart';
@@ -42,12 +45,18 @@ class _SettingsDialogContentState extends State<_SettingsDialogContent> {
   final _displayName = TextEditingController();
   final _nodeName = TextEditingController();
   final _storageLimit = TextEditingController();
+  final _listenPort = TextEditingController();
 
   bool _loading = true;
   bool _busy = false;
   String? _error;
 
   bool _propEnabled = false;
+
+  /// The "Direct connections" switch. Applied the moment it is flipped
+  /// rather than on SAVE: off closes the sessions this node holds, and a
+  /// user withdrawing their address should not have to confirm it twice.
+  bool _directEnabled = false;
 
   /// GET /voice/devices snapshot; unavailable until loaded (or when the
   /// backend has no audio stack, in which case [AudioDevices.reason] says why).
@@ -63,15 +72,24 @@ class _SettingsDialogContentState extends State<_SettingsDialogContent> {
   @override
   void initState() {
     super.initState();
+    widget.state.addListener(_onStateChanged);
     _load();
   }
 
   @override
   void dispose() {
+    widget.state.removeListener(_onStateChanged);
     _displayName.dispose();
     _nodeName.dispose();
     _storageLimit.dispose();
+    _listenPort.dispose();
     super.dispose();
+  }
+
+  /// The diagnostics list is AppState's, and a path_changed event moves it
+  /// while the dialog is open.
+  void _onStateChanged() {
+    if (mounted) setState(() {});
   }
 
   Future<void> _load() async {
@@ -83,12 +101,19 @@ class _SettingsDialogContentState extends State<_SettingsDialogContent> {
       try {
         devices = await widget.state.api.getVoiceDevices();
       } catch (_) {}
+      await widget.state.loadDirectConnections();
+      await widget.state.loadDirectSessions();
       if (!mounted) return;
+      final port = settings.upgradeListenPort > 0
+          ? settings.upgradeListenPort
+          : widget.state.directConnections.listenPort;
       setState(() {
         _displayName.text = widget.state.meDisplayName;
         _propEnabled = settings.propagationEnabled;
         _nodeName.text = settings.propagationNodeName;
         _storageLimit.text = '${settings.propagationStorageLimitMb}';
+        _directEnabled = widget.state.directConnections.enabled;
+        _listenPort.text = port > 0 ? '$port' : '';
         _devices = devices;
         _inputDevice = devices.selectedInput;
         _outputDevice = devices.selectedOutput;
@@ -114,6 +139,15 @@ class _SettingsDialogContentState extends State<_SettingsDialogContent> {
       setState(() => _error = 'Storage limit must be a number of at least 16 MB.');
       return;
     }
+    // An empty field is a backend that never answered with a port; sending
+    // nothing leaves the stored one alone rather than asking for port zero.
+    final portText = _listenPort.text.trim();
+    final listenPort = portText.isEmpty ? 0 : int.tryParse(portText) ?? -1;
+    if (portText.isNotEmpty && (listenPort < 1 || listenPort > 65535)) {
+      setState(() =>
+          _error = 'Listen port must be a number between 1 and 65535.');
+      return;
+    }
     setState(() {
       _busy = true;
       _error = null;
@@ -125,6 +159,7 @@ class _SettingsDialogContentState extends State<_SettingsDialogContent> {
       propagationEnabled: _propEnabled,
       propagationNodeName: _nodeName.text.trim(),
       propagationStorageLimitMb: storageMb,
+      upgradeListenPort: listenPort,
     ));
     final devicesChanged = _devices.available &&
         (_inputDevice != _devices.selectedInput ||
@@ -381,6 +416,12 @@ class _SettingsDialogContentState extends State<_SettingsDialogContent> {
                     const SizedBox(height: 16),
                     Container(height: 1, color: tc.borderSubtle),
                     const SizedBox(height: 12),
+                    _sectionLabel(tc, 'DIRECT CONNECTIONS'),
+                    const SizedBox(height: 8),
+                    _directConnections(tc),
+                    const SizedBox(height: 16),
+                    Container(height: 1, color: tc.borderSubtle),
+                    const SizedBox(height: 12),
                     _sectionLabel(tc, 'ABOUT'),
                     const SizedBox(height: 8),
                     _readonlyRow(tc, 'Version', _version),
@@ -497,6 +538,162 @@ class _SettingsDialogContentState extends State<_SettingsDialogContent> {
         ),
       ],
     );
+  }
+
+  /// The switch, the port, and why each eligible peer has a session or has
+  /// none. Whether this node is listening at all is the line that keeps a
+  /// blocked port from reading as a NAT that will not punch.
+  Widget _directConnections(TCSectionColors tc) {
+    final direct = widget.state.directSessions;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        TcCheckbox(
+          value: _directEnabled,
+          label: 'Connect directly to members over IP when possible',
+          onChanged: _onDirectEnabledChanged,
+        ),
+        const SizedBox(height: 8),
+        Text(
+          'A direct session carries files, voice and history between two '
+          'members of a shared invite-only channel at IP speed. Everything '
+          'still works without one: the pair stays on the mesh. Turning this '
+          'off closes the sessions this node holds, and offers nobody an '
+          'address.',
+          style: TextStyle(fontSize: TCType.textBodySm, color: tc.textSecondary),
+        ),
+        const SizedBox(height: 10),
+        TcTextField(
+          label: 'Listen port (UDP)',
+          controller: _listenPort,
+          hintText: 'e.g. 42420',
+          onSubmitted: (_) => _submit(),
+        ),
+        const SizedBox(height: 6),
+        Text(
+          direct.listening
+              ? 'Listening on port ${direct.listenPort}. A new port takes '
+                  'effect on the next launch.'
+              : 'Not listening: nothing can arrive on this node. A new port '
+                  'takes effect on the next launch.',
+          style: TextStyle(
+            fontSize: TCType.textMicro,
+            color: direct.listening ? tc.textTertiary : tc.statusWarn,
+          ),
+        ),
+        const SizedBox(height: 10),
+        if (direct.sessions.isEmpty && direct.failures.isEmpty)
+          Text(
+            'No peer to report on yet.',
+            style: TextStyle(fontSize: TCType.textBodySm, color: tc.textTertiary),
+          ),
+        for (final session in direct.sessions) _sessionRow(tc, session),
+        for (final failure in direct.failures) _failureRow(tc, failure),
+      ],
+    );
+  }
+
+  /// One peer this node holds a session with: how long, how far, how much.
+  Widget _sessionRow(TCSectionColors tc, DirectSession session) {
+    final name = session.displayName.isNotEmpty
+        ? session.displayName
+        : widget.state.resolvePeerName(session.peer) ?? '';
+    final roundTrip = session.roundTripSecs > 0
+        ? '${(session.roundTripSecs * 1000).toStringAsFixed(0)} ms'
+        : 'not measured yet';
+    return Padding(
+      padding: const EdgeInsets.only(top: 6),
+      child: Row(
+        children: [
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Flexible(
+                      child: Text(
+                        '${name.isEmpty ? '' : '$name '}'
+                        '${_shortHash(session.peer)}',
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                            fontSize: TCType.textBodySm, color: tc.textPrimary),
+                      ),
+                    ),
+                    const SizedBox(width: 6),
+                    const DirectBadge(),
+                  ],
+                ),
+                Text(
+                  'up ${formatRelativeAgo(session.since)
+                      .replaceAll(' ago', '')}, round trip $roundTrip, '
+                  '${formatByteCount(session.bytesIn)} in / '
+                  '${formatByteCount(session.bytesOut)} out',
+                  style: TextStyle(
+                      fontSize: TCType.textMicro, color: tc.textTertiary),
+                ),
+              ],
+            ),
+          ),
+          TcGhostButton(
+            label: 'DROP',
+            onPressed: () => widget.state.closeDirectSession(session.peer),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// One eligible peer with no session, and why not.
+  Widget _failureRow(TCSectionColors tc, DirectFailure failure) {
+    final name = widget.state.resolvePeerName(failure.peer) ?? '';
+    final waiting = failure.nextAttempt >
+        DateTime.now().millisecondsSinceEpoch / 1000;
+    return Padding(
+      padding: const EdgeInsets.only(top: 6),
+      child: Row(
+        children: [
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  '${name.isEmpty ? '' : '$name '}${_shortHash(failure.peer)}',
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                      fontSize: TCType.textBodySm, color: tc.textSecondary),
+                ),
+                Text(
+                  waiting
+                      ? '${directFailureReason(failure.reason)}; waiting '
+                          'until ${formatTsShort(failure.nextAttempt)}'
+                      : directFailureReason(failure.reason),
+                  style: TextStyle(
+                      fontSize: TCType.textMicro, color: tc.textTertiary),
+                ),
+              ],
+            ),
+          ),
+          TcGhostButton(
+            label: 'TRY NOW',
+            onPressed: () => widget.state.tryDirectSession(failure.peer),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _onDirectEnabledChanged(bool value) async {
+    setState(() => _directEnabled = value);
+    final ok = await widget.state.setDirectConnections(value);
+    if (!mounted) return;
+    setState(() {
+      _directEnabled = widget.state.directConnections.enabled;
+      if (!ok) {
+        _error = widget.state.takeActionError() ??
+            'Could not change direct connections.';
+      }
+    });
   }
 
   Widget _sectionLabel(TCSectionColors tc, String label) => Text(

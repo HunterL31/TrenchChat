@@ -37,6 +37,16 @@ void main() {
     };
     backend.routes['POST /settings'] = {'ok': true};
     backend.routes['POST /me/display_name'] = {'ok': true};
+    backend.routes['GET /upgrade/enabled'] = {
+      'enabled': true,
+      'listen_port': 42420,
+    };
+    backend.routes['GET /upgrade/sessions'] = {
+      'sessions': <dynamic>[],
+      'last_failure': <String, dynamic>{},
+      'listening': true,
+      'listen_port': 42420,
+    };
     state = AppState(baseUrl: backend.baseUrl, httpClient: backend.client());
     state.meHashHex = 'a9f13c02e7d84b119876543210fedcba';
     state.meDisplayName = 'operator';
@@ -263,6 +273,166 @@ void main() {
 
     expect(find.text('Settings'), findsNothing);
     expect(backend.requests.any((r) => r.path == '/settings' && r.method == 'POST'), isTrue);
+  });
+
+  group('direct connections', () {
+    const alice = 'aa11bb22cc33dd44ee55ff6600112233';
+    const bob = 'bb11bb22bb33bb44bb55bb66bb77bb88';
+
+    void stubDiagnostics({
+      bool listening = true,
+      List<dynamic> sessions = const [],
+      Map<String, dynamic> failures = const {},
+    }) {
+      backend.routes['GET /upgrade/sessions'] = {
+        'sessions': sessions,
+        'last_failure': failures,
+        'listening': listening,
+        'listen_port': listening ? 42420 : 0,
+      };
+    }
+
+    testWidgets('shows the switch, the port and where this node listens',
+        (tester) async {
+      await open(tester);
+      await scrollTo(tester, find.text('DIRECT CONNECTIONS'));
+
+      expect(find.textContaining('Connect directly to members over IP'),
+          findsOneWidget);
+      expect(find.widgetWithText(TextField, '42420'), findsOneWidget);
+      expect(find.textContaining('Listening on port 42420'), findsOneWidget);
+      expect(find.textContaining('next launch'), findsOneWidget);
+    });
+
+    testWidgets('a node that could not bind says so rather than staying quiet',
+        (tester) async {
+      stubDiagnostics(listening: false);
+      await open(tester);
+      await scrollTo(tester, find.text('DIRECT CONNECTIONS'));
+
+      expect(find.textContaining('Not listening'), findsOneWidget);
+    });
+
+    testWidgets('turning the switch off posts it at once', (tester) async {
+      backend.routes['POST /upgrade/enabled'] = {'ok': true, 'enabled': false};
+      await open(tester);
+      await scrollTo(tester, find.text('DIRECT CONNECTIONS'));
+
+      await tester.tap(
+          find.textContaining('Connect directly to members over IP'));
+      await settle(tester);
+
+      final post = backend.requests.singleWhere(
+          (r) => r.path == '/upgrade/enabled' && r.method == 'POST');
+      expect(jsonDecode(post.body), {'enabled': false});
+    });
+
+    testWidgets('lists a session and a peer with none, and why', (tester) async {
+      stubDiagnostics(
+        sessions: [
+          {
+            'peer': alice,
+            'display_name': 'Alice',
+            'since': 1700.0,
+            'round_trip_secs': 0.012,
+            'bytes_in': 4096,
+            'bytes_out': 2048,
+          }
+        ],
+        failures: {
+          bob: {'reason': 'punch_failed', 'at': 1700.0, 'next_attempt': 1760.0},
+        },
+      );
+      await open(tester);
+      await scrollTo(tester, find.text('DIRECT CONNECTIONS'));
+
+      expect(find.textContaining('Alice'), findsOneWidget);
+      expect(find.textContaining('12 ms'), findsOneWidget);
+      expect(find.textContaining('4.0 KB in'), findsOneWidget);
+      expect(find.textContaining('Could not punch through NAT'), findsOneWidget);
+      expect(find.text('DROP'), findsOneWidget);
+      expect(find.text('TRY NOW'), findsOneWidget);
+    });
+
+    testWidgets('a peer waiting out a backoff says until when', (tester) async {
+      stubDiagnostics(failures: {
+        bob: {
+          'reason': 'no_answer',
+          'at': 1700.0,
+          // Far enough out that the wait is unambiguous whenever this runs.
+          'next_attempt': 4102444800.0,
+        },
+      });
+      await open(tester);
+      await scrollTo(tester, find.text('DIRECT CONNECTIONS'));
+
+      expect(find.textContaining('No answer to the offer'), findsOneWidget);
+      expect(find.textContaining('waiting until'), findsOneWidget);
+    });
+
+    testWidgets('DROP and TRY NOW call their own endpoints', (tester) async {
+      stubDiagnostics(
+        sessions: [
+          {
+            'peer': alice,
+            'display_name': 'Alice',
+            'since': 1700.0,
+            'round_trip_secs': 0.0,
+            'bytes_in': 0,
+            'bytes_out': 0,
+          }
+        ],
+        failures: {
+          bob: {'reason': 'refused', 'at': 1700.0, 'next_attempt': 1760.0},
+        },
+      );
+      backend.routes['POST /upgrade/close/$alice'] = {'ok': true};
+      backend.routes['POST /upgrade/try/$bob'] = {'ok': true, 'reason': null};
+      await open(tester);
+      await scrollTo(tester, find.text('DROP'));
+      await tester.ensureVisible(find.text('DROP'));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('DROP'));
+      await settle(tester);
+      await tester.ensureVisible(find.text('TRY NOW'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('TRY NOW'));
+      await settle(tester);
+
+      expect(backend.requests.any((r) => r.path == '/upgrade/close/$alice'),
+          isTrue);
+      expect(backend.requests.any((r) => r.path == '/upgrade/try/$bob'), isTrue);
+    });
+
+    testWidgets('saving carries the edited port', (tester) async {
+      await open(tester);
+      await scrollTo(tester, find.text('DIRECT CONNECTIONS'));
+
+      await tester.enterText(find.widgetWithText(TextField, '42420'), '42999');
+      await tester.tap(find.text('SAVE'));
+      await settle(tester);
+      await tester.pumpAndSettle();
+
+      final post = backend.requests
+          .singleWhere((r) => r.path == '/settings' && r.method == 'POST');
+      expect((jsonDecode(post.body) as Map<String, dynamic>)['upgrade_listen_port'],
+          42999);
+    });
+
+    testWidgets('a port outside the range is refused without saving',
+        (tester) async {
+      await open(tester);
+      await scrollTo(tester, find.text('DIRECT CONNECTIONS'));
+
+      await tester.enterText(find.widgetWithText(TextField, '42420'), '99999');
+      await tester.tap(find.text('SAVE'));
+      await tester.pump();
+
+      expect(find.textContaining('between 1 and 65535'), findsOneWidget);
+      expect(backend.requests.where((r) => r.path == '/settings' && r.method == 'POST'),
+          isEmpty);
+    });
   });
 
   // Up to MAX_TRACKED_NODES are held at once and ordered nearest first, so

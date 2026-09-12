@@ -13,7 +13,7 @@ stubbed down to what the endpoints touch.
 import sys
 import warnings
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, PropertyMock
 
 import pytest
 
@@ -49,6 +49,7 @@ ME = "a" * 32
 DIRECT_PEER = "1" * 32
 MESH_PEER = "2" * 32
 GONE_PEER = "3" * 32
+LISTEN_PORT = 42420
 
 
 def _member(identity_hash: str, role: str = "member") -> dict:
@@ -81,6 +82,7 @@ def with_direct(backend):
     """The same backend, holding a direct path with sessions on it."""
     backend.router.direct_transport = MagicMock()
     backend.router.direct_transport.sessions.return_value = []
+    backend.router.direct_transport.listen_port = LISTEN_PORT
     return backend.router.direct_transport
 
 
@@ -114,9 +116,11 @@ class TestMemberPath:
 
 @needs_backend
 class TestUpgradeSessions:
-    def test_a_node_with_no_direct_path_lists_nothing(self, client):
+    def test_a_node_with_no_direct_path_lists_nothing_and_is_not_listening(
+            self, client):
         body = client.get("/upgrade/sessions", headers=AUTH).json()
-        assert body == {"sessions": [], "last_failure": {}}
+        assert body == {"sessions": [], "last_failure": {},
+                        "listening": False, "listen_port": 0}
 
     def test_a_session_is_listed_with_what_this_node_knows_about_it(
             self, client, with_direct):
@@ -134,6 +138,23 @@ class TestUpgradeSessions:
         assert session["bytes_in"] == 4096
         assert session["bytes_out"] == 2048
         assert session["display_name"]
+
+    def test_it_says_where_this_node_listens(self, client, with_direct):
+        body = client.get("/upgrade/sessions", headers=AUTH).json()
+        assert body["listening"] is True
+        assert body["listen_port"] == LISTEN_PORT
+
+    def test_a_port_that_could_not_be_bound_reads_as_not_listening(
+            self, client, with_direct):
+        # The transport can still dial with no listener, so the sessions it
+        # holds are listed either way; what a user needs told is that nothing
+        # can arrive, which is a firewall rather than a NAT that will not punch.
+        with_direct.listen_port = 0
+
+        body = client.get("/upgrade/sessions", headers=AUTH).json()
+
+        assert body["listening"] is False
+        assert body["listen_port"] == 0
 
     def test_it_needs_the_token_like_every_other_endpoint(self, client):
         assert client.get("/upgrade/sessions").status_code == 401
@@ -255,3 +276,54 @@ class TestTheDirectConnectionsSwitch:
     def test_it_needs_the_token_like_everything_else(self, client):
         assert client.post("/upgrade/enabled",
                            json={"enabled": False}).status_code == 401
+
+
+@needs_backend
+class TestTheListenPort:
+    """The port a session arrives on, which a user edits with the settings."""
+
+    @pytest.fixture
+    def settings_backend(self, backend):
+        backend.config.propagation_enabled = False
+        backend.config.propagation_node_name = ""
+        backend.config.propagation_storage_limit_mb = 500
+        backend.config.outbound_propagation_node = ""
+        backend.config.upgrade_listen_port = LISTEN_PORT
+        return backend
+
+    def test_it_is_read_back_with_the_rest_of_the_settings(self, client,
+                                                           settings_backend):
+        body = client.get("/settings", headers=AUTH).json()
+
+        assert body["upgrade_listen_port"] == LISTEN_PORT
+        assert body["propagation_storage_limit_mb"] == 500
+
+    def test_saving_one_writes_it_and_leaves_the_rest_alone(self, client,
+                                                            settings_backend):
+        res = client.post("/settings", headers=AUTH,
+                          json={"upgrade_listen_port": 42999})
+
+        assert res.status_code == 200
+        assert settings_backend.config.upgrade_listen_port == 42999
+        # Nothing live is touched: the port is bound on the next launch.
+        settings_backend.router.enable_propagation.assert_not_called()
+
+    def test_a_port_the_config_refuses_is_an_error_not_a_silent_drop(
+            self, client, settings_backend):
+        type(settings_backend.config).upgrade_listen_port = PropertyMock(
+            side_effect=ValueError("upgrade_listen_port must be between 0 "
+                                   "and 65535, got 99999"))
+
+        res = client.post("/settings", headers=AUTH,
+                          json={"upgrade_listen_port": 99999})
+
+        assert res.status_code == 400
+        assert "65535" in res.json()["error"]
+
+    def test_a_save_that_does_not_mention_it_leaves_it_where_it_was(
+            self, client, settings_backend):
+        res = client.post("/settings", headers=AUTH,
+                          json={"propagation_node_name": "ridge-relay"})
+
+        assert res.status_code == 200
+        assert settings_backend.config.upgrade_listen_port == LISTEN_PORT

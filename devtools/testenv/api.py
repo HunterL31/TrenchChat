@@ -217,6 +217,7 @@ class SettingsUpdateRequest(BaseModel):
     propagation_enabled: bool | None = None
     propagation_node_name: str | None = None
     propagation_storage_limit_mb: int | None = None
+    upgrade_listen_port: int | None = None
 
 
 class UpgradeEnabledRequest(BaseModel):
@@ -805,20 +806,36 @@ def create_app(backend: Backend, *, token: str | None = None,
         actions.set_display_name(backend.router, req.display_name)
         return {"ok": True}
 
+    def _settings_body() -> dict:
+        """The propagation settings plus the port direct sessions arrive on.
+
+        The port is a stored preference the Settings pane edits; the switch
+        beside it is not, because turning direct sessions off takes effect at
+        once (/upgrade/enabled) while a new port is bound on the next launch.
+        """
+        settings = actions.read_settings(backend.config)
+        settings["upgrade_listen_port"] = backend.config.upgrade_listen_port
+        return settings
+
     @app.get("/settings")
     def get_settings():
-        return actions.read_settings(backend.config)
+        return _settings_body()
 
     @app.post("/settings")
     def update_settings(req: SettingsUpdateRequest):
         # Same entry point the Settings dialog's _on_accept uses, minus
-        # display_name/avatar which have their own endpoints above.
+        # display_name/avatar which have their own endpoints above. The
+        # listen port is a plain config write: nothing live reads it until
+        # the next launch binds it.
         updates = req.model_dump(exclude_unset=True)
+        listen_port = updates.pop("upgrade_listen_port", None)
         try:
+            if listen_port is not None:
+                backend.config.upgrade_listen_port = listen_port
             actions.apply_settings(backend.config, backend.router, updates)
         except ValueError as e:
             return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
-        return {"ok": True, "settings": actions.read_settings(backend.config)}
+        return {"ok": True, "settings": _settings_body()}
 
     @app.get("/ui_theme")
     def get_ui_theme():
@@ -1659,8 +1676,13 @@ def create_app(backend: Backend, *, token: str | None = None,
         reason from UpgradeManager's fixed set and when the next attempt is
         due, which is what tells a user a pair is stuck behind symmetric NAT
         rather than leaving it mysterious.
+
+        listening is whether the UDP socket is actually bound, and on which
+        port: a node whose port was refused reaches nobody, and without this
+        a firewall reads as a NAT that will not punch.
         """
         direct = backend.router.direct_transport
+        listen_port = direct.listen_port if direct is not None else 0
         sessions = []
         for entry in (direct.sessions() if direct is not None else []):
             sessions.append({
@@ -1674,7 +1696,9 @@ def create_app(backend: Backend, *, token: str | None = None,
                 "bytes_out": entry["bytes_out"],
             })
         return {"sessions": sessions,
-                "last_failure": backend.upgrade_mgr.failures()}
+                "last_failure": backend.upgrade_mgr.failures(),
+                "listening": listen_port != 0,
+                "listen_port": listen_port}
 
     @app.get("/upgrade/enabled")
     def get_upgrade_enabled():
