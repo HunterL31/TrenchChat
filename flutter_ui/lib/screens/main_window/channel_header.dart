@@ -10,6 +10,7 @@ import '../../widgets/signal_meter.dart';
 import '../../widgets/tc_button.dart';
 import '../../widgets/tc_icon.dart';
 import '../../widgets/tc_tooltip.dart';
+import 'link_quality_popover.dart';
 
 enum ChannelTab { chat, map, iface, friends, browse }
 
@@ -17,6 +18,11 @@ enum ChannelTab { chat, map, iface, friends, browse }
 /// the whole window -- the tabs render as icons and the link label drops, so
 /// the channel name stays visible and the FRIENDS tab stays on-screen.
 const double _denseHeaderWidth = 560;
+
+/// Below this width the link pill drops its tier word. The meter beside it
+/// already shows the tier, and the room is needed for the reach fraction and
+/// for the socket pill, which only appears when live updates are down.
+const double _wideHeaderWidth = 860;
 
 class ChannelHeader extends StatelessWidget {
   const ChannelHeader({
@@ -58,23 +64,29 @@ class ChannelHeader extends StatelessWidget {
         LinkQualityLevel.unknown => 'UNKNOWN',
       };
 
+  /// Tier, how much of the roster has a path, and the median hop count over
+  /// the part that does. The tilde marks it as a median, not one peer's reading.
+  String _pillLabel(bool wide) {
+    final hops = linkQuality.medianHops;
+    final hopsLabel =
+        hops != null ? '~$hops HOP${hops == 1 ? '' : 'S'}' : 'HOPS UNKNOWN';
+    final reach = '${linkQuality.reachable}/${linkQuality.total} · $hopsLabel';
+    return wide ? '$_levelLabel · $reach' : reach;
+  }
+
   @override
   Widget build(BuildContext context) {
     final tc = SectionTheme.of(context);
-    final hopsLabel = linkQuality.hops != null
-        ? '${linkQuality.hops} HOP${linkQuality.hops == 1 ? '' : 'S'}'
-        : 'HOPS UNKNOWN';
-
     return LayoutBuilder(
       builder: (context, constraints) {
         final dense = compact || constraints.maxWidth < _denseHeaderWidth;
-        return _buildBar(context, tc, hopsLabel, dense);
+        return _buildBar(context, tc, dense, constraints.maxWidth >= _wideHeaderWidth);
       },
     );
   }
 
   Widget _buildBar(
-      BuildContext context, TCSectionColors tc, String hopsLabel, bool dense) {
+      BuildContext context, TCSectionColors tc, bool dense, bool wide) {
     return Container(
       height: 42,
       padding: const EdgeInsets.symmetric(horizontal: 12),
@@ -117,29 +129,33 @@ class ChannelHeader extends StatelessWidget {
             _ConnectionPill(state: connectionState, compact: dense),
             const SizedBox(width: 8),
           ],
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
-            decoration: BoxDecoration(
-              color: tc.bgInset,
-              border: Border.all(color: tc.borderSubtle),
-            ),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                SignalMeter(level: linkQuality.level, size: 12),
-                if (!dense) ...[
-                  const SizedBox(width: 5),
-                  Text(
-                    '$_levelLabel · $hopsLabel',
-                    style: TextStyle(
-                      fontSize: TCType.textMicro,
-                      color: tc.textSecondary,
-                      letterSpacing:
-                          TCType.letterSpacingFor(TCType.textMicro, TCType.trackingWide),
+          LinkQualityPopover(
+            quality: linkQuality,
+            compact: dense,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+              decoration: BoxDecoration(
+                color: tc.bgInset,
+                border: Border.all(color: tc.borderSubtle),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  SignalMeter(level: linkQuality.level, size: 12),
+                  if (!dense) ...[
+                    const SizedBox(width: 5),
+                    Text(
+                      _pillLabel(wide),
+                      style: TextStyle(
+                        fontSize: TCType.textMicro,
+                        color: tc.textSecondary,
+                        letterSpacing: TCType.letterSpacingFor(
+                            TCType.textMicro, TCType.trackingWide),
+                      ),
                     ),
-                  ),
+                  ],
                 ],
-              ],
+              ),
             ),
           ),
           if (onViewMembers != null) ...[

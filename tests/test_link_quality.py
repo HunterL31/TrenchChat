@@ -9,7 +9,7 @@ import time
 import pytest
 
 from trenchchat.core.link_quality import (
-    LinkQuality, score_path, quality_label,
+    LinkQuality, score_path, quality_label, summarize_channel,
     _RTT_EXCELLENT_MS, _RTT_GOOD_MS, _RTT_FAIR_MS,
     _PATH_FRESH_SECS, _PATH_STALE_SECS,
 )
@@ -180,3 +180,85 @@ class TestQualityLabel:
 
     def test_unknown_label(self):
         assert quality_label(LinkQuality.UNKNOWN) == "Unknown"
+
+
+# ---------------------------------------------------------------------------
+# summarize_channel
+# ---------------------------------------------------------------------------
+
+def _peer(identity: str, quality: int, hops: int | None) -> dict:
+    return {"identity_hash": identity, "quality": quality, "hops": hops}
+
+
+class TestSummarizeChannel:
+    def test_empty_roster_is_unknown(self):
+        summary = summarize_channel([])
+        assert summary["level"] == int(LinkQuality.UNKNOWN)
+        assert summary["level_label"] == "Unknown"
+        assert summary["reachable"] == 0
+        assert summary["total"] == 0
+        assert summary["median_hops"] is None
+        assert summary["best_identity_hash"] is None
+        assert summary["best_hops"] is None
+
+    def test_one_peer_is_that_peer(self):
+        summary = summarize_channel([_peer("aa", int(LinkQuality.GOOD), 2)])
+        assert summary["level"] == int(LinkQuality.GOOD)
+        assert summary["reachable"] == 1
+        assert summary["total"] == 1
+        assert summary["median_hops"] == 2
+        assert summary["best_identity_hash"] == "aa"
+        assert summary["best_hops"] == 2
+
+    def test_even_count_takes_the_lower_middle(self):
+        # Four members, so the median falls between two values; both readings
+        # take the numerically lower one. Hops 1, 2, 4, 8 read as 2, and the
+        # quality tiers read as the worse of the two middles.
+        summary = summarize_channel([
+            _peer("aa", int(LinkQuality.EXCELLENT), 1),
+            _peer("bb", int(LinkQuality.GOOD), 2),
+            _peer("cc", int(LinkQuality.FAIR), 4),
+            _peer("dd", int(LinkQuality.POOR), 8),
+        ])
+        assert summary["median_hops"] == 2
+        assert summary["level"] == int(LinkQuality.FAIR)
+
+    def test_one_distant_peer_does_not_move_the_median(self):
+        near = [_peer(f"{i:02x}", int(LinkQuality.EXCELLENT), 1) for i in range(3)]
+        far = _peer("ff", int(LinkQuality.POOR), 11)
+
+        # The mean of 1, 1, 1, 11 is 3.5; the median stays where the channel is.
+        assert summarize_channel(near + [far])["median_hops"] == 1
+        assert summarize_channel(near)["median_hops"] == 1
+
+    def test_unreachable_peers_count_in_total_only(self):
+        summary = summarize_channel([
+            _peer("aa", int(LinkQuality.EXCELLENT), 1),
+            _peer("bb", int(LinkQuality.UNKNOWN), None),
+            _peer("cc", int(LinkQuality.UNKNOWN), None),
+        ])
+        assert summary["reachable"] == 1
+        assert summary["total"] == 3
+        # Averaging the unreachable members in as zero would report the one
+        # member this node can actually reach as POOR.
+        assert summary["level"] == int(LinkQuality.EXCELLENT)
+        assert summary["median_hops"] == 1
+
+    def test_no_reachable_peer_is_unknown_but_keeps_the_total(self):
+        summary = summarize_channel([
+            _peer("aa", int(LinkQuality.UNKNOWN), None),
+            _peer("bb", int(LinkQuality.UNKNOWN), None),
+        ])
+        assert summary["level"] == int(LinkQuality.UNKNOWN)
+        assert summary["reachable"] == 0
+        assert summary["total"] == 2
+        assert summary["best_identity_hash"] is None
+
+    def test_best_breaks_a_quality_tie_on_hops(self):
+        summary = summarize_channel([
+            _peer("far", int(LinkQuality.EXCELLENT), 3),
+            _peer("near", int(LinkQuality.EXCELLENT), 1),
+            _peer("closest_but_worse", int(LinkQuality.FAIR), 0),
+        ])
+        assert summary["best_identity_hash"] == "near"
+        assert summary["best_hops"] == 1

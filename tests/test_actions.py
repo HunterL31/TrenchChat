@@ -7,6 +7,7 @@ silently-filtered request.
 
 import hashlib
 import time
+from unittest.mock import patch
 
 import LXMF
 import pytest
@@ -898,3 +899,77 @@ class TestFilterDirectoryScope:
     def test_all_and_unknown_scopes_pass_everything_through(self):
         assert len(self._filter("all")) == 3
         assert len(self._filter("bogus")) == 3
+
+
+class TestChannelLinkQuality:
+    """actions.channel_link_quality backs GET /channels/{hash}/link_quality."""
+
+    SELF = "aa" * 16
+    NEAR = "bb" * 16
+    FAR = "cc" * 16
+    ABSENT = "dd" * 16
+
+    @pytest.fixture
+    def db(self, tmp_path):
+        from trenchchat.core.storage import Storage
+        s = Storage(db_path=tmp_path / "link.db")
+        s.upsert_channel("11" * 16, "ch", "", self.SELF, dict(PRESET_PRIVATE),
+                         time.time())
+        yield s
+        s.close()
+
+    class _Presence:
+        def is_online(self, peer_hex: str) -> bool:
+            return peer_hex.startswith("bb")
+
+        def last_seen_at(self, peer_hex: str) -> float:
+            return 42.0
+
+    def _path(self, identity_hex: str, hops: int) -> dict:
+        return {
+            "hash": RNS.Destination.hash(bytes.fromhex(identity_hex), "lxmf", "delivery"),
+            "via": bytes.fromhex("ee" * 8),
+            "hops": hops,
+            "expires": time.time() + 300.0,
+        }
+
+    def _call(self, db, path_table):
+        return actions.channel_link_quality(
+            db, None, self._Presence(), path_table, "11" * 16, self.SELF,
+            lambda peer_hex: peer_hex[:4],
+        )
+
+    def test_sorts_by_quality_then_hops_then_name(self, db):
+        for peer in (self.ABSENT, self.FAR, self.NEAR):
+            db.upsert_member("11" * 16, peer, "")
+        db.upsert_member("11" * 16, self.SELF, "")
+
+        result = self._call(db, [self._path(self.NEAR, 1), self._path(self.FAR, 3)])
+
+        assert [p["identity_hash"] for p in result["peers"]] == [
+            self.NEAR, self.FAR, self.ABSENT,
+        ]
+        assert result["peers"][0]["is_online"] is True
+        assert result["peers"][0]["last_seen"] == 42.0
+        assert result["peers"][0]["via"] == "ee" * 8
+        assert result["summary"]["reachable"] == 2
+        assert result["summary"]["total"] == 3
+
+    def test_a_path_table_it_cannot_read_reads_as_no_paths(self, db):
+        db.upsert_member("11" * 16, self.NEAR, "")
+
+        result = self._call(db, None)
+
+        assert result["peers"][0]["hops"] is None
+        assert result["summary"]["reachable"] == 0
+        assert result["summary"]["total"] == 1
+
+    def test_asks_the_mesh_for_nothing(self, db):
+        db.upsert_member("11" * 16, self.NEAR, "")
+        db.upsert_member("11" * 16, self.ABSENT, "")
+
+        with patch.object(RNS.Transport, "request_path") as request_path:
+            self._call(db, [self._path(self.NEAR, 1)])
+        # An indicator that re-reads on every topology change must stay
+        # passive: a path request here would put the header on the air.
+        request_path.assert_not_called()

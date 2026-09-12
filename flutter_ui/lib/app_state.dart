@@ -149,6 +149,10 @@ class AppState extends ChangeNotifier {
   bool voiceAudioError = false;
   Timer? _voicePollTimer;
 
+  Timer? _linkQualityTimer;
+  bool _linkQualityInFlight = false;
+  bool _linkQualityDirty = false;
+
   /// One-line headline for the voice panel's audio warning, empty when the
   /// pipeline is fully up. Distinguishes total failure from one direction
   /// down; the pipeline runs whichever of mic/speakers opened.
@@ -356,6 +360,7 @@ class AppState extends ChangeNotifier {
       voiceRosterByChannel[channelHashHex] = results[5] as List<VoiceParticipant>;
       syncStateByChannel[channelHashHex] = results[6] as String;
       notifyListeners();
+      _startLinkQualityPoll();
     } catch (e) {
       _reportActionError(e);
     }
@@ -962,6 +967,55 @@ class AppState extends ChangeNotifier {
   void _stopVoicePoll() {
     _voicePollTimer?.cancel();
     _voicePollTimer = null;
+  }
+
+  /// The open channel's link reading, or null when what is open is a direct
+  /// conversation: a conversation has no roster to have a reach into.
+  String? get _linkQualityChannel =>
+      selectedDmHash == null ? selectedChannelHash : null;
+
+  /// Re-reads how well this node reaches the open channel. Cheap and local to
+  /// the backend (the path table, no mesh traffic), so it can follow every
+  /// topology change. Coalesced: a request arriving mid-flight is collapsed
+  /// into one more fetch when the current one lands.
+  Future<void> refreshLinkQuality() async {
+    final channelHash = _linkQualityChannel;
+    if (channelHash == null) return;
+    if (_linkQualityInFlight) {
+      _linkQualityDirty = true;
+      return;
+    }
+    _linkQualityInFlight = true;
+    try {
+      linkQualityByChannel[channelHash] = await api.getChannelLinkQuality(channelHash);
+      notifyListeners();
+    } catch (_) {
+      // The last reading stays up; the next event or tick tries again.
+    } finally {
+      _linkQualityInFlight = false;
+    }
+    if (_linkQualityDirty) {
+      _linkQualityDirty = false;
+      await refreshLinkQuality();
+    }
+  }
+
+  /// Path entries expire with no event to announce it, so the reading is also
+  /// re-read on a timer for as long as a channel is open.
+  void _startLinkQualityPoll() {
+    _linkQualityTimer ??= Timer.periodic(linkQualityRefreshInterval, (_) {
+      if (_linkQualityChannel == null) {
+        _stopLinkQualityPoll();
+        return;
+      }
+      if (connectionState != TcConnState.connected) return;
+      unawaited(refreshLinkQuality());
+    });
+  }
+
+  void _stopLinkQualityPoll() {
+    _linkQualityTimer?.cancel();
+    _linkQualityTimer = null;
   }
 
   Future<void> refreshInvites() async {
@@ -1896,6 +1950,8 @@ class AppState extends ChangeNotifier {
             notifyListeners();
           }));
         }
+        // A changed roster is a changed set of links to reach.
+        if (channelHash == _linkQualityChannel) unawaited(refreshLinkQuality());
       case DeliveryStatusEvent(:final channelHash, :final messageId, :final deliveryState):
         final list = messagesByChannel[channelHash];
         if (list != null) {
@@ -1949,6 +2005,9 @@ class AppState extends ChangeNotifier {
         }
       case NetworkMapChangedEvent():
         _networkMapRevision++;
+        // Announces, presence transitions and link changes all move the path
+        // table, which is what the header pill reads.
+        unawaited(refreshLinkQuality());
         notifyListeners();
       case NomadNodeEvent(:final nodeHash, :final displayName):
         final existing = nomadNodes[nodeHash];
@@ -2094,6 +2153,7 @@ class AppState extends ChangeNotifier {
     }
     _reactionRefreshTimers.clear();
     _voicePollTimer?.cancel();
+    _linkQualityTimer?.cancel();
     _sub?.cancel();
     _socket.close();
     api.close();
