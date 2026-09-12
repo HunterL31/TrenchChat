@@ -815,8 +815,10 @@ void main() {
       'interfaces': <Map<String, dynamic>>[],
       'stats': {'node_count': 2, 'path_count': 1, 'interface_count': 0},
     });
+    // The reserved rect is the backing box the painter draws: the text
+    // clamped to 140, plus 3 lp of padding each side.
     final layout = layoutMapNodes(long);
-    expect(layout.labels['p']!.rect.width, lessThanOrEqualTo(140));
+    expect(layout.labels['p']!.rect.width, lessThanOrEqualTo(146));
     expect(layout.size.longestSide, lessThan(1000));
   });
 

@@ -22,7 +22,10 @@ class TcTextField extends StatefulWidget {
     this.inputFormatters,
   });
 
+  /// Names the field above its box. Empty for a field that stands on its
+  /// own in a row of controls and says what it is in its hint instead.
   final String label;
+
   final TextEditingController controller;
 
   /// Supplied by a caller that needs to move focus itself, e.g. to put it back
@@ -75,15 +78,17 @@ class _TcTextFieldState extends State<TcTextField> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(
-          widget.label,
-          style: TextStyle(
-            fontSize: TCType.textCaption,
-            color: tc.textSecondary,
-            letterSpacing: TCType.letterSpacingFor(TCType.textCaption, TCType.trackingWide),
+        if (widget.label.isNotEmpty) ...[
+          Text(
+            widget.label,
+            style: TextStyle(
+              fontSize: TCType.textCaption,
+              color: tc.textSecondary,
+              letterSpacing: TCType.letterSpacingFor(TCType.textCaption, TCType.trackingWide),
+            ),
           ),
-        ),
-        const SizedBox(height: 6),
+          const SizedBox(height: 6),
+        ],
         Container(
           decoration: BoxDecoration(
             color: tc.bgInset,

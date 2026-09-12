@@ -159,6 +159,9 @@ const double _tcMarkerRadius = 2.0;
 const double _labelMaxWidth = 140.0;
 const double _labelHeight = 14.0;
 const double _labelGap = 6.0;
+
+/// Side padding on a label's backing box, reserved as well as painted.
+const double _labelPadX = 3.0;
 const double _ringGap = 84.0;
 const double _innerRadius = 64.0;
 const double _arcGap = 20.0;
@@ -738,7 +741,7 @@ MapLayout layoutMapNodes(NetworkMapData data) {
   // stay off the radial edge lines. The other three sides are fallbacks for
   // when that spot is taken.
   MapLabel anchored(String id, Offset pos, int side) {
-    final w = _estimateLabelWidth(byId[id]!.label);
+    final w = _estimateLabelWidth(byId[id]!.label) + 2 * _labelPadX;
     const h = _labelHeight;
     return switch (side) {
       0 => MapLabel(
@@ -864,6 +867,19 @@ const Duration mapFallbackRefresh = Duration(seconds: 15);
 /// destination, which serves no pages. Falls back to the id for old backends.
 String mapNomadPageUrl(MapNode node) =>
     '${node.nomadNodeHash ?? node.id}:/page/index.mu';
+
+/// The box every legend swatch occupies, whatever glyph it draws inside it.
+const double _legendSwatch = 8;
+
+/// Room between legend entries, now that no entry carries its own trailing gap.
+const double _legendGap = 10;
+
+/// The close control on either details panel.
+const double _panelCloseSize = 22;
+
+/// The box an overflow row's kind marker occupies, so a rotated diamond and
+/// an upright square start their labels on the same column.
+const double _markerBox = 10;
 
 class MapTab extends StatefulWidget {
   const MapTab({super.key, required this.state, this.onOpenNomadPage});
@@ -1088,7 +1104,7 @@ class _MapTabState extends State<MapTab> with SingleTickerProviderStateMixin {
     final query = _search.text.trim();
     return Container(
       color: tc.bgApp,
-      padding: const EdgeInsets.all(18),
+      padding: const EdgeInsets.all(TCSpace.space4),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
@@ -1107,10 +1123,10 @@ class _MapTabState extends State<MapTab> with SingleTickerProviderStateMixin {
               SizedBox(
                 width: 172,
                 child: TcTextField(
-                  label: 'FIND',
+                  label: '',
                   controller: _search,
                   focusNode: _searchFocus,
-                  hintText: 'name or hash…',
+                  hintText: 'FIND name or hash…',
                   onSubmitted: (_) => _focusNextMatch(),
                 ),
               ),
@@ -1122,20 +1138,16 @@ class _MapTabState extends State<MapTab> with SingleTickerProviderStateMixin {
                 child: Wrap(
                   alignment: WrapAlignment.end,
                   crossAxisAlignment: WrapCrossAlignment.center,
+                  spacing: 6,
                   runSpacing: 6,
                   children: [
                     if (data != null) ...[
                       _statChip(tc, '${data.nodeCount} NODES'),
-                      const SizedBox(width: 6),
                       _statChip(tc, '${data.pathCount} PATHS'),
-                      const SizedBox(width: 6),
                       _statChip(tc,
                           '${data.interfaceCount} IFACE${data.interfaceCount == 1 ? '' : 'S'}'),
-                      if (data.onlinePeerCount != null) ...[
-                        const SizedBox(width: 6),
+                      if (data.onlinePeerCount != null)
                         _statChip(tc, '${data.onlinePeerCount} ONLINE'),
-                      ],
-                      const SizedBox(width: 8),
                     ],
                     TcGhostButton(icon: TcIcons.sync, label: 'REFRESH', onPressed: _refresh),
                   ],
@@ -1144,7 +1156,7 @@ class _MapTabState extends State<MapTab> with SingleTickerProviderStateMixin {
             ],
           ),
           if (_error != null) ...[
-            const SizedBox(height: 10),
+            const SizedBox(height: TCSpace.space3),
             Text(
               _error!,
               style: TextStyle(fontSize: TCType.textCaption, color: tc.statusDanger),
@@ -1167,8 +1179,9 @@ class _MapTabState extends State<MapTab> with SingleTickerProviderStateMixin {
                   : ClipRect(child: _mapArea(tc, query)),
             ),
           ),
-          const SizedBox(height: 10),
+          const SizedBox(height: TCSpace.space3),
           Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               TcCheckbox(
                 value: _peersOnly,
@@ -1183,6 +1196,7 @@ class _MapTabState extends State<MapTab> with SingleTickerProviderStateMixin {
                 child: Wrap(
                   alignment: WrapAlignment.end,
                   crossAxisAlignment: WrapCrossAlignment.center,
+                  spacing: _legendGap,
                   runSpacing: 6,
                   children: [
                     for (final (label, quality) in const [
@@ -1312,12 +1326,23 @@ class _MapTabState extends State<MapTab> with SingleTickerProviderStateMixin {
     );
   }
 
-  /// One legend swatch + label. The trailing gap rides inside the entry so an
-  /// end-aligned Wrap keeps the same right margin the old Row had.
-  Widget _legendEntry(TCSectionColors tc, String label, int quality) => Row(
+  /// One legend swatch + label. Every swatch occupies the same box, whatever
+  /// it draws inside it, so the glyph column does not step mid-row.
+  Widget _legendEntry(TCSectionColors tc, String label, int quality) => _legendRow(
+        tc,
+        label,
+        Container(width: _legendSwatch, height: _legendSwatch,
+            color: mapQualityColor(quality, colors: tc)),
+      );
+
+  Widget _legendRow(TCSectionColors tc, String label, Widget swatch) => Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Container(width: 8, height: 8, color: mapQualityColor(quality, colors: tc)),
+          SizedBox(
+            width: _legendSwatch,
+            height: _legendSwatch,
+            child: Center(child: swatch),
+          ),
           const SizedBox(width: 4),
           Text(
             label,
@@ -1327,7 +1352,6 @@ class _MapTabState extends State<MapTab> with SingleTickerProviderStateMixin {
               letterSpacing: TCType.letterSpacingFor(TCType.textMicro, TCType.trackingWide),
             ),
           ),
-          const SizedBox(width: 10),
         ],
       );
 
@@ -1335,95 +1359,68 @@ class _MapTabState extends State<MapTab> with SingleTickerProviderStateMixin {
   /// TrenchChat, independent of the quality color they are painted in.
   Widget _kindLegendEntry(TCSectionColors tc, String label,
           {required bool filled}) =>
-      Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Container(
-            width: 8,
-            height: 8,
-            decoration: BoxDecoration(
-              color: filled ? tc.textSecondary : null,
-              border: Border.all(color: tc.textSecondary),
-            ),
+      _legendRow(
+        tc,
+        label,
+        Container(
+          width: _legendSwatch,
+          height: _legendSwatch,
+          decoration: BoxDecoration(
+            color: filled ? tc.textSecondary : null,
+            border: Border.all(color: tc.textSecondary),
           ),
-          const SizedBox(width: 4),
-          Text(
-            label,
-            style: TextStyle(
-              fontSize: TCType.textMicro,
-              color: tc.textSecondary,
-              letterSpacing: TCType.letterSpacingFor(TCType.textMicro, TCType.trackingWide),
-            ),
-          ),
-          const SizedBox(width: 10),
-        ],
+        ),
       );
 
   /// The outlined circle standing for the children a crowded parent had no
   /// room to draw -- the only marker on the map that is not one node.
-  Widget _groupedLegendEntry(TCSectionColors tc, String label) => Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Container(
-            width: 8,
-            height: 8,
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              border: Border.all(color: tc.textSecondary),
-            ),
+  Widget _groupedLegendEntry(TCSectionColors tc, String label) => _legendRow(
+        tc,
+        label,
+        Container(
+          width: _legendSwatch,
+          height: _legendSwatch,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            border: Border.all(color: tc.textSecondary),
           ),
-          const SizedBox(width: 4),
-          Text(
-            label,
-            style: TextStyle(
-              fontSize: TCType.textMicro,
-              color: tc.textSecondary,
-              letterSpacing: TCType.letterSpacingFor(TCType.textMicro, TCType.trackingWide),
-            ),
-          ),
-          const SizedBox(width: 10),
-        ],
+        ),
       );
 
   /// The corner dots a node marker can carry: presence, Nomad, propagation.
   Widget _markerLegendEntry(TCSectionColors tc, String label, Color color,
           {bool round = false}) =>
-      Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Container(
-            width: 6,
-            height: 6,
-            decoration: BoxDecoration(
-              color: color,
-              shape: round ? BoxShape.circle : BoxShape.rectangle,
-            ),
+      _legendRow(
+        tc,
+        label,
+        Container(
+          width: 6,
+          height: 6,
+          decoration: BoxDecoration(
+            color: color,
+            shape: round ? BoxShape.circle : BoxShape.rectangle,
           ),
-          const SizedBox(width: 4),
-          Text(
-            label,
-            style: TextStyle(
-              fontSize: TCType.textMicro,
-              color: tc.textSecondary,
-              letterSpacing: TCType.letterSpacingFor(TCType.textMicro, TCType.trackingWide),
-            ),
-          ),
-          const SizedBox(width: 10),
-        ],
+        ),
       );
 
-  Widget _statChip(TCSectionColors tc, String label) => Container(
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-        decoration: BoxDecoration(
-          color: tc.bgInset,
-          border: Border.all(color: tc.borderSubtle),
-        ),
-        child: Text(
-          label,
-          style: TextStyle(
-            fontSize: TCType.textMicro,
-            color: tc.textSecondary,
-            letterSpacing: TCType.letterSpacingFor(TCType.textMicro, TCType.trackingWide),
+  Widget _statChip(TCSectionColors tc, String label) => SizedBox(
+        height: tcControlHeight,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 8),
+          decoration: BoxDecoration(
+            color: tc.bgInset,
+            border: Border.all(color: tc.borderSubtle),
+          ),
+          child: Center(
+            widthFactor: 1,
+            child: Text(
+              label,
+              style: TextStyle(
+                fontSize: TCType.textMicro,
+                color: tc.textSecondary,
+                letterSpacing: TCType.letterSpacingFor(TCType.textMicro, TCType.trackingWide),
+              ),
+            ),
           ),
         ),
       );
@@ -1504,6 +1501,7 @@ class _NetworkMapPainter extends CustomPainter {
           alpha: alpha, emphasized: selectedEdge);
     }
 
+    final rings = <(Offset, double, double, bool)>[];
     for (final node in data.nodes) {
       final pos = shown.positions[node.id];
       if (pos == null) continue;
@@ -1516,11 +1514,13 @@ class _NetworkMapPainter extends CustomPainter {
         alpha = 0.7;
       }
       if (appearing) alpha *= eased;
+      final selected = node.id == selectedId;
+      final highlighted = query.isNotEmpty && matches.contains(node.id);
       _drawNode(canvas, node, pos,
-          alpha: alpha,
-          scale: appearing ? 0.6 + 0.4 * eased : 1.0,
-          selected: node.id == selectedId,
-          highlighted: query.isNotEmpty && matches.contains(node.id));
+          alpha: alpha, scale: appearing ? 0.6 + 0.4 * eased : 1.0);
+      if (selected || highlighted) {
+        rings.add((pos, _nodeHalf * (appearing ? 0.6 + 0.4 * eased : 1.0), alpha, selected));
+      }
     }
     for (final node in data.nodes) {
       final label = shown.labels[node.id];
@@ -1531,6 +1531,12 @@ class _NetworkMapPainter extends CustomPainter {
         alpha *= eased;
       }
       _drawLabel(canvas, node, label, alpha);
+    }
+
+    // After the labels: a focus ring drawn before them is clipped square by
+    // the opaque box the label paints over it.
+    for (final (pos, half, alpha, selected) in rings) {
+      _drawFocusRing(canvas, pos, half, alpha, selected: selected);
     }
 
     // Whatever the new data dropped, fading out from where it used to be.
@@ -1605,18 +1611,16 @@ class _NetworkMapPainter extends CustomPainter {
   }
 
   void _drawNode(Canvas canvas, MapNode node, Offset pos,
-      {double alpha = 1.0,
-      double scale = 1.0,
-      bool selected = false,
-      bool highlighted = false}) {
+      {double alpha = 1.0, double scale = 1.0}) {
     final half = _nodeHalf * scale;
     final rect = Rect.fromCircle(center: pos, radius: half);
-    final diamond = Path()
-      ..moveTo(pos.dx, pos.dy - half - 2)
-      ..lineTo(pos.dx + half + 2, pos.dy)
-      ..lineTo(pos.dx, pos.dy + half + 2)
-      ..lineTo(pos.dx - half - 2, pos.dy)
+    Path diamondPath(double inset) => Path()
+      ..moveTo(pos.dx, pos.dy - half - 2 + inset)
+      ..lineTo(pos.dx + half + 2 - inset, pos.dy)
+      ..lineTo(pos.dx, pos.dy + half + 2 - inset)
+      ..lineTo(pos.dx - half - 2 + inset, pos.dy)
       ..close();
+    final diamond = diamondPath(0);
 
     // A group of children the parent had no room for: an outlined circle with
     // a dot in it, deliberately unlike every marker that stands for one node.
@@ -1631,7 +1635,6 @@ class _NetworkMapPainter extends CustomPainter {
       );
       canvas.drawCircle(
           pos, _tcMarkerRadius * scale, Paint()..color = _fade(colors.textSecondary, alpha));
-      _drawFocusRing(canvas, pos, half, alpha, selected: selected, highlighted: highlighted);
       return;
     }
 
@@ -1657,7 +1660,7 @@ class _NetworkMapPainter extends CustomPainter {
         canvas.drawRect(rect, Paint()..color = _fade(colors.accentPrimary, alpha));
       case MapNodeKind.interface_:
         canvas.drawPath(
-          diamond,
+          diamondPath(0.75),
           Paint()
             ..color = _fade(colors.accentSecondary, alpha)
             ..style = PaintingStyle.stroke
@@ -1669,20 +1672,21 @@ class _NetworkMapPainter extends CustomPainter {
             Paint()
               ..color = _fade(mapQualityColor(node.quality, colors: colors), alpha));
         if (showsTrenchChatDot(node)) {
-          canvas.drawCircle(Offset(pos.dx + half, pos.dy - half), _tcMarkerRadius,
+          canvas.drawCircle(Offset(pos.dx + half + 1, pos.dy - half - 1), _tcMarkerRadius,
               Paint()..color = _fade(colors.accentPrimary, alpha));
         }
       case MapNodeKind.peer:
+        final style = mapPeerStyle(node);
         canvas.drawRect(
-          rect,
+          style == PaintingStyle.stroke ? rect.deflate(0.75) : rect,
           Paint()
             ..color = _fade(mapQualityColor(node.quality, colors: colors), alpha)
-            ..style = mapPeerStyle(node)
+            ..style = style
             ..strokeWidth = 1.5,
         );
       case MapNodeKind.unknown:
         canvas.drawRect(
-          rect,
+          rect.deflate(0.5),
           Paint()
             ..color = _fade(colors.statusOffline, alpha)
             ..style = PaintingStyle.stroke
@@ -1702,16 +1706,13 @@ class _NetworkMapPainter extends CustomPainter {
       canvas.drawCircle(Offset(pos.dx + half + 1, pos.dy + half + 1), _tcMarkerRadius,
           Paint()..color = _fade(colors.statusWarn, alpha));
     }
-
-    _drawFocusRing(canvas, pos, half, alpha, selected: selected, highlighted: highlighted);
   }
 
   void _drawFocusRing(Canvas canvas, Offset pos, double half, double alpha,
-      {required bool selected, required bool highlighted}) {
-    if (!selected && !highlighted) return;
+      {required bool selected}) {
     canvas.drawCircle(
       pos,
-      half + (selected ? 7 : 5),
+      half + (selected ? 7 : 6),
       Paint()
         ..color = _fade(colors.accentPrimary, selected ? alpha : 0.7 * alpha)
         ..style = PaintingStyle.stroke
@@ -1736,18 +1737,20 @@ class _NetworkMapPainter extends CustomPainter {
       ellipsis: '…',
     )..layout(maxWidth: _labelMaxWidth);
 
-    final x = switch (label.align) {
+    final boxWidth = painter.width + 2 * _labelPadX;
+    final boxLeft = switch (label.align) {
       TextAlign.left => label.rect.left,
-      TextAlign.right => label.rect.right - painter.width,
-      _ => label.rect.center.dx - painter.width / 2,
+      TextAlign.right => label.rect.right - boxWidth,
+      _ => label.rect.center.dx - boxWidth / 2,
     };
     final y = label.rect.center.dy - painter.height / 2;
-    // Backing box so text stays readable where an edge passes underneath.
+    // Backing box so text stays readable where an edge passes underneath. It
+    // is exactly what the collision solver reserved, or labels overlap.
     canvas.drawRect(
-      Rect.fromLTWH(x - 3, y - 1, painter.width + 6, painter.height + 2),
+      Rect.fromLTWH(boxLeft, y - 1, boxWidth, painter.height + 2),
       Paint()..color = _fade(colors.bgSurface, alpha),
     );
-    painter.paint(canvas, Offset(x, y));
+    painter.paint(canvas, Offset(boxLeft + _labelPadX, y));
   }
 
   @override
@@ -1824,7 +1827,7 @@ class _NodeDetailsPanel extends StatelessWidget {
         mainAxisSize: MainAxisSize.min,
         children: [
           Padding(
-            padding: const EdgeInsets.fromLTRB(12, 10, 8, 6),
+            padding: const EdgeInsets.fromLTRB(12, 10, 12, 6),
             child: Row(
               children: [
                 if (onBack != null) ...[
@@ -1838,12 +1841,18 @@ class _NodeDetailsPanel extends StatelessWidget {
                         : (n.label.isEmpty ? mapShortHex(n.id) : n.label),
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(
-                      fontSize: TCType.textBodySm,
+                      fontSize: TCType.textCaption,
                       color: tc.textPrimary,
+                      letterSpacing: TCType.letterSpacingFor(
+                          TCType.textCaption, TCType.trackingWider),
                     ),
                   ),
                 ),
-                _IconTap(icon: TcIcons.close, onTap: onClose),
+                TcIconButton(
+                    icon: TcIcons.close,
+                    tooltip: 'Close',
+                    size: _panelCloseSize,
+                    onPressed: onClose),
               ],
             ),
           ),
@@ -1867,14 +1876,14 @@ class _NodeDetailsPanel extends StatelessWidget {
   Widget _groupedNote(TCSectionColors tc, String group) => Padding(
         padding: const EdgeInsets.only(bottom: 8),
         child: Text(
-          'GROUPED UNDER $group — not drawn on the map.',
+          'GROUPED UNDER $group: not drawn on the map.',
           style: TextStyle(fontSize: TCType.textCaption, color: tc.textTertiary),
         ),
       );
 
   List<Widget> _goneRows(TCSectionColors tc) => [
         Text(
-          'NO LONGER VISIBLE — the last refresh dropped this node.',
+          'NO LONGER VISIBLE: the last refresh dropped this node.',
           style: TextStyle(fontSize: TCType.textCaption, color: tc.textTertiary),
         ),
       ];
@@ -1960,7 +1969,7 @@ class _NodeDetailsPanel extends StatelessWidget {
       if (n.propagation) ('PROPAGATION', tc.statusWarn),
       if (n.online == true) ('ONLINE', tc.statusOnline),
     ];
-    if (badges.isEmpty) return const SizedBox(height: 2);
+    if (badges.isEmpty) return const SizedBox.shrink();
     return Padding(
       padding: const EdgeInsets.only(bottom: 8),
       child: Wrap(
@@ -1988,7 +1997,8 @@ class _NodeDetailsPanel extends StatelessWidget {
       Padding(
         padding: const EdgeInsets.only(bottom: 6),
         child: Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
+          crossAxisAlignment: CrossAxisAlignment.baseline,
+          textBaseline: TextBaseline.alphabetic,
           children: [
             SizedBox(
               width: 88,
@@ -2020,7 +2030,6 @@ class _NodeDetailsPanel extends StatelessWidget {
       Padding(
         padding: const EdgeInsets.only(bottom: 6),
         child: Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             SizedBox(
               width: 88,
@@ -2044,7 +2053,7 @@ class _NodeDetailsPanel extends StatelessWidget {
                 ),
               ),
             ),
-            const SizedBox(width: 6),
+            const SizedBox(width: TCSpace.space2),
             TcGhostButton(
               label: 'COPY',
               onPressed: () => Clipboard.setData(ClipboardData(text: hex)),
@@ -2104,7 +2113,11 @@ class _OverflowListPanel extends StatelessWidget {
                     ),
                   ),
                 ),
-                _IconTap(icon: TcIcons.close, onTap: onClose),
+                TcIconButton(
+                    icon: TcIcons.close,
+                    tooltip: 'Close',
+                    size: _panelCloseSize,
+                    onPressed: onClose),
               ],
             ),
           ),
@@ -2202,20 +2215,25 @@ class _OverflowRowState extends State<_OverflowRow> {
   /// The same marker language the canvas uses: a square for a peer, filled
   /// for a TrenchChat client, a diamond for a transport.
   Widget _kindMarker(TCSectionColors tc, MapNode n, Color quality) {
-    if (n.kind == MapNodeKind.transport) {
-      return Transform.rotate(
-        angle: math.pi / 4,
-        child: Container(width: 7, height: 7, color: quality),
-      );
-    }
     final filled = n.kind == MapNodeKind.peer && n.isTrenchChat;
     final color = n.kind == MapNodeKind.unknown ? tc.statusOffline : quality;
-    return Container(
-      width: 8,
-      height: 8,
-      decoration: BoxDecoration(
-        color: filled ? color : null,
-        border: Border.all(color: color),
+    return SizedBox(
+      width: _markerBox,
+      height: _markerBox,
+      child: Center(
+        child: n.kind == MapNodeKind.transport
+            ? Transform.rotate(
+                angle: math.pi / 4,
+                child: Container(width: 7, height: 7, color: quality),
+              )
+            : Container(
+                width: 8,
+                height: 8,
+                decoration: BoxDecoration(
+                  color: filled ? color : null,
+                  border: Border.all(color: color),
+                ),
+              ),
       ),
     );
   }
@@ -2243,25 +2261,6 @@ class _Badge extends StatelessWidget {
           color: color,
           letterSpacing: TCType.letterSpacingFor(TCType.textMicro, TCType.trackingWide),
         ),
-      ),
-    );
-  }
-}
-
-class _IconTap extends StatelessWidget {
-  const _IconTap({required this.icon, required this.onTap});
-
-  final TcIconData icon;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    return MouseRegion(
-      cursor: SystemMouseCursors.click,
-      child: GestureDetector(
-        onTap: onTap,
-        behavior: HitTestBehavior.opaque,
-        child: Padding(padding: const EdgeInsets.all(4), child: TcIcon(icon, size: 12)),
       ),
     );
   }

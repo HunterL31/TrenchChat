@@ -162,12 +162,13 @@ void main() {
     await settle(tester);
 
     // Squeezed to 390 the seven columns would ellipsize away; the row keeps
-    // its full width behind a horizontal scroll instead.
+    // its full width behind a horizontal scroll instead. The bandwidth strip
+    // above the table pans the same way, so there are two of them.
     expect(tester.getSize(find.text('NAME').hitTestable()).width, greaterThan(0));
     final scroller = find.byWidgetPredicate(
       (w) => w is SingleChildScrollView && w.scrollDirection == Axis.horizontal,
     );
-    expect(scroller, findsOneWidget);
+    expect(scroller, findsNWidgets(2));
     expect(tester.getSize(find.byType(SizedBox).at(0)).width, isNot(390));
   });
 

@@ -84,6 +84,7 @@ class _TcGhostButtonState extends State<TcGhostButton> {
             ),
             child: Row(
               mainAxisSize: MainAxisSize.min,
+              mainAxisAlignment: MainAxisAlignment.center,
               children: [
                 if (widget.icon != null) ...[
                   TcIcon(widget.icon!, size: TCType.textCaption, color: fg),
