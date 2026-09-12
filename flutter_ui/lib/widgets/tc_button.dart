@@ -1,5 +1,7 @@
 // Ghost button + icon button, hover-only per the design readme: "buttons
 // don't move, they light up." Hover brightens; press darkens to bg-pressed.
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 
 import '../theme/effects.dart';
@@ -19,6 +21,20 @@ const double tcChromeHeight = 26;
 /// Fraction of an icon button's box its glyph occupies, so a 22 lp button
 /// does not carry the same glyph a 30 lp one does.
 const double _iconButtonGlyphFactor = 0.47;
+
+/// Width of the widest of [labels] in [style], so a button that swaps its
+/// label mid-action reserves room for both and never resizes.
+double _widest(List<String> labels, TextStyle style) {
+  final painter = TextPainter(textDirection: TextDirection.ltr);
+  var widest = 0.0;
+  for (final label in labels) {
+    painter.text = TextSpan(text: label, style: style);
+    painter.layout();
+    widest = math.max(widest, painter.width);
+  }
+  painter.dispose();
+  return widest;
+}
 
 class TcGhostButton extends StatefulWidget {
   const TcGhostButton({
@@ -124,9 +140,18 @@ class TcPrimaryButton extends StatefulWidget {
     super.key,
     required this.label,
     required this.onPressed,
+    this.busyLabel,
+    this.busy = false,
   });
 
   final String label;
+
+  /// What the button reads while the action is in flight. The button always
+  /// reserves the wider of the two labels, so starting the action does not
+  /// resize it and shove the rest of the action row sideways.
+  final String? busyLabel;
+  final bool busy;
+
   final VoidCallback? onPressed;
 
   @override
@@ -136,6 +161,18 @@ class TcPrimaryButton extends StatefulWidget {
 class _TcPrimaryButtonState extends State<TcPrimaryButton> {
   bool _hover = false;
   bool _pressed = false;
+
+  Widget _label(Color fg) {
+    final style = TextStyle(
+      fontSize: TCType.textCaption,
+      color: fg,
+      letterSpacing: TCType.letterSpacingFor(TCType.textCaption, TCType.trackingWide),
+    );
+    final busyLabel = widget.busyLabel;
+    final text = Text(widget.busy && busyLabel != null ? busyLabel : widget.label, style: style);
+    if (busyLabel == null) return text;
+    return SizedBox(width: _widest([widget.label, busyLabel], style), child: Center(child: text));
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -174,18 +211,7 @@ class _TcPrimaryButtonState extends State<TcPrimaryButton> {
               border: Border.all(color: border),
               borderRadius: tcCorners(context, scale: 0.5),
             ),
-            child: Center(
-              widthFactor: 1,
-              child: Text(
-                widget.label,
-                style: TextStyle(
-                  fontSize: TCType.textCaption,
-                  color: fg,
-                  letterSpacing:
-                      TCType.letterSpacingFor(TCType.textCaption, TCType.trackingWide),
-                ),
-              ),
-            ),
+            child: Center(widthFactor: 1, child: _label(fg)),
           ),
         ),
       ),

@@ -1110,13 +1110,17 @@ class _MapTabState extends State<MapTab> with SingleTickerProviderStateMixin {
         children: [
           Row(
             children: [
-              Text(
-                'NETWORK MAP',
-                style: TextStyle(
-                  fontSize: TCType.textCaption,
-                  color: tc.textSecondary,
-                  letterSpacing:
-                      TCType.letterSpacingFor(TCType.textCaption, TCType.trackingWider),
+              Flexible(
+                child: Text(
+                  'NETWORK MAP',
+                  overflow: TextOverflow.ellipsis,
+                  softWrap: false,
+                  style: TextStyle(
+                    fontSize: TCType.textCaption,
+                    color: tc.textSecondary,
+                    letterSpacing:
+                        TCType.letterSpacingFor(TCType.textCaption, TCType.trackingWider),
+                  ),
                 ),
               ),
               const SizedBox(width: 12),

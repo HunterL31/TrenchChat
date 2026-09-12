@@ -10,6 +10,7 @@
 import 'package:flutter/material.dart';
 
 import '../theme/section_theme.dart';
+import '../theme/shape.dart';
 import '../theme/theme_spec.dart';
 import '../theme/tokens.dart';
 import 'tc_button.dart';
@@ -38,6 +39,15 @@ const double _padWidth = 240;
 const double _padHeight = 140;
 const double _stripHeight = 16;
 const double _checkerSize = 6;
+
+/// The swatch pair beside the hex box. Same height as the box, so the four
+/// outlines in that row sit on whole pixels.
+const double _swatchWidth = 34;
+const double _swatchHeight = 28;
+
+/// Content inset the dialog shell applies on each side; the dialog is exactly
+/// as wide as the pads, so nothing in it stops short of anything else.
+const double _dialogInset = 20;
 
 /// Opens the picker on [initial] and resolves to the chosen color, or null
 /// when it was cancelled or dismissed.
@@ -157,17 +167,24 @@ class _TcColorPickerContentState extends State<_TcColorPickerContent> {
   }
 
   Widget _swatch(TCSectionColors tc, Color color, {Key? key, VoidCallback? onTap, String? tip}) {
+    // A swatch with no tap is the pending colour: it is a readout, not a
+    // control, and only its tooltip says so.
     Widget box = Container(
-      width: 34,
-      height: 26,
-      decoration: BoxDecoration(border: Border.all(color: tc.borderStrong)),
+      width: _swatchWidth,
+      height: _swatchHeight,
+      clipBehavior: Clip.antiAlias,
+      decoration: BoxDecoration(borderRadius: tcCorners(context, scale: 0.25)),
+      foregroundDecoration: BoxDecoration(
+        border: Border.all(color: tc.borderStrong),
+        borderRadius: tcCorners(context, scale: 0.25),
+      ),
       child: CustomPaint(
         painter: _CheckerPainter(),
         child: Container(color: color),
       ),
     );
-    if (onTap == null) return box;
     if (tip != null) box = TcTooltip(message: tip, child: box);
+    if (onTap == null) return box;
     return MouseRegion(
       cursor: SystemMouseCursors.click,
       child: GestureDetector(key: key, onTap: onTap, child: box),
@@ -180,7 +197,7 @@ class _TcColorPickerContentState extends State<_TcColorPickerContent> {
     final pending = _pending;
     return TcDialogShell(
       title: widget.title,
-      width: 300,
+      width: _padWidth + 2 * _dialogInset,
       actions: [
         TcGhostButton(
           key: tcPickerCancelKey,
@@ -202,7 +219,7 @@ class _TcColorPickerContentState extends State<_TcColorPickerContent> {
           onPosition: _onPad,
           painter: _SvPadPainter(hue: _hue, sat: _sat, val: _val),
         ),
-        const SizedBox(height: 10),
+        const SizedBox(height: TCSpace.space2),
         _DragArea(
           key: tcPickerHueKey,
           width: _padWidth,
@@ -229,15 +246,18 @@ class _TcColorPickerContentState extends State<_TcColorPickerContent> {
             _swatch(tc, widget.initial,
                 key: tcPickerOldKey, onTap: _reset, tip: 'Back to the original'),
             const SizedBox(width: 4),
-            _swatch(tc, pending),
+            _swatch(tc, pending, tip: 'The colour you are choosing'),
             const SizedBox(width: 8),
             Expanded(
               child: Container(
+                height: _swatchHeight,
+                alignment: Alignment.centerLeft,
                 decoration: BoxDecoration(
                   color: tc.bgInset,
                   border: Border.all(color: tc.borderDefault),
+                  borderRadius: tcCorners(context, scale: 0.25),
                 ),
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+                padding: const EdgeInsets.symmetric(horizontal: 8),
                 child: TextField(
                   key: tcPickerHexKey,
                   controller: _hex,
@@ -288,6 +308,8 @@ class _DragArea extends StatelessWidget {
         child: Container(
           width: width,
           height: height,
+          clipBehavior: Clip.hardEdge,
+          decoration: const BoxDecoration(),
           // A foreground border keeps the painted area exactly [width] x
           // [height], so a touch position needs no inset to mean what it
           // points at.
@@ -305,9 +327,16 @@ void _paintThumb(Canvas canvas, Rect rect) {
   final stroke = Paint()
     ..style = PaintingStyle.stroke
     ..strokeWidth = 1;
-  canvas.drawRect(rect.deflate(1), stroke..color = const Color(0xFF000000));
-  canvas.drawRect(rect, stroke..color = const Color(0xFFFFFFFF));
+  canvas.drawRect(rect.deflate(1.5), stroke..color = const Color(0xFF000000));
+  canvas.drawRect(rect.deflate(0.5), stroke..color = const Color(0xFFFFFFFF));
 }
+
+/// Keeps a thumb of [width] by [height] wholly inside [size].
+Offset _thumbCenter(Size size, double x, double y, double width, double height) =>
+    Offset(
+      x.clamp(width / 2, size.width - width / 2),
+      y.clamp(height / 2, size.height - height / 2),
+    );
 
 void _paintChecker(Canvas canvas, Size size) {
   canvas.save();
@@ -360,7 +389,7 @@ class _SvPadPainter extends CustomPainter {
     _paintThumb(
       canvas,
       Rect.fromCenter(
-        center: Offset(sat * size.width, (1 - val) * size.height),
+        center: _thumbCenter(size, sat * size.width, (1 - val) * size.height, 10, 10),
         width: 10,
         height: 10,
       ),
@@ -397,7 +426,7 @@ class _HuePainter extends CustomPainter {
     _paintThumb(
       canvas,
       Rect.fromCenter(
-        center: Offset(hue / 360 * size.width, size.height / 2),
+        center: _thumbCenter(size, hue / 360 * size.width, size.height / 2, 6, size.height),
         width: 6,
         height: size.height,
       ),
@@ -428,7 +457,7 @@ class _AlphaPainter extends CustomPainter {
     _paintThumb(
       canvas,
       Rect.fromCenter(
-        center: Offset(alpha * size.width, size.height / 2),
+        center: _thumbCenter(size, alpha * size.width, size.height / 2, 6, size.height),
         width: 6,
         height: size.height,
       ),

@@ -336,12 +336,12 @@ class _BrowserTabState extends State<BrowserTab> {
       message: turningOn
           ? 'This node will see your identity hash '
               '${status.identityHash} on every page you open here, and can '
-              'keep a record of it. Pages that need an account — a forum, '
-              'anything with a login — use it as your account. Nothing '
+              'keep a record of it. Pages that need an account (a forum, '
+              'anything with a login) use it as your account. Nothing '
               'about your Reticulum instance or your other nodes is '
               'revealed, and no other node is affected.'
           : 'This node stops seeing your identity from the next page you '
-              'open — the connection carrying it is dropped. What it '
+              'open: the connection carrying it is dropped. What it '
               'already recorded about this identity stays recorded.',
       confirmLabel: turningOn ? 'IDENTIFY' : 'STOP',
     );

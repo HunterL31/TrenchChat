@@ -133,6 +133,7 @@ class _MainWindowState extends State<MainWindow> {
       message: 'You will stop receiving messages here. '
           'Your local history is kept, and you can join again later.',
       confirmLabel: 'LEAVE',
+      destructive: true,
     );
     if (!confirmed) return;
     await widget.state.leaveChannel(channel.hash);
@@ -166,6 +167,7 @@ class _MainWindowState extends State<MainWindow> {
       message: 'You will stop receiving this server’s channels. '
           'You can be invited back later.',
       confirmLabel: 'LEAVE',
+      destructive: true,
     );
     if (!confirmed) return;
     await widget.state.leaveServer(hash);

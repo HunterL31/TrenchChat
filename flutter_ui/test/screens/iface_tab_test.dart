@@ -198,7 +198,7 @@ void main() {
 
     expect(find.text('Add Interface'), findsOneWidget);
     expect(find.text('AutoInterface'), findsWidgets);
-    expect(find.text('TYPE-SPECIFIC SETTINGS'), findsOneWidget);
+    expect(find.text('Type-specific settings'), findsOneWidget);
 
     // AutoInterface is the default type; its fields are visible.
     expect(find.text('Group ID'), findsOneWidget);
@@ -234,8 +234,12 @@ void main() {
     }
 
     await scrollDown();
-    final kiss = tester.widget<TcCheckbox>(
-        find.widgetWithText(TcCheckbox, 'KISS framing'));
+    // A flag wears its name as a field label above the box, so the box is the
+    // checkbox sitting under that label rather than one carrying the text.
+    final kiss = tester.widget<TcCheckbox>(find.descendant(
+      of: find.ancestor(of: find.text('KISS framing'), matching: find.byType(Column)).first,
+      matching: find.byType(TcCheckbox),
+    ));
     expect(kiss.value, isTrue);
 
     // A key absent from the config falls back to the type default.

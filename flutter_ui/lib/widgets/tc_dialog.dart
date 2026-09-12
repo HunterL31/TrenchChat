@@ -76,6 +76,25 @@ double scrollbarInset(BuildContext context) => switch (Theme.of(context).platfor
       _ => 0,
     };
 
+/// The one placeholder a dialog shows while its content is on its way, so
+/// three dialogs do not spell the same wait three ways.
+Widget tcDialogPlaceholder(BuildContext context, String label) {
+  final tc = SectionTheme.of(context);
+  return Padding(
+    padding: const EdgeInsets.symmetric(vertical: TCSpace.space6),
+    child: Center(
+      child: Text(
+        label,
+        style: TextStyle(
+          fontSize: TCType.textCaption,
+          color: tc.textTertiary,
+          letterSpacing: TCType.letterSpacingFor(TCType.textCaption, TCType.trackingWide),
+        ),
+      ),
+    ),
+  );
+}
+
 /// Shared chrome for dialog content: the section's panel shape, title rule,
 /// and a bottom-aligned action row. Dialogs supply their form fields as [children]
 /// and their buttons as [actions].

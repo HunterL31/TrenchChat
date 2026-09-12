@@ -738,9 +738,9 @@ class _MessageRowWidgetState extends State<_MessageRowWidget> {
     }
     _linkRecognizers.clear();
     final links = InlineLinkConfig(
-      style: baseStyle.copyWith(color: tc.linkColor, decoration: TextDecoration.underline),
+      style: TextStyle(color: tc.linkColor, decoration: TextDecoration.underline),
       hoverStyle:
-          baseStyle.copyWith(color: tc.linkHoverColor, decoration: TextDecoration.underline),
+          TextStyle(color: tc.linkHoverColor, decoration: TextDecoration.underline),
       recognizers: _linkRecognizers,
       onTap: widget.onOpenLink,
       hoveredUrl: _hoveredLink,

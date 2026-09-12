@@ -9,6 +9,26 @@ import '../theme/section_theme.dart';
 import '../theme/shape.dart';
 import '../theme/tokens.dart';
 
+/// The label a field wears above its box. Public so a control that is not a
+/// [TcTextField] can sit in the same column shape without restating the style.
+class TcFieldLabel extends StatelessWidget {
+  const TcFieldLabel(this.label, {super.key});
+
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    return Text(
+      label,
+      style: TextStyle(
+        fontSize: TCType.textCaption,
+        color: SectionTheme.of(context).textSecondary,
+        letterSpacing: TCType.letterSpacingFor(TCType.textCaption, TCType.trackingWide),
+      ),
+    );
+  }
+}
+
 class TcTextField extends StatefulWidget {
   const TcTextField({
     super.key,
@@ -79,14 +99,7 @@ class _TcTextFieldState extends State<TcTextField> {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         if (widget.label.isNotEmpty) ...[
-          Text(
-            widget.label,
-            style: TextStyle(
-              fontSize: TCType.textCaption,
-              color: tc.textSecondary,
-              letterSpacing: TCType.letterSpacingFor(TCType.textCaption, TCType.trackingWide),
-            ),
-          ),
+          TcFieldLabel(widget.label),
           const SizedBox(height: 6),
         ],
         Container(
