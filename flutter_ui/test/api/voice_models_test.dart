@@ -1,6 +1,7 @@
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:flutter_ui/api/models/link_quality.dart';
+import 'package:flutter_ui/api/models/upgrade.dart';
 import 'package:flutter_ui/api/models/voice.dart';
 
 VoicePeerQuality _quality({double lossPct = 0, double jitterMs = 0}) =>
@@ -26,6 +27,24 @@ void main() {
       expect(p.speaking, isFalse);
       expect(p.displayName, isEmpty);
     });
+  });
+
+  test('a roster row carries the path its frames take, self included', () {
+    final direct = VoiceParticipant.fromJson({
+      'identity_hash': 'aa',
+      'link_state': 'streaming',
+      'path': 'direct',
+    });
+    expect(direct.path, PeerPath.direct);
+    expect(direct.copyWith(speaking: true).path, PeerPath.direct);
+
+    // This node is nobody's pair, so its own row carries no path at all.
+    final self = VoiceParticipant.fromJson({
+      'identity_hash': 'aa',
+      'link_state': 'self',
+      'path': null,
+    });
+    expect(self.path, PeerPath.unknown);
   });
 
   test('copyWith flips speaking without touching the rest', () {

@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import '../../api/models/link_quality.dart';
 import '../../theme/section_theme.dart';
 import '../../theme/tokens.dart';
+import '../../widgets/badge.dart';
 import '../../widgets/signal_meter.dart';
 import '../../widgets/tc_button.dart';
 import '../../widgets/tc_icon.dart';
@@ -20,6 +21,7 @@ class VoicePanel extends StatelessWidget {
     required this.audioError,
     this.audioWarning = '',
     this.audioReason = '',
+    this.allDirect = false,
     required this.onToggleMute,
     required this.onLeave,
   });
@@ -27,6 +29,11 @@ class VoicePanel extends StatelessWidget {
   final String channelName;
   final LinkQualityLevel quality;
   final bool muted;
+
+  /// Every other peer in the call is on a direct session. One encoder feeds
+  /// every pair, so the session runs at the least any pair affords: only
+  /// when none of them is on the mesh is the whole call on the fast path.
+  final bool allDirect;
 
   /// The session is up but some of the audio pipeline is not: mic,
   /// speakers, or both. [audioWarning] names which.
@@ -71,6 +78,11 @@ class VoicePanel extends StatelessWidget {
                   ),
                 ),
               ),
+              if (allDirect)
+                const DirectBadge(
+                  message: 'Every peer in this call is connected directly '
+                      'over IP; voice takes the fast path',
+                ),
             ],
           ),
           if (audioError) ...[

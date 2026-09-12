@@ -1,13 +1,16 @@
-// Reaction chip: emoji + count, highlighted when the viewer reacted.
+// Row chips: the reaction chip (emoji + count, highlighted when the viewer
+// reacted) and the direct-path badge.
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 
+import '../api/models/upgrade.dart';
 import '../theme/effects.dart';
 import '../theme/section_theme.dart';
 import '../theme/shape.dart';
 import '../theme/tokens.dart';
 import 'peer_image.dart';
+import 'tc_tooltip.dart';
 
 final RegExp _sha256Hex = RegExp(r'^[0-9a-fA-F]{64}$');
 
@@ -76,6 +79,41 @@ class _ReactionChipState extends State<ReactionChip> {
                 style: TextStyle(fontSize: TCType.textCaption, color: fg),
               ),
             ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// The marker on a member or voice roster row this node holds a direct IP
+/// session with. It says nothing about anyone else's pairs: a node shows its
+/// own sessions and nothing more.
+class DirectBadge extends StatelessWidget {
+  const DirectBadge({super.key, this.message = directBadgeTooltip});
+
+  /// What the badge explains when pointed at.
+  final String message;
+
+  @override
+  Widget build(BuildContext context) {
+    final tc = SectionTheme.of(context);
+    return TcTooltip(
+      message: message,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+        decoration: BoxDecoration(
+          color: tc.accentPrimaryMuted,
+          border: Border.all(color: tc.borderAccent),
+          borderRadius: tcCorners(context, stock: TCSpace.radiusSm, scale: 0.5),
+        ),
+        child: Text(
+          'DIRECT',
+          style: TextStyle(
+            fontSize: TCType.textMicro,
+            color: tc.accentPrimary,
+            letterSpacing:
+                TCType.letterSpacingFor(TCType.textMicro, TCType.trackingWide),
           ),
         ),
       ),

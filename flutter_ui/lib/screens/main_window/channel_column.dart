@@ -9,11 +9,13 @@ import '../../api/models/dm.dart';
 import '../../api/models/invite.dart';
 import '../../api/models/permissions.dart';
 import '../../api/models/server.dart';
+import '../../api/models/upgrade.dart';
 import '../../api/models/voice.dart';
 import '../../theme/effects.dart';
 import '../../theme/section_theme.dart';
 import '../../theme/shape.dart';
 import '../../theme/tokens.dart';
+import '../../widgets/badge.dart';
 import '../../widgets/status_dot.dart';
 import '../../widgets/tc_button.dart';
 import '../../widgets/tc_context_menu.dart';
@@ -461,6 +463,11 @@ class _VoiceRow extends StatelessWidget {
                 style: TextStyle(fontSize: 12, color: tc.textSecondary),
               ),
             ),
+            if (participant.path == PeerPath.direct)
+              const Padding(
+                padding: EdgeInsets.symmetric(horizontal: 6),
+                child: DirectBadge(),
+              ),
             if (participant.muted)
               TcIcon(TcIcons.micMuted, size: 12, color: tc.textTertiary),
           ],

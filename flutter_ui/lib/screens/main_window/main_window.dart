@@ -10,6 +10,7 @@ import '../../api/models/link_quality.dart';
 import '../../api/models/member.dart';
 import '../../api/models/message.dart';
 import '../../api/models/server.dart';
+import '../../api/models/upgrade.dart';
 import '../../api/models/voice.dart';
 import '../../app_state.dart';
 import '../../attachments.dart';
@@ -429,9 +430,19 @@ class _MainWindowState extends State<MainWindow> {
           ),
         );
 
+        // The session's own roster, which is the one the badge answers for:
+        // the open channel may not be the channel the call is in.
+        final sessionRoster = inVoice
+            ? state.voiceRosterByChannel[state.voiceChannelHash!] ?? const []
+            : const <VoiceParticipant>[];
+        final voicePeers = sessionRoster
+            .where((p) => p.identityHash != state.meHashHex)
+            .toList();
         final voicePanel = inVoice
             ? VoicePanel(
                 channelName: state.channelByHash(state.voiceChannelHash!)?.name ?? '',
+                allDirect: voicePeers.isNotEmpty &&
+                    voicePeers.every((p) => p.path == PeerPath.direct),
                 quality: state.voiceQualityLevel,
                 muted: state.voiceMuted,
                 audioError: state.voiceAudioError,
@@ -713,6 +724,7 @@ class _MainWindowState extends State<MainWindow> {
                     presence: presence,
                     meHashHex: state.meHashHex,
                     friendHashes: friendHashes,
+                    paths: state.pathByPeer,
                     onAddFriend: (hash) =>
                         showAddFriendDialog(context, state, identityHash: hash),
                   ),

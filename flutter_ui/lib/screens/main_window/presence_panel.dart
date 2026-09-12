@@ -6,8 +6,10 @@
 import 'package:flutter/material.dart';
 
 import '../../api/models/member.dart';
+import '../../api/models/upgrade.dart';
 import '../../theme/section_theme.dart';
 import '../../theme/tokens.dart';
+import '../../widgets/badge.dart';
 import '../../widgets/status_dot.dart';
 import '../../widgets/tc_context_menu.dart';
 
@@ -24,10 +26,15 @@ class PresencePanel extends StatelessWidget {
     this.meHashHex = '',
     this.friendHashes = const {},
     this.onAddFriend,
+    this.paths = const {},
   });
 
   /// The open channel's roster, online and offline alike.
   final List<PresenceEntry> presence;
+
+  /// Identity hash -> the path this node reaches that peer over. Only a
+  /// direct one marks a row; everyone else is on the mesh and says nothing.
+  final Map<String, PeerPath> paths;
 
   /// The local user's identity hash, so the panel never lists the reader
   /// as one of their own peers.
@@ -127,6 +134,11 @@ class _PeerRow extends StatelessWidget {
                   style: TextStyle(fontSize: 12, color: tc.textSecondary),
                 ),
               ),
+              if (panel.paths[entry.identityHash] == PeerPath.direct)
+                const Padding(
+                  padding: EdgeInsets.only(left: 6),
+                  child: DirectBadge(),
+                ),
             ],
           ),
         ),

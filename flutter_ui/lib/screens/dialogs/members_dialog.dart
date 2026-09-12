@@ -7,10 +7,12 @@
 import 'package:flutter/material.dart';
 
 import '../../api/models/member.dart';
+import '../../api/models/upgrade.dart';
 import '../../app_state.dart';
 import '../../theme/section_theme.dart';
 import '../../theme/theme_spec.dart';
 import '../../theme/tokens.dart';
+import '../../widgets/badge.dart';
 import '../../widgets/status_dot.dart';
 import '../../widgets/tc_button.dart';
 import '../../widgets/tc_dialog.dart';
@@ -196,6 +198,10 @@ class _MembersDialogContentState extends State<_MembersDialogContent> {
               ),
             ),
           ),
+          if (widget.state.pathFor(m.identityHash) == PeerPath.direct) ...[
+            const SizedBox(width: 6),
+            const DirectBadge(),
+          ],
           if (isOwner || m.role == _roleAdmin) ...[
             const SizedBox(width: 6),
             Container(
