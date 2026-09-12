@@ -141,19 +141,38 @@ void main() {
     expect(roster.last.displayName, isNull);
   });
 
-  test('getChannelLinkQuality folds the roster down to its best link', () async {
-    // The shape api.py really returns: one scored entry per other member.
+  test('getChannelLinkQuality reads the summary and every peer row', () async {
+    // The shape api.py really returns: a channel summary over a sorted roster.
     final client = ApiClient(
       baseUrl: 'http://example.test',
       client: MockClient((request) async {
         expect(request.url.path, '/channels/chan-hash/link_quality');
         return http.Response(
-          jsonEncode([
-            {'identity_hash': 'aa', 'display_name': 'ada', 'quality': 2,
-             'quality_label': 'Fair', 'hops': 4},
-            {'identity_hash': 'bb', 'display_name': 'grace', 'quality': 3,
-             'quality_label': 'Good', 'hops': 2},
-          ]),
+          jsonEncode({
+            'summary': {
+              'level': 3,
+              'level_label': 'Good',
+              'reachable': 2,
+              'total': 3,
+              'median_hops': 2,
+              'best_identity_hash': 'bb',
+              'best_hops': 2,
+            },
+            'peers': [
+              {'identity_hash': 'bb', 'display_name': 'grace', 'quality': 3,
+               'quality_label': 'Good', 'hops': 2, 'via': 'cc11',
+               'rtt_ms': 42.5, 'path_expires_in': 300.0,
+               'is_online': true, 'last_seen': 99.0},
+              {'identity_hash': 'aa', 'display_name': 'ada', 'quality': 2,
+               'quality_label': 'Fair', 'hops': 4, 'via': null,
+               'rtt_ms': null, 'path_expires_in': 120.0,
+               'is_online': false, 'last_seen': 0.0},
+              {'identity_hash': 'dd', 'display_name': 'hopper', 'quality': 0,
+               'quality_label': 'Unknown', 'hops': null, 'via': null,
+               'rtt_ms': null, 'path_expires_in': null,
+               'is_online': false, 'last_seen': 0.0},
+            ],
+          }),
           200,
         );
       }),
@@ -161,26 +180,55 @@ void main() {
 
     final quality = await client.getChannelLinkQuality('chan-hash');
     expect(quality.level.name, 'good');
-    expect(quality.hops, 2, reason: 'the hops of the peer whose score won');
+    expect(quality.medianHops, 2);
+    expect(quality.reachable, 2);
+    expect(quality.total, 3);
+    expect(quality.bestName, 'grace', reason: 'resolved out of the peer rows');
+    expect(quality.bestHops, 2);
+
+    // Server-side order is kept: the backend sorted it, the client does not.
+    expect(quality.peers.map((p) => p.identityHash), ['bb', 'aa', 'dd']);
+    final closest = quality.peers.first;
+    expect(closest.displayName, 'grace');
+    expect(closest.via, 'cc11');
+    expect(closest.rttMs, 42.5);
+    expect(closest.pathExpiresIn, 300.0);
+    expect(closest.isOnline, isTrue);
+    expect(closest.isReachable, isTrue);
+    expect(quality.unreachablePeers.single.identityHash, 'dd');
   });
 
-  test('getChannelLinkQuality reads an empty or unscorable roster as unknown',
+  test('getChannelLinkQuality reads an empty or unusable body as unknown',
       () async {
-    Object body = <Object>[];
+    Object body = {'summary': <String, Object?>{}, 'peers': <Object>[]};
     final client = ApiClient(
       baseUrl: 'http://example.test',
       client: MockClient((request) async => http.Response(jsonEncode(body), 200)),
     );
 
+    final empty = await client.getChannelLinkQuality('chan-hash');
+    expect(empty.level.name, 'unknown');
+    expect(empty.reachable, 0);
+    expect(empty.total, 0);
+    expect(empty.peers, isEmpty);
+
+    // A body that is not the agreed object at all still reads, rather than
+    // taking the whole channel load down with it.
+    body = <Object>[];
     expect((await client.getChannelLinkQuality('chan-hash')).level.name, 'unknown');
 
-    body = [
-      {'identity_hash': 'aa', 'quality': 0, 'quality_label': 'Unknown', 'hops': null},
-      'not an entry',
-    ];
+    body = {
+      'summary': {'level': 0, 'reachable': 0, 'total': 1, 'median_hops': null},
+      'peers': [
+        {'identity_hash': 'aa', 'quality': 0, 'quality_label': 'Unknown', 'hops': null},
+        'not an entry',
+      ],
+    };
     final quality = await client.getChannelLinkQuality('chan-hash');
     expect(quality.level.name, 'unknown');
-    expect(quality.hops, isNull);
+    expect(quality.medianHops, isNull);
+    expect(quality.bestName, isNull);
+    expect(quality.peers.single.isReachable, isFalse);
   });
 
   test('getMessages passes limit and before_ts as query params', () async {

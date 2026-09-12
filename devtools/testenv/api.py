@@ -57,9 +57,6 @@ from trenchchat.core.protocol import MAX_SHARED_FILE_BYTES
 from trenchchat.core.storage import (
     FILE_STORE_MAX_BYTES, OWN_FILE_STORE_MAX_BYTES, PARTIAL_STORE_MAX_BYTES,
 )
-from trenchchat.core.link_quality import (
-    LinkQuality, quality_label, score_path,
-)
 from trenchchat.core.reticulum_config import (
     load_reticulum_config, write_reticulum_config,
 )
@@ -1621,23 +1618,6 @@ def create_app(backend: Backend, *, token: str | None = None,
         # owner last broadcast, so the two views can legitimately differ.
         return sorted(backend.subscription_mgr.get_subscribers(channel_hash))
 
-    def _peer_link_quality(peer_hex: str) -> tuple[LinkQuality, int | None]:
-        """This peer's link quality and the hop count it was scored from."""
-        if peer_hex == backend.identity.hash_hex:
-            return LinkQuality.EXCELLENT, 0
-        try:
-            delivery = RNS.Destination.hash(bytes.fromhex(peer_hex), "lxmf", "delivery")
-            for entry in backend.rns.get_path_table():
-                dest_h = entry.get("hash")
-                if isinstance(dest_h, bytes) and dest_h == delivery:
-                    via = entry.get("via")
-                    via_hex = via.hex() if isinstance(via, bytes) else None
-                    hops = entry.get("hops", 0)
-                    return score_path(delivery.hex(), hops, via_hex), hops
-        except Exception:
-            pass
-        return LinkQuality.UNKNOWN, None
-
     @app.get("/channels/{channel_hash}/presence")
     def channel_presence(channel_hash: str):
         # Roster source follows the channel kind: subscribers for open-join
@@ -1657,28 +1637,23 @@ def create_app(backend: Backend, *, token: str | None = None,
 
     @app.get("/channels/{channel_hash}/link_quality")
     def channel_link_quality(channel_hash: str):
-        """This node's link quality to each other member of the channel.
+        """How well this node reaches the channel, and each peer behind it.
 
-        The local identity is left out: a link to yourself always scores
-        EXCELLENT, and a reading that includes it says nothing about how
-        well this node reaches the channel.
+        Read-only and local: the path table plus any link already open. The
+        client polls this while a channel is open, so it must never ask the
+        mesh for anything.
         """
-        entries = []
-        for peer_hex in actions.channel_roster_hexes(
-                backend.storage, backend.subscription_mgr, channel_hash):
-            if peer_hex == backend.identity.hash_hex:
-                continue
-            quality, hops = _peer_link_quality(peer_hex)
-            entries.append({
-                "identity_hash": peer_hex,
-                "display_name": resolve_display_name(
-                    peer_hex, backend.identity.hash_hex, backend.storage,
-                    backend.config),
-                "quality": int(quality),
-                "quality_label": quality_label(quality),
-                "hops": hops,
-            })
-        return entries
+        try:
+            path_table = backend.rns.get_path_table()
+        except Exception as e:
+            RNS.log(f"TrenchChat [api]: path table unreadable: {e}", RNS.LOG_WARNING)
+            path_table = []
+        return actions.channel_link_quality(
+            backend.storage, backend.subscription_mgr, backend.presence_mgr,
+            path_table, channel_hash, backend.identity.hash_hex,
+            lambda peer_hex: resolve_display_name(
+                peer_hex, backend.identity.hash_hex, backend.storage, backend.config),
+        )
 
     @app.get("/channels/{channel_hash}/sync_status")
     def get_sync_status(channel_hash: str):

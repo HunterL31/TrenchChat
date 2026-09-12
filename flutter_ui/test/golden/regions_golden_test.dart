@@ -63,7 +63,11 @@ void main() {
       ChannelHeader(
         channelName: 'general',
         topic: 'relay talk, coast mesh, nothing operational',
-        linkQuality: const ChannelLinkQuality(level: LinkQualityLevel.excellent, hops: 2),
+        linkQuality: const ChannelLinkQuality(
+            level: LinkQualityLevel.excellent,
+            medianHops: 2,
+            reachable: 3,
+            total: 4),
         activeTab: ChannelTab.chat,
         onTabSelected: (_) {},
       ),

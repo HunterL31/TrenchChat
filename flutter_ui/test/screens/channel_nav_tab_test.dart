@@ -45,7 +45,8 @@ void _seedChannelReads(FakeBackend backend, String hash) {
   backend.routes['GET /channels/$hash/members'] = <Object>[];
   backend.routes['GET /channels/$hash/messages'] = <Object>[];
   backend.routes['GET /channels/$hash/presence'] = <Object>[];
-  backend.routes['GET /channels/$hash/link_quality'] = <Object>[];
+  backend.routes['GET /channels/$hash/link_quality'] =
+      {'summary': <String, Object?>{}, 'peers': <Object>[]};
   backend.routes['GET /channels/$hash/my_permissions'] = {'invite': false};
   backend.routes['GET /channels/$hash/voice/roster'] = <Object>[];
   backend.routes['GET /channels/$hash/sync_status'] = {'state': 'synced'};
@@ -65,8 +66,10 @@ Future<AppState> _pumpShell(WidgetTester tester, FakeBackend backend) async {
   backend.routes['GET /channels/$_conversation/messages'] = <Object>[];
   backend.routes['POST /dms/$_conversation/read'] = {'ok': true};
 
+  // Disposed inside each test body, not in a teardown: an open channel holds
+  // a link-quality poll timer, and the binding checks for pending timers
+  // before teardowns run.
   final state = AppState(baseUrl: backend.baseUrl, httpClient: backend.client());
-  addTearDown(state.dispose);
   state.loading = false;
   state.standaloneChannels = [
     Channel.fromJson(_channelJson('alpha')),
@@ -107,11 +110,12 @@ void main() {
     expect(find.byType(MessageList), findsOneWidget);
     expect(find.byType(ComposeBar), findsOneWidget);
     expect(state.selectedChannelHash, 'hash-beta');
+    state.dispose();
   });
 
   testWidgets('re-picking the open channel also returns to the chat pane',
       (tester) async {
-    await _pumpShell(tester, backend);
+    final state = await _pumpShell(tester, backend);
 
     await tester.tap(find.text('MAP'));
     await tester.pumpAndSettle();
@@ -123,6 +127,7 @@ void main() {
     expect(find.byType(MapTab), findsNothing);
     expect(find.byType(MessageList), findsOneWidget);
     expect(find.byType(ComposeBar), findsOneWidget);
+    state.dispose();
   });
 
   testWidgets('picking a conversation from the column returns to the chat pane',
@@ -140,5 +145,6 @@ void main() {
     expect(find.byType(MessageList), findsOneWidget);
     expect(find.byType(ComposeBar), findsOneWidget);
     expect(state.selectedDmHash, _conversation);
+    state.dispose();
   });
 }

@@ -11,6 +11,10 @@ link to be open:
 
 The result is a four-tier enum that maps directly to a display colour in the
 network map and will later be used to rank candidates for voice connections.
+
+summarize_channel folds a roster's worth of those readings into the one answer
+a channel header needs: how much of the channel this node can reach, and how
+far away the reachable part is.
 """
 
 from __future__ import annotations
@@ -64,7 +68,7 @@ def rtt_ms_for(dest_hex: str) -> float | None:
     return None
 
 
-def _path_ttl(dest_hex: str) -> float | None:
+def path_ttl_secs(dest_hex: str) -> float | None:
     """Return seconds until the path entry expires, or None if not in table."""
     try:
         dest_hash = bytes.fromhex(dest_hex)
@@ -137,7 +141,7 @@ def score_path(
         return LinkQuality.POOR
 
     # --- hop count + path freshness ---
-    ttl = _path_ttl(dest_hex)
+    ttl = path_ttl_secs(dest_hex)
 
     if hops == 0:
         # Interface / self: always excellent
@@ -170,3 +174,50 @@ def quality_label(quality: LinkQuality) -> str:
         LinkQuality.POOR:      "Poor",
         LinkQuality.UNKNOWN:   "Unknown",
     }[quality]
+
+
+def _lower_median(values: list[int]) -> int:
+    """Middle value, taking the lower of the two when the count is even."""
+    ordered = sorted(values)
+    return ordered[(len(ordered) - 1) // 2]
+
+
+def summarize_channel(peers: list[dict]) -> dict:
+    """Fold per-peer link readings into one answer for a whole channel.
+
+    A channel send is unicast to every member, so the headline is how many of
+    them this node has a path to at all: a member with none is queued for
+    retry rather than reached. Over the members that are reachable, the hop
+    count and the quality tier are medians rather than means. Hops are
+    ordinal, a member with no path has no hop count to average in, and one
+    member eleven hops out would drag the mean of 1, 1, 1, 11 to 3.5 while
+    three quarters of the channel is a single hop away. The best-scored peer
+    is kept as a detail, not the headline: the old best-peer reading showed
+    full bars while every other member was unreachable.
+
+    Each entry is expected to carry at least "quality" and "hops", with hops
+    None when no path is known. Pure: it asks the network nothing.
+    """
+    reachable = [p for p in peers if p.get("hops") is not None]
+    if not reachable:
+        return {
+            "level": int(LinkQuality.UNKNOWN),
+            "level_label": quality_label(LinkQuality.UNKNOWN),
+            "reachable": 0,
+            "total": len(peers),
+            "median_hops": None,
+            "best_identity_hash": None,
+            "best_hops": None,
+        }
+
+    level = LinkQuality(_lower_median([int(p.get("quality", 0)) for p in reachable]))
+    best = min(reachable, key=lambda p: (-int(p.get("quality", 0)), int(p["hops"])))
+    return {
+        "level": int(level),
+        "level_label": quality_label(level),
+        "reachable": len(reachable),
+        "total": len(peers),
+        "median_hops": _lower_median([int(p["hops"]) for p in reachable]),
+        "best_identity_hash": best.get("identity_hash"),
+        "best_hops": int(best["hops"]),
+    }
