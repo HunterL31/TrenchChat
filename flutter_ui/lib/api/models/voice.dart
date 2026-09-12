@@ -1,4 +1,5 @@
 import 'link_quality.dart';
+import 'upgrade.dart';
 
 /// Mirrors trenchchat/core/voice.py's roster link_state values.
 enum VoiceLinkState { self, streaming, connecting, unreachable, signalled, unknown }
@@ -20,6 +21,7 @@ class VoiceParticipant {
     required this.joinedAt,
     required this.linkState,
     required this.speaking,
+    this.path = PeerPath.unknown,
   });
 
   final String identityHash;
@@ -29,6 +31,10 @@ class VoiceParticipant {
   final VoiceLinkState linkState;
   final bool speaking;
 
+  /// Which path this pair's frames take. Null on the wire for this node's
+  /// own row, which is nobody's pair, and reads as unknown here.
+  final PeerPath path;
+
   VoiceParticipant copyWith({bool? speaking, bool? muted}) => VoiceParticipant(
         identityHash: identityHash,
         displayName: displayName,
@@ -36,6 +42,7 @@ class VoiceParticipant {
         joinedAt: joinedAt,
         linkState: linkState,
         speaking: speaking ?? this.speaking,
+        path: path,
       );
 
   factory VoiceParticipant.fromJson(Map<String, dynamic> json) => VoiceParticipant(
@@ -45,6 +52,7 @@ class VoiceParticipant {
         joinedAt: (json['joined_at'] as num? ?? 0).toDouble(),
         linkState: _linkStateFrom(json['link_state'] as String?),
         speaking: json['speaking'] as bool? ?? false,
+        path: peerPathFrom(json['path'] as String?),
       );
 }
 

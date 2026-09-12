@@ -1,3 +1,5 @@
+import 'upgrade.dart';
+
 class Member {
   const Member({
     required this.channelHash,
@@ -5,6 +7,7 @@ class Member {
     required this.displayName,
     required this.role,
     required this.addedAt,
+    this.path = PeerPath.unknown,
   });
 
   final String channelHash;
@@ -13,12 +16,18 @@ class Member {
   final String role;
   final double addedAt;
 
+  /// Which path this node reached the member over when the row was read.
+  /// A path_changed event moves on without the row, so what the UI renders
+  /// is AppState.pathFor; this is where that map is filled from.
+  final PeerPath path;
+
   factory Member.fromJson(Map<String, dynamic> json) => Member(
         channelHash: json['channel_hash'] as String,
         identityHash: json['identity_hash'] as String,
         displayName: json['display_name'] as String? ?? '',
         role: json['role'] as String? ?? 'member',
         addedAt: (json['added_at'] as num).toDouble(),
+        path: peerPathFrom(json['path'] as String?),
       );
 }
 

@@ -5,6 +5,7 @@ import 'dart:convert';
 
 import '../theme/theme_spec.dart';
 import 'models/message.dart';
+import 'models/upgrade.dart';
 
 sealed class TcEvent {
   const TcEvent();
@@ -85,6 +86,12 @@ sealed class TcEvent {
         return DirectoryUpdatedEvent(
           json['identity_hash'] as String,
           json['display_name'] as String? ?? '',
+        );
+      case 'path_changed':
+        return PathChangedEvent(
+          json['peer'] as String,
+          peerPathFrom(json['path'] as String?),
+          (json['since'] as num?)?.toDouble() ?? 0.0,
         );
       case 'voice_roster':
         return VoiceRosterEvent(json['channel_hash'] as String);
@@ -254,6 +261,17 @@ class DirectoryUpdatedEvent extends TcEvent {
   const DirectoryUpdatedEvent(this.identityHash, this.displayName);
   final String identityHash;
   final String displayName;
+}
+
+/// The path this node reaches one peer over changed: a direct session came
+/// up, or the one it had went away. Local knowledge about this node's own
+/// sessions, never a claim about anyone else's. [since] is when the session
+/// came up.
+class PathChangedEvent extends TcEvent {
+  const PathChangedEvent(this.peer, this.path, this.since);
+  final String peer;
+  final PeerPath path;
+  final double since;
 }
 
 /// A channel's voice roster changed. Carries only the hash; handlers

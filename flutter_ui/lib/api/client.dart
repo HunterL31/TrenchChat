@@ -23,6 +23,7 @@ import 'models/permissions.dart';
 import 'models/reticulum_config.dart';
 import 'models/server.dart';
 import 'models/settings.dart';
+import 'models/upgrade.dart';
 import 'models/voice.dart';
 
 /// Directory scopes accepted by GET /directory.
@@ -352,6 +353,47 @@ class ApiClient {
   Future<FileUsage> fileUsage() async {
     final res = await _http.get(_u('/files/usage'));
     return FileUsage.fromJson(_decode(res) as Map<String, dynamic>);
+  }
+
+  // --- direct sessions (the diagnostics panel in Settings) ---
+
+  /// This node's own direct sessions, why each remaining eligible peer has
+  /// none, and whether the UDP socket is bound at all.
+  Future<DirectSessions> getDirectSessions() async {
+    final res = await _http.get(_u('/upgrade/sessions'));
+    return DirectSessions.fromJson(_decode(res) as Map<String, dynamic>);
+  }
+
+  /// The "Direct connections" switch and the port sessions arrive on.
+  Future<DirectConnections> getDirectConnections() async {
+    final res = await _http.get(_u('/upgrade/enabled'));
+    return DirectConnections.fromJson(_decode(res) as Map<String, dynamic>);
+  }
+
+  /// Turns direct sessions on or off and returns the state the backend now
+  /// holds. Off closes every session this node has, so nobody keeps an
+  /// address the user just withdrew.
+  Future<bool> setDirectConnections(bool enabled) async {
+    final res = await _http.post(
+      _u('/upgrade/enabled'),
+      headers: _jsonHeaders,
+      body: jsonEncode({'enabled': enabled}),
+    );
+    return (_decode(res) as Map<String, dynamic>)['enabled'] as bool? ?? false;
+  }
+
+  /// Asks for a session with one peer now. [reason] is the backend's own
+  /// cause when [ok] is false; the eligibility gate is re-applied there.
+  Future<({bool ok, String? reason})> tryDirectSession(String peerHashHex) async {
+    final res = await _http.post(_u('/upgrade/try/$peerHashHex'));
+    final body = _decode(res) as Map<String, dynamic>;
+    return (ok: body['ok'] as bool? ?? false, reason: body['reason'] as String?);
+  }
+
+  /// Drops the direct session with one peer; the pair falls back to the mesh.
+  Future<bool> closeDirectSession(String peerHashHex) async {
+    final res = await _http.post(_u('/upgrade/close/$peerHashHex'));
+    return (_decode(res) as Map<String, dynamic>)['ok'] as bool? ?? false;
   }
 
   Future<ChannelPermissions> getMyPermissions(String channelHashHex) async {

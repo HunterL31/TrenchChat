@@ -4,6 +4,7 @@ import 'package:flutter/painting.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:flutter_ui/api/events.dart';
+import 'package:flutter_ui/api/models/upgrade.dart';
 
 void main() {
   test('invite_received parses into InviteReceivedEvent', () {
@@ -29,6 +30,33 @@ void main() {
 
     expect(event, isA<FriendUpdatedEvent>());
     expect((event as FriendUpdatedEvent).identityHash, 'abc123');
+  });
+
+  test('path_changed parses into PathChangedEvent', () {
+    final event = TcEvent.tryParse(jsonEncode({
+      'type': 'path_changed',
+      'peer': 'aa11bb22cc33dd44ee55ff6600112233',
+      'path': 'direct',
+      'since': 1700.5,
+    }));
+
+    expect(
+      event,
+      isA<PathChangedEvent>()
+          .having((e) => e.peer, 'peer', 'aa11bb22cc33dd44ee55ff6600112233')
+          .having((e) => e.path, 'path', PeerPath.direct)
+          .having((e) => e.since, 'since', 1700.5),
+    );
+  });
+
+  test('a path this client does not know reads as unknown, not as direct', () {
+    final event = TcEvent.tryParse(jsonEncode({
+      'type': 'path_changed',
+      'peer': 'aa11bb22cc33dd44ee55ff6600112233',
+      'path': 'something-newer',
+    }));
+
+    expect((event as PathChangedEvent).path, PeerPath.unknown);
   });
 
   test('voice_roster parses into VoiceRosterEvent', () {

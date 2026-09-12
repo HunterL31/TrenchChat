@@ -22,6 +22,7 @@ import 'api/models/nomad.dart';
 import 'api/models/permissions.dart';
 import 'api/models/server.dart';
 import 'api/models/settings.dart';
+import 'api/models/upgrade.dart';
 import 'api/models/voice.dart';
 import 'api/ws.dart';
 import 'attachments.dart';
@@ -132,6 +133,21 @@ class AppState extends ChangeNotifier {
   final Map<String, Uint8List?> avatarCache = {};
 
   final Map<String, List<VoiceParticipant>> voiceRosterByChannel = {};
+
+  /// Which path this node reaches each peer over, filled from member rows and
+  /// kept live by [PathChangedEvent]. One map rather than a field per roster:
+  /// a member row, a voice row and a diagnostics row are the same peer, and a
+  /// path that moved must move in all of them at once.
+  final Map<String, PeerPath> pathByPeer = {};
+
+  /// This node's own direct sessions and why the rest of its eligible peers
+  /// have none, for the Settings diagnostics panel. Loaded on demand: a
+  /// client that never opens Settings never asks.
+  DirectSessions directSessions = DirectSessions.empty;
+  bool _directSessionsLoaded = false;
+
+  /// The "Direct connections" switch and the port sessions arrive on.
+  DirectConnections directConnections = DirectConnections.unknown;
 
   /// The live voice session, straight from GET /voice/status; idle when not
   /// in a call. Refreshed on session events and by [_voicePollTimer].
@@ -347,6 +363,7 @@ class AppState extends ChangeNotifier {
         api.getSyncState(channelHashHex),
       ]);
       membersByChannel[channelHashHex] = results[0] as List<Member>;
+      _adoptMemberPaths(results[0] as List<Member>);
       final page = results[1] as List<Message>;
       messagesByChannel[channelHashHex] = page;
       hasMoreOlderByChannel[channelHashHex] = page.length >= messagePageSize;
@@ -962,6 +979,90 @@ class AppState extends ChangeNotifier {
   void _stopVoicePoll() {
     _voicePollTimer?.cancel();
     _voicePollTimer = null;
+  }
+
+  // --- the direct path ---
+
+  /// Which path this node reaches a peer over. Unknown until a member row or
+  /// a path_changed event says; unknown draws no badge rather than claiming
+  /// the mesh.
+  PeerPath pathFor(String identityHashHex) =>
+      pathByPeer[identityHashHex] ?? PeerPath.unknown;
+
+  /// Folds the path each member row carries into [pathByPeer]. A row is a
+  /// snapshot; the map is what the rosters render, so events and rows cannot
+  /// disagree.
+  void _adoptMemberPaths(List<Member> members) {
+    for (final m in members) {
+      if (m.path != PeerPath.unknown) pathByPeer[m.identityHash] = m.path;
+    }
+  }
+
+  /// This node's own direct sessions, why its other eligible peers have none,
+  /// and whether it is listening at all.
+  Future<void> loadDirectSessions() async {
+    try {
+      directSessions = await api.getDirectSessions();
+      _directSessionsLoaded = true;
+      notifyListeners();
+    } catch (_) {
+      // A backend without the endpoint leaves the panel empty rather than
+      // taking over the dialog with an error.
+    }
+  }
+
+  Future<void> loadDirectConnections() async {
+    try {
+      directConnections = await api.getDirectConnections();
+      notifyListeners();
+    } catch (_) {
+      // Same: the switch reads as off rather than failing the dialog.
+    }
+  }
+
+  /// Turns direct sessions on or off. Off closes the sessions this node
+  /// holds, so the listing is re-read after it.
+  Future<bool> setDirectConnections(bool enabled) async {
+    try {
+      final now = await api.setDirectConnections(enabled);
+      directConnections = DirectConnections(
+          enabled: now, listenPort: directConnections.listenPort);
+      notifyListeners();
+      await loadDirectSessions();
+      return true;
+    } catch (e) {
+      _reportActionError(e);
+      return false;
+    }
+  }
+
+  /// Asks for a session with one peer now. False means the backend refused,
+  /// with the reason left in [actionError].
+  Future<bool> tryDirectSession(String peerHashHex) async {
+    try {
+      final result = await api.tryDirectSession(peerHashHex);
+      if (!result.ok) {
+        actionError = directFailureReason(result.reason ?? '');
+        notifyListeners();
+      }
+      await loadDirectSessions();
+      return result.ok;
+    } catch (e) {
+      _reportActionError(e);
+      return false;
+    }
+  }
+
+  /// Drops the direct session with one peer; the pair falls back to the mesh.
+  Future<bool> closeDirectSession(String peerHashHex) async {
+    try {
+      final ok = await api.closeDirectSession(peerHashHex);
+      await loadDirectSessions();
+      return ok;
+    } catch (e) {
+      _reportActionError(e);
+      return false;
+    }
   }
 
   Future<void> refreshInvites() async {
@@ -1893,6 +1994,7 @@ class AppState extends ChangeNotifier {
         if (membersByChannel.containsKey(channelHash)) {
           unawaited(api.getMembers(channelHash).then((m) {
             membersByChannel[channelHash] = m;
+            _adoptMemberPaths(m);
             notifyListeners();
           }));
         }
@@ -1932,6 +2034,12 @@ class AppState extends ChangeNotifier {
         unawaited(_applyAvatarUpdated(identityHash, avatarVersion));
       case DirectoryUpdatedEvent(:final identityHash, :final displayName):
         _applyDirectoryUpdated(identityHash, displayName);
+      case PathChangedEvent(:final peer, :final path):
+        pathByPeer[peer] = path;
+        // The diagnostics panel is the only reader of the sessions listing,
+        // so a client that has never opened it asks for nothing here.
+        if (_directSessionsLoaded) unawaited(loadDirectSessions());
+        notifyListeners();
       case VoiceRosterEvent(:final channelHash):
         if (channelHash == selectedChannelHash ||
             channelHash == voiceStatus.channel ||
