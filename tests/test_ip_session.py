@@ -41,6 +41,10 @@ from trenchchat.network.ip.transport import IPTransport, MAX_PENDING_HANDSHAKES
 CONNECT_TIMEOUT_SECS = 10.0
 FRAME_TIMEOUT_SECS = 5.0
 
+# Long enough that a path read racing a path_changed handler loses the race
+# every time, short enough to spend on one test.
+SLOW_HANDLER_SECS = 0.3
+
 
 # ---------------------------------------------------------------------------
 # A node with a direct transport and nothing above it
@@ -441,6 +445,33 @@ class TestSession:
                         msg="the other end to notice")
         assert alice.transport.send(bob.hash_hex, {}, "too late") \
             is SendState.NO_PATH
+
+    def test_a_path_is_announced_before_anyone_else_can_see_it(self, ip_node):
+        """The state and the event are one step, on the way up and down.
+
+        A handler that takes its time is what makes the order visible: while
+        it runs, no other thread may see the session it is being told about.
+        A manager that saw it first would act on a path this node had not
+        announced, and nothing downstream could tell that had happened.
+        """
+        alice, bob = ip_node("alice"), ip_node("bob")
+
+        def announce(peer_hex: str, path: str) -> None:
+            time.sleep(SLOW_HANDLER_SECS)
+            alice.paths.append((peer_hex, path))
+
+        alice.transport.set_peer_event_callbacks(path_changed=announce)
+
+        assert alice.open_to(bob)
+        assert alice.transport.can_reach(bob.hash_hex)
+        assert (bob.hash_hex, PATH_DIRECT) in alice.paths, \
+            "the session was reachable before it was announced"
+
+        alice.transport.close_session(bob.hash_hex)
+        assert wait_for(lambda: not alice.transport.can_reach(bob.hash_hex),
+                        msg="the session to end")
+        assert (bob.hash_hex, PATH_RETICULUM) in alice.paths, \
+            "the session was gone before its end was announced"
 
     def test_a_session_that_ends_fails_what_it_had_not_acknowledged(self, ip_node):
         alice, bob = ip_node("alice"), ip_node("bob")

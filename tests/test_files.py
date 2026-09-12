@@ -41,20 +41,33 @@ def file_channel(peer_factory, *names):
     holder choice is exercised rather than presence.
     """
     owner = peer_factory(names[0])
-    peers = [owner]
     perms = dict(PRESET_PRIVATE)
     ch_hash = owner.channel_mgr.create_channel("files-ch", "", permissions=perms)
 
-    for name in names[1:]:
-        member = peer_factory(name)
-        peers.append(member)
+    members = [peer_factory(name) for name in names[1:]]
+    peers = [owner] + members
+    # Each member's own record of the channel comes first: a document for a
+    # channel it has no record of is held for confirmation rather than applied
+    # (tests/test_invites.py::TestAnchoring), and one member list for everybody
+    # means there is no second version still to come.
+    for member in members:
+        member.storage.upsert_channel(ch_hash, "files-ch", "",
+                                      owner.identity.hash_hex, perms, time.time())
+    if members:
         owner.invite_mgr.publish_member_list(
-            ch_hash, add_members=[member.identity.hash])
-        assert wait_for_member(owner.storage, ch_hash, member.identity.hash_hex)
+            ch_hash, add_members=[m.identity.hash for m in members])
 
-    for peer in peers[1:]:
-        peer.storage.upsert_channel(ch_hash, "files-ch", "",
-                                    owner.identity.hash_hex, perms, time.time())
+    # The document lands on each member's own thread and rewrites the
+    # channel's permissions when it does. Everything below has to come after
+    # it, or a test that narrows a member's permissions has them restored a
+    # fraction of a second later and passes on the timing.
+    for member in members:
+        assert wait_for_member(owner.storage, ch_hash, member.identity.hash_hex)
+        assert wait_for(
+            lambda m=member: m.storage.get_member_list_version(ch_hash) is not None,
+        ), f"{member.name} never applied the owner's member list"
+
+    for peer in members:
         peer.storage.subscribe(ch_hash)
         peer.storage.set_channel_permissions(ch_hash, perms)
         for other in peers:
@@ -155,6 +168,33 @@ def hostile_serve(data: bytes, *, bad_list: bool = False):
                              for i in range(first, first + count))
 
     return serve
+
+
+# ---------------------------------------------------------------------------
+# The channel every file test starts from
+# ---------------------------------------------------------------------------
+
+def test_the_owners_member_list_is_settled_before_the_fixture_returns(
+        peer_factory):
+    """Nothing may still be in flight for the channel a test is handed.
+
+    A member list applied after the fixture returns rewrites the channel's
+    permissions, so a test that narrows a member's own permissions has them
+    restored under it a fraction of a second later and then passes or fails on
+    the timing. Either every member is on the owner's current version, or a
+    document is still sitting held.
+    """
+    peers, ch_hash = file_channel(peer_factory, "alice", "bob", "carol")
+    owner = peers[0]
+    published = owner.storage.get_member_list_version(ch_hash)
+
+    for member in peers[1:]:
+        applied = member.storage.get_member_list_version(ch_hash)
+        assert applied is not None, \
+            f"{member.name} never applied the owner's member list"
+        assert applied["version"] == published["version"]
+        assert member.invite_mgr.list_pending_memberships() == [], \
+            f"{member.name} is holding a document that can still be applied"
 
 
 # ---------------------------------------------------------------------------

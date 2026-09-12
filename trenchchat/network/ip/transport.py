@@ -11,6 +11,12 @@ marshals them through EventBus) is the same on this path as on the mesh.
 A session only ever carries messages from the identity that proved itself on
 it: an inbound envelope is checked against the session's authenticated peer
 and against the author's own signature before a handler sees it.
+
+A peer's path and the path_changed that announces it are one step in both
+directions: a handler is called with the new state already in place, and no
+other thread can see a session come up or go away before that call has
+returned. Anything less and a manager can act on a path this node has not
+told it about, which is a race it has no way to see.
 """
 
 import asyncio
@@ -56,6 +62,11 @@ MAX_QUEUED_INBOUND = 256
 MAX_INFLIGHT_REQUESTS = 8
 
 CALLBACK_WORKERS = 4
+
+# How long a thread waits for a path change to be announced before it reads the
+# new state anyway. A path_changed handler slower than this has a problem of
+# its own; holding every send on this node behind it would be a worse one.
+PATH_ANNOUNCE_TIMEOUT_SECS = 5.0
 
 OPEN_TIMEOUT_SECS = 20.0
 STOP_TIMEOUT_SECS = 5.0
@@ -144,6 +155,11 @@ class IPTransport(Transport):
         self._sessions: dict[str, DirectSession] = {}
         self._queues: dict[int, _SerialQueue] = {}
         self._sessions_lock = threading.Lock()
+        # peer hex -> the event a path change is announced behind. Held under
+        # the same lock as the sessions, so "what is this peer's path" and "is
+        # a change to it still unannounced" are read as one answer.
+        self._path_gates: dict[str, threading.Event] = {}
+        self._announcing = threading.local()
         self._pending_handshakes: set = set()
         # One-shot listeners on punched sockets, one per peer, closed with the
         # session they accepted. Closing one closes its socket.
@@ -156,8 +172,15 @@ class IPTransport(Transport):
 
         self._pool = ThreadPoolExecutor(max_workers=CALLBACK_WORKERS,
                                         thread_name_prefix="ip-callbacks")
+        # Path changes get a thread of their own, in arrival order: on the
+        # shared pool two of them could be announced out of order, and a
+        # thread waiting for one could be waiting behind the work that
+        # announces it.
+        self._announcer = ThreadPoolExecutor(max_workers=1,
+                                             thread_name_prefix="ip-paths")
         self._inflight = 0
         self._inflight_lock = threading.Lock()
+        self._loop_thread_id = 0
         self._loop = asyncio.new_event_loop()
         self._loop_ready = threading.Event()
         self._thread = threading.Thread(target=self._run_loop, daemon=True,
@@ -170,6 +193,7 @@ class IPTransport(Transport):
 
     def _run_loop(self) -> None:
         asyncio.set_event_loop(self._loop)
+        self._loop_thread_id = threading.get_ident()
         self._loop.call_soon(self._loop_ready.set)
         try:
             self._loop.run_forever()
@@ -241,6 +265,7 @@ class IPTransport(Transport):
             pass
         self._thread.join(timeout=STOP_TIMEOUT_SECS)
         self._pool.shutdown(wait=False)
+        self._announcer.shutdown(wait=False)
 
     def _wait_for_callbacks(self) -> None:
         """Let work already handed to the pool finish before anything is torn down.
@@ -312,9 +337,72 @@ class IPTransport(Transport):
         return [peer_session.stats() for peer_session in self.live_sessions()]
 
     def session_for(self, peer_hex: str) -> DirectSession | None:
-        """The session with one peer, if there is one."""
+        """The session with one peer, if there is one.
+
+        A path change and the callback that announces it are one step: a
+        thread that would see a session come up or go away waits here until
+        every path_changed handler for it has run, so nothing on this node
+        can act on a path it has not been told about. Two threads never wait:
+        the one doing the announcing, which would be waiting for itself, and
+        the loop, which carries every session here.
+        """
+        deadline = time.time() + PATH_ANNOUNCE_TIMEOUT_SECS
+        while True:
+            with self._sessions_lock:
+                gate = self._path_gates.get(peer_hex)
+                if gate is None or self._announces_its_own_paths():
+                    return self._sessions.get(peer_hex)
+            if not gate.wait(max(deadline - time.time(), 0.0)):
+                RNS.log(f"TrenchChat [ip]: the path change for "
+                        f"{peer_hex[:12]}… was still unannounced after "
+                        f"{PATH_ANNOUNCE_TIMEOUT_SECS:.0f}s", RNS.LOG_WARNING)
+                with self._sessions_lock:
+                    return self._sessions.get(peer_hex)
+
+    def _announces_its_own_paths(self) -> bool:
+        """Whether this thread is one that must never wait for an announcement."""
+        return (bool(getattr(self._announcing, "active", False))
+                or threading.get_ident() == self._loop_thread_id)
+
+    def _open_path_gate(self, peer_hex: str) -> threading.Event:
+        """Hold readers of this peer's path. Call under the sessions lock."""
+        gate = threading.Event()
+        previous = self._path_gates.get(peer_hex)
+        self._path_gates[peer_hex] = gate
+        if previous is not None:
+            previous.set()
+        return gate
+
+    def _close_path_gate(self, peer_hex: str, gate: threading.Event) -> None:
+        """Let readers of this peer's path see the change behind this gate."""
         with self._sessions_lock:
-            return self._sessions.get(peer_hex)
+            if self._path_gates.get(peer_hex) is gate:
+                del self._path_gates[peer_hex]
+        gate.set()
+
+    def _announce_path(self, gate: threading.Event, peer_hex: str, path: str,
+                       appeared: bool) -> None:
+        """Tell the managers where a peer is, then let the change be read.
+
+        The gate opens again on the path itself, and a peer appearing follows
+        on the pool: that one is the work the news leads to (a flush, a sync
+        request) and has no business holding a send to somebody else.
+        """
+        self._announcing.active = True
+        try:
+            self._call(self._fire_path_changed, peer_hex, path)
+        finally:
+            self._announcing.active = False
+            self._close_path_gate(peer_hex, gate)
+        if appeared:
+            self._dispatch(self._fire_peer_appeared, peer_hex)
+
+    def _announce(self, gate: threading.Event, peer_hex: str, path: str, *,
+                  appeared: bool) -> None:
+        """Queue one path change, opening the gate again if it cannot be sent."""
+        if not self._submit(self._announce_path, gate, peer_hex, path,
+                            appeared, executor=self._announcer):
+            self._close_path_gate(peer_hex, gate)
 
     def open_session(self, peer_hex: str, host: str, port: int,
                      peer_cert_der: bytes, *, sock: socket.socket | None = None,
@@ -502,43 +590,46 @@ class IPTransport(Transport):
         self._pending_handshakes.discard(peer_session)
         peer_hex = peer_session.peer_hex
         with self._sessions_lock:
+            gate = self._open_path_gate(peer_hex)
             previous = self._sessions.get(peer_hex)
             self._sessions[peer_hex] = peer_session
             self._queues[id(peer_session)] = _SerialQueue(self._submit)
         if previous is not None and previous is not peer_session:
+            self._close_path_gate(peer_hex, gate)
             previous.shut_down("replaced by a newer session")
             return
-        self._dispatch(self._fire_path_changed, peer_hex, PATH_DIRECT)
-        self._dispatch(self._fire_peer_appeared, peer_hex)
+        self._announce(gate, peer_hex, PATH_DIRECT, appeared=True)
 
     def _on_closed(self, peer_session: DirectSession, reason: str) -> None:
         """A session ended: the peer is back on whatever path is left."""
         self._pending_handshakes.discard(peer_session)
         self._fail_requests(peer_session)
         peer_hex = peer_session.peer_hex
+        gate = None
         with self._sessions_lock:
             self._queues.pop(id(peer_session), None)
             if peer_hex and self._sessions.get(peer_hex) is peer_session:
+                gate = self._open_path_gate(peer_hex)
                 del self._sessions[peer_hex]
             else:
                 peer_hex = ""
-        if peer_hex:
+        if peer_hex and gate is not None:
             RNS.log(f"TrenchChat [ip]: session with {peer_hex[:12]}… ended: "
                     f"{reason}", RNS.LOG_NOTICE)
             self._close_accept_server(peer_hex)
-            self._dispatch(self._fire_path_changed, peer_hex, PATH_RETICULUM)
+            self._announce(gate, peer_hex, PATH_RETICULUM, appeared=False)
 
     def _dispatch(self, fn, *args) -> None:
         """Hand one callback to the worker pool, off the connection's loop."""
         if fn is not None:
             self._submit(self._call, fn, *args)
 
-    def _submit(self, fn, *args) -> bool:
-        """Run one piece of work on the pool, counted so stop() can wait for it."""
+    def _submit(self, fn, *args, executor=None) -> bool:
+        """Run one piece of work on a pool, counted so stop() can wait for it."""
         with self._inflight_lock:
             self._inflight += 1
         try:
-            self._pool.submit(self._run, fn, *args)
+            (executor or self._pool).submit(self._run, fn, *args)
         except RuntimeError:
             with self._inflight_lock:
                 self._inflight -= 1
