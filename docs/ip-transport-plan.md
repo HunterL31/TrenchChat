@@ -22,6 +22,20 @@ Three decisions fix the shape of this plan. Everything below follows from them.
    an upgrade.** An offer discloses this node's IP addresses to the peer;
    that is acceptable for someone an admin vetted and invited, and never for
    whoever happened to subscribe to a public channel.
+4. **Nothing depends on port forwarding or on the router cooperating.** A
+   direct session must come up between two ordinary home routers with no
+   setting changed on either. The ladder is: punch over IPv4 from the socket
+   this node advertised; punch over IPv6 where both sides have it, which
+   needs no address discovery at all; and, only when both of those have
+   failed for a pair, a per-client prompt to enable a public address-echo
+   service (STUN), off by default, which answers one question and sees no
+   chat data. Router port mapping stays as an opportunistic extra that
+   nothing waits for. A member that is reachable serves the whole channel as
+   its address echo through the HELLO, and address knowledge spreads from it;
+   a member that merely knows its own address behind a home router cannot
+   serve a member that knows nothing yet, because its router drops the
+   unsolicited probe, which is why the prompt is per client rather than per
+   channel.
 
 An earlier draft of this plan proposed a standalone IP backend with its own
 discovery (signed endpoint records, gossip, an optional Tailscale probe). It
@@ -554,10 +568,38 @@ message's delivery state is one aggregate over every recipient with no path on
 it, so the indicator is unchanged and saying more would need the path carried
 with the message.
 
-**Phase 6: the list (ongoing).** Items 2 through 8 above, each with its own
+**Phase 6: reachability without the router (2 to 3 weeks).** Decision 4,
+in three steps that land in order because they share the transport.
+
+- *Punch from the advertised socket.* The dialing side must send its probes
+  from, and carry the session on, the same socket its candidates name: that
+  socket is a QUIC server today, so the transport gains one datagram
+  endpoint that demultiplexes inbound datagrams between the listener's
+  connections and outbound connections by connection id. Check: the
+  `cone_helper` harness variant, two cone NATs and one reachable member,
+  comes up direct between the two NATed peers in five runs of five, and
+  `one_nat` and `symmetric` keep their results.
+- *IPv6 end to end.* A dual-stack listener, IPv6 candidates (the global
+  temporary address, never link-local), both families tried in parallel,
+  the observed-address exchange per family, and a harness variant of two
+  stateful IPv6 firewalls with no NAT. Check: that variant comes up direct
+  in five runs of five with no helper and no address echo.
+- *Opt-in public address echo.* A STUN binding client (stdlib, RFC 5389,
+  request and response only) for the listening socket, `upgrade.stun`
+  config (`enabled`, default false; `servers`, a short editable list),
+  a distinct failure reason `no_public_address` so the client can tell "we
+  could not learn where we are" from "we could not punch", and a one-time
+  prompt in the client when a pair has failed both punches for that reason,
+  explaining what turning it on discloses. Check: a `cone_stun` harness
+  variant, two cone NATs, no helper, a STUN responder in the root
+  namespace, comes up direct in five runs of five once both sides enable it
+  and never before; pytest covers the client against a fake STUN server and
+  the prompt against the failure reason.
+
+**Phase 7: the list (ongoing).** Items 2 through 8 above, each with its own
 tests and, for anything periodic, a shaped scenario run.
 
-Phases 0 to 5 are about fourteen to sixteen weeks. Everything after is the
+Phases 0 to 6 are about seventeen to nineteen weeks. Everything after is the
 reason for doing it.
 
 ## Testing
