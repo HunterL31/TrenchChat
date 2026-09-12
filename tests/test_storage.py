@@ -1620,6 +1620,37 @@ class TestFileStoreOnDisk:
         finally:
             db.close()
 
+    def test_a_partial_download_keeps_its_chunks_across_a_reopen(self, tmp_path):
+        """What a killed download comes back to: the rows that committed.
+
+        A download writes a chunk and commits its row one at a time, so a
+        process that dies part way leaves a file with bytes for some chunks
+        and none for the rest. The collection pass on the next open has to
+        keep that, which is the whole reason a restart costs one request.
+        """
+        db_path = tmp_path / "test.db"
+        db = Storage(db_path=db_path)
+        size = FILE_CHUNK_BYTES * 4
+        data = os.urandom(size)
+        db.begin_file(self.HASH, size)
+        for idx in (0, 1):
+            assert db.put_file_chunk(
+                self.HASH, idx,
+                data[idx * FILE_CHUNK_BYTES:(idx + 1) * FILE_CHUNK_BYTES])
+        db.close()
+
+        db = Storage(db_path=db_path)
+        try:
+            row = db.get_file(self.HASH)
+            assert row is not None and not row["complete"]
+            assert row["held_bytes"] == FILE_CHUNK_BYTES * 2
+            assert db.file_chunk_indices(self.HASH) == [0, 1]
+            assert db.get_file_chunks(self.HASH, 0, 2) == [
+                data[:FILE_CHUNK_BYTES],
+                data[FILE_CHUNK_BYTES:2 * FILE_CHUNK_BYTES]]
+        finally:
+            db.close()
+
     def test_chunks_in_an_older_database_move_to_disk_on_open(self, tmp_path):
         """The bytes were rows once; opening the profile moves them out."""
         db_path = tmp_path / "test.db"

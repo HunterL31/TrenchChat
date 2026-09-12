@@ -21,6 +21,7 @@ from trenchchat.core.files import (
 )
 from trenchchat.core.permissions import PRESET_PRIVATE, ROLE_MEMBER, ROLE_OWNER
 from trenchchat.core.protocol import FILE_CHUNK_BYTES, chunk_hashes
+from trenchchat.core.storage import Storage
 from tests.fake_file_transport import FakeFileTransport
 
 
@@ -459,6 +460,81 @@ def test_a_restarted_manager_resumes_at_the_same_index(peer_factory):
     finally:
         resumed.stop()
         resumed_transport.join_threads()
+
+
+def test_a_reopened_profile_restores_the_download_and_its_chunks(peer_factory):
+    """The restart a scenario kills a process for, without killing one.
+
+    A new manager over the same profile is not the same as a new manager over
+    the same Storage: opening the database again runs the collection pass that
+    drops bytes nothing accounts for, and a download still in flight is
+    exactly the state that pass must not read as an orphan.
+    """
+    (alice, bob), ch_hash = file_channel(peer_factory, "alice", "bob")
+    data = blob(4)
+    manifest = share(alice, ch_hash, "survey.bin", data)
+    file_hash = manifest["hash"].hex()
+    msg_id = wait_for_file_message(bob, ch_hash, file_hash)
+    bob.file_transport.stall_chunks.add((alice.identity.hash_hex, 1))
+
+    bob.file_mgr.request_download(ch_hash, msg_id)
+    wait_for_state(bob, file_hash, DL_UNAVAILABLE)
+    held = bob.file_mgr.download_status(file_hash)["chunks_held"]
+    assert held == 1
+    bob.file_mgr.stop()
+
+    reopened = Storage(db_path=bob.data_dir / "storage.db")
+    resumed_transport = FakeFileTransport(bob.identity.hash_hex,
+                                          bob.file_transport.registry)
+    resumed = FileManager(bob.identity, reopened, bob.presence_mgr,
+                          transport=resumed_transport)
+    try:
+        status = resumed.download_status(file_hash)
+        assert status is not None, \
+            "the download was forgotten when the profile was opened again"
+        assert status["chunks_held"] == held
+        assert reopened.file_chunk_indices(file_hash) == [0]
+
+        resumed.on_peer_appeared(alice.identity.hash_hex)
+        assert wait_for(
+            lambda: (resumed.download_status(file_hash) or {})["state"]
+            == DL_DONE, timeout=20.0)
+        assert resumed.file_bytes(file_hash) == data
+    finally:
+        resumed.stop()
+        resumed_transport.join_threads()
+        reopened.close()
+
+
+def test_a_finished_download_is_forgotten_but_its_bytes_are_not(peer_factory):
+    """Why a restarted node reports no download for a file it holds.
+
+    Only unfinished downloads are rebuilt, so a finished one and one whose
+    chunks were lost both answer nothing. Anything reading that answer has to
+    ask for the bytes to tell them apart.
+    """
+    (alice, bob), ch_hash = file_channel(peer_factory, "alice", "bob")
+    data = blob(3)
+    manifest = share(alice, ch_hash, "survey.bin", data)
+    file_hash = manifest["hash"].hex()
+    msg_id = wait_for_file_message(bob, ch_hash, file_hash)
+
+    bob.file_mgr.request_download(ch_hash, msg_id)
+    wait_for_state(bob, file_hash, DL_DONE)
+    bob.file_mgr.stop()
+
+    reopened = Storage(db_path=bob.data_dir / "storage.db")
+    resumed_transport = FakeFileTransport(bob.identity.hash_hex,
+                                          bob.file_transport.registry)
+    resumed = FileManager(bob.identity, reopened, bob.presence_mgr,
+                          transport=resumed_transport)
+    try:
+        assert resumed.download_status(file_hash) is None
+        assert resumed.file_bytes(file_hash) == data
+    finally:
+        resumed.stop()
+        resumed_transport.join_threads()
+        reopened.close()
 
 
 def test_the_request_window_doubles_after_two_successes(peer_factory):
