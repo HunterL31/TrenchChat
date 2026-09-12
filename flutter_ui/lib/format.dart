@@ -42,7 +42,7 @@ String formatRelativeAgo(double unixSeconds) {
   if (unixSeconds <= 0) return 'never';
   final diff = DateTime.now().millisecondsSinceEpoch / 1000 - unixSeconds;
   if (diff < 0) return 'now';
-  return '${_durationLabel(diff)} ago';
+  return '${formatDuration(diff)} ago';
 }
 
 /// Remaining time as a deadline: "in 4m". Already-passed deadlines read as
@@ -50,10 +50,11 @@ String formatRelativeAgo(double unixSeconds) {
 String formatRelativeIn(double unixSeconds) {
   final diff = unixSeconds - DateTime.now().millisecondsSinceEpoch / 1000;
   if (diff <= 0) return 'expired';
-  return 'in ${_durationLabel(diff)}';
+  return 'in ${formatDuration(diff)}';
 }
 
-String _durationLabel(double secs) {
+/// A span of time as one coarse unit: "12s", "4m", "2h", "3d".
+String formatDuration(double secs) {
   if (secs < 60) return '${secs.floor()}s';
   if (secs < 3600) return '${(secs / 60).floor()}m';
   if (secs < 86400) return '${(secs / 3600).floor()}h';

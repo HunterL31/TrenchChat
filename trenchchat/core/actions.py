@@ -12,9 +12,15 @@ These functions take already-constructed manager/storage objects and are
 free of any GUI framework dependency.
 """
 
+import time
 from collections.abc import Callable
 
+import RNS
+
 from trenchchat.core.files import REASON_STORAGE, build_manifest
+from trenchchat.core.link_quality import (
+    LinkQuality, quality_label, rtt_ms_for, score_path, summarize_channel,
+)
 from trenchchat.core.node_browser import parse_nomad_url
 from trenchchat.core.permissions import (
     CREATE_CHANNEL, KICK, MANAGE_CHANNEL, MANAGE_ROLES, SEND_MESSAGE,
@@ -442,6 +448,89 @@ def channel_roster_hexes(storage, subscription_mgr,
     if is_open_join(perms):
         return sorted(subscription_mgr.get_subscribers(channel_hash_hex))
     return [row["identity_hash"] for row in storage.get_members(channel_hash_hex)]
+
+
+def _paths_by_delivery_hash(path_table) -> dict[bytes, dict]:
+    """Index an RNS path table by destination hash, for one lookup per peer."""
+    indexed: dict[bytes, dict] = {}
+    try:
+        for entry in path_table:
+            dest_hash = entry.get("hash")
+            if isinstance(dest_hash, bytes):
+                indexed[dest_hash] = entry
+    except (AttributeError, TypeError) as e:
+        RNS.log(f"TrenchChat [link]: unreadable path table: {e}", RNS.LOG_WARNING)
+        return {}
+    return indexed
+
+
+def _peer_link_entry(peer_hex: str, paths: dict[bytes, dict], presence_mgr,
+                     display_name: Callable[[str], str]) -> dict:
+    """One peer's row in a channel's link-quality reading."""
+    quality = LinkQuality.UNKNOWN
+    hops: int | None = None
+    via_hex: str | None = None
+    rtt_ms: float | None = None
+    expires_in: float | None = None
+
+    try:
+        delivery = RNS.Destination.hash(bytes.fromhex(peer_hex), "lxmf", "delivery")
+    except (TypeError, ValueError):
+        delivery = None
+
+    entry = paths.get(delivery) if delivery is not None else None
+    if entry is not None:
+        via = entry.get("via")
+        via_hex = via.hex() if isinstance(via, bytes) else None
+        hops = entry.get("hops", 0)
+        quality = score_path(delivery.hex(), hops, via_hex)
+        rtt_ms = rtt_ms_for(delivery.hex())
+        expires = entry.get("expires")
+        if isinstance(expires, (int, float)):
+            expires_in = max(0.0, expires - time.time())
+
+    return {
+        "identity_hash": peer_hex,
+        "display_name": display_name(peer_hex),
+        "quality": int(quality),
+        "quality_label": quality_label(quality),
+        "hops": hops,
+        "via": via_hex,
+        "rtt_ms": rtt_ms,
+        "path_expires_in": expires_in,
+        "is_online": presence_mgr.is_online(peer_hex),
+        "last_seen": presence_mgr.last_seen_at(peer_hex),
+    }
+
+
+def _link_sort_key(peer: dict) -> tuple:
+    hops = peer["hops"]
+    return (-peer["quality"], hops is None, hops if hops is not None else 0,
+            peer["display_name"].lower())
+
+
+def channel_link_quality(storage, subscription_mgr, presence_mgr, path_table,
+                         channel_hash_hex: str, self_hash_hex: str,
+                         display_name: Callable[[str], str]) -> dict:
+    """How well this node reaches a channel: a summary plus each peer's row.
+
+    Everything here is read from state this node already holds, the RNS path
+    table and any link already open, so a reading costs nothing on the air. It
+    never requests a path: an unresolved peer reads as unreachable until an
+    announce fills the table in.
+
+    The local identity is left out. A link to yourself always scores
+    EXCELLENT, and a reading that includes it says nothing about how well this
+    node reaches the rest of the channel.
+    """
+    paths = _paths_by_delivery_hash(path_table)
+    peers = [
+        _peer_link_entry(peer_hex, paths, presence_mgr, display_name)
+        for peer_hex in channel_roster_hexes(storage, subscription_mgr, channel_hash_hex)
+        if peer_hex != self_hash_hex
+    ]
+    peers.sort(key=_link_sort_key)
+    return {"summary": summarize_channel(peers), "peers": peers}
 
 
 def shared_channel_peers(storage, self_hash_hex: str) -> set[str]:

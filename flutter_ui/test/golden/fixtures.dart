@@ -181,8 +181,14 @@ void populateFixtureState(AppState state) {
   state.membersByChannel[kGeneralHash] = const [];
   state.messagesByChannel[kGeneralHash] = fixtureMessages();
   state.presenceByChannel[kGeneralHash] = fixturePresence();
-  state.linkQualityByChannel[kGeneralHash] =
-      const ChannelLinkQuality(level: LinkQualityLevel.excellent, hops: 2);
+  state.linkQualityByChannel[kGeneralHash] = const ChannelLinkQuality(
+    level: LinkQualityLevel.excellent,
+    medianHops: 2,
+    reachable: 3,
+    total: 4,
+    bestIdentityHash: 'peer-close',
+    bestHops: 1,
+  );
   state.permissionsByChannel[kGeneralHash] =
       const ChannelPermissions(
       invite: false, kick: false, manageRoles: false, manageChannel: false,
