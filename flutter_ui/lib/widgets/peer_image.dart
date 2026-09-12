@@ -11,26 +11,28 @@ const int _decodeScale = 3;
 /// drawn into, so a small file claiming huge dimensions costs the full
 /// allocation before being scaled down. The backend refuses an implausible
 /// declared decode, but that ceiling is per image and a screen holds one per
-/// peer -- cacheWidth/cacheHeight make the cost track the display size.
+/// peer -- cacheWidth makes the cost track the display size. Only the width
+/// is capped: passing both axes picks the exact resize policy, which squashes
+/// a non-square source to a square raster before [fit] ever runs.
 ///
 /// errorBuilder matters for the same reason: bytes that reached storage
 /// without parsing as an image are stored as-is by design, so a decode
-/// failure here is expected rather than exceptional.
+/// failure here is expected rather than exceptional. [fallback] is what a
+/// caller with something better than a hole shows in its place.
 Widget peerImage(
   Uint8List bytes, {
   required double size,
-  BoxFit? fit,
+  BoxFit fit = BoxFit.contain,
+  Widget? fallback,
 }) {
-  final cap = (size * _decodeScale).ceil();
   return Image.memory(
     bytes,
     width: size,
     height: size,
     fit: fit,
     filterQuality: FilterQuality.medium,
-    cacheWidth: cap,
-    cacheHeight: cap,
+    cacheWidth: (size * _decodeScale).ceil(),
     errorBuilder: (context, error, stack) =>
-        SizedBox(width: size, height: size),
+        fallback ?? SizedBox(width: size, height: size),
   );
 }

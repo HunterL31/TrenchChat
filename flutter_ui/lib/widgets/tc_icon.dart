@@ -2,6 +2,8 @@
 // Same language as the panel notch -- hard angles, 45-degree chamfers, butt
 // caps, miter joins. Add an icon by extending the catalog, not by importing
 // Material icons; the rounded Material style clashes with this design.
+import 'dart:math' as math;
+
 import 'package:flutter/widgets.dart';
 
 import '../theme/section_theme.dart';
@@ -22,34 +24,34 @@ class TcIcons {
 
   static const settings = TcIconData('settings', [
     [
-      Offset(12.73, 6.73), Offset(14.83, 7.04), Offset(14.83, 8.96), Offset(12.73, 9.27),
-      Offset(12.24, 10.45), Offset(13.51, 12.15), Offset(12.15, 13.51), Offset(10.45, 12.24),
-      Offset(9.27, 12.73), Offset(8.96, 14.83), Offset(7.04, 14.83), Offset(6.73, 12.73),
-      Offset(5.55, 12.24), Offset(3.85, 13.51), Offset(2.49, 12.15), Offset(3.76, 10.45),
-      Offset(3.27, 9.27), Offset(1.17, 8.96), Offset(1.17, 7.04), Offset(3.27, 6.73),
-      Offset(3.76, 5.55), Offset(2.49, 3.85), Offset(3.85, 2.49), Offset(5.55, 3.76),
-      Offset(6.73, 3.27), Offset(7.04, 1.17), Offset(8.96, 1.17), Offset(9.27, 3.27),
-      Offset(10.45, 3.76), Offset(12.15, 2.49), Offset(13.51, 3.85), Offset(12.24, 5.55),
-      Offset(12.73, 6.73),
+      Offset(11.45, 7.07), Offset(12.99, 7.3), Offset(12.99, 8.7), Offset(11.45, 8.93),
+      Offset(11.1, 9.79), Offset(12.02, 11.03), Offset(11.03, 12.02), Offset(9.79, 11.1),
+      Offset(8.93, 11.45), Offset(8.7, 12.99), Offset(7.3, 12.99), Offset(7.07, 11.45),
+      Offset(6.21, 11.1), Offset(4.97, 12.02), Offset(3.98, 11.03), Offset(4.9, 9.79),
+      Offset(4.55, 8.93), Offset(3.01, 8.7), Offset(3.01, 7.3), Offset(4.55, 7.07),
+      Offset(4.9, 6.21), Offset(3.98, 4.97), Offset(4.97, 3.98), Offset(6.21, 4.9),
+      Offset(7.07, 4.55), Offset(7.3, 3.01), Offset(8.7, 3.01), Offset(8.93, 4.55),
+      Offset(9.79, 4.9), Offset(11.03, 3.98), Offset(12.02, 4.97), Offset(11.1, 6.21),
+      Offset(11.45, 7.07),
     ],
     [
-      Offset(10.12, 8.88), Offset(8.88, 10.12), Offset(7.12, 10.12), Offset(5.88, 8.88),
-      Offset(5.88, 7.12), Offset(7.12, 5.88), Offset(8.88, 5.88), Offset(10.12, 7.12),
-      Offset(10.12, 8.88),
+      Offset(9.55, 8.64), Offset(8.64, 9.55), Offset(7.36, 9.55), Offset(6.45, 8.64),
+      Offset(6.45, 7.36), Offset(7.36, 6.45), Offset(8.64, 6.45), Offset(9.55, 7.36),
+      Offset(9.55, 8.64),
     ],
   ]);
 
   static const lock = TcIconData('lock', [
     [
-      Offset(5.5, 7), Offset(5.5, 4.75), Offset(6.75, 3.5), Offset(9.25, 3.5),
-      Offset(10.5, 4.75), Offset(10.5, 7),
+      Offset(5.5, 6.5), Offset(5.5, 4.25), Offset(6.75, 3), Offset(9.25, 3),
+      Offset(10.5, 4.25), Offset(10.5, 6.5),
     ],
     [
-      Offset(3.5, 7), Offset(10.75, 7), Offset(12.5, 8.75), Offset(12.5, 13.5),
-      Offset(3.5, 13.5), Offset(3.5, 7),
+      Offset(3.5, 6.5), Offset(10.75, 6.5), Offset(12.5, 8.25), Offset(12.5, 13),
+      Offset(3.5, 13), Offset(3.5, 6.5),
     ],
     [
-      Offset(8, 9.5), Offset(8, 11.25),
+      Offset(8, 9), Offset(8, 10.75),
     ],
   ]);
 
@@ -64,13 +66,13 @@ class TcIcons {
 
   static const join = TcIconData('join', [
     [
-      Offset(9.5, 3.5), Offset(12.5, 3.5), Offset(12.5, 12.5), Offset(9.5, 12.5),
+      Offset(9.75, 3.5), Offset(12.75, 3.5), Offset(12.75, 12.5), Offset(9.75, 12.5),
     ],
     [
-      Offset(3, 8), Offset(9.5, 8),
+      Offset(3.25, 8), Offset(9.75, 8),
     ],
     [
-      Offset(6.75, 5.25), Offset(9.5, 8), Offset(6.75, 10.75),
+      Offset(7, 5.25), Offset(9.75, 8), Offset(7, 10.75),
     ],
   ]);
 
@@ -107,27 +109,28 @@ class TcIcons {
 
   static const users = TcIconData('users', [
     [
-      Offset(4.75, 3.75), Offset(7.75, 3.75), Offset(7.75, 6.75), Offset(4.75, 6.75),
-      Offset(4.75, 3.75),
+      Offset(4.75, 3.38), Offset(7.75, 3.38), Offset(7.75, 6.38), Offset(4.75, 6.38),
+      Offset(4.75, 3.38),
     ],
     [
-      Offset(3, 13), Offset(3, 11.5), Offset(4.75, 9.75), Offset(7.75, 9.75), Offset(9.5, 11.5),
-      Offset(9.5, 13),
+      Offset(3, 12.62), Offset(3, 11.12), Offset(4.75, 9.38), Offset(7.75, 9.38),
+      Offset(9.5, 11.12), Offset(9.5, 12.62),
     ],
     [
-      Offset(10.5, 4.5), Offset(13, 4.5), Offset(13, 7), Offset(10.5, 7), Offset(10.5, 4.5),
+      Offset(10.5, 4.12), Offset(13, 4.12), Offset(13, 6.62), Offset(10.5, 6.62),
+      Offset(10.5, 4.12),
     ],
     [
-      Offset(11, 9.4), Offset(12.5, 10.6), Offset(12.5, 13),
+      Offset(11, 9.03), Offset(12.5, 10.22), Offset(12.5, 12.62),
     ],
   ]);
 
   static const close = TcIconData('close', [
     [
-      Offset(4.25, 4.25), Offset(11.75, 11.75),
+      Offset(3.24, 3.24), Offset(12.76, 12.76),
     ],
     [
-      Offset(11.75, 4.25), Offset(4.25, 11.75),
+      Offset(12.76, 3.24), Offset(3.24, 12.76),
     ],
   ]);
 
@@ -143,10 +146,10 @@ class TcIcons {
 
   static const send = TcIconData('send', [
     [
-      Offset(4.5, 4), Offset(9.5, 8), Offset(4.5, 12),
+      Offset(3.38, 4), Offset(8.38, 8), Offset(3.38, 12),
     ],
     [
-      Offset(10.75, 12), Offset(13.75, 12),
+      Offset(9.62, 12), Offset(12.62, 12),
     ],
   ]);
 
@@ -167,30 +170,31 @@ class TcIcons {
 
   static const map = TcIconData('map', [
     [
-      Offset(4, 3.5), Offset(12, 3.5), Offset(12, 8.5), Offset(8, 13.5), Offset(4, 8.5),
-      Offset(4, 3.5),
+      Offset(4, 3), Offset(12, 3), Offset(12, 8), Offset(8, 13),
+      Offset(4, 8), Offset(4, 3),
     ],
     [
-      Offset(7, 6.25), Offset(9, 6.25), Offset(9, 8.25), Offset(7, 8.25), Offset(7, 6.25),
+      Offset(7, 5.75), Offset(9, 5.75), Offset(9, 7.75), Offset(7, 7.75),
+      Offset(7, 5.75),
     ],
   ]);
 
   static const iface = TcIconData('iface', [
     [
-      Offset(8, 7), Offset(8, 13.5),
+      Offset(8, 5.9), Offset(8, 12.8),
     ],
     [
-      Offset(5.4, 3.9), Offset(3.9, 5.5), Offset(5.4, 7.1),
+      Offset(5.4, 3.2), Offset(3.9, 4.8), Offset(5.4, 6.4),
     ],
     [
-      Offset(10.6, 3.9), Offset(12.1, 5.5), Offset(10.6, 7.1),
+      Offset(10.6, 3.2), Offset(12.1, 4.8), Offset(10.6, 6.4),
     ],
     [
-      Offset(5.5, 13.5), Offset(10.5, 13.5),
+      Offset(5.5, 12.8), Offset(10.5, 12.8),
     ],
   ], fills: [
     [
-      Offset(8, 4.4), Offset(9.1, 5.5), Offset(8, 6.6), Offset(6.9, 5.5),
+      Offset(8, 3.7), Offset(9.1, 4.8), Offset(8, 5.9), Offset(6.9, 4.8),
     ],
   ]);
   static const mic = TcIconData('mic', [
@@ -228,7 +232,7 @@ class TcIcons {
       Offset(5.5, 13.25), Offset(10.5, 13.25),
     ],
     [
-      Offset(3.25, 3.25), Offset(12.75, 12.75),
+      Offset(4.25, 4.25), Offset(11.75, 11.75),
     ],
   ]);
 
@@ -261,20 +265,20 @@ class TcIcons {
 
   static const globe = TcIconData('globe', [
     [
-      Offset(8, 1.5), Offset(12.6, 3.4), Offset(14.5, 8), Offset(12.6, 12.6),
-      Offset(8, 14.5), Offset(3.4, 12.6), Offset(1.5, 8), Offset(3.4, 3.4),
-      Offset(8, 1.5),
+      Offset(8, 3.25), Offset(11.36, 4.64), Offset(12.75, 8), Offset(11.36, 11.36),
+      Offset(8, 12.75), Offset(4.64, 11.36), Offset(3.25, 8), Offset(4.64, 4.64),
+      Offset(8, 3.25),
     ],
     [
-      Offset(1.5, 8), Offset(14.5, 8),
+      Offset(3.25, 8), Offset(12.75, 8),
     ],
     [
-      Offset(8, 1.5), Offset(10.6, 4.4), Offset(11.5, 8), Offset(10.6, 11.6),
-      Offset(8, 14.5),
+      Offset(8, 3.25), Offset(9.9, 5.37), Offset(10.55, 8), Offset(9.9, 10.63),
+      Offset(8, 12.75),
     ],
     [
-      Offset(8, 1.5), Offset(5.4, 4.4), Offset(4.5, 8), Offset(5.4, 11.6),
-      Offset(8, 14.5),
+      Offset(8, 3.25), Offset(6.1, 5.37), Offset(5.45, 8), Offset(6.1, 10.63),
+      Offset(8, 12.75),
     ],
   ]);
 
@@ -311,12 +315,31 @@ class _TcIconPainter extends CustomPainter {
   final TcIconData icon;
   final Color color;
 
-  Path _path(List<Offset> points, double scale) {
+  /// Centre of an [width]-wide run that covers whole device pixels: a
+  /// half-integer for an odd width, an integer for an even one. Only the
+  /// axis a run is aligned on is snapped, so diagonals keep their angle.
+  static double _snap(double value, double width) =>
+      width.toInt().isOdd ? (value - 0.5).roundToDouble() + 0.5 : value.roundToDouble();
+
+  Path _path(List<Offset> points, double scale, double? strokeWidth) {
     final closed = points.first == points.last;
     final upper = closed ? points.length - 1 : points.length;
-    final path = Path()..moveTo(points.first.dx * scale, points.first.dy * scale);
-    for (int i = 1; i < upper; i++) {
-      path.lineTo(points[i].dx * scale, points[i].dy * scale);
+    final placed = <Offset>[];
+    for (int i = 0; i < upper; i++) {
+      final p = points[i];
+      double x = p.dx * scale;
+      double y = p.dy * scale;
+      if (strokeWidth != null) {
+        final before = i > 0 ? points[i - 1] : (closed ? points[upper - 1] : null);
+        final after = i < upper - 1 ? points[i + 1] : (closed ? points[0] : null);
+        if (before?.dx == p.dx || after?.dx == p.dx) x = _snap(x, strokeWidth);
+        if (before?.dy == p.dy || after?.dy == p.dy) y = _snap(y, strokeWidth);
+      }
+      placed.add(Offset(x, y));
+    }
+    final path = Path()..moveTo(placed.first.dx, placed.first.dy);
+    for (int i = 1; i < placed.length; i++) {
+      path.lineTo(placed[i].dx, placed[i].dy);
     }
     if (closed) path.close();
     return path;
@@ -325,18 +348,19 @@ class _TcIconPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     final scale = size.shortestSide / _grid;
+    final width = math.max(1.0, (_strokeWidth * scale).roundToDouble());
     final stroke = Paint()
       ..color = color
       ..style = PaintingStyle.stroke
-      ..strokeWidth = _strokeWidth * scale
+      ..strokeWidth = width
       ..strokeCap = StrokeCap.butt
       ..strokeJoin = StrokeJoin.miter;
     for (final points in icon.strokes) {
-      canvas.drawPath(_path(points, scale), stroke);
+      canvas.drawPath(_path(points, scale, width), stroke);
     }
     final fill = Paint()..color = color;
     for (final points in icon.fills) {
-      canvas.drawPath(_path([...points, points.first], scale), fill);
+      canvas.drawPath(_path([...points, points.first], scale, null), fill);
     }
   }
 

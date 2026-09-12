@@ -114,6 +114,8 @@ class TcDialogShell extends StatelessWidget {
           children: [
             Text(
               title,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
               style: TextStyle(
                 fontFamily: SectionTheme.styleOf(context).displayFont,
                 fontSize: 22,

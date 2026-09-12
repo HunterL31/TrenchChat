@@ -104,6 +104,7 @@ class _TcTextFieldState extends State<TcTextField> {
             ),
             decoration: InputDecoration(
               isDense: true,
+              contentPadding: EdgeInsets.zero,
               border: InputBorder.none,
               hintText: widget.hintText,
               hintStyle: TextStyle(fontSize: TCType.textBodyMd, color: tc.textTertiary),
