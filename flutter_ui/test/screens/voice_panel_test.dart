@@ -30,6 +30,8 @@ Widget _harness({
     );
 
 void main() {
+  group('share screen', shareScreenTests);
+
   testWidgets('shows channel, meter, and LIVE when unmuted', (tester) async {
     await tester.pumpWidget(_harness());
 
@@ -97,5 +99,64 @@ void main() {
     await tester.tap(find.byTooltip('Leave voice'));
     expect(muted, isTrue);
     expect(left, isTrue);
+  });
+}
+
+Widget _shareHarness({
+  VoidCallback? onShareScreen,
+  String? disabledReason,
+  String sharingSource = '',
+  int viewerCount = 0,
+  VoidCallback? onStopShare,
+}) =>
+    MaterialApp(
+      home: Scaffold(
+        body: VoicePanel(
+          channelName: 'general',
+          quality: LinkQualityLevel.excellent,
+          muted: false,
+          audioError: false,
+          onToggleMute: () {},
+          onLeave: () {},
+          onShareScreen: onShareScreen,
+          shareScreenDisabledReason: disabledReason,
+          sharingSource: sharingSource,
+          viewerCount: viewerCount,
+          onStopShare: onStopShare,
+        ),
+      ),
+    );
+
+void shareScreenTests() {
+  testWidgets('no share control when the caller has no opinion', (tester) async {
+    await tester.pumpWidget(_shareHarness());
+    expect(find.byTooltip('Share screen'), findsNothing);
+    expect(find.byWidgetPredicate((w) => w is TcIcon && w.icon == TcIcons.screen),
+        findsNothing);
+  });
+
+  testWidgets('the share control fires its callback', (tester) async {
+    var fired = false;
+    await tester.pumpWidget(_shareHarness(onShareScreen: () => fired = true));
+    await tester.tap(find.byTooltip('Share screen'));
+    expect(fired, isTrue);
+  });
+
+  testWidgets('a disabled share control names its reason', (tester) async {
+    await tester.pumpWidget(_shareHarness(
+        disabledReason: 'Screen share needs direct connections, which are off.'));
+    expect(find.byTooltip('Screen share needs direct connections, which are off.'),
+        findsOneWidget);
+    expect(find.byTooltip('Share screen'), findsNothing);
+  });
+
+  testWidgets('while sharing the panel says so and offers stop', (tester) async {
+    var stopped = false;
+    await tester.pumpWidget(_shareHarness(
+        sharingSource: 'Monitor 2', viewerCount: 3, onStopShare: () => stopped = true));
+    expect(find.text('SHARING Monitor 2 · 3 WATCHING'), findsOneWidget);
+    await tester.tap(find.byTooltip('Stop sharing'));
+    expect(stopped, isTrue);
+    expect(find.byTooltip('Share screen'), findsNothing);
   });
 }

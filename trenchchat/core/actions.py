@@ -12,14 +12,15 @@ These functions take already-constructed manager/storage objects and are
 free of any GUI framework dependency.
 """
 
+import base64
 from collections.abc import Callable
 
 from trenchchat.core import upgrade
 from trenchchat.core.files import REASON_STORAGE, build_manifest
 from trenchchat.core.node_browser import parse_nomad_url
 from trenchchat.core.permissions import (
-    CREATE_CHANNEL, KICK, MANAGE_CHANNEL, MANAGE_ROLES, SEND_MESSAGE,
-    SHARE_FILES, VOICE_CHAT, is_open_join, permissions_from_json,
+    CREATE_CHANNEL, KICK, MANAGE_CHANNEL, MANAGE_ROLES, SCREEN_SHARE,
+    SEND_MESSAGE, SHARE_FILES, VOICE_CHAT, is_open_join, permissions_from_json,
 )
 from trenchchat.core.protocol import file_manifest
 
@@ -28,6 +29,10 @@ MAX_THEME_NAME_LEN = 64
 # Why a send was turned down, for a caller with no other feedback loop.
 REASON_NO_SEND_PERMISSION = "no_send_permission"
 REASON_NO_SHARE_PERMISSION = "no_share_permission"
+REASON_NOT_IN_VOICE = "not_in_voice"
+REASON_NO_SCREEN_PERMISSION = "no_screen_permission"
+REASON_NO_DIRECT = "no_direct"
+REASON_NO_SHARE = "no_share"
 REASON_NO_CHANNEL = "no_channel"
 REASON_OPEN_JOIN = "open_join_channel"
 REASON_BAD_MANIFEST = "bad_manifest"
@@ -313,6 +318,93 @@ def leave_voice_channel(voice_mgr) -> bool:
 
 def set_voice_muted(voice_mgr, muted: bool) -> None:
     voice_mgr.set_muted(muted)
+
+
+def screen_share_refusal(storage, voice_mgr, channel_hash_hex: str,
+                         self_hash_hex: str) -> str | None:
+    """Why this node may not share its screen here, or None if it may.
+
+    The outbound half of the SCREEN_SHARE gate, and the client's gate reads
+    the same answer: a share lives inside a voice session, so being in this
+    channel's session comes first; then the permission, which an open-join
+    channel grants to anyone the way it grants voice. The core enforcement is
+    ScreenShareManager.may_share on the receiving side, which holds against
+    a peer calling in directly.
+    """
+    if voice_mgr.current_channel != channel_hash_hex:
+        return REASON_NOT_IN_VOICE
+    channel = storage.get_channel(channel_hash_hex)
+    if channel is None:
+        return REASON_NO_CHANNEL
+    if is_open_join(permissions_from_json(channel["permissions"])):
+        return None
+    if not storage.has_permission(channel_hash_hex, self_hash_hex, SCREEN_SHARE):
+        return REASON_NO_SCREEN_PERMISSION
+    return None
+
+
+def start_screen_share(config, storage, voice_mgr, screen_mgr,
+                       self_hash_hex: str, *, monitor: int | None = None,
+                       preset: str | None = None, fps: int | None = None) -> dict:
+    """Share a monitor with the current voice session, re-checking the gate.
+
+    Remembers the choices as the picker's next defaults. Returns
+    {"ok", "reason"}; a reason names what refused it, from this guard or
+    from the manager (no direct connections, capture unavailable).
+    """
+    channel_hash_hex = voice_mgr.current_channel
+    if channel_hash_hex is None:
+        return {"ok": False, "reason": REASON_NOT_IN_VOICE}
+    if screen_mgr is None:
+        return {"ok": False, "reason": REASON_NO_DIRECT}
+    refusal = screen_share_refusal(storage, voice_mgr, channel_hash_hex,
+                                   self_hash_hex)
+    if refusal is not None:
+        return {"ok": False, "reason": refusal}
+    if monitor is not None:
+        config.screen_monitor = monitor
+    if preset is not None:
+        config.screen_preset = preset
+    if fps is not None:
+        config.screen_fps = fps
+    reason = screen_mgr.start_share(channel_hash_hex, monitor=config.screen_monitor,
+                                    preset=config.screen_preset,
+                                    fps=config.screen_fps)
+    return {"ok": reason is None, "reason": reason}
+
+
+def stop_screen_share(screen_mgr) -> bool:
+    """End this node's share. False if there was none."""
+    return screen_mgr is not None and screen_mgr.stop_share()
+
+
+def watch_screen_share(voice_mgr, screen_mgr, peer_hash_hex: str) -> str | None:
+    """Watch a peer's share, re-checking that it is one this node was told
+    of and that this node is in that voice session. None when watching."""
+    if screen_mgr is None:
+        return REASON_NO_DIRECT
+    held = [s for s in screen_mgr.held_shares() if s["peer"] == peer_hash_hex]
+    if not held:
+        return REASON_NO_SHARE
+    if voice_mgr.current_channel != held[0]["channel"]:
+        return REASON_NOT_IN_VOICE
+    return screen_mgr.watch(peer_hash_hex)
+
+
+def list_screen_sources(config, *, with_thumbnails: bool = True) -> dict:
+    """The monitors a user may share, with a small picture of each for the
+    picker, plus the choices the picker starts from."""
+    from trenchchat.core.screen.capture import list_monitors, monitor_thumbnail
+
+    sources = list_monitors()
+    if with_thumbnails:
+        for monitor in sources["monitors"]:
+            thumbnail = monitor_thumbnail(monitor["index"])
+            monitor["thumbnail"] = (base64.b64encode(thumbnail).decode()
+                                    if thumbnail else None)
+    sources["selected"] = {"monitor": config.screen_monitor,
+                           "preset": config.screen_preset, "fps": config.screen_fps}
+    return sources
 
 
 def list_audio_devices(config) -> dict:

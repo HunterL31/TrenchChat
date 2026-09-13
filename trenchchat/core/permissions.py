@@ -42,6 +42,7 @@ CREATE_CHANNEL = "create_channel"
 FULL_SYNC = "full_sync"
 VOICE_CHAT = "voice_chat"
 SHARE_FILES = "share_files"
+SCREEN_SHARE = "screen_share"
 
 # Permissions a plain member may never hold, whatever a permissions blob says.
 #
@@ -54,7 +55,8 @@ SHARE_FILES = "share_files"
 ADMIN_ONLY_PERMISSIONS = (KICK, MANAGE_ROLES)
 
 ALL_PERMISSIONS = (SEND_MESSAGE, INVITE, KICK, MANAGE_ROLES, MANAGE_CHANNEL,
-                   CREATE_CHANNEL, FULL_SYNC, VOICE_CHAT, SHARE_FILES)
+                   CREATE_CHANNEL, FULL_SYNC, VOICE_CHAT, SHARE_FILES,
+                   SCREEN_SHARE)
 
 # ---------------------------------------------------------------------------
 # Channel-level flags
@@ -71,24 +73,24 @@ PRESET_PRIVATE: dict[str, Any] = {
     FLAG_OPEN_JOIN: False,
     FLAG_DISCOVERABLE: False,
     ROLE_ADMIN: [SEND_MESSAGE, INVITE, KICK, MANAGE_ROLES, VOICE_CHAT,
-                 SHARE_FILES],
-    ROLE_MEMBER: [SEND_MESSAGE, VOICE_CHAT, SHARE_FILES],
+                 SHARE_FILES, SCREEN_SHARE],
+    ROLE_MEMBER: [SEND_MESSAGE, VOICE_CHAT, SHARE_FILES, SCREEN_SHARE],
 }
 
 PRESET_OPEN: dict[str, Any] = {
     FLAG_OPEN_JOIN: True,
     FLAG_DISCOVERABLE: True,
     ROLE_ADMIN: [SEND_MESSAGE, INVITE, KICK, MANAGE_ROLES, VOICE_CHAT,
-                 SHARE_FILES],
-    ROLE_MEMBER: [SEND_MESSAGE, INVITE, VOICE_CHAT, SHARE_FILES],
+                 SHARE_FILES, SCREEN_SHARE],
+    ROLE_MEMBER: [SEND_MESSAGE, INVITE, VOICE_CHAT, SHARE_FILES, SCREEN_SHARE],
 }
 
 PRESET_SERVER: dict[str, Any] = {
     FLAG_OPEN_JOIN: False,
     FLAG_DISCOVERABLE: False,
     ROLE_ADMIN: [SEND_MESSAGE, INVITE, KICK, MANAGE_ROLES, CREATE_CHANNEL,
-                 VOICE_CHAT, SHARE_FILES],
-    ROLE_MEMBER: [SEND_MESSAGE, VOICE_CHAT, SHARE_FILES],
+                 VOICE_CHAT, SHARE_FILES, SCREEN_SHARE],
+    ROLE_MEMBER: [SEND_MESSAGE, VOICE_CHAT, SHARE_FILES, SCREEN_SHARE],
 }
 
 PRESETS = {
@@ -228,6 +230,11 @@ def has_permission(perms: dict, role: str, permission: str) -> bool:
     trade is that clearing it from every role at once reads as a blob that
     never knew it; a channel is made text-only by clearing send_message, or
     by leaving share_files on one role and off the other.
+
+    SCREEN_SHARE carries the same rule against VOICE_CHAT: a share lives
+    inside a voice session, so a blob that never names screen_share grants
+    it wherever voice_chat is granted, and one that names it anywhere is
+    read as written.
     """
     if role == ROLE_OWNER:
         return True
@@ -236,6 +243,8 @@ def has_permission(perms: dict, role: str, permission: str) -> bool:
         return True
     if permission == SHARE_FILES and not mentions_permission(perms, SHARE_FILES):
         return SEND_MESSAGE in granted
+    if permission == SCREEN_SHARE and not mentions_permission(perms, SCREEN_SHARE):
+        return VOICE_CHAT in granted
     return False
 
 

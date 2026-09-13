@@ -29,6 +29,7 @@ dependencies = [
     "uvicorn>=0.52",
     "websockets>=16.1",
     "aioquic>=1.3",
+    "mss>=10.0",
 ]
 
 [project.gui-scripts]

@@ -7,6 +7,7 @@ class ChannelPermissions {
     required this.sendMessage,
     this.shareFiles = false,
     required this.voiceChat,
+    this.screenShare = false,
   });
 
   /// Fails closed against an older backend that doesn't report it.
@@ -28,6 +29,10 @@ class ChannelPermissions {
   /// Fails closed against an older backend that doesn't report it.
   final bool voiceChat;
 
+  /// Whether this node may share its screen in the channel's voice session.
+  /// Fails closed against an older backend that doesn't report it.
+  final bool screenShare;
+
   factory ChannelPermissions.fromJson(Map<String, dynamic> json) => ChannelPermissions(
         invite: json['invite'] as bool? ?? false,
         kick: json['kick'] as bool? ?? false,
@@ -36,5 +41,6 @@ class ChannelPermissions {
         sendMessage: json['send_message'] as bool? ?? true,
         shareFiles: json['share_files'] as bool? ?? false,
         voiceChat: json['voice_chat'] as bool? ?? false,
+        screenShare: json['screen_share'] as bool? ?? false,
       );
 }

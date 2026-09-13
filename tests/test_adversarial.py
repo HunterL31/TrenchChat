@@ -79,8 +79,8 @@ from trenchchat.core.friends import (
 from trenchchat.core.storage import FRIEND_PENDING_IN, FRIEND_PENDING_OUT
 from trenchchat.core.permissions import (
     ALL_PERMISSIONS, FULL_SYNC, INVITE, KICK, MANAGE_CHANNEL, MANAGE_ROLES,
-    PRESET_OPEN, PRESET_PRIVATE, ROLE_ADMIN, ROLE_MEMBER, ROLE_OWNER, SEND_MESSAGE,
-    SHARE_FILES, VOICE_CHAT, is_open_join, permissions_from_json,
+    PRESET_OPEN, PRESET_PRIVATE, ROLE_ADMIN, ROLE_MEMBER, ROLE_OWNER, SCREEN_SHARE,
+    SEND_MESSAGE, SHARE_FILES, VOICE_CHAT, is_open_join, permissions_from_json,
 )
 from trenchchat.core.subscription import SubscriptionManager, _subscriber_payload
 from trenchchat.core.protocol import (
@@ -4979,3 +4979,99 @@ class TestTheAddressEchoGate:
 
         assert echo.requests == 1
         assert alice.storage.get_upgrade_addresses(upgrade.ADDRESS_SELF)
+
+
+# ---------------------------------------------------------------------------
+# Screen share: the core layer, reached over a real direct session
+# ---------------------------------------------------------------------------
+
+class TestAdversarialScreen:
+    """A share lives inside a voice session and travels direct sessions only;
+    these reach the plane's callbacks the way a peer does, over the session,
+    with the client and the outbound guard bypassed."""
+
+    def _screen_perms(self, *member):
+        return {ROLE_ADMIN: [SEND_MESSAGE, VOICE_CHAT, SCREEN_SHARE],
+                ROLE_MEMBER: list(member)}
+
+    def test_a_started_from_a_peer_without_the_permission_is_dropped(
+            self, peer_factory):
+        from tests.test_screen import setup_call
+        alice, bob, _carol, ch_hash = setup_call(
+            peer_factory, member_perms=[SEND_MESSAGE, VOICE_CHAT])
+        answered = []
+        bob.screen_mgr._plane.send_started(
+            alice.identity.hash_hex, ch_hash, 320, 200, 7, 15,
+            lambda ok, body: answered.append((ok, body.get("r"))))
+        assert wait_for(lambda: answered, msg="alice never answered")
+        assert answered[0] == (False, "forbidden")
+        assert alice.screen_mgr.held_shares() == []
+
+    def test_a_watch_from_a_peer_outside_the_voice_session_is_refused(
+            self, peer_factory):
+        from tests.test_screen import setup_call, start_and_hold
+        alice, bob, _carol, ch_hash = setup_call(peer_factory)
+        start_and_hold(alice, bob, ch_hash)
+        bob.voice_mgr.leave_voice()
+        assert wait_for(lambda: not alice.voice_mgr.is_participant(
+            ch_hash, bob.identity.hash_hex))
+        answered = []
+        bob.screen_mgr._plane.send_watch(
+            alice.identity.hash_hex, ch_hash, 640, 480,
+            lambda ok, body: answered.append((ok, body.get("r"))))
+        assert wait_for(lambda: answered, msg="alice never answered")
+        assert answered[0] == (False, "not_in_voice")
+        assert alice.screen_mgr.sharing()["viewers"] == []
+
+    def test_a_watch_from_a_peer_without_voice_chat_is_refused(self, peer_factory):
+        from tests.test_screen import setup_call, start_and_hold
+        alice, bob, _carol, ch_hash = setup_call(peer_factory)
+        start_and_hold(alice, bob, ch_hash)
+        alice.storage.set_channel_permissions(ch_hash, self._screen_perms(SEND_MESSAGE))
+        answered = []
+        bob.screen_mgr._plane.send_watch(
+            alice.identity.hash_hex, ch_hash, 640, 480,
+            lambda ok, body: answered.append((ok, body.get("r"))))
+        assert wait_for(lambda: answered, msg="alice never answered")
+        assert answered[0] == (False, "forbidden")
+        assert alice.screen_mgr.sharing()["viewers"] == []
+
+    def test_a_viewer_whose_voice_permission_is_revoked_is_cut_off(
+            self, peer_factory):
+        from tests.test_screen import setup_call, start_and_hold
+        alice, bob, _carol, ch_hash = setup_call(peer_factory)
+        start_and_hold(alice, bob, ch_hash)
+        assert bob.screen_mgr.watch(alice.identity.hash_hex) is None
+        assert wait_for(lambda: len(alice.screen_mgr.sharing()["viewers"]) == 1)
+        alice.storage.set_channel_permissions(ch_hash, self._screen_perms(SEND_MESSAGE))
+        assert wait_for(lambda: alice.screen_mgr.sharing()["viewers"] == [],
+                        timeout=5.0, msg="the revoked viewer was never cut off")
+
+    def test_a_sharer_whose_permission_is_revoked_stops_within_a_sweep(
+            self, peer_factory):
+        from tests.test_screen import held_from, setup_call, start_and_hold
+        alice, bob, _carol, ch_hash = setup_call(peer_factory)
+        start_and_hold(bob, alice, ch_hash)
+        narrowed = self._screen_perms(SEND_MESSAGE, VOICE_CHAT)
+        bob.storage.set_channel_permissions(ch_hash, narrowed)
+        alice.storage.set_channel_permissions(ch_hash, narrowed)
+        assert wait_for(lambda: bob.screen_mgr.sharing() is None, timeout=5.0,
+                        msg="bob kept sharing without the permission")
+        assert wait_for(lambda: not held_from(alice, bob), timeout=5.0,
+                        msg="alice kept holding a share bob may not make")
+
+    def test_an_update_from_a_peer_not_being_watched_is_refused(self, peer_factory):
+        from tests.test_screen import setup_call
+        from tests.test_screen_wire import jpeg
+        from trenchchat.network.screen_wire import KIND_FULL, ScreenUpdate
+        alice, bob, _carol, ch_hash = setup_call(peer_factory)
+        update = ScreenUpdate(seq=1, width=64, height=64, kind=KIND_FULL,
+                              entries=[(0, 0, jpeg(64, 64))])
+        answered = []
+        bob.screen_mgr._plane.send_update(
+            alice.identity.hash_hex, update,
+            lambda ok, body: answered.append((ok, body.get("r"))))
+        assert wait_for(lambda: answered, msg="alice never answered")
+        assert answered[0] == (False, "not_watching")
+        assert alice.screen_mgr.watching() is None
+        assert alice.ip_transport.can_reach(bob.identity.hash_hex)

@@ -24,6 +24,7 @@ import 'models/reticulum_config.dart';
 import 'models/server.dart';
 import 'models/settings.dart';
 import 'models/upgrade.dart';
+import 'models/screen.dart';
 import 'models/voice.dart';
 
 /// Directory scopes accepted by GET /directory.
@@ -520,6 +521,48 @@ class ApiClient {
     );
     final body = _decode(res) as Map<String, dynamic>;
     return AudioDevices.fromJson(body['devices'] as Map<String, dynamic>);
+  }
+
+  // --- screen share ---
+
+  Future<ScreenSources> getScreenSources() async {
+    final res = await _http.get(_u('/screen/sources'));
+    return ScreenSources.fromJson(_decode(res) as Map<String, dynamic>);
+  }
+
+  /// The reason the share was refused, or null once it is running.
+  Future<String?> startScreenShare({
+    int? monitor,
+    ScreenPreset? preset,
+    int? fps,
+  }) async {
+    final res = await _http.post(
+      _u('/screen/start'),
+      headers: _jsonHeaders,
+      body: jsonEncode({
+        'monitor': monitor,
+        'preset': preset == null ? null : screenPresetName(preset),
+        'fps': fps,
+      }),
+    );
+    final body = _decode(res) as Map<String, dynamic>;
+    if (body['ok'] as bool? ?? false) return null;
+    return body['reason'] as String? ?? 'failed';
+  }
+
+  Future<bool> stopScreenShare() async {
+    final res = await _http.post(_u('/screen/stop'));
+    return (_decode(res) as Map<String, dynamic>)['ok'] as bool? ?? false;
+  }
+
+  Future<bool> unwatchScreen() async {
+    final res = await _http.post(_u('/screen/unwatch'));
+    return (_decode(res) as Map<String, dynamic>)['ok'] as bool? ?? false;
+  }
+
+  Future<ScreenStatus> getScreenStatus() async {
+    final res = await _http.get(_u('/screen/status'));
+    return ScreenStatus.fromJson(_decode(res) as Map<String, dynamic>);
   }
 
   Future<List<Friend>> getFriends() async {

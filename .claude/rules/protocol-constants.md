@@ -80,6 +80,12 @@ Control messages are identified by `fields[F_MSG_TYPE]`. Defined values:
 Chat messages have **no** `F_MSG_TYPE` field. Handlers should check `F_MSG_TYPE in fields`
 to distinguish control messages from chat messages.
 
+**Screen share has no field and no message type here, on purpose.** It travels direct
+sessions only (`network/ip/screen_plane.py`, one request operation on the session's own
+REQ/RESP streams; its binary layout is `network/screen_wire.py`). With no key to pack it
+under, nothing about a share can be put into an LXMF message, and
+`tests/test_screen.py` asserts this file names none. Do not add one.
+
 A **shared file is a chat message too**: the four `0x90` fields are a manifest
 (name, size, hash, chunk root), never bytes. The bytes are pulled from a holder
 over the file plane's own request path, which is not LXMF at all and carries no

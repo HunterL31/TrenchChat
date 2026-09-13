@@ -27,12 +27,19 @@ layer allows a bad client (or a bug) to bypass the restriction.
 | `MANAGE_ROLES` | promote/demote hidden in members view | `actions.update_membership` re-applies the gate | `publish_member_list` nulls `add/remove_admins` |
 | `MANAGE_CHANNEL` | permissions editor hidden | `actions.edit_channel_permissions` re-checks it | n/a (member list doc is signature-validated) |
 | `SHARE_FILES` | attach-file action hidden in the compose bar (`AppState.canShareFiles`) | `actions.file_share_refusal`, called by `send_message_result` and `share_file` | `_on_lxmf_message` drops an inbound message carrying a manifest |
+| `SCREEN_SHARE` | "Share screen" hidden on the voice panel (`AppState.canShareScreen`) | `actions.screen_share_refusal`, called by `start_screen_share` | `ScreenShareManager.may_share` drops a `started` from a peer without it and stops a share whose owner loses it; the sharer refuses a `watch` from a peer outside its voice session or without `voice_chat` |
 
 `SHARE_FILES` carries one compatibility rule, and `permissions.has_permission` is
 the only place it lives: a permissions blob that mentions `share_files` in no role
 list at all predates the permission, so it grants it wherever `send_message` is
 granted; one that mentions it anywhere is read exactly as written. Never re-derive
-that rule elsewhere.
+that rule elsewhere. `SCREEN_SHARE` carries the same rule against `voice_chat`,
+in the same place: a share lives inside a voice session, so a blob that never
+names `screen_share` grants it wherever `voice_chat` is granted.
+
+Screen share has no mesh path and no protocol field, so its core layer is reached
+only over an authenticated direct session (`network/ip/screen_plane.py`); the
+adversarial cases are `tests/test_adversarial.py::TestAdversarialScreen`.
 
 Direct messages are gated by mutual friendship rather than a channel permission, but the same
 three-layer shape applies: the client offers a conversation only for an accepted friend, the

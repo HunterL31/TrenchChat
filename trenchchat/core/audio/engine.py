@@ -13,7 +13,7 @@ on the audio callback), and playout runs on its own 20 ms-cadence thread
 that pops each sender's jitter buffer, decodes with packet-loss
 concealment, and mixes.
 
-Every periodic thread runs on _Cadence: a sender even a few percent slow
+Every periodic thread runs on Cadence: a sender even a few percent slow
 drains the listener's jitter buffer, and the listener then plays 80 ms,
 starves, refills and plays again, audible as the stream cutting in and
 out, while loss and jitter both read clean.
@@ -30,6 +30,7 @@ import time
 import RNS
 
 from trenchchat.core.audio.jitter import JitterBuffer
+from trenchchat.core.cadence import Cadence
 from trenchchat.network.voice_wire import (
     VOICE_FRAME_MS, VOICE_FRAMES_PER_PACKET, VOICE_MAX_PACKET_PAYLOAD,
 )
@@ -58,28 +59,6 @@ def _rms_db(pcm: bytes) -> float:
     if rms <= 0.0:
         return -120.0
     return 20.0 * math.log10(rms)
-
-
-class _Cadence:
-    """Monotonic tick schedule for a periodic thread.
-
-    Sleeps only what is left of the interval after the cycle's work, and
-    re-anchors on an overrun rather than sleeping negative or bursting to
-    catch up. Sleeping the whole interval and then working instead makes
-    the real period interval + work, which drifts without bound.
-    """
-
-    def __init__(self, interval: float):
-        self._interval = interval
-        self._next_at = time.monotonic()
-
-    def wait(self) -> None:
-        self._next_at += self._interval
-        delay = self._next_at - time.monotonic()
-        if delay > 0:
-            time.sleep(delay)
-        else:
-            self._next_at = time.monotonic()
 
 
 class _PlayoutCounters:
@@ -436,7 +415,7 @@ class AudioPipeline:
         """
         from trenchchat.core.audio.mixer import mix
 
-        cadence = _Cadence(VOICE_FRAME_MS / 1000.0)
+        cadence = Cadence(VOICE_FRAME_MS / 1000.0)
         while self._running:
             try:
                 self._playout_tick(mix)
@@ -578,7 +557,7 @@ class TonePipeline:
         self.cue_count += len(frames)
 
     def _loop(self) -> None:
-        cadence = _Cadence(VOICE_FRAME_MS * VOICE_FRAMES_PER_PACKET / 1000.0)
+        cadence = Cadence(VOICE_FRAME_MS * VOICE_FRAMES_PER_PACKET / 1000.0)
         while self._running:
             self._emit_bundle()
             cadence.wait()
@@ -597,7 +576,7 @@ class TonePipeline:
                     RNS.LOG_ERROR)
 
     def _playout_loop(self) -> None:
-        cadence = _Cadence(VOICE_FRAME_MS / 1000.0)
+        cadence = Cadence(VOICE_FRAME_MS / 1000.0)
         while self._running:
             try:
                 for peer_hex, buffer, decoder, active in _playout_peers(

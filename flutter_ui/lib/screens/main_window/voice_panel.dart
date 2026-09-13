@@ -24,6 +24,11 @@ class VoicePanel extends StatelessWidget {
     this.allDirect = false,
     required this.onToggleMute,
     required this.onLeave,
+    this.onShareScreen,
+    this.shareScreenDisabledReason,
+    this.sharingSource = '',
+    this.viewerCount = 0,
+    this.onStopShare,
   });
 
   final String channelName;
@@ -49,6 +54,19 @@ class VoicePanel extends StatelessWidget {
   final String audioReason;
   final VoidCallback? onToggleMute;
   final VoidCallback? onLeave;
+
+  /// Opens the share picker. Null with [shareScreenDisabledReason] set
+  /// shows the button disabled with the reason as its tooltip; null with no
+  /// reason hides it (already sharing, or the caller has no opinion).
+  final VoidCallback? onShareScreen;
+  final String? shareScreenDisabledReason;
+
+  /// What this node is sharing ("Monitor 1"); empty when not sharing.
+  final String sharingSource;
+  final int viewerCount;
+  final VoidCallback? onStopShare;
+
+  bool get _sharing => sharingSource.isNotEmpty;
 
   @override
   Widget build(BuildContext context) {
@@ -117,6 +135,29 @@ class VoicePanel extends StatelessWidget {
                 ),
               ),
           ],
+          if (_sharing)
+            Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: Row(
+                children: [
+                  TcIcon(TcIcons.screen, size: 12, color: tc.statusWarn),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: Text(
+                      'SHARING $sharingSource · '
+                      '${viewerCount == 1 ? '1 WATCHING' : '$viewerCount WATCHING'}',
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: TCType.textMicro,
+                        color: tc.statusWarn,
+                        letterSpacing: TCType.letterSpacingFor(
+                            TCType.textMicro, TCType.trackingWide),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
           const SizedBox(height: 6),
           Row(
             children: [
@@ -127,6 +168,24 @@ class VoicePanel extends StatelessWidget {
                 onPressed: onToggleMute,
               ),
               const SizedBox(width: 4),
+              if (_sharing)
+                TcIconButton(
+                  icon: TcIcons.screen,
+                  tooltip: 'Stop sharing',
+                  size: 26,
+                  onPressed: onStopShare,
+                )
+              else if (onShareScreen != null || shareScreenDisabledReason != null)
+                TcIconButton(
+                  icon: TcIcons.screen,
+                  tooltip: onShareScreen != null
+                      ? 'Share screen'
+                      : shareScreenDisabledReason!,
+                  size: 26,
+                  onPressed: onShareScreen,
+                ),
+              if (_sharing || onShareScreen != null || shareScreenDisabledReason != null)
+                const SizedBox(width: 4),
               TcIconButton(
                 icon: TcIcons.close,
                 tooltip: 'Leave voice',

@@ -44,11 +44,14 @@ from trenchchat.core.direct import DirectMessageManager
 from trenchchat.core.friends import FriendsManager
 from trenchchat.core.propagation import PropagationCollector, PropagationNodes
 from trenchchat.core.reaction import ReactionManager
+from trenchchat.core.screen.capture import MovingBoxSource
+from trenchchat.core.screen.manager import ScreenShareManager
 from trenchchat.core.voice import VoiceManager
 from trenchchat.core.audio.engine import make_tone_pipeline
 from trenchchat.core.files import FileManager
 from trenchchat.core.node_browser import NodeBrowserManager
 from trenchchat.network.ip.file_plane import IPFileTransport
+from trenchchat.network.ip.screen_plane import IPScreenTransport
 from trenchchat.network.ip.voice_plane import IPVoiceTransport
 from trenchchat.network.ip.transport import IPTransport
 from trenchchat.network.lxmf_transport import REANNOUNCE_INTERVAL_SECS
@@ -367,6 +370,20 @@ class Backend:
             direct_transport=self.direct_voice_transport, **voice_kwargs,
         )
 
+        # Screen share rides direct sessions and nothing else: with no direct
+        # transport there is no plane, and the manager answers no_direct. A
+        # headless tester has no display, so it shares a generated picture.
+        screen_kwargs = {}
+        if use_tone_audio:
+            screen_kwargs["source_factory"] = MovingBoxSource
+            screen_kwargs["capture_probe"] = lambda: (True, "")
+        self.screen_mgr = ScreenShareManager(
+            self.identity, self.storage, self.router, self.voice_mgr,
+            plane=(IPScreenTransport(self.direct_transport)
+                   if self.direct_transport is not None else None),
+            **screen_kwargs,
+        )
+
         self.node_transport = RNSNodeTransport(self.identity)
         self.node_browser = NodeBrowserManager(
             self.identity, self.storage, self.config,
@@ -527,6 +544,11 @@ class Backend:
                     RNS.log(f"TesterBackend: upgrade tick failed: {e}",
                             RNS.LOG_WARNING)
                 try:
+                    self.screen_mgr.tick()
+                except Exception as e:
+                    RNS.log(f"TesterBackend: screen tick failed: {e}",
+                            RNS.LOG_WARNING)
+                try:
                     self.node_browser.tick()
                 except Exception as e:
                     RNS.log(f"TesterBackend: node tick failed: {e}", RNS.LOG_WARNING)
@@ -604,6 +626,7 @@ class Backend:
         return self.presence_beacon.announce_offline()
 
     def close(self):
+        self.screen_mgr.stop()
         self.upgrade_mgr.stop()
         self.file_mgr.stop()
         self.link_watcher.stop()

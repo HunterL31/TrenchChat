@@ -44,6 +44,13 @@ _DEFAULTS = {
         "enabled": False,
         "node_name": "",
     },
+    # Screen share: the monitor last shared, the preset and the frame rate the
+    # picker starts from. The share itself is never stored.
+    "screen": {
+        "monitor": 1,
+        "preset": "clearer",
+        "fps": 15,
+    },
     "upgrade": {
         "enabled": True,
         "listen_port": 42420,
@@ -75,6 +82,10 @@ MAX_PORT = 65535
 # floor for intelligible speech.
 VOICE_MIN_BITRATE = 6000
 VOICE_MAX_BITRATE = 64000
+
+# The screen share frame rate's range; core/screen/encoder.py clamps the same.
+SCREEN_MIN_FPS = 1
+SCREEN_MAX_FPS = 30
 
 # Address echo servers a user may list, and how long one entry may be. Both
 # are bounds on a config file rather than on a network: a list this long is
@@ -367,6 +378,42 @@ class Config:
     @nomad_node_name.setter
     def nomad_node_name(self, value: str):
         self._data["nomad_node"]["node_name"] = str(value)
+        self.save()
+
+    # --- screen share ---
+
+    @property
+    def screen_monitor(self) -> int:
+        """The monitor the picker offers first: the one last shared."""
+        return int(self._data["screen"]["monitor"])
+
+    @screen_monitor.setter
+    def screen_monitor(self, value: int):
+        self._data["screen"]["monitor"] = max(1, int(value))
+        self.save()
+
+    @property
+    def screen_preset(self) -> str:
+        return str(self._data["screen"]["preset"])
+
+    @screen_preset.setter
+    def screen_preset(self, value: str):
+        self._data["screen"]["preset"] = str(value)
+        self.save()
+
+    @property
+    def screen_fps(self) -> int:
+        return int(self._data["screen"]["fps"])
+
+    @screen_fps.setter
+    def screen_fps(self, value: int):
+        fps = int(value)
+        if not SCREEN_MIN_FPS <= fps <= SCREEN_MAX_FPS:
+            raise ValueError(
+                f"screen_fps must be between {SCREEN_MIN_FPS} and "
+                f"{SCREEN_MAX_FPS}, got {fps}"
+            )
+        self._data["screen"]["fps"] = fps
         self.save()
 
     # --- direct sessions ---

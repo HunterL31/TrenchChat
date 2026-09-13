@@ -43,6 +43,8 @@ class ChannelColumn extends StatelessWidget {
     this.voiceParticipants = const [],
     this.onJoinVoice,
     this.voiceSessionPanel,
+    this.screenSharers = const {},
+    this.onWatchScreen,
     this.syncStates = const {},
     this.channelPermissions = const {},
     this.onViewMembers,
@@ -90,6 +92,13 @@ class ChannelColumn extends StatelessWidget {
   /// VOICE section so the whole voice area reads as one block; null when
   /// not in a call.
   final Widget? voiceSessionPanel;
+
+  /// Participants whose screen share this node holds: only ever peers it is
+  /// directly connected with, since a share crosses nothing else.
+  final Set<String> screenSharers;
+
+  /// Watches a sharing participant's screen; null hides the affordance.
+  final ValueChanged<String>? onWatchScreen;
 
   /// Channel hash -> sync state as reported by the backend. Only
   /// `incomplete` draws anything; every other state is the quiet case.
@@ -255,6 +264,8 @@ class ChannelColumn extends StatelessWidget {
             _VoiceSection(
               participants: voiceParticipants,
               onJoinVoice: onJoinVoice,
+              screenSharers: screenSharers,
+              onWatchScreen: onWatchScreen,
             ),
           ?voiceSessionPanel,
           if (_addMenuItems().isNotEmpty)
@@ -389,10 +400,17 @@ class _MentionPill extends StatelessWidget {
 /// the join affordance. Pinned at the foot of the column, separated by a
 /// top border, so it never scrolls away or mingles with the channel lists.
 class _VoiceSection extends StatelessWidget {
-  const _VoiceSection({required this.participants, this.onJoinVoice});
+  const _VoiceSection({
+    required this.participants,
+    this.onJoinVoice,
+    this.screenSharers = const {},
+    this.onWatchScreen,
+  });
 
   final List<VoiceParticipant> participants;
   final VoidCallback? onJoinVoice;
+  final Set<String> screenSharers;
+  final ValueChanged<String>? onWatchScreen;
 
   @override
   Widget build(BuildContext context) {
@@ -408,7 +426,14 @@ class _VoiceSection extends StatelessWidget {
           _SectionLabel(
             participants.isEmpty ? 'VOICE' : 'VOICE — ${participants.length}',
           ),
-          for (final p in participants) _VoiceRow(participant: p),
+          for (final p in participants)
+            _VoiceRow(
+              participant: p,
+              sharing: screenSharers.contains(p.identityHash),
+              onWatch: onWatchScreen == null || !screenSharers.contains(p.identityHash)
+                  ? null
+                  : () => onWatchScreen!(p.identityHash),
+            ),
           if (onJoinVoice != null)
             Padding(
               padding: const EdgeInsets.fromLTRB(14, 4, 14, 0),
@@ -425,9 +450,13 @@ class _VoiceSection extends StatelessWidget {
 }
 
 class _VoiceRow extends StatelessWidget {
-  const _VoiceRow({required this.participant});
+  const _VoiceRow({required this.participant, this.sharing = false, this.onWatch});
 
   final VoiceParticipant participant;
+
+  /// This participant is sharing its screen, told over a direct session.
+  final bool sharing;
+  final VoidCallback? onWatch;
 
   @override
   Widget build(BuildContext context) {
@@ -463,6 +492,11 @@ class _VoiceRow extends StatelessWidget {
                 style: TextStyle(fontSize: 12, color: tc.textSecondary),
               ),
             ),
+            if (sharing)
+              Padding(
+                padding: const EdgeInsets.only(left: 6),
+                child: LiveBadge(onWatch: onWatch),
+              ),
             if (participant.path == PeerPath.direct)
               const Padding(
                 padding: EdgeInsets.symmetric(horizontal: 6),

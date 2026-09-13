@@ -49,8 +49,8 @@ from trenchchat.core.interfaces_config import (
 from trenchchat.core.naming import NameInUseError
 from trenchchat.core.permissions import (
     ALL_PERMISSIONS, CREATE_CHANNEL, INVITE, KICK, MANAGE_CHANNEL, MANAGE_ROLES,
-    ROLE_ADMIN, ROLE_MEMBER, PRESET_OPEN, PRESET_PRIVATE, SEND_MESSAGE,
-    SHARE_FILES, VOICE_CHAT, is_open_join, offered_permissions,
+    ROLE_ADMIN, ROLE_MEMBER, PRESET_OPEN, PRESET_PRIVATE, SCREEN_SHARE,
+    SEND_MESSAGE, SHARE_FILES, VOICE_CHAT, is_open_join, offered_permissions,
     permissions_from_json,
 )
 from trenchchat.core.presence import resolve_display_name
@@ -65,6 +65,7 @@ from trenchchat.core.reticulum_config import (
     load_reticulum_config, write_reticulum_config,
 )
 from trenchchat.network.base import PATH_DIRECT, PATH_OFFLINE, PATH_RETICULUM
+from trenchchat.network.screen_wire import pack_update
 from trenchchat.network.file_transport import (
     FILE_FETCH_TIMEOUT_SECS, RNSFileTransport,
 )
@@ -275,6 +276,12 @@ class VoiceMuteRequest(BaseModel):
     muted: bool
 
 
+class ScreenStartRequest(BaseModel):
+    monitor: int | None = None
+    preset: str | None = None
+    fps: int | None = None
+
+
 class VoiceToneRequest(BaseModel):
     enabled: bool
 
@@ -413,6 +420,10 @@ class EventBus:
 
 
 TOKEN_HEADER = "x-tc-token"
+
+# How long a watch socket sleeps with nothing to send before it re-checks
+# whether the share it shows is still there.
+SCREEN_WATCH_IDLE_SECS = 1.0
 TOKEN_QUERY_PARAM = "token"
 
 # Largest request body accepted. Every upload endpoint takes base64 in JSON and
@@ -729,6 +740,21 @@ def create_app(backend: Backend, *, token: str | None = None,
     def _on_voice_session(state: str):
         bus.emit("voice_session", state=state)
 
+    def _on_screen_share(peer_hex: str, channel_hash_hex: str, state: str):
+        # A peer's share this node was told of over a direct session came or
+        # went; the roster's LIVE badge and its Watch action hang off it.
+        bus.emit("screen_share", peer=peer_hex, channel=channel_hash_hex,
+                 state=state)
+
+    def _on_screen_session(state: str, reason: str):
+        bus.emit("screen_session", state=state, reason=reason)
+
+    def _on_screen_viewers(count: int):
+        bus.emit("screen_viewers", count=count)
+
+    def _on_screen_watch(peer_hex: str | None, reason: str):
+        bus.emit("screen_watch", peer=peer_hex, reason=reason)
+
     def _on_public_address_needed(needed: bool):
         # A failure changes no path and fires no other event, so without this
         # a client would have to poll to learn that a pair is stuck for want
@@ -786,6 +812,10 @@ def create_app(backend: Backend, *, token: str | None = None,
     backend.voice_mgr.add_roster_callback(_on_voice_roster)
     backend.voice_mgr.add_speaking_callback(_on_voice_speaking)
     backend.voice_mgr.add_session_callback(_on_voice_session)
+    backend.screen_mgr.add_share_callback(_on_screen_share)
+    backend.screen_mgr.add_session_callback(_on_screen_session)
+    backend.screen_mgr.add_viewers_callback(_on_screen_viewers)
+    backend.screen_mgr.add_watch_callback(_on_screen_watch)
     backend.router.add_path_changed_callback(_on_path_changed)
     backend.upgrade_mgr.add_public_address_callback(_on_public_address_needed)
     backend.node_browser.add_node_callback(_on_nomad_node)
@@ -1897,6 +1927,11 @@ def create_app(backend: Backend, *, token: str | None = None,
             "manage_roles": backend.storage.has_permission(channel_hash, my_hex, MANAGE_ROLES),
             "manage_channel": backend.storage.has_permission(channel_hash, my_hex, MANAGE_CHANNEL),
             "voice_chat": backend.storage.has_permission(channel_hash, my_hex, VOICE_CHAT),
+            # A share lives inside a voice session, so an open-join channel
+            # grants it to anyone the way it grants voice; otherwise the role.
+            "screen_share": (True if channel and is_open_join(perms) else
+                             backend.storage.has_permission(
+                                 channel_hash, my_hex, SCREEN_SHARE)),
         }
 
     @app.get("/channels/{channel_hash}/permissions")
@@ -2371,6 +2406,119 @@ def create_app(backend: Backend, *, token: str | None = None,
             "stats": backend.voice_mgr.frame_stats(),
             "audio": backend.voice_mgr.audio_status(),
         }
+
+    # --- screen share ---
+
+    @app.get("/screen/sources")
+    def get_screen_sources():
+        """The monitors this node can share, each with a small picture for the
+        picker, grabbed now and kept nowhere; plus the picker's defaults."""
+        return actions.list_screen_sources(backend.config)
+
+    @app.post("/screen/start")
+    def start_screen(req: ScreenStartRequest):
+        # actions.start_screen_share re-applies the gate (in voice, the
+        # screen_share permission, direct connections on) so this endpoint
+        # and the client's button cannot diverge from it.
+        try:
+            return actions.start_screen_share(
+                backend.config, backend.storage, backend.voice_mgr,
+                backend.screen_mgr, backend.identity.hash_hex,
+                monitor=req.monitor, preset=req.preset, fps=req.fps)
+        except ValueError as e:
+            return JSONResponse({"ok": False, "reason": str(e)}, status_code=400)
+
+    @app.post("/screen/stop")
+    def stop_screen():
+        return {"ok": actions.stop_screen_share(backend.screen_mgr)}
+
+    @app.post("/screen/unwatch")
+    def unwatch_screen():
+        return {"ok": backend.screen_mgr.unwatch()}
+
+    @app.get("/screen/status")
+    def get_screen_status():
+        """What this node shares and watches, and the shares it holds from
+        direct participants; every peer carries its display name."""
+        status = backend.screen_mgr.status()
+
+        def _name(peer_hex: str) -> str:
+            return resolve_display_name(peer_hex, backend.identity.hash_hex,
+                                        backend.storage, backend.config)
+
+        if status["sharing"] is not None:
+            for viewer in status["sharing"]["viewers"]:
+                viewer["display_name"] = _name(viewer["peer"])
+        if status["watching"] is not None:
+            status["watching"]["display_name"] = _name(status["watching"]["peer"])
+        for share in status["shares"]:
+            share["display_name"] = _name(share["peer"])
+        return status
+
+    @app.websocket("/screen/watch/{peer_hash}")
+    async def screen_watch(ws: WebSocket, peer_hash: str):
+        """Watch one peer's share: opening this socket is what subscribes to
+        it, closing it is what unsubscribes.
+
+        Each binary message is one update in the wire's own layout, the same
+        bytes the session carried; the client answers each with any text,
+        which is the credit for the next. Nothing is sent that the client
+        has not made room for, so a slow client gets fewer, larger updates
+        rather than a queue, and no socket means this node does not watch.
+        """
+        if not _token_ok(api_token, _presented_token(ws.headers, ws.query_params)):
+            await ws.close(code=1008)
+            return
+        if not _host_allowed(ws.headers.get("host", ""), origins):
+            await ws.close(code=1008)
+            return
+        if not _origin_allowed(ws.headers.get("origin", ""),
+                               ws.headers.get("host", ""), origins):
+            await ws.close(code=1008)
+            return
+        await ws.accept()
+        loop = asyncio.get_running_loop()
+        wake = asyncio.Event()
+
+        def _wake(*_args) -> None:
+            loop.call_soon_threadsafe(wake.set)
+
+        screen = backend.screen_mgr
+        screen.add_update_callback(_wake)
+        screen.add_watch_callback(_wake)
+        client = None
+        try:
+            reason = await loop.run_in_executor(
+                None, actions.watch_screen_share, backend.voice_mgr, screen,
+                peer_hash)
+            if reason is not None:
+                await ws.send_text(json.dumps({"ended": reason}))
+                return
+            client = screen.new_client()
+            while True:
+                update = screen.next_for_client(client)
+                if update is None:
+                    watching = screen.watching()
+                    if watching is None or watching["peer"] != peer_hash:
+                        await ws.send_text(json.dumps({"ended": "stopped"}))
+                        return
+                    wake.clear()
+                    try:
+                        await asyncio.wait_for(wake.wait(), SCREEN_WATCH_IDLE_SECS)
+                    except asyncio.TimeoutError:
+                        pass
+                    continue
+                await ws.send_bytes(pack_update(update))
+                await ws.receive_text()
+        except WebSocketDisconnect:
+            pass
+        finally:
+            screen.remove_update_callback(_wake)
+            screen.remove_watch_callback(_wake)
+            if client is not None:
+                screen.drop_client(client)
+            if screen.client_count() == 0:
+                await loop.run_in_executor(None, screen.unwatch)
 
     @app.get("/voice/devices")
     def get_voice_devices():

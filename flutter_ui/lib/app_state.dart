@@ -23,7 +23,9 @@ import 'api/models/permissions.dart';
 import 'api/models/server.dart';
 import 'api/models/settings.dart';
 import 'api/models/upgrade.dart';
+import 'api/models/screen.dart';
 import 'api/models/voice.dart';
+import 'api/screen_watch.dart';
 import 'api/ws.dart';
 import 'attachments.dart';
 import 'mentions.dart';
@@ -67,14 +69,18 @@ class AppState extends ChangeNotifier {
       {required String baseUrl,
       http.Client? httpClient,
       String token = '',
-      FileSaver? saveFileBytes})
+      FileSaver? saveFileBytes,
+      ScreenWatchFactory? screenWatchFactory})
       : api = ApiClient(baseUrl: baseUrl, client: httpClient, token: token),
         _saveFileBytes = saveFileBytes ?? saveBytesToFile,
-        _socket = TcSocket(baseUrl: baseUrl, token: token);
+        _socket = TcSocket(baseUrl: baseUrl, token: token),
+        _screenWatchFactory = screenWatchFactory ??
+            ((peer) => ScreenWatch(baseUrl: baseUrl, peer: peer, token: token));
 
   final ApiClient api;
   final FileSaver _saveFileBytes;
   final TcSocket _socket;
+  final ScreenWatchFactory _screenWatchFactory;
   StreamSubscription<TcEvent>? _sub;
 
   String meHashHex = '';
@@ -369,6 +375,7 @@ class AppState extends ChangeNotifier {
       // The backend session outlives client restarts; pick it up if live.
       await refreshVoiceStatus();
       if (voiceStatus.channel != null) _startVoicePoll();
+      await refreshScreenStatus();
     } catch (e) {
       error = e.toString();
       loading = false;
@@ -643,6 +650,138 @@ class AppState extends ChangeNotifier {
     final hash = selectedChannelHash;
     if (hash == null || selectedDmHash != null) return false;
     return permissionsByChannel[hash]?.shareFiles ?? false;
+  }
+
+  // --- screen share ---
+
+  /// GET /screen/status, refreshed on every screen event.
+  ScreenStatus screenStatus = ScreenStatus.idle;
+
+  /// How many peers watch this node's share, moved by screen_viewers.
+  int screenViewerCount = 0;
+
+  /// Whether the stage fills the content column or sits above the messages.
+  bool screenStageExpanded = false;
+
+  /// Why the share this node was watching ended, shown over the last picture
+  /// until the stage is closed; empty while a watch is live.
+  String screenWatchEnded = '';
+
+  ScreenWatch? _screenWatch;
+
+  /// The share this node is watching, or null.
+  String? get watchingPeer => _screenWatch?.peer;
+
+  /// The frame buffer the stage paints, while watching.
+  ScreenFrameBuffer? get screenBuffer => _screenWatch?.buffer;
+
+  /// The shares direct participants have told this node of, by sharer.
+  Map<String, HeldShare> get heldSharesByPeer =>
+      {for (final share in screenStatus.shares) share.peer: share};
+
+  /// The client gate over actions.screen_share_refusal: in voice, allowed
+  /// to share there (open-join channels need no row), able to capture, and
+  /// not already sharing. Null when the button may show; else why not.
+  String? get screenShareDisabledReason {
+    final channelHash = voiceStatus.channel;
+    if (channelHash == null) return 'not_in_voice';
+    if (screenStatus.sharing != null) return 'already_sharing';
+    final channel = channelByHash(channelHash);
+    final allowed = (channel?.openJoin ?? false) ||
+        (permissionsByChannel[channelHash]?.screenShare ?? false);
+    if (!allowed) return 'no_screen_permission';
+    if (!screenStatus.available) {
+      return screenStatus.reason.contains('direct') ? 'no_direct' : 'capture_unavailable';
+    }
+    return null;
+  }
+
+  bool get canShareScreen => screenShareDisabledReason == null;
+
+  Future<void> refreshScreenStatus() async {
+    try {
+      screenStatus = await api.getScreenStatus();
+      screenViewerCount = screenStatus.sharing?.viewers.length ?? screenViewerCount;
+      notifyListeners();
+    } catch (_) {
+      // The next event refreshes it.
+    }
+  }
+
+  Future<ScreenSources> loadScreenSources() async {
+    try {
+      return await api.getScreenSources();
+    } catch (e) {
+      _reportActionError(e);
+      return ScreenSources.unavailable;
+    }
+  }
+
+  /// Starts sharing a monitor with the current voice session. False with
+  /// [actionError] set when the backend refused.
+  Future<bool> startScreenShare({int? monitor, ScreenPreset? preset}) async {
+    try {
+      final reason = await api.startScreenShare(monitor: monitor, preset: preset);
+      if (reason != null) {
+        actionError = screenReasonText(reason);
+        notifyListeners();
+        return false;
+      }
+      await refreshScreenStatus();
+      return true;
+    } catch (e) {
+      _reportActionError(e);
+      return false;
+    }
+  }
+
+  Future<bool> stopScreenShare() async {
+    try {
+      final ok = await api.stopScreenShare();
+      screenViewerCount = 0;
+      await refreshScreenStatus();
+      return ok;
+    } catch (e) {
+      _reportActionError(e);
+      return false;
+    }
+  }
+
+  /// Watches a participant's share: opens the watch socket, which is what
+  /// subscribes this node to it. Watching another replaces the first.
+  void watchScreen(String peer) {
+    if (_screenWatch?.peer == peer && screenWatchEnded.isEmpty) return;
+    _closeScreenWatch();
+    final watch = _screenWatchFactory(peer);
+    watch.onEnded = (reason) {
+      if (_screenWatch != watch) return;
+      screenWatchEnded = screenReasonText(reason).isEmpty
+          ? 'The share ended.'
+          : screenReasonText(reason);
+      notifyListeners();
+    };
+    _screenWatch = watch;
+    screenWatchEnded = '';
+    watch.start();
+    notifyListeners();
+  }
+
+  /// Closes the stage and the socket behind it.
+  void stopWatchingScreen() {
+    _closeScreenWatch();
+    screenStageExpanded = false;
+    notifyListeners();
+  }
+
+  void toggleScreenStage() {
+    screenStageExpanded = !screenStageExpanded;
+    notifyListeners();
+  }
+
+  void _closeScreenWatch() {
+    _screenWatch?.close();
+    _screenWatch = null;
+    screenWatchEnded = '';
   }
 
   Future<void> loadFileUsage() async {
@@ -942,6 +1081,9 @@ class AppState extends ChangeNotifier {
       _stopVoicePoll();
       voiceStatus = VoiceStatus.idle;
       voiceAudioError = false;
+      // A share lives inside the session, so the stage goes with the call.
+      _closeScreenWatch();
+      screenStageExpanded = false;
       notifyListeners();
       if (oldChannel != null) unawaited(refreshVoiceRoster(oldChannel));
       return ok;
@@ -2096,6 +2238,23 @@ class AppState extends ChangeNotifier {
         // so a client that has never opened it asks for nothing here.
         if (_directSessionsLoaded) unawaited(loadDirectSessions());
         notifyListeners();
+      case ScreenShareEvent():
+        unawaited(refreshScreenStatus());
+      case ScreenSessionEvent(:final state, :final reason):
+        if (state == 'error' && reason.isNotEmpty) {
+          actionError = 'Screen share failed: $reason';
+        }
+        unawaited(refreshScreenStatus());
+      case ScreenViewersEvent(:final count):
+        screenViewerCount = count;
+        notifyListeners();
+      case ScreenWatchEvent(:final peer, :final reason):
+        if (peer == null && _screenWatch != null && screenWatchEnded.isEmpty) {
+          screenWatchEnded = screenReasonText(reason).isEmpty
+              ? 'The share ended.'
+              : screenReasonText(reason);
+          notifyListeners();
+        }
       case VoiceRosterEvent(:final channelHash):
         if (channelHash == selectedChannelHash ||
             channelHash == voiceStatus.channel ||
@@ -2258,6 +2417,7 @@ class AppState extends ChangeNotifier {
     }
     _reactionRefreshTimers.clear();
     _voicePollTimer?.cancel();
+    _closeScreenWatch();
     _sub?.cancel();
     _socket.close();
     api.close();

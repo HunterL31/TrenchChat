@@ -533,6 +533,25 @@ class VoiceManager:
         return self._storage.has_permission(
             channel_hash_hex, sender_hex, VOICE_CHAT)
 
+    def may_voice(self, channel_hash_hex: str, peer_hex: str) -> bool:
+        """Whether a peer may take part in this channel's voice session."""
+        return self._peer_may_voice(channel_hash_hex, peer_hex)
+
+    def participants(self, channel_hash_hex: str) -> set[str]:
+        """Every peer in a channel's voice session as this node sees it: the
+        live roster and the peers it is streaming with, itself excluded."""
+        now = time.time()
+        with self._lock:
+            peers = set(self._live_roster(channel_hash_hex, now))
+        if channel_hash_hex == self._session_channel:
+            peers |= self._connected_peers()
+        peers.discard(self._identity.hash_hex)
+        return peers
+
+    def is_participant(self, channel_hash_hex: str, peer_hex: str) -> bool:
+        """Whether a peer is in this channel's voice session as this node sees it."""
+        return peer_hex in self.participants(channel_hash_hex)
+
     def _authorize_link(self, peer_hex: str, channel_hash_hex: str) -> bool:
         """Transport authorize callback for inbound link handshakes.
 

@@ -487,6 +487,32 @@ class TestSession:
         assert (bob.hash_hex, PATH_RETICULUM) in alice.paths, \
             "the session was gone before its end was announced"
 
+    def test_a_request_the_listener_sends_the_moment_it_is_up_is_answered(
+            self, ip_node):
+        """The listener is proven before the dialer is, and a plane that acts on
+        path_changed can open a request stream that reaches the dialer before
+        its handshake task has read the hello. Held, not refused."""
+        alice, bob = ip_node("alice"), ip_node("bob")
+        bob.transport.set_request_handler("echo", lambda _peer, body: (True, body))
+        answers: list = []
+
+        def ask_at_once(peer_hex: str, path: str) -> None:
+            if path == PATH_DIRECT:
+                alice.transport.send_request(
+                    peer_hex, "echo", {"n": len(answers)},
+                    lambda ok, body: answers.append((ok, body)))
+
+        alice.transport.set_peer_event_callbacks(path_changed=ask_at_once)
+        for attempt in range(5):
+            assert bob.open_to(alice), f"attempt {attempt} did not come up"
+            assert wait_for(lambda: len(answers) == attempt + 1,
+                            msg=f"attempt {attempt} was never answered")
+            assert answers[-1] == (True, {"n": attempt})
+            assert alice.transport.can_reach(bob.hash_hex)
+            bob.transport.close_session(alice.hash_hex)
+            assert wait_for(lambda: not bob.transport.can_reach(alice.hash_hex),
+                            msg="the session to end")
+
     def test_a_session_that_ends_fails_what_it_had_not_acknowledged(self, ip_node):
         alice, bob = ip_node("alice"), ip_node("bob")
         assert alice.open_to(bob)

@@ -9,6 +9,7 @@ import '../../api/models/dm.dart';
 import '../../api/models/link_quality.dart';
 import '../../api/models/member.dart';
 import '../../api/models/message.dart';
+import '../../api/models/screen.dart';
 import '../../api/models/server.dart';
 import '../../api/models/upgrade.dart';
 import '../../api/models/voice.dart';
@@ -32,6 +33,7 @@ import '../dialogs/new_channel_dialog.dart';
 import '../dialogs/new_server_dialog.dart';
 import '../dialogs/permissions_dialog.dart';
 import '../dialogs/public_address_dialog.dart';
+import '../dialogs/screen_source_dialog.dart';
 import '../dialogs/settings_dialog.dart';
 import '../dialogs/start_dm_dialog.dart';
 import 'channel_column.dart';
@@ -43,6 +45,7 @@ import 'iface_tab.dart';
 import 'map_tab.dart';
 import 'message_list.dart';
 import 'presence_panel.dart';
+import 'screen_stage.dart';
 import 'server_rail.dart';
 import 'voice_panel.dart';
 
@@ -465,6 +468,32 @@ class _MainWindowState extends State<MainWindow> {
                 audioReason: state.voiceAudioReason,
                 onToggleMute: () => state.toggleVoiceMute(),
                 onLeave: () => state.leaveVoice(),
+                onShareScreen: state.canShareScreen
+                    ? () => showScreenSourceDialog(context, state)
+                    : null,
+                shareScreenDisabledReason: state.screenStatus.sharing != null
+                    ? null
+                    : screenReasonText(state.screenShareDisabledReason),
+                sharingSource: state.screenStatus.sharing?.source ?? '',
+                viewerCount: state.screenViewerCount,
+                onStopShare: () => state.stopScreenShare(),
+              )
+            : null;
+        // Shares this node was told of are only ever from peers it holds a
+        // direct session with; the roster shows them as LIVE with Watch.
+        final screenSharers = state.heldSharesByPeer.keys.toSet();
+        final watchingPeer = state.watchingPeer;
+        final screenBuffer = state.screenBuffer;
+        final screenStage = watchingPeer != null && screenBuffer != null
+            ? ScreenStage(
+                buffer: screenBuffer,
+                sharerName: _displayNameFor(
+                    watchingPeer,
+                    state.heldSharesByPeer[watchingPeer]?.displayName ?? ''),
+                expanded: state.screenStageExpanded,
+                endedReason: state.screenWatchEnded,
+                onToggleExpanded: () => state.toggleScreenStage(),
+                onStop: () => state.stopWatchingScreen(),
               )
             : null;
         final channelColumn = ChannelColumn(
@@ -500,6 +529,8 @@ class _MainWindowState extends State<MainWindow> {
           voiceParticipants: voiceRoster,
           onJoinVoice: canJoinVoice ? () => state.joinVoice(channelHash) : null,
           voiceSessionPanel: voicePanel,
+          screenSharers: screenSharers,
+          onWatchScreen: inVoice ? (peer) => state.watchScreen(peer) : null,
           syncStates: state.syncStateByChannel,
           unreadCounts: state.unreadByChannel,
           mentionCounts: state.mentionsByChannel,
@@ -547,8 +578,14 @@ class _MainWindowState extends State<MainWindow> {
                               ),
                     ),
                   ),
+                  if (screenStage != null && _tab == ChannelTab.chat &&
+                      !state.screenStageExpanded)
+                    screenStage,
                   Expanded(
-                    child: switch (_tab) {
+                    child: screenStage != null && _tab == ChannelTab.chat &&
+                            state.screenStageExpanded
+                        ? screenStage
+                        : switch (_tab) {
                       ChannelTab.map =>
                         MapTab(state: state, onOpenNomadPage: _openLink),
                       ChannelTab.iface => IfaceTab(state: state),

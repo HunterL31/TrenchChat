@@ -3,6 +3,7 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'package:flutter_ui/api/models/voice.dart';
 import 'package:flutter_ui/screens/main_window/channel_column.dart';
+import 'package:flutter_ui/widgets/badge.dart';
 import 'package:flutter_ui/widgets/tc_icon.dart';
 
 const _kAlice = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
@@ -28,6 +29,8 @@ Widget _harness({
   List<VoiceParticipant> voiceParticipants = const [],
   VoidCallback? onJoinVoice,
   Widget? voiceSessionPanel,
+  Set<String> screenSharers = const {},
+  ValueChanged<String>? onWatchScreen,
 }) =>
     MaterialApp(
       home: Scaffold(
@@ -41,6 +44,8 @@ Widget _harness({
           voiceParticipants: voiceParticipants,
           onJoinVoice: onJoinVoice,
           voiceSessionPanel: voiceSessionPanel,
+          screenSharers: screenSharers,
+          onWatchScreen: onWatchScreen,
         ),
       ),
     );
@@ -124,5 +129,32 @@ void main() {
     );
     expect(aliceOpacity.opacity, 0.45);
     expect(bobOpacity.opacity, 1.0);
+  });
+
+  testWidgets('a sharing participant wears LIVE and the badge watches',
+      (tester) async {
+    String? watched;
+    await tester.pumpWidget(_harness(
+      voiceParticipants: [
+        _participant(_kAlice, name: 'Alice'),
+        _participant(_kBob, name: 'Bob'),
+      ],
+      screenSharers: {_kAlice},
+      onWatchScreen: (peer) => watched = peer,
+    ));
+
+    expect(find.byType(LiveBadge), findsOneWidget);
+    expect(find.text('LIVE'), findsOneWidget);
+    await tester.tap(find.text('LIVE'));
+    expect(watched, _kAlice);
+  });
+
+  testWidgets('no LIVE badge without a share, whatever the callback',
+      (tester) async {
+    await tester.pumpWidget(_harness(
+      voiceParticipants: [_participant(_kAlice, name: 'Alice')],
+      onWatchScreen: (_) {},
+    ));
+    expect(find.byType(LiveBadge), findsNothing);
   });
 }

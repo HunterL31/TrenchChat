@@ -82,7 +82,11 @@ browsing is anonymous unless the user opts a specific node into identify-on-conn
 `files.py` (files shared in invite-only channels: a message carries only a manifest and the bytes
 are pulled chunk by chunk from any member holding them, over `network/file_transport.py` on the
 `files` aspect; the trust model, the deliberate costs and the store budgets are in
-`docs/security-improvements.md`).
+`docs/security-improvements.md`),
+`screen/` (screen share inside a voice session: capture through `mss`, tiled JPEG updates, and
+a manager that fans out to viewers on credit; it travels direct sessions only, over
+`network/ip/screen_plane.py`, has no mesh plane and no protocol field by design, and a peer
+with no direct session is never told a share exists; see `docs/screen-share-plan.md`).
 UI code must never construct LXMF messages or touch protocol fields directly: it reads
 `Storage`-backed state for display and delegates all mutations to the relevant core manager via
 the HTTP/WS API. RNS/LXMF callbacks fire on background threads; the API layer marshals them into

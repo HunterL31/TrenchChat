@@ -51,6 +51,7 @@ import scen_interop # noqa: F401,E402  (registers family interop)
 import scen_dm     # noqa: F401,E402  (registers family dm)
 import scen_files  # noqa: F401,E402  (registers family files)
 import scen_upgrade  # noqa: F401,E402  (registers family upgrade)
+import scen_screen  # noqa: F401,E402  (registers family screen)
 
 _ORCHESTRATOR = _TESTENV_DIR / "orchestrator.py"
 _BOOT_TIMEOUT = 180.0

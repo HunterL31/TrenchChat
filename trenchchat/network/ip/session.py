@@ -65,8 +65,12 @@ MAX_STREAM_DATA_BYTES = 32 * 1024 * 1024
 # The largest certificate a peer may assert, matching F_UPGRADE_CERT.
 MAX_CERT_BYTES = 2 * 1024
 
-# Frames held while a connection has not authenticated. Small on purpose: an
-# unproven peer must not be able to make this node hold anything.
+# Frames held while a connection has not authenticated, on the control stream
+# and on any other. Small on purpose: an unproven peer must not be able to make
+# this node hold anything. The others exist because the listener is proven
+# first and may open a request stream the moment it is, and that stream can
+# reach the dialer before the dialer's handshake task has read the hello that
+# proves the listener; refusing it would end a session both sides have earned.
 MAX_PREAUTH_FRAMES = 32
 
 # Messages waiting for an ACK on one session.
@@ -244,6 +248,7 @@ class DirectSession(QuicConnectionProtocol):
         self._control_stream_id: int | None = None
         self._decoders: dict[int, frames.FrameDecoder] = {}
         self._preauth: asyncio.Queue = asyncio.Queue()
+        self._early: list[tuple[int, int, dict]] = []
         self._pending: dict[bytes, _Pending] = {}
         self._handshake_task: asyncio.Task | None = None
         self._peer_address: tuple | None = None
@@ -378,9 +383,6 @@ class DirectSession(QuicConnectionProtocol):
             self._control_stream_id = event.stream_id
         decoder = self._decoders.get(event.stream_id)
         if decoder is None:
-            if not self._authenticated and event.stream_id != self._control_stream_id:
-                self.fail("a second stream before the hello")
-                return
             decoder = frames.FrameDecoder(
                 frames.MAX_FRAME_BYTES if self._authenticated
                 else frames.MAX_HANDSHAKE_FRAME_BYTES)
@@ -394,10 +396,19 @@ class DirectSession(QuicConnectionProtocol):
             if self._authenticated:
                 self._dispatch(event.stream_id, kind, payload)
                 continue
-            if self._preauth.qsize() >= MAX_PREAUTH_FRAMES:
+            if event.stream_id == self._control_stream_id:
+                if self._preauth.qsize() >= MAX_PREAUTH_FRAMES:
+                    self.fail("too many frames before the hello")
+                    return
+                self._preauth.put_nowait((kind, payload))
+                continue
+            if kind in frames.HANDSHAKE_KINDS:
+                self.fail("a handshake frame off the control stream")
+                return
+            if len(self._early) >= MAX_PREAUTH_FRAMES:
                 self.fail("too many frames before the hello")
                 return
-            self._preauth.put_nowait((kind, payload))
+            self._early.append((event.stream_id, kind, payload))
 
     def _on_datagram(self, data: bytes) -> None:
         self.bytes_in += len(data)
@@ -552,6 +563,9 @@ class DirectSession(QuicConnectionProtocol):
             if item is None:
                 continue
             self._dispatch(stream_id, item[0], item[1])
+        early, self._early = self._early, []
+        for early_stream_id, kind, payload in early:
+            self._dispatch(early_stream_id, kind, payload)
 
     # --- frames ---
 

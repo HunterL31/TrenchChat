@@ -27,6 +27,7 @@ const Map<String, String> _permissionLabels = {
   'create_channel': 'Create channels in this server',
   'full_sync': 'Full history sync',
   'voice_chat': 'Join voice chat',
+  'screen_share': 'Share screen in voice',
 };
 
 Future<void> showPermissionsDialog(BuildContext context, AppState state,

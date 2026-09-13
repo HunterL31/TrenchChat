@@ -1,5 +1,6 @@
 // Row chips: the reaction chip (emoji + count, highlighted when the viewer
-// reacted) and the direct-path badge.
+// reacted), the direct-path badge, and the live badge on a participant
+// sharing its screen.
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
@@ -117,6 +118,50 @@ class DirectBadge extends StatelessWidget {
           ),
         ),
       ),
+    );
+  }
+}
+
+/// The marker on a voice roster row whose participant is sharing its screen,
+/// which this node only ever knows over a direct session with them. Tapping
+/// it watches; a row this node holds no session with never shows it, and its
+/// direct badge's absence is the reason.
+class LiveBadge extends StatelessWidget {
+  const LiveBadge({super.key, this.onWatch});
+
+  /// Watches the share; null renders the badge without an action.
+  final VoidCallback? onWatch;
+
+  @override
+  Widget build(BuildContext context) {
+    final tc = SectionTheme.of(context);
+    final badge = Container(
+      padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+      decoration: BoxDecoration(
+        color: tc.statusWarn.withValues(alpha: 0.18),
+        border: Border.all(color: tc.statusWarn),
+        borderRadius: tcCorners(context, stock: TCSpace.radiusSm, scale: 0.5),
+      ),
+      child: Text(
+        'LIVE',
+        style: TextStyle(
+          fontSize: TCType.textMicro,
+          color: tc.statusWarn,
+          letterSpacing:
+              TCType.letterSpacingFor(TCType.textMicro, TCType.trackingWide),
+        ),
+      ),
+    );
+    return TcTooltip(
+      message: onWatch == null
+          ? 'Sharing their screen'
+          : 'Sharing their screen; click to watch',
+      child: onWatch == null
+          ? badge
+          : MouseRegion(
+              cursor: SystemMouseCursors.click,
+              child: GestureDetector(onTap: onWatch, child: badge),
+            ),
     );
   }
 }

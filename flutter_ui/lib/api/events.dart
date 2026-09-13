@@ -105,6 +105,24 @@ sealed class TcEvent {
         );
       case 'voice_session':
         return VoiceSessionEvent(json['state'] as String);
+      case 'screen_share':
+        return ScreenShareEvent(
+          json['peer'] as String,
+          json['channel'] as String? ?? '',
+          json['state'] as String? ?? '',
+        );
+      case 'screen_session':
+        return ScreenSessionEvent(
+          json['state'] as String? ?? '',
+          json['reason'] as String? ?? '',
+        );
+      case 'screen_viewers':
+        return ScreenViewersEvent(json['count'] as int? ?? 0);
+      case 'screen_watch':
+        return ScreenWatchEvent(
+          json['peer'] as String?,
+          json['reason'] as String? ?? '',
+        );
       case 'ui_theme':
         final theme = json['theme'];
         if (theme is! Map<String, dynamic>) return null;
@@ -283,6 +301,36 @@ class PathChangedEvent extends TcEvent {
 class DirectAddressNeededEvent extends TcEvent {
   const DirectAddressNeededEvent(this.needed);
   final bool needed;
+}
+
+/// A participant's screen share, told to this node over a direct session,
+/// started or stopped. Handlers re-fetch GET /screen/status.
+class ScreenShareEvent extends TcEvent {
+  const ScreenShareEvent(this.peer, this.channel, this.state);
+  final String peer;
+  final String channel;
+  final String state;
+}
+
+/// This node's own share started, stopped, or failed ([reason] says why).
+class ScreenSessionEvent extends TcEvent {
+  const ScreenSessionEvent(this.state, this.reason);
+  final String state;
+  final String reason;
+}
+
+/// How many peers watch this node's share.
+class ScreenViewersEvent extends TcEvent {
+  const ScreenViewersEvent(this.count);
+  final int count;
+}
+
+/// What this node watches changed: [peer] is the share now watched, or null
+/// when a watch ended, with the reason it did.
+class ScreenWatchEvent extends TcEvent {
+  const ScreenWatchEvent(this.peer, this.reason);
+  final String? peer;
+  final String reason;
 }
 
 /// A channel's voice roster changed. Carries only the hash; handlers

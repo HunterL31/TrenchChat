@@ -95,6 +95,97 @@ class EventListener:
         self.close()
 
 
+class ScreenWatcher:
+    """A live watch of one peer's share over the tester's watch socket.
+
+    Each binary message is one update; the watcher parses it, counts it, and
+    answers with the credit for the next after ack_delay seconds, which is how
+    a scenario makes a viewer slow. A text message ends the watch and its
+    reason is kept.
+    """
+
+    def __init__(self, url: str, headers: dict[str, str], ack_delay: float = 0.0):
+        self._url = url
+        self._headers = headers
+        self._ack_delay = ack_delay
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._ws = None
+        self._thread: threading.Thread | None = None
+        self.updates = 0
+        self.full_frames = 0
+        self.bytes = 0
+        self.last_seq = 0
+        self.width = 0
+        self.height = 0
+        self.ended: str | None = None
+
+    def start(self) -> "ScreenWatcher":
+        from websockets.sync.client import connect
+
+        self._ws = connect(self._url, additional_headers=self._headers,
+                           open_timeout=10, max_size=None)
+        self._thread = threading.Thread(target=self._read, daemon=True,
+                                        name="screen-watcher")
+        self._thread.start()
+        return self
+
+    def _read(self) -> None:
+        from trenchchat.network.screen_wire import KIND_FULL, unpack_update
+
+        while not self._stop.is_set():
+            try:
+                raw = self._ws.recv(timeout=1.0)
+            except TimeoutError:
+                continue
+            except Exception:
+                with self._lock:
+                    self.ended = self.ended or "closed"
+                return
+            if isinstance(raw, str):
+                try:
+                    body = json.loads(raw)
+                except ValueError:
+                    body = {}
+                with self._lock:
+                    self.ended = str(body.get("ended", "stopped"))
+                return
+            update = unpack_update(raw)
+            with self._lock:
+                self.updates += 1
+                self.bytes += update.payload_bytes
+                self.last_seq = update.seq
+                self.width, self.height = update.width, update.height
+                if update.kind == KIND_FULL:
+                    self.full_frames += 1
+            if self._ack_delay:
+                self._stop.wait(self._ack_delay)
+            try:
+                self._ws.send("r")
+            except Exception:
+                return
+
+    def snapshot(self) -> dict:
+        with self._lock:
+            return {"updates": self.updates, "full_frames": self.full_frames,
+                    "bytes": self.bytes, "last_seq": self.last_seq,
+                    "width": self.width, "height": self.height,
+                    "ended": self.ended}
+
+    def close(self) -> None:
+        self._stop.set()
+        try:
+            self._ws.close()
+        except Exception:
+            pass
+
+    def __enter__(self) -> "ScreenWatcher":
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.close()
+
+
 class Peer:
     """One tester, addressed by its API port.
 
@@ -629,6 +720,35 @@ class Peer:
         """
         return {e["identity_hash"]: e.get("path")
                 for e in self.voice_roster(channel_hash)}
+
+    # --- screen share ---
+
+    def screen_start(self, monitor: int = 1, preset: str = "clearer") -> dict:
+        return self._post("/screen/start", {"monitor": monitor, "preset": preset})
+
+    def screen_stop(self) -> bool:
+        return self._post("/screen/stop")["ok"]
+
+    def screen_status(self) -> dict:
+        return self._get("/screen/status")
+
+    def screen_sources(self) -> dict:
+        return self._get("/screen/sources")
+
+    def held_shares(self) -> dict[str, dict]:
+        """{sharer_hash: share} for every share this node has been told of."""
+        return {s["peer"]: s for s in self.screen_status()["shares"]}
+
+    def screen_viewers(self) -> set[str]:
+        """Who is watching this node's share, as it counts them."""
+        sharing = self.screen_status()["sharing"]
+        return {v["peer"] for v in sharing["viewers"]} if sharing else set()
+
+    def watch_screen(self, peer_hash: str, ack_delay: float = 0.0) -> ScreenWatcher:
+        """Open the watch socket for one peer's share and start counting."""
+        url = (self._base.replace("http://", "ws://")
+               + f"/screen/watch/{peer_hash}")
+        return ScreenWatcher(url, _auth_headers(self.token), ack_delay).start()
 
     # --- nomad page browsing ---
 

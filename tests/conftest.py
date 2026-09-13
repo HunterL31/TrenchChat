@@ -45,7 +45,10 @@ from trenchchat.core.reaction import ReactionManager
 from trenchchat.core.presence import PresenceManager
 from trenchchat.core.server import ServerManager
 from trenchchat.core.sync import SyncManager
+from trenchchat.core.screen.capture import MovingBoxSource
+from trenchchat.core.screen.manager import ScreenShareManager
 from trenchchat.core.voice import VoiceManager
+from trenchchat.network.ip.screen_plane import IPScreenTransport
 from trenchchat.network.base import (
     InboundMessage, PATH_RETICULUM, SendState, Transport, TransportLimits,
     reticulum_limits,
@@ -456,6 +459,7 @@ class TestPeer:
     direct_file_transport: FakeFileTransport
     lxmf_transport: "LXMFTransport | None" = None
     ip_transport: "DirectTestTransport | None" = None
+    screen_mgr: "ScreenShareManager | None" = None
     _teardown_callbacks: list = field(default_factory=list, repr=False)
 
     def announce(self):
@@ -622,6 +626,17 @@ def peer_factory(request, rns_instance, tmp_path):
                                transport=file_transport,
                                direct_transport=direct_file_transport)
 
+        # Screen share has no mesh plane: a peer with no direct transport
+        # gets no manager either, and every call answers no_direct.
+        screen_mgr = None
+        if ip_transport is not None:
+            screen_mgr = ScreenShareManager(
+                identity, storage, router, voice_mgr,
+                plane=IPScreenTransport(ip_transport),
+                source_factory=MovingBoxSource,
+                capture_probe=lambda: (True, ""),
+            )
+
         channel_mgr.restore_owned_channels()
 
         peer = TestPeer(
@@ -648,6 +663,7 @@ def peer_factory(request, rns_instance, tmp_path):
             file_transport=file_transport,
             direct_file_transport=direct_file_transport,
             ip_transport=ip_transport,
+            screen_mgr=screen_mgr,
         )
 
         # Drive VoiceManager.tick the way the testenv ticker thread would,
@@ -659,6 +675,8 @@ def peer_factory(request, rns_instance, tmp_path):
             while not ticker_stop.wait(0.2):
                 try:
                     voice_mgr.tick()
+                    if screen_mgr is not None:
+                        screen_mgr.tick()
                 except Exception as e:
                     RNS.log(f"TestVoiceTicker: {e}", RNS.LOG_ERROR)
 
@@ -668,6 +686,8 @@ def peer_factory(request, rns_instance, tmp_path):
         def _stop_voice():
             ticker_stop.set()
             ticker_thread.join(timeout=2.0)
+            if screen_mgr is not None:
+                screen_mgr.stop()
             voice_mgr.leave_voice()
             voice_transport.stop()
 
