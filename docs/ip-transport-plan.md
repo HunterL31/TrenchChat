@@ -522,7 +522,8 @@ port, because the session has to run on the socket whose mapping the punch
 opened; the `observed` candidate still named the listen port, and the listener
 answers probes so it is reachable. A peer refused as ineligible is re-checked
 on its next sighting instead of waiting out a backoff, so an admin's invite is
-followed by a session in seconds rather than in half a minute. `last_failure` carries every reason except `backoff`, which is deliberate:
+followed by a session in seconds rather than in half a minute. `last_failure`
+carries every reason except `backoff`, which is deliberate:
 recording "waiting" as a failure would overwrite the reason the pair is
 actually waiting on and double the wait for asking. And the wait doubles per
 attempt rather than per ask, so a peer announcing every ten seconds cannot push
@@ -701,8 +702,9 @@ The failure a user can answer is now told apart from the one they cannot.
 and none of this node's own candidates was an address a peer outside its network
 could reach in a family the peer actually named. An address a member observed
 counts, and a global IPv6 address counts because it crosses no translation; a
-private IPv4 address does not, however many of them are offered. Without that distinction the prompt would have to be asked of every
-pair that failed to punch, including the symmetric-NAT pairs an echo cannot help.
+private IPv4 address does not, however many of them are offered. Without that
+distinction the prompt would have to be asked of every pair that failed to
+punch, including the symmetric-NAT pairs an echo cannot help.
 
 The prompt is per client and fires on the transition rather than being polled
 for. A failure moves no path and fires no other event, so `UpgradeManager`
@@ -795,8 +797,9 @@ direct path gets rows of its own instead of a shaped re-run of the mesh ones.
   that case, and it comes up in about four seconds across a real masquerading
   NAT. What does not punch is a pair where **neither** side can be named: two
   cone NATs with no prior observation have nothing to aim at, every probe
-  goes to an unroutable address, and no observation can start. The fix that fits the Zen is not a service that answers "where am
-  I" but the members themselves: every direct session's HELLO carries the
+  goes to an unroutable address, and no observation can start. The fix that
+  fits the Zen is not a service that answers "where am I" but the members
+  themselves: every direct session's HELLO carries the
   address the accepting side saw the dialer arrive from, so one reachable
   member (a public host, a shared LAN) teaches every peer
   it talks to its own translated address, and that peer can then be named to
