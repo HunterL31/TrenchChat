@@ -22,7 +22,7 @@
 # routes between the two LANs, so a peer's lan candidate is genuinely
 # unreachable from the other side and the punch has to do the work.
 #
-# Five variants, and only three of them are a pass or a fail:
+# Six variants, and `cone` alone is recorded rather than judged:
 #
 #   one_nat    A is behind a masquerading NAT and B is on the segment with the
 #              hub, which is the shape of every pair where one side is
@@ -34,9 +34,15 @@
 #   cone_helper  The cone pair again, with a third member on the hub's segment
 #              that both can reach. A and B each come up direct with C first,
 #              and C's hello tells each of them the address it arrived from, so
-#              a peer that could name nothing now has something to name.
-#              Recorded rather than judged: what it measures is how far that
-#              gets a pair whose NATs still filter by source.
+#              a peer that could name nothing now has something to name. The
+#              pair must then come up direct: one reachable member is all the
+#              design asks for.
+#   cone_stun  The cone pair again, with no helper and a STUN responder in the
+#              root namespace that both can reach outbound. It must stay on
+#              Reticulum while the echo is off, with both sides recording
+#              no_public_address, and come up direct once both users switch it
+#              on: the pair no member can help, and the one thing left that
+#              helps it.
 #   symmetric  Both sides behind `fully-random` masquerading, so no candidate
 #              can predict the external port. The pair must stay on Reticulum,
 #              which is the deliberate non-fix the plan records.
@@ -56,13 +62,15 @@
 # nobody can observe an address to report back. The design's answers to that
 # are a router mapping (UPnP-IGD or NAT-PMP, which no namespace here speaks) or
 # an address a peer observed in an earlier exchange, and with neither the pair
-# stays on Reticulum and says so as punch_failed. Phase 0's spike punched this
-# case only because the harness told each side the other's public address.
+# stays on Reticulum and says so, as no_public_address rather than punch_failed
+# because the two are a different problem for a user. Phase 0's spike punched
+# this case only because the harness told each side the other's public address.
 #
 # Needs root with CAP_NET_ADMIN, iproute2 and nftables. Linux only.
 #
 #   sudo ./nat_harness.sh                     # every variant
 #   sudo ./nat_harness.sh one_nat
+#   sudo ./nat_harness.sh cone_stun
 #   sudo ./nat_harness.sh ipv6_fw
 #   sudo PYTHON=/path/to/.venv/bin/python ./nat_harness.sh symmetric
 
@@ -94,10 +102,14 @@ HUB_PORT=41101
 API_A=8901
 API_B=8902
 API_C=8903
+# Where the address echo answers, in the root namespace on the bridge: both
+# NATed peers reach it outbound and neither can be reached at.
+STUN_PORT=3478
 # Where B is, which the one_nat variant moves onto the segment with the hub.
 HOST_B="$LAN_B.2"
 
 hub_pid=""
+stun_pid=""
 worker_a_pid=""
 worker_b_pid=""
 worker_c_pid=""
@@ -132,11 +144,12 @@ require_ipv6() {
 }
 
 stop_processes() {
-    for pid in "$worker_a_pid" "$worker_b_pid" "$worker_c_pid" "$hub_pid"; do
+    for pid in "$worker_a_pid" "$worker_b_pid" "$worker_c_pid" "$hub_pid" \
+               "$stun_pid"; do
         [ -n "$pid" ] && kill "$pid" 2>/dev/null
     done
     wait 2>/dev/null || true
-    worker_a_pid=""; worker_b_pid=""; worker_c_pid=""; hub_pid=""
+    worker_a_pid=""; worker_b_pid=""; worker_c_pid=""; hub_pid=""; stun_pid=""
 }
 
 teardown() {
@@ -222,6 +235,12 @@ nat_in_front_of_b() {
 # both NATed peers and therefore able to tell each of them its own address.
 has_helper() {
     [ "$1" = "cone_helper" ]
+}
+
+# Whether this variant runs an address echo, which is a server outside both
+# networks and the only thing left for a pair no member can name.
+has_stun() {
+    [ "$1" = "cone_stun" ]
 }
 
 setup() {
@@ -329,6 +348,17 @@ start_hub() {
         sleep 0.5
     done
     fail "the hub never opened its listener; see $WORK/hub.log"
+}
+
+start_stun() {
+    "$PYTHON" "$HERE/stun_responder.py" "$HUB_IP" "$STUN_PORT" \
+        > "$WORK/stun.log" 2>&1 &
+    stun_pid=$!
+    for _ in $(seq 1 30); do
+        grep -q "listening on" "$WORK/stun.log" 2>/dev/null && return 0
+        sleep 0.5
+    done
+    fail "the address echo never came up; see $WORK/stun.log"
 }
 
 start_worker() {
@@ -489,6 +519,99 @@ raise SystemExit(0 if result["upgraded"] else 1)
 PYTHON
 }
 
+# The pair nobody can name: two NATs, no helper, and an address echo outside
+# both networks. It has two halves and needs both, because a variant that only
+# watched the pair come up could not tell a working echo from a punch that
+# would have worked anyway: first with the echo off, where the pair must stay
+# on Reticulum and say why, and then with it on.
+drive_stun() {
+    "$PYTHON" - "$WORK" "$REPO_ROOT" "$LAN_A.2" "$LAN_B.2" \
+        "$HUB_IP:$STUN_PORT" <<'PYTHON'
+import sys
+import time
+from pathlib import Path
+
+WORK, REPO_ROOT, HOST_A, HOST_B, ECHO = sys.argv[1:6]
+sys.path.insert(0, f"{REPO_ROOT}/devtools/testenv/scenarios")
+sys.path.insert(0, f"{REPO_ROOT}/devtools/testenv")
+sys.path.insert(0, REPO_ROOT)
+
+from asserts import ScenarioFailure, set_timeout_scale, wait_until  # noqa: E402
+from flows import invite_only_channel  # noqa: E402
+from peer import Peer  # noqa: E402
+from scen_upgrade import _upgraded  # noqa: E402
+from trenchchat.core.upgrade import REASON_NO_PUBLIC_ADDRESS  # noqa: E402
+from trenchchat.network.base import PATH_DIRECT  # noqa: E402
+
+set_timeout_scale(1.5)
+a = Peer("A", 8901, "nat-harness-token", host=HOST_A)
+b = Peer("B", 8902, "nat-harness-token", host=HOST_B)
+for peer in (a, b):
+    deadline = time.time() + 120
+    while time.time() < deadline and not peer.alive():
+        time.sleep(1.0)
+    if not peer.alive():
+        raise SystemExit(f"{peer.tag}'s API never came up")
+
+
+def stuck_for_an_address(peer, other) -> bool:
+    """Whether this tester has given up on a pair for want of its own address."""
+    failure = peer.upgrade_failure(other.hash) or {}
+    return failure.get("reason") == REASON_NO_PUBLIC_ADDRESS
+
+
+channel = invite_only_channel(a, [b], "nat-stun-room")
+result = {"mode": "cone_stun", "channel": channel[:12]}
+
+# Half one: the echo is off, which is the default, and must stay unasked.
+started = time.time()
+try:
+    wait_until(lambda: stuck_for_an_address(a, b) and stuck_for_an_address(b, a),
+               "both testers to give up for want of their own address", 120.0)
+    result["stuck_secs"] = round(time.time() - started, 1)
+    result["stuck_without_echo"] = True
+except (ScenarioFailure, TimeoutError) as e:
+    result["stuck_without_echo"] = False
+    result["stuck_detail"] = str(e)[:200]
+    result["a_failure"] = a.upgrade_failure(b.hash)
+    result["b_failure"] = b.upgrade_failure(a.hash)
+result["upgraded_without_echo"] = _upgraded(a, b)
+result["asked_before_enabling"] = [peer.stun()["enabled"] for peer in (a, b)]
+result["needs_public_address"] = [peer.needs_public_address() for peer in (a, b)]
+
+# Half two: both users switch it on, and the pair has something to name.
+for peer in (a, b):
+    peer.set_stun(enabled=True, servers=[ECHO])
+started = time.time()
+try:
+    wait_until(lambda: _upgraded(a, b), "A to open a session with B", 150.0)
+    wait_until(lambda: _upgraded(b, a), "B to hold the far side", 60.0)
+    wait_until(lambda: a.member_path(channel, b.hash) == PATH_DIRECT,
+               "A's roster to show B as direct", 60.0)
+    result["upgraded"] = True
+    result["seconds"] = round(time.time() - started, 1)
+except (ScenarioFailure, TimeoutError) as e:
+    result["upgraded"] = False
+    result["seconds"] = round(time.time() - started, 1)
+    result["detail"] = str(e)[:200]
+    result["a_failure"] = a.upgrade_failure(b.hash)
+    result["b_failure"] = b.upgrade_failure(a.hash)
+
+a.send(channel, "nat-stun-message")
+carried = False
+for _ in range(60):
+    if "nat-stun-message" in b.contents(channel):
+        carried = True
+        break
+    time.sleep(1.0)
+result["message_carried"] = carried
+Path(WORK, "cone_stun.result.json").write_text(repr(result))
+print(f"  {result}")
+raise SystemExit(0 if (result["upgraded"] and result["stuck_without_echo"]
+                       and not result["upgraded_without_echo"]) else 1)
+PYTHON
+}
+
 # The IPv6 case: no translation anywhere, both peers knowing the address they
 # will be reached at, and a firewall that only asks each of them to send first.
 # What it has to show beyond "a session came up" is which family carried it,
@@ -593,9 +716,14 @@ run_variant() {
         start_worker "$NS_C" C "$WORK/c" "$API_C" "$WAN.4" trenchchat_nat_c
         worker_c_pid=$!
     fi
+    if has_stun "$mode"; then
+        start_stun
+    fi
 
     if has_helper "$mode"; then
         drive_helper
+    elif has_stun "$mode"; then
+        drive_stun
     elif is_ipv6 "$mode"; then
         drive_ipv6
     else
@@ -612,7 +740,7 @@ run_variant() {
     fi
     if [ "$expect" = "succeed" ]; then
         [ "$rc" = "0" ] && { echo "  PASS"; return 0; }
-        echo "  FAIL: the pair never upgraded; see $WORK/A.log and $WORK/B.log"
+        echo "  FAIL: the variant did not behave as it must; see $WORK/A.log"
         return 1
     fi
     [ "$rc" != "0" ] && { echo "  PASS: the pair stayed on Reticulum, as it must"; return 0; }
@@ -629,12 +757,14 @@ main() {
         one_nat)     run_variant one_nat succeed || failures=1 ;;
         cone)        run_variant cone record ;;
         cone_helper) run_variant cone_helper succeed || failures=1 ;;
+        cone_stun)   run_variant cone_stun succeed || failures=1 ;;
         symmetric)   run_variant symmetric fail || failures=1 ;;
         ipv6_fw)     require_ipv6; run_variant ipv6_fw succeed || failures=1 ;;
         all|both)
             run_variant one_nat succeed || failures=1
             run_variant cone record
             run_variant cone_helper succeed || failures=1
+            run_variant cone_stun succeed || failures=1
             run_variant symmetric fail || failures=1
             if have_ipv6; then
                 run_variant ipv6_fw succeed || failures=1
@@ -643,7 +773,7 @@ main() {
             fi
             ;;
         *) fail "unknown variant '$which', expected one_nat, cone, cone_helper, "\
-                "symmetric, ipv6_fw or all" ;;
+                "cone_stun, symmetric, ipv6_fw or all" ;;
     esac
     [ "$failures" = "0" ] && echo "every variant behaved as expected"
     return "$failures"

@@ -707,6 +707,24 @@ class Peer:
         """Turn this tester's direct sessions on or off: the client gate."""
         return self._post("/upgrade/enabled", {"enabled": enabled})["enabled"]
 
+    def needs_public_address(self) -> bool:
+        """Whether a pair here is stuck for want of an address of its own."""
+        return bool(self.upgrade_sessions().get("needs_public_address"))
+
+    def stun(self) -> dict:
+        """The public address echo: whether it may be asked, and which servers."""
+        return self._get("/upgrade/stun")
+
+    def set_stun(self, *, enabled: bool | None = None,
+                 servers: list[str] | None = None) -> dict:
+        """Turn this tester's address echo on or off, or point it somewhere."""
+        body: dict = {}
+        if enabled is not None:
+            body["enabled"] = enabled
+        if servers is not None:
+            body["servers"] = servers
+        return self._post("/upgrade/stun", body)
+
     def upgrade_try(self, peer_hash: str) -> dict:
         """Ask for a direct session with one peer now."""
         return self._post(f"/upgrade/try/{peer_hash}")
