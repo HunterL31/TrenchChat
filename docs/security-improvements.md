@@ -834,3 +834,66 @@ removes them. Putting them under the same LRU is the follow-up.
   and applies the same membership check would let a member pull a channel file
   with the stock CLI. Whole-file only, fetch only, and it needs the user's
   identity in a form `rncp -i` can load.
+
+## The public address echo: a disclosure a user opts into
+
+Two members both behind a home router cannot connect directly until each knows
+the address it appears at from outside its own network. The design's first
+answer costs nothing and asks nobody: a member that is already reachable tells
+every peer it talks to where it saw them arrive from, so one reachable member
+teaches a whole channel, and `cone_helper` in the NAT harness is that case
+working. What is left is a channel where no member is reachable. Nobody inside
+it can answer the question, and the only thing that can is a server outside
+both networks that echoes the address it sees: RFC 5389's binding request,
+built in `trenchchat/network/ip/stun.py`.
+
+**What the server learns.** The IP address and port this machine's direct-session
+socket appears at, that something at that address asked, and when. That is the
+whole request: twenty bytes, no identity, no name, no channel, no message, no
+peer, and no second question. It is sent from the same UDP socket that carries
+direct sessions, so the server sees a port TrenchChat listens on and nothing
+about what travels over it; the answer comes back to that socket and goes
+nowhere else. Nothing from a chat ever reaches it, because the client speaks
+only one message type and that one carries no payload.
+
+**Why it is off by default.** Every other thing this node does over IP is
+either with a member an admin vetted or with Reticulum's own volunteer
+transport. A public echo is a third party with no relationship to the channel,
+and the Zen's first check is against a center: a node that asked one on every
+start would have made a public server part of how the application works. Off by
+default keeps the default shape honest, and it costs a pair that could have
+punched nothing but a fallback to the mesh, which is where it already was.
+
+**Why the prompt is per client, not per channel.** A member that merely knows
+its own address behind a home router cannot answer for another: its router
+drops the unsolicited probe. So the decision cannot be made for a channel by
+whoever is reachable in it; it belongs to the user whose machine would do the
+asking, and it is asked once, on the first pair that actually gets stuck, with
+the disclosure above in the prompt. "Not now" holds for the run and the switch
+stays in Settings either way.
+
+**What is enforced.** Nothing STUN-shaped leaves a node while the setting is
+off, checked at the client gate (the Settings switch and the prompt), the
+outbound guard (`actions.set_stun`, the only way in), and the manager itself,
+which re-reads the setting before every request rather than once per round, so
+switching it off stops a round already under way. An answer is believed only
+from the server that was asked and only for the transaction that was sent, and
+what it says is treated exactly like an address a member observed: somewhere to
+aim a probe, never a reason to trust anybody. The adversarial cases are
+`tests/test_adversarial.py::TestTheAddressEchoGate`, whose evidence is a server
+that received no datagram of any kind.
+
+**What is left open.** One prompt can be asked for nothing. Nothing can tell a
+symmetric NAT from a cone one without asking an echo, so a user behind one is
+asked, turns it on, and learns an address that is the mapping towards the echo
+and no use to any peer; the failure then reads `punch_failed`, which is the
+true reason. Asking once per run is the price of not leaving the pair that the
+echo *does* help stuck with no way to know it.
+
+A server on the default list also sees a request from this
+address every few minutes while the setting is on, which over time is a
+coarse record of when this machine is up. A user who minds that can point the
+list at a server they run, which is why the list is editable rather than fixed.
+The alternative considered and rejected was shipping our own echo: it would be
+a center of ours, and the one thing a public STUN server has going for it is
+that it is nobody's in particular.

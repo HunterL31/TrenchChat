@@ -594,7 +594,7 @@ in three steps that land in order because they share the transport.
   variant, two cone NATs, no helper, a STUN responder in the root
   namespace, comes up direct in five runs of five once both sides enable it
   and never before; pytest covers the client against a fake STUN server and
-  the prompt against the failure reason.
+  the prompt against the failure reason. Built; the results are below.
 
 **Phase 6 results, steps 1 and 2.** The two reachability steps are built, the
 STUN opt-in is not, and six things are worth recording.
@@ -672,6 +672,67 @@ session, so a pair that can never punch would clear its backoff on every
 sighting and try for ever. Left as it is until the STUN step gives a node one
 address to believe in.
 
+**Phase 6 results, step 3.** The opt-in address echo is built, and five things
+are worth recording.
+
+The client is RFC 5389's binding request and nothing else
+(`network/ip/stun.py`): twenty bytes out, one response back, no session and no
+second question, stdlib only. It goes out of, and comes back on, the socket
+this node listens on, because the address a server echoes is the translation of
+the socket it heard from and an address for any other socket is one a peer's
+probes cannot use. The endpoint routes the answer by transaction id exactly as
+it routes a probe by nonce, and no QUIC packet can be read as either, since both
+start with two zero bits where QUIC always has at least one set. What a server
+says is stored as an observed address like any other, filed against a source
+that is not a peer, so `candidates.gather` offers it and nothing downstream had
+to learn a new kind of candidate.
+
+The failure a user can answer is now told apart from the one they cannot.
+`no_public_address` is recorded instead of `punch_failed` when an attempt fails
+and none of this node's own candidates was an address a peer outside its network
+could reach in a family the peer actually named. A router mapping counts, an
+address a member observed counts, and a global IPv6 address counts because it
+crosses no translation; a private IPv4 address does not, however many of them
+are offered. Without that distinction the prompt would have to be asked of every
+pair that failed to punch, including the symmetric-NAT pairs an echo cannot help.
+
+The prompt is per client and fires on the transition rather than being polled
+for. A failure moves no path and fires no other event, so `UpgradeManager`
+announces the change to a callback and `api.py` emits `direct_address_needed`;
+`GET /upgrade/sessions` carries the same answer as `needs_public_address` for a
+client that has just started. "Not now" holds for the run, in `AppState` rather
+than in browser storage, and the switch and the editable server list stay in
+Settings either way.
+
+Turning it on is what clears the wait, and it made the general fix unnecessary.
+Steps 1 and 2 left a backoff reset on this node's own candidate set changing,
+against the day a node had one address to believe in. It is still not
+implemented, because behind a symmetric NAT the address an echo reports is the
+mapping towards the echo and changes per destination, so the old objection holds
+unchanged: a pair that can never punch would clear its backoff for ever. What is
+implemented is narrower and answers the case that prompted it: switching the
+echo on clears the wait for exactly the pairs whose failure was
+`no_public_address`, so the next sighting tries at once. `cone_stun` comes up
+four seconds after the second user says yes, against the backoff a general reset
+would have been for.
+
+What the runs say. The NAT harness, five runs of each variant: `cone_stun` is
+5 of 5 on both halves, staying on Reticulum with both peers recording
+`no_public_address` in **10.1 to 12.1 seconds** and coming up direct in **4.0
+seconds** once both sides enable the echo; `one_nat` comes up in **5.0 to 6.1s**
+and `cone_helper` in **24.7 to 31.7s** after its helper sessions, both 5 of 5;
+`cone` and `symmetric` stay on Reticulum every run in **180.1 to 180.3s**, both
+now recording `no_public_address`. That last is worth naming as a cost: nothing
+can tell a symmetric NAT from a cone one without asking an echo, so a user
+behind a symmetric NAT is asked once, turns it on, learns an address that is the
+mapping towards the echo and no use to a peer, and the reason then reads
+`punch_failed`. One prompt per run is what that costs, against a `cone` pair
+left stuck. The `upgrade` scenario family is 8 of 8 strict, and the pytest suite
+is 2,476 passing and 3 skipped in both modes. The echo is covered against a
+responder built from the same message code
+(`devtools/testenv/stun_responder.py`), in-process for pytest and in the root
+namespace for the harness; nothing in either run reaches the internet.
+
 **Phase 7: the list (ongoing).** Items 2 through 8 above, each with its own
 tests and, for anything periodic, a shaped scenario run.
 
@@ -739,9 +800,12 @@ direct path gets rows of its own instead of a shaped re-run of the mesh ones.
   probe runs on the one socket a node advertises, and both ends of a session
   say where they saw the other arrive from, since two NATed peers each need
   their own translated address before either can name the other: `cone_helper`
-  comes up direct in five runs of five. What still does not punch is a pair
+  comes up direct in five runs of five. What no member can help is a pair
   where neither side can be named and no member can name them, which is `cone`,
-  and that is what the STUN opt-in is for. A pair with IPv6 on both ends skips
+  and that is what the STUN opt-in answers: with the echo switched on at both
+  ends the same pair is direct in four seconds (`cone_stun`), and with it off
+  they stay on the mesh and record `no_public_address` rather than leaving a
+  user to guess at a NAT. A pair with IPv6 on both ends skips
   the question entirely, since each end already knows the address it will be
   reached at and a stateful firewall only asks it to send first.
   Symmetric NAT and most CGNAT do not punch either, and both sides symmetric
