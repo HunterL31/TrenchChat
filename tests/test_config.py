@@ -3,8 +3,8 @@ Tests for trenchchat.config.Config.
 
 Covers defensive on-disk value handling (wrong-typed nested values must fall
 back to defaults rather than crash on property access) and setter validation
-for voice bitrate, propagation storage limit, UI theme size/count caps, and
-the direct session's switch and port.
+for voice bitrate, propagation storage limit, UI theme size/count caps, the
+direct session's switch and port, and the public address echo.
 """
 
 import json
@@ -13,6 +13,7 @@ import pytest
 
 from trenchchat.config import (
     Config,
+    MAX_STUN_SERVERS,
     MAX_THEME_BYTES,
     MAX_THEME_LIBRARY_ENTRIES,
     UPGRADE_DEFAULT_PORT,
@@ -192,3 +193,45 @@ class TestDirectSessionSettings:
         config = Config(data_dir=tmp_path)
         config.upgrade_listen_port = 0
         assert config.upgrade_listen_port == 0
+
+
+class TestTheAddressEchoSettings:
+    """The "upgrade.stun" block: a disclosure, so it starts off."""
+
+    def test_it_is_off_by_default_with_servers_ready_to_ask(self, tmp_path):
+        config = Config(data_dir=tmp_path)
+        assert config.stun_enabled is False
+        assert config.stun_servers, "no default server to ask once it is on"
+        assert all(":" in server for server in config.stun_servers)
+
+    def test_the_switch_and_the_servers_persist(self, tmp_path):
+        config = Config(data_dir=tmp_path)
+        config.stun_enabled = True
+        config.stun_servers = ["stun.example.com:3478", "203.0.113.7"]
+        reloaded = Config(data_dir=tmp_path)
+        assert reloaded.stun_enabled is True
+        assert reloaded.stun_servers == ["stun.example.com:3478", "203.0.113.7"]
+
+    def test_a_server_that_is_not_a_host_and_port_is_refused(self, tmp_path):
+        config = Config(data_dir=tmp_path)
+        defaults = config.stun_servers
+        for bad in (["two words:3478"], ["host:70000"], ["[2001:db8::1"]):
+            with pytest.raises(ValueError):
+                config.stun_servers = bad
+        assert config.stun_servers == defaults
+
+    def test_a_list_longer_than_the_cap_is_refused(self, tmp_path):
+        config = Config(data_dir=tmp_path)
+        with pytest.raises(ValueError):
+            config.stun_servers = [f"stun{n}.example.com:3478"
+                                   for n in range(MAX_STUN_SERVERS + 1)]
+
+    def test_blanks_are_dropped_rather_than_stored(self, tmp_path):
+        config = Config(data_dir=tmp_path)
+        config.stun_servers = [" stun.example.com:3478 ", "", "   "]
+        assert config.stun_servers == ["stun.example.com:3478"]
+
+    def test_an_empty_list_means_nothing_to_ask(self, tmp_path):
+        config = Config(data_dir=tmp_path)
+        config.stun_servers = []
+        assert config.stun_servers == []

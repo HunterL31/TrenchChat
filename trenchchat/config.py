@@ -7,6 +7,7 @@ from pathlib import Path
 import RNS
 
 from trenchchat.core.fileutils import atomic_write_bytes
+from trenchchat.network.ip import stun
 
 DATA_DIR = Path.home() / ".trenchchat"
 CONFIG_PATH = DATA_DIR / "config.json"
@@ -46,6 +47,17 @@ _DEFAULTS = {
     "upgrade": {
         "enabled": True,
         "listen_port": 42420,
+        # The public address echo: off until a user turns it on, because
+        # asking it discloses this machine's address to a server outside the
+        # channel. See docs/security-improvements.md.
+        "stun": {
+            "enabled": False,
+            "servers": [
+                "stun.l.google.com:19302",
+                "stun1.l.google.com:19302",
+                "stun.cloudflare.com:3478",
+            ],
+        },
     },
 }
 
@@ -63,6 +75,12 @@ MAX_PORT = 65535
 # floor for intelligible speech.
 VOICE_MIN_BITRATE = 6000
 VOICE_MAX_BITRATE = 64000
+
+# Address echo servers a user may list, and how long one entry may be. Both
+# are bounds on a config file rather than on a network: a list this long is
+# already longer than any attempt will work through.
+MAX_STUN_SERVERS = 8
+MAX_STUN_SERVER_CHARS = 260
 
 # A propagation-node storage limit below zero is meaningless.
 MIN_PROPAGATION_STORAGE_MB = 0
@@ -377,6 +395,44 @@ class Config:
                 f"{MAX_PORT}, got {port}"
             )
         self._data["upgrade"]["listen_port"] = port
+        self.save()
+
+    @property
+    def stun_enabled(self) -> bool:
+        """Whether this node may ask a public server where it appears to be.
+
+        Off by default: the answer is useful only to a pair no member can help,
+        and asking tells a server outside the channel this machine's address
+        and that it asked.
+        """
+        return bool(self._data["upgrade"]["stun"]["enabled"])
+
+    @stun_enabled.setter
+    def stun_enabled(self, value: bool):
+        self._data["upgrade"]["stun"]["enabled"] = bool(value)
+        self.save()
+
+    @property
+    def stun_servers(self) -> list[str]:
+        """The address echo servers to try, in order, as "host:port" strings."""
+        return list(self._data["upgrade"]["stun"]["servers"])
+
+    @stun_servers.setter
+    def stun_servers(self, value: list[str]):
+        servers = [str(entry).strip() for entry in value if str(entry).strip()]
+        if len(servers) > MAX_STUN_SERVERS:
+            raise ValueError(
+                f"at most {MAX_STUN_SERVERS} stun servers, got {len(servers)}"
+            )
+        for server in servers:
+            if len(server) > MAX_STUN_SERVER_CHARS:
+                raise ValueError(
+                    f"a stun server is at most {MAX_STUN_SERVER_CHARS} "
+                    f"characters, got {len(server)}"
+                )
+            if stun.parse_server(server) is None:
+                raise ValueError(f"not a host:port stun server: {server!r}")
+        self._data["upgrade"]["stun"]["servers"] = servers
         self.save()
 
     # --- ui theme ---
