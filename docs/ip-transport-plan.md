@@ -432,9 +432,9 @@ feature that check 3 forbids on radio is allowed on IP.
 8. Voice at Discord bitrates between direct pairs, per-peer quality from the
    loss counters `frame_stats` already tracks, and the participant ceiling
    revisited with measurements.
-9. Screen share and video: a codec question and a bandwidth question, and
-   the one item that may justify an optional mixer a user runs on their own
-   machine. Not in this plan.
+9. Screen share and video: a codec question and a bandwidth question.
+   Screen share is planned in `docs/screen-share-plan.md`, over direct
+   sessions only and with no mixer.
 
 ## Phases
 
