@@ -46,6 +46,7 @@ class _SettingsDialogContentState extends State<_SettingsDialogContent> {
   final _nodeName = TextEditingController();
   final _storageLimit = TextEditingController();
   final _listenPort = TextEditingController();
+  final _stunServers = TextEditingController();
 
   bool _loading = true;
   bool _busy = false;
@@ -57,6 +58,13 @@ class _SettingsDialogContentState extends State<_SettingsDialogContent> {
   /// rather than on SAVE: off closes the sessions this node holds, and a
   /// user withdrawing their address should not have to confirm it twice.
   bool _directEnabled = false;
+
+  /// The public address echo. Applied the moment it is flipped, like the
+  /// switch above it: a user turning a disclosure off should not have to
+  /// press SAVE for it to stop. The server list is an ordinary preference and
+  /// rides on SAVE.
+  bool _stunEnabled = false;
+  List<String> _loadedStunServers = const [];
 
   /// GET /voice/devices snapshot; unavailable until loaded (or when the
   /// backend has no audio stack, in which case [AudioDevices.reason] says why).
@@ -83,6 +91,7 @@ class _SettingsDialogContentState extends State<_SettingsDialogContent> {
     _nodeName.dispose();
     _storageLimit.dispose();
     _listenPort.dispose();
+    _stunServers.dispose();
     super.dispose();
   }
 
@@ -103,6 +112,7 @@ class _SettingsDialogContentState extends State<_SettingsDialogContent> {
       } catch (_) {}
       await widget.state.loadDirectConnections();
       await widget.state.loadDirectSessions();
+      await widget.state.loadStun();
       if (!mounted) return;
       final port = settings.upgradeListenPort > 0
           ? settings.upgradeListenPort
@@ -114,6 +124,9 @@ class _SettingsDialogContentState extends State<_SettingsDialogContent> {
         _storageLimit.text = '${settings.propagationStorageLimitMb}';
         _directEnabled = widget.state.directConnections.enabled;
         _listenPort.text = port > 0 ? '$port' : '';
+        _stunEnabled = widget.state.stun.enabled;
+        _loadedStunServers = widget.state.stun.servers;
+        _stunServers.text = _loadedStunServers.join(', ');
         _devices = devices;
         _inputDevice = devices.selectedInput;
         _outputDevice = devices.selectedOutput;
@@ -167,9 +180,12 @@ class _SettingsDialogContentState extends State<_SettingsDialogContent> {
     final okDevices = !devicesChanged ||
         await widget.state.setVoiceDevices(
             inputDevice: _inputDevice, outputDevice: _outputDevice);
+    final servers = _parsedStunServers();
+    final okStun = _sameServers(servers, _loadedStunServers) ||
+        await widget.state.setStun(servers: servers);
 
     if (!mounted) return;
-    if (!okName || !okSettings || !okDevices) {
+    if (!okName || !okSettings || !okDevices || !okStun) {
       setState(() {
         _busy = false;
         _error = widget.state.takeActionError() ?? 'Could not save settings.';
@@ -581,6 +597,33 @@ class _SettingsDialogContentState extends State<_SettingsDialogContent> {
             color: direct.listening ? tc.textTertiary : tc.statusWarn,
           ),
         ),
+        const SizedBox(height: 12),
+        TcCheckbox(
+          value: _stunEnabled,
+          label: 'Ask a public server for this machine\u2019s address',
+          onChanged: _onStunEnabledChanged,
+        ),
+        const SizedBox(height: 8),
+        Text(
+          'Needed only when two members are both behind a router and no '
+          'member either of them can reach is able to tell them where they '
+          'are. The server learns this machine\u2019s address and that it '
+          'asked, and nothing else: no messages, no channels, nobody you '
+          'talk to. Off until you turn it on.',
+          style: TextStyle(fontSize: TCType.textBodySm, color: tc.textSecondary),
+        ),
+        const SizedBox(height: 10),
+        TcTextField(
+          label: 'Address echo servers',
+          controller: _stunServers,
+          hintText: 'host:port, host:port',
+          onSubmitted: (_) => _submit(),
+        ),
+        const SizedBox(height: 6),
+        Text(
+          'Tried in order; the first that answers is the only one asked.',
+          style: TextStyle(fontSize: TCType.textMicro, color: tc.textTertiary),
+        ),
         const SizedBox(height: 10),
         if (direct.sessions.isEmpty && direct.failures.isEmpty)
           Text(
@@ -681,6 +724,29 @@ class _SettingsDialogContentState extends State<_SettingsDialogContent> {
         ],
       ),
     );
+  }
+
+  /// The server list as typed: comma or newline separated, blanks dropped.
+  List<String> _parsedStunServers() => [
+        for (final entry in _stunServers.text.split(RegExp(r'[,\n]')))
+          if (entry.trim().isNotEmpty) entry.trim(),
+      ];
+
+  static bool _sameServers(List<String> a, List<String> b) =>
+      a.length == b.length &&
+      List.generate(a.length, (i) => a[i] == b[i]).every((same) => same);
+
+  Future<void> _onStunEnabledChanged(bool value) async {
+    setState(() => _stunEnabled = value);
+    final ok = await widget.state.setStun(enabled: value);
+    if (!mounted) return;
+    setState(() {
+      _stunEnabled = widget.state.stun.enabled;
+      if (!ok) {
+        _error = widget.state.takeActionError() ??
+            'Could not change the address echo.';
+      }
+    });
   }
 
   Future<void> _onDirectEnabledChanged(bool value) async {

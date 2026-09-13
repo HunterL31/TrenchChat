@@ -149,6 +149,31 @@ class AppState extends ChangeNotifier {
   /// The "Direct connections" switch and the port sessions arrive on.
   DirectConnections directConnections = DirectConnections.unknown;
 
+  /// The public address echo and the servers it would ask. Off until a user
+  /// turns it on, which is what [shouldAskForPublicAddress] is about.
+  StunSettings stun = StunSettings.off;
+
+  /// A pair has no direct session for want of an address of this node's own,
+  /// and the echo that would find one is off. Kept live by
+  /// [DirectAddressNeededEvent] rather than polled: a failure moves no path,
+  /// so nothing else would say so.
+  bool needsPublicAddress = false;
+
+  /// Whether the one-time prompt has already been put to this user. Held here
+  /// rather than in browser storage: "not now" is an answer for this run, and
+  /// a next run is a fair place to ask again about a pair still stuck.
+  bool _publicAddressAsked = false;
+
+  /// Whether to put the public address echo to the user now. True once on the
+  /// transition, and never again after they have answered either way.
+  bool get shouldAskForPublicAddress =>
+      needsPublicAddress && !stun.enabled && !_publicAddressAsked;
+
+  /// Remember that the prompt has been shown, whatever the user answers.
+  void markPublicAddressAsked() {
+    _publicAddressAsked = true;
+  }
+
   /// The live voice session, straight from GET /voice/status; idle when not
   /// in a call. Refreshed on session events and by [_voicePollTimer].
   VoiceStatus voiceStatus = VoiceStatus.idle;
@@ -1004,6 +1029,7 @@ class AppState extends ChangeNotifier {
     try {
       directSessions = await api.getDirectSessions();
       _directSessionsLoaded = true;
+      needsPublicAddress = directSessions.needsPublicAddress;
       notifyListeners();
     } catch (_) {
       // A backend without the endpoint leaves the panel empty rather than
@@ -1017,6 +1043,33 @@ class AppState extends ChangeNotifier {
       notifyListeners();
     } catch (_) {
       // Same: the switch reads as off rather than failing the dialog.
+    }
+  }
+
+  /// The public address echo: whether it is on, and which servers it asks.
+  Future<void> loadStun() async {
+    try {
+      stun = await api.getStun();
+      notifyListeners();
+    } catch (_) {
+      // A backend without the endpoint reads as off, which is the default
+      // and the safe answer: nothing is disclosed by a client that fails.
+    }
+  }
+
+  /// Turns the public address echo on or off, or edits its servers. Turning
+  /// it on clears the backend's wait for the pairs that were stuck, so the
+  /// listing is re-read after it.
+  Future<bool> setStun({bool? enabled, List<String>? servers}) async {
+    try {
+      stun = await api.setStun(enabled: enabled, servers: servers);
+      if (stun.enabled) needsPublicAddress = false;
+      notifyListeners();
+      if (_directSessionsLoaded) await loadDirectSessions();
+      return true;
+    } catch (e) {
+      _reportActionError(e);
+      return false;
     }
   }
 
@@ -2034,6 +2087,9 @@ class AppState extends ChangeNotifier {
         unawaited(_applyAvatarUpdated(identityHash, avatarVersion));
       case DirectoryUpdatedEvent(:final identityHash, :final displayName):
         _applyDirectoryUpdated(identityHash, displayName);
+      case DirectAddressNeededEvent(:final needed):
+        needsPublicAddress = needed;
+        notifyListeners();
       case PathChangedEvent(:final peer, :final path):
         pathByPeer[peer] = path;
         // The diagnostics panel is the only reader of the sessions listing,

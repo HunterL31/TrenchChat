@@ -382,6 +382,24 @@ class ApiClient {
     return (_decode(res) as Map<String, dynamic>)['enabled'] as bool? ?? false;
   }
 
+  /// The public address echo and the servers it would ask.
+  Future<StunSettings> getStun() async {
+    final res = await _http.get(_u('/upgrade/stun'));
+    return StunSettings.fromJson(_decode(res) as Map<String, dynamic>);
+  }
+
+  /// Turns the public address echo on or off, or edits its server list, and
+  /// returns what the backend now holds. Only the arguments given are
+  /// changed, so editing the list never decides the switch by omission.
+  Future<StunSettings> setStun({bool? enabled, List<String>? servers}) async {
+    final res = await _http.post(
+      _u('/upgrade/stun'),
+      headers: _jsonHeaders,
+      body: jsonEncode({'enabled': ?enabled, 'servers': ?servers}),
+    );
+    return StunSettings.fromJson(_decode(res) as Map<String, dynamic>);
+  }
+
   /// Asks for a session with one peer now. [reason] is the backend's own
   /// cause when [ok] is false; the eligibility gate is re-applied there.
   Future<({bool ok, String? reason})> tryDirectSession(String peerHashHex) async {

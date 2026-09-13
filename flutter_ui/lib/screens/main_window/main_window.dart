@@ -31,6 +31,7 @@ import '../dialogs/members_dialog.dart';
 import '../dialogs/new_channel_dialog.dart';
 import '../dialogs/new_server_dialog.dart';
 import '../dialogs/permissions_dialog.dart';
+import '../dialogs/public_address_dialog.dart';
 import '../dialogs/settings_dialog.dart';
 import '../dialogs/start_dm_dialog.dart';
 import 'channel_column.dart';
@@ -99,6 +100,19 @@ class _MainWindowState extends State<MainWindow> {
           side: BorderSide(color: colors.statusDanger),
         ),
       ));
+    });
+  }
+
+  /// Puts the public address echo to the user the first time a pair is stuck
+  /// for want of an address of this node's own. Once per run, whichever way
+  /// they answer: it is a disclosure, so the answer is theirs and asking twice
+  /// would be nagging for one.
+  void _maybeAskForPublicAddress(AppState state) {
+    if (!state.shouldAskForPublicAddress) return;
+    state.markPublicAddressAsked();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      showPublicAddressDialog(context, state);
     });
   }
 
@@ -339,6 +353,7 @@ class _MainWindowState extends State<MainWindow> {
 
         _maybeShowActionError(state, baseColors, spec.resolveBaseStyle());
         _maybeShowThemeShare(state);
+        _maybeAskForPublicAddress(state);
 
         final selectedServer = state.selectedServerHash;
         final serverName = selectedServer != null

@@ -67,7 +67,8 @@ class DirectFailure {
   final String peer;
 
   /// The backend's own machine-readable cause: disabled, ineligible,
-  /// no_answer, punch_failed, handshake_failed, refused or backoff.
+  /// no_answer, punch_failed, no_public_address, handshake_failed, refused
+  /// or backoff.
   final String reason;
   final double at;
 
@@ -84,7 +85,8 @@ class DirectFailure {
 }
 
 /// What GET /upgrade/sessions answers: the sessions, why the rest of the
-/// eligible peers have none, and whether this node is listening at all.
+/// eligible peers have none, whether this node is listening at all, and
+/// whether a pair is stuck for want of an address of this node's own.
 /// Not listening is what tells a firewall block apart from a NAT failure.
 class DirectSessions {
   const DirectSessions({
@@ -92,12 +94,17 @@ class DirectSessions {
     required this.failures,
     required this.listening,
     required this.listenPort,
+    this.needsPublicAddress = false,
   });
 
   final List<DirectSession> sessions;
   final List<DirectFailure> failures;
   final bool listening;
   final int listenPort;
+
+  /// A pair failed because this node has no address of its own to offer and
+  /// the public address echo is off. The one failure a user can answer.
+  final bool needsPublicAddress;
 
   static const empty = DirectSessions(
       sessions: [], failures: [], listening: false, listenPort: 0);
@@ -117,8 +124,29 @@ class DirectSessions {
       ],
       listening: json['listening'] as bool? ?? false,
       listenPort: (json['listen_port'] as num? ?? 0).toInt(),
+      needsPublicAddress: json['needs_public_address'] as bool? ?? false,
     );
   }
+}
+
+/// GET /upgrade/stun: the public address echo and the servers it would ask.
+/// Off until a user turns it on, because asking tells a server outside the
+/// channel this machine's address and that it asked.
+class StunSettings {
+  const StunSettings({required this.enabled, required this.servers});
+
+  final bool enabled;
+  final List<String> servers;
+
+  static const off = StunSettings(enabled: false, servers: []);
+
+  factory StunSettings.fromJson(Map<String, dynamic> json) => StunSettings(
+        enabled: json['enabled'] as bool? ?? false,
+        servers: [
+          for (final server in json['servers'] as List<dynamic>? ?? const [])
+            '$server',
+        ],
+      );
 }
 
 /// GET /upgrade/enabled: the "Direct connections" switch and the port a
@@ -145,6 +173,7 @@ String directFailureReason(String reason) => switch (reason) {
       'ineligible' => 'Not eligible: no invite-only channel or server in common',
       'no_answer' => 'No answer to the offer',
       'punch_failed' => 'Could not punch through NAT',
+      'no_public_address' => 'No way to learn our public address yet',
       'handshake_failed' => 'The session handshake failed',
       'refused' => 'The peer refused',
       'backoff' => 'Waiting before the next try',

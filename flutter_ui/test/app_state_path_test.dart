@@ -171,6 +171,121 @@ void main() {
     expect(backend.requests.any((r) => r.path == '/upgrade/close/$_alice'), isTrue);
   });
 
+  test('the sessions listing says when a pair is stuck for want of an address',
+      () async {
+    final backend = FakeBackend();
+    backend.routes['GET /upgrade/sessions'] = {
+      'sessions': <dynamic>[],
+      'last_failure': {
+        _bob: {
+          'reason': 'no_public_address',
+          'at': 1700.0,
+          'next_attempt': 1760.0,
+        },
+      },
+      'listening': true,
+      'listen_port': 42420,
+      'needs_public_address': true,
+    };
+    final state = _state(backend);
+    addTearDown(state.dispose);
+
+    await state.loadDirectSessions();
+
+    expect(state.directSessions.needsPublicAddress, isTrue);
+    expect(state.needsPublicAddress, isTrue);
+    expect(state.shouldAskForPublicAddress, isTrue);
+    expect(directFailureReason(state.directSessions.failures.single.reason),
+        'No way to learn our public address yet');
+  });
+
+  test('the event moves it without the panel ever being opened', () async {
+    final state = _state(FakeBackend());
+    addTearDown(state.dispose);
+
+    expect(state.shouldAskForPublicAddress, isFalse);
+    state.applyEvent(const DirectAddressNeededEvent(true));
+
+    expect(state.needsPublicAddress, isTrue);
+    expect(state.shouldAskForPublicAddress, isTrue);
+
+    state.applyEvent(const DirectAddressNeededEvent(false));
+    expect(state.shouldAskForPublicAddress, isFalse);
+  });
+
+  test('once asked, this run does not ask again', () async {
+    final state = _state(FakeBackend());
+    addTearDown(state.dispose);
+    state.applyEvent(const DirectAddressNeededEvent(true));
+
+    state.markPublicAddressAsked();
+
+    expect(state.needsPublicAddress, isTrue);
+    expect(state.shouldAskForPublicAddress, isFalse,
+        reason: 'the user was asked once and answered');
+  });
+
+  test('the address echo reads back and turns on through its own endpoint',
+      () async {
+    final backend = FakeBackend();
+    backend.routes['GET /upgrade/stun'] = {
+      'enabled': false,
+      'servers': ['stun.example.com:3478'],
+    };
+    backend.routes['POST /upgrade/stun'] = {
+      'ok': true,
+      'enabled': true,
+      'servers': ['stun.example.com:3478'],
+    };
+    final state = _state(backend);
+    addTearDown(state.dispose);
+    state.applyEvent(const DirectAddressNeededEvent(true));
+
+    await state.loadStun();
+    expect(state.stun.enabled, isFalse);
+    expect(state.stun.servers, ['stun.example.com:3478']);
+
+    expect(await state.setStun(enabled: true), isTrue);
+
+    final post = backend.requests
+        .singleWhere((r) => r.path == '/upgrade/stun' && r.method == 'POST');
+    expect(jsonDecode(post.body), {'enabled': true});
+    expect(state.stun.enabled, isTrue);
+    // With the echo on there is nothing left to ask the user about.
+    expect(state.shouldAskForPublicAddress, isFalse);
+  });
+
+  test('editing the server list leaves the switch alone', () async {
+    final backend = FakeBackend();
+    backend.routes['POST /upgrade/stun'] = {
+      'ok': true,
+      'enabled': false,
+      'servers': ['stun.example.org:3478'],
+    };
+    final state = _state(backend);
+    addTearDown(state.dispose);
+
+    expect(await state.setStun(servers: ['stun.example.org:3478']), isTrue);
+
+    final post = backend.requests
+        .singleWhere((r) => r.path == '/upgrade/stun' && r.method == 'POST');
+    expect(jsonDecode(post.body), {
+      'servers': ['stun.example.org:3478']
+    });
+    expect(state.stun.servers, ['stun.example.org:3478']);
+  });
+
+  test('a backend with no echo endpoint reads as off rather than failing',
+      () async {
+    final state = _state(FakeBackend());
+    addTearDown(state.dispose);
+
+    await state.loadStun();
+
+    expect(state.stun.enabled, isFalse);
+    expect(state.error, isNull);
+  });
+
   test('a refused try reports the backend reason in plain words', () async {
     final backend = FakeBackend();
     backend.routes['POST /upgrade/try/$_bob'] = {

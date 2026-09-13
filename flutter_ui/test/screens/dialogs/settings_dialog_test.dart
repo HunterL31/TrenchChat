@@ -46,6 +46,11 @@ void main() {
       'last_failure': <String, dynamic>{},
       'listening': true,
       'listen_port': 42420,
+      'needs_public_address': false,
+    };
+    backend.routes['GET /upgrade/stun'] = {
+      'enabled': false,
+      'servers': ['stun.example.com:3478'],
     };
     state = AppState(baseUrl: backend.baseUrl, httpClient: backend.client());
     state.meHashHex = 'a9f13c02e7d84b119876543210fedcba';
@@ -418,6 +423,93 @@ void main() {
           .singleWhere((r) => r.path == '/settings' && r.method == 'POST');
       expect((jsonDecode(post.body) as Map<String, dynamic>)['upgrade_listen_port'],
           42999);
+    });
+
+    testWidgets('the address echo switch and its servers read back', (tester) async {
+      await open(tester);
+      await scrollTo(tester, find.text('DIRECT CONNECTIONS'));
+
+      expect(
+          find.textContaining('Ask a public server for this machine'),
+          findsOneWidget);
+      expect(find.textContaining('learns this machine\u2019s address and that '
+          'it asked'), findsOneWidget);
+      expect(find.widgetWithText(TextField, 'stun.example.com:3478'),
+          findsOneWidget);
+    });
+
+    testWidgets('turning the echo on posts it at once', (tester) async {
+      backend.routes['POST /upgrade/stun'] = {
+        'ok': true,
+        'enabled': true,
+        'servers': ['stun.example.com:3478'],
+      };
+      await open(tester);
+      final label =
+          find.textContaining('Ask a public server for this machine');
+      await scrollTo(tester, label);
+      await tester.ensureVisible(label);
+      await tester.pumpAndSettle();
+
+      await tester.tap(label);
+      await settle(tester);
+
+      final post = backend.requests.singleWhere(
+          (r) => r.path == '/upgrade/stun' && r.method == 'POST');
+      expect(jsonDecode(post.body), {'enabled': true});
+      expect(state.stun.enabled, isTrue);
+    });
+
+    testWidgets('an edited server list is saved and the switch is not',
+        (tester) async {
+      backend.routes['POST /upgrade/stun'] = {
+        'ok': true,
+        'enabled': false,
+        'servers': ['stun.example.org:3478', 'stun.example.net:19302'],
+      };
+      await open(tester);
+      final servers = find.widgetWithText(TextField, 'stun.example.com:3478');
+      await scrollTo(tester, servers);
+
+      await tester.enterText(servers,
+          'stun.example.org:3478, stun.example.net:19302');
+      await tester.tap(find.text('SAVE'));
+      await settle(tester);
+      await tester.pumpAndSettle();
+
+      final post = backend.requests.singleWhere(
+          (r) => r.path == '/upgrade/stun' && r.method == 'POST');
+      expect(jsonDecode(post.body), {
+        'servers': ['stun.example.org:3478', 'stun.example.net:19302']
+      });
+    });
+
+    testWidgets('an unchanged server list posts nothing', (tester) async {
+      await open(tester);
+      await scrollTo(tester, find.text('DIRECT CONNECTIONS'));
+
+      await tester.tap(find.text('SAVE'));
+      await settle(tester);
+      await tester.pumpAndSettle();
+
+      expect(backend.requests.where((r) => r.path == '/upgrade/stun'
+          && r.method == 'POST'), isEmpty);
+    });
+
+    testWidgets('a pair stuck for an address says so in plain words',
+        (tester) async {
+      stubDiagnostics(failures: {
+        bob: {
+          'reason': 'no_public_address',
+          'at': 1700.0,
+          'next_attempt': 1760.0,
+        },
+      });
+      await open(tester);
+      await scrollTo(tester, find.text('DIRECT CONNECTIONS'));
+
+      expect(find.textContaining('No way to learn our public address yet'),
+          findsOneWidget);
     });
 
     testWidgets('a port outside the range is refused without saving',

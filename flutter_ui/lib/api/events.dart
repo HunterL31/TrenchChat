@@ -93,6 +93,8 @@ sealed class TcEvent {
           peerPathFrom(json['path'] as String?),
           (json['since'] as num?)?.toDouble() ?? 0.0,
         );
+      case 'direct_address_needed':
+        return DirectAddressNeededEvent(json['needed'] as bool? ?? false);
       case 'voice_roster':
         return VoiceRosterEvent(json['channel_hash'] as String);
       case 'voice_speaking':
@@ -272,6 +274,15 @@ class PathChangedEvent extends TcEvent {
   final String peer;
   final PeerPath path;
   final double since;
+}
+
+/// A pair has no direct session because this node has no address of its own
+/// to offer, and the public address echo is off. Fired on the change only: a
+/// failure moves no path and fires no other event, so without this a client
+/// would have to poll to know it has something to ask the user about.
+class DirectAddressNeededEvent extends TcEvent {
+  const DirectAddressNeededEvent(this.needed);
+  final bool needed;
 }
 
 /// A channel's voice roster changed. Carries only the hash; handlers
