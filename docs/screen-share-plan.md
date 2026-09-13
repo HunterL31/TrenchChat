@@ -1,8 +1,9 @@
 # Plan: screen share over direct sessions only
 
-Status: a plan for work not yet started, kept here so the decisions it records
-survive until the work lands. Per `.claude/rules/docs-worth-committing.md`, the
-durable reasoning moves next to the code and this file is deleted when it does.
+Status: built through Phase 3, with the results recorded under each phase.
+Kept here for the decisions and the measurements; per
+`.claude/rules/docs-worth-committing.md`, the durable reasoning moves next to
+the code and this file goes when the follow-ups land.
 
 ## Decisions
 
@@ -362,6 +363,29 @@ against the direct session's measured ceiling. Output: the tile size, the
 presets, the full-frame threshold, a yes or no on a video codec, and this
 file amended.
 
+**Phase 0 results.** Run on this machine only (a 4-core Xeon container with
+no display), so the capture half of the spike is not done: `mss` imports and
+refuses cleanly with no display, which is the Wayland path's shape, and the
+three platforms and a Wayland session are still to be tried. The encoder half
+is `devtools/spikes/screen/encode_cost.py`, three synthetic 1080p workloads
+at 15 frames a second:
+
+| Workload | Tile 64 | Tile 128 |
+|---|---|---|
+| Desktop with typing | 12.2 ms/tick, 0.24 Mbit/s | 7.3 ms/tick, 0.58 Mbit/s |
+| Scrolling document | 26.0 ms/tick, 41 Mbit/s | 19.2 ms/tick, 29 Mbit/s |
+| Full-motion (noise) | 31.2 ms/tick, 84 Mbit/s | 25.8 ms/tick, 74 Mbit/s |
+
+A tick costs 7 to 31 ms, so 15 frames a second fits in one core with room.
+128-px tiles beat 64 on both cost and bytes, and stay the default. A static
+desktop with typing is under a megabit. Scrolling and full motion cross the
+full-frame threshold every tick and become one 250 to 630 KB image each, which
+at 15 frames a second is far more than a home uplink carries: that is the case
+the credit model throttles, and screen5 below measures it doing so. The
+noise workload is a worst case no real screen reaches. The video codec
+question stays open, and the numbers say what it would buy: nothing for a
+desktop, everything for full motion.
+
 **Phase 1: core (3 weeks).** `network/screen_wire.py`; `core/screen/`
 (capture over `mss` with a fake source for tests, encoder, the manager's
 sharer and viewer halves); the `screen` request handler on `IPTransport`;
@@ -370,14 +394,63 @@ sharer and viewer halves); the `screen` request handler on `IPTransport`;
 socket. Check: the tests under "Testing", and the full suite passing in both
 modes (`--direct` and without).
 
+**Phase 1 results.** Built as designed, with four things worth recording.
+The transport had a race the plan's first request exposed: the listener is
+proven before the dialer is, and a request the listener sends the moment its
+path comes up (the `started` that tells a new participant) can reach the
+dialer on a second stream before its handshake task has read the hello, which
+the session took for a hostile second stream and closed. Frames on other
+streams are now held, bounded like the pre-hello queue, and dispatched once
+the hello passes (`network/ip/session.py`), and a session test pins it; the
+file plane never sent a request that early, so nothing had hit it. The
+sharer sends a viewer's first update from inside its watch handler, before
+the answer that makes the viewer a watcher, so the viewer accepts updates
+from the peer whose watch is pending. The manager reads its voice session
+through three public queries added to `VoiceManager` (`may_voice`,
+`participants`, `is_participant`) rather than its roster. And the mesh test
+is two assertions: with the fake transport recording every send, a whole
+share puts nothing but voice signalling on it, and `protocol.py` names no
+screen constant. The pytest suite is 2,548 passing and 3 skipped in the
+default mode; the direct mode's count is recorded below.
+
 **Phase 2: client (2 weeks).** The panel, the picker, the roster badge and
 Watch, the stage painter, the watch socket with its ready credit, Settings.
 Check: `flutter analyze && flutter test`, and a person on two machines on
 one LAN shares a monitor from one and watches on the other.
 
+**Phase 2 results.** Built as designed. The client parses the wire itself
+(`lib/api/screen_wire.dart`), decodes each image bounded to the slot it
+declares, keeps one image per tile plus the latest full frame, and answers
+the socket after the paint has what it needs; the backend forwards bytes and
+re-encodes nothing. The stage sits above the message list and expands to
+fill the column; the LIVE badge with Watch sits on the voice roster row, and
+a row with no direct badge never gets one. Settings gained nothing: the
+picker remembers the monitor and preset, which is all a user chooses. The
+icon pack golden was regenerated on Linux for the two new glyphs and should
+be re-rendered on Windows like the rest; the ten goldens that fail on Linux
+are the documented ten and no other.
+
 **Phase 3: scenarios and tuning (1 week).** The `screen` scenario family
 below at `--repeat 5`, the measured numbers into `docs/testenv-scenarios.md`,
 and the presets adjusted from what a real session carries.
+
+**Phase 3 results.** The `screen` family is 4 of 4 on its first full run and
+15 of 15 at `--repeat 3`, on loopback. What the runs say: a direct
+participant has the first frames 0.5 seconds after opening its socket
+(screen1); a mesh-only participant of the same voice session is never told,
+holds nothing, and has its own watch refused `no_share` (screen2); a dropped
+session ends the watch in 0.5 seconds and the share is told again 3.5 seconds
+after the pair returns, once 47.8 under the upgrade backoff (screen3); a
+kicked viewer is out of the fan-out within a sweep (screen4); and a viewer
+answering half a second late received 13 updates in six seconds against the
+fast viewer's 97, finishing six sequence numbers behind it rather than
+ninety (screen5), which is the credit model doing what the numbers in Phase
+0 said it would have to. One thing left as it is: the watch socket says
+`stopped` whatever ended the share, while the `screen_watch` event carries the
+reason (`session_lost`, `voice_left`), so a client reads the reason from the
+event. The tuning the phase named did not happen: the loopback carries every
+frame rate, so the presets stand on Phase 0's numbers until a real uplink
+says otherwise.
 
 **Later, each its own change:** cursor position; window capture; system
 audio; the video codec if Phase 0 says so; Wayland through the desktop

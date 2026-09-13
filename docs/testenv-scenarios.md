@@ -1264,6 +1264,28 @@ row's range with a slower tail; one of the three earlier passes took 45.8s and
 none of the five repeated it, so it is recorded rather than explained, and the
 row's 90s ceiling absorbs it either way.
 
+### `screen`: screen share over direct sessions only
+
+A share lives inside a voice session and travels the direct session two
+members already hold, and nothing else: no frames, no signalling and not the
+fact that a share exists ever crosses the mesh (`docs/screen-share-plan.md`).
+pytest proves that against a fake transport whose outbox it can read; these
+rows prove it on a real network, where the only witnesses are what each
+tester holds and what its watch socket delivers. screen2 is the row that
+matters most, the way upgrade2 is for sessions.
+
+Headless testers share a generated picture (`core/screen/capture.py`'s
+`MovingBoxSource`), so every frame differs from the last in one tile and a
+watcher always has something to count.
+
+| ID | Peers | Actions | Expected result |
+|---|---|---|---|
+| screen1 | A,B | A and B private, direct and in voice; A shares, B watches over its socket | ✅ **4/4, 12-14s.** B holds the share the moment it starts, its socket has the first frames **0.5s** after opening (a full frame, then tiles, 7 updates and 7.9 KB in the window), A counts B as a viewer, and both drop it when A stops |
+| screen2 | A,B,C | C shares only a public channel with A and B and is in the same voice session | ✅ **4/4, 41-45s.** C is never told, holds no screen state across a 15s hold, has its own watch refused `no_share`, and is never counted as a viewer. Decision 1 on a real network |
+| screen3 | A,B | `POST /upgrade/close/{peer}` while B watches | ✅ **4/4, 15-60s.** B's watch ends **0.5s** after the drop and B drops the share; A's share outlives the session; B is told again once the pair is back (**3.5s** in three runs, 47.8s in one, the upgrade backoff), and frames flow over the new session |
+| screen4 | A,B | B is kicked while watching | ✅ **4/4, 16-22s.** B is out of A's fan-out in **0.0-1.01s**, the sweep's own cadence, its watch ends, and it stays out across a 5s hold |
+| screen5 | A,B,C | B acknowledges each update 0.5s late, C at once | ✅ **3/3, 25-27s.** In 6s B received **13 updates (19.5 KB)** to C's **97 (108.7 KB)**, and B's last sequence was 6 behind C's: the slow viewer got fewer, larger updates and never a queue, and the fast one ran at the frame rate |
+
 ### The NAT harness
 
 `devtools/testenv/nat_harness.sh` runs real backends in Linux network
