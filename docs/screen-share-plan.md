@@ -411,7 +411,10 @@ through three public queries added to `VoiceManager` (`may_voice`,
 is two assertions: with the fake transport recording every send, a whole
 share puts nothing but voice signalling on it, and `protocol.py` names no
 screen constant. The pytest suite is 2,548 passing and 3 skipped in the
-default mode; the direct mode's count is recorded below.
+default mode and 2,563 passing and 3 skipped under `--direct`, where one sync
+test unrelated to this work (`test_sync_reporting.py`'s oversized image over
+sync) fails about half the time on the base commit as well, and is left for
+its own change.
 
 **Phase 2: client (2 weeks).** The panel, the picker, the roster badge and
 Watch, the stage painter, the watch socket with its ready credit, Settings.
