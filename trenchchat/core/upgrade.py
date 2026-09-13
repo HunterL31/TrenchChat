@@ -7,7 +7,10 @@ peer is eligible when this node and that peer are both current members of one
 invite-only channel, or of one server, by the stored members table. Servers
 are always invite-only. An open-join channel never qualifies whatever its
 subscriber list says, because anyone can join one, and an accepted friendship
-does not qualify either in this first cut.
+does not qualify either, because a session is TrenchChat's own and a direct
+message is the one message that leaves the TrenchChat world, so a gate on
+friendship would make a conversation behave differently depending on what the
+friend is running.
 
 is_eligible is the core enforcement layer of that gate, called by IPTransport
 the moment an inbound HELLO proves an identity and before any frame of theirs

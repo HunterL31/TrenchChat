@@ -6,7 +6,11 @@ durable reasoning moves next to the code and this file is deleted when it does.
 
 ## Decisions
 
-Three decisions fix the shape of this plan. Everything below follows from them.
+The direct session exists so that voice, video and other high-bandwidth
+features can run at full fidelity between members without putting that load on
+the Reticulum network, which stays the path for everything that must reach
+everyone. Five decisions fix the shape of this plan. Everything below follows
+from them.
 
 1. **Reticulum stays, and brokers the upgrade.** TrenchChat keeps running
    Reticulum and LXMF for everything it does today. When two peers can also
@@ -37,6 +41,14 @@ Three decisions fix the shape of this plan. Everything below follows from them.
    router cannot serve a member that knows nothing yet, because its router
    drops the unsolicited probe, which is why the prompt is per client rather
    than per channel.
+5. **Eligibility is shared membership, not friendship.** A session is offered
+   to members of a shared invite-only channel or server and to nobody else,
+   accepted friends included. A direct message is the one message that leaves
+   the TrenchChat world: a plain LXMF message another client can hold the
+   other half of. A direct session is TrenchChat's own, so a gate on
+   friendship would make a conversation behave differently depending on what
+   the friend is running, which is the interop the DM design exists to
+   protect.
 
 An earlier draft of this plan proposed a standalone IP backend with its own
 discovery (signed endpoint records, gossip, an optional Tailscale probe). It
@@ -203,9 +215,8 @@ messages; the user-facing word is "direct".
 - A peer is eligible when it is a current member of at least one invite-only
   channel or server this node is a member of, by the stored members table.
   Open-join channels never qualify, whatever their subscriber list says.
-  Accepted friends who share no such channel do not qualify in the first
-  cut; whether friendship should also qualify is an open decision recorded
-  below.
+  Accepted friends who share no such channel do not qualify either, by
+  decision 5.
 - Client gate: a "Direct connections" switch in Settings, on by default,
   which stops the node listening and offering.
 - Outbound guard: `actions.offer_upgrade` and `UpgradeManager.consider`
@@ -730,8 +741,13 @@ responder built from the same message code
 (`devtools/testenv/stun_responder.py`), in-process for pytest and in the root
 namespace for the harness; nothing in either run reaches the internet.
 
-**Phase 7: the list (ongoing).** Items 2 through 8 above, each with its own
-tests and, for anything periodic, a shaped scenario run.
+**Phase 7: the list (ongoing).** Voice at full fidelity between direct pairs
+(item 8: bitrate, per-peer quality, and the participant ceiling revisited with
+measurements) and video or screen sharing over the direct path (item 9) come
+first. They are what the direct session is for: the load the mesh must never
+carry, run at full fidelity between members instead. Neither is designed here.
+Then items 2 through 7, each with its own tests and, for anything periodic, a
+shaped scenario run.
 
 Phases 0 to 6 are about seventeen to nineteen weeks. Everything after is the
 reason for doing it.
@@ -770,10 +786,6 @@ direct path gets rows of its own instead of a shaped re-run of the mesh ones.
 
 ## Risks and open decisions
 
-- **Should accepted friends qualify?** A mutual friendship is a stronger tie
-  than shared membership, and direct messages with large attachments would
-  benefit. Left out of the first cut so the gate is one rule; extending it
-  is a one-line change to `core/upgrade.is_eligible` plus its tests.
 - **Punch success rate.** A pair punches when at least one side can be named:
   an address on a shared LAN or tailnet, a public host, or an address a peer
   observed in an earlier exchange. The first probe that arrives
