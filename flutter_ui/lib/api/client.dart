@@ -896,10 +896,11 @@ class ApiClient {
         .toList();
   }
 
-  /// The channel's overall mesh link quality, computed over its subscribers.
+  /// How much of the channel this node can reach right now, plus a row per
+  /// member. Read-only and local to the backend: it asks the mesh nothing.
   Future<ChannelLinkQuality> getChannelLinkQuality(String channelHashHex) async {
     final res = await _http.get(_u('/channels/$channelHashHex/link_quality'));
-    return ChannelLinkQuality.fromRoster(_decode(res) as List<dynamic>);
+    return ChannelLinkQuality.fromJson(_decode(res));
   }
 
   /// Leaves a server: drops the membership so the server disappears from

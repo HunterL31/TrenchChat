@@ -25,7 +25,8 @@ void _seedChannelReads(FakeBackend backend, String hash) {
   backend.routes['GET /channels/$hash/members'] = <Object>[];
   backend.routes['GET /channels/$hash/messages'] = <Object>[];
   backend.routes['GET /channels/$hash/presence'] = <Object>[];
-  backend.routes['GET /channels/$hash/link_quality'] = <Object>[];
+  backend.routes['GET /channels/$hash/link_quality'] =
+      {'summary': <String, Object?>{}, 'peers': <Object>[]};
   backend.routes['GET /channels/$hash/my_permissions'] = {'invite': false};
   backend.routes['GET /channels/$hash/voice/roster'] = <Object>[];
   backend.routes['GET /channels/$hash/sync_status'] = {'state': 'synced'};
