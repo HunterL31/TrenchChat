@@ -10,9 +10,13 @@ packet after the first carries and which is unique per connection whichever
 side opened it. A probe is told apart before that, by its magic and a nonce an
 attempt is waiting on.
 
-Everything above this file works in ordinary addresses: a v4-mapped address is
-unmapped on the way in and mapped again on the way out, so a peer is never told
-about an address it could not dial.
+Both families run under the same endpoint. Where the platform lets one socket
+carry them (Linux binds :: with IPV6_V6ONLY off and reads IPv4 as
+::ffff:a.b.c.d) there is one; where it does not, or where the host has no IPv6
+at all, there is one socket per family and the address being sent to picks
+between them. Everything above this file works in ordinary addresses: a
+v4-mapped address is unmapped on the way in and mapped again on the way out,
+so a peer is never told about an address it could not dial.
 
 aioquic's own server and connect() each bind a socket of their own, which is
 the one thing this design cannot have; the demultiplexing here is the same
@@ -31,7 +35,13 @@ from aioquic.quic.packet import (
     QuicPacketType, encode_quic_version_negotiation, pull_quic_header,
 )
 
+DUAL_STACK_HOST = "::"
+IPV4_ANY_HOST = "0.0.0.0"
 MAPPED_PREFIX = "::ffff:"
+
+# Tries at binding both families on one port before settling for the one that
+# is bound. Only the kernel-assigned case can collide, and only rarely.
+PAIRED_BIND_ATTEMPTS = 4
 
 
 def unmap_host(host: str) -> str:
@@ -83,16 +93,72 @@ def bind_datagram_socket(host: str, port: int) -> socket.socket:
     return sock
 
 
+def _carries_ipv4(sock: socket.socket) -> bool:
+    """Whether this socket can send to an IPv4 address in its mapped form."""
+    if sock.family == socket.AF_INET:
+        return True
+    try:
+        return sock.getsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY) == 0
+    except OSError:
+        return False
+
+
+def _dual_stack_socket(port: int) -> socket.socket | None:
+    """One socket for both families, or None where the platform refuses."""
+    try:
+        sock = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
+    except OSError:
+        return None
+    try:
+        sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+        if sock.getsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY) != 0:
+            sock.close()
+            return None
+        sock.bind((DUAL_STACK_HOST, port))
+    except OSError:
+        sock.close()
+        return None
+    return sock
+
+
+def _paired_sockets(port: int) -> list[socket.socket]:
+    """One socket per family on the same port, for a host that splits them."""
+    for _attempt in range(PAIRED_BIND_ATTEMPTS):
+        try:
+            sixth = bind_datagram_socket(DUAL_STACK_HOST, port)
+        except OSError:
+            return [bind_datagram_socket(IPV4_ANY_HOST, port)]
+        bound = sixth.getsockname()[1]
+        try:
+            return [sixth, bind_datagram_socket(IPV4_ANY_HOST, bound)]
+        except OSError:
+            sixth.close()
+            if port:
+                return [bind_datagram_socket(IPV4_ANY_HOST, port)]
+    return [bind_datagram_socket(IPV4_ANY_HOST, port)]
+
+
 def bind_listen_sockets(host: str, port: int) -> list[socket.socket]:
-    """The sockets this node listens on, which is one of them for now."""
-    return [bind_datagram_socket(host, port)]
+    """The sockets this node listens on, dual-stack where the platform allows.
+
+    A host named explicitly gets exactly that one socket, which is what a test
+    and a machine with one address to offer both want. The default asks for
+    both families: one socket where IPV6_V6ONLY can be cleared, a socket each
+    on the same port where it cannot, and an IPv4 socket alone on a host with
+    no IPv6.
+    """
+    if host != DUAL_STACK_HOST:
+        return [bind_datagram_socket(host, port)]
+    sock = _dual_stack_socket(port)
+    return [sock] if sock is not None else _paired_sockets(port)
 
 
 class _Binding(asyncio.DatagramProtocol):
     """One socket under the endpoint, and what arrives on it."""
 
-    def __init__(self, endpoint: "DatagramEndpoint", family: int):
+    def __init__(self, endpoint: "DatagramEndpoint", family: int, dual: bool):
         self.family = family
+        self.dual = dual
         self.transport = None
         self._endpoint = endpoint
 
@@ -150,7 +216,7 @@ class DatagramEndpoint:
         taken = 0
         try:
             for sock in sockets:
-                binding = _Binding(self, sock.family)
+                binding = _Binding(self, sock.family, _carries_ipv4(sock))
                 await loop.create_datagram_endpoint(lambda b=binding: b, sock=sock)
                 self._bindings.append(binding)
                 taken += 1
@@ -185,16 +251,21 @@ class DatagramEndpoint:
     # --- sending ---
 
     def _binding_for(self, host: str) -> _Binding | None:
-        """The socket that can reach this address, which is one of this family."""
+        """The socket that can reach this address, preferring its own family."""
         try:
             version = ipaddress.ip_address(unmap_host(host)).version
         except ValueError:
             return None
         wanted = socket.AF_INET6 if version == 6 else socket.AF_INET
+        fallback = None
         for binding in self._bindings:
-            if binding.transport is not None and binding.family == wanted:
+            if binding.transport is None:
+                continue
+            if binding.family == wanted:
                 return binding
-        return None
+            if version == 4 and binding.dual:
+                fallback = binding
+        return fallback
 
     def send_to(self, data: bytes, addr) -> bool:
         """Send one datagram to an ordinary address. False when none can."""

@@ -27,10 +27,11 @@ from trenchchat.core.protocol import (
 )
 from trenchchat.core.storage import Storage
 from trenchchat.core.upgrade import (
+    ADDRESS_PEER, ADDRESS_PEER6, ADDRESS_SELF, ADDRESS_SELF6,
     BACKOFF_MAX_SECS, BACKOFF_START_SECS, FALLBACK_OFFER_SECS, REASON_BACKOFF,
     REASON_DISABLED, REASON_HANDSHAKE_FAILED, REASON_INELIGIBLE,
     OFFER_TIMEOUT_SECS, REASON_NO_ANSWER, REASON_PUNCH_FAILED,
-    UpgradeManager, is_eligible,
+    UpgradeManager, address_kind, is_eligible,
 )
 from trenchchat.network.base import PATH_DIRECT
 from trenchchat.network.ip import candidates, punch
@@ -189,6 +190,93 @@ class TestCandidateGathering:
         gathered = candidates.gather(45678, mapped=("203.0.113.7", 51820))
         wire = [[host, port, kind] for host, port, kind in gathered]
         assert upgrade_candidates(wire) == gathered
+
+
+class TestDualStackGathering:
+    """What a host with both families offers, and what it leaves out.
+
+    An IPv6 pair needs no address anybody observed and no router that
+    cooperates, only a firewall that lets the reply back in, so a candidate
+    list that carries IPv6 is the one case this design gets for free. A host
+    holds several IPv6 addresses at once and only some of them are worth a
+    peer's time.
+    """
+
+    def test_both_families_are_offered_as_lan(self, monkeypatch):
+        monkeypatch.setattr(candidates, "local_addresses",
+                            lambda: ["192.168.1.9", "2001:db8:ff::5", "fd00::7"])
+        gathered = candidates.gather(42420)
+        assert gathered == [("192.168.1.9", 42420, UPGRADE_KIND_LAN),
+                            ("2001:db8:ff::5", 42420, UPGRADE_KIND_LAN),
+                            ("fd00::7", 42420, UPGRADE_KIND_LAN)]
+
+    def test_a_unique_local_address_is_reachable_and_a_link_local_one_is_not(self):
+        assert candidates.is_reachable_address("fd00::7")
+        assert candidates.is_reachable_address("2001:db8:ff::5")
+        assert not candidates.is_reachable_address("fe80::1%eth0")
+        assert not candidates.is_reachable_address("::ffff:192.168.1.9")
+        assert not candidates.is_reachable_address("fec0::1")
+
+    def test_the_address_the_kernel_would_send_from_comes_first(self, monkeypatch):
+        monkeypatch.setattr(candidates, "_route_address",
+                            lambda family, _target: {
+                                socket.AF_INET: "192.168.1.9",
+                                socket.AF_INET6: "2001:db8:ff::7777",
+                            }.get(family))
+        monkeypatch.setattr(candidates, "_interface_addresses", lambda: [])
+        monkeypatch.setattr(candidates, "_hostname_addresses", lambda: [])
+        monkeypatch.setattr(candidates, "_interface_addresses6",
+                            lambda: ["2001:db8:ff::5", "2001:db8:ff::7777"])
+        found = candidates.local_addresses()
+        assert found[0] == "192.168.1.9"
+        assert found[1] == "2001:db8:ff::7777", \
+            "the temporary address the kernel would use was not offered first"
+        assert "2001:db8:ff::5" in found, "the permanent address was not offered"
+
+    def test_no_more_than_two_ipv6_addresses_are_offered(self, monkeypatch):
+        monkeypatch.setattr(candidates, "_route_address",
+                            lambda _family, _target: None)
+        monkeypatch.setattr(candidates, "_interface_addresses",
+                            lambda: ["192.168.1.9"])
+        monkeypatch.setattr(candidates, "_hostname_addresses", lambda: [])
+        monkeypatch.setattr(candidates, "_interface_addresses6",
+                            lambda: [f"2001:db8:ff::{n}" for n in range(1, 7)])
+        found = candidates.local_addresses()
+        assert len([a for a in found if candidates.family_of(a) == 6]) == \
+            candidates.MAX_IPV6_ADDRESSES
+        assert "192.168.1.9" in found, "IPv4 was bounded along with IPv6"
+
+    def test_the_kernels_ipv6_list_is_read_with_its_flags(self, monkeypatch,
+                                                          tmp_path):
+        """Deprecated and tentative addresses are not ones to be dialled at."""
+        table = tmp_path / "if_inet6"
+        table.write_text(
+            "20010db800ff00000000000000000005 02 40 00 80     eth0\n"
+            "20010db800ff0000000000000000abcd 02 40 00 01     eth0\n"
+            "20010db800ff0000000000000000dead 02 40 00 20     eth0\n"
+            "20010db800ff0000000000000000beef 02 40 00 40     eth0\n"
+            "fe800000000000000000000000000001 02 40 20 80     eth0\n"
+            "00000000000000000000000000000001 01 80 10 80       lo\n")
+        monkeypatch.setattr(candidates, "_IF_INET6", str(table))
+        found = candidates._interface_addresses6()
+        assert found == ["2001:db8:ff::5", "2001:db8:ff::abcd",
+                         "fe80::1", "::1"]
+        assert [a for a in found if candidates.is_reachable_address(a)] == \
+            ["2001:db8:ff::5", "2001:db8:ff::abcd"]
+
+    def test_a_host_without_the_kernels_list_gathers_what_it_can(self,
+                                                                 monkeypatch):
+        monkeypatch.setattr(candidates, "_IF_INET6", "/nonexistent/if_inet6")
+        assert candidates._interface_addresses6() == []
+
+    def test_one_observed_address_of_each_family_is_offered(self):
+        observed = candidates.newest_per_family(
+            [("203.0.113.7", 33445), ("198.51.100.4", 41000),
+             ("2001:db8:ff::5", 42420), ("2001:db8:ff::9", 42421)])
+        assert observed == [("203.0.113.7", 33445), ("2001:db8:ff::5", 42420)]
+        gathered = candidates.gather(42420, observed=observed)
+        assert gathered[:2] == [("203.0.113.7", 33445, UPGRADE_KIND_OBSERVED),
+                                ("2001:db8:ff::5", 42420, UPGRADE_KIND_OBSERVED)]
 
 
 class TestProbeDatagrams:
@@ -396,6 +484,36 @@ class TestPunchExchange:
                                  start_at=time.time() + 0.5)
             assert not result.punched
             assert time.monotonic() - started >= 0.5
+
+
+class TestBothFamiliesAtOnce:
+    """Which family a pair has in common is not something either side knows.
+
+    So both are probed in the same round and the first pair seen both ways
+    wins, whichever family it is in. Nothing chooses a family in advance and
+    nothing waits for one to fail before trying the other.
+    """
+
+    def test_every_candidate_is_probed_in_the_same_round(self):
+        nonce = b"\x3c" * UPGRADE_NONCE_BYTES
+        sent: list = []
+        channel = punch.ProbeChannel(
+            nonce, lambda data, addr: sent.append(addr) or True)
+        punch.punch(channel, [("198.51.100.4", 41000, UPGRADE_KIND_OBSERVED),
+                              ("2001:db8:ff::5", 42420, UPGRADE_KIND_LAN)],
+                    seconds=0.25)
+        assert sent[:2] == [("198.51.100.4", 41000), ("2001:db8:ff::5", 42420)]
+
+    def test_the_family_that_answers_first_is_the_one_taken(self):
+        nonce = b"\x3d" * UPGRADE_NONCE_BYTES
+        channel = punch.ProbeChannel(nonce, lambda _data, _addr: True)
+        six = ("2001:db8:ff::5", 42420)
+        channel.deliver(punch.probe_datagram(nonce), six)
+        channel.deliver(punch.ack_datagram(nonce), six)
+        result = punch.punch(channel, [("198.51.100.4", 41000), six],
+                             seconds=2.0)
+        assert result.remote == six
+        assert result.seconds < 1.0, "the other family was waited out"
 
 
 # ---------------------------------------------------------------------------
@@ -684,6 +802,48 @@ class TestObservedAddresses:
         fields = {}
         smaller.manager._add_observed(fields, larger.hash_hex)
         assert fields[F_UPGRADE_OBSERVED] == ["198.51.100.9", 41000]
+
+    def test_an_observation_of_one_family_never_overwrites_the_other(
+            self, upgrade_pair):
+        """A translated IPv4 address is the one a node cannot work out itself.
+
+        Its IPv6 address it already holds, so an IPv6 observation arriving
+        after an IPv4 one must not take its place; the pair that depends on
+        the translated address would have nothing left to offer.
+        """
+        smaller, larger = _smaller_first(upgrade_pair)
+        storage = smaller.peer.storage
+        smaller.manager._note_observed(larger.hash_hex, "203.0.113.7", 33445)
+        smaller.manager._note_observed(larger.hash_hex, "2001:db8:ff::5", 42420)
+
+        assert storage.get_upgrade_addresses(ADDRESS_SELF) == [
+            ("203.0.113.7", 33445)]
+        assert storage.get_upgrade_addresses(ADDRESS_SELF6) == [
+            ("2001:db8:ff::5", 42420)]
+        assert smaller.manager._own_candidates()[:2] == [
+            ["203.0.113.7", 33445, UPGRADE_KIND_OBSERVED],
+            ["2001:db8:ff::5", 42420, UPGRADE_KIND_OBSERVED]], \
+            "one observation of each family was not offered"
+
+    def test_the_translated_address_is_the_one_a_peer_is_told_about(
+            self, upgrade_pair):
+        smaller, larger = _smaller_first(upgrade_pair)
+        storage = smaller.peer.storage
+        storage.record_upgrade_address(larger.hash_hex, ADDRESS_PEER6,
+                                       "2001:db8:ff::9", 42420)
+        fields = {}
+        smaller.manager._add_observed(fields, larger.hash_hex)
+        assert fields[F_UPGRADE_OBSERVED] == ["2001:db8:ff::9", 42420]
+
+        storage.record_upgrade_address(larger.hash_hex, ADDRESS_PEER,
+                                       "198.51.100.9", 41000)
+        smaller.manager._add_observed(fields, larger.hash_hex)
+        assert fields[F_UPGRADE_OBSERVED] == ["198.51.100.9", 41000]
+
+    def test_an_address_is_filed_under_the_family_it_is_in(self):
+        assert address_kind(ADDRESS_PEER, "203.0.113.7") == ADDRESS_PEER
+        assert address_kind(ADDRESS_PEER, "2001:db8:ff::5") == ADDRESS_PEER6
+        assert address_kind(ADDRESS_SELF, "fd00::1") == ADDRESS_SELF6
 
     def test_a_nonsense_observation_is_not_stored(self, upgrade_pair):
         smaller, larger = _smaller_first(upgrade_pair)

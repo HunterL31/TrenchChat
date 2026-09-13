@@ -34,10 +34,12 @@ from trenchchat.network.base import (
 )
 from trenchchat.network.ip import frames, punch, session as session_mod
 from trenchchat.network.ip.certificate import SessionCertificate
-from trenchchat.network.ip.endpoint import DatagramEndpoint, bind_listen_sockets
+from trenchchat.network.ip.endpoint import (
+    DUAL_STACK_HOST, DatagramEndpoint, bind_listen_sockets,
+)
 from trenchchat.network.ip.session import DirectSession, SessionHooks
 
-DEFAULT_LISTEN_HOST = "0.0.0.0"
+DEFAULT_LISTEN_HOST = DUAL_STACK_HOST
 
 # The plan's session caps.
 MAX_SESSIONS = 128

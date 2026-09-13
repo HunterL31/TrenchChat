@@ -24,7 +24,7 @@ from aioquic.quic.events import (
     ConnectionTerminated, HandshakeCompleted, StreamDataReceived,
 )
 
-from tests.helpers import wait_for
+from tests.helpers import ipv6_available, wait_for
 from trenchchat.config import Config
 from trenchchat.core.identity import Identity
 from trenchchat.network.base import PATH_DIRECT, PATH_RETICULUM, SendState
@@ -42,6 +42,9 @@ from trenchchat.network.ip.transport import IPTransport, MAX_PENDING_HANDSHAKES
 
 CONNECT_TIMEOUT_SECS = 10.0
 FRAME_TIMEOUT_SECS = 5.0
+
+# A port nothing on this host listens on, for a candidate that must not answer.
+DEAD_PORT = 9
 
 # Long enough that a path read racing a path_changed handler loses the race
 # every time, short enough to spend on one test.
@@ -803,6 +806,17 @@ class TestSocketOwnership:
             other.close()
             sock.close()
 
+    def test_the_listener_binds_one_port_whatever_the_families(self):
+        """Dual-stack or a socket each, a peer is told one port."""
+        sockets = bind_listen_sockets("::", 0)
+        try:
+            assert sockets
+            assert len({sock.getsockname()[1] for sock in sockets}) == 1
+            assert len({sock.family for sock in sockets}) == len(sockets)
+        finally:
+            for sock in sockets:
+                sock.close()
+
     def test_a_port_that_is_taken_is_not_the_end_of_the_matter(self, ip_node):
         """One endpoint carries everything this node does over IP, so a node
         that has none holds no sessions at all, in or out. A configured port
@@ -945,3 +959,45 @@ class TestOneSocketForEverything:
         assert probe_once(("127.0.0.1", bob.transport.listen_port), nonce,
                           timeout=1.0) == []
 
+    @pytest.mark.skipif(not ipv6_available(),
+                        reason="this kernel has no IPv6 (ipv6.disable=1)")
+    def test_a_punch_tries_both_families_and_takes_the_one_that_answers(
+            self, ip_node):
+        """Two sockets under one endpoint, and a candidate list naming both.
+
+        Which family a pair has in common is not something either side knows
+        in advance, so both are probed in the same round and the first pair
+        seen both ways wins. Here the IPv4 candidate is a port nothing is on.
+        """
+        alice = ip_node("alice", listen_host="::")
+        bob = ip_node("bob", listen_host="::")
+        nonce = b"\x47" * 16
+        alice_channel = alice.transport.open_probe_channel(nonce)
+        bob_channel = bob.transport.open_probe_channel(nonce)
+        assert alice_channel is not None and bob_channel is not None
+        try:
+            result = punch.punch(
+                alice_channel,
+                [("127.0.0.1", DEAD_PORT), ("::1", bob.transport.listen_port)],
+                seconds=4.0)
+        finally:
+            alice.transport.close_probe_channel(nonce)
+            bob.transport.close_probe_channel(nonce)
+
+        assert result.punched, "neither family answered"
+        assert result.remote[0] == "::1"
+        assert result.remote[1] == bob.transport.listen_port
+
+    @pytest.mark.skipif(not ipv6_available(),
+                        reason="this kernel has no IPv6 (ipv6.disable=1)")
+    def test_a_session_runs_over_ipv6(self, ip_node):
+        alice = ip_node("alice", listen_host="::1")
+        bob = ip_node("bob", listen_host="::1")
+        assert alice.transport.open_session(
+            bob.hash_hex, "::1", bob.transport.listen_port,
+            bob.transport.certificate_der)
+        alice.transport.send(bob.hash_hex, {}, "over six")
+        assert wait_for(lambda: [m.content for m in bob.inbox] == ["over six"],
+                        msg="the message over IPv6")
+        assert wait_for(lambda: alice.observed, msg="the observed address")
+        assert alice.observed[0][1] == "::1"

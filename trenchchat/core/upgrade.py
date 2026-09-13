@@ -72,9 +72,14 @@ REASON_REFUSED = "refused"
 REASON_BACKOFF = "backoff"
 
 # Where the address kinds are remembered. 'peer' is where this node last saw
-# that peer; 'self' is where that peer last saw this node.
+# that peer; 'self' is where that peer last saw this node. One of each per
+# family, because an observation of one is no answer about the other, and a
+# pair that depends on a translated IPv4 address must not lose it to an IPv6
+# address that was only ever the one the peer already knew.
 ADDRESS_PEER = "peer"
 ADDRESS_SELF = "self"
+ADDRESS_PEER6 = "peer6"
+ADDRESS_SELF6 = "self6"
 
 # A pair that failed waits this long before trying again, doubling to a day.
 # Reset when either side's candidate set changes, because a new address is new
@@ -104,9 +109,18 @@ MAX_CONCURRENT_ATTEMPTS = 4
 MAX_TRACKED_PEERS = 256
 MAX_SPENT_NONCES = 512
 
+# How many remembered observations of this node's own address are read for a
+# candidate list, from which one per family is offered.
+OBSERVED_SELF_ROWS = 4
+
 # How often the router mapping is asked about. The mapper itself decides
 # whether anything is due; this only keeps it off the tick's thread.
 PORTMAP_INTERVAL_SECS = 60.0
+
+
+def address_kind(kind: str, host: str) -> str:
+    """The kind one observation is stored under, which carries its family."""
+    return kind + "6" if candidate_gathering.family_of(host) == 6 else kind
 
 
 def is_eligible(storage: Storage, self_hex: str, peer_hex: str) -> bool:
@@ -518,17 +532,18 @@ class UpgradeManager:
     def _punch(self, attempt: _Attempt, start_at: float | None) -> None:
         """Probe the peer's candidates, then carry the handshake on the winner."""
         targets = list(attempt.peer_candidates)
-        remembered = self._storage.get_upgrade_address(attempt.peer_hex,
-                                                       ADDRESS_PEER)
-        if remembered is not None:
-            targets.append((remembered[0], remembered[1]))
+        for kind in (ADDRESS_PEER, ADDRESS_PEER6):
+            remembered = self._storage.get_upgrade_address(attempt.peer_hex, kind)
+            if remembered is not None:
+                targets.append((remembered[0], remembered[1]))
         result = punching.punch(
             attempt.channel, targets, start_at=start_at,
             on_probe=lambda source: attempt.probe_addresses.append(source),
         )
         for source in list(attempt.probe_addresses):
             self._storage.record_upgrade_address(
-                attempt.peer_hex, ADDRESS_PEER, source[0], source[1])
+                attempt.peer_hex, address_kind(ADDRESS_PEER, source[0]),
+                source[0], source[1])
         if self._self_hex > attempt.peer_hex:
             self._await_dial(attempt, result, len(targets))
             return
@@ -612,7 +627,11 @@ class UpgradeManager:
     def _own_candidates(self) -> list:
         """This node's candidates for one attempt, as the wire carries them."""
         mapped = self._mapper.address() if self._mapper is not None else None
-        observed = self._storage.get_upgrade_addresses(ADDRESS_SELF, limit=2)
+        observed = candidate_gathering.newest_per_family(
+            self._storage.get_upgrade_addresses(ADDRESS_SELF,
+                                                limit=OBSERVED_SELF_ROWS)
+            + self._storage.get_upgrade_addresses(ADDRESS_SELF6,
+                                                  limit=OBSERVED_SELF_ROWS))
         gathered = candidate_gathering.gather(
             self._transport.listen_port, mapped=mapped, observed=observed)
         return [[host, port, kind] for host, port, kind in gathered]
@@ -622,11 +641,15 @@ class UpgradeManager:
 
         The Phase 0 harness showed this is the only recovery from a NAT that
         remapped a port: the peer's own candidate is wrong and nothing but an
-        observation from outside can say so.
+        observation from outside can say so. The IPv4 observation is the one
+        worth the bytes when there are both, because that is the one address a
+        peer cannot work out for itself; its IPv6 address it already holds.
         """
-        seen = self._storage.get_upgrade_address(peer_hex, ADDRESS_PEER)
-        if seen is not None:
-            fields[F_UPGRADE_OBSERVED] = [seen[0], seen[1]]
+        for kind in (ADDRESS_PEER, ADDRESS_PEER6):
+            seen = self._storage.get_upgrade_address(peer_hex, kind)
+            if seen is not None:
+                fields[F_UPGRADE_OBSERVED] = [seen[0], seen[1]]
+                return
 
     def _note_observed(self, peer_hex: str, host: str, port: int) -> None:
         """Record where a peer's session saw this node arrive from.
@@ -654,8 +677,8 @@ class UpgradeManager:
         """
         if not candidate_gathering.is_reachable_address(host):
             return
-        self._storage.record_upgrade_address(peer_hex, ADDRESS_SELF, host,
-                                             port)
+        self._storage.record_upgrade_address(
+            peer_hex, address_kind(ADDRESS_SELF, host), host, port)
         RNS.log(f"TrenchChat [upgrade]: {peer_hex[:12]}… saw this node at "
                 f"{host}:{port}", RNS.LOG_DEBUG)
 

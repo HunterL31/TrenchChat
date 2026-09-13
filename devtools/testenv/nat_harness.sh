@@ -22,7 +22,7 @@
 # routes between the two LANs, so a peer's lan candidate is genuinely
 # unreachable from the other side and the punch has to do the work.
 #
-# Four variants, and only two of them are a pass or a fail:
+# Five variants, and only three of them are a pass or a fail:
 #
 #   one_nat    A is behind a masquerading NAT and B is on the segment with the
 #              hub, which is the shape of every pair where one side is
@@ -40,6 +40,14 @@
 #   symmetric  Both sides behind `fully-random` masquerading, so no candidate
 #              can predict the external port. The pair must stay on Reticulum,
 #              which is the deliberate non-fix the plan records.
+#   ipv6_fw    No NAT at all: both peers hold a global IPv6 address and sit
+#              behind their own stateful IPv6 firewall, which accepts
+#              established and related and drops new inbound. Inbound IPv4 UDP
+#              is dropped in both namespaces, so the only path between them is
+#              the IPv6 one, and the hub they both signal through is reached
+#              over IPv6 as well. The punch must succeed with nothing observed
+#              and nobody helping: each side already knows the address it will
+#              be reached at, and all the firewall asks is that it send first.
 #
 # The finding the cone variant records: a node knows its own addresses and
 # nothing about the address translation in front of them, so two peers that are
@@ -55,6 +63,7 @@
 #
 #   sudo ./nat_harness.sh                     # every variant
 #   sudo ./nat_harness.sh one_nat
+#   sudo ./nat_harness.sh ipv6_fw
 #   sudo PYTHON=/path/to/.venv/bin/python ./nat_harness.sh symmetric
 
 set -u -o pipefail
@@ -75,7 +84,12 @@ BRIDGE=tcn-br0
 LAN_A=10.1.0
 LAN_B=10.2.0
 WAN=198.51.100
+WAN6=2001:db8:ff
 HUB_IP="$WAN.254"
+HUB6="$WAN6::254"
+# Where the hub listens and where the testers dial it, which the IPv6 variant
+# moves onto IPv6 so that nothing in the run depends on IPv4 but the driver.
+HUB_HOST="$HUB_IP"
 HUB_PORT=41101
 API_A=8901
 API_B=8902
@@ -103,6 +117,20 @@ preflight() {
     ip link del tcn-probe0
 }
 
+# The IPv6 variant needs a kernel with IPv6 in it. A kernel booted with
+# ipv6.disable=1 has no /proc/sys/net/ipv6 and refuses every socket of the
+# family, and no amount of namespace setup works around that. Asking for the
+# variant by name on such a kernel is an error; a run of everything says so and
+# carries on, because the other four still mean something.
+have_ipv6() {
+    [ -d /proc/sys/net/ipv6 ]
+}
+
+require_ipv6() {
+    have_ipv6 || fail \
+        "this kernel has no IPv6 (booted with ipv6.disable=1?), so ipv6_fw cannot run"
+}
+
 stop_processes() {
     for pid in "$worker_a_pid" "$worker_b_pid" "$worker_c_pid" "$hub_pid"; do
         [ -n "$pid" ] && kill "$pid" 2>/dev/null
@@ -116,7 +144,7 @@ teardown() {
     for ns in "$NS_A" "$NS_NAT_A" "$NS_NAT_B" "$NS_B" "$NS_C"; do
         ip netns del "$ns" 2>/dev/null || true
     done
-    for leg in tcn-wa-br tcn-wb-br tcn-b-br tcn-c-br; do
+    for leg in tcn-wa-br tcn-wb-br tcn-a-br tcn-b-br tcn-c-br; do
         ip link del "$leg" 2>/dev/null || true
     done
     ip link del "$BRIDGE" 2>/dev/null || true
@@ -146,6 +174,45 @@ masquerade() {
     ip netns exec "$ns" nft "add rule ip tcn forward iifname \"$wan\" ct state new,invalid drop"
 }
 
+# A stateful IPv6 firewall, the one an ordinary home router runs: everything
+# established or related comes back in, anything new from outside does not, and
+# ICMPv6 is let through because neighbour discovery is ICMPv6 and a segment
+# without it has no addresses to talk to. IPv4 UDP is dropped outright, so the
+# punch this variant measures is the IPv6 one and cannot quietly be an IPv4 one.
+ipv6_firewall() {
+    local ns="$1"
+    ip netns exec "$ns" nft add table ip6 tcn6
+    ip netns exec "$ns" nft \
+        "add chain ip6 tcn6 input { type filter hook input priority 0 ; policy accept ; }"
+    ip netns exec "$ns" nft "add rule ip6 tcn6 input iifname \"lo\" accept"
+    ip netns exec "$ns" nft "add rule ip6 tcn6 input meta l4proto ipv6-icmp accept"
+    ip netns exec "$ns" nft "add rule ip6 tcn6 input ct state established,related accept"
+    ip netns exec "$ns" nft "add rule ip6 tcn6 input ct state new,invalid drop"
+    ip netns exec "$ns" nft add table ip tcn
+    ip netns exec "$ns" nft \
+        "add chain ip tcn input { type filter hook input priority 0 ; policy accept ; }"
+    ip netns exec "$ns" nft "add rule ip tcn input meta l4proto udp drop"
+}
+
+# One namespace on the bridge with both families and no translation in front.
+bridge_peer() {
+    local ns="$1" leg="$2" four="$3" six="$4"
+    ip link add "$leg" type veth peer name "$leg-br"
+    ip link set "$leg" netns "$ns"
+    ip link set "$leg-br" master "$BRIDGE"
+    ip link set "$leg-br" up
+    ip netns exec "$ns" ip addr add "$four/24" dev "$leg"
+    # nodad, because an address still proving itself is tentative, and a
+    # tentative address is one this node deliberately does not offer a peer.
+    ip netns exec "$ns" ip -6 addr add "$six/64" dev "$leg" nodad
+    ip netns exec "$ns" ip link set "$leg" up
+}
+
+# Whether this variant is the IPv6 one, which has no NAT anywhere in it.
+is_ipv6() {
+    [ "$1" = "ipv6_fw" ]
+}
+
 # Whether this variant puts a NAT in front of B as well as in front of A.
 nat_in_front_of_b() {
     [ "$1" != "one_nat" ]
@@ -168,6 +235,20 @@ setup() {
     ip link add "$BRIDGE" type bridge
     ip addr add "$HUB_IP/24" dev "$BRIDGE"
     ip link set "$BRIDGE" up
+
+    if is_ipv6 "$mode"; then
+        HUB_HOST="$HUB6"
+        HOST_A="$WAN.5"
+        HOST_B="$WAN.6"
+        ip -6 addr add "$HUB6/64" dev "$BRIDGE" nodad
+        bridge_peer "$NS_A" tcn-a0 "$HOST_A" "$WAN6::5"
+        bridge_peer "$NS_B" tcn-b0 "$HOST_B" "$WAN6::6"
+        ipv6_firewall "$NS_A"
+        ipv6_firewall "$NS_B"
+        return
+    fi
+    HUB_HOST="$HUB_IP"
+    HOST_A="$LAN_A.2"
 
     # A is always behind a NAT: its LAN, and its NAT's leg on the bridge.
     ip link add tcn-a0 type veth peer name tcn-a1
@@ -240,7 +321,7 @@ setup() {
 
 start_hub() {
     mkdir -p "$WORK/hub"
-    "$PYTHON" "$HERE/hub.py" "$WORK/hub" "$HUB_PORT" trenchchat_nat_hub "$HUB_IP" \
+    "$PYTHON" "$HERE/hub.py" "$WORK/hub" "$HUB_PORT" trenchchat_nat_hub "$HUB_HOST" \
         > "$WORK/hub.log" 2>&1 &
     hub_pid=$!
     for _ in $(seq 1 30); do
@@ -259,14 +340,14 @@ start_worker() {
     # way the launcher declares a Tailscale name.
     ip netns exec "$ns" env PYTHONPATH="$REPO_ROOT:$HERE" \
         "$PYTHON" "$HERE/worker.py" "$tag" "$data" "$tag" client 0 \
-        "$HUB_IP" "$HUB_PORT" "$api" "$instance" false 0 "$TOKEN" "$lan" \
+        "$HUB_HOST" "$HUB_PORT" "$api" "$instance" false 0 "$TOKEN" "$lan" \
         "http://$lan:$api" \
         > "$WORK/$tag.log" 2>&1 &
 }
 
 drive() {
     local mode="$1"
-    "$PYTHON" - "$mode" "$WORK" "$REPO_ROOT" "$LAN_A.2" "$HOST_B" <<'PYTHON'
+    "$PYTHON" - "$mode" "$WORK" "$REPO_ROOT" "$HOST_A" "$HOST_B" <<'PYTHON'
 import sys
 import time
 from pathlib import Path
@@ -408,13 +489,103 @@ raise SystemExit(0 if result["upgraded"] else 1)
 PYTHON
 }
 
+# The IPv6 case: no translation anywhere, both peers knowing the address they
+# will be reached at, and a firewall that only asks each of them to send first.
+# What it has to show beyond "a session came up" is which family carried it,
+# since a pair that quietly punched over IPv4 would look exactly the same.
+drive_ipv6() {
+    "$PYTHON" - "$WORK" "$REPO_ROOT" "$HOST_A" "$HOST_B" <<'PYTHON'
+import sys
+import time
+from pathlib import Path
+
+WORK, REPO_ROOT, HOST_A, HOST_B = sys.argv[1:5]
+sys.path.insert(0, f"{REPO_ROOT}/devtools/testenv/scenarios")
+sys.path.insert(0, f"{REPO_ROOT}/devtools/testenv")
+sys.path.insert(0, REPO_ROOT)
+
+from asserts import ScenarioFailure, set_timeout_scale, wait_until  # noqa: E402
+from flows import invite_only_channel  # noqa: E402
+from peer import Peer  # noqa: E402
+from scen_upgrade import _upgraded  # noqa: E402
+from trenchchat.core.storage import Storage  # noqa: E402
+from trenchchat.network.base import PATH_DIRECT  # noqa: E402
+
+set_timeout_scale(1.5)
+a = Peer("A", 8901, "nat-harness-token", host=HOST_A)
+b = Peer("B", 8902, "nat-harness-token", host=HOST_B)
+for peer in (a, b):
+    deadline = time.time() + 120
+    while time.time() < deadline and not peer.alive():
+        time.sleep(1.0)
+    if not peer.alive():
+        raise SystemExit(f"{peer.tag}'s API never came up")
+
+
+def read_store(data_dir: str, read):
+    """Open a tester's store, ask it one question, and close it again."""
+    store = Storage(db_path=Path(data_dir) / "storage.db")
+    try:
+        return read(store)
+    finally:
+        store.close()
+
+
+def seen_peer_at(data_dir: str, peer_hash: str):
+    """Where a tester saw the other's probes arrive from."""
+    return read_store(data_dir, lambda store: store.get_upgrade_address(
+        peer_hash, "peer"))
+
+
+channel = invite_only_channel(a, [b], "ipv6-room")
+started = time.time()
+result = {"mode": "ipv6_fw", "channel": channel[:12]}
+try:
+    wait_until(lambda: _upgraded(a, b), "A to open a session with B", 120.0)
+    wait_until(lambda: _upgraded(b, a), "B to hold the far side", 60.0)
+    wait_until(lambda: a.member_path(channel, b.hash) == PATH_DIRECT,
+               "A's roster to show B as direct", 60.0)
+    result["upgraded"] = True
+    result["seconds"] = round(time.time() - started, 1)
+except (ScenarioFailure, TimeoutError) as e:
+    result["upgraded"] = False
+    result["seconds"] = round(time.time() - started, 1)
+    result["detail"] = str(e)[:200]
+    result["failure"] = a.upgrade_failure(b.hash)
+
+result["a_saw_b_at"] = seen_peer_at(f"{WORK}/a", b.hash)
+result["b_saw_a_at"] = seen_peer_at(f"{WORK}/b", a.hash)
+# The addresses are stored as this node read them off the wire, so a colon in
+# one is the punch saying which family it crossed.
+result["over_ipv6"] = all(":" in (seen or ("", 0))[0]
+                          for seen in (result["a_saw_b_at"], result["b_saw_a_at"]))
+result["observed_self"] = {
+    tag: read_store(f"{WORK}/{tag}",
+                    lambda store: store.get_upgrade_addresses("self"))
+    for tag in ("a", "b")
+}
+
+a.send(channel, "ipv6-harness-message")
+carried = False
+for _ in range(60):
+    if "ipv6-harness-message" in b.contents(channel):
+        carried = True
+        break
+    time.sleep(1.0)
+result["message_carried"] = carried
+Path(WORK, "ipv6_fw.result.json").write_text(repr(result))
+print(f"  {result}")
+raise SystemExit(0 if result["upgraded"] and result["over_ipv6"] else 1)
+PYTHON
+}
+
 run_variant() {
     local mode="$1" expect="$2"
     echo "=== $mode, upgrade expected to $expect ==="
     mkdir -p "$WORK"
     setup "$mode"
     start_hub
-    start_worker "$NS_A" A "$WORK/a" "$API_A" "$LAN_A.2" trenchchat_nat_a
+    start_worker "$NS_A" A "$WORK/a" "$API_A" "$HOST_A" trenchchat_nat_a
     worker_a_pid=$!
     start_worker "$NS_B" B "$WORK/b" "$API_B" "$HOST_B" trenchchat_nat_b
     worker_b_pid=$!
@@ -425,6 +596,8 @@ run_variant() {
 
     if has_helper "$mode"; then
         drive_helper
+    elif is_ipv6 "$mode"; then
+        drive_ipv6
     else
         drive "$mode"
     fi
@@ -455,16 +628,22 @@ main() {
     case "$which" in
         one_nat)     run_variant one_nat succeed || failures=1 ;;
         cone)        run_variant cone record ;;
-        cone_helper) run_variant cone_helper record ;;
+        cone_helper) run_variant cone_helper succeed || failures=1 ;;
         symmetric)   run_variant symmetric fail || failures=1 ;;
+        ipv6_fw)     require_ipv6; run_variant ipv6_fw succeed || failures=1 ;;
         all|both)
             run_variant one_nat succeed || failures=1
             run_variant cone record
-            run_variant cone_helper record
+            run_variant cone_helper succeed || failures=1
             run_variant symmetric fail || failures=1
+            if have_ipv6; then
+                run_variant ipv6_fw succeed || failures=1
+            else
+                echo "=== ipv6_fw skipped: this kernel has no IPv6"
+            fi
             ;;
         *) fail "unknown variant '$which', expected one_nat, cone, cone_helper, "\
-                "symmetric or all" ;;
+                "symmetric, ipv6_fw or all" ;;
     esac
     [ "$failures" = "0" ] && echo "every variant behaved as expected"
     return "$failures"

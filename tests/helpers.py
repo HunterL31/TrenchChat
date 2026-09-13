@@ -2,13 +2,30 @@
 Shared test utilities for TrenchChat integration tests.
 """
 
+import socket
 import time
+
 import RNS
 
 from tests.conftest import TestPeer, peer_is_live, signing_identity
 from trenchchat.core.authorship import sign_message
 from trenchchat.core.permissions import is_open_join, permissions_from_json
 from trenchchat.core.storage import Storage
+
+
+def ipv6_available() -> bool:
+    """Whether this host can use IPv6 at all.
+
+    A kernel booted with ipv6.disable=1 has the family compiled in and refuses
+    every socket of it, which no amount of test setup can work around; what
+    depends on IPv6 is skipped there rather than failing for the wrong reason.
+    """
+    try:
+        with socket.socket(socket.AF_INET6, socket.SOCK_DGRAM) as probe:
+            probe.bind(("::1", 0))
+        return True
+    except OSError:
+        return False
 
 
 def wait_for(predicate, timeout: float = 10.0, interval: float = 0.2,
