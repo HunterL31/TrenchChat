@@ -596,6 +596,82 @@ in three steps that land in order because they share the transport.
   and never before; pytest covers the client against a fake STUN server and
   the prompt against the failure reason.
 
+**Phase 6 results, steps 1 and 2.** The two reachability steps are built, the
+STUN opt-in is not, and six things are worth recording.
+
+The transport has one datagram endpoint (`network/ip/endpoint.py`) and
+everything this node does over IP runs on it: sessions dialled, sessions
+accepted, and an attempt's probes. Inbound datagrams are told apart by QUIC's
+connection id, the routing aioquic's own server does, except that outbound
+connections register in the same table and follow the ids QUIC issues and
+retires for them; a probe is told apart before that, by its magic and a nonce a
+live attempt is waiting on, which no QUIC packet is small enough to be mistaken
+for. `open_session(sock=)` and `accept_on` are gone: a dial goes out of the
+endpoint and the side that does not dial waits for one (`await_session`),
+because the peer's first packet is addressed to the socket it was told about
+and the listener is already there. Every candidate a node offers therefore
+names that one port, which is what `cone_helper` needed.
+
+A punch is now a channel rather than a socket. `punch.ProbeChannel` holds one
+attempt's nonce, the endpoint hands it every datagram carrying that nonce on
+the loop, and it answers there and then with an acknowledgement and a probe of
+this node's own at the address the probe came from; `punch()` drives the
+retransmission from a worker thread and touches no socket at all.
+
+The observed address had to become symmetric, and that is the change that
+completed `cone_helper`. Only the accepting side used to say where it saw the
+other arrive from, so a node that only ever accepts sessions learned nothing
+about itself; and two peers behind NATs need *both* translated addresses before
+either can punch, because each side's NAT only lets the other's probe in after
+it has sent one that way. One side knowing is enough when the other is
+reachable (`one_nat`) and no use at all when neither is.
+
+What `accept_on` took with it is one narrowing: a punched accept socket was
+held to one peer and to the certificate that peer had offered over Reticulum.
+An inbound session is now held to the eligibility gate and the HELLO alone,
+which is what the listening socket was always held to, since an eligible peer
+could always dial that port directly; the certificate stays what it was, a
+claim that is only ever the pin for a later connection.
+
+The larger hash no longer needs a pair of its own. Its probes are there to open
+its own way in and the session arrives on the socket they went out of, so it
+waits to be dialled whenever any probe from the peer arrived, and calls the
+pair unpunched only when nothing did.
+
+Both families run under that one endpoint: `::` with `IPV6_V6ONLY` off where
+the platform allows it, a socket per family on one port where it does not, and
+an IPv4 socket alone on a host with no IPv6 at all. `candidates.gather` offers
+the address the kernel would send from, which is the temporary one wherever
+privacy extensions are on, and one other global address, never link-local, with
+unique-local kept because two peers on one site can reach each other by it.
+Both families are probed in the same round and the first pair seen both ways
+wins, so nothing chooses a family in advance or waits for one to fail, and
+observations are kept per family, because an IPv6 observation is usually an
+address the peer already knew and losing the translated IPv4 one to it would
+cost a NATed pair the only address it had.
+
+What the runs say. The NAT harness, five runs of each variant: `one_nat` comes
+up in 4.0 to 9.1 seconds; `cone_helper` in 0.0 to 33.7 seconds after its helper
+sessions, five of five, where it had failed five of five; `cone` and
+`symmetric` stay on Reticulum every run and record `punch_failed` with a next
+attempt to show for it. The `upgrade` scenario family is 8 of 8 strict, upgrade1
+and upgrade3 3 of 3 each at `--repeat 3`, and the pytest suite is 2,400 passing
+in both modes. The `ipv6_fw` variant is written and unrun: the kernel this was
+built on boots with `ipv6.disable=1`, so every socket of the family is refused;
+what depends on IPv6 is skipped in pytest and refused by the harness's preflight
+rather than passing without having run.
+
+One thing measured and deliberately left: a `cone_helper` pair takes about
+thirty seconds rather than five, because all three peers meet at once and the
+first A-B attempt goes out before either has been told its own address; the
+second, one backoff later, has both. The plan says a backoff resets when either
+side's candidate set changes, and only the peer's side is implemented. Reading
+this node's own new address the same way would cost nothing on the mesh and
+would save that wait, but a symmetric NAT hands out a different address per
+session, so a pair that can never punch would clear its backoff on every
+sighting and try for ever. Left as it is until the STUN step gives a node one
+address to believe in.
+
 **Phase 7: the list (ongoing).** Items 2 through 8 above, each with its own
 tests and, for anything periodic, a shaped scenario run.
 
@@ -656,15 +732,18 @@ direct path gets rows of its own instead of a shaped re-run of the mesh ones.
   member (a public host, a router mapping, a shared LAN) teaches every peer
   it talks to its own translated address, and that peer can then be named to
   the rest. Any member can be that observer, none is special, and nothing is
-  asked of anyone outside the channel. Phase 4 added it and the harness
-  measured it: the teaching works (`cone_helper`, five runs, both peers told
-  their own address in seconds by a member they could reach) and the pair still
-  does not punch, because what a peer is told is the address of the socket
-  carrying the session it was told over, and a port-restricted NAT forwards to
-  that mapping from that peer alone. Completing such a pair needs each side to
-  probe from the socket it advertised and then carry the session on it, which
-  the accepting side can already do and the dialing side cannot while its
-  listening socket belongs to a QUIC server. Recorded rather than built.
+  asked of anyone outside the channel. Phase 4 added it, Phase 6 finished it.
+  What a peer was told used to be the address of the socket carrying the
+  session it was told over, and a port-restricted NAT forwards that mapping to
+  that peer alone, so the pair still did not punch. Now every session and every
+  probe runs on the one socket a node advertises, and both ends of a session
+  say where they saw the other arrive from, since two NATed peers each need
+  their own translated address before either can name the other: `cone_helper`
+  comes up direct in five runs of five. What still does not punch is a pair
+  where neither side can be named and no member can name them, which is `cone`,
+  and that is what the STUN opt-in is for. A pair with IPv6 on both ends skips
+  the question entirely, since each end already knows the address it will be
+  reached at and a stateful firewall only asks it to send first.
   Symmetric NAT and most CGNAT do not punch either, and both sides symmetric
   never will; those pairs stay on Reticulum, recorded as a deliberate
   non-fix. The diagnostics panel says which case a pair is in rather than

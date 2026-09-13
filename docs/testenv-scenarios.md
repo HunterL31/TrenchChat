@@ -1252,59 +1252,66 @@ which is exactly the once-a-second sweep doing it rather than the peer
 noticing: membership is what the session is held on, so losing it closes the
 session whether or not the far end agrees yet.
 
+**Re-run after Phase 6's first two steps**, which put every session and every
+probe on the one socket a node advertises: **8 of 8 strict**, with upgrade1 and
+upgrade3 **3 of 3 each** at `--repeat 3` and upgrade3 **5 of 5** on its own.
+upgrade1 comes up in 3.5 to 12.1s and measures a 2.7 to 5.0 ms round trip, both
+inside what the row already records. upgrade6's ratio came in at 1.9, 2.1s for
+the direct pull against 4.0s for the mesh one, which is one run against the
+row's five and a tenth of a second outside its direct figure. upgrade3's
+recovery after the deliberate drop is **0.5-8.6s over a later 5/5 pass**, the
+row's range with a slower tail; one of the three earlier passes took 45.8s and
+none of the five repeated it, so it is recorded rather than explained, and the
+row's 90s ceiling absorbs it either way.
+
 ### The NAT harness
 
-`devtools/testenv/nat_harness.sh` runs two real backends in Linux network
-namespaces behind their own masquerading NATs, with the hub in the root
-namespace where both can reach it outbound and neither can be reached at. It
-is the only place the punch faces real address translation; the scenario
-family above runs every tester on one host, where a candidate is a local
-address and the punch barely punches.
+`devtools/testenv/nat_harness.sh` runs real backends in Linux network
+namespaces, two of them behind their own masquerading NATs and, in one variant,
+a third on the segment both can reach, with the hub in the root namespace where
+everyone reaches it outbound and nobody can be reached at. It is the only place
+the punch faces real address translation; the scenario family above runs every
+tester on one host, where a candidate is a local address and the punch barely
+punches. A fifth variant has no translation at all and a stateful IPv6 firewall
+instead.
 
 | Variant | Topology | Result |
 |---|---|---|
-| `one_nat` | A behind a NAT, B on the hub's segment | ✅ The session comes up **4.5s** after the invite lands, across real masquerading, and the message crosses it. The pair that punches is the one neither candidate list named: A's translated address, which B learned from the probe that arrived |
-| `cone` | Both behind port-restricted NATs | ⚠ **Recorded.** No session in **540s**, and the conversation carries on over Reticulum throughout. Neither side can name the other: every probe goes to an unroutable lan candidate, so no probe arrives and no observation can start. See the finding below |
-| `cone_helper` | Both behind port-restricted NATs, with a third member C on the hub's segment | ⚠ **Recorded, 5 runs.** A and B each come up direct with C in **5.5-10.6s**, and C's hello tells them their own translated address: both learned one in 3 runs of 5, one of them in a fourth, neither in the fifth. A and B still never punched **in 225s of trying**, all five runs, recorded as `punch_failed`, and the conversation carried on over Reticulum throughout. See the finding below |
-| `symmetric` | Both behind `fully-random` NATs | ✅ No session in **180s**, recorded as `punch_failed` with a next attempt to show for it, and the conversation carries on over Reticulum. The case the plan calls a deliberate non-fix, failing cleanly rather than hanging |
+| `one_nat` | A behind a NAT, B on the hub's segment | ✅ **5/5.** The session comes up **4.0-9.1s** after the invite lands, across real masquerading, and the message crosses it every run. The pair that punches is the one neither candidate list named: A's translated address, which B learned from the probe that arrived |
+| `cone` | Both behind port-restricted NATs | ⚠ **Recorded, 5/5 the same.** No session in the **180s** the driver waits, `punch_failed` every run, and the conversation carries on over Reticulum throughout. Neither side can name the other and no member can name them for it: every probe goes to an unroutable lan candidate, so nothing arrives and no observation can start. This is the pair the opt-in address echo of the plan's step 3 is for |
+| `cone_helper` | Both behind port-restricted NATs, with a third member C on the hub's segment | ✅ **5/5**, where it was 0 of 5 before Phase 6. A and B come up direct with C in **4.0-9.6s**, C's hello tells each of them its own translated address whichever way that session was dialled, and the pair is direct **0.0-33.7s** later. The wait is one backoff: all three meet at once, so the first A-B attempt goes out before either has been told anything and the second has both addresses; the run that took 0.0s had been told before the driver started asking |
+| `symmetric` | Both behind `fully-random` NATs | ✅ **5/5.** No session in **180.5s**, recorded as `punch_failed` with a next attempt to show for it, and the conversation carries on over Reticulum. The case the plan calls a deliberate non-fix, failing cleanly rather than hanging |
+| `ipv6_fw` | No translation anywhere: a global IPv6 address each behind a stateful IPv6 firewall that accepts established and related and drops new inbound, with inbound IPv4 UDP dropped so the punch cannot quietly be an IPv4 one, and the hub reached over IPv6 | ⏸ **Written, not run.** The kernel this was built on boots with `ipv6.disable=1`, which refuses every socket of the family, and the variant's preflight says so rather than running something that is not the test. What it asserts when it does run: both ends direct with no helper and nothing observed, and both ends' record of where the other's probes arrived from in the IPv6 family |
 
-**The finding.** A node knows its own addresses and nothing about the address
-translation in front of them, so two peers both behind a NAT with no router
-mapping have nothing to aim at. Phase 0's spike punched this case because the
-harness told each side the other's public address; nothing tells a real node
-that, and asking a service for it would be a center. What the harness did
-change is the other direction: a probe carries the sender's translated address
-with it, so the side that can be reached now probes back at wherever the probe
-came from, which is what makes `one_nat` complete in both directions. The
-design's answers for the two-NAT case are a router mapping (UPnP-IGD or
-NAT-PMP, which no namespace here speaks) and an address a peer observed in an
-earlier exchange; with neither, the pair stays on Reticulum and the diagnostics
-panel says `punch_failed` rather than leaving it mysterious.
+**The finding, and what closed it.** A node knows its own addresses and nothing
+about the address translation in front of them, so two peers both behind a NAT
+have nothing to aim at until somebody tells them. Phase 0's spike punched this
+case only because the harness told each side the other's public address;
+nothing tells a real node that, and asking a service for it would be a center.
+The members themselves can, and now do, but it took two changes and the first
+alone was not enough.
 
-**What the helper variant adds, and where it still stops.** `cone_helper` is
-the observation working and still not being enough. A member both NATed peers
-can reach does teach each of them its own translated address, in seconds, with
-no service and nothing asked of anyone outside the channel: that half of the
-plan's answer holds. The pair still does not punch, for two reasons worth
-naming separately.
+The first is that every session and every probe runs on the socket a node
+advertises. An attempt used to punch from a socket of its own, so the mapping a
+helping member observed belonged to the session with *that member*, and a
+port-restricted NAT forwards it to that member alone: the address was true and
+useless. One datagram endpoint per node, told apart by QUIC connection id,
+makes what a member observes the mapping the other peer's probes can use.
 
-The first is which side is told. Only the dialer learns anything from a
-session's hello, because only the accepting side can see an address the other
-cannot, and the dialer is the smaller identity hash. With one helper that is a
-coin flip per peer, which is why two of five runs had one side or neither
-knowing its own address.
+The second is that both ends of a session now say where they saw the other
+arrive from. Only the dialer used to learn anything, so which of two peers knew
+its own address came down to who had the smaller identity hash, which is why
+three runs of five had both, one had one and one had neither. Two NATed peers
+need *both* addresses before either can punch: each side's NAT only lets the
+other's probe in after it has sent one that way, so one side knowing is enough
+when the other is reachable (`one_nat`) and no use at all when neither is.
 
-The second is which socket the address names, and it is the one that matters.
-An attempt punches from a socket of its own, so what the helper observed is the
-mapping for the socket carrying the session *with the helper*. A
-port-restricted NAT forwards to that mapping only from the helper, so the other
-peer's probe at it is dropped, and the probes this peer sends go out from a
-third socket the other peer was never told about. For the pair to complete,
-each side would have to probe *from* the socket it advertised, which here is
-the listening socket, and then carry the session on it: the accepting side
-already can, and the dialing side cannot, because its listening socket belongs
-to a QUIC server that cannot also dial. That is the change this case needs, and
-it is a change to how a session is opened rather than to what is observed.
+With both, `cone_helper` comes up direct in five runs of five, where it had
+failed in five of five. What is left is the pair nobody can name: `cone`, where
+neither peer is reachable and no member is either, which is what the plan's
+opt-in address echo is for; and symmetric NAT, which is the deliberate non-fix
+it always was. The diagnostics panel says which case a pair is in rather than
+leaving it mysterious.
 
 ## The LoRa pass
 
@@ -1396,6 +1403,7 @@ Everything the matrix turned up, across all ten families.
 | **A parked download had one trigger and it was the wrong one**: only hearing the holder announce made it try again, and a transport node damps repeat announces while the liveness beacon informs only its receiver. Under 15% loss the requester heard nothing from a holder that was up the whole time and never asked again in eight minutes | Fixed: a parked download asks again on its own after 120s, doubling to an hour, reset by any sign of a member. The same shape `SyncManager.tick` needed for sync2, and for the same reason. Regression tests in `tests/test_files.py` |
 | **The per-link serve rate limit was below what one download costs**: a download issues one range at a time and waits for it, so how many requests it makes in a second is the link's speed rather than anything either end chose, and over loopback a 2 MB file asks eight times in well under one. Every member of files9 was refused mid-transfer by the shared 8-per-second ceiling, and a refusal is silence, so each paid the 120s stall sweep and none of three finished in 924s | Fixed: the file plane sets its own ceiling of 64 per link per second, above the 18 ranges the largest file allowed costs in total. What bounds the work here is the concurrent-serve cap and the response ceiling, not the request rate; this only bounds a peer that is not waiting for answers at all. files9 goes from 0 of 3 to 7 of 7 with seven askers, 5/5 runs. Regression test in `tests/test_file_transport.py` |
 | **Rejections were silent**: `_validate_document` returned `None` with no log for a failed signature or an unrecallable signer, and the auto-join block aborted without one for a name mismatch or a missing channel name. From outside, a rejected document is indistinguishable from one never sent | Fixed: each of those paths logs a warning naming the scope and the reason |
+| **A pair behind two NATs could be told its own address and still not punch**: an attempt punched from a socket of its own, so the mapping a helping member observed belonged to the session with *that member*, and a port-restricted NAT forwards it to that member alone. Only the dialer learned anything from a session's hello either, so which peer knew its own address came down to who dialled | Fixed: one datagram endpoint per node carries every session and every probe, so a candidate names the socket a peer's probes can use, and both ends of a session report where they saw the other arrive from. The NAT harness's `cone_helper` goes from 0 of 5 to 5 of 5. Regression tests in `tests/test_ip_session.py` (`TestOneSocketForEverything`) |
 
 ### Open
 
@@ -1490,7 +1498,7 @@ All sixteen families built and run: **132 scenarios, 104 strict and 28 probes**,
 | `bw`: bytes on the wire | 1 (probe) | Measured before and after reconciliation; see the family's section |
 | `interop`: direct messages with other LXMF clients | 5 (5 strict) | All passing against a real bare RNS+LXMF client; interop4 found a real gap, 5/5 after the fix; interop3 and interop5 race on live delivery when run alone |
 | `files`: shared files in invite-only channels | 11 (7 strict, 4 probes) | All strict rows passing; files1 alone found three defects, files8 a fourth, the two radio probes two more and files9 a seventh, all fixed. files5, files8 and files10 record what a slow link, a lossy one and a shared one each cost, and files11 moves the 5 MB ceiling itself over SF7 in 5h 14m |
-| `upgrade`: direct IP sessions between members | 4 (4 strict) | All passing, **20/20 at `--repeat 5`**; the NAT harness beside them upgrades across real address translation and records the two-NAT case it cannot |
+| `upgrade`: direct IP sessions between members | 8 (8 strict) | All passing, **20/20 at `--repeat 5`**, and 8/8 again after Phase 6 put every session on one socket, with upgrade1 and upgrade3 3/3 at `--repeat 3`; the NAT harness beside them now upgrades a pair behind two NATs as well as one |
 
 **All strict scenarios pass**, sync11 included: 6/6 on broadband and 3/3 on
 `lora_fast` since beacons carry a sync probe, from 1/5 and 0/3 when this
