@@ -42,6 +42,7 @@ Scenarios covered:
 
 import os
 import struct
+import threading
 import time
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -52,6 +53,7 @@ import LXMF
 import RNS
 
 from tests.conftest import deliver, forge, lxmf_transport_for
+from tests.fake_stun import StunResponder, routable_host
 from tests.helpers import sign_as, wait_for, wait_for_member
 from trenchchat.network.base import PATH_DIRECT
 from trenchchat.network.ip.certificate import SessionCertificate
@@ -4895,3 +4897,85 @@ class TestUpgradeOfferGate:
             lambda: not alice_direct.can_reach(bob.identity.hash_hex),
             timeout=1.0, msg="the kicked member's session to be closed")
         assert time.time() - started < 1.0
+
+
+class TestTheAddressEchoGate:
+    """The public address echo is a disclosure, so it is off until a user says.
+
+    What it discloses is small and real: a server outside the channel learns
+    this machine's address and that it asked, which is one more party than the
+    design otherwise needs. So with the setting off nothing STUN-shaped may
+    leave this node at all, whoever calls in, and these bypass the client and
+    the endpoint to say so: the evidence is a server that received no datagram
+    of any kind.
+    """
+
+    @pytest.fixture
+    def echo(self):
+        responder = StunResponder(routable_host(), 0).start()
+        try:
+            yield responder
+        finally:
+            responder.stop()
+
+    def test_a_whole_attempt_asks_nothing_while_it_is_off(self, peer_factory,
+                                                          echo):
+        alice, bob, _ch_hash = _setup_channel_with_member(peer_factory)
+        _drop_direct_sessions(alice, bob)
+        alice.config.stun_servers = [echo.server]
+        assert alice.config.stun_enabled is False
+        manager = _upgrade_manager_for(alice)
+
+        deliver(bob, alice, _offer())
+        assert wait_for(lambda: len(_answers_sent(alice)) == 1,
+                        msg="the answer, which gathers candidates first")
+        manager.tick()
+        time.sleep(1.0)
+
+        assert echo.datagrams == 0, "a node with the echo off asked anyway"
+
+    def test_the_query_itself_refuses_to_run_while_it_is_off(self, peer_factory,
+                                                             echo):
+        """Called straight, past the tick and past the offer that would."""
+        alice = peer_factory("alice", direct=True, open_sessions=False)
+        alice.config.stun_servers = [echo.server]
+        manager = _upgrade_manager_for(alice)
+
+        manager._ensure_public_address()
+        manager._ask_public_address()
+        time.sleep(0.5)
+
+        assert echo.datagrams == 0
+        assert alice.storage.get_upgrade_addresses(upgrade.ADDRESS_SELF) == []
+
+    def test_switching_it_off_stops_a_round_that_is_already_running(
+            self, peer_factory, echo):
+        """The setting is read before every request, not once per round, so a
+        user turning it off is obeyed by the round in flight."""
+        alice = peer_factory("alice", direct=True, open_sessions=False)
+        manager = _upgrade_manager_for(alice)
+        dead = f"{routable_host()}:9"
+        manager.set_stun(enabled=True, servers=[dead, echo.server])
+
+        def _turn_off() -> None:
+            time.sleep(0.2)
+            manager.set_stun(enabled=False)
+
+        switch = threading.Thread(target=_turn_off, daemon=True)
+        switch.start()
+        manager._ask_public_address()
+        switch.join(timeout=5.0)
+
+        assert echo.datagrams == 0, "the second server was asked after the switch"
+
+    def test_with_it_on_the_same_call_does_ask(self, peer_factory, echo):
+        """The gate is the setting and nothing else, which this proves by
+        turning it on and watching the very same path reach the server."""
+        alice = peer_factory("alice", direct=True, open_sessions=False)
+        manager = _upgrade_manager_for(alice)
+        manager.set_stun(enabled=True, servers=[echo.server])
+
+        manager._ensure_public_address()
+
+        assert echo.requests == 1
+        assert alice.storage.get_upgrade_addresses(upgrade.ADDRESS_SELF)

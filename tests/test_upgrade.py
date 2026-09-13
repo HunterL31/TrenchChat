@@ -9,6 +9,7 @@ two peers on loopback, with real probes and a real session at the end.
 """
 
 import contextlib
+import os
 import socket
 import sys
 import threading
@@ -16,7 +17,9 @@ import time
 
 import pytest
 
+from tests.fake_stun import StunResponder, routable_host
 from tests.helpers import wait_for
+from trenchchat.config import Config
 from trenchchat.core import actions
 from trenchchat.core.permissions import PRESET_PRIVATE, ROLE_MEMBER, ROLE_OWNER
 from trenchchat.core.protocol import (
@@ -30,12 +33,16 @@ from trenchchat.core.upgrade import (
     ADDRESS_PEER, ADDRESS_PEER6, ADDRESS_SELF, ADDRESS_SELF6,
     BACKOFF_MAX_SECS, BACKOFF_START_SECS, FALLBACK_OFFER_SECS, REASON_BACKOFF,
     REASON_DISABLED, REASON_HANDSHAKE_FAILED, REASON_INELIGIBLE,
-    OFFER_TIMEOUT_SECS, REASON_NO_ANSWER, REASON_PUNCH_FAILED,
-    UpgradeManager, address_kind, is_eligible,
+    OFFER_TIMEOUT_SECS, REASON_NO_ANSWER, REASON_NO_PUBLIC_ADDRESS,
+    REASON_PUNCH_FAILED, STUN_SOURCE, UpgradeManager, address_kind, is_eligible,
 )
 from trenchchat.network.base import PATH_DIRECT
 from trenchchat.network.ip import candidates, punch
 from trenchchat.network.ip.endpoint import bind_datagram_socket
+
+
+# A peer hash for the failure bookkeeping, which never has to be an identity.
+_FAILURE_PEER = "fe" * 16
 
 
 def _candidate(host: str = "10.0.0.5", port: int = 42420,
@@ -1007,3 +1014,287 @@ class TestTheClientGate:
 
         assert wait_for(lambda: smaller.has_session_with(larger), timeout=30.0,
                         msg="the session after the switch came back")
+
+
+class TestPublicAddresses:
+    """Which of this node's own candidates a peer outside could ever reach."""
+
+    def test_a_router_mapping_and_an_observation_count(self):
+        assert candidates.public_families(
+            [("192.168.1.9", 42420, UPGRADE_KIND_MAPPED)]) == {4}
+        assert candidates.public_families(
+            [("198.51.100.4", 33445, UPGRADE_KIND_OBSERVED)]) == {4}
+
+    def test_a_local_ipv4_address_counts_for_nothing(self):
+        """Behind a home router it is reachable by this node's own network and
+        by nobody else, however many of them are offered."""
+        assert candidates.public_families([
+            ("192.168.1.9", 42420, UPGRADE_KIND_LAN),
+            ("10.0.0.5", 42420, UPGRADE_KIND_LAN),
+            ("100.64.1.2", 42420, UPGRADE_KIND_LAN),
+        ]) == set()
+
+    def test_a_global_ipv6_address_counts_on_its_own(self):
+        assert candidates.is_global_ipv6("2001:db8:ff::5")
+        assert candidates.public_families(
+            [("2001:db8:ff::5", 42420, UPGRADE_KIND_LAN)]) == {6}
+
+    def test_unique_local_ipv6_does_not(self):
+        assert not candidates.is_global_ipv6("fd00::1")
+        assert not candidates.is_global_ipv6("192.0.2.1")
+        assert candidates.public_families(
+            [("fd00::1", 42420, UPGRADE_KIND_LAN)]) == set()
+
+    def test_both_families_are_reported_when_both_are_held(self):
+        assert candidates.public_families([
+            ("198.51.100.4", 33445, UPGRADE_KIND_OBSERVED),
+            ("2001:db8:ff::5", 42420, UPGRADE_KIND_LAN),
+        ]) == {4, 6}
+
+
+@pytest.fixture
+def echo():
+    """A STUN server of this test's own, where this host can route to it."""
+    responder = StunResponder(routable_host(), 0).start()
+    try:
+        yield responder
+    finally:
+        responder.stop()
+
+
+class TestTheAddressEcho:
+    """What a node learns about itself when a user turns the echo on."""
+
+    def test_it_is_off_until_a_user_turns_it_on(self, upgrade_pair, echo):
+        smaller, _larger = _smaller_first(upgrade_pair)
+        assert smaller.peer.config.stun_enabled is False
+        assert smaller.manager.stun_settings()["enabled"] is False
+
+        smaller.manager._ensure_public_address()
+
+        assert echo.requests == 0, "a request went out with the setting off"
+        assert smaller.peer.storage.get_upgrade_addresses(ADDRESS_SELF) == []
+
+    def test_with_it_on_the_echoed_address_becomes_a_candidate(self,
+                                                               upgrade_pair, echo):
+        smaller, _larger = _smaller_first(upgrade_pair)
+        smaller.manager.set_stun(enabled=True, servers=[echo.server])
+
+        smaller.manager._ensure_public_address()
+
+        assert echo.requests == 1
+        learned = smaller.peer.storage.get_upgrade_addresses(ADDRESS_SELF)
+        assert len(learned) == 1
+        host, port = learned[0]
+        assert port == smaller.transport.listen_port, \
+            "the echo did not name the socket this node listens on"
+        assert candidates.is_reachable_address(host)
+        assert smaller.manager._own_candidates()[0] == [
+            host, port, UPGRADE_KIND_OBSERVED]
+
+    def test_it_is_filed_against_the_echo_rather_than_a_peer(self, upgrade_pair,
+                                                             echo):
+        smaller, larger = _smaller_first(upgrade_pair)
+        smaller.manager.set_stun(enabled=True, servers=[echo.server])
+        smaller.manager._ensure_public_address()
+
+        storage = smaller.peer.storage
+        assert storage.get_upgrade_address(STUN_SOURCE, ADDRESS_SELF) is not None
+        assert storage.get_upgrade_address(larger.hash_hex, ADDRESS_SELF) is None
+
+    def test_a_second_ask_inside_the_window_costs_nothing(self, upgrade_pair,
+                                                          echo):
+        smaller, _larger = _smaller_first(upgrade_pair)
+        smaller.manager.set_stun(enabled=True, servers=[echo.server])
+
+        smaller.manager._ensure_public_address()
+        smaller.manager._ensure_public_address()
+
+        assert echo.requests == 1
+
+    def test_the_first_server_that_answers_wins_and_the_rest_are_spared(
+            self, upgrade_pair, echo):
+        smaller, _larger = _smaller_first(upgrade_pair)
+        second = StunResponder(routable_host(), 0).start()
+        try:
+            smaller.manager.set_stun(enabled=True,
+                                     servers=[echo.server, second.server])
+            smaller.manager._ensure_public_address()
+        finally:
+            second.stop()
+
+        assert echo.requests == 1
+        assert second.requests == 0
+
+    def test_a_server_that_cannot_be_reached_moves_on_to_the_next(self,
+                                                                  upgrade_pair,
+                                                                  echo):
+        smaller, _larger = _smaller_first(upgrade_pair)
+        smaller.manager.set_stun(enabled=True,
+                                 servers=[f"{routable_host()}:9", echo.server])
+
+        smaller.manager._ensure_public_address()
+
+        assert echo.requests == 1
+        assert smaller.peer.storage.get_upgrade_addresses(ADDRESS_SELF)
+
+    def test_turning_it_off_again_stops_the_asking(self, upgrade_pair, echo):
+        smaller, _larger = _smaller_first(upgrade_pair)
+        smaller.manager.set_stun(enabled=True, servers=[echo.server])
+        smaller.manager._ensure_public_address()
+        assert smaller.manager.set_stun(enabled=False)["enabled"] is False
+
+        smaller.manager._stun_at = 0.0
+        smaller.manager._ensure_public_address()
+
+        assert echo.requests == 1, "a request went out after the switch went off"
+
+    def test_a_server_that_is_not_a_host_and_port_is_refused(self, upgrade_pair):
+        smaller, _larger = _smaller_first(upgrade_pair)
+        with pytest.raises(ValueError):
+            smaller.manager.set_stun(servers=["not a server:x"])
+        assert smaller.peer.config.stun_servers != ["not a server:x"]
+
+    def test_the_setting_survives_a_restart(self, upgrade_pair, echo):
+        smaller, _larger = _smaller_first(upgrade_pair)
+        smaller.manager.set_stun(enabled=True, servers=[echo.server])
+
+        reopened = Config(data_dir=smaller.peer.data_dir)
+        assert reopened.stun_enabled is True
+        assert reopened.stun_servers == [echo.server]
+
+    def test_the_tick_asks_at_start_and_not_again_inside_the_window(
+            self, upgrade_pair, echo):
+        smaller, _larger = _smaller_first(upgrade_pair)
+        smaller.manager.set_stun(enabled=True, servers=[echo.server])
+
+        smaller.manager.tick()
+        assert wait_for(lambda: echo.requests == 1, msg="the first ask")
+        smaller.manager.tick()
+        time.sleep(0.3)
+
+        assert echo.requests == 1
+
+
+class TestNoPublicAddressToOffer:
+    """The failure a user can answer, told apart from the one they cannot."""
+
+    def _attempt(self, manager, own):
+        attempt = manager._begin(_FAILURE_PEER, os.urandom(16), offered=True)
+        attempt.own_candidates = own
+        return attempt
+
+    def test_only_local_addresses_means_the_pair_had_nothing_to_offer(
+            self, upgrade_pair):
+        smaller, _larger = _smaller_first(upgrade_pair)
+        attempt = self._attempt(smaller.manager,
+                                [["192.168.1.9", 42420, UPGRADE_KIND_LAN]])
+        try:
+            assert smaller.manager._punch_failure(
+                attempt, [("198.51.100.4", 33445)]) == REASON_NO_PUBLIC_ADDRESS
+        finally:
+            smaller.manager._finish(attempt, None)
+
+    def test_an_address_a_peer_observed_makes_it_an_ordinary_punch_failure(
+            self, upgrade_pair):
+        smaller, _larger = _smaller_first(upgrade_pair)
+        attempt = self._attempt(
+            smaller.manager, [["198.51.100.4", 33445, UPGRADE_KIND_OBSERVED]])
+        try:
+            assert smaller.manager._punch_failure(
+                attempt, [("203.0.113.7", 41000)]) == REASON_PUNCH_FAILED
+        finally:
+            smaller.manager._finish(attempt, None)
+
+    def test_an_address_in_a_family_the_peer_never_named_is_no_help(
+            self, upgrade_pair):
+        """A global IPv6 address says nothing about a peer offering IPv4."""
+        smaller, _larger = _smaller_first(upgrade_pair)
+        attempt = self._attempt(
+            smaller.manager, [["2001:db8:ff::5", 42420, UPGRADE_KIND_LAN]])
+        try:
+            assert smaller.manager._punch_failure(
+                attempt, [("198.51.100.4", 33445)]) == REASON_NO_PUBLIC_ADDRESS
+        finally:
+            smaller.manager._finish(attempt, None)
+
+    def test_a_real_attempt_between_two_unreachable_peers_records_it(
+            self, upgrade_pair, monkeypatch):
+        """Both peers offer an address only their own network could reach, so
+        every probe goes nowhere and neither can observe anything."""
+        smaller, larger = _smaller_first(upgrade_pair)
+        monkeypatch.setattr(candidates, "local_addresses", lambda: ["10.9.9.9"])
+
+        smaller.manager.on_peer_appeared(larger.hash_hex)
+
+        assert wait_for(
+            lambda: smaller.manager.failures().get(larger.hash_hex, {})
+            .get("reason") == REASON_NO_PUBLIC_ADDRESS, timeout=40.0,
+            msg="the attempt to end for want of a public address")
+        assert not smaller.has_session_with(larger)
+        assert smaller.manager.needs_public_address()
+
+
+class TestAskingTheUserOnce:
+    """needs_public_address, which is the whole of what the client prompts on."""
+
+    def test_it_is_false_until_a_pair_fails_for_that_reason(self, upgrade_pair):
+        smaller, larger = _smaller_first(upgrade_pair)
+        assert smaller.manager.needs_public_address() is False
+
+        smaller.manager._record_failure(larger.hash_hex, REASON_PUNCH_FAILED)
+        assert smaller.manager.needs_public_address() is False
+
+        smaller.manager._record_failure(larger.hash_hex,
+                                        REASON_NO_PUBLIC_ADDRESS)
+        assert smaller.manager.needs_public_address() is True
+
+    def test_with_the_echo_on_there_is_nothing_left_to_ask(self, upgrade_pair,
+                                                           echo):
+        smaller, larger = _smaller_first(upgrade_pair)
+        smaller.manager._record_failure(larger.hash_hex,
+                                        REASON_NO_PUBLIC_ADDRESS)
+        smaller.manager.set_stun(enabled=True, servers=[echo.server])
+
+        assert smaller.manager.needs_public_address() is False
+
+    def test_turning_the_echo_on_clears_the_wait_for_the_stuck_pairs(
+            self, upgrade_pair, echo):
+        smaller, larger = _smaller_first(upgrade_pair)
+        smaller.manager._record_failure(larger.hash_hex, REASON_PUNCH_FAILED)
+        smaller.manager._record_failure("ab" * 16, REASON_NO_PUBLIC_ADDRESS)
+        assert smaller.manager.consider(larger.hash_hex) == REASON_BACKOFF
+
+        smaller.manager.set_stun(enabled=True, servers=[echo.server])
+
+        assert "ab" * 16 not in smaller.manager.failures(), \
+            "a pair stuck for want of an address was left waiting"
+        assert smaller.manager.failures()[larger.hash_hex]["reason"] == \
+            REASON_PUNCH_FAILED, "an unrelated wait was cleared as well"
+
+    def test_the_client_is_told_once_on_the_transition(self, upgrade_pair):
+        smaller, larger = _smaller_first(upgrade_pair)
+        told: list = []
+        smaller.manager.add_public_address_callback(told.append)
+
+        smaller.manager._record_failure(larger.hash_hex,
+                                        REASON_NO_PUBLIC_ADDRESS)
+        assert wait_for(lambda: told == [True], msg="the client to be told")
+
+        smaller.manager._record_failure("cd" * 16, REASON_NO_PUBLIC_ADDRESS)
+        time.sleep(0.3)
+        assert told == [True], "the same answer was announced twice"
+
+    def test_it_is_taken_back_when_the_pairs_are_no_longer_stuck(self,
+                                                                 upgrade_pair):
+        smaller, larger = _smaller_first(upgrade_pair)
+        told: list = []
+        smaller.manager.add_public_address_callback(told.append)
+        smaller.manager._record_failure(larger.hash_hex,
+                                        REASON_NO_PUBLIC_ADDRESS)
+        assert wait_for(lambda: told == [True], msg="the client to be told")
+
+        smaller.manager._clear_failure(larger.hash_hex)
+
+        assert wait_for(lambda: told == [True, False],
+                        msg="the client to be told it is over")

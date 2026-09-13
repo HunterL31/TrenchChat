@@ -38,6 +38,15 @@ The handshake, between two peers that can already see each other on the mesh:
 Nothing here is periodic on the mesh. An offer is sent once per sighting of an
 eligible peer under a backoff that doubles from thirty seconds to a day, and a
 pair that cannot punch stays on Reticulum, which is where it already was.
+
+What a node knows about its own translated address it learns from members: the
+probes that arrive and every session's hello say where this node was seen. A
+channel with no reachable member teaches nobody anything, and that pair fails
+as no_public_address rather than punch_failed, which is the one failure a user
+can answer: switching on the public address echo (network/ip/stun.py) asks a
+server outside the channel the same question a member would have answered. It
+is off until they do, and the setting is read before every request rather than
+only at the start of a round.
 """
 
 import os
@@ -59,6 +68,7 @@ from trenchchat.core.storage import Storage
 from trenchchat.network.base import SendState
 from trenchchat.network.ip import candidates as candidate_gathering
 from trenchchat.network.ip import punch as punching
+from trenchchat.network.ip import stun
 from trenchchat.network.ip.portmap import PortMapper
 
 # Why a pair has no session, as the diagnostics panel names it. A fixed set, so
@@ -70,6 +80,7 @@ REASON_PUNCH_FAILED = "punch_failed"
 REASON_HANDSHAKE_FAILED = "handshake_failed"
 REASON_REFUSED = "refused"
 REASON_BACKOFF = "backoff"
+REASON_NO_PUBLIC_ADDRESS = "no_public_address"
 
 # Where the address kinds are remembered. 'peer' is where this node last saw
 # that peer; 'self' is where that peer last saw this node. One of each per
@@ -80,6 +91,10 @@ ADDRESS_PEER = "peer"
 ADDRESS_SELF = "self"
 ADDRESS_PEER6 = "peer6"
 ADDRESS_SELF6 = "self6"
+
+# What an address echo's answer is filed against. Not a peer, and it cannot
+# collide with one: an identity hash is thirty-two hex characters.
+STUN_SOURCE = "stun"
 
 # A pair that failed waits this long before trying again, doubling to a day.
 # Reset when either side's candidate set changes, because a new address is new
@@ -117,6 +132,20 @@ OBSERVED_SELF_ROWS = 4
 # whether anything is due; this only keeps it off the tick's thread.
 PORTMAP_INTERVAL_SECS = 60.0
 
+# How old an answer from the address echo may be before it is asked again: a
+# home router's translation outlives this, and an offer carrying a stale
+# address costs the pair an attempt.
+STUN_REFRESH_SECS = 300.0
+
+# How often this node re-reads its own interface addresses to notice it moved,
+# which is the other thing that makes an echoed address stale. Cheaper than the
+# echo and still not free, so not on every tick.
+LOCAL_ADDRESS_CHECK_SECS = 60.0
+
+# The whole of one round of asking, across every server. A round that spends
+# this and learns nothing holds a worker for no longer.
+STUN_BUDGET_SECS = 12.0
+
 
 def address_kind(kind: str, host: str) -> str:
     """The kind one observation is stored under, which carries its family."""
@@ -150,6 +179,7 @@ class _Attempt:
         self.started_at = time.time()
         self.punch_at = self.started_at + PUNCH_LEAD_SECS
         self.peer_candidates: list = []
+        self.own_candidates: list = []
         self.peer_cert = b""
         self.answered = False
         self.done = False
@@ -185,6 +215,12 @@ class UpgradeManager:
         self._spent_nonces: deque = deque(maxlen=MAX_SPENT_NONCES)
         self._stopped = False
         self._last_portmap = 0.0
+        self._address_callbacks: list = []
+        self._address_needed = False
+        self._stun_at = 0.0
+        self._stun_busy = False
+        self._local_addresses: tuple = ()
+        self._local_checked = 0.0
 
         self._pool = ThreadPoolExecutor(max_workers=MAX_CONCURRENT_ATTEMPTS,
                                         thread_name_prefix="upgrade")
@@ -220,6 +256,60 @@ class UpgradeManager:
         RNS.log(f"TrenchChat [upgrade]: direct sessions are now "
                 f"{'on' if enabled else 'off'}", RNS.LOG_NOTICE)
         return self.enabled
+
+    @property
+    def stun_enabled(self) -> bool:
+        """Whether this node may ask a public server where it appears to be."""
+        return bool(self._config.stun_enabled) and self._transport is not None
+
+    def stun_settings(self) -> dict:
+        """The address echo as a client reads it back."""
+        return {"enabled": bool(self._config.stun_enabled),
+                "servers": list(self._config.stun_servers)}
+
+    def set_stun(self, *, enabled: bool | None = None,
+                 servers: list[str] | None = None) -> dict:
+        """Turn the public address echo on or off, and say what it now is.
+
+        The client gate over the disclosure: with it off nothing STUN-shaped
+        leaves this node, and the only thing it knows about its own address is
+        what a member told it. Turning it on clears the wait for every pair
+        that was stuck for want of an address, because the next sighting is
+        now worth trying rather than a repeat of the same failure.
+        """
+        if servers is not None:
+            self._config.stun_servers = servers
+        if enabled is not None:
+            self._config.stun_enabled = bool(enabled)
+            if enabled:
+                with self._lock:
+                    self._stun_at = 0.0
+                self._clear_address_failures()
+            RNS.log(f"TrenchChat [upgrade]: the public address echo is now "
+                    f"{'on' if enabled else 'off'}", RNS.LOG_NOTICE)
+        self._announce_address_need()
+        return self.stun_settings()
+
+    def needs_public_address(self) -> bool:
+        """Whether a pair is stuck for want of an address of this node's own.
+
+        True only while the echo is off: with it on this node is already doing
+        the one thing that would help, and a client has nothing to ask about.
+        """
+        if self._config.stun_enabled:
+            return False
+        with self._lock:
+            return any(entry["reason"] == REASON_NO_PUBLIC_ADDRESS
+                       for entry in self._failures.values())
+
+    def add_public_address_callback(self, callback) -> None:
+        """Register what is told when this node starts or stops needing an echo.
+
+        callback(needed: bool), called on a worker thread. A client asks once
+        on the transition rather than polling, because a failure changes no
+        path and fires no other event.
+        """
+        self._address_callbacks.append(callback)
 
     def is_eligible(self, peer_hex: str) -> bool:
         """Whether a peer is one this node may hold a session with."""
@@ -279,14 +369,16 @@ class UpgradeManager:
         """Periodic housekeeping; call roughly once per second.
 
         Closes a session whose peer has stopped being eligible, gives up on an
-        offer nothing answered, makes the larger hash's fallback offer, and
-        keeps the router mapping alive.
+        offer nothing answered, makes the larger hash's fallback offer, keeps
+        the router mapping alive, and keeps what the address echo last said
+        current where a user has turned it on.
         """
         now = time.time() if now is None else now
         self._sweep_sessions()
         self._expire_attempts(now)
         self._fallback_offers(now)
         self._refresh_mapping(now)
+        self._refresh_public_address(now)
 
     def _sweep_sessions(self) -> None:
         """Drop any session whose peer is no longer a member. The core re-check."""
@@ -328,6 +420,34 @@ class UpgradeManager:
         self._last_portmap = now
         self._submit(self._mapper.refresh)
 
+    def _refresh_public_address(self, now: float) -> None:
+        """Ask the address echo at start, on a move, and every few minutes.
+
+        A move is what makes an echoed address wrong rather than merely old, so
+        this node's own interface addresses are re-read on their own slower
+        cadence and a change asks again at once.
+        """
+        if not self.stun_enabled:
+            return
+        with self._lock:
+            due = now - self._stun_at >= STUN_REFRESH_SECS
+            check = now - self._local_checked >= LOCAL_ADDRESS_CHECK_SECS
+            if check:
+                self._local_checked = now
+        if check:
+            local = tuple(candidate_gathering.local_addresses())
+            with self._lock:
+                moved = bool(self._local_addresses) and local != self._local_addresses
+                self._local_addresses = local
+            if moved:
+                RNS.log("TrenchChat [upgrade]: this node's own addresses "
+                        "changed; asking the address echo again", RNS.LOG_NOTICE)
+                with self._lock:
+                    self._stun_at = 0.0
+                due = True
+        if due:
+            self._submit(self._ensure_public_address)
+
     # --- offering ---
 
     def offer(self, peer_hex: str, *, ignore_backoff: bool = False,
@@ -366,7 +486,9 @@ class UpgradeManager:
                               offered=True)
         if attempt is None:
             return
+        self._ensure_public_address()
         own = self._own_candidates()
+        attempt.own_candidates = own
         if not own:
             RNS.log(f"TrenchChat [upgrade]: not offering {peer_hex[:12]}… a "
                     f"session: this node has no address to name", RNS.LOG_DEBUG)
@@ -473,7 +595,9 @@ class UpgradeManager:
         attempt.peer_candidates = peer_candidates
         attempt.peer_cert = peer_cert
         attempt.punch_at = punch_at
+        self._ensure_public_address()
         own = self._own_candidates()
+        attempt.own_candidates = own
         if not own:
             RNS.log(f"TrenchChat [upgrade]: not answering {peer_hex[:12]}…: "
                     f"this node has no address to name", RNS.LOG_DEBUG)
@@ -545,13 +669,13 @@ class UpgradeManager:
                 attempt.peer_hex, address_kind(ADDRESS_PEER, source[0]),
                 source[0], source[1])
         if self._self_hex > attempt.peer_hex:
-            self._await_dial(attempt, result, len(targets))
+            self._await_dial(attempt, result, targets)
             return
         if not result.punched:
             RNS.log(f"TrenchChat [upgrade]: no path punched to "
                     f"{attempt.peer_hex[:12]}… in {result.seconds:.1f}s over "
                     f"{len(targets)} candidates", RNS.LOG_WARNING)
-            self._finish(attempt, REASON_PUNCH_FAILED)
+            self._finish(attempt, self._punch_failure(attempt, targets))
             return
         host, port = result.remote
         opened = self._transport.open_session(
@@ -564,7 +688,7 @@ class UpgradeManager:
                 f"{attempt.peer_hex[:12]}… over {host}:{port}", RNS.LOG_NOTICE)
         self._finish(attempt, None)
 
-    def _await_dial(self, attempt: _Attempt, result, targets: int) -> None:
+    def _await_dial(self, attempt: _Attempt, result, targets: list) -> None:
         """The larger hash's half: probe to open the way in, then be dialled.
 
         Its probes are what make its own mapping, and the peer's session
@@ -576,8 +700,8 @@ class UpgradeManager:
         if not result.punched and not result.probes_from:
             RNS.log(f"TrenchChat [upgrade]: no path punched to "
                     f"{attempt.peer_hex[:12]}… in {result.seconds:.1f}s over "
-                    f"{targets} candidates", RNS.LOG_WARNING)
-            self._finish(attempt, REASON_PUNCH_FAILED)
+                    f"{len(targets)} candidates", RNS.LOG_WARNING)
+            self._finish(attempt, self._punch_failure(attempt, targets))
             return
         if not self._transport.await_session(attempt.peer_hex,
                                              timeout=SESSION_TIMEOUT_SECS):
@@ -623,6 +747,81 @@ class UpgradeManager:
             self._clear_failure(attempt.peer_hex)
         else:
             self._record_failure(attempt.peer_hex, reason)
+
+    def _punch_failure(self, attempt: _Attempt, targets: list) -> str:
+        """Which of the two punch failures this attempt was.
+
+        no_public_address is the one a user can do something about: every
+        address this node named is one only its own network can reach, so the
+        peer's probes went nowhere and nothing it could have done would have
+        helped. punch_failed is the other case, where both sides could be named
+        and the translation in front of one of them would not co-operate.
+        """
+        tried = {candidate_gathering.family_of(entry[0]) for entry in targets}
+        mine = candidate_gathering.public_families(attempt.own_candidates)
+        return REASON_PUNCH_FAILED if mine & tried else REASON_NO_PUBLIC_ADDRESS
+
+    # --- this node's own address ---
+
+    def _ensure_public_address(self, now: float | None = None) -> None:
+        """Ask the address echo where this node is, if it may and it is due.
+
+        The outbound guard on the disclosure: nothing STUN-shaped leaves this
+        node while the setting is off, whoever calls in. Blocks for as long as
+        the servers take, so every caller is already on the pool; a round
+        already in flight is left to finish rather than waited for, because an
+        offer is worth more now with a stale address than in eight seconds with
+        a fresh one.
+        """
+        if not self.stun_enabled:
+            return
+        now = time.time() if now is None else now
+        with self._lock:
+            if self._stun_busy or now - self._stun_at < STUN_REFRESH_SECS:
+                return
+            self._stun_busy = True
+        try:
+            self._ask_public_address()
+        finally:
+            with self._lock:
+                self._stun_at = time.time()
+                self._stun_busy = False
+
+    def _ask_public_address(self) -> tuple[str, int] | None:
+        """One round of the echo: the first server that answers wins.
+
+        The setting is re-read before every request, so switching it off stops
+        a round already under way rather than only the next one.
+        """
+        deadline = time.time() + STUN_BUDGET_SECS
+        for server in self._config.stun_servers:
+            for address in stun.resolve(server):
+                remaining = deadline - time.time()
+                if not self.stun_enabled or remaining <= 0:
+                    return None
+                found = self._binding(address, min(remaining,
+                                                   stun.TOTAL_WAIT_SECS))
+                if found is None:
+                    continue
+                self._record_self_address(STUN_SOURCE, found[0], found[1])
+                RNS.log(f"TrenchChat [upgrade]: the address echo at {server} "
+                        f"says this node is at {found[0]}:{found[1]}",
+                        RNS.LOG_NOTICE)
+                return found
+        RNS.log("TrenchChat [upgrade]: no address echo answered", RNS.LOG_WARNING)
+        return None
+
+    def _binding(self, server: tuple[str, int],
+                 timeout: float) -> tuple[str, int] | None:
+        """One binding transaction on the socket this node listens on."""
+        transaction_id = stun.new_transaction_id()
+        channel = self._transport.open_binding_channel(transaction_id, server)
+        if channel is None:
+            return None
+        try:
+            return stun.request(channel, timeout=timeout).address
+        finally:
+            self._transport.close_binding_channel(transaction_id)
 
     def _own_candidates(self) -> list:
         """This node's candidates for one attempt, as the wire carries them."""
@@ -720,12 +919,42 @@ class UpgradeManager:
             self._prune_tracked()
         RNS.log(f"TrenchChat [upgrade]: {peer_hex[:12]}… has no direct session "
                 f"({reason}); next attempt in {wait:.0f}s", RNS.LOG_DEBUG)
+        self._announce_address_need()
 
     def _clear_failure(self, peer_hex: str) -> None:
         with self._lock:
             self._failures.pop(peer_hex, None)
             self._backoff.pop(peer_hex, None)
             self._next_attempt_at.pop(peer_hex, None)
+        self._announce_address_need()
+
+    def _clear_address_failures(self) -> None:
+        """Let every pair stuck for want of an address try again at once.
+
+        Their wait is about an address this node did not have; it now has a way
+        to get one, so the next sighting is worth an attempt rather than a
+        repeat of the same refusal.
+        """
+        with self._lock:
+            stuck = [peer_hex for peer_hex, entry in self._failures.items()
+                     if entry["reason"] == REASON_NO_PUBLIC_ADDRESS]
+        for peer_hex in stuck:
+            self._clear_failure(peer_hex)
+
+    def _announce_address_need(self) -> None:
+        """Tell the client when this node starts or stops needing an echo.
+
+        Only on the change: a client asks a user once, and a failure recorded
+        again while the answer is still no is not a new question.
+        """
+        needed = self.needs_public_address()
+        with self._lock:
+            if needed == self._address_needed:
+                return
+            self._address_needed = needed
+            callbacks = list(self._address_callbacks)
+        for callback in callbacks:
+            self._submit(callback, needed)
 
     def _prune_tracked(self) -> None:
         """Keep the per-peer books bounded. Called under the lock."""
