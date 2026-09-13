@@ -13,7 +13,6 @@ import asyncio
 import os
 import socket
 import struct
-import threading
 import time
 
 import msgpack
@@ -33,8 +32,11 @@ from trenchchat.network.ip import frames, punch
 from trenchchat.network.ip.certificate import (
     CERT_FILE_NAME, SessionCertificate, fingerprint_for,
 )
+from trenchchat.network.ip.endpoint import (
+    bind_datagram_socket, bind_listen_sockets, socket_address, unmap_host,
+)
 from trenchchat.network.ip.session import (
-    MAX_PREAUTH_FRAMES, bind_datagram_socket, dialer_configuration, hello_digest,
+    MAX_PREAUTH_FRAMES, dialer_configuration, hello_digest,
 )
 from trenchchat.network.ip.transport import IPTransport, MAX_PENDING_HANDSHAKES
 
@@ -90,14 +92,15 @@ def ip_node(rns_instance, tmp_path):
     """Factory for IPNodes, torn down with the test."""
     nodes: list[IPNode] = []
 
-    def make(name: str, *, authorize=None) -> IPNode:
+    def make(name: str, *, authorize=None, listen_host: str = "127.0.0.1",
+             listen_port: int = 0) -> IPNode:
         node_dir = tmp_path / name
         node_dir.mkdir(parents=True, exist_ok=True)
         config = Config(data_dir=node_dir)
         identity = Identity(config, identity_path=node_dir / "identity")
         transport = IPTransport(
             config, identity, authorize=authorize or (lambda _peer: True),
-            listen_host="127.0.0.1", listen_port=0,
+            listen_host=listen_host, listen_port=listen_port,
         )
         node = IPNode(name, config, identity, transport)
         nodes.append(node)
@@ -414,23 +417,30 @@ class TestSession:
         assert bob.hash_hex in alice.appeared
         assert alice.hash_hex in bob.appeared
 
-    def test_the_accepting_side_says_where_the_caller_arrived_from(self, ip_node):
+    def test_each_side_says_where_the_other_arrived_from(self, ip_node):
         """The one thing a node behind a NAT cannot work out for itself.
 
         Nothing inside its own network can see its translated address, and
-        asking a service for it would be a center. The peer that answered saw
-        it, and says so in the hello that authenticates the session.
+        asking a service for it would be a center. The peer on the other end
+        saw it, and says so in the hello that authenticates the session. Both
+        ends say it: a node that only ever accepts sessions would otherwise
+        learn nothing about itself, and a pair who each need an observation
+        before they can name the other would come down to who dialled.
         """
         alice, bob = ip_node("alice"), ip_node("bob")
         assert alice.open_to(bob)
 
-        assert wait_for(lambda: alice.observed, msg="the observed address")
+        assert wait_for(lambda: alice.observed and bob.observed,
+                        msg="the observed address at both ends")
         peer_hex, host, port = alice.observed[0]
         assert peer_hex == bob.hash_hex
         assert host == "127.0.0.1"
-        assert 1 <= port <= 65535
-        assert bob.observed == [], \
-            "the calling side reported an address it could not have seen"
+        assert port == alice.transport.listen_port
+
+        peer_hex, host, port = bob.observed[0]
+        assert peer_hex == alice.hash_hex
+        assert host == "127.0.0.1"
+        assert port == bob.transport.listen_port
 
     def test_a_session_going_down_puts_the_peer_back_on_the_mesh(self, ip_node):
         alice, bob = ip_node("alice"), ip_node("bob")
@@ -778,14 +788,12 @@ class TestSocketOwnership:
 
     SO_REUSEADDR on a UDP socket lets a second socket bind the same port, and
     the kernel then chooses which of them a datagram reaches. A second node on
-    the host, or a second attempt in the same process, would take sessions
-    meant for this one; on a listening socket that is a dial answered by the
-    wrong certificate, which the caller cannot tell from an impostor."""
+    the host would take sessions meant for this one, which the caller cannot
+    tell from an impostor; now that every session and every probe runs on the
+    listening socket, that port is the whole of this node's direct path."""
 
-    @pytest.mark.parametrize("bind", [bind_datagram_socket, punch.bind_socket],
-                             ids=["listener", "punch"])
-    def test_a_bound_socket_keeps_its_port_to_itself(self, bind):
-        sock = bind("127.0.0.1", 0)
+    def test_a_bound_socket_keeps_its_port_to_itself(self):
+        sock = bind_datagram_socket("127.0.0.1", 0)
         other = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         other.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
@@ -795,117 +803,145 @@ class TestSocketOwnership:
             other.close()
             sock.close()
 
+    def test_a_port_that_is_taken_is_not_the_end_of_the_matter(self, ip_node):
+        """One endpoint carries everything this node does over IP, so a node
+        that has none holds no sessions at all, in or out. A configured port
+        somebody else has is worth a port the kernel picks instead: the peer is
+        told whichever port this node actually listens on."""
+        first = ip_node("first")
+        taken = first.transport.listen_port
+        second = ip_node("second", listen_port=taken)
+
+        assert second.transport.listen_port not in (0, taken)
+        assert second.open_to(first)
+
+    def test_a_named_host_binds_exactly_that_one_socket(self):
+        sockets = bind_listen_sockets("127.0.0.1", 0)
+        try:
+            assert len(sockets) == 1
+            assert sockets[0].family == socket.AF_INET
+        finally:
+            for sock in sockets:
+                sock.close()
+
+
+class TestAddressForms:
+    """A v4-mapped address is this node's own socket talking about itself."""
+
+    def test_a_mapped_address_is_unmapped_for_everybody_above(self):
+        assert unmap_host("::ffff:203.0.113.7") == "203.0.113.7"
+        assert unmap_host("203.0.113.7") == "203.0.113.7"
+        assert unmap_host("fd00::1") == "fd00::1"
+        assert unmap_host("not an address") == "not an address"
+
+    def test_an_ipv4_address_goes_out_of_a_dual_stack_socket_mapped(self):
+        assert socket_address("203.0.113.7", 42420, socket.AF_INET6) == \
+            ("::ffff:203.0.113.7", 42420, 0, 0)
+        assert socket_address("fd00::1", 42420, socket.AF_INET6) == \
+            ("fd00::1", 42420, 0, 0)
+
+    def test_an_ipv4_socket_has_no_form_for_an_ipv6_address(self):
+        assert socket_address("fd00::1", 42420, socket.AF_INET) is None
+        assert socket_address("203.0.113.7", 42420, socket.AF_INET) == \
+            ("203.0.113.7", 42420)
+        assert socket_address("peer.example.com", 1, socket.AF_INET) is None
+
 
 # ---------------------------------------------------------------------------
-# Accepting on a punched socket
+# One socket for everything
 # ---------------------------------------------------------------------------
 
-class TestAcceptOnAPunchedSocket:
-    """The other half of open_session: the side that does not dial.
+def probe_once(target: tuple[str, int], nonce: bytes,
+               timeout: float = 2.0) -> list[bytes]:
+    """Send one probe from a socket of its own and read what comes back."""
+    sock = bind_datagram_socket("127.0.0.1", 0)
+    answers: list[bytes] = []
+    try:
+        sock.settimeout(timeout)
+        sock.sendto(punch.probe_datagram(nonce), target)
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                data, _source = sock.recvfrom(punch.DATAGRAM_BYTES)
+            except (socket.timeout, TimeoutError):
+                break
+            answers.append(data)
+            if len(answers) >= 2:
+                break
+    finally:
+        sock.close()
+    return answers
 
-    A punched socket is the only address the peer's first packet is sent to,
-    so the accepting side has to listen there rather than on the port it
-    ordinarily listens on.
+
+class TestOneSocketForEverything:
+    """Dialling, accepting and probing all happen on the listening socket.
+
+    A punched mapping forwards the socket that opened it and nothing else, so
+    the port a node names in its candidates has to be the port it dials from,
+    accepts on, and answers probes on. Anything else and the pair a NAT lets
+    through is not the pair the session runs over.
     """
 
-    def test_a_session_comes_up_between_two_punched_sockets(self, ip_node):
-        alice = ip_node("alice")
-        bob = ip_node("bob")
-        alice_sock = punch.bind_socket("127.0.0.1", 0)
-        bob_sock = punch.bind_socket("127.0.0.1", 0)
-        accepted: list = []
-
-        def _accept():
-            accepted.append(bob.transport.accept_on(
-                bob_sock, alice.hash_hex, alice.transport.certificate_der,
-                timeout=15.0))
-
-        waiter = threading.Thread(target=_accept)
-        waiter.start()
-        try:
-            opened = alice.transport.open_session(
-                bob.hash_hex, "127.0.0.1", bob_sock.getsockname()[1],
-                bob.transport.certificate_der, sock=alice_sock)
-        finally:
-            waiter.join(timeout=20.0)
-
-        assert opened, "the dialer never opened the session"
-        assert accepted == [True]
-        assert alice.transport.can_reach(bob.hash_hex)
-        assert bob.transport.can_reach(alice.hash_hex)
-
-    def test_the_punched_socket_takes_only_the_peer_it_was_punched_with(
+    def test_one_socket_carries_a_dialled_and_an_accepted_session_at_once(
             self, ip_node):
-        bob = ip_node("bob")
-        mallory = ip_node("mallory")
-        expected = "c" * 32
-        bob_sock = punch.bind_socket("127.0.0.1", 0)
-        accepted: list = []
+        alice, bob, carol = ip_node("alice"), ip_node("bob"), ip_node("carol")
+        assert alice.open_to(bob), "alice could not dial bob"
+        assert carol.open_to(alice), "carol could not dial alice"
 
-        def _accept():
-            accepted.append(bob.transport.accept_on(bob_sock, expected,
-                                                    timeout=4.0))
+        assert alice.transport.session_count() == 2
+        alice.transport.send(bob.hash_hex, {}, "dialled")
+        alice.transport.send(carol.hash_hex, {}, "accepted")
+        assert wait_for(lambda: bob.inbox and carol.inbox, msg="both messages")
+        assert bob.inbox[0].content == "dialled"
+        assert carol.inbox[0].content == "accepted"
 
-        waiter = threading.Thread(target=_accept)
-        waiter.start()
-        try:
-            opened = mallory.transport.open_session(
-                bob.hash_hex, "127.0.0.1", bob_sock.getsockname()[1],
-                bob.transport.certificate_der,
-                sock=punch.bind_socket("127.0.0.1", 0), timeout=6.0)
-        finally:
-            waiter.join(timeout=20.0)
+    def test_a_dialler_is_seen_at_the_port_it_listens_on(self, ip_node):
+        """The observed address is only useful if it names the listening port.
 
-        assert not opened
-        assert accepted == [False]
-        assert bob.transport.session_count() == 0
-
-    def test_a_peer_already_on_a_session_needs_no_second_socket(self, ip_node):
-        alice = ip_node("alice")
-        bob = ip_node("bob")
+        A peer behind a NAT offers what it was told about itself, and its
+        router forwards that mapping to the socket that opened it. Naming an
+        attempt's own socket would hand every peer an address that stops
+        working the moment the attempt ends.
+        """
+        alice, bob = ip_node("alice"), ip_node("bob")
         assert alice.open_to(bob)
-        assert wait_for(lambda: bob.transport.can_reach(alice.hash_hex),
-                        msg="bob's side of the session")
-        sock = punch.bind_socket("127.0.0.1", 0)
-        assert bob.transport.accept_on(sock, alice.hash_hex, timeout=1.0)
-        assert sock.fileno() == -1, "the socket was not given back"
 
-    def test_a_caller_asserting_another_certificate_is_refused(self, ip_node):
-        bob = ip_node("bob")
-        alice = ip_node("alice")
-        bob_sock = punch.bind_socket("127.0.0.1", 0)
-        accepted: list = []
+        assert wait_for(lambda: alice.observed, msg="the observed address")
+        peer_hex, host, port = alice.observed[0]
+        assert peer_hex == bob.hash_hex
+        assert host == "127.0.0.1"
+        assert port == alice.transport.listen_port
 
-        def _accept():
-            accepted.append(bob.transport.accept_on(
-                bob_sock, alice.hash_hex, SessionCertificate.mint().der,
-                timeout=4.0))
-
-        waiter = threading.Thread(target=_accept)
-        waiter.start()
-        try:
-            opened = alice.transport.open_session(
-                bob.hash_hex, "127.0.0.1", bob_sock.getsockname()[1],
-                bob.transport.certificate_der,
-                sock=punch.bind_socket("127.0.0.1", 0), timeout=6.0)
-        finally:
-            waiter.join(timeout=20.0)
-
-        assert not opened
-        assert accepted == [False]
-        assert bob.transport.session_count() == 0
-
-    def test_a_probe_on_the_listening_socket_is_answered_not_dropped(self, ip_node):
-        bob = ip_node("bob")
+    def test_a_probe_is_answered_on_the_listening_socket_while_sessions_are_up(
+            self, ip_node):
+        alice, bob = ip_node("alice"), ip_node("bob")
+        assert alice.open_to(bob)
         nonce = b"\x44" * 16
-        bob.transport.set_probe_responder(
-            lambda data, addr, send: punch.answer_probe(data, addr, send, nonce))
-        sock = punch.bind_socket("127.0.0.1", 0)
+        channel = bob.transport.open_probe_channel(nonce)
+        assert channel is not None
         try:
-            result = punch.punch(
-                sock, [("127.0.0.1", bob.transport.listen_port)], nonce,
-                seconds=3.0)
-            assert result.punched
-            assert result.remote[1] == bob.transport.listen_port
+            answers = probe_once(("127.0.0.1", bob.transport.listen_port), nonce)
         finally:
-            sock.close()
+            bob.transport.close_probe_channel(nonce)
+
+        assert punch.ack_datagram(nonce) in answers, \
+            "the listening socket never acknowledged the probe"
+        assert punch.probe_datagram(nonce) in answers, \
+            "the listening socket never probed back"
+        alice.transport.send(bob.hash_hex, {}, "still up")
+        assert wait_for(lambda: [m.content for m in bob.inbox] == ["still up"],
+                        msg="the session after the probe")
+
+    def test_a_probe_for_no_live_attempt_is_not_answered(self, ip_node):
+        bob = ip_node("bob")
+        assert probe_once(("127.0.0.1", bob.transport.listen_port),
+                          b"\x45" * 16, timeout=1.0) == []
+
+    def test_a_closed_channel_stops_answering(self, ip_node):
+        bob = ip_node("bob")
+        nonce = b"\x46" * 16
+        assert bob.transport.open_probe_channel(nonce) is not None
+        bob.transport.close_probe_channel(nonce)
+        assert probe_once(("127.0.0.1", bob.transport.listen_port), nonce,
+                          timeout=1.0) == []
+

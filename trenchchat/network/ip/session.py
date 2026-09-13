@@ -14,14 +14,13 @@ claim, useful only as the pin for a later connection the other way.
 
 Not one application frame is read before that passes: everything arriving
 early is queued, and the first frame that is not part of the handshake ends
-the session. The UDP endpoint is owned by the caller rather than by aioquic,
-whose own connect() binds a dual-stack IPv6 socket and fails on an IPv4-only
-host, and because Phase 3 hands the session the socket a punch opened.
+the session. A session owns no socket: dialled or accepted, it runs on the one
+datagram endpoint this node listens on (network/ip/endpoint.py), because the
+socket a peer was told about is the only one its router forwards.
 """
 
 import asyncio
 import os
-import socket
 import ssl
 import struct
 import time
@@ -30,7 +29,6 @@ from typing import Callable
 
 import RNS
 from aioquic.asyncio.protocol import QuicConnectionProtocol
-from aioquic.asyncio.server import QuicServer
 from aioquic.quic.configuration import QuicConfiguration
 from aioquic.quic.connection import QuicConnection
 from aioquic.quic.events import (
@@ -43,6 +41,7 @@ from trenchchat.network.ip import frames
 from trenchchat.network.ip.certificate import (
     SessionCertificate, fingerprint_for, pem_for,
 )
+from trenchchat.network.ip.endpoint import unmap_host
 
 ALPN_PROTOCOL = "trenchchat-session/1"
 
@@ -246,7 +245,6 @@ class DirectSession(QuicConnectionProtocol):
         self._decoders: dict[int, frames.FrameDecoder] = {}
         self._preauth: asyncio.Queue = asyncio.Queue()
         self._pending: dict[bytes, _Pending] = {}
-        self._datagram_transport = None
         self._handshake_task: asyncio.Task | None = None
         self._peer_address: tuple | None = None
         self._verifier: RNS.Identity | None = None
@@ -276,14 +274,6 @@ class DirectSession(QuicConnectionProtocol):
             return
         if not self._is_client and self._handshake_task is None:
             self._handshake_task = asyncio.ensure_future(self._listen_handshake())
-
-    def own_datagram_transport(self, transport) -> None:
-        """Take ownership of a socket this session alone uses.
-
-        A session the listener accepted shares the listening socket and owns
-        nothing; one this node dialled closes its own when it ends.
-        """
-        self._datagram_transport = transport
 
     @property
     def authenticated(self) -> bool:
@@ -336,7 +326,7 @@ class DirectSession(QuicConnectionProtocol):
         self._finish(reason)
 
     def _finish(self, reason: str) -> None:
-        """Fire the closed hook once, fail everything outstanding, drop the socket."""
+        """Fire the closed hook once and fail everything outstanding."""
         if self._closed_fired:
             return
         self._closed_fired = True
@@ -353,12 +343,6 @@ class DirectSession(QuicConnectionProtocol):
             self._hooks.on_closed(self, reason)
         except Exception as e:
             RNS.log(f"TrenchChat [ip]: session closed hook error: {e}", RNS.LOG_ERROR)
-        if self._datagram_transport is not None:
-            try:
-                self._datagram_transport.close()
-            except Exception:
-                pass
-            self._datagram_transport = None
 
     def _cancel_handshake(self) -> None:
         """Stop a handshake that will never finish, rather than leave it pending."""
@@ -467,7 +451,8 @@ class DirectSession(QuicConnectionProtocol):
                 own_fingerprint, peer_fingerprint, nonce, timestamp))
             self._write(frames.hello_frame(
                 self._identity.rns_identity.get_public_key(), timestamp,
-                signature, certificate=self._certificate.der))
+                signature, certificate=self._certificate.der,
+                seen=self._observed_peer_address()))
             kind, payload = await self._next_handshake_frame()
             if kind != frames.KIND_HELLO:
                 raise HelloRejected("the peer answered no hello")
@@ -493,11 +478,7 @@ class DirectSession(QuicConnectionProtocol):
             if kind != frames.KIND_HELLO:
                 raise HelloRejected("the caller sent no hello")
             own_fingerprint = self._certificate.fingerprint
-            asserted = asserted_certificate(payload)
-            if self._peer_cert_der and asserted != self._peer_cert_der:
-                raise HelloRejected("the caller asserted a certificate it did "
-                                    "not offer")
-            self._peer_cert_der = asserted
+            self._peer_cert_der = asserted_certificate(payload)
             peer_fingerprint = fingerprint_for(self._peer_cert_der)
             peer_hash, public_key = verify_hello(
                 payload, own_fingerprint, peer_fingerprint, self._nonce, None)
@@ -511,6 +492,7 @@ class DirectSession(QuicConnectionProtocol):
                 self._identity.rns_identity.get_public_key(), timestamp,
                 signature, seen=self._observed_peer_address()))
             self._authenticate(peer_hex, public_key)
+            self._note_observed(frames.read_observed(payload))
         except (HelloRejected, frames.FrameError, asyncio.TimeoutError,
                 ValueError) as e:
             self.fail(str(e) or type(e).__name__)
@@ -523,10 +505,17 @@ class DirectSession(QuicConnectionProtocol):
         host, port = address[0], address[1]
         if not isinstance(host, str) or not isinstance(port, int):
             return None
-        return host, port
+        return unmap_host(host), port
 
     def _note_observed(self, observed: tuple[str, int] | None) -> None:
-        """Hand up the address the peer says it saw this node arrive from."""
+        """Hand up the address the peer says it saw this node arrive from.
+
+        Both ends of a session say so, because both are behind whatever
+        translates their own address and neither can see it. A peer that only
+        ever accepts sessions would otherwise learn nothing about itself, and
+        a pair of peers who both need an observation to name each other would
+        depend on which of them happened to dial.
+        """
         if observed is None or self._hooks.on_observed is None:
             return
         self._hooks.dispatch(self._hooks.on_observed, self, observed[0],
@@ -748,94 +737,3 @@ class DirectSession(QuicConnectionProtocol):
             "bytes_out": self.bytes_out,
             "pending_acks": len(self._pending),
         }
-
-
-def bind_datagram_socket(host: str, port: int) -> socket.socket:
-    """A UDP socket bound where the caller asked, in the family it resolves to.
-
-    aioquic binds a dual-stack IPv6 socket of its own, which an IPv4-only host
-    refuses outright; a session also has to be able to run on the socket a
-    punch opened, so the socket is always this side's to make.
-
-    The port is claimed exclusively, and SO_REUSEADDR is deliberately not set:
-    on a UDP socket it lets a second socket bind the same port, after which the
-    kernel decides which of them an arriving datagram reaches, and a second node
-    on the host silently takes this one's sessions. UDP has no TIME_WAIT, so a
-    port is free to bind again the moment it is closed either way.
-    """
-    info = socket.getaddrinfo(host, port, type=socket.SOCK_DGRAM)[0]
-    family, _type, _proto, _canonical, address = info
-    sock = socket.socket(family, socket.SOCK_DGRAM)
-    sock.bind(address)
-    return sock
-
-
-class ProbeAwareQuicServer(QuicServer):
-    """A listener that hands a punch probe to its owner before QUIC sees it.
-
-    A probe aimed at a mapped or observed candidate arrives here rather than at
-    an attempt's own socket, and QUIC would drop it unread. The handler answers
-    it on this socket, which is the one a router forwards and therefore the one
-    whose mapping is worth punching.
-    """
-
-    def __init__(self, *args, probe_handler=None, **kwargs):
-        super().__init__(*args, **kwargs)
-        self._probe_handler = probe_handler
-        self._socket_transport = None
-
-    def connection_made(self, transport) -> None:
-        """Keep the socket, so a probe can be answered on it."""
-        super().connection_made(transport)
-        self._socket_transport = transport
-
-    def datagram_received(self, data: bytes, addr) -> None:
-        """Answer a probe here; hand everything else to QUIC unchanged."""
-        if self._probe_handler is not None:
-            try:
-                if self._probe_handler(data, addr, self.send_to):
-                    return
-            except Exception as e:
-                RNS.log(f"TrenchChat [ip]: probe handler error: {e}", RNS.LOG_ERROR)
-        super().datagram_received(data, addr)
-
-    def send_to(self, data: bytes, addr) -> None:
-        """Write one datagram back out of the listening socket."""
-        if self._socket_transport is not None:
-            self._socket_transport.sendto(data, addr)
-
-
-async def create_listener(sock: socket.socket, configuration: QuicConfiguration,
-                          create_protocol, probe_handler=None
-                          ) -> QuicServer:
-    """Accept sessions on a socket this node owns.
-
-    probe_handler(data, addr, send) -> bool sees every datagram first and says
-    whether it took it; a punch probe is the only thing it ever takes.
-    """
-    loop = asyncio.get_running_loop()
-    _transport, server = await loop.create_datagram_endpoint(
-        lambda: ProbeAwareQuicServer(configuration=configuration,
-                                     create_protocol=create_protocol,
-                                     probe_handler=probe_handler),
-        sock=sock,
-    )
-    return server
-
-
-async def dial_session(host: str, port: int, configuration: QuicConfiguration,
-                       create_protocol, sock: socket.socket | None = None
-                       ) -> "DirectSession":
-    """Open one outbound connection, on a given socket or on a fresh one."""
-    loop = asyncio.get_running_loop()
-    infos = await loop.getaddrinfo(host, port, type=socket.SOCK_DGRAM)
-    family, _type, _proto, _canonical, address = infos[0]
-    if sock is None:
-        sock = socket.socket(family, socket.SOCK_DGRAM)
-        sock.bind(("::", 0) if family == socket.AF_INET6 else ("0.0.0.0", 0))
-    connection = QuicConnection(configuration=configuration)
-    transport, session = await loop.create_datagram_endpoint(
-        lambda: create_protocol(connection), sock=sock)
-    session.own_datagram_transport(transport)
-    await session.dial(address)
-    return session

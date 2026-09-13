@@ -197,10 +197,11 @@ def hello_frame(public_key: bytes, timestamp: int, signature: bytes,
     """This node's identity, bound to this connection by the signature.
 
     certificate is set by the connecting side only: the listener's own
-    certificate is already pinned by whoever dialled it. seen is set by the
-    accepting side only: it is where this node saw the caller arrive from,
-    which is the caller's own translated address and the one thing it cannot
-    learn from inside its own network.
+    certificate is already pinned by whoever dialled it. seen is set by both
+    sides: it is where this node saw the other's packets arrive from, which is
+    that peer's own translated address and the one thing it cannot learn from
+    inside its own network. A dialler knows it too, because the address it
+    dialled is often one a punch found rather than one the peer could name.
     """
     payload = {"pub": public_key, "ts": int(timestamp), "sig": signature}
     if certificate is not None:

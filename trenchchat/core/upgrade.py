@@ -31,7 +31,9 @@ The handshake, between two peers that can already see each other on the mesh:
    mapping wanted.
 3. The offerer probes when the answer arrives, no earlier than the time it
    named. The first candidate pair seen both ways carries the QUIC handshake:
-   the smaller hash dials it, the larger takes it on the punched socket.
+   the smaller hash dials it and the larger waits for that dial. Both happen on
+   the socket this node listens on, which is the socket its candidates named
+   and the only one a punched mapping forwards.
 
 Nothing here is periodic on the mesh. An offer is sent once per sighting of an
 eligible peer under a backoff that doubles from thirty seconds to a day, and a
@@ -126,10 +128,10 @@ def is_eligible(storage: Storage, self_hex: str, peer_hex: str) -> bool:
 class _Attempt:
     """One upgrade in flight with one peer."""
 
-    def __init__(self, peer_hex: str, nonce: bytes, sock, offered: bool):
+    def __init__(self, peer_hex: str, nonce: bytes, channel, offered: bool):
         self.peer_hex = peer_hex
         self.nonce = nonce
-        self.sock = sock
+        self.channel = channel
         self.offered = offered
         self.started_at = time.time()
         self.punch_at = self.started_at + PUNCH_LEAD_SECS
@@ -167,7 +169,6 @@ class UpgradeManager:
         self._first_seen: dict[str, float] = {}
         self._peer_candidate_sets: dict[str, tuple] = {}
         self._spent_nonces: deque = deque(maxlen=MAX_SPENT_NONCES)
-        self._live_nonces: dict[bytes, str] = {}
         self._stopped = False
         self._last_portmap = 0.0
 
@@ -179,7 +180,6 @@ class UpgradeManager:
         if router is not None:
             router.add_delivery_callback(self._on_message)
         if transport is not None:
-            transport.set_probe_responder(self._answer_probe)
             transport.set_observed_callback(self._note_observed)
 
     # --- the gate ---
@@ -347,12 +347,12 @@ class UpgradeManager:
             return peer_hex not in self._attempts
 
     def _run_offer(self, peer_hex: str) -> None:
-        """Bind a socket, name this node's candidates, and send the offer."""
+        """Take an attempt, name this node's candidates, and send the offer."""
         attempt = self._begin(peer_hex, os.urandom(UPGRADE_NONCE_BYTES),
                               offered=True)
         if attempt is None:
             return
-        own = self._own_candidates(attempt)
+        own = self._own_candidates()
         if not own:
             RNS.log(f"TrenchChat [upgrade]: not offering {peer_hex[:12]}… a "
                     f"session: this node has no address to name", RNS.LOG_DEBUG)
@@ -459,7 +459,7 @@ class UpgradeManager:
         attempt.peer_candidates = peer_candidates
         attempt.peer_cert = peer_cert
         attempt.punch_at = punch_at
-        own = self._own_candidates(attempt)
+        own = self._own_candidates()
         if not own:
             RNS.log(f"TrenchChat [upgrade]: not answering {peer_hex[:12]}…: "
                     f"this node has no address to name", RNS.LOG_DEBUG)
@@ -523,12 +523,15 @@ class UpgradeManager:
         if remembered is not None:
             targets.append((remembered[0], remembered[1]))
         result = punching.punch(
-            attempt.sock, targets, attempt.nonce, start_at=start_at,
+            attempt.channel, targets, start_at=start_at,
             on_probe=lambda source: attempt.probe_addresses.append(source),
         )
         for source in list(attempt.probe_addresses):
             self._storage.record_upgrade_address(
                 attempt.peer_hex, ADDRESS_PEER, source[0], source[1])
+        if self._self_hex > attempt.peer_hex:
+            self._await_dial(attempt, result, len(targets))
+            return
         if not result.punched:
             RNS.log(f"TrenchChat [upgrade]: no path punched to "
                     f"{attempt.peer_hex[:12]}… in {result.seconds:.1f}s over "
@@ -536,16 +539,9 @@ class UpgradeManager:
             self._finish(attempt, REASON_PUNCH_FAILED)
             return
         host, port = result.remote
-        sock = attempt.sock
-        attempt.sock = None
-        if self._self_hex < attempt.peer_hex:
-            opened = self._transport.open_session(
-                attempt.peer_hex, host, port, attempt.peer_cert, sock=sock,
-                timeout=SESSION_TIMEOUT_SECS)
-        else:
-            opened = self._transport.accept_on(
-                sock, attempt.peer_hex, attempt.peer_cert,
-                timeout=SESSION_TIMEOUT_SECS)
+        opened = self._transport.open_session(
+            attempt.peer_hex, host, port, attempt.peer_cert,
+            timeout=SESSION_TIMEOUT_SECS)
         if not opened:
             self._finish(attempt, REASON_HANDSHAKE_FAILED)
             return
@@ -553,24 +549,47 @@ class UpgradeManager:
                 f"{attempt.peer_hex[:12]}… over {host}:{port}", RNS.LOG_NOTICE)
         self._finish(attempt, None)
 
+    def _await_dial(self, attempt: _Attempt, result, targets: int) -> None:
+        """The larger hash's half: probe to open the way in, then be dialled.
+
+        Its probes are what make its own mapping, and the peer's session
+        arrives on the socket they went out of, so a matched pair is not
+        needed here: a probe from the peer is proof enough that its dial can
+        take the same path, and nothing arriving at all is the pair that has
+        no path.
+        """
+        if not result.punched and not result.probes_from:
+            RNS.log(f"TrenchChat [upgrade]: no path punched to "
+                    f"{attempt.peer_hex[:12]}… in {result.seconds:.1f}s over "
+                    f"{targets} candidates", RNS.LOG_WARNING)
+            self._finish(attempt, REASON_PUNCH_FAILED)
+            return
+        if not self._transport.await_session(attempt.peer_hex,
+                                             timeout=SESSION_TIMEOUT_SECS):
+            RNS.log(f"TrenchChat [upgrade]: {attempt.peer_hex[:12]}… never "
+                    f"dialled the path it punched", RNS.LOG_WARNING)
+            self._finish(attempt, REASON_HANDSHAKE_FAILED)
+            return
+        RNS.log(f"TrenchChat [upgrade]: direct session with "
+                f"{attempt.peer_hex[:12]}…, dialled by them", RNS.LOG_NOTICE)
+        self._finish(attempt, None)
+
     # --- attempts ---
 
     def _begin(self, peer_hex: str, nonce: bytes, offered: bool) -> _Attempt | None:
-        """Take the slot for this peer and bind the socket the session runs on."""
-        try:
-            sock = punching.bind_socket()
-        except OSError as e:
-            RNS.log(f"TrenchChat [upgrade]: could not bind a socket to punch "
-                    f"with {peer_hex[:12]}…: {e}", RNS.LOG_WARNING)
+        """Take the slot for this peer and a probe channel on the listening socket."""
+        channel = self._transport.open_probe_channel(nonce)
+        if channel is None:
+            RNS.log(f"TrenchChat [upgrade]: cannot punch with {peer_hex[:12]}…: "
+                    f"this node is not listening", RNS.LOG_WARNING)
             self._record_failure(peer_hex, REASON_HANDSHAKE_FAILED)
             return None
-        attempt = _Attempt(peer_hex, nonce, sock, offered)
+        attempt = _Attempt(peer_hex, nonce, channel, offered)
         with self._lock:
             if peer_hex in self._attempts or self._stopped:
-                sock.close()
+                self._transport.close_probe_channel(nonce)
                 return None
             self._attempts[peer_hex] = attempt
-            self._live_nonces[nonce] = peer_hex
             self._spent_nonces.append(nonce)
         return attempt
 
@@ -582,22 +601,20 @@ class UpgradeManager:
             attempt.done = True
             if self._attempts.get(attempt.peer_hex) is attempt:
                 del self._attempts[attempt.peer_hex]
-            self._live_nonces.pop(attempt.nonce, None)
-            sock = attempt.sock
-            attempt.sock = None
-        if sock is not None:
-            sock.close()
+            attempt.channel = None
+        if self._transport is not None:
+            self._transport.close_probe_channel(attempt.nonce)
         if reason is None:
             self._clear_failure(attempt.peer_hex)
         else:
             self._record_failure(attempt.peer_hex, reason)
 
-    def _own_candidates(self, attempt: _Attempt) -> list:
+    def _own_candidates(self) -> list:
         """This node's candidates for one attempt, as the wire carries them."""
         mapped = self._mapper.address() if self._mapper is not None else None
         observed = self._storage.get_upgrade_addresses(ADDRESS_SELF, limit=2)
         gathered = candidate_gathering.gather(
-            attempt.sock.getsockname()[1], mapped=mapped, observed=observed)
+            self._transport.listen_port, mapped=mapped, observed=observed)
         return [[host, port, kind] for host, port, kind in gathered]
 
     def _add_observed(self, fields: dict, peer_hex: str) -> None:
@@ -620,16 +637,27 @@ class UpgradeManager:
         it is trusted: it is a place to aim a probe, and a session still
         authenticates from nothing.
         """
-        self._storage.record_upgrade_address(peer_hex, ADDRESS_SELF, host, port)
-        RNS.log(f"TrenchChat [upgrade]: {peer_hex[:12]}… saw this node at "
-                f"{host}:{port}", RNS.LOG_DEBUG)
+        self._record_self_address(peer_hex, host, port)
 
     def _remember_self_address(self, peer_hex: str, fields: dict) -> None:
         """Record where a peer says it saw this node, as a candidate for later."""
         observed = upgrade_address(fields.get(F_UPGRADE_OBSERVED))
         if observed is not None:
-            self._storage.record_upgrade_address(peer_hex, ADDRESS_SELF,
-                                                 observed[0], observed[1])
+            self._record_self_address(peer_hex, observed[0], observed[1])
+
+    def _record_self_address(self, peer_hex: str, host: str, port: int) -> None:
+        """Keep one address a peer says this node was reached at.
+
+        An address nobody outside this machine could dial is not an
+        observation worth keeping: it would be offered to nobody and would
+        push out the one that was.
+        """
+        if not candidate_gathering.is_reachable_address(host):
+            return
+        self._storage.record_upgrade_address(peer_hex, ADDRESS_SELF, host,
+                                             port)
+        RNS.log(f"TrenchChat [upgrade]: {peer_hex[:12]}… saw this node at "
+                f"{host}:{port}", RNS.LOG_DEBUG)
 
     def _note_candidate_set(self, peer_hex: str, peer_candidates: list) -> None:
         """A peer that moved gets a clean slate: the old failure is about an
@@ -641,23 +669,6 @@ class UpgradeManager:
             changed = previous is not None and previous != current
         if changed:
             self._clear_failure(peer_hex)
-
-    def _answer_probe(self, data: bytes, source, send) -> bool:
-        """Answer a probe that arrived on the listening socket.
-
-        A probe aimed at a mapped or observed candidate lands there rather than
-        on an attempt's own socket. Runs on the transport's loop, so it records
-        the address in memory and leaves the writing to the attempt.
-        """
-        for nonce, peer_hex in list(self._live_nonces.items()):
-            if not punching.answer_probe(data, source, send, nonce):
-                continue
-            with self._lock:
-                attempt = self._attempts.get(peer_hex)
-            if attempt is not None and source not in attempt.probe_addresses:
-                attempt.probe_addresses.append(source)
-            return True
-        return False
 
     # --- failures ---
 
@@ -741,15 +752,12 @@ class UpgradeManager:
             self._stopped = True
             attempts = list(self._attempts.values())
             self._attempts.clear()
-            self._live_nonces.clear()
         for attempt in attempts:
-            if attempt.sock is not None:
-                attempt.sock.close()
-                attempt.sock = None
+            attempt.channel = None
+            if self._transport is not None:
+                self._transport.close_probe_channel(attempt.nonce)
         if self._router is not None:
             self._router.remove_delivery_callback(self._on_message)
-        if self._transport is not None:
-            self._transport.set_probe_responder(None)
         self._pool.shutdown(wait=False)
         if self._mapper is not None:
             self._mapper.release()

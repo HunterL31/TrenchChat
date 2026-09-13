@@ -329,11 +329,15 @@ class DirectTestTransport(IPTransport):
     which stands for a path that has not resolved. A live QUIC session would
     reach it anyway and the test would be asserting nothing, so this path is
     unreachable wherever the other one is.
+
+    It listens where a real node does rather than on the loopback: a candidate
+    a peer probes is a routable address of this host, and the socket it has to
+    reach is the one this node listens on.
     """
 
     def __init__(self, config: Config, identity, fake: FakeTransport):
         super().__init__(config, identity, authorize=lambda _peer: True,
-                         listen_host="127.0.0.1", listen_port=0)
+                         listen_port=0)
         self._fake = fake
 
     def can_reach(self, dest_hex: str) -> bool:

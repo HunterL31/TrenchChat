@@ -11,10 +11,12 @@ A pair counts as punched when it is seen both ways from one address: a probe
 arrived from it, and an acknowledgement echoing this node's nonce arrived from
 it, which is the peer saying it received something this node sent.
 
-The socket is the caller's, bound before the punch and handed to the session
-after it, because the QUIC session has to run on the socket whose mapping the
-punch opened. Everything here blocks, so it belongs on a worker thread and
-never on an RNS callback thread.
+Probes go out of the socket this node listens on and arrive back on it, because
+that is the socket its candidates named and the only one a router forwards to.
+The endpoint owns that socket and hands every datagram carrying an attempt's
+nonce to its ProbeChannel; punch() drives the retransmission from a worker
+thread, since everything here blocks and none of it belongs on an RNS callback
+thread or on the transport's loop.
 
 Phase 0 found the ordering that matters: a probe reaching a NAT before that NAT
 has made its own outbound mapping can take the very tuple the mapping wanted,
@@ -23,8 +25,7 @@ first, from the moment it answers, and the offering side waits for that answer
 and for the punch time it named.
 """
 
-import errno
-import socket
+import threading
 import time
 from dataclasses import dataclass, field
 
@@ -48,8 +49,10 @@ KIND_ACK = "ack"
 PROBE_INTERVAL_SECS = 0.2
 PUNCH_TIMEOUT_SECS = 5.0
 
-# Nothing legitimate is longer than a probe, so the read is the exact size.
-RECV_BYTES = DATAGRAM_BYTES
+# Addresses one attempt will answer probes from. An attempt aims at eight
+# candidates and learns a handful more from the probes that arrive; anything
+# past this is somebody spraying nonces they should not have.
+MAX_PROBE_SOURCES = 32
 
 
 def probe_datagram(nonce: bytes) -> bytes:
@@ -78,18 +81,104 @@ def read_datagram(data: bytes, nonce: bytes) -> str | None:
     return None
 
 
-def bind_socket(host: str = "0.0.0.0", port: int = 0) -> socket.socket:
-    """One UDP socket for one attempt, bound where the caller asked.
+def nonce_of(data: bytes) -> bytes | None:
+    """The nonce a probe datagram carries, or None when it is not one.
 
-    Its own socket every time: the session runs on it afterwards, and a socket
-    another transport owns cannot be handed over. The port is claimed
-    exclusively, for the reason bind_datagram_socket gives.
+    What the endpoint asks of every datagram before QUIC sees it: no valid QUIC
+    packet is this short, and the nonce still has to name a live attempt.
     """
-    info = socket.getaddrinfo(host, port, type=socket.SOCK_DGRAM)[0]
-    family, _type, _proto, _canonical, address = info
-    sock = socket.socket(family, socket.SOCK_DGRAM)
-    sock.bind(address)
-    return sock
+    if len(data) != DATAGRAM_BYTES or data[:MAGIC_BYTES] not in (PROBE_MAGIC,
+                                                                ACK_MAGIC):
+        return None
+    return data[MAGIC_BYTES:]
+
+
+class ProbeChannel:
+    """One attempt's probes on the socket this node listens on.
+
+    The endpoint delivers every datagram carrying this attempt's nonce here, on
+    its loop, and the answer goes back on the spot: an acknowledgement, so the
+    far side knows its probe arrived, and a probe of this node's own at the
+    address it came from, which is the address a NAT chose and no candidate
+    list could have named. punch() keeps probing from a thread of its own,
+    because one datagram each way is not a path until both sides have seen one.
+    """
+
+    def __init__(self, nonce: bytes, send):
+        """
+        nonce: the sixteen bytes this attempt's datagrams carry
+        send(data, (host, port)) -> bool: the endpoint's own sender
+        """
+        self._nonce = nonce
+        self._send = send
+        self._lock = threading.Lock()
+        self._arrived = threading.Event()
+        self._probes_from: set = set()
+        self._acks_from: set = set()
+        self._fresh: list = []
+        self._closed = False
+
+    def send_probe(self, addr) -> bool:
+        """Probe one address. False when nothing here could send it."""
+        with self._lock:
+            if self._closed:
+                return False
+        return bool(self._send(probe_datagram(self._nonce), addr))
+
+    def deliver(self, data: bytes, addr) -> bool:
+        """Take one datagram and answer it. Runs on the transport's loop."""
+        kind = read_datagram(data, self._nonce)
+        if kind is None:
+            return False
+        with self._lock:
+            if self._closed:
+                return True
+            if kind == KIND_ACK:
+                self._acks_from.add(addr)
+                self._arrived.set()
+                return True
+            fresh = addr not in self._probes_from
+            if fresh and len(self._probes_from) >= MAX_PROBE_SOURCES:
+                return True
+            self._probes_from.add(addr)
+            if fresh:
+                self._fresh.append(addr)
+            self._arrived.set()
+        self._send(ack_datagram(self._nonce), addr)
+        if fresh:
+            self._send(probe_datagram(self._nonce), addr)
+        return True
+
+    def arm(self) -> None:
+        """Forget what has arrived, so the next wait is about the next round."""
+        self._arrived.clear()
+
+    def wait(self, timeout: float) -> bool:
+        """Wait for anything to arrive, or for the round to be over."""
+        return self._arrived.wait(timeout)
+
+    def take_fresh(self) -> list:
+        """The addresses probes newly arrived from, which are new targets."""
+        with self._lock:
+            fresh, self._fresh = self._fresh, []
+        return fresh
+
+    def matched(self) -> tuple | None:
+        """The first address seen both ways, which is the punched pair."""
+        with self._lock:
+            both_ways = self._probes_from & self._acks_from
+        return sorted(both_ways)[0] if both_ways else None
+
+    def seen(self) -> tuple[list, list]:
+        """Every address a probe and an acknowledgement arrived from."""
+        with self._lock:
+            return sorted(self._probes_from), sorted(self._acks_from)
+
+    def close(self) -> None:
+        """Stop answering: the attempt this channel belonged to is over."""
+        with self._lock:
+            self._closed = True
+        self._arrived.set()
 
 
 @dataclass
@@ -108,7 +197,7 @@ class PunchResult:
         return self.remote is not None
 
 
-def punch(sock: socket.socket, peer_candidates, nonce: bytes, *,
+def punch(channel: ProbeChannel, peer_candidates, *,
           seconds: float = PUNCH_TIMEOUT_SECS,
           interval: float = PROBE_INTERVAL_SECS,
           start_at: float | None = None, on_probe=None) -> PunchResult:
@@ -128,91 +217,29 @@ def punch(sock: socket.socket, peer_candidates, nonce: bytes, *,
         if 0 < wait <= MAX_UPGRADE_PUNCH_AHEAD_SECS:
             time.sleep(wait)
     deadline = time.monotonic() + seconds
-    probe = probe_datagram(nonce)
     result = PunchResult()
-    probes_from: set = set()
-    acks_from: set = set()
     targets = [(host, port) for host, port, *_rest in peer_candidates]
 
-    abandoned = False
-    sock.settimeout(interval)
-    try:
-        while time.monotonic() < deadline and not abandoned:
-            for target in targets:
-                try:
-                    sock.sendto(probe, target)
-                    result.probes_sent += 1
-                except OSError as e:
-                    # The socket goes out from under an attempt this node has
-                    # given up on, which is an ending rather than an error.
-                    if e.errno == errno.EBADF:
-                        abandoned = True
-                        break
-                if abandoned:
-                    break
-            window = time.monotonic() + interval
-            while time.monotonic() < window:
-                try:
-                    data, source = sock.recvfrom(RECV_BYTES)
-                except (socket.timeout, TimeoutError):
-                    break
-                except OSError as e:
-                    if e.errno == errno.EBADF:
-                        abandoned = True
-                        break
-                    continue
-                kind = read_datagram(data, nonce)
-                if kind is None:
-                    continue
-                if kind == KIND_PROBE:
-                    if source not in probes_from:
-                        probes_from.add(source)
-                        # Where the peer actually is, which its own candidate
-                        # list could not say: a NAT names the address, not the
-                        # node behind it. Probing back is what makes a pair
-                        # work when only one side could be reached first.
-                        if source not in targets:
-                            targets.append(source)
-                        if on_probe is not None:
-                            on_probe(source)
-                    try:
-                        sock.sendto(ack_datagram(nonce), source)
-                    except OSError:
-                        pass
-                else:
-                    acks_from.add(source)
-                both_ways = probes_from & acks_from
-                if both_ways:
-                    result.remote = sorted(both_ways)[0]
-                    break
-            if result.remote is not None:
-                break
-    finally:
-        try:
-            sock.settimeout(None)
-        except OSError:
-            pass
-    result.probes_from = sorted(probes_from)
-    result.acks_from = sorted(acks_from)
+    while time.monotonic() < deadline:
+        channel.arm()
+        for target in targets:
+            if channel.send_probe(target):
+                result.probes_sent += 1
+        channel.wait(min(interval, max(deadline - time.monotonic(), 0.0)))
+        for source in channel.take_fresh():
+            if source not in targets:
+                targets.append(source)
+            if on_probe is not None:
+                on_probe(source)
+        remote = channel.matched()
+        if remote is not None:
+            result.remote = remote
+            break
+
+    result.probes_from, result.acks_from = channel.seen()
     result.seconds = round(time.monotonic() - started, 3)
     if result.punched:
         RNS.log(f"TrenchChat [ip]: punched a path to "
                 f"{result.remote[0]}:{result.remote[1]} in "
                 f"{result.seconds:.1f}s", RNS.LOG_NOTICE)
     return result
-
-
-def answer_probe(data: bytes, source, send, nonce: bytes) -> bool:
-    """Answer one probe that arrived somewhere other than an attempt's socket.
-
-    The listening socket sees probes aimed at a mapped or observed candidate,
-    which name the port a router forwards rather than the port being punched.
-    Answering with an acknowledgement and a probe of this node's own makes that
-    address a candidate pair like any other. Returns whether the datagram was a
-    probe at all; anything else belongs to whoever was going to read it next.
-    """
-    if read_datagram(data, nonce) != KIND_PROBE:
-        return False
-    send(ack_datagram(nonce), source)
-    send(probe_datagram(nonce), source)
-    return True
