@@ -135,13 +135,12 @@ capturing a black screen.
 ### The pipeline
 
 ```
-sharer                                             viewer
-mss capture ─ diff tiles ─ JPEG ─┐               ┌─ bounds check ─ tile store ─ WS ─ client
-      (one capture thread,       │  direct        │   (ScreenShareManager,      (stage painter)
-       one encode per tick)      ├─ session ──────┤    per share watched)
-                                 │  REQ/RESP      │
-   per viewer: dirty set,        │  (one op)      │   credit back to the sharer
-   credit, last seq  ────────────┘               └── credit back to the backend
+sharer                                        viewer
+mss capture - diff tiles - JPEG               bounds check - tile store - WS - client
+  (one capture thread,       \   direct    /    (ScreenShareManager,      (stage painter)
+   one encode per tick)       > session <       per share watched)
+per viewer: dirty set,       /  REQ/RESP  \    credit back to the sharer
+  credit, last seq                              credit back to the backend
 ```
 
 **Capture and encode** (`core/screen/capture.py`, `core/screen/encoder.py`).
