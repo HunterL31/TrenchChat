@@ -110,7 +110,9 @@ class _NomadHostingContentState extends State<_NomadHostingContent> {
       actions: [
         TcGhostButton(label: 'CLOSE', onPressed: () => Navigator.pop(context)),
         TcPrimaryButton(
-          label: _busy ? 'SAVING…' : 'APPLY',
+          label: 'APPLY',
+          busyLabel: 'SAVING…',
+          busy: _busy,
           onPressed: _busy ? null : _save,
         ),
       ],
@@ -128,19 +130,20 @@ class _NomadHostingContentState extends State<_NomadHostingContent> {
           onSubmitted: (_) => _save(),
         ),
         if (hosting != null) ...[
-          const SizedBox(height: 14),
+          const SizedBox(height: TCSpace.space3),
           Text(
-            'PAGES DIRECTORY',
+            'Pages directory',
             style: TextStyle(
-              fontSize: TCType.textMicro,
-              color: tc.textTertiary,
+              fontSize: TCType.textCaption,
+              color: tc.textSecondary,
               letterSpacing:
-                  TCType.letterSpacingFor(TCType.textMicro, TCType.trackingWide),
+                  TCType.letterSpacingFor(TCType.textCaption, TCType.trackingWide),
             ),
           ),
-          const SizedBox(height: 4),
+          const SizedBox(height: 6),
           SelectableText(
             hosting.pagesDir,
+            maxLines: 1,
             style:
                 TextStyle(fontSize: TCType.textCaption, color: tc.textSecondary),
           ),
@@ -163,11 +166,12 @@ class _NomadHostingContentState extends State<_NomadHostingContent> {
                   label: 'RESCAN', onPressed: _busy ? null : _rescan),
             ],
           ),
-          const SizedBox(height: 4),
+          const SizedBox(height: 10),
           ConstrainedBox(
             constraints: const BoxConstraints(maxHeight: 160),
             child: ListView(
               shrinkWrap: true,
+              padding: EdgeInsets.only(right: scrollbarInset(context)),
               children: [
                 for (final entry in [...hosting.pages, ...hosting.files])
                   Padding(
@@ -183,6 +187,7 @@ class _NomadHostingContentState extends State<_NomadHostingContent> {
                                 color: tc.textSecondary),
                           ),
                         ),
+                        const SizedBox(width: TCSpace.space2),
                         Text(
                           '${entry.size} B',
                           style: TextStyle(

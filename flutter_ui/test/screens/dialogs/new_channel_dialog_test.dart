@@ -44,7 +44,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('New Channel'), findsOneWidget);
-    expect(find.text('ACCESS'), findsOneWidget);
+    expect(find.text('Access'), findsOneWidget);
     expect(find.text('PUBLIC'), findsOneWidget);
     expect(find.text('INVITE-ONLY'), findsOneWidget);
   });
@@ -55,7 +55,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('New Channel in Server'), findsOneWidget);
-    expect(find.text('ACCESS'), findsNothing);
+    expect(find.text('Access'), findsNothing);
     expect(find.text('PUBLIC'), findsNothing);
     expect(find.text('INVITE-ONLY'), findsNothing);
   });

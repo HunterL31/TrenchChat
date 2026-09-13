@@ -602,7 +602,11 @@ class _ComposeBarState extends State<ComposeBar> {
             onTap: widget.pickAttachment == null ? null : _pickAttachment,
             child: TcTooltip(
               message: 'Attach an image',
-              child: TcIcon(TcIcons.plus, size: 15, color: tc.textTertiary),
+              child: SizedBox(
+                width: tcChromeHeight,
+                height: tcChromeHeight,
+                child: Center(child: TcIcon(TcIcons.plus, size: 15, color: tc.textTertiary)),
+              ),
             ),
           ),
         ),
@@ -638,6 +642,7 @@ class _ComposeBarState extends State<ComposeBar> {
             style: TextStyle(fontSize: TCType.textBodyMd, color: tc.textPrimary),
             decoration: InputDecoration(
               isDense: true,
+              contentPadding: EdgeInsets.zero,
               border: InputBorder.none,
               hintText: 'Message #${widget.channelName}…',
               hintStyle: TextStyle(fontSize: TCType.textBodyMd, color: tc.textTertiary),
@@ -650,7 +655,11 @@ class _ComposeBarState extends State<ComposeBar> {
               widget.pickEmoji == null ? SystemMouseCursors.basic : SystemMouseCursors.click,
           child: GestureDetector(
             onTap: widget.pickEmoji == null ? null : _insertEmoji,
-            child: TcIcon(TcIcons.emoji, size: 15, color: tc.textTertiary),
+            child: SizedBox(
+              width: tcChromeHeight,
+              height: tcChromeHeight,
+              child: Center(child: TcIcon(TcIcons.emoji, size: 15, color: tc.textTertiary)),
+            ),
           ),
         ),
         const SizedBox(width: 10),
@@ -702,12 +711,14 @@ class _ComposeBarState extends State<ComposeBar> {
   /// Each row carries the identity's short hash as well as its name, since a
   /// name alone is self-asserted and two peers may share one.
   Widget _mentionPicker(TCSectionColors tc) {
+    final corners = tcCorners(context);
     return Container(
       margin: const EdgeInsets.only(bottom: 8),
+      clipBehavior: corners == null ? Clip.none : Clip.antiAlias,
       decoration: BoxDecoration(
         color: tc.bgSurfaceRaised,
         border: Border.all(color: tc.borderSubtle),
-        borderRadius: tcCorners(context),
+        borderRadius: corners,
       ),
       child: Column(
         mainAxisSize: MainAxisSize.min,
@@ -829,7 +840,7 @@ class _ComposeBarState extends State<ComposeBar> {
       padding: const EdgeInsets.only(bottom: 8),
       child: Row(
         children: [
-          Container(width: 2, height: 26, color: tc.borderAccent),
+          Container(width: 2, height: 27, color: tc.borderAccent),
           const SizedBox(width: 8),
           Expanded(
             child: Column(

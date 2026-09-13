@@ -7,11 +7,24 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
-import '../../theme/glow.dart';
 import '../../theme/section_theme.dart';
+import '../../theme/shape.dart';
+import '../../theme/theme_spec.dart';
 import '../../theme/tokens.dart';
 import '../../widgets/tc_button.dart';
 import '../../widgets/tc_dialog.dart';
+import '../../widgets/tc_text_field.dart';
+
+/// Every PIN dialog is a dialog like the other eighteen, so it renders under
+/// the user's theme rather than the stock green.
+Widget _themed(ThemeSpec? spec, Widget child) => SectionTheme(
+      spec: spec ?? ThemeSpec.empty,
+      section: TCSection.dialogs,
+      child: child,
+    );
+
+/// One width for all three PIN dialogs.
+const double _pinDialogWidth = 360;
 
 const int pinMinLen = 4;
 const int pinMaxLen = 8;
@@ -47,6 +60,7 @@ class _PinField extends StatelessWidget {
       decoration: BoxDecoration(
         color: tc.bgInset,
         border: Border.all(color: tc.borderDefault),
+        borderRadius: tcCorners(context, scale: 0.5),
       ),
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
       child: TextField(
@@ -64,34 +78,32 @@ class _PinField extends StatelessWidget {
         ),
         decoration: InputDecoration(
           isDense: true,
+          contentPadding: EdgeInsets.zero,
           counterText: '',
           border: InputBorder.none,
           hintText: hint,
-          hintStyle: TextStyle(fontSize: TCType.textBodyMd, color: tc.textTertiary),
+          hintStyle: TextStyle(
+            fontSize: TCType.textBodyMd,
+            color: tc.textTertiary,
+            letterSpacing:
+                TCType.letterSpacingFor(TCType.textBodyMd, TCType.trackingWider),
+          ),
         ),
       ),
     );
   }
 }
 
-Widget _fieldLabel(BuildContext context, String label) => Text(
-      label,
-      style: TextStyle(
-        fontSize: TCType.textCaption,
-        color: SectionTheme.of(context).textSecondary,
-        letterSpacing: TCType.letterSpacingFor(TCType.textCaption, TCType.trackingWide),
-      ),
-    );
-
 // ---------------------------------------------------------------------------
 // SetPinDialog
 // ---------------------------------------------------------------------------
 
 /// Pops the chosen PIN, or null on cancel.
-Future<String?> showSetPinDialog(BuildContext context) {
+Future<String?> showSetPinDialog(BuildContext context,
+    {ThemeSpec? spec}) {
   return showTcDialog<String>(
     context: context,
-    builder: (context) => const _SetPinContent(),
+    builder: (context) => _themed(spec, const _SetPinContent()),
   );
 }
 
@@ -133,7 +145,7 @@ class _SetPinContentState extends State<_SetPinContent> {
   Widget build(BuildContext context) {
     return TcDialogShell(
       title: 'Set PIN',
-      width: 340,
+      width: _pinDialogWidth,
       errorText: _error,
       actions: [
         TcGhostButton(label: 'CANCEL', onPressed: () => Navigator.pop(context)),
@@ -147,11 +159,11 @@ class _SetPinContentState extends State<_SetPinContent> {
               fontSize: TCType.textBodySm, color: SectionTheme.of(context).textSecondary),
         ),
         const SizedBox(height: 12),
-        _fieldLabel(context, 'NEW PIN'),
+        TcFieldLabel('New PIN'),
         const SizedBox(height: 6),
         _PinField(controller: _pin1, hint: 'New PIN', autofocus: true),
         const SizedBox(height: 10),
-        _fieldLabel(context, 'CONFIRM PIN'),
+        TcFieldLabel('Confirm PIN'),
         const SizedBox(height: 6),
         _PinField(controller: _pin2, hint: 'Confirm PIN', onSubmitted: (_) => _submit()),
       ],
@@ -166,10 +178,11 @@ class _SetPinContentState extends State<_SetPinContent> {
 /// Pops a [PinChange] (newPin null = remove protection), or null on cancel.
 /// [verifyPin] checks the current PIN, standing in for lockbox.unlock().
 Future<PinChange?> showChangePinDialog(BuildContext context,
-    {required bool Function(String pin) verifyPin}) {
+    {required bool Function(String pin) verifyPin,
+    ThemeSpec? spec}) {
   return showTcDialog<PinChange>(
     context: context,
-    builder: (context) => _ChangePinContent(verifyPin: verifyPin),
+    builder: (context) => _themed(spec, _ChangePinContent(verifyPin: verifyPin)),
   );
 }
 
@@ -231,7 +244,7 @@ class _ChangePinContentState extends State<_ChangePinContent> {
   Widget build(BuildContext context) {
     return TcDialogShell(
       title: 'Change PIN',
-      width: 360,
+      width: _pinDialogWidth,
       errorText: _error,
       actions: [
         TcGhostButton(label: 'CANCEL', onPressed: () => Navigator.pop(context)),
@@ -245,15 +258,15 @@ class _ChangePinContentState extends State<_ChangePinContent> {
               fontSize: TCType.textBodySm, color: SectionTheme.of(context).textSecondary),
         ),
         const SizedBox(height: 12),
-        _fieldLabel(context, 'CURRENT PIN'),
+        TcFieldLabel('Current PIN'),
         const SizedBox(height: 6),
         _PinField(controller: _current, hint: 'Current PIN', autofocus: true),
         const SizedBox(height: 10),
-        _fieldLabel(context, 'NEW PIN'),
+        TcFieldLabel('New PIN'),
         const SizedBox(height: 6),
         _PinField(controller: _new1, hint: 'New PIN (leave blank to remove)'),
         const SizedBox(height: 10),
-        _fieldLabel(context, 'CONFIRM NEW PIN'),
+        TcFieldLabel('Confirm new PIN'),
         const SizedBox(height: 6),
         _PinField(controller: _new2, hint: 'Confirm new PIN', onSubmitted: (_) => _submit()),
       ],
@@ -268,10 +281,11 @@ class _ChangePinContentState extends State<_ChangePinContent> {
 /// Pops true when [verifyPin] accepts the entered PIN. Enforces the Qt
 /// dialog's 5-attempt limit and 30-second cooldown.
 Future<bool?> showUnlockDialog(BuildContext context,
-    {required bool Function(String pin) verifyPin}) {
+    {required bool Function(String pin) verifyPin,
+    ThemeSpec? spec}) {
   return showTcDialog<bool>(
     context: context,
-    builder: (context) => _UnlockContent(verifyPin: verifyPin),
+    builder: (context) => _themed(spec, _UnlockContent(verifyPin: verifyPin)),
   );
 }
 
@@ -342,36 +356,23 @@ class _UnlockContentState extends State<_UnlockContent> {
 
   @override
   Widget build(BuildContext context) {
-    final tc = SectionTheme.of(context);
     return TcDialogShell(
-      title: 'TrenchChat — Unlock',
-      width: 340,
+      title: 'TrenchChat \u00b7 Unlock',
+      width: _pinDialogWidth,
       errorText: _error,
       actions: [
         TcGhostButton(label: 'QUIT', onPressed: () => Navigator.pop(context, false)),
         TcPrimaryButton(label: 'UNLOCK', onPressed: _coolingDown ? null : _submit),
       ],
       children: [
-        Center(
-          child: Text(
-            'TrenchChat is locked',
-            style: TextStyle(
-              fontFamily: SectionTheme.styleOf(context).displayFont,
-              fontSize: TCType.textDisplaySm,
-              color: tc.textEmphasis,
-              shadows: tcTextGlow(context),
-            ),
-          ),
+        Text(
+          'Enter your PIN to unlock.',
+          style: TextStyle(
+              fontSize: TCType.textBodySm, color: SectionTheme.of(context).textSecondary),
         ),
+        const SizedBox(height: TCSpace.space3),
+        TcFieldLabel('PIN'),
         const SizedBox(height: 6),
-        Center(
-          child: Text(
-            'Enter your PIN to unlock.',
-            style: TextStyle(
-                fontSize: TCType.textBodySm, color: SectionTheme.of(context).textSecondary),
-          ),
-        ),
-        const SizedBox(height: 14),
         _PinField(
           controller: _pin,
           hint: 'Enter PIN',

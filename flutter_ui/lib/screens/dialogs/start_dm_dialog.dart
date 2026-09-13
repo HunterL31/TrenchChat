@@ -68,39 +68,71 @@ class _StartDmDialogContent extends StatelessWidget {
             constraints: const BoxConstraints(maxHeight: 280),
             child: ListView(
               shrinkWrap: true,
+              padding: EdgeInsets.only(right: scrollbarInset(context)),
               children: [
                 for (final f in friends)
-                  InkWell(
+                  _FriendRow(
+                    label: _label(f),
+                    online: f.isOnline,
                     onTap: () {
                       Navigator.pop(context);
                       state.openDm(f.identityHash);
                     },
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 8),
-                      child: Row(
-                        children: [
-                          StatusDot(
-                            status: f.isOnline
-                                ? PresenceStatus.online
-                                : PresenceStatus.offline,
-                            size: 10,
-                          ),
-                          const SizedBox(width: 9),
-                          Expanded(
-                            child: Text(
-                              _label(f),
-                              overflow: TextOverflow.ellipsis,
-                              style: TextStyle(fontSize: 13, color: tc.textSecondary),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
                   ),
               ],
             ),
           ),
       ],
+    );
+  }
+}
+
+/// One friend to open a conversation with. Hover is painted here rather than
+/// left to InkWell, whose ink this theme turns off everywhere.
+class _FriendRow extends StatefulWidget {
+  const _FriendRow({required this.label, required this.online, required this.onTap});
+
+  final String label;
+  final bool online;
+  final VoidCallback onTap;
+
+  @override
+  State<_FriendRow> createState() => _FriendRowState();
+}
+
+class _FriendRowState extends State<_FriendRow> {
+  bool _hover = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final tc = SectionTheme.of(context);
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() => _hover = false),
+      child: GestureDetector(
+        onTap: widget.onTap,
+        child: Container(
+          color: _hover ? tc.bgHover : Colors.transparent,
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+          child: Row(
+            children: [
+              StatusDot(
+                status: widget.online ? PresenceStatus.online : PresenceStatus.offline,
+                ringColor: tc.bgSurfaceRaised,
+              ),
+              const SizedBox(width: TCSpace.space2),
+              Expanded(
+                child: Text(
+                  widget.label,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(fontSize: TCType.textBodySm, color: tc.textSecondary),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }

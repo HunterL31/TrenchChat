@@ -24,6 +24,9 @@ Key tcColorInputKey(String label) => Key('tc-color-input:$label');
 /// The key of the swatch button that opens the picker for [label].
 Key tcColorSwatchKey(String label) => Key('tc-color-swatch:$label');
 
+/// The colour chip at the head of the row, centred in the row's height.
+const double _swatchSize = 20;
+
 class TcColorField extends StatefulWidget {
   const TcColorField({
     super.key,
@@ -116,82 +119,86 @@ class _TcColorFieldState extends State<TcColorField> {
     final tc = SectionTheme.of(context);
     final canClear = widget.overridden && widget.onClear != null;
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 3),
-      child: Row(
-        children: [
-          TcTooltip(
-            message: 'Pick color…',
-            child: MouseRegion(
-              cursor: SystemMouseCursors.click,
-              child: GestureDetector(
-                key: tcColorSwatchKey(widget.label),
-                onTap: _pick,
-                child: Container(
-                  width: 16,
-                  height: 16,
-                  decoration: BoxDecoration(
-                    color: widget.color,
-                    border: Border.all(color: tc.borderStrong),
-                    borderRadius: tcCorners(context, scale: 0.25),
+      padding: const EdgeInsets.symmetric(vertical: TCSpace.space1),
+      child: SizedBox(
+        height: tcChromeHeight,
+        child: Row(
+          children: [
+            TcTooltip(
+              message: 'Pick color…',
+              child: MouseRegion(
+                cursor: SystemMouseCursors.click,
+                child: GestureDetector(
+                  key: tcColorSwatchKey(widget.label),
+                  onTap: _pick,
+                  child: Container(
+                    width: _swatchSize,
+                    height: _swatchSize,
+                    decoration: BoxDecoration(
+                      color: widget.color,
+                      border: Border.all(color: tc.borderStrong),
+                      borderRadius: tcCorners(context, scale: 0.25),
+                    ),
                   ),
                 ),
               ),
             ),
-          ),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Tooltip(
-              decoration: tcTooltipDecoration(context),
-              textStyle: tcTooltipTextStyle(context),
-              message: widget.label,
-              child: Text(
-                widget.displayLabel ?? widget.label,
-                overflow: TextOverflow.ellipsis,
-                softWrap: false,
-                style: TextStyle(
-                  fontSize: TCType.textCaption,
-                  color: widget.overridden ? tc.accentPrimary : tc.textSecondary,
+            const SizedBox(width: 8),
+            Expanded(
+              child: Tooltip(
+                decoration: tcTooltipDecoration(context),
+                textStyle: tcTooltipTextStyle(context),
+                message: widget.label,
+                child: Text(
+                  widget.displayLabel ?? widget.label,
+                  overflow: TextOverflow.ellipsis,
+                  softWrap: false,
+                  style: TextStyle(
+                    fontSize: TCType.textCaption,
+                    color: widget.overridden ? tc.accentPrimary : tc.textSecondary,
+                  ),
                 ),
               ),
             ),
-          ),
-          const SizedBox(width: 8),
-          Container(
-            width: 108,
-            decoration: BoxDecoration(
-              color: tc.bgInset,
-              border: Border.all(color: tc.borderDefault),
-              borderRadius: tcCorners(context, scale: 0.5),
-            ),
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
-            child: TextField(
-              key: tcColorInputKey(widget.label),
-              controller: _controller,
-              focusNode: _focus,
-              onChanged: _onTextChanged,
-              onSubmitted: (_) => _syncText(),
-              style: TextStyle(fontSize: TCType.textBodySm, color: tc.textPrimary),
-              decoration: const InputDecoration(
-                isDense: true,
-                border: InputBorder.none,
-                contentPadding: EdgeInsets.zero,
+            const SizedBox(width: 8),
+            Container(
+              width: 108,
+              alignment: Alignment.centerLeft,
+              decoration: BoxDecoration(
+                color: tc.bgInset,
+                border: Border.all(color: tc.borderDefault),
+                borderRadius: tcCorners(context, scale: 0.25),
+              ),
+              padding: const EdgeInsets.symmetric(horizontal: 8),
+              child: TextField(
+                key: tcColorInputKey(widget.label),
+                controller: _controller,
+                focusNode: _focus,
+                onChanged: _onTextChanged,
+                onSubmitted: (_) => _syncText(),
+                style: TextStyle(fontSize: TCType.textBodySm, color: tc.textPrimary),
+                decoration: const InputDecoration(
+                  isDense: true,
+                  border: InputBorder.none,
+                  contentPadding: EdgeInsets.zero,
+                ),
               ),
             ),
-          ),
-          const SizedBox(width: 6),
-          SizedBox(
-            width: 22,
-            height: 22,
-            child: canClear
-                ? TcIconButton(
-                    icon: TcIcons.close,
-                    tooltip: 'Clear override',
-                    size: 22,
-                    onPressed: widget.onClear,
-                  )
-                : null,
-          ),
-        ],
+            const SizedBox(width: 6),
+            SizedBox(
+              width: tcChromeHeight,
+              height: tcChromeHeight,
+              child: canClear
+                  ? TcIconButton(
+                      icon: TcIcons.close,
+                      tooltip: 'Clear override',
+                      size: tcChromeHeight,
+                      onPressed: widget.onClear,
+                    )
+                  : null,
+            ),
+          ],
+        ),
       ),
     );
   }

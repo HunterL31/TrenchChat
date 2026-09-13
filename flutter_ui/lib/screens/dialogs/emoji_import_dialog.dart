@@ -9,6 +9,7 @@ import 'package:flutter/material.dart';
 
 import '../../app_state.dart';
 import '../../theme/section_theme.dart';
+import '../../theme/shape.dart';
 import '../../theme/theme_spec.dart';
 import '../../theme/tokens.dart';
 import '../../widgets/peer_image.dart';
@@ -29,6 +30,12 @@ Future<void> showEmojiImportDialog(BuildContext context, AppState state) {
     ),
   );
 }
+
+/// The square the picked image previews in, and the box it fills.
+const double _previewWell = 64;
+
+/// One of the three dialog widths this app settles on.
+const double _importDialogWidth = 380;
 
 class _EmojiImportContent extends StatefulWidget {
   const _EmojiImportContent({required this.state});
@@ -117,12 +124,14 @@ class _EmojiImportContentState extends State<_EmojiImportContent> {
     final tc = SectionTheme.of(context);
     return TcDialogShell(
       title: 'Import Emoji',
-      width: 360,
+      width: _importDialogWidth,
       errorText: _error,
       actions: [
         TcGhostButton(label: 'CANCEL', onPressed: () => Navigator.pop(context)),
         TcPrimaryButton(
-          label: _busy ? 'IMPORTING…' : 'IMPORT',
+          label: 'IMPORT',
+          busyLabel: 'IMPORTING…',
+          busy: _busy,
           onPressed: _busy ? null : _submit,
         ),
       ],
@@ -134,23 +143,26 @@ class _EmojiImportContentState extends State<_EmojiImportContent> {
           autofocus: true,
           onSubmitted: (_) => _loadFile(),
         ),
-        const SizedBox(height: 8),
+        const SizedBox(height: TCSpace.space3),
         Align(
           alignment: Alignment.centerLeft,
           child: TcGhostButton(label: 'LOAD', onPressed: _loadFile),
         ),
-        const SizedBox(height: 10),
-        Center(
+        const SizedBox(height: TCSpace.space3),
+        Align(
+          alignment: Alignment.centerLeft,
           child: Container(
-            width: 64,
-            height: 64,
+            width: _previewWell,
+            height: _previewWell,
             alignment: Alignment.center,
+            clipBehavior: Clip.antiAlias,
             decoration: BoxDecoration(
               color: tc.bgInset,
               border: Border.all(color: tc.borderDefault),
+              borderRadius: tcCorners(context, scale: 0.5),
             ),
             child: _imageBytes != null
-                ? peerImage(_imageBytes!, size: 56)
+                ? peerImage(_imageBytes!, size: _previewWell - 2)
                 : Text(
                     'NO IMAGE',
                     style: TextStyle(
@@ -158,7 +170,7 @@ class _EmojiImportContentState extends State<_EmojiImportContent> {
                   ),
           ),
         ),
-        const SizedBox(height: 10),
+        const SizedBox(height: TCSpace.space3),
         TcTextField(
           label: 'Short name (e.g. salute)',
           controller: _name,

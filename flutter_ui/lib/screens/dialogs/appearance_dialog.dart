@@ -460,13 +460,17 @@ class _AppearanceDialogContentState extends State<_AppearanceDialogContent> {
         ),
       );
 
+  /// Width the delete control keeps whether it is the compact cross or the
+  /// wider SURE? confirmation, so arming it moves nothing beside it.
+  static const double _deleteSlotWidth = 62;
+
   Widget _savedThemeRow(TCSectionColors tc, String name) {
     final spec = widget.state.themeLibrary[name] ?? ThemeSpec.empty;
     final active = name == _activeName && spec == _draft;
     // The name wears its own theme's colors, so each row previews itself.
     final own = spec.resolveBase();
     return Padding(
-      padding: const EdgeInsets.only(bottom: 4),
+      padding: const EdgeInsets.only(top: 4),
       child: Row(
         children: [
           Expanded(
@@ -488,9 +492,9 @@ class _AppearanceDialogContentState extends State<_AppearanceDialogContent> {
             ),
           ),
           if (active) ...[
-            const SizedBox(width: 6),
+            const SizedBox(width: TCSpace.space2),
             Container(
-              padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+              padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 4),
               decoration: BoxDecoration(
                 color: tc.bgSelected,
                 border: Border.all(color: tc.borderAccent),
@@ -506,38 +510,39 @@ class _AppearanceDialogContentState extends State<_AppearanceDialogContent> {
               ),
             ),
           ],
-          const SizedBox(width: 6),
+          const SizedBox(width: TCSpace.space2),
           TcGhostButton(
             key: appearanceApplySavedKey(name),
             label: 'APPLY',
             onPressed: _busy ? null : () => _applySaved(name, spec),
           ),
-          const SizedBox(width: 6),
+          const SizedBox(width: TCSpace.space2),
           TcGhostButton(
             key: appearanceShareSavedKey(name),
             label: 'SHARE',
             onPressed: _busy ? null : () => _shareSaved(name, spec),
           ),
-          const SizedBox(width: 6),
-          if (_armedDelete == name)
-            TcGhostButton(
-              key: appearanceDeleteSavedKey(name),
-              label: 'SURE?',
-              accent: tc.statusDanger,
-              onPressed: _busy ? null : () => _deleteSaved(name),
-            )
-          else
-            SizedBox(
-              width: 22,
-              height: 22,
-              child: TcIconButton(
-                key: appearanceDeleteSavedKey(name),
-                icon: TcIcons.close,
-                tooltip: 'Delete theme',
-                size: 22,
-                onPressed: _busy ? null : () => _armDelete(name),
-              ),
+          const SizedBox(width: TCSpace.space2),
+          SizedBox(
+            width: _deleteSlotWidth,
+            height: tcControlHeight,
+            child: Align(
+              alignment: Alignment.centerRight,
+              child: _armedDelete == name
+                  ? TcGhostButton(
+                      key: appearanceDeleteSavedKey(name),
+                      label: 'SURE?',
+                      accent: tc.statusDanger,
+                      onPressed: _busy ? null : () => _deleteSaved(name),
+                    )
+                  : TcIconButton(
+                      key: appearanceDeleteSavedKey(name),
+                      icon: TcIcons.close,
+                      tooltip: 'Delete theme',
+                      onPressed: _busy ? null : () => _armDelete(name),
+                    ),
             ),
+          ),
         ],
       ),
     );
@@ -555,7 +560,9 @@ class _AppearanceDialogContentState extends State<_AppearanceDialogContent> {
       actions: [
         TcGhostButton(label: 'CLOSE', onPressed: () => Navigator.pop(context)),
         TcPrimaryButton(
-          label: _busy ? 'SAVING…' : 'APPLY',
+          label: 'APPLY',
+          busyLabel: 'SAVING…',
+          busy: _busy,
           onPressed: _busy ? null : _apply,
         ),
       ],
@@ -576,7 +583,7 @@ class _AppearanceDialogContentState extends State<_AppearanceDialogContent> {
         const SizedBox(height: 8),
         if (_savedNames.isEmpty)
           Text(
-            'Nothing saved yet — name the current draft below to keep it.',
+            'Nothing saved yet: name the current draft below to keep it.',
             style: TextStyle(fontSize: TCType.textMicro, color: tc.textTertiary),
           )
         else
@@ -597,7 +604,7 @@ class _AppearanceDialogContentState extends State<_AppearanceDialogContent> {
                 onSubmitted: (_) => _saveDraftAs(),
               ),
             ),
-            const SizedBox(width: 6),
+            const SizedBox(width: TCSpace.space2),
             TcGhostButton(
               label: _saveAsOverwrites ? 'OVERWRITE' : 'SAVE AS…',
               onPressed: _busy || _saveAsTarget.isEmpty ? null : _saveDraftAs,
@@ -618,7 +625,7 @@ class _AppearanceDialogContentState extends State<_AppearanceDialogContent> {
             style: TextStyle(fontSize: TCType.textMicro, color: tc.accentSecondary),
           ),
         ],
-        const SizedBox(height: 12),
+        const SizedBox(height: TCSpace.space4),
         Container(height: 1, color: tc.borderSubtle),
         const SizedBox(height: 12),
         _caption(tc, 'SCOPE'),
@@ -638,16 +645,16 @@ class _AppearanceDialogContentState extends State<_AppearanceDialogContent> {
         const SizedBox(height: 6),
         Text(
           own.isEmpty && _ownStyles.isEmpty
-              ? 'No overrides in this scope — every color is inherited.'
+              ? 'No overrides in this scope: every color is inherited.'
               : '${own.length + _ownStyles.length} '
                   'override${own.length + _ownStyles.length == 1 ? '' : 's'} in this scope.',
           style: TextStyle(fontSize: TCType.textMicro, color: tc.textSecondary),
         ),
-        const SizedBox(height: 12),
+        const SizedBox(height: TCSpace.space4),
         Container(height: 1, color: tc.borderSubtle),
         const SizedBox(height: 12),
         _editorBody(tc),
-        const SizedBox(height: 12),
+        const SizedBox(height: TCSpace.space4),
         Container(height: 1, color: tc.borderSubtle),
         const SizedBox(height: 12),
         Row(
@@ -656,7 +663,7 @@ class _AppearanceDialogContentState extends State<_AppearanceDialogContent> {
               label: _scope == 'base' ? 'RESET BASE' : 'RESET SECTION',
               onPressed: own.isEmpty && _ownStyles.isEmpty ? null : _resetScope,
             ),
-            const SizedBox(width: 6),
+            const SizedBox(width: TCSpace.space2),
             TcGhostButton(
               label: 'RESET ALL',
               onPressed: _hasResettableOverrides ? _resetAll : null,
@@ -677,6 +684,7 @@ class _AppearanceDialogContentState extends State<_AppearanceDialogContent> {
     return Container(
       constraints: BoxConstraints(maxHeight: _editorBodyHeight(context)),
       child: SingleChildScrollView(
+        padding: EdgeInsets.only(right: scrollbarInset(context)),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -724,7 +732,7 @@ class _AppearanceDialogContentState extends State<_AppearanceDialogContent> {
             v == _inheritKey ? null : v,
           ),
         ),
-        const SizedBox(height: 12),
+        const SizedBox(height: TCSpace.space4),
         Container(height: 1, color: tc.borderSubtle),
         const SizedBox(height: 12),
         _caption(tc, 'SHAPE'),
@@ -764,7 +772,7 @@ class _AppearanceDialogContentState extends State<_AppearanceDialogContent> {
             v == _inheritKey ? null : v,
           ),
         ),
-        const SizedBox(height: 12),
+        const SizedBox(height: TCSpace.space4),
         Container(height: 1, color: tc.borderSubtle),
         const SizedBox(height: 12),
         for (final key in TCSectionColors.tokenKeys)

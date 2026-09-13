@@ -8,10 +8,13 @@ import 'package:flutter/material.dart';
 import '../../app_state.dart';
 import '../../theme/effects.dart';
 import '../../theme/section_theme.dart';
+import '../../theme/shape.dart';
 import '../../theme/theme_spec.dart';
 import '../../theme/tokens.dart';
 import '../../widgets/peer_image.dart';
+import '../../widgets/tc_button.dart';
 import '../../widgets/tc_dialog.dart';
+import '../../widgets/tc_icon.dart';
 import '../../widgets/tc_text_field.dart';
 import '../../widgets/tc_tooltip.dart';
 import 'emoji_import_dialog.dart';
@@ -81,11 +84,12 @@ class _EmojiPickerContentState extends State<_EmojiPickerContent> {
           ..sort((a, b) => a.name.compareTo(b.name));
         return TcDialogShell(
           title: widget.title,
-          width: 340,
+          width: _pickerWidth,
           actions: [
-            _FooterButton(
-              label: '+ IMPORT EMOJI',
-              onTap: () async {
+            TcGhostButton(
+              icon: TcIcons.plus,
+              label: 'IMPORT EMOJI',
+              onPressed: () async {
                 await showEmojiImportDialog(context, state);
               },
             ),
@@ -108,13 +112,13 @@ class _EmojiPickerContentState extends State<_EmojiPickerContent> {
                       tooltip: e,
                       onTap: () => Navigator.pop(
                           context, EmojiSelection(reactionKey: e, composeToken: e)),
-                      child: Text(e, style: const TextStyle(fontSize: 20)),
+                      child: Text(e, style: const TextStyle(fontSize: _glyphSize)),
                     ),
                 ],
               ),
               const SizedBox(height: 10),
               Container(height: 1, color: tc.borderSubtle),
-              const SizedBox(height: 10),
+              const SizedBox(height: TCSpace.space4),
             ],
             if (customs.isEmpty)
               Padding(
@@ -128,6 +132,7 @@ class _EmojiPickerContentState extends State<_EmojiPickerContent> {
               Container(
                 constraints: const BoxConstraints(maxHeight: 220),
                 child: SingleChildScrollView(
+                  padding: EdgeInsets.only(right: scrollbarInset(context)),
                   child: Wrap(
                     spacing: 4,
                     runSpacing: 4,
@@ -142,7 +147,7 @@ class _EmojiPickerContentState extends State<_EmojiPickerContent> {
                               composeToken: ':${e.name}@${e.emojiHash}:',
                             ),
                           ),
-                          child: peerImage(e.imageBytes, size: 24),
+                          child: peerImage(e.imageBytes, size: _glyphSize),
                         ),
                     ],
                   ),
@@ -154,6 +159,14 @@ class _EmojiPickerContentState extends State<_EmojiPickerContent> {
     );
   }
 }
+
+/// Wide enough that the eight-cell grid survives the scrollbar inset instead
+/// of reflowing to seven.
+const double _pickerWidth = 380;
+
+/// One glyph size for a built-in and a custom emoji, so their cells' contents
+/// share a left edge.
+const double _glyphSize = 22;
 
 class _EmojiCell extends StatefulWidget {
   const _EmojiCell({required this.child, required this.tooltip, required this.onTap});
@@ -182,6 +195,7 @@ class _EmojiCellState extends State<_EmojiCell> {
           onTap: widget.onTap,
           child: AnimatedContainer(
             duration: TCEffects.durationFast,
+            curve: TCEffects.easeTerminal,
             width: 34,
             height: 34,
             alignment: Alignment.center,
@@ -189,6 +203,7 @@ class _EmojiCellState extends State<_EmojiCell> {
               color: _hover ? tc.bgHover : Colors.transparent,
               border: Border.all(
                   color: _hover ? tc.borderStrong : Colors.transparent),
+              borderRadius: tcCorners(context, scale: 0.5),
             ),
             child: widget.child,
           ),
@@ -198,28 +213,4 @@ class _EmojiCellState extends State<_EmojiCell> {
   }
 }
 
-class _FooterButton extends StatelessWidget {
-  const _FooterButton({required this.label, required this.onTap});
 
-  final String label;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    final tc = SectionTheme.of(context);
-    return GestureDetector(
-      onTap: onTap,
-      child: MouseRegion(
-        cursor: SystemMouseCursors.click,
-        child: Text(
-          label,
-          style: TextStyle(
-            fontSize: TCType.textCaption,
-            color: tc.textSecondary,
-            letterSpacing: TCType.letterSpacingFor(TCType.textCaption, TCType.trackingWide),
-          ),
-        ),
-      ),
-    );
-  }
-}

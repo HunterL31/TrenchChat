@@ -120,15 +120,15 @@ void main() {
     expect(scopes(), isNotEmpty);
     expect(scopes().every((s) => s == 'all'), isTrue);
 
-    await tester.tap(find.widgetWithText(TcGhostButton, 'FRIENDS'));
+    await tester.tap(find.text('FRIENDS'));
     await settle(tester);
     expect(scopes().last, 'friends');
 
-    await tester.tap(find.widgetWithText(TcGhostButton, 'SHARED'));
+    await tester.tap(find.text('SHARED'));
     await settle(tester);
     expect(scopes().last, 'shared');
 
-    await tester.tap(find.widgetWithText(TcGhostButton, 'ALL'));
+    await tester.tap(find.text('ALL'));
     await settle(tester);
     expect(scopes().last, 'all');
   });
@@ -142,7 +142,7 @@ void main() {
     expect(inviteButton(tester).onPressed, isNotNull);
 
     backend.routes['GET /directory'] = <dynamic>[];
-    await tester.tap(find.widgetWithText(TcGhostButton, 'FRIENDS'));
+    await tester.tap(find.text('FRIENDS'));
     await settle(tester);
 
     expect(find.text('Alice'), findsNothing);

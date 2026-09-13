@@ -34,6 +34,10 @@ String _shortHash(String hex) {
   return '${hex.substring(0, 4)}…${hex.substring(hex.length - 4)}';
 }
 
+/// The square every in-row control occupies, so a row with one is the same
+/// height as a row without.
+const double _rowControlSize = 22;
+
 class FriendsTab extends StatelessWidget {
   const FriendsTab({super.key, required this.state, this.onOpenNomadPage});
 
@@ -52,7 +56,7 @@ class FriendsTab extends StatelessWidget {
     final blockCount = (incoming.isEmpty ? 0 : 1) + (outgoing.isEmpty ? 0 : 1);
     return Container(
       color: tc.bgApp,
-      padding: const EdgeInsets.all(18),
+      padding: const EdgeInsets.all(TCSpace.space4),
       child: LayoutBuilder(
         builder: (context, constraints) {
           // A request block sizes to its rows and scrolls past this cap, so a
@@ -206,36 +210,53 @@ class _FriendRowState extends State<_FriendRow> {
           child: Container(
             color: _hover ? tc.bgHover : Colors.transparent,
             padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
-            child: Row(
-              children: [
-                StatusDot(
-                  status: f.isOnline ? PresenceStatus.online : PresenceStatus.offline,
-                  size: 10,
-                ),
-                const SizedBox(width: 9),
-                Expanded(
-                  child: Text(
-                    friendLabel(f),
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(fontSize: 13, color: tc.textSecondary),
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(minHeight: _rowControlSize),
+              child: Row(
+                children: [
+                  StatusDot(
+                    status: f.isOnline ? PresenceStatus.online : PresenceStatus.offline,
+                    ringColor: tc.bgSurface,
                   ),
-                ),
-                const SizedBox(width: 6),
-                Text(
-                  formatRelative(f.lastSeenAt),
-                  style: TextStyle(fontSize: TCType.textMicro, color: tc.textTertiary),
-                ),
-                if (f.nomadNodeHash != null && widget.onOpenNomadPage != null) ...[
-                  const SizedBox(width: 8),
-                  TcIconButton(
-                    icon: TcIcons.globe,
-                    tooltip: 'Open their page',
-                    size: 24,
-                    onPressed: () => widget.onOpenNomadPage!(
-                        '${f.nomadNodeHash}:/page/index.mu'),
+                  const SizedBox(width: TCSpace.space2),
+                  Expanded(
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.baseline,
+                      textBaseline: TextBaseline.alphabetic,
+                      children: [
+                        Expanded(
+                          child: Text(
+                            friendLabel(f),
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                                fontSize: TCType.textBodySm, color: tc.textSecondary),
+                          ),
+                        ),
+                        const SizedBox(width: 6),
+                        Text(
+                          formatRelative(f.lastSeenAt),
+                          style:
+                              TextStyle(fontSize: TCType.textMicro, color: tc.textTertiary),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(width: TCSpace.space2),
+                  SizedBox(
+                    width: _rowControlSize,
+                    height: _rowControlSize,
+                    child: f.nomadNodeHash != null && widget.onOpenNomadPage != null
+                        ? TcIconButton(
+                            icon: TcIcons.globe,
+                            tooltip: 'Open their page',
+                            size: _rowControlSize,
+                            onPressed: () => widget.onOpenNomadPage!(
+                                '${f.nomadNodeHash}:/page/index.mu'),
+                          )
+                        : null,
                   ),
                 ],
-              ],
+              ),
             ),
           ),
         ),
@@ -278,11 +299,11 @@ class _RequestBlock extends StatelessWidget {
             ),
             child: ListView(
               shrinkWrap: true,
-              padding: EdgeInsets.zero,
+              padding: const EdgeInsets.symmetric(vertical: 4),
               children: [
                 for (final r in requests)
                   Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
                     child: Row(
                       children: [
                         Expanded(
@@ -290,13 +311,16 @@ class _RequestBlock extends StatelessWidget {
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
                               Row(
+                                crossAxisAlignment: CrossAxisAlignment.baseline,
+                                textBaseline: TextBaseline.alphabetic,
                                 children: [
                                   Flexible(
                                     child: Text(
                                       _requestLabel(r),
                                       overflow: TextOverflow.ellipsis,
                                       style: TextStyle(
-                                          fontSize: 13, color: tc.textSecondary),
+                                          fontSize: TCType.textBodySm,
+                                          color: tc.textSecondary),
                                     ),
                                   ),
                                   // A client with no friend-request concept can

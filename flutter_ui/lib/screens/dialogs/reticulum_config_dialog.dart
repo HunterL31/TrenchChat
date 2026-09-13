@@ -159,7 +159,9 @@ class _ReticulumConfigDialogContentState
         TcGhostButton(label: 'CANCEL', onPressed: () => Navigator.pop(context)),
         if (options != null && options.isNotEmpty)
           TcPrimaryButton(
-            label: _busy ? 'SAVING…' : 'SAVE',
+            label: 'SAVE',
+            busyLabel: 'SAVING…',
+            busy: _busy,
             onPressed: _busy ? null : _submit,
           ),
       ],
@@ -170,22 +172,17 @@ class _ReticulumConfigDialogContentState
               ? _placeholder('LOADING…')
               : options.isEmpty
                   ? _placeholder('No node-wide settings available.')
-                  : ListView(shrinkWrap: true, children: _buildRows(options)),
+                  : ListView(
+                      shrinkWrap: true,
+                      padding: EdgeInsets.only(right: scrollbarInset(context)),
+                      children: _buildRows(options),
+                    ),
         ),
       ],
     );
   }
 
-  Widget _placeholder(String text) => Padding(
-        padding: const EdgeInsets.symmetric(vertical: 24),
-        child: Text(
-          text,
-          style: TextStyle(
-            fontSize: TCType.textCaption,
-            color: SectionTheme.of(context).textTertiary,
-          ),
-        ),
-      );
+  Widget _placeholder(String text) => tcDialogPlaceholder(context, text);
 
   List<Widget> _buildRows(List<ReticulumOption> options) {
     final rows = <Widget>[];
@@ -193,12 +190,13 @@ class _ReticulumConfigDialogContentState
     for (final opt in options) {
       if (opt.category != category) {
         category = opt.category;
-        if (rows.isNotEmpty) rows.add(const SizedBox(height: 6));
-        rows.add(_fieldLabel(category.toUpperCase()));
+        if (rows.isNotEmpty) rows.add(const SizedBox(height: TCSpace.space4));
+        rows.add(_categoryLabel(category.toUpperCase()));
         rows.add(const SizedBox(height: 8));
+      } else if (rows.isNotEmpty) {
+        rows.add(const SizedBox(height: 10));
       }
       rows.add(_optionRow(opt));
-      rows.add(const SizedBox(height: 10));
     }
     return rows;
   }
@@ -231,7 +229,7 @@ class _ReticulumConfigDialogContentState
       Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          _fieldLabel(label.toUpperCase()),
+          TcFieldLabel(label),
           const SizedBox(height: 6),
           TcChoiceRow(
             options: options,
@@ -241,12 +239,15 @@ class _ReticulumConfigDialogContentState
         ],
       );
 
-  Widget _fieldLabel(String label) => Text(
+
+  /// A category heading, in the accent every other dialog gives its section
+  /// labels, so it does not read as one more field label.
+  Widget _categoryLabel(String label) => Text(
         label,
         style: TextStyle(
           fontSize: TCType.textCaption,
-          color: SectionTheme.of(context).textSecondary,
-          letterSpacing: TCType.letterSpacingFor(TCType.textCaption, TCType.trackingWide),
+          color: SectionTheme.of(context).accentPrimary,
+          letterSpacing: TCType.letterSpacingFor(TCType.textCaption, TCType.trackingWider),
         ),
       );
 }

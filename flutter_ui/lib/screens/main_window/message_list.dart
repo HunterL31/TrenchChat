@@ -529,6 +529,10 @@ class _DateDivider extends StatelessWidget {
 const double _mentionRowTint = 0.06;
 const double _mentionSelfTint = 0.16;
 
+/// How much the reader's own rows lift off the message list, taken from the
+/// theme's raised surface so a light preset reads the same way a dark one does.
+const double _ownRowTint = 0.35;
+
 class _MessageRowWidget extends StatefulWidget {
   const _MessageRowWidget({
     required this.message,
@@ -673,6 +677,10 @@ class _MessageRowWidgetState extends State<_MessageRowWidget> {
     );
   }
 
+  /// Where the react button sits when a delivery glyph already occupies the
+  /// row's right edge, so hovering never hides the glyph.
+  static const double _reactButtonClearance = 44;
+
   /// Wraps a row in the hover tracker and the react affordance.
   Widget _withReactButton(Widget row) {
     return MouseRegion(
@@ -683,7 +691,7 @@ class _MessageRowWidgetState extends State<_MessageRowWidget> {
           row,
           if (_hover && widget.onReact != null)
             Positioned(
-              right: 20,
+              right: isOwn && message.deliveryState != null ? _reactButtonClearance : 20,
               top: 2,
               child: TcIconButton(
                 icon: TcIcons.emoji,
@@ -711,7 +719,7 @@ class _MessageRowWidgetState extends State<_MessageRowWidget> {
     final bg = pingsMe
         ? tc.accentPrimary.withValues(alpha: _mentionRowTint)
         : isOwn
-            ? const Color.fromRGBO(255, 255, 255, 0.02)
+            ? tc.bgSurfaceRaised.withValues(alpha: _ownRowTint)
             : Colors.transparent;
     final baseStyle = TextStyle(
       fontSize: TCType.textBodyMd,
@@ -730,9 +738,9 @@ class _MessageRowWidgetState extends State<_MessageRowWidget> {
     }
     _linkRecognizers.clear();
     final links = InlineLinkConfig(
-      style: baseStyle.copyWith(color: tc.linkColor, decoration: TextDecoration.underline),
+      style: TextStyle(color: tc.linkColor, decoration: TextDecoration.underline),
       hoverStyle:
-          baseStyle.copyWith(color: tc.linkHoverColor, decoration: TextDecoration.underline),
+          TextStyle(color: tc.linkHoverColor, decoration: TextDecoration.underline),
       recognizers: _linkRecognizers,
       onTap: widget.onOpenLink,
       hoveredUrl: _hoveredLink,
@@ -851,7 +859,7 @@ class _MessageRowWidgetState extends State<_MessageRowWidget> {
             SizedBox(
               width: 34,
               child: Padding(
-                padding: const EdgeInsets.only(top: 4),
+                padding: const EdgeInsets.only(top: 5),
                 child: Text(
                   formatTsShort(message.timestamp),
                   textAlign: TextAlign.right,
@@ -1142,7 +1150,7 @@ class _DeliveryIndicator extends StatelessWidget {
   Widget build(BuildContext context) {
     final tc = SectionTheme.of(context);
     final (String glyph, Color color, String tip) = switch (state) {
-      'pending' => ('◷', tc.textTertiary, 'Queued — waiting to deliver'),
+      'pending' => ('◷', tc.textTertiary, 'Queued: waiting to deliver'),
       'failed' => ('⚠', tc.accentSecondary, 'Delivery failed'),
       'delivered' => ('✓', tc.textTertiary, 'Delivered'),
       _ => ('', tc.textTertiary, ''),
@@ -1175,6 +1183,7 @@ class _ReactionRow extends StatelessWidget {
       padding: const EdgeInsets.only(top: 5),
       child: Wrap(
         spacing: 4,
+        runSpacing: 4,
         children: [
           for (final r in message.reactions)
             ReactionChip(

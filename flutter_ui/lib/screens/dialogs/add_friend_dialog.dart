@@ -16,6 +16,7 @@ import '../../theme/section_theme.dart';
 import '../../theme/theme_spec.dart';
 import '../../theme/tokens.dart';
 import '../../widgets/tc_button.dart';
+import '../../widgets/tc_checkbox.dart';
 import '../../widgets/tc_dialog.dart';
 import '../../widgets/tc_text_field.dart';
 
@@ -33,6 +34,13 @@ Future<void> showAddFriendDialog(
     ),
   );
 }
+
+/// Which kind of hash was pasted. An LXMF address (what NomadNet, Sideband
+/// and bots advertise) and an identity hash are both 32 hex characters, and
+/// neither can be derived from the other, so nothing but the user can say
+/// which one this is.
+const String _kindHash = 'hash';
+const String _kindLxmf = 'lxmf';
 
 class _AddFriendDialogContent extends StatefulWidget {
   const _AddFriendDialogContent({required this.state, this.identityHash});
@@ -135,7 +143,7 @@ class _AddFriendDialogContentState extends State<_AddFriendDialogContent> {
       setState(() {
         _busy = false;
         _error = 'Looking for that address on the mesh. It becomes a contact '
-            'once its announce arrives — try again in a moment.';
+            'once its announce arrives; try again in a moment.';
       });
       return;
     }
@@ -183,7 +191,9 @@ class _AddFriendDialogContentState extends State<_AddFriendDialogContent> {
             onPressed: _busy ? null : _sendRequest,
           ),
         TcPrimaryButton(
-          label: _busy ? 'SAVING…' : (_isEdit ? 'SAVE' : 'ADD'),
+          label: _isEdit ? 'SAVE' : 'ADD',
+          busyLabel: 'SAVING…',
+          busy: _busy,
           onPressed: _busy ? null : _submit,
         ),
       ],
@@ -198,17 +208,21 @@ class _AddFriendDialogContentState extends State<_AddFriendDialogContent> {
         ),
         if (!_isEdit) ...[
           const SizedBox(height: 6),
-          _AddressKindToggle(
-            isLxmf: _isLxmfAddress,
-            onChanged: _busy
+          TcChoiceRow(
+            options: const {
+              _kindHash: 'IDENTITY HASH',
+              _kindLxmf: 'LXMF ADDRESS',
+            },
+            value: _isLxmfAddress ? _kindLxmf : _kindHash,
+            onSelected: _busy
                 ? null
                 : (value) => setState(() {
-                      _isLxmfAddress = value;
+                      _isLxmfAddress = value == _kindLxmf;
                       _error = null;
                     }),
           ),
         ],
-        const SizedBox(height: 12),
+        const SizedBox(height: TCSpace.space4),
         TcTextField(
           label: 'Nickname',
           controller: _nickname,
@@ -230,56 +244,6 @@ class _AddFriendDialogContentState extends State<_AddFriendDialogContent> {
             controller: _message,
             hintText: 'optional, sent with the request',
             onSubmitted: (_) => _sendRequest(),
-          ),
-        ],
-      ],
-    );
-  }
-}
-
-
-/// Which kind of hash was pasted. An LXMF address (what NomadNet, Sideband
-/// and bots advertise) and an identity hash are both 32 hex characters, and
-/// neither can be derived from the other, so nothing but the user can say
-/// which one this is.
-class _AddressKindToggle extends StatelessWidget {
-  const _AddressKindToggle({required this.isLxmf, required this.onChanged});
-
-  final bool isLxmf;
-  final ValueChanged<bool>? onChanged;
-
-  @override
-  Widget build(BuildContext context) {
-    final tc = SectionTheme.of(context);
-    return Row(
-      children: [
-        for (final option in const [
-          (label: 'IDENTITY HASH', lxmf: false),
-          (label: 'LXMF ADDRESS', lxmf: true),
-        ]) ...[
-          GestureDetector(
-            onTap: onChanged == null ? null : () => onChanged!(option.lxmf),
-            child: Container(
-              padding:
-                  const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-              margin: const EdgeInsets.only(right: 6),
-              decoration: BoxDecoration(
-                color: isLxmf == option.lxmf ? tc.bgSelected : null,
-                border: Border.all(
-                    color: isLxmf == option.lxmf
-                        ? tc.borderAccent
-                        : tc.borderSubtle),
-              ),
-              child: Text(
-                option.label,
-                style: TextStyle(
-                  fontSize: TCType.textMicro,
-                  color: isLxmf == option.lxmf
-                      ? tc.textEmphasis
-                      : tc.textTertiary,
-                ),
-              ),
-            ),
           ),
         ],
       ],

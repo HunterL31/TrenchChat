@@ -7,6 +7,7 @@ import '../theme/effects.dart';
 import '../theme/section_theme.dart';
 import '../theme/shape.dart';
 import '../theme/tokens.dart';
+import 'tc_button.dart';
 
 class TcCheckbox extends StatefulWidget {
   const TcCheckbox({
@@ -40,7 +41,7 @@ class _TcCheckboxState extends State<TcCheckbox> {
       decoration: BoxDecoration(
         color: tc.bgInset,
         border: Border.all(
-          color: widget.value
+          color: widget.value && !disabled
               ? tc.borderAccent
               : (_hover && !disabled ? tc.borderStrong : tc.borderDefault),
         ),
@@ -133,25 +134,32 @@ class _ChoiceChip extends StatelessWidget {
       onTap: onTap,
       child: MouseRegion(
         cursor: disabled ? SystemMouseCursors.basic : SystemMouseCursors.click,
-        child: AnimatedContainer(
-          duration: TCEffects.durationMed,
-          curve: TCEffects.easeTerminal,
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-          decoration: BoxDecoration(
-            color: selected ? tc.bgSelected : Colors.transparent,
-            border: Border.all(
-              color: selected ? tc.borderAccent : tc.borderDefault,
+        child: SizedBox(
+          height: tcChromeHeight,
+          child: AnimatedContainer(
+            duration: TCEffects.durationMed,
+            curve: TCEffects.easeTerminal,
+            padding: const EdgeInsets.symmetric(horizontal: TCSpace.space2),
+            decoration: BoxDecoration(
+              color: selected ? tc.bgSelected : Colors.transparent,
+              border: Border.all(
+                color: selected ? tc.borderAccent : tc.borderSubtle,
+              ),
+              borderRadius: tcCorners(context, scale: 0.5),
             ),
-            borderRadius: tcCorners(context, scale: 0.5),
-          ),
-          child: Text(
-            label,
-            style: TextStyle(
-              fontSize: TCType.textCaption,
-              letterSpacing: TCType.letterSpacingFor(TCType.textCaption, TCType.trackingWide),
-              color: disabled
-                  ? tc.textDisabled
-                  : (selected ? tc.textEmphasis : tc.textSecondary),
+            child: Center(
+              widthFactor: 1,
+              child: Text(
+                label,
+                style: TextStyle(
+                  fontSize: TCType.textCaption,
+                  letterSpacing:
+                      TCType.letterSpacingFor(TCType.textCaption, TCType.trackingWide),
+                  color: disabled
+                      ? tc.textDisabled
+                      : (selected ? tc.textEmphasis : tc.textSecondary),
+                ),
+              ),
             ),
           ),
         ),

@@ -97,7 +97,7 @@ void main() {
     expect(find.text('TRANSPORT & ROUTING'), findsOneWidget);
     expect(find.text('INSTANCE'), findsOneWidget);
     expect(find.text('LOGGING'), findsOneWidget);
-    expect(find.text('ENABLE TRANSPORT (?)'), findsOneWidget);
+    expect(find.text('Enable transport (?)'), findsOneWidget);
     expect(find.widgetWithText(TcTextField, 'Default gravity (?)'), findsOneWidget);
   });
 

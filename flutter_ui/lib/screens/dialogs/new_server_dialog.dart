@@ -70,7 +70,11 @@ class _NewServerDialogContentState extends State<_NewServerDialogContent> {
       errorText: _error,
       actions: [
         TcGhostButton(label: 'CANCEL', onPressed: () => Navigator.pop(context)),
-        TcPrimaryButton(label: _busy ? 'CREATING…' : 'CREATE', onPressed: _busy ? null : _submit),
+        TcPrimaryButton(
+            label: 'CREATE',
+            busyLabel: 'CREATING…',
+            busy: _busy,
+            onPressed: _busy ? null : _submit),
       ],
       children: [
         TcTextField(

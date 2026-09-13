@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import '../../api/models/link_quality.dart';
 import '../../api/ws.dart';
 import '../../theme/section_theme.dart';
+import '../../theme/shape.dart';
 import '../../theme/theme_spec.dart';
 import '../../theme/tokens.dart';
 import '../../widgets/signal_meter.dart';
@@ -85,11 +86,17 @@ class ChannelHeader extends StatelessWidget {
       child: Row(
         children: [
           if (compact && onOpenNav != null) ...[
-            TcIconButton(icon: TcIcons.menu, tooltip: 'Channels', size: 26, onPressed: onOpenNav),
+            TcIconButton(
+                icon: TcIcons.menu,
+                tooltip: 'Channels',
+                size: tcChromeHeight,
+                onPressed: onOpenNav),
             const SizedBox(width: 8),
           ],
           Expanded(
             child: Row(
+              crossAxisAlignment: CrossAxisAlignment.baseline,
+              textBaseline: TextBaseline.alphabetic,
               children: [
                 Text('#', style: TextStyle(color: tc.accentPrimary, fontSize: 15)),
                 Flexible(
@@ -117,29 +124,33 @@ class ChannelHeader extends StatelessWidget {
             _ConnectionPill(state: connectionState, compact: dense),
             const SizedBox(width: 8),
           ],
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
-            decoration: BoxDecoration(
-              color: tc.bgInset,
-              border: Border.all(color: tc.borderSubtle),
-            ),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                SignalMeter(level: linkQuality.level, size: 12),
-                if (!dense) ...[
-                  const SizedBox(width: 5),
-                  Text(
-                    '$_levelLabel · $hopsLabel',
-                    style: TextStyle(
-                      fontSize: TCType.textMicro,
-                      color: tc.textSecondary,
-                      letterSpacing:
-                          TCType.letterSpacingFor(TCType.textMicro, TCType.trackingWide),
+          SizedBox(
+            height: tcChromeHeight,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 7),
+              decoration: BoxDecoration(
+                color: tc.bgInset,
+                border: Border.all(color: tc.borderSubtle),
+                borderRadius: tcCorners(context, scale: 0.5),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  SignalMeter(level: linkQuality.level, size: 12),
+                  if (!dense) ...[
+                    const SizedBox(width: 5),
+                    Text(
+                      '$_levelLabel · $hopsLabel',
+                      style: TextStyle(
+                        fontSize: TCType.textMicro,
+                        color: tc.textSecondary,
+                        letterSpacing:
+                            TCType.letterSpacingFor(TCType.textMicro, TCType.trackingWide),
+                      ),
                     ),
-                  ),
+                  ],
                 ],
-              ],
+              ),
             ),
           ),
           if (onViewMembers != null) ...[
@@ -147,11 +158,11 @@ class ChannelHeader extends StatelessWidget {
             TcIconButton(
               icon: TcIcons.users,
               tooltip: 'Members',
-              size: 26,
+              size: tcChromeHeight,
               onPressed: onViewMembers,
             ),
           ],
-          const SizedBox(width: 8),
+          const SizedBox(width: 6),
           Row(
             children: [
               _HeaderTab(
@@ -194,35 +205,39 @@ class _ConnectionPill extends StatelessWidget {
       TcConnState.connected => (tc.statusOnline, 'LIVE'),
     };
     return TcTooltip(
-      message: 'Backend connection $label — live updates '
+      message: 'Backend connection $label: live updates '
           '${state == TcConnState.connected ? 'flowing' : 'paused'}',
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
-        decoration: BoxDecoration(
-          color: tc.bgInset,
-          border: Border.all(color: color),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Container(
-              width: 8,
-              height: 8,
-              decoration: BoxDecoration(color: color, shape: BoxShape.circle),
-            ),
-            if (!compact) ...[
-              const SizedBox(width: 5),
-              Text(
-                label,
-                style: TextStyle(
-                  fontSize: TCType.textMicro,
-                  color: color,
-                  letterSpacing:
-                      TCType.letterSpacingFor(TCType.textMicro, TCType.trackingWide),
-                ),
+      child: SizedBox(
+        height: tcChromeHeight,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 7),
+          decoration: BoxDecoration(
+            color: tc.bgInset,
+            border: Border.all(color: color),
+            borderRadius: tcCorners(context, scale: 0.5),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                width: 8,
+                height: 8,
+                decoration: BoxDecoration(color: color, shape: BoxShape.circle),
               ),
+              if (!compact) ...[
+                const SizedBox(width: 5),
+                Text(
+                  label,
+                  style: TextStyle(
+                    fontSize: TCType.textMicro,
+                    color: color,
+                    letterSpacing:
+                        TCType.letterSpacingFor(TCType.textMicro, TCType.trackingWide),
+                  ),
+                ),
+              ],
             ],
-          ],
+          ),
         ),
       ),
     );
@@ -259,24 +274,31 @@ class _HeaderTab extends StatelessWidget {
         cursor: SystemMouseCursors.click,
         child: TcTooltip(
           message: compact ? label : '',
-          child: Container(
-            margin: const EdgeInsets.only(left: 2),
-            padding: EdgeInsets.symmetric(horizontal: compact ? 7 : 8, vertical: 4),
-            decoration: BoxDecoration(
-              color: selected ? tc.bgSelected : Colors.transparent,
-              border: Border.all(color: selected ? tc.borderAccent : tc.borderSubtle),
+          child: SizedBox(
+            height: tcChromeHeight,
+            child: Container(
+              margin: const EdgeInsets.only(left: 2),
+              padding: EdgeInsets.symmetric(horizontal: compact ? 7 : 8),
+              decoration: BoxDecoration(
+                color: selected ? tc.bgSelected : Colors.transparent,
+                border: Border.all(color: selected ? tc.borderAccent : tc.borderSubtle),
+                borderRadius: tcCorners(context, scale: 0.5),
+              ),
+              child: Center(
+                widthFactor: 1,
+                child: compact
+                    ? TcIcon(icon, size: 13, color: foreground)
+                    : Text(
+                        label,
+                        style: TextStyle(
+                          fontSize: TCType.textCaption,
+                          letterSpacing: TCType.letterSpacingFor(
+                              TCType.textCaption, TCType.trackingWide),
+                          color: foreground,
+                        ),
+                      ),
+              ),
             ),
-            child: compact
-                ? TcIcon(icon, size: 13, color: foreground)
-                : Text(
-                    label,
-                    style: TextStyle(
-                      fontSize: TCType.textCaption,
-                      letterSpacing:
-                          TCType.letterSpacingFor(TCType.textCaption, TCType.trackingWide),
-                      color: foreground,
-                    ),
-                  ),
           ),
         ),
       ),

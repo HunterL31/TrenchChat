@@ -4,11 +4,10 @@
 import 'package:flutter/material.dart';
 
 import '../../app_state.dart';
-import '../../theme/effects.dart';
 import '../../theme/section_theme.dart';
 import '../../theme/theme_spec.dart';
-import '../../theme/tokens.dart';
 import '../../widgets/tc_button.dart';
+import '../../widgets/tc_checkbox.dart';
 import '../../widgets/tc_dialog.dart';
 import '../../widgets/tc_text_field.dart';
 
@@ -78,13 +77,16 @@ class _NewChannelDialogContentState extends State<_NewChannelDialogContent> {
   @override
   Widget build(BuildContext context) {
     final inServer = widget.serverHashHex != null;
-    final tc = SectionTheme.of(context);
     return TcDialogShell(
       title: inServer ? 'New Channel in Server' : 'New Channel',
       errorText: _error,
       actions: [
         TcGhostButton(label: 'CANCEL', onPressed: () => Navigator.pop(context)),
-        TcPrimaryButton(label: _busy ? 'CREATING…' : 'CREATE', onPressed: _busy ? null : _submit),
+        TcPrimaryButton(
+            label: 'CREATE',
+            busyLabel: 'CREATING…',
+            busy: _busy,
+            onPressed: _busy ? null : _submit),
       ],
       children: [
         TcTextField(
@@ -102,77 +104,15 @@ class _NewChannelDialogContentState extends State<_NewChannelDialogContent> {
         ),
         if (!inServer) ...[
           const SizedBox(height: 12),
-          Text(
-            'ACCESS',
-            style: TextStyle(
-              fontSize: TCType.textCaption,
-              color: tc.textSecondary,
-              letterSpacing: TCType.letterSpacingFor(TCType.textCaption, TCType.trackingWide),
-            ),
-          ),
+          const TcFieldLabel('Access'),
           const SizedBox(height: 6),
-          Row(
-            children: [
-              _AccessOption(
-                label: 'PUBLIC',
-                value: 'public',
-                groupValue: _access,
-                onSelected: (v) => setState(() => _access = v),
-              ),
-              const SizedBox(width: 6),
-              _AccessOption(
-                label: 'INVITE-ONLY',
-                value: 'invite',
-                groupValue: _access,
-                onSelected: (v) => setState(() => _access = v),
-              ),
-            ],
+          TcChoiceRow(
+            options: const {'public': 'PUBLIC', 'invite': 'INVITE-ONLY'},
+            value: _access,
+            onSelected: (v) => setState(() => _access = v),
           ),
         ],
       ],
-    );
-  }
-}
-
-class _AccessOption extends StatelessWidget {
-  const _AccessOption({
-    required this.label,
-    required this.value,
-    required this.groupValue,
-    required this.onSelected,
-  });
-
-  final String label;
-  final String value;
-  final String groupValue;
-  final ValueChanged<String> onSelected;
-
-  @override
-  Widget build(BuildContext context) {
-    final tc = SectionTheme.of(context);
-    final selected = value == groupValue;
-    return GestureDetector(
-      onTap: () => onSelected(value),
-      child: MouseRegion(
-        cursor: SystemMouseCursors.click,
-        child: AnimatedContainer(
-          duration: TCEffects.durationMed,
-          curve: TCEffects.easeTerminal,
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-          decoration: BoxDecoration(
-            color: selected ? tc.bgSelected : Colors.transparent,
-            border: Border.all(color: selected ? tc.borderAccent : tc.borderDefault),
-          ),
-          child: Text(
-            label,
-            style: TextStyle(
-              fontSize: TCType.textCaption,
-              letterSpacing: TCType.letterSpacingFor(TCType.textCaption, TCType.trackingWide),
-              color: selected ? tc.textEmphasis : tc.textSecondary,
-            ),
-          ),
-        ),
-      ),
     );
   }
 }

@@ -81,7 +81,7 @@ void main() {
     for (final token in TCSectionColors.tokenKeys) {
       expect(find.byKey(tcColorInputKey(token)), findsOneWidget, reason: token);
     }
-    expect(find.text('No overrides in this scope — every color is inherited.'), findsOneWidget);
+    expect(find.text('No overrides in this scope: every color is inherited.'), findsOneWidget);
   });
 
   testWidgets('every color row reads as its human label, not its wire key', (tester) async {
@@ -406,7 +406,7 @@ void main() {
     await tester.pump();
     await tester.enterText(find.byKey(appearanceSaveAsFieldKey), 'Deep');
     await tester.pump();
-    expect(find.text('Nothing saved yet — name the current draft below to keep it.'),
+    expect(find.text('Nothing saved yet: name the current draft below to keep it.'),
         findsOneWidget);
     expect(find.textContaining('Overwrites existing'), findsNothing);
 

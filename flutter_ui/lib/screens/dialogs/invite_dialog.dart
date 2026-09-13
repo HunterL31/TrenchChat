@@ -9,10 +9,12 @@ import '../../api/client.dart';
 import '../../api/models/invite.dart';
 import '../../app_state.dart';
 import '../../theme/section_theme.dart';
+import '../../theme/shape.dart';
 import '../../theme/theme_spec.dart';
 import '../../theme/tokens.dart';
 import '../../widgets/status_dot.dart';
 import '../../widgets/tc_button.dart';
+import '../../widgets/tc_checkbox.dart';
 import '../../widgets/tc_dialog.dart';
 import '../../widgets/tc_text_field.dart';
 
@@ -175,11 +177,13 @@ class _InviteDialogContentState extends State<_InviteDialogContent> {
     return TcDialogShell(
       title: widget.title,
       width: 440,
-      errorText: _error,
+      errorText: _isSelf ? "You can't invite yourself." : _error,
       actions: [
         TcGhostButton(label: 'CANCEL', onPressed: () => Navigator.pop(context)),
         TcPrimaryButton(
-          label: _busy ? 'INVITING…' : 'INVITE',
+          label: 'INVITE',
+          busyLabel: 'INVITING…',
+          busy: _busy,
           onPressed: _busy || _inviteeHash == null || _isSelf ? null : _submit,
         ),
       ],
@@ -191,21 +195,23 @@ class _InviteDialogContentState extends State<_InviteDialogContent> {
           autofocus: true,
         ),
         const SizedBox(height: 8),
-        Row(
-          children: [
-            _scopeChip('ALL', directoryScopeAll),
-            const SizedBox(width: 6),
-            _scopeChip('FRIENDS', directoryScopeFriends),
-            const SizedBox(width: 6),
-            _scopeChip('SHARED', directoryScopeShared),
-          ],
+        TcChoiceRow(
+          options: const {
+            directoryScopeAll: 'ALL',
+            directoryScopeFriends: 'FRIENDS',
+            directoryScopeShared: 'SHARED',
+          },
+          value: _scope,
+          onSelected: _setScope,
         ),
         const SizedBox(height: 8),
         Container(
           height: 150,
+          clipBehavior: Clip.antiAlias,
           decoration: BoxDecoration(
             color: tc.bgInset,
             border: Border.all(color: tc.borderDefault),
+            borderRadius: tcCorners(context, scale: 0.5),
           ),
           child: _entries.isEmpty
               ? Center(
@@ -220,6 +226,7 @@ class _InviteDialogContentState extends State<_InviteDialogContent> {
                   ),
                 )
               : ListView(
+                  padding: EdgeInsets.only(right: scrollbarInset(context)),
                   children: [for (final e in _entries) _entryRow(e)],
                 ),
         ),
@@ -229,23 +236,7 @@ class _InviteDialogContentState extends State<_InviteDialogContent> {
           controller: _manualHash,
           hintText: 'e.g. a3f1c2d4e5b6a7f8…  (hex, 32 chars)',
         ),
-        if (_isSelf) ...[
-          const SizedBox(height: 8),
-          Text(
-            "You can't invite yourself.",
-            style: TextStyle(fontSize: TCType.textCaption, color: tc.statusDanger),
-          ),
-        ],
       ],
-    );
-  }
-
-  Widget _scopeChip(String label, String scope) {
-    final tc = SectionTheme.of(context);
-    return TcGhostButton(
-      label: label,
-      accent: _scope == scope ? tc.accentPrimary : null,
-      onPressed: () => _setScope(scope),
     );
   }
 
@@ -269,9 +260,9 @@ class _InviteDialogContentState extends State<_InviteDialogContent> {
             children: [
               StatusDot(
                 status: e.isOnline ? PresenceStatus.online : PresenceStatus.offline,
-                size: 10,
+                ringColor: tc.bgInset,
               ),
-              const SizedBox(width: 8),
+              const SizedBox(width: TCSpace.space2),
               Expanded(
                 child: Text(
                   label,

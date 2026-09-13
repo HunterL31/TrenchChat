@@ -76,6 +76,7 @@ class _PropagationNodesContentState extends State<_PropagationNodesContent> {
         ConstrainedBox(
           constraints: const BoxConstraints(maxHeight: 320),
           child: SingleChildScrollView(
+            padding: EdgeInsets.only(right: scrollbarInset(context)),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
@@ -103,22 +104,28 @@ class PropagationNodeRow extends StatelessWidget {
     final tc = SectionTheme.of(context);
     final pinned = state.propagation.pinned == node.hash;
     return Padding(
-      padding: const EdgeInsets.only(top: 6),
-      child: Row(
-        children: [
-          Expanded(
-            child: Text(
-              '${shortNodeHash(node.hash)} — ${node.hops} hop'
-              '${node.hops == 1 ? "" : "s"}${pinned ? " (pinned)" : ""}',
-              style: TextStyle(fontSize: TCType.textBodySm, color: tc.textSecondary),
+      padding: const EdgeInsets.symmetric(vertical: 3),
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(minHeight: tcControlHeight),
+        child: Row(
+          children: [
+            Expanded(
+              child: Text(
+                '${shortNodeHash(node.hash)} \u00b7 ${node.hops} hop'
+                '${node.hops == 1 ? "" : "s"}${pinned ? " (pinned)" : ""}',
+                overflow: TextOverflow.ellipsis,
+                softWrap: false,
+                style: TextStyle(fontSize: TCType.textBodySm, color: tc.textSecondary),
+              ),
             ),
-          ),
-          if (!pinned)
-            TcGhostButton(
-              label: 'USE',
-              onPressed: () => state.pinPropagationNode(node.hash),
-            ),
-        ],
+            const SizedBox(width: TCSpace.space2),
+            if (!pinned)
+              TcGhostButton(
+                label: 'USE',
+                onPressed: () => state.pinPropagationNode(node.hash),
+              ),
+          ],
+        ),
       ),
     );
   }
