@@ -189,9 +189,9 @@ the root namespace where both reach it outbound and neither can be reached at.
 Three variants. `one_nat` has A behind a NAT and B on the hub's segment, which
 is the shape of every pair where one side is reachable, and it must come up
 direct. `cone` has both sides behind port-restricted NATs and is recorded
-rather than judged: with no router mapping and no address a peer observed
-earlier, neither side can name the other and no probe arrives anywhere.
-`symmetric` must fail, and the pair must stay on Reticulum without drama.
+rather than judged: with no address a peer observed earlier, neither side can
+name the other and no probe arrives anywhere. `symmetric` must fail, and the
+pair must stay on Reticulum without drama.
 
 Needs root with CAP_NET_ADMIN, iproute2 and nftables, and it is Linux only. The
 results are in `docs/testenv-scenarios.md`.

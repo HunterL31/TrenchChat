@@ -69,7 +69,6 @@ from trenchchat.network.base import SendState
 from trenchchat.network.ip import candidates as candidate_gathering
 from trenchchat.network.ip import punch as punching
 from trenchchat.network.ip import stun
-from trenchchat.network.ip.portmap import PortMapper
 
 # Why a pair has no session, as the diagnostics panel names it. A fixed set, so
 # a client can say what to do about each one rather than print a sentence.
@@ -127,10 +126,6 @@ MAX_SPENT_NONCES = 512
 # How many remembered observations of this node's own address are read for a
 # candidate list, from which one per family is offered.
 OBSERVED_SELF_ROWS = 4
-
-# How often the router mapping is asked about. The mapper itself decides
-# whether anything is due; this only keeps it off the tick's thread.
-PORTMAP_INTERVAL_SECS = 60.0
 
 # How old an answer from the address echo may be before it is asked again: a
 # home router's translation outlives this, and an offer carrying a stale
@@ -214,7 +209,6 @@ class UpgradeManager:
         self._peer_candidate_sets: dict[str, tuple] = {}
         self._spent_nonces: deque = deque(maxlen=MAX_SPENT_NONCES)
         self._stopped = False
-        self._last_portmap = 0.0
         self._address_callbacks: list = []
         self._address_needed = False
         self._stun_at = 0.0
@@ -224,9 +218,6 @@ class UpgradeManager:
 
         self._pool = ThreadPoolExecutor(max_workers=MAX_CONCURRENT_ATTEMPTS,
                                         thread_name_prefix="upgrade")
-        self._mapper = (PortMapper(transport.listen_port)
-                        if transport is not None and transport.listen_port
-                        else None)
         if router is not None:
             router.add_delivery_callback(self._on_message)
         if transport is not None:
@@ -369,15 +360,14 @@ class UpgradeManager:
         """Periodic housekeeping; call roughly once per second.
 
         Closes a session whose peer has stopped being eligible, gives up on an
-        offer nothing answered, makes the larger hash's fallback offer, keeps
-        the router mapping alive, and keeps what the address echo last said
-        current where a user has turned it on.
+        offer nothing answered, makes the larger hash's fallback offer, and
+        keeps what the address echo last said current where a user has turned
+        it on.
         """
         now = time.time() if now is None else now
         self._sweep_sessions()
         self._expire_attempts(now)
         self._fallback_offers(now)
-        self._refresh_mapping(now)
         self._refresh_public_address(now)
 
     def _sweep_sessions(self) -> None:
@@ -413,12 +403,6 @@ class UpgradeManager:
             if self._presence is not None and not self._presence.is_online(peer_hex):
                 continue
             self.offer(peer_hex, now=now)
-
-    def _refresh_mapping(self, now: float) -> None:
-        if self._mapper is None or now - self._last_portmap < PORTMAP_INTERVAL_SECS:
-            return
-        self._last_portmap = now
-        self._submit(self._mapper.refresh)
 
     def _refresh_public_address(self, now: float) -> None:
         """Ask the address echo at start, on a move, and every few minutes.
@@ -836,14 +820,13 @@ class UpgradeManager:
 
     def _own_candidates(self) -> list:
         """This node's candidates for one attempt, as the wire carries them."""
-        mapped = self._mapper.address() if self._mapper is not None else None
         observed = candidate_gathering.newest_per_family(
             self._storage.get_upgrade_addresses(ADDRESS_SELF,
                                                 limit=OBSERVED_SELF_ROWS)
             + self._storage.get_upgrade_addresses(ADDRESS_SELF6,
                                                   limit=OBSERVED_SELF_ROWS))
         gathered = candidate_gathering.gather(
-            self._transport.listen_port, mapped=mapped, observed=observed)
+            self._transport.listen_port, observed=observed)
         return [[host, port, kind] for host, port, kind in gathered]
 
     def _add_observed(self, fields: dict, peer_hex: str) -> None:
@@ -1008,7 +991,7 @@ class UpgradeManager:
             RNS.log(f"TrenchChat [upgrade]: attempt failed: {e}", RNS.LOG_ERROR)
 
     def stop(self) -> None:
-        """Drop every attempt in flight and give the router mapping back."""
+        """Drop every attempt in flight."""
         with self._lock:
             if self._stopped:
                 return
@@ -1022,5 +1005,3 @@ class UpgradeManager:
         if self._router is not None:
             self._router.remove_delivery_callback(self._on_message)
         self._pool.shutdown(wait=False)
-        if self._mapper is not None:
-            self._mapper.release()

@@ -55,7 +55,7 @@ LXMF fields layout:
     0x93  file_chunk_root   bytes[32], SHA-256 over the concatenated SHA-256s
                                           of each 32 KB chunk, so the author's
                                           signature covers every chunk
-    0xA0  upgrade_candidates list of [host, port, kind], kind lan|mapped|observed,
+    0xA0  upgrade_candidates list of [host, port, kind], kind lan|observed,
                                           at most 8 (core/upgrade.py)
     0xA1  upgrade_nonce     bytes[16], the probe secret for one attempt
     0xA2  upgrade_cert      bytes, the sender's session certificate, DER, max 2 KB

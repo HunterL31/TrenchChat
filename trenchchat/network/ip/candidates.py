@@ -2,9 +2,8 @@
 Where a peer should try to reach this node, gathered with the standard library.
 
 A candidate is a literal address and a port, tagged with how this node came by
-it. Three kinds, in the order a truncated list keeps them:
+it. Two kinds, in the order a truncated list keeps them:
 
-    mapped    a router gave this node an inbound port (UPnP-IGD or NAT-PMP)
     observed  a peer saw this node's probes arrive from here
     lan       an address of a local interface, with the port being punched
 
@@ -36,8 +35,7 @@ import struct
 import sys
 
 from trenchchat.core.protocol import (
-    MAX_UPGRADE_CANDIDATES, UPGRADE_KIND_LAN, UPGRADE_KIND_MAPPED,
-    UPGRADE_KIND_OBSERVED,
+    MAX_UPGRADE_CANDIDATES, UPGRADE_KIND_LAN, UPGRADE_KIND_OBSERVED,
 )
 
 # Addresses the kernel would route towards, asked one at a time so every
@@ -123,18 +121,18 @@ def is_global_ipv6(host: str) -> bool:
 def public_families(gathered) -> set[int]:
     """Which families this node holds an address a peer outside could reach.
 
-    A router mapping and an address a peer observed were both chosen outside
-    this network, so they count whatever they look like. A local address counts
-    only when it is global IPv6, which crosses no translation and needs no echo
-    to be learned; an IPv4 address behind a home router is reachable by nobody
-    but this node's own network, however many of them there are.
+    An address a peer observed was chosen outside this network, so it counts
+    whatever it looks like. A local address counts only when it is global IPv6,
+    which crosses no translation and needs no echo to be learned; an IPv4
+    address behind a home router is reachable by nobody but this node's own
+    network, however many of them there are.
     """
     families: set[int] = set()
     for host, _port, kind in gathered:
         version = family_of(host)
         if version is None:
             continue
-        if kind in (UPGRADE_KIND_MAPPED, UPGRADE_KIND_OBSERVED):
+        if kind == UPGRADE_KIND_OBSERVED:
             families.add(version)
         elif version == 6 and is_global_ipv6(host):
             families.add(version)
@@ -281,19 +279,18 @@ def _bounded(addresses) -> list[str]:
     return kept
 
 
-def gather(port: int, *, mapped: tuple[str, int] | None = None,
-           observed=(), limit: int = MAX_UPGRADE_CANDIDATES
+def gather(port: int, *, observed=(), limit: int = MAX_UPGRADE_CANDIDATES
            ) -> list[tuple[str, int, str]]:
     """This node's candidates for one attempt, at most *limit* of them.
 
     *port* is the port being punched, as bound rather than as configured: a
     kernel-assigned port is the only one a test or a second instance on one
-    machine ever has. *mapped* and *observed* carry their own ports, because
-    both name a port some other party chose.
+    machine ever has. *observed* carries its own port, because it names a port
+    some other party chose.
 
-    A truncated list keeps the mapped and observed entries: those are the ones
-    that cross a NAT, and a peer that cannot use them has usually already
-    failed on the lan entries too.
+    A truncated list keeps the observed entries: those are the ones that cross
+    a NAT, and a peer that cannot use them has usually already failed on the
+    lan entries too.
 
     Both families are offered together and probed together, since which of
     them a pair has in common is not a thing either side knows in advance.
@@ -309,8 +306,6 @@ def gather(port: int, *, mapped: tuple[str, int] | None = None,
         seen.add((host, host_port))
         gathered.append((host, host_port, kind))
 
-    if mapped is not None:
-        _add(mapped[0], mapped[1], UPGRADE_KIND_MAPPED)
     for entry in observed:
         _add(entry[0], entry[1], UPGRADE_KIND_OBSERVED)
     for address in local_addresses():

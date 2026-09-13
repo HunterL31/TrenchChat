@@ -24,7 +24,7 @@ from trenchchat.core import actions
 from trenchchat.core.permissions import PRESET_PRIVATE, ROLE_MEMBER, ROLE_OWNER
 from trenchchat.core.protocol import (
     MAX_UPGRADE_CANDIDATES, MAX_UPGRADE_CERT_BYTES, MAX_UPGRADE_HOST_CHARS,
-    UPGRADE_KIND_LAN, UPGRADE_KIND_MAPPED, UPGRADE_KIND_OBSERVED,
+    UPGRADE_KIND_LAN, UPGRADE_KIND_OBSERVED,
     F_UPGRADE_OBSERVED, UPGRADE_NONCE_BYTES, upgrade_address, upgrade_candidates,
     upgrade_certificate, upgrade_nonce, upgrade_punch_at,
 )
@@ -55,9 +55,9 @@ class TestCandidateBounds:
 
     def test_a_plain_list_round_trips(self):
         parsed = upgrade_candidates([_candidate(), _candidate("192.168.1.9", 1234,
-                                                              UPGRADE_KIND_MAPPED)])
+                                                              UPGRADE_KIND_OBSERVED)])
         assert parsed == [("10.0.0.5", 42420, UPGRADE_KIND_LAN),
-                          ("192.168.1.9", 1234, UPGRADE_KIND_MAPPED)]
+                          ("192.168.1.9", 1234, UPGRADE_KIND_OBSERVED)]
 
     def test_ipv6_is_a_candidate_like_any_other(self):
         assert upgrade_candidates([_candidate("fd00::1", 5000)]) == [
@@ -167,11 +167,9 @@ class TestCandidateGathering:
             assert port == 45678
             assert candidates.is_reachable_address(host)
 
-    def test_a_mapped_and_an_observed_address_carry_their_own_ports(self):
-        gathered = candidates.gather(45678, mapped=("203.0.113.7", 51820),
-                                     observed=[("198.51.100.4", 33445)])
-        assert gathered[0] == ("203.0.113.7", 51820, UPGRADE_KIND_MAPPED)
-        assert gathered[1] == ("198.51.100.4", 33445, UPGRADE_KIND_OBSERVED)
+    def test_an_observed_address_carries_its_own_port(self):
+        gathered = candidates.gather(45678, observed=[("198.51.100.4", 33445)])
+        assert gathered[0] == ("198.51.100.4", 33445, UPGRADE_KIND_OBSERVED)
 
     def test_the_list_never_exceeds_the_protocol_cap(self):
         observed = [(f"198.51.100.{n}", 30000 + n) for n in range(1, 20)]
@@ -181,9 +179,8 @@ class TestCandidateGathering:
     def test_a_truncated_list_keeps_what_crosses_a_nat(self):
         observed = [(f"198.51.100.{n}", 30000 + n)
                     for n in range(1, MAX_UPGRADE_CANDIDATES + 4)]
-        gathered = candidates.gather(45678, mapped=("203.0.113.7", 51820),
-                                     observed=observed)
-        assert gathered[0][2] == UPGRADE_KIND_MAPPED
+        gathered = candidates.gather(45678, observed=observed)
+        assert gathered[0][2] == UPGRADE_KIND_OBSERVED
         assert all(kind != UPGRADE_KIND_LAN for _host, _port, kind in gathered)
 
     def test_the_same_address_is_never_offered_twice(self):
@@ -194,7 +191,7 @@ class TestCandidateGathering:
         assert len(gathered) == len({(h, p) for h, p, _k in gathered})
 
     def test_what_is_gathered_is_what_the_wire_accepts(self):
-        gathered = candidates.gather(45678, mapped=("203.0.113.7", 51820))
+        gathered = candidates.gather(45678, observed=[("203.0.113.7", 51820)])
         wire = [[host, port, kind] for host, port, kind in gathered]
         assert upgrade_candidates(wire) == gathered
 
@@ -1019,9 +1016,7 @@ class TestTheClientGate:
 class TestPublicAddresses:
     """Which of this node's own candidates a peer outside could ever reach."""
 
-    def test_a_router_mapping_and_an_observation_count(self):
-        assert candidates.public_families(
-            [("192.168.1.9", 42420, UPGRADE_KIND_MAPPED)]) == {4}
+    def test_an_observation_counts(self):
         assert candidates.public_families(
             [("198.51.100.4", 33445, UPGRADE_KIND_OBSERVED)]) == {4}
 

@@ -136,31 +136,14 @@ the real server, and listens for the client.
 The server records every refusal, so the four rows above are read back out of its report
 file rather than inferred from a silence.
 
-## portmap.py and test_portmap.py
+## portmap.py and test_portmap.py: removed
 
-```bash
-.venv/bin/python -m pytest devtools/spikes/upgrade/ -q      # 19 tests, 0.06 s
-.venv/bin/python devtools/spikes/upgrade/portmap.py probe
-```
-
-UPnP-IGD (SSDP discovery, then SOAP `AddPortMapping`, `DeletePortMapping` and
-`GetExternalIPAddress`) and NAT-PMP (RFC 6886), stdlib only: `socket`, `struct`,
-`urllib`, `xml.etree`.
-
-**It has never run against real router hardware.** There is no router on this machine and
-no way to put one here. The unit tests cover the bytes on the wire only: the M-SEARCH
-datagram, SSDP header parsing, device-description parsing including the URLBase and
-LOCATION fallback and the WANIPConnection over WANPPPConnection preference, the SOAP
-envelope and its argument order and `SOAPAction` header, SOAP fault decoding to a UPnP
-error code, and every NAT-PMP request and response shape including the delete form and
-the short, unmarked and non-zero-result rejections. Discovery, the SOAP round trip and
-the NAT-PMP round trip are untested against anything.
-
-With no gateway it fails fast and cleanly, which is the behaviour Phase 3 needs: a node
-with no mapped candidate must carry on with the candidates it has. Measured here,
-`portmap.py probe` returns in about 6 seconds total, `natpmp` giving up after four
-doubling retries against a gateway that never answers and `upnp` after a 3 second SSDP
-window. Both report a one-line reason and neither raises.
+The spike carried a stdlib UPnP-IGD and NAT-PMP mapping client, and it is gone. It never
+ran against real router hardware, there was none here to run it against, and the plan's
+decision 4 has since said that nothing waits on a router cooperating. Rather than keep an
+untested client on the strength of being an opportunistic extra, the owner decided the
+mapping code goes: the `mapped` candidate kind went with it, and a node's candidates are
+now its local addresses and whatever a peer or an address echo observed of it.
 
 ## netns_nat.sh and punch.py
 
@@ -252,9 +235,6 @@ bump are now the same decision.
 
 ## What could not be checked here
 
-- **UPnP-IGD and NAT-PMP against real hardware.** No router, no way to reach one. The
-  encoders and parsers are unit-tested; nothing else is. This is the largest open item
-  in Phase 0.
 - **The PyInstaller bundle on macOS and Windows.** Linux only here. The wheel matrix says
   the dependency is available on both; it does not say the one-file build works there.
 - **Punch success rates on real NATs and CGNAT.** The namespace harness models a

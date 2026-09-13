@@ -181,7 +181,7 @@ FILE_DIGEST_BYTES = 32
 # end like every other message, and punch a UDP path between the candidates
 # they name. Nothing here is ever relayed onward: a transport node carrying the
 # offer sees an opaque envelope, and no third member is told what it held.
-F_UPGRADE_CANDIDATES = 0xA0  # list of [host, port, kind], kind lan|mapped|observed
+F_UPGRADE_CANDIDATES = 0xA0  # list of [host, port, kind], kind lan|observed
 F_UPGRADE_NONCE      = 0xA1  # bytes[16]: the probe secret for this attempt
 F_UPGRADE_CERT       = 0xA2  # bytes: the sender's session certificate, DER
 F_UPGRADE_PUNCH_AT   = 0xA3  # float: unix timestamp the sender starts probing
@@ -201,9 +201,8 @@ UPGRADE_NONCE_BYTES = 16
 MAX_UPGRADE_PUNCH_AHEAD_SECS = 60.0
 
 UPGRADE_KIND_LAN = "lan"
-UPGRADE_KIND_MAPPED = "mapped"
 UPGRADE_KIND_OBSERVED = "observed"
-UPGRADE_KINDS = (UPGRADE_KIND_LAN, UPGRADE_KIND_MAPPED, UPGRADE_KIND_OBSERVED)
+UPGRADE_KINDS = (UPGRADE_KIND_LAN, UPGRADE_KIND_OBSERVED)
 
 
 # --- Mentions ---

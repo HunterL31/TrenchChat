@@ -57,14 +57,13 @@
 #
 # The finding the cone variant records: a node knows its own addresses and
 # nothing about the address translation in front of them, so two peers that are
-# both behind a NAT with no router mapping have nothing to name each other by.
-# Every probe goes to an unroutable lan candidate, nobody's probe arrives, and
-# nobody can observe an address to report back. The design's answers to that
-# are a router mapping (UPnP-IGD or NAT-PMP, which no namespace here speaks) or
-# an address a peer observed in an earlier exchange, and with neither the pair
-# stays on Reticulum and says so, as no_public_address rather than punch_failed
-# because the two are a different problem for a user. Phase 0's spike punched
-# this case only because the harness told each side the other's public address.
+# both behind a NAT have nothing to name each other by. Every probe goes to an
+# unroutable lan candidate, nobody's probe arrives, and nobody can observe an
+# address to report back. The design's answer to that is an address a peer
+# observed in an earlier exchange, and with none the pair stays on Reticulum
+# and says so, as no_public_address rather than punch_failed because the two
+# are a different problem for a user. Phase 0's spike punched this case only
+# because the harness told each side the other's public address.
 #
 # Needs root with CAP_NET_ADMIN, iproute2 and nftables. Linux only.
 #

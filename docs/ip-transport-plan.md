@@ -29,13 +29,14 @@ Three decisions fix the shape of this plan. Everything below follows from them.
    needs no address discovery at all; and, only when both of those have
    failed for a pair, a per-client prompt to enable a public address-echo
    service (STUN), off by default, which answers one question and sees no
-   chat data. Router port mapping stays as an opportunistic extra that
-   nothing waits for. A member that is reachable serves the whole channel as
-   its address echo through the HELLO, and address knowledge spreads from it;
-   a member that merely knows its own address behind a home router cannot
-   serve a member that knows nothing yet, because its router drops the
-   unsolicited probe, which is why the prompt is per client rather than per
-   channel.
+   chat data. Router port mapping was written and then removed: nothing
+   waited on it, no router was ever there to test it against, and an
+   untested client is not an extra. A member that is reachable serves the
+   whole channel as its address echo through the HELLO, and address knowledge
+   spreads from it; a member that merely knows its own address behind a home
+   router cannot serve a member that knows nothing yet, because its router
+   drops the unsolicited probe, which is why the prompt is per client rather
+   than per channel.
 
 An earlier draft of this plan proposed a standalone IP backend with its own
 discovery (signed endpoint records, gossip, an optional Tailscale probe). It
@@ -223,13 +224,12 @@ is the smaller.
    has no direct session with him, and her backoff for him has expired.
 2. She gathers candidates: each local interface address with the port she
    will punch from (a Tailscale or WireGuard interface shows up here on its
-   own, which is all the overlay support this design needs), a router-mapped
-   port if UPnP-IGD, NAT-PMP or PCP gave her one, and the public address a
-   peer last observed her at. At most eight. The mapped and observed
-   candidates name the listening port rather than the attempt's, because both
-   are addresses somebody else chose, so the listening socket answers probes
-   too (`network/ip/session.py`'s `ProbeAwareQuicServer`); without that a
-   mapped candidate could never be punched and would be dead weight.
+   own, which is all the overlay support this design needs), and the public
+   address a peer last observed her at. At most eight. The observed candidate
+   names the listening port rather than the attempt's, because it is an address
+   somebody else chose, so the listening socket answers probes too
+   (`network/ip/session.py`'s `ProbeAwareQuicServer`); without that an observed
+   candidate could never be punched and would be dead weight.
 3. She sends `MT_UPGRADE_OFFER` to Bob over LXMF: candidates, a 16-byte
    nonce, her session certificate (DER, a few hundred bytes), and the time
    she will start punching. It is authenticated like every control message
@@ -250,7 +250,7 @@ is the smaller.
    `HELLO {pub64, ts, sig}` with `sig` over both certificate fingerprints
    and `ts`. The certificates already arrived over an authenticated message;
    the HELLO binds them to the identity keys anyway, so a session that
-   arrives on a mapped port with no offer behind it is held to the same
+   arrives on the listening port with no offer behind it is held to the same
    proof.
 7. `Router` marks Bob `direct`, fires `path_changed`, and routes to him over
    the session from then on. The session stays up while both are online;
@@ -340,7 +340,7 @@ Per `.claude/rules/protocol-constants.md`, the next unused range:
 
 | Key | Constant | Carries |
 |---|---|---|
-| `0xA0` | `F_UPGRADE_CANDIDATES` | list of `(host, port, kind)`, `kind` one of `lan`, `mapped`, `observed`, at most 8 |
+| `0xA0` | `F_UPGRADE_CANDIDATES` | list of `(host, port, kind)`, `kind` one of `lan`, `observed`, at most 8 |
 | `0xA1` | `F_UPGRADE_NONCE` | 16 bytes |
 | `0xA2` | `F_UPGRADE_CERT` | the session certificate, DER, at most 2 KB |
 | `0xA3` | `F_UPGRADE_PUNCH_AT` | unix timestamp |
@@ -387,8 +387,8 @@ Additive only; nothing existing moves or hides.
   roster, filled from member rows and moved by the event, because a member
   row, a voice row and a diagnostics row are the same peer.
 - `GET /upgrade/sessions` lists this node's direct sessions for a Settings
-  diagnostics panel: peer, since, which candidate kind won (`lan`,
-  `mapped`, `observed`), round trip, bytes each way, and the last failure
+  diagnostics panel: peer, since, which candidate kind won (`lan` or
+  `observed`), round trip, bytes each way, and the last failure
   reason per eligible peer with no session. This is where a user learns
   that a pair is stuck behind symmetric NAT. As built in Phase 2 it answers
   `{sessions, last_failure}` with the round trip measured from
@@ -446,8 +446,7 @@ plus HELLO handshake with certificate pinning through the public API and
 reject a relaying third process; the same handshake bundles under
 PyInstaller on Linux, macOS and Windows; a UDP punch succeeds between two
 Linux network namespaces behind separate NATs and fails as expected behind
-symmetric NAT; UPnP-IGD and NAT-PMP mapping is read from Python against a
-home router. Output: the QUIC decision confirmed or the TCP fallback chosen,
+symmetric NAT. Output: the QUIC decision confirmed or the TCP fallback chosen,
 and this file amended.
 
 **Phase 0 results.** QUIC via `aioquic` 1.3.0 is confirmed, and the spike that
@@ -465,10 +464,10 @@ fallback stays designed but unbuilt. The namespace harness punched in 200 ms
 through port-restricted cone NATs and failed as intended through symmetric
 ones, five runs of five, and turned up one thing Phase 3 needs: an unsolicited
 probe reaching a NAT first can poison the port its own mapping wanted, which
-makes the observed-address exchange a recovery path rather than a nicety. Two
-checks did not happen here and stay open: UPnP-IGD and NAT-PMP are written and
-unit-tested but have never seen a real router, and the PyInstaller bundle is
-proven on Linux only.
+makes the observed-address exchange a recovery path rather than a nicety. The
+spike also wrote a UPnP-IGD and NAT-PMP mapping client that never saw a real
+router; it has since been removed by decision rather than kept untested. One
+check stays open: the PyInstaller bundle is proven on Linux only.
 
 **Phase 1: the seam (3 to 4 weeks).** `network/base.py`, `InboundMessage`,
 `Router.send` and the peer-event callbacks; `LXMFTransport` split out of
@@ -495,9 +494,9 @@ unauthenticated frames dropped, oversize frames, session floods, stale
 HELLO replay, an inbound session from an ineligible identity closed).
 
 **Phase 3: the upgrade handshake (3 weeks).** `UpgradeManager`: eligibility
-at all three layers, candidate gathering, port mapping, offer and answer
-messages, the probe exchange, the backoff schedule, observed-address
-learning, and the once-a-second eligibility sweep. Check: adversarial tests
+at all three layers, candidate gathering, offer and answer messages, the
+probe exchange, the backoff schedule, observed-address learning, and the
+once-a-second eligibility sweep. Check: adversarial tests
 (an offer from a non-member, from a public-channel co-subscriber, with too
 many candidates, with a reused nonce, with a `punch_at` an hour out; a
 kicked member's session torn down within a second); scenarios where two
@@ -509,21 +508,20 @@ run against the real handshake.
 **Phase 3 results.** Built as designed, with five things worth recording. The
 `lan` candidate names the port an attempt punches from rather than the listen
 port, because the session has to run on the socket whose mapping the punch
-opened; the `mapped` and `observed` candidates still name the listen port, and
-the listener answers probes so they are reachable. A peer refused as ineligible
-is re-checked on its next sighting instead of waiting out a backoff, so an
-admin's invite is followed by a session in seconds rather than in half a
-minute. `last_failure` carries every reason except `backoff`, which is deliberate:
+opened; the `observed` candidate still named the listen port, and the listener
+answers probes so it is reachable. A peer refused as ineligible is re-checked
+on its next sighting instead of waiting out a backoff, so an admin's invite is
+followed by a session in seconds rather than in half a minute. `last_failure` carries every reason except `backoff`, which is deliberate:
 recording "waiting" as a failure would overwrite the reason the pair is
 actually waiting on and double the wait for asking. And the wait doubles per
 attempt rather than per ask, so a peer announcing every ten seconds cannot push
 its own next attempt into next week. And the namespace harness found the one
 thing the design was missing: a probe carries the sender's translated address
 with it, so a node that receives one probes back at wherever it came from, which
-is what completes a pair the candidate lists could not have named. The two open
-items from Phase 0 are still
-open: UPnP-IGD and NAT-PMP have never met a real router, and the punch's success
-rate on real NATs and CGNAT is a question only a deployment answers.
+is what completes a pair the candidate lists could not have named. Phase 3 also
+wired in the router port mapping, which has since been removed with the rest of
+that code; what stays open from Phase 0 is the punch's success rate on real
+NATs and CGNAT, a question only a deployment answers.
 
 **Phase 4: planes over the direct path (3 weeks).** `IPFileTransport` with
 per-path chunk limits and the on-disk file store; `IPVoiceTransport` over
@@ -690,10 +688,9 @@ to learn a new kind of candidate.
 The failure a user can answer is now told apart from the one they cannot.
 `no_public_address` is recorded instead of `punch_failed` when an attempt fails
 and none of this node's own candidates was an address a peer outside its network
-could reach in a family the peer actually named. A router mapping counts, an
-address a member observed counts, and a global IPv6 address counts because it
-crosses no translation; a private IPv4 address does not, however many of them
-are offered. Without that distinction the prompt would have to be asked of every
+could reach in a family the peer actually named. An address a member observed
+counts, and a global IPv6 address counts because it crosses no translation; a
+private IPv4 address does not, however many of them are offered. Without that distinction the prompt would have to be asked of every
 pair that failed to punch, including the symmetric-NAT pairs an echo cannot help.
 
 The prompt is per client and fires on the transition rather than being polled
@@ -778,19 +775,18 @@ direct path gets rows of its own instead of a shaped re-run of the mesh ones.
   benefit. Left out of the first cut so the gate is one rule; extending it
   is a one-line change to `core/upgrade.is_eligible` plus its tests.
 - **Punch success rate.** A pair punches when at least one side can be named:
-  an address on a shared LAN or tailnet, a public host, a router mapping, or an
-  address a peer observed in an earlier exchange. The first probe that arrives
+  an address on a shared LAN or tailnet, a public host, or an address a peer
+  observed in an earlier exchange. The first probe that arrives
   carries the sender's translated address with it, so the side that could be
   reached probes back at where the probe came from and the pair completes in
   both directions; `devtools/testenv/nat_harness.sh`'s `one_nat` variant is
   that case, and it comes up in about four seconds across a real masquerading
   NAT. What does not punch is a pair where **neither** side can be named: two
-  cone NATs with no router mapping and no prior observation have nothing to
-  aim at, every probe goes to an unroutable address, and no observation can
-  start. The fix that fits the Zen is not a service that answers "where am
+  cone NATs with no prior observation have nothing to aim at, every probe
+  goes to an unroutable address, and no observation can start. The fix that fits the Zen is not a service that answers "where am
   I" but the members themselves: every direct session's HELLO carries the
   address the accepting side saw the dialer arrive from, so one reachable
-  member (a public host, a router mapping, a shared LAN) teaches every peer
+  member (a public host, a shared LAN) teaches every peer
   it talks to its own translated address, and that peer can then be named to
   the rest. Any member can be that observer, none is special, and nothing is
   asked of anyone outside the channel. Phase 4 added it, Phase 6 finished it.
