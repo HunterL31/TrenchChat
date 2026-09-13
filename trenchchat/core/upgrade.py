@@ -434,19 +434,30 @@ class UpgradeManager:
             check = now - self._local_checked >= LOCAL_ADDRESS_CHECK_SECS
             if check:
                 self._local_checked = now
-        if check:
-            local = tuple(candidate_gathering.local_addresses())
+        if check or due:
+            self._submit(self._check_public_address, check)
+
+    def _check_public_address(self, for_a_move: bool) -> None:
+        """Notice a move, then ask if anything is due. On a worker thread.
+
+        Reading this node's own addresses resolves its host name, which is a
+        thing that can block; the ticker carries every other manager's tick and
+        is no place for it.
+        """
+        if for_a_move and self._addresses_moved():
+            RNS.log("TrenchChat [upgrade]: this node's own addresses changed; "
+                    "asking the address echo again", RNS.LOG_NOTICE)
             with self._lock:
-                moved = bool(self._local_addresses) and local != self._local_addresses
-                self._local_addresses = local
-            if moved:
-                RNS.log("TrenchChat [upgrade]: this node's own addresses "
-                        "changed; asking the address echo again", RNS.LOG_NOTICE)
-                with self._lock:
-                    self._stun_at = 0.0
-                due = True
-        if due:
-            self._submit(self._ensure_public_address)
+                self._stun_at = 0.0
+        self._ensure_public_address()
+
+    def _addresses_moved(self) -> bool:
+        """Whether this node's own interface addresses changed since last read."""
+        local = tuple(candidate_gathering.local_addresses())
+        with self._lock:
+            moved = bool(self._local_addresses) and local != self._local_addresses
+            self._local_addresses = local
+        return moved
 
     # --- offering ---
 
