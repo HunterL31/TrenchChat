@@ -669,6 +669,18 @@ def set_direct_connections(upgrade_mgr, enabled: bool) -> bool:
     return upgrade_mgr.set_enabled(enabled)
 
 
+def set_stun(upgrade_mgr, *, enabled: bool | None = None,
+             servers: list[str] | None = None) -> dict:
+    """Turn the public address echo on or off, or edit its server list.
+
+    The outbound guard over the disclosure: a client cannot reach the echo
+    except through this, and the manager refuses to send anything STUN-shaped
+    while the setting it writes here is off. Only the keys given are touched,
+    so a client editing the list does not decide the switch by omission.
+    """
+    return upgrade_mgr.set_stun(enabled=enabled, servers=servers)
+
+
 def apply_settings(config, router, updates: dict) -> None:
     """
     Apply a partial settings update, same order as the Settings dialog's

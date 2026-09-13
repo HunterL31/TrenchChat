@@ -50,6 +50,7 @@ DIRECT_PEER = "1" * 32
 MESH_PEER = "2" * 32
 GONE_PEER = "3" * 32
 LISTEN_PORT = 42420
+STUN_SERVERS = ["stun.example.com:3478"]
 
 
 def _member(identity_hash: str, role: str = "member") -> dict:
@@ -74,6 +75,11 @@ def backend():
     backend.router.direct_transport = None
     backend.upgrade_mgr.failures.return_value = {}
     backend.upgrade_mgr.offer.return_value = None
+    backend.upgrade_mgr.needs_public_address.return_value = False
+    backend.upgrade_mgr.stun_settings.return_value = {
+        "enabled": False, "servers": list(STUN_SERVERS)}
+    backend.upgrade_mgr.set_stun.return_value = {
+        "enabled": True, "servers": list(STUN_SERVERS)}
     return backend
 
 
@@ -120,7 +126,8 @@ class TestUpgradeSessions:
             self, client):
         body = client.get("/upgrade/sessions", headers=AUTH).json()
         assert body == {"sessions": [], "last_failure": {},
-                        "listening": False, "listen_port": 0}
+                        "listening": False, "listen_port": 0,
+                        "needs_public_address": False}
 
     def test_a_session_is_listed_with_what_this_node_knows_about_it(
             self, client, with_direct):
@@ -172,6 +179,87 @@ class TestUpgradeFailures:
         body = client.get("/upgrade/sessions", headers=AUTH).json()
         assert body["last_failure"][MESH_PEER]["reason"] == "punch_failed"
         assert body["last_failure"][MESH_PEER]["next_attempt"] == 1760.0
+
+
+@needs_backend
+class TestNeedsAPublicAddress:
+    """The one failure a user can answer, which the client prompts on once."""
+
+    def test_it_is_false_while_no_pair_is_stuck_for_an_address(self, client):
+        body = client.get("/upgrade/sessions", headers=AUTH).json()
+        assert body["needs_public_address"] is False
+
+    def test_it_reaches_the_client_when_the_manager_says_so(self, client,
+                                                            backend):
+        backend.upgrade_mgr.needs_public_address.return_value = True
+        backend.upgrade_mgr.failures.return_value = {
+            MESH_PEER: {"reason": "no_public_address", "at": 1700.0,
+                        "next_attempt": 1760.0},
+        }
+
+        body = client.get("/upgrade/sessions", headers=AUTH).json()
+
+        assert body["needs_public_address"] is True
+        assert body["last_failure"][MESH_PEER]["reason"] == "no_public_address"
+
+
+@needs_backend
+class TestTheAddressEchoSetting:
+    """GET and POST /upgrade/stun, which is its own decision and its own switch."""
+
+    def test_it_reads_back_the_switch_and_the_servers(self, client):
+        body = client.get("/upgrade/stun", headers=AUTH).json()
+        assert body == {"enabled": False, "servers": STUN_SERVERS}
+
+    def test_turning_it_on_reaches_the_manager(self, client, backend):
+        res = client.post("/upgrade/stun", headers=AUTH, json={"enabled": True})
+
+        assert res.status_code == 200
+        assert res.json() == {"ok": True, "enabled": True,
+                              "servers": STUN_SERVERS}
+        backend.upgrade_mgr.set_stun.assert_called_once_with(
+            enabled=True, servers=None)
+
+    def test_editing_the_servers_leaves_the_switch_alone(self, client, backend):
+        client.post("/upgrade/stun", headers=AUTH,
+                    json={"servers": ["stun.example.org:3478"]})
+
+        backend.upgrade_mgr.set_stun.assert_called_once_with(
+            enabled=None, servers=["stun.example.org:3478"])
+
+    def test_a_server_the_config_refuses_is_an_error_not_a_silent_drop(
+            self, client, backend):
+        backend.upgrade_mgr.set_stun.side_effect = ValueError(
+            "not a host:port stun server: 'nonsense:x'")
+
+        res = client.post("/upgrade/stun", headers=AUTH,
+                          json={"servers": ["nonsense:x"]})
+
+        assert res.status_code == 400
+        assert "host:port" in res.json()["error"]
+
+    def test_it_needs_the_token_like_everything_else(self, client):
+        assert client.get("/upgrade/stun").status_code == 401
+        assert client.post("/upgrade/stun", json={"enabled": True}).status_code \
+            == 401
+
+
+@needs_backend
+class TestAddressNeededEvent:
+    """A failure moves no path and fires no other event, so it has its own."""
+
+    def test_it_reaches_the_client_on_the_transition(self, client, backend):
+        registered = backend.upgrade_mgr.add_public_address_callback.call_args_list
+        assert registered, "no public address callback was registered"
+        callback = registered[0].args[0]
+
+        with client.websocket_connect(f"/ws?token={TOKEN}",
+                                      headers=WS_HOST) as socket:
+            callback(True)
+            event = socket.receive_json()
+
+        assert event["type"] == "direct_address_needed"
+        assert event["needed"] is True
 
 
 @needs_backend

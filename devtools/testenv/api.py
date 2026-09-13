@@ -224,6 +224,11 @@ class UpgradeEnabledRequest(BaseModel):
     enabled: bool
 
 
+class StunRequest(BaseModel):
+    enabled: bool | None = None
+    servers: list[str] | None = None
+
+
 class SetUiThemeRequest(BaseModel):
     theme: dict
 
@@ -724,6 +729,12 @@ def create_app(backend: Backend, *, token: str | None = None,
     def _on_voice_session(state: str):
         bus.emit("voice_session", state=state)
 
+    def _on_public_address_needed(needed: bool):
+        # A failure changes no path and fires no other event, so without this
+        # a client would have to poll to learn that a pair is stuck for want
+        # of an address of this node's own.
+        bus.emit("direct_address_needed", needed=bool(needed))
+
     def _on_path_changed(peer_hex: str, path: str):
         # The member roster renders this per row; "since" is when the session
         # came up, so a client can show how long a pair has been direct.
@@ -776,6 +787,7 @@ def create_app(backend: Backend, *, token: str | None = None,
     backend.voice_mgr.add_speaking_callback(_on_voice_speaking)
     backend.voice_mgr.add_session_callback(_on_voice_session)
     backend.router.add_path_changed_callback(_on_path_changed)
+    backend.upgrade_mgr.add_public_address_callback(_on_public_address_needed)
     backend.node_browser.add_node_callback(_on_nomad_node)
     backend.node_browser.add_fetch_callback(_on_nomad_fetch)
 
@@ -1680,6 +1692,11 @@ def create_app(backend: Backend, *, token: str | None = None,
         listening is whether the UDP socket is actually bound, and on which
         port: a node whose port was refused reaches nobody, and without this
         a firewall reads as a NAT that will not punch.
+
+        needs_public_address is the one failure a user can answer: a pair
+        failed because this node has no address of its own to offer and the
+        public address echo is off. It is what the client asks them about,
+        once.
         """
         direct = backend.router.direct_transport
         listen_port = direct.listen_port if direct is not None else 0
@@ -1698,7 +1715,9 @@ def create_app(backend: Backend, *, token: str | None = None,
         return {"sessions": sessions,
                 "last_failure": backend.upgrade_mgr.failures(),
                 "listening": listen_port != 0,
-                "listen_port": listen_port}
+                "listen_port": listen_port,
+                "needs_public_address":
+                    backend.upgrade_mgr.needs_public_address()}
 
     @app.get("/upgrade/enabled")
     def get_upgrade_enabled():
@@ -1723,6 +1742,30 @@ def create_app(backend: Backend, *, token: str | None = None,
         enabled = actions.set_direct_connections(backend.upgrade_mgr,
                                                  req.enabled)
         return {"ok": True, "enabled": enabled}
+
+    @app.get("/upgrade/stun")
+    def get_stun():
+        """The public address echo: whether it is on, and which servers.
+
+        Its own endpoint rather than a field on the switch, because it is a
+        separate decision with a separate disclosure: direct connections tell
+        members an address, this tells a server outside the channel one.
+        """
+        return backend.upgrade_mgr.stun_settings()
+
+    @app.post("/upgrade/stun")
+    def set_stun(req: StunRequest):
+        """Turn the public address echo on or off, or edit its servers.
+
+        Off is the default and nothing STUN-shaped leaves this node while it
+        is off. Turning it on clears the wait for every pair that was stuck
+        for want of an address, so the next sighting tries again at once. A
+        server that is not a host:port raises, which the ValueError handler
+        answers with a 400 rather than storing something nothing can dial.
+        """
+        settings = actions.set_stun(backend.upgrade_mgr, enabled=req.enabled,
+                                    servers=req.servers)
+        return {"ok": True, **settings}
 
     @app.post("/upgrade/try/{peer_hash}")
     def upgrade_try(peer_hash: str):
