@@ -32,7 +32,7 @@ from trenchchat.network.base import (
     InboundMessage, PATH_DIRECT, PATH_RETICULUM, SendState, Transport,
     TransportLimits, direct_limits,
 )
-from trenchchat.network.ip import frames, punch, session as session_mod
+from trenchchat.network.ip import frames, punch, session as session_mod, stun
 from trenchchat.network.ip.certificate import SessionCertificate
 from trenchchat.network.ip.endpoint import (
     DUAL_STACK_HOST, DatagramEndpoint, bind_listen_sockets,
@@ -165,6 +165,8 @@ class IPTransport(Transport):
         self._pending_handshakes: set = set()
         # nonce -> the attempt waiting on datagrams carrying it.
         self._probe_channels: dict[bytes, punch.ProbeChannel] = {}
+        # transaction id -> the address echo waiting on the answer to it.
+        self._binding_channels: dict[bytes, stun.BindingChannel] = {}
         self._stopped = False
         self._endpoint: DatagramEndpoint | None = None
         self._sweep_task = None
@@ -230,7 +232,7 @@ class IPTransport(Transport):
         sockets = bind_listen_sockets(self._listen_host, port)
         endpoint = DatagramEndpoint(
             session_mod.listener_configuration(self._certificate),
-            self._accept, probe_router=self._route_probe)
+            self._accept, datagram_router=self._route_datagram)
         await endpoint.bind(sockets)
         self._endpoint = endpoint
         self._listen_port = endpoint.port
@@ -492,7 +494,7 @@ class IPTransport(Transport):
         """
         if self._endpoint is None or self._stopped:
             return None
-        channel = punch.ProbeChannel(nonce, self._send_probe)
+        channel = punch.ProbeChannel(nonce, self._send_datagram)
         with self._sessions_lock:
             self._probe_channels[nonce] = channel
         return channel
@@ -504,27 +506,56 @@ class IPTransport(Transport):
         if channel is not None:
             channel.close()
 
-    def _route_probe(self, data: bytes, addr) -> bool:
-        """Hand one datagram to the attempt whose nonce it carries.
+    def open_binding_channel(self, transaction_id: bytes,
+                             server: tuple[str, int]) -> stun.BindingChannel | None:
+        """A channel for one address echo, on the listening socket.
+
+        The same routing a probe gets, by transaction id rather than by nonce,
+        and for the same reason: the address a server echoes is the translation
+        of the socket it heard from, so asking from any other socket would
+        learn an address a peer's probes cannot use. None when this node is not
+        listening, which is when it has no such socket.
+        """
+        if self._endpoint is None or self._stopped:
+            return None
+        channel = stun.BindingChannel(transaction_id, self._send_datagram, server)
+        with self._sessions_lock:
+            self._binding_channels[transaction_id] = channel
+        return channel
+
+    def close_binding_channel(self, transaction_id: bytes) -> None:
+        """Stop reading answers for one address echo."""
+        with self._sessions_lock:
+            channel = self._binding_channels.pop(transaction_id, None)
+        if channel is not None:
+            channel.close()
+
+    def _route_datagram(self, data: bytes, addr) -> bool:
+        """Hand one datagram to the attempt or the echo it belongs to.
 
         Called on the transport's loop for every datagram before QUIC sees it.
-        No QUIC packet is short enough to be read as a probe, and a nonce that
-        names no live attempt is nothing.
+        No QUIC packet can be read as either, and a nonce or a transaction id
+        that names nothing live is nothing.
         """
         nonce = punch.nonce_of(data)
-        if nonce is None:
+        if nonce is not None:
+            with self._sessions_lock:
+                channel = self._probe_channels.get(nonce)
+            return channel is not None and channel.deliver(data, addr)
+        transaction_id = stun.transaction_of(data)
+        if transaction_id is None:
             return False
         with self._sessions_lock:
-            channel = self._probe_channels.get(nonce)
-        return channel is not None and channel.deliver(data, addr)
+            binding = self._binding_channels.get(transaction_id)
+        return binding is not None and binding.deliver(data, addr)
 
-    def _send_probe(self, data: bytes, addr) -> bool:
-        """Put one probe datagram on the loop, from whatever thread asks.
+    def _send_datagram(self, data: bytes, addr) -> bool:
+        """Put one bare datagram on the loop, from whatever thread asks.
 
-        A punch runs on a worker thread and an asyncio transport is not its to
-        write to, so every probe goes through the loop the endpoint lives on.
-        True means the datagram was handed over, which is all a datagram ever
-        promises.
+        A punch and an address echo both run on a worker thread and an asyncio
+        transport is not theirs to write to, so every datagram goes through the
+        loop the endpoint lives on. True means it was handed over, which is all
+        a datagram ever promises.
         """
         endpoint = self._endpoint
         if endpoint is None or self._stopped:

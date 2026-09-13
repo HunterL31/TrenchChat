@@ -7,8 +7,10 @@ opened and nothing else. So this node has one endpoint. It is where sessions
 are accepted, where they are dialled from, and where an attempt's probes go
 out, and inbound datagrams are told apart by QUIC's connection id, which every
 packet after the first carries and which is unique per connection whichever
-side opened it. A probe is told apart before that, by its magic and a nonce an
-attempt is waiting on.
+side opened it. A punch probe is told apart before that, by its magic and a
+nonce an attempt is waiting on, and an address echo's answer by its own magic
+cookie and a transaction id; no QUIC packet can be read as either, because both
+start with two zero bits where QUIC always has at least one set.
 
 Both families run under the same endpoint. Where the platform lets one socket
 carry them (Linux binds :: with IPV6_V6ONLY off and reads IPv4 as
@@ -194,16 +196,17 @@ class DatagramEndpoint:
     """Every direct session on one node, over the sockets it listens on."""
 
     def __init__(self, configuration: QuicConfiguration, create_protocol,
-                 *, probe_router=None):
+                 *, datagram_router=None):
         """
         configuration: the listening side's, used for sessions accepted here
         create_protocol(connection) -> the session wrapping that connection
-        probe_router(data, host_port) -> bool: sees every datagram before QUIC
-        does and says whether it took it, which only a punch probe ever is
+        datagram_router(data, host_port) -> bool: sees every datagram before
+        QUIC does and says whether it took it, which only a punch probe or an
+        address echo's answer ever is
         """
         self._configuration = configuration
         self._create_protocol = create_protocol
-        self._probe_router = probe_router
+        self._datagram_router = datagram_router
         self._bindings: list[_Binding] = []
         self._protocols: dict[bytes, object] = {}
         self._closed = False
@@ -323,12 +326,13 @@ class DatagramEndpoint:
 
     def receive(self, binding: _Binding, data: bytes, addr) -> None:
         """One datagram: a probe, a packet for a session here, or a new session."""
-        if self._probe_router is not None:
+        if self._datagram_router is not None:
             try:
-                if self._probe_router(data, (unmap_host(addr[0]), addr[1])):
+                if self._datagram_router(data, (unmap_host(addr[0]), addr[1])):
                     return
             except Exception as e:
-                RNS.log(f"TrenchChat [ip]: probe router error: {e}", RNS.LOG_ERROR)
+                RNS.log(f"TrenchChat [ip]: datagram router error: {e}",
+                        RNS.LOG_ERROR)
         try:
             header = pull_quic_header(
                 Buffer(data=data),

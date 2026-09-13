@@ -24,11 +24,12 @@ from aioquic.quic.events import (
     ConnectionTerminated, HandshakeCompleted, StreamDataReceived,
 )
 
+from tests.fake_stun import StunResponder
 from tests.helpers import ipv6_available, wait_for
 from trenchchat.config import Config
 from trenchchat.core.identity import Identity
 from trenchchat.network.base import PATH_DIRECT, PATH_RETICULUM, SendState
-from trenchchat.network.ip import frames, punch
+from trenchchat.network.ip import frames, punch, stun
 from trenchchat.network.ip.certificate import (
     CERT_FILE_NAME, SessionCertificate, fingerprint_for,
 )
@@ -958,6 +959,61 @@ class TestOneSocketForEverything:
         bob.transport.close_probe_channel(nonce)
         assert probe_once(("127.0.0.1", bob.transport.listen_port), nonce,
                           timeout=1.0) == []
+
+    def test_the_address_echo_is_asked_from_the_listening_socket(self, ip_node):
+        """The one thing that makes an echoed address worth having.
+
+        A server echoes the translation of the socket it heard from, and a
+        peer's probes can only use the socket this node's candidates name, so
+        asking from anywhere else would learn an address nobody can dial.
+        """
+        bob = ip_node("bob")
+        responder = StunResponder("127.0.0.1", 0).start()
+        transaction_id = stun.new_transaction_id()
+        channel = bob.transport.open_binding_channel(transaction_id,
+                                                     responder.address)
+        assert channel is not None
+        try:
+            result = stun.request(channel, timeout=4.0, rto=0.3)
+        finally:
+            bob.transport.close_binding_channel(transaction_id)
+            responder.stop()
+
+        assert result.address == ("127.0.0.1", bob.transport.listen_port)
+
+    def test_the_echo_is_asked_while_sessions_are_up_and_they_survive_it(
+            self, ip_node):
+        alice, bob = ip_node("alice"), ip_node("bob")
+        assert alice.open_to(bob)
+        responder = StunResponder("127.0.0.1", 0).start()
+        transaction_id = stun.new_transaction_id()
+        channel = bob.transport.open_binding_channel(transaction_id,
+                                                     responder.address)
+        try:
+            assert stun.request(channel, timeout=4.0, rto=0.3).answered
+        finally:
+            bob.transport.close_binding_channel(transaction_id)
+            responder.stop()
+
+        alice.transport.send(bob.hash_hex, {}, "still up")
+        assert wait_for(lambda: [m.content for m in bob.inbox] == ["still up"],
+                        msg="the session after the echo")
+
+    def test_an_answer_for_no_live_transaction_is_dropped(self, ip_node):
+        """A datagram nothing here asked for reaches no channel and no session."""
+        bob = ip_node("bob")
+        sock = bind_datagram_socket("127.0.0.1", 0)
+        try:
+            sock.sendto(
+                stun.build_response(stun.new_transaction_id(), "203.0.113.7",
+                                    33445),
+                ("127.0.0.1", bob.transport.listen_port))
+            time.sleep(0.3)
+        finally:
+            sock.close()
+
+        assert bob.transport.session_count() == 0
+        assert bob.transport.listen_port != 0, "the listener went away"
 
     @pytest.mark.skipif(not ipv6_available(),
                         reason="this kernel has no IPv6 (ipv6.disable=1)")

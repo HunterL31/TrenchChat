@@ -22,9 +22,12 @@ is never offered, because it needs a zone this node cannot name for the peer;
 unique-local is, because two peers on one site can reach each other by it and
 nobody else can.
 
-Nothing here asks the network anything. There is no service to query for "my
-address", because one would be a center; what this node knows about its own
-public address, it learned from a peer that already had a reason to talk to it.
+Nothing here asks the network anything. What this node knows about its own
+public address it learned from a peer that already had a reason to talk to it,
+and an observed candidate is that knowledge. A user may also switch on a public
+address echo (network/ip/stun.py) for the pair no member can help, and its
+answer arrives here as an observed candidate like any other; it is off until
+somebody turns it on, so the default stays "no service was asked anything".
 """
 
 import ipaddress
@@ -52,6 +55,10 @@ ROUTE_PROBES = (
 )
 
 PROBE_PORT = 9
+
+# fc00::/7, which two peers on one site reach each other by and nobody else
+# does. Offered as a candidate, never counted as a public address.
+_UNIQUE_LOCAL = ipaddress.ip_network("fc00::/7")
 
 # IPv6 addresses offered per attempt. A host with privacy extensions on holds a
 # permanent address and a rotating temporary one per prefix, and a candidate
@@ -96,6 +103,42 @@ def family_of(host: str) -> int | None:
         return ipaddress.ip_address(host).version
     except ValueError:
         return None
+
+
+def is_global_ipv6(host: str) -> bool:
+    """Whether an IPv6 address is one a peer anywhere could route to.
+
+    Unique-local is not: two peers on one site reach each other by it and
+    nobody else does, so it is worth offering and is no answer to the question
+    "can a peer outside this network reach this node".
+    """
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return (address.version == 6 and is_reachable_address(host)
+            and address not in _UNIQUE_LOCAL)
+
+
+def public_families(gathered) -> set[int]:
+    """Which families this node holds an address a peer outside could reach.
+
+    A router mapping and an address a peer observed were both chosen outside
+    this network, so they count whatever they look like. A local address counts
+    only when it is global IPv6, which crosses no translation and needs no echo
+    to be learned; an IPv4 address behind a home router is reachable by nobody
+    but this node's own network, however many of them there are.
+    """
+    families: set[int] = set()
+    for host, _port, kind in gathered:
+        version = family_of(host)
+        if version is None:
+            continue
+        if kind in (UPGRADE_KIND_MAPPED, UPGRADE_KIND_OBSERVED):
+            families.add(version)
+        elif version == 6 and is_global_ipv6(host):
+            families.add(version)
+    return families
 
 
 def newest_per_family(addresses) -> list[tuple[str, int]]:
